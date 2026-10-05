@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::ipc_error::lock;
-use crate::service::orgs::OrgScope;
 
 #[tool_router(router = fleet_router, vis = "pub(super)")]
 impl FleetTools {
@@ -38,15 +37,37 @@ impl FleetTools {
                         alias: host.to_string(),
                         trackers: caller.org_scope(&s).ok(),
                     }
+                // This is the org boundary, not a privacy fence: it asks which org a caller is
+                // BOUND to, so as to pick that org's HealthView. The person's own view is the
+                // next arm (`HealthView::Person`).
                 } else if caller.is_scoped() {
                     // Work graph M14: a client bound to an org sees its org's
                     // trackers only, as a host token does, and every roll-up
                     // that sums across hosts is over the hosts it sees.
-                    match caller.org_scope(&s) {
-                        Ok(scope) => health::HealthView::Org(scope),
+                    //
+                    // Multi-user M1 (T10): with the caller's WHOLE scope, not
+                    // its org half. An org-bound client is somebody's device
+                    // too, and `HealthView::Org`'s session roll-ups were summed
+                    // over every session in the org — a colleague's private
+                    // ones included. The org half it still asks is
+                    // `ViewScope::org`, which `org_scope` built here before.
+                    match caller.view_scope(&s) {
+                        Ok(view) => health::HealthView::Org(view),
+                        Err(_) => health::HealthView::Blank,
+                    }
+                } else if caller.client.is_some() {
+                    // Multi-user M1 (T8d): a paired client bound to no org is
+                    // a PERSON's own device, and it used to fall through to
+                    // `Fleet` because `is_scoped()` is false for it — the
+                    // predicate spec §3.6 names as a leak class. Its session
+                    // roll-ups and per-host spend are now its own.
+                    match caller.view_scope(&s) {
+                        Ok(view) => health::HealthView::Person(view),
                         Err(_) => health::HealthView::Blank,
                     }
                 } else {
+                    // The master token and the standalone desktop: §4.5's hub
+                    // operator, deliberately not fenced.
                     health::HealthView::Fleet
                 };
                 health::health_for(&s, &view, tunnels)
@@ -55,6 +76,8 @@ impl FleetTools {
                 let mut h = health::unready_health();
                 // An org-bound client is told nothing of another org's
                 // hosts, tunnels included.
+                // This is the org boundary, not a privacy fence: an org-bound client is told
+                // nothing of another org's hosts, tunnels included.
                 if caller.host_alias.is_some() || !caller.is_scoped() {
                     h.set_tunnels(tunnels);
                 }
@@ -80,6 +103,8 @@ impl FleetTools {
         }
         // The last reconcile error is the hub's own text about any host —
         // another org's too; a scoped caller gets that it failed, not why.
+        // This is the org boundary, not a privacy fence: the reconcile error is the hub's own
+        // text about any host, another ORG's included.
         if caller.is_scoped() {
             if let Some(r) = h.hub.as_mut().map(|hub| &mut hub.reconcile) {
                 if r.last_error.is_some() {
@@ -100,6 +125,8 @@ impl FleetTools {
         });
         // The decision envelope is the hub's own business: a per-host token
         // or an org-bound client gets none of it.
+        // This is the org boundary, not a privacy fence: whether this caller is inside an org
+        // boundary at all, and the decision envelope is outside every one of them.
         if caller.host_alias.is_some() || caller.is_scoped() {
             h.decide = None;
         }
@@ -136,11 +163,20 @@ impl FleetTools {
             // and hosts only, as in `fleet_health`; a host outside them
             // answers as an unknown one. (A per-host token is pinned to its
             // host by `usage_scope`.)
-            let scope = if caller.is_scoped() && caller.host_alias.is_none() {
-                caller.org_scope(&s).map_err(to_mcp_err)?
-            } else {
-                OrgScope::All
-            };
+            //
+            // Multi-user M1 (T7): and WHOSE sessions, which `is_scoped()`
+            // cannot ask — it is false for the master and for every paired
+            // client bound to no org, so the old `if caller.is_scoped()` here
+            // handed a second person `OrgScope::All` and `report_on` returned
+            // every private session's tmux name, friendly name, model and
+            // per-session spend. `Caller::view_scope` is the predicate that
+            // means "restricted"; its `.org` is the org half this host check
+            // still asks.
+            let view = caller.view_scope(&s).map_err(to_mcp_err)?;
+            let scope = view.org.clone();
+            // This is the org boundary, not a privacy fence: whether a named HOST exists for
+            // this caller, and a host belongs to an org. The report's own session rows are
+            // fenced by `view` (the whole scope), inside `report_on`.
             if let (Some(h), false) = (host.as_deref(), scope.is_all()) {
                 if !health::hosts_in_scope(&s, &scope)
                     .iter()
@@ -149,7 +185,7 @@ impl FleetTools {
                     return Err(mcp_err("E_NOTFOUND", format!("no host {h:?}"), None));
                 }
             }
-            usage::report_on(&s, host.as_deref(), p.since_secs, now, &scope).map_err(to_mcp_err)?
+            usage::report_on(&s, host.as_deref(), p.since_secs, now, &view).map_err(to_mcp_err)?
         };
         ok_json_compact(&report)
     }
@@ -157,10 +193,21 @@ impl FleetTools {
     // ---- hosts ----
 
     #[tool(description = "Registered hosts: reachability, claude/tmux \
-        versions, linked account.")]
-    pub(super) async fn list_hosts(&self) -> Result<CallToolResult, McpError> {
+        versions, linked account. unclaimed_sessions is how many sessions \
+        on that host nobody owns, served only on a one-person fleet: null \
+        means you are not told, 0 means there are none.")]
+    pub(super) async fn list_hosts(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("list_hosts", "");
-        ok_json_compact(&hosts::list_hosts(self.reader()).map_err(to_mcp_err)?)
+        // Scope and rows off the same handle: `list_hosts` takes the lock
+        // itself, so the scope is built here against the same reader.
+        let scope = {
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            caller.view_scope(&s).map_err(to_mcp_err)?
+        };
+        ok_json_compact(&hosts::list_hosts(self.reader(), &scope).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Which agent hosts (transport \"agent\") have a \
@@ -353,8 +400,11 @@ impl FleetTools {
         hub's link (see peer_exchange), updater is fleet-updater's (/update \
         only); fleet-admin tools stay out of a \
         client's reach. Codes are in memory only: a hub restart voids them. \
-        org_id binds it to one org (its work and sessions only). Master token \
-        only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.")]
+        org_id binds it to one org (its work and sessions only). person names \
+        whose device it is; the default is this hub's owner, and its sessions \
+        are private to that person. Master token \
+        only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, \
+        person }.")]
     // The master-only gate is `enforce_admin` in `call_tool` (`pair_client`
     // is in `guard::ADMIN_TOOLS`), so no caller extractor is needed here.
     pub(super) async fn pair_client(
@@ -382,6 +432,17 @@ impl FleetTools {
                 None,
             ));
         }
+        // A hub link and an updater token are nobody's device: binding
+        // either to a person would make it a reader of that person's private
+        // sessions. `Store::set_client_person` refuses both at the write, and
+        // this is the same rule at the mint, where the operator sees it.
+        if p.person.is_some() && (mode == "peer" || mode == "updater") {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                format!("a {mode} token is not a person's device; drop person"),
+                None,
+            ));
+        }
         // `fleet-updater` sends no prompts and belongs to no org.
         if mode == "updater" && (p.trusted || p.org_id.is_some()) {
             return Err(mcp_err(
@@ -390,16 +451,29 @@ impl FleetTools {
                 None,
             ));
         }
+        // The person's NAME is validated here, at the mint, rather than at
+        // redemption: the row is created when the phone redeems the code
+        // (see `pairing::MintRequest::person`), and an operator must read a
+        // bad name at their own terminal, not minutes later on a device.
+        let person = p
+            .person
+            .as_deref()
+            .map(crate::store::validate_person_name)
+            .transpose()
+            .map_err(to_mcp_err)?;
         audit(
             "pair_client",
             &format!(
-                "name={name} mode={mode} trusted={} ttl_s={:?} org_id={:?}",
-                p.trusted, p.ttl_s, p.org_id
+                "name={name} mode={mode} trusted={} ttl_s={:?} org_id={:?} person={}",
+                p.trusted,
+                p.ttl_s,
+                p.org_id,
+                person.as_deref().unwrap_or("-").escape_debug()
             ),
         );
         let ttl = pair_ttl(p.ttl_s);
-        // Both reads under one lock, released before the mint.
-        let base = {
+        // Every read under one lock, released before the mint.
+        let (base, person) = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             // A code minted for a name a live client already holds could only
             // ever fail at redemption (the partial unique index), wasting the
@@ -428,12 +502,42 @@ impl FleetTools {
                     ));
                 }
             }
-            crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?
+            // A device belongs to somebody or it is not minted at all
+            // (multi-user M1): with no `person` named, the code is for THIS
+            // HUB'S OWNER, by the owner's current name — the flag, not the
+            // name, is what `people` keys the owner on, so a renamed owner
+            // still pairs their own devices. A hub that cannot say whose it
+            // is refuses rather than minting a person-less token, which is
+            // the privilege level the milestone exists to remove.
+            //
+            // A `peer` / `updater` code is the exception and stays `None`:
+            // neither is anybody's device, and both were refused a `person`
+            // above.
+            let person = match (person, mode.as_str()) {
+                (some @ Some(_), _) => some,
+                (None, "peer" | "updater") => None,
+                (None, _) => Some(owner_name(&s).ok_or_else(|| {
+                    mcp_err(
+                        codes::E_PROVISION,
+                        "this hub has no personal owner, so a device cannot be paired to \
+                         anybody; run fleet-hub init (or name a person explicitly)",
+                        None,
+                    )
+                })?),
+            };
+            (
+                crate::service::hub::HubBase::read(&s).map_err(to_mcp_err)?,
+                person,
+            )
         };
-        let req = self
-            .guards
-            .pairings
-            .mint_bound(&name, &mode, p.trusted, p.org_id, ttl);
+        let req = self.guards.pairings.mint(crate::mcp::pairing::MintRequest {
+            name: &name,
+            mode: &mode,
+            trusted: p.trusted,
+            org_id: p.org_id,
+            person: person.as_deref(),
+            ttl,
+        });
         ok_json(&serde_json::json!({
             "url": crate::mcp::pair_url(&base.url, &req.code),
             "code": req.code,
@@ -442,6 +546,7 @@ impl FleetTools {
             "mode": req.mode,
             "trusted": req.trusted,
             "org_id": req.org_id,
+            "person": req.person,
         }))
     }
 
@@ -449,7 +554,7 @@ impl FleetTools {
         The token digest is never returned: a token exists in plaintext only \
         in the /pair response that minted it. Read-only but master token \
         only (it names every paired device). Rows: { id, name, mode, \
-        created_at, last_seen_at, revoked_at, trusted_at }.")]
+        created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.")]
     pub(super) async fn list_clients(
         &self,
         Parameters(p): Parameters<ListClientsParams>,
@@ -747,6 +852,53 @@ impl SettingsWho {
             SettingsWho::Device(name) => Actor::PersonVia(name),
         }
     }
+}
+
+/// WHOSE a thing this caller creates is (multi-user M1): the `people` row id
+/// to stamp on a session it starts, a grant it makes, a claim it files.
+///
+/// A paired device carries its person on the connection
+/// ([`Caller::person`]); the MASTER does not, because the master token is
+/// not a device — its person is whoever owns this hub, which is a store
+/// read. This is the one place that mapping is made, so "the master is the
+/// owner" is written down once rather than re-derived per call site.
+///
+/// `None` has exactly one meaning everywhere it is returned — **nobody** —
+/// and it is never a substitute for somebody:
+///
+/// - a per-host token is an agent on a machine, not a person;
+/// - a device the migration's backfill did not reach is bound to nobody;
+/// - a hub whose `people` row is missing cannot say who its owner is
+///   (`Store::personal_owner_id`'s fail-closed rule, T1).
+///
+/// The create paths leave the row UNCLAIMED on `None` rather than
+/// attributing it to a guess: an unowned row leaks no metadata and can be
+/// claimed later, while a row attributed to the wrong person cannot be taken
+/// back.
+/// Callers: the create paths (`new_session`, `new_shell_session`,
+/// `new_bg_session`, `dispatch_task`'s fallback worker owner, `work_link`'s
+/// `start` and `resume`) and `orchestration::require_conversation_person`,
+/// the gate that stands in front of `work_link { resume | summarize }`.
+pub(super) fn owner_for(caller: &Caller, s: &Store) -> Option<i64> {
+    match caller.person() {
+        some @ Some(_) => some,
+        // Not `is_master()` alone: a per-host token also carries no person,
+        // and it must stay `None` rather than inherit the hub's owner.
+        None if caller.is_master() => s.personal_owner_id().ok().flatten(),
+        None => None,
+    }
+}
+
+/// The hub's personal owner by NAME, or `None` when it has none.
+///
+/// `pair_client` needs the name rather than the id because a pairing code
+/// carries a person's name (the row is created at redemption — see
+/// `pairing::MintRequest::person`), and it must be the owner's CURRENT name:
+/// `people.is_personal_owner` is the flag the owner is keyed on, and the
+/// name beside it is explicitly renameable.
+fn owner_name(s: &Store) -> Option<String> {
+    let id = s.personal_owner_id().ok().flatten()?;
+    Some(s.get_person(id).ok().flatten()?.name)
 }
 
 pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {

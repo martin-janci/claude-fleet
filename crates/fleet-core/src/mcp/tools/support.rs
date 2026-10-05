@@ -4,6 +4,10 @@
 
 use super::*;
 use crate::ipc_error::lock;
+// Multi-user M1 (T6/T7/T8): the one visibility rule, and the result gate's
+// session half. Named rather than reached through a path at each use, because
+// several helpers here mention both.
+use crate::service::view_scope::{ViewScope, Visibility};
 
 // --- shared helpers --------------------------------------------------------
 
@@ -84,9 +88,13 @@ pub(super) fn tool_error_result(e: McpError) -> Result<CallToolResult, McpError>
 /// asks for more, but an MCP caller gets a token-capped page by default.
 pub(super) const REPO_LOG_DEFAULT_LIMIT: u32 = 50;
 
-/// Default `max_lines` for `capture_session`: the tail of the pane that is
-/// returned when the caller does not choose a cap.
-pub(super) const CAPTURE_DEFAULT_MAX_LINES: u32 = 200;
+// `capture_session`'s cap, its blank-pane text and its truncation note moved
+// to the service layer, beside `capture_session_output`
+// (`sessions::shape_capture`), because the desktop's routed `capture_session`
+// command (multi-user M1, T13) has a standalone arm that must shape a pane
+// exactly as this server does. Nothing here wraps them any more; the tool
+// calls `sessions::shape_capture` and the tests that pin the shaping call
+// the service functions by their full path.
 
 /// Default `limit` for `list_worktrees`. A fleet accumulates worktrees far
 /// faster than sessions (every branch of every project on every host), and an
@@ -94,35 +102,6 @@ pub(super) const CAPTURE_DEFAULT_MAX_LINES: u32 = 200;
 /// whole tool surface. The result carries `total`, so a caller can see it is
 /// holding a page and narrow with `project_id` / `host_alias`.
 pub(super) const WORKTREES_DEFAULT_LIMIT: usize = 100;
-
-/// Keep only the last `max` lines of `text`. Returns the kept text plus the
-/// total line count so the caller can say how much was dropped. `max == 0`
-/// means no cap.
-pub(super) fn tail_lines(text: &str, max: u32) -> (String, usize) {
-    let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
-    if max == 0 || total <= max as usize {
-        return (text.to_string(), total);
-    }
-    (lines[total - max as usize..].join("\n"), total)
-}
-
-/// Render a pane capture for the caller: the last `max` lines, prefixed with
-/// a truncation note when lines were dropped.
-pub(super) fn capture_response(text: &str, max: u32) -> String {
-    let (kept, total) = tail_lines(text, max);
-    if total > kept.lines().count() {
-        format!(
-            "[capture_session: showing the last {} of {} lines — raise max_lines \
-             (0 = no cap) to see more]\n{}",
-            kept.lines().count(),
-            total,
-            kept
-        )
-    } else {
-        kept
-    }
-}
 
 /// Build an MCP tool error carrying an `E_*` code and optional structured data.
 pub(super) fn mcp_err(
@@ -228,6 +207,61 @@ pub(super) fn require_move_hosts(
     require_host(caller, target_host, "the move target host")
 }
 
+/// How deep into a session one call reaches (multi-user M1, task T7).
+///
+/// **Three levels, two of them grantable.** `watch` and `drive` are what a
+/// grant can carry; [`Reach::Own`] is a TIER, not a third level anybody can
+/// be given (spec §4.3, *What a grant may and may not do*, invariant 5).
+/// **That invariant holds the one authoritative list of the operations the
+/// tier covers; it is cited here and deliberately not restated** — revision 4
+/// of the plan carried three copies of the list and they disagreed with each
+/// other on whether a `drive` grantee may kill, restart or rename the
+/// owner's session. (They may not: `drive` is "make this machine do work",
+/// not "dispose of it".)
+///
+/// For everything that invariant does *not* name, the classification is
+/// mechanical, in this order:
+///
+/// 1. anything the spec's `own` invariant names → [`Reach::Own`];
+/// 2. anything that writes to a pane, a row, a task or a tmux server →
+///    [`Reach::Drive`];
+/// 3. the rest → [`Reach::Read`].
+///
+/// **`readonly` in [`guard::TOOL_POLICIES`] cannot stand in for this.**
+/// `quick_replies` is `readonly: false` and a read, `whoami` is
+/// `readonly: false` and a read, and `inbox` is `readonly: true` and writes
+/// the moment it is called with `mark_read`. The two questions are "may a
+/// readonly TOKEN call this at all" and "how far into somebody else's
+/// session does this one call reach", and they have different answers.
+///
+/// The level travels in the same call that resolves the row
+/// ([`resolve_row_and_gate`] and its wrappers), so a tool cannot resolve a
+/// target and then forget to say what it is about to do with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Reach {
+    /// Read the row, its transcript, its history, its worktree — the
+    /// substance of a `watch` grant.
+    Read,
+    /// Make the session's machine do work: a pane write, a row write, a
+    /// task, a tmux command. The owner and a `drive` grantee.
+    Drive,
+    /// The owner alone (and the hub's own readers). No grant reaches it.
+    Own,
+}
+
+impl Reach {
+    /// The level this reach needs, as the refusal says it to a caller who
+    /// has less. Never names the owner: who a session belongs to is not
+    /// something a refusal is entitled to tell the refused.
+    fn needed(self) -> &'static str {
+        match self {
+            Reach::Read => "watch",
+            Reach::Drive => "drive",
+            Reach::Own => "ownership (no grant confers it)",
+        }
+    }
+}
+
 /// `resolve_session_target` + `require_host` on the RESOLVED row: the host
 /// binding is checked against where the session actually lives, never
 /// against the caller-supplied `host_alias` (which is optional and ignored
@@ -238,27 +272,223 @@ pub(super) fn resolve_and_gate(
     session_id: Option<i64>,
     host_alias: Option<&str>,
     tmux_name: Option<&str>,
+    reach: Reach,
     what: &str,
 ) -> Result<(String, String), McpError> {
-    let row = resolve_row_and_gate(s, caller, session_id, host_alias, tmux_name, what)?;
+    let row = resolve_row_and_gate(s, caller, session_id, host_alias, tmux_name, reach, what)?;
     Ok((row.host_alias, row.tmux_name))
 }
 
 /// [`resolve_and_gate`] returning the whole row — for tools that also need
 /// the id, `turn_seq` or `claude_session_id` of the target.
+///
+/// **Choke point 2** (multi-user M1, T7): both wrappers meet here, so this
+/// is where the person gate goes. A check in `resolve_and_gate` above would
+/// be bypassed by every caller of `resolve_row_and_gate`, and the two sets
+/// of tools are both large.
 pub(super) fn resolve_row_and_gate(
     s: &Store,
     caller: &Caller,
     session_id: Option<i64>,
     host_alias: Option<&str>,
     tmux_name: Option<&str>,
+    reach: Reach,
     what: &str,
 ) -> Result<crate::store::SessionRow, McpError> {
     let row = sessions::resolve_session_target(s, session_id, host_alias, tmux_name)
         .map_err(to_mcp_err)?;
     require_host(caller, &row.host_alias, what)?;
     require_bound_client_sees(s, caller, &row)?;
+    // Unconditional SIBLING of the org gate above, never a check nested
+    // inside it: `require_bound_client_sees` returns `Ok(())` on its first
+    // line for a client with no `org_id`, which is exactly the shape of
+    // every person's device and of every per-host token — so a person check
+    // written inside it would run for nobody (spec §4.4).
+    require_person_sees(s, caller, &row, reach, what)?;
     Ok(row)
+}
+
+/// The person half of choke point 2: may THIS caller see `row` at all, and
+/// if so, may they reach it this far?
+///
+/// Two refusals, and the difference between them is the whole design:
+///
+/// * a row the caller cannot see answers `E_NOTFOUND`, exactly as an id that
+///   does not exist — no existence oracle, the discipline
+///   [`crate::service::orgs::not_found`] already applies to the org
+///   boundary. A session's metadata IS its content (spec §4.3, *What counts
+///   as content*), so there is no shape of another person's row an
+///   out-of-scope caller may hold;
+/// * a row the caller CAN see, at too low a level, answers `E_FORBIDDEN`.
+///   The caller is a grantee here, so telling them their grant is narrower
+///   than this call reveals nothing they were not already told when it was
+///   made.
+///
+/// The one exception is the per-host token standing in the wrong pane, which
+/// gets its own code — see [`codes::E_PANE_UNPROVEN`].
+///
+/// The scope is built from the SAME store handle the row came from. A scope
+/// read through the other handle races a grant created between the two,
+/// which is a revoked share still being served.
+pub(super) fn require_person_sees(
+    s: &Store,
+    caller: &Caller,
+    row: &crate::store::SessionRow,
+    reach: Reach,
+    what: &str,
+) -> Result<(), McpError> {
+    person_sees(s, caller, row, reach, what).map_err(to_mcp_err)
+}
+
+/// [`require_person_sees`] in the service layer's own error type.
+///
+/// The gate is written ONCE, here, and `require_person_sees` is this plus
+/// [`to_mcp_err`] — which is lossless, so the two refusals are the same
+/// code, the same words and the same details. The reason it exists is the
+/// long-poll re-check (T11): `service::tasks::AccessRecheck` runs inside
+/// `fleet-core`'s service layer, which deals in `IpcError` and must not
+/// know what an `McpError` or a [`Caller`] is.
+fn person_sees(
+    s: &Store,
+    caller: &Caller,
+    row: &crate::store::SessionRow,
+    reach: Reach,
+    what: &str,
+) -> Result<(), IpcError> {
+    let scope = caller.view_scope(s)?;
+    if !scope.sees_session_row(row).is_visible() {
+        // §4.4 clause 2, as it actually fails in the field. One token
+        // authenticates every Claude on a host, so the agent that reaches
+        // here with a real id is normally just in a different split of the
+        // same window (or its row was reconciled onto a new pane id since
+        // the MCP connection was made). `E_NOTFOUND` would send it hunting
+        // for a session `tmux list-sessions` shows it; this says what is
+        // actually wrong, and says nothing about whose the row is.
+        // Only when the pane proof is the ONE thing missing: a row the org
+        // boundary itself refuses is not this caller's to be told about,
+        // whichever host it sits on.
+        if scope.host.as_deref() == Some(row.host_alias.as_str())
+            // `sees_session_row` above has ALREADY refused: this org call
+            // only decides whether the refusal may name the pane.
+            && scope.org.sees_session_org_only(&row.host_alias, row.org_id)
+        {
+            return Err(IpcError::new(
+                codes::E_PANE_UNPROVEN,
+                format!(
+                    "{what}: session {} is on {} but this request proves no pane of it \
+                     (a host token reaches an unclaimed session on its host, and the one \
+                     session whose pane its X-Fleet-Pane header names)",
+                    row.id, row.host_alias
+                ),
+            ));
+        }
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", row.id),
+        ));
+    }
+    let allowed = match reach {
+        // Visibility IS the read level: a caller who sees the row sees its
+        // content (the two-armed `Visibility` above has no middle value).
+        Reach::Read => true,
+        Reach::Drive => scope.may_drive(row),
+        Reach::Own => scope.may_own(row),
+    };
+    if allowed {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_FORBIDDEN,
+        format!(
+            "{what}: session {} needs {} and this access does not carry it",
+            row.id,
+            reach.needed()
+        ),
+    ))
+}
+
+/// The PREDICATE half of [`require_person_sees`]: does `caller` reach `row` at
+/// `reach`?
+///
+/// For the one caller-facing place that DEGRADES instead of refusing —
+/// `inbox`'s `mark_read`, which advances the owner's unread cursor. A watcher
+/// asking for the documented default (`inbox { session_id }`, with
+/// `mark_read` defaulted to `true`) must get the rows their grant promises;
+/// what they must not do is blank the owner's unread view. So the read is
+/// served and the write is dropped, rather than the call refused for a side
+/// effect the caller never asked for by name.
+///
+/// Everywhere else `require_person_sees` is the right shape: a refusal with
+/// the words, the code and the audit row a refusal needs.
+pub(super) fn reaches_row(
+    s: &Store,
+    caller: &Caller,
+    row: &crate::store::SessionRow,
+    reach: Reach,
+) -> Result<bool, McpError> {
+    let scope = caller.view_scope(s).map_err(to_mcp_err)?;
+    if !scope.sees_session_row(row).is_visible() {
+        return Ok(false);
+    }
+    Ok(match reach {
+        Reach::Read => true,
+        Reach::Drive => scope.may_drive(row),
+        Reach::Own => scope.may_own(row),
+    })
+}
+
+/// The long-poll re-check for a SESSION-bound wait (T11): is the caller
+/// that opened this wait still allowed to see the row it is waiting on?
+///
+/// Handed to `service::tasks::wait_for_session*` and
+/// `service::messages::wait_for_reply` as a `&dyn
+/// tasks::AccessRecheck`, which they call on every wake inside the lock
+/// window that reads the row, and which the tool calls once more before it
+/// builds the payload.
+///
+/// The row is re-read **by id**, from the handle the re-check is given.
+/// Never by `(host_alias, tmux_name)`: that pair is reusable — a killed
+/// session's tmux name is taken by the next one on that host — so a wait
+/// resolved by name could be handed a DIFFERENT session's row than the one
+/// whose access was gated at the top of the call. The id is the row.
+pub(super) struct SessionRecheck<'a> {
+    pub caller: &'a Caller,
+    pub session_id: i64,
+    pub reach: Reach,
+    pub what: &'a str,
+}
+
+impl tasks::AccessRecheck for SessionRecheck<'_> {
+    fn check(&self, s: &Store) -> Result<(), IpcError> {
+        // A row that vanished mid-wait is `E_NOTFOUND`, which is also what
+        // the wait loops themselves answer for it — and the only answer
+        // that is not "permission by absence of evidence".
+        let row = s.get_session_by_id(self.session_id)?.ok_or_else(|| {
+            IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {} not found", self.session_id),
+            )
+        })?;
+        person_sees(s, self.caller, &row, self.reach, self.what)
+    }
+}
+
+/// The long-poll re-check for `wait_for_task` (T11): the task's own gate,
+/// [`task_visible_at`], asked again on every wake.
+///
+/// A task is visible when the caller sees every session it names, so a
+/// share revoked on the worker (or on the requester) ends the wait before
+/// `task.result` — the worker's paragraph — is returned.
+pub(super) struct TaskRecheck<'a> {
+    pub caller: &'a Caller,
+    pub task_id: i64,
+    pub reach: Reach,
+}
+
+impl tasks::AccessRecheck for TaskRecheck<'_> {
+    fn check(&self, s: &Store) -> Result<(), IpcError> {
+        task_visible_at(s, self.caller, self.task_id, self.reach).map(|_| ())
+    }
 }
 
 /// A paired client bound to an org (work graph M14) starts sessions only
@@ -290,6 +520,83 @@ pub(super) fn require_bound_client_may_create(
     Ok(())
 }
 
+/// May this caller LAND a new session in `worktree_id` (multi-user M1, T8d)?
+///
+/// `new_session` and `new_shell_session` are exempt from a per-row tier
+/// because they act on no existing row — and the `worktree_id` they take was
+/// read as "a checkout, not a session". It is both: a pane started in a
+/// checkout somebody else's live session is working in shares that working
+/// tree, so `new_shell_session { worktree_id: <Bob's>, start_command: "cat
+/// .env; git diff" }` followed by `capture_session` on the caller's OWN row
+/// read the contents of Bob's tree — past `repo_file`'s `Reach::Read`, which
+/// would have refused the same bytes asked for by his session id. Neither
+/// fence in front of it stops that: `require_host` is a no-op for a caller
+/// with no host binding, and `require_bound_client_may_create` returns on its
+/// first line for a client whose `org_id` is `None`, which is every person's
+/// own device.
+///
+/// So the LANDING is gated, and at `Reach::Drive` rather than `Read`: the new
+/// pane can write in the tree (`git reset --hard`, an editor, a build), which
+/// is more than reading one file out of it, and `Drive` is the level the same
+/// crate already requires to make somebody's machine do work. `own` would be
+/// wrong in the other direction — nothing of the existing session is
+/// destroyed, relocated or re-shared.
+///
+/// `new_worktree` passes through untouched: a tree that does not exist yet has
+/// no occupants, and `worktree_id` is `None` on that path.
+///
+/// The occupants are the ones `delete_worktree` gates
+/// ([`crate::store::Store::occupant_session_ids_for_worktree`]) — the running
+/// rows plus the rows a host LOST while pointing there, because a reboot
+/// leaves the checkout and its uncommitted work exactly where they were.
+///
+/// The refusal names no session: the caller addressed a worktree, and a
+/// sentence naming the occupant would make this an oracle for whose sessions
+/// live where (the same reason `delete_worktree`'s refusal is the worktree's).
+/// It is [`crate::service::sessions::LANDING_NOT_YOURS`], the same sentence
+/// the service-layer gate uses — `work_link { start }` resolves its
+/// `worktree_id` inside `tickets::plan_resolved` and takes
+/// [`crate::service::sessions::require_may_land_in_worktree`] there, which is
+/// the same rule by the same words (T9b).
+/// `reach` is the caller's argument rather than a constant here, for the
+/// reason [`FleetTools::gate_restore_plan`] takes its own: the literal then
+/// sits in the HANDLER, where
+/// `tests::every_session_addressed_tool_declares_its_reach` reads it, so
+/// `new_session` and `new_shell_session` can carry a row in `SESSION_REACH`
+/// instead of an exemption whose sentence would have to argue they gate
+/// nothing.
+pub(super) fn require_may_land_in_worktree(
+    store: &Mutex<Store>,
+    caller: &Caller,
+    worktree_id: Option<i64>,
+    reach: Reach,
+) -> Result<(), McpError> {
+    let Some(wid) = worktree_id else {
+        return Ok(());
+    };
+    let occupants: Vec<i64> = {
+        let s = lock(store).map_err(to_mcp_err)?;
+        s.occupant_session_ids_for_worktree(wid)
+            .map_err(|e| to_mcp_err(crate::ipc_error::IpcError::from(e)))?
+    };
+    for sid in occupants {
+        let s = lock(store).map_err(to_mcp_err)?;
+        let Ok(row) = crate::service::sessions::resolve_session_target(&s, Some(sid), None, None)
+        else {
+            // Gone between the two reads: nothing of anybody's to share.
+            continue;
+        };
+        if !reaches_row(&s, caller, &row, reach)? {
+            return Err(mcp_err(
+                codes::E_FORBIDDEN,
+                crate::service::sessions::LANDING_NOT_YOURS,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A paired client bound to an org (work graph M14) acts on a host with no
 /// session in play (`add_project`, `list_github_repos`) only when it may see
 /// that host's org: its own, or none while its org's `bound_sees_unassigned`
@@ -317,8 +624,9 @@ pub(super) fn require_bound_client_sees_host(
 /// A paired client bound to an org (work graph M14) reaches only its org's
 /// and unassigned sessions — to read, prompt, kill or link them. Another
 /// org's session answers exactly as one that does not exist. A per-host
-/// token's own rule (its host, D7) is [`require_host`] and
-/// `require_visible_session`; everyone else is unrestricted.
+/// token's own rule (its host, D7) is [`require_host`]; the PERSON half of
+/// the same question — ownership, grants and §4.4's pane proof — is
+/// [`require_person_sees`], which runs beside this, never inside it.
 pub(super) fn require_bound_client_sees(
     s: &Store,
     caller: &Caller,
@@ -328,7 +636,7 @@ pub(super) fn require_bound_client_sees(
         return Ok(());
     }
     let scope = caller.org_scope(s).map_err(to_mcp_err)?;
-    if scope.sees_row(row) {
+    if scope.sees_row_org_only(row) {
         Ok(())
     } else {
         Err(mcp_err(
@@ -879,15 +1187,33 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
         return Ok(());
     }
     let access = guard::policy(tool).map(|p| p.access);
+    // Multi-user M1 (T2a): say WHOSE device it has to be. Both arms are
+    // satisfied only by THIS hub's own personal owner, so a message that
+    // said "a person's own paired device" told the one caller T2a was
+    // written to stop — a colleague's phone, paired to the same hub — that
+    // it should have got through. A refusal line is the only explanation a
+    // blocked operator gets.
     let message = if access == Some(guard::Access::Person) {
         format!(
-            "{tool} is for the fleet's operator or a person's own paired device, \
-             not a host's token or a device bound to an org ({} refused)",
+            "{tool} is for the fleet's operator or the hub owner's OWN paired device, \
+             not a host's token, a device bound to an org, or another person's \
+             device ({} refused)",
             caller.label()
         )
     } else if access == Some(guard::Access::PersonDevice) {
         format!(
-            "{tool} is for a paired device; on the hub machine use fleet-hub settings ({} refused)",
+            "{tool} is for the hub owner's OWN paired device — not another person's, \
+             not one bound to an org; on the hub machine use fleet-hub settings \
+             ({} refused)",
+            caller.label()
+        )
+    } else if access == Some(guard::Access::HostToken) {
+        // Multi-user M1 (T12). Says which caller it IS for, because the
+        // refused one is usually the operator reaching for a claim: their
+        // path is `fleet-hub session claim` on the hub machine, and naming it
+        // is the only help a refusal line can give.
+        format!(
+            "{tool} is a per-host token's only: it is reachable from the agent in the              session's own pane, never from the master or a paired device — on the hub              machine use fleet-hub session claim ({} refused)",
             caller.label()
         )
     } else if guard::is_admin_tool(tool) {
@@ -938,14 +1264,89 @@ pub(super) fn rewrite_json_content(
     }
 }
 
-/// Fail closed: drop every work field of every session row in a result.
-fn strip_all_work(result: &mut CallToolResult) {
+/// Fail closed: a result the gate could not judge at all — a poisoned store
+/// lock, or a scope that would not build — keeps no session row and no work
+/// field.
+///
+/// Both halves, and the ROW half is the one M1 added: dropping the work
+/// fields of a row the caller may not see at all was the old answer, and it
+/// left the row (its name, its host, its project, its activity, its prompt)
+/// in the bytes. The replacement has no scope to ask, so it asks nothing and
+/// keeps nothing.
+fn fence_everything(result: &mut CallToolResult) {
+    // An org no scope can hold, so every work field a row still carries goes
+    // with it.
     let nobody = crate::service::orgs::OrgScope::Host {
         alias: String::new(),
         org: None,
         isolated: Default::default(),
     };
-    rewrite_json_content(result, |v| nobody.redact_json(v, &|_| Some(i64::MIN)));
+    rewrite_json_content(result, |v| {
+        crate::service::view_scope::drop_every_session_row(v);
+        nobody.redact_json(v, &|_| Some(i64::MIN));
+    });
+}
+
+/// What [`ViewScope::drop_invisible_rows`] asks of one row-shaped object: the
+/// STORED row, read by id and judged by this scope.
+///
+/// Three answers collapse to [`Visibility::None`], and each is deliberate:
+///
+/// * no `id` and no `session_id` in the object
+///   ([`crate::service::view_scope::session_row_id`]) — a projection the gate
+///   cannot resolve is not a row it may pass;
+/// * no such row in the store — a row that is gone cannot be judged, and
+///   unlike an org (which the payload still carries honestly) its visibility
+///   is exactly what a stale payload must not be trusted for;
+/// * a failed read — the gate's job is to be the last net, so a broken net
+///   holds everything back.
+///
+/// Memoised per call, because a result can carry one row many times (a page
+/// plus a summary, a task's two ends) and the judgement is a row read.
+fn visibility_resolver<'a>(
+    s: &'a Store,
+    scope: &'a ViewScope,
+) -> impl Fn(&serde_json::Map<String, serde_json::Value>) -> Visibility + 'a {
+    let memo: std::cell::RefCell<std::collections::HashMap<i64, Visibility>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+    move |m| {
+        let Some(id) = crate::service::view_scope::session_row_id(m) else {
+            return Visibility::None;
+        };
+        if let Some(answer) = memo.borrow().get(&id) {
+            return *answer;
+        }
+        let answer = match s.get_session_by_id(id) {
+            Ok(Some(row)) => scope.sees_session_row(&row),
+            Ok(None) | Err(_) => Visibility::None,
+        };
+        memo.borrow_mut().insert(id, answer);
+        answer
+    }
+}
+
+/// What [`crate::service::orgs::OrgScope::redact_json`] asks of one row-shaped
+/// object: the row's org, read from the STORE by id — a projection that
+/// dropped `org_id` cannot make a row look unassigned. An id the store has no
+/// row for keeps the org it was serialised with (a kill's answer); any failed
+/// lookup, and any object with no id at all, reads as an org no scope can
+/// hold.
+fn org_resolver<'a>(
+    s: &'a Store,
+) -> impl Fn(&serde_json::Map<String, serde_json::Value>) -> Option<i64> + 'a {
+    // An org no scope can hold: any failed lookup reads as "not yours".
+    const UNREADABLE: i64 = i64::MIN;
+    move |m| {
+        let own = m.get("org_id").and_then(serde_json::Value::as_i64);
+        match m.get("id").and_then(serde_json::Value::as_i64) {
+            Some(id) => match s.session_org(id) {
+                Ok(Some(o)) => Some(o),
+                Ok(None) => own,
+                Err(_) => Some(UNREADABLE),
+            },
+            None => Some(UNREADABLE),
+        }
+    }
 }
 
 /// Build a text content block guaranteed to be non-empty. Empty or
@@ -1105,6 +1506,11 @@ pub(super) struct ClientSummary {
     /// (`catalog_admin`, migration 074); absent: not granted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) assets_admin_at: Option<i64>,
+    /// WHOSE device this is (multi-user M1, migration 100); absent: nobody's,
+    /// which means it sees no private session at all. `fleet-hub client list`
+    /// prints it, and `fleet-hub client bind-person` changes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) person_id: Option<i64>,
 }
 
 impl From<crate::store::ClientTokenRow> for ClientSummary {
@@ -1119,6 +1525,7 @@ impl From<crate::store::ClientTokenRow> for ClientSummary {
             trusted_at: r.trusted_at,
             org_id: r.org_id,
             assets_admin_at: r.assets_admin_at,
+            person_id: r.person_id,
         }
     }
 }
@@ -1418,92 +1825,361 @@ impl FleetTools {
         session_id: Option<i64>,
         host_alias: Option<&str>,
         tmux_name: Option<&str>,
+        reach: Reach,
         what: &str,
     ) -> Result<(String, String), McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
-        resolve_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
+        resolve_and_gate(&s, caller, session_id, host_alias, tmux_name, reach, what)
     }
 
-    /// Decision D7 on a session-addressed read a per-host token may make of
-    /// any host's session (history, repo reads): a session of an org
-    /// isolated from the caller's answers exactly as a missing one.
-    pub(super) fn require_visible_session(
-        &self,
-        caller: &Caller,
-        session_id: i64,
-    ) -> Result<(), McpError> {
-        if !caller.is_scoped() {
-            return Ok(());
-        }
-        let s = lock(&self.store).map_err(to_mcp_err)?;
-        let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
-        match s
-            .get_session_by_id(session_id)
-            .map_err(|e| to_mcp_err(IpcError::from(e)))?
-        {
-            Some(row) if !scope.sees_row(&row) => Err(mcp_err(
-                codes::E_NOTFOUND,
-                format!("session {session_id} not found"),
-                None,
-            )),
-            _ => Ok(()),
-        }
-    }
+    // `require_visible_session` was here (decision D7's org-only read gate).
+    // It is GONE, collapsed into `resolve_row_and_gate` by multi-user M1's
+    // T7, and the collapse is the point rather than a tidy-up: its first
+    // line was `if !caller.is_scoped() { return Ok(()) }`, which is false
+    // for the master AND for every unbound paired client — so for a phone it
+    // checked nothing at all, while being the only gate on the tools that
+    // called it (`repo_file`, which returns arbitrary worktree file
+    // contents, and `session_history`, one of the four reads the spec calls
+    // the substance of `watch`). Every former call site now resolves its
+    // target through `resolve_target_row` with the reach it needs.
 
-    /// The org boundary's backstop over EVERY tool result a per-host token
-    /// receives (work graph M5): each session row anywhere in the JSON loses
-    /// the work its reader may not see (`OrgScope::redact_json`), the row's
-    /// org read from the store by id, never from the payload — a projection
-    /// that dropped `org_id` cannot make a row look unassigned. Fails
-    /// closed: if the scope or a row's org cannot be read, every work field
-    /// goes.
+    /// **Choke point 3** (spec §5.1): the one net under EVERY tool result,
+    /// whatever tool answered and whether it answered a result or an error's
+    /// details.
     ///
-    /// The orgs are read through `store`: the read pool for a tool that
-    /// wrote nothing (`POOLED_READ_TOOLS`), else the writer.
-    pub(super) fn redact_work_via(
+    /// Two halves, under one lock and in one pass over the JSON:
+    ///
+    /// * the **session** half (multi-user M1, T8): a session row the
+    ///   caller's [`ViewScope`] cannot see is REMOVED — out of its array, or
+    ///   nulled where it was a field (`ViewScope::drop_invisible_rows`).
+    /// * the **org** half (work graph M5): a row the caller may see keeps its
+    ///   identity and loses the work of another company
+    ///   (`OrgScope::redact_json`).
+    ///
+    /// Both resolve a row through the **store**, by id, never through the
+    /// payload: a projection that dropped `org_id` cannot make a row look
+    /// unassigned, and one that dropped `visibility` cannot make a private
+    /// row look unclaimed.
+    ///
+    /// **It runs for every caller.** Until M1 the call site in `call_tool`
+    /// was `if caller.is_scoped()` and the body returned early on
+    /// `OrgScope::is_all` — and `is_scoped()` is false for the master and for
+    /// every paired client bound to no org, which is precisely the caller M1
+    /// introduces. So revision 3's "fail-closed backstop over every tool
+    /// result" executed, for a person's phone, never. There is no early
+    /// return left here: the only unrestricted scope is
+    /// `ViewScope::internal`, the hub's own reader, which is built directly
+    /// and never from a `Caller` (`drop_invisible_rows` states that rule
+    /// where the rest of the type's rules live).
+    ///
+    /// Fails closed twice over: a poisoned lock or a scope that cannot be
+    /// built drops every session row AND every work field
+    /// ([`fence_everything`]) — not only the work fields, which was the old
+    /// behaviour and which left the rows themselves in the answer.
+    ///
+    /// The store is read through `store`: the read pool for a tool that wrote
+    /// nothing (`POOLED_READ_TOOLS`), else the writer, so a tool's gate sees
+    /// its own writes.
+    ///
+    /// [`ViewScope`]: crate::service::view_scope::ViewScope
+    pub(super) fn fence_result_via(
         &self,
         store: &Mutex<Store>,
         caller: &Caller,
         result: &mut CallToolResult,
     ) {
         let Ok(s) = store.lock() else {
-            strip_all_work(result);
+            fence_everything(result);
+            return;
+        };
+        let scope = match caller.view_scope(&s) {
+            Ok(sc) => sc,
+            Err(_) => {
+                drop(s);
+                fence_everything(result);
+                return;
+            }
+        };
+        let sees = visibility_resolver(&s, &scope);
+        let org_of = org_resolver(&s);
+        rewrite_json_content(result, |v| {
+            // Rows first: a row that leaves the answer takes its work with
+            // it, and the org half then has less to walk.
+            scope.drop_invisible_rows(v, &sees);
+            scope.org.redact_json(v, &org_of);
+        });
+    }
+
+    /// [`Self::fence_result_via`] through the writer, exactly as `call_tool`
+    /// gates a tool that may have written.
+    ///
+    /// The tests drive this rather than `ServerHandler::call_tool` itself
+    /// because a `RequestContext` cannot be built outside rmcp (its `Peer`
+    /// has no public constructor), so the call site is pinned by reading
+    /// `mod.rs` instead — `the_result_gate_is_reached_for_every_caller`.
+    #[cfg(test)]
+    pub(super) fn fence_result_for(&self, caller: &Caller, result: &mut CallToolResult) {
+        self.fence_result_via(&self.store, caller, result)
+    }
+
+    /// The ORG half alone, as the org-isolation matrix drives it
+    /// (`tests_isolation.rs`), through the writer.
+    ///
+    /// Production has no such path any more — `call_tool` runs
+    /// [`Self::fence_result_via`], which does both halves together. The
+    /// matrix keeps the narrow form deliberately: what it asserts is the org
+    /// boundary over results whose rows its fixture makes visible to every
+    /// caller in it (each host token stands in its own row's pane, and every
+    /// client is the hub's one person's device), and a matrix that also
+    /// dropped rows would stop saying which boundary refused what. The
+    /// session half has its own tests, and the gate's own call site has a
+    /// regression guard that reads `mod.rs`
+    /// (`the_result_gate_is_reached_for_every_caller`).
+    #[cfg(test)]
+    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
+        let Ok(s) = self.store.lock() else {
+            fence_everything(result);
             return;
         };
         let scope = match caller.org_scope(&s) {
             Ok(sc) => sc,
             Err(_) => {
                 drop(s);
-                strip_all_work(result);
+                fence_everything(result);
                 return;
             }
         };
-        if scope.is_all() {
-            return;
-        }
-        // An org no scope can hold: any failed lookup reads as "not yours".
-        const UNREADABLE: i64 = i64::MIN;
-        let org_of = |m: &serde_json::Map<String, serde_json::Value>| -> Option<i64> {
-            let own = m.get("org_id").and_then(serde_json::Value::as_i64);
-            match m.get("id").and_then(serde_json::Value::as_i64) {
-                // A row that is gone (a kill's answer) keeps the org it was
-                // serialised with.
-                Some(id) => match s.session_org(id) {
-                    Ok(Some(o)) => Some(o),
-                    Ok(None) => own,
-                    Err(_) => Some(UNREADABLE),
-                },
-                None => Some(UNREADABLE),
-            }
-        };
+        let org_of = org_resolver(&s);
         rewrite_json_content(result, |v| scope.redact_json(v, &org_of));
     }
 
-    /// [`Self::redact_work_via`] through the writer, as `call_tool` gates a
-    /// tool that may have written.
-    #[cfg(test)]
-    pub(super) fn redact_work_for(&self, caller: &Caller, result: &mut CallToolResult) {
-        self.redact_work_via(&self.store, caller, result)
+    /// `send_message`'s RECIPIENT, through the one session gate (multi-user
+    /// M1, T7).
+    ///
+    /// Before this, the far end of a message was checked only inside
+    /// `service/messages.rs`'s `if !scope.is_all()` blocks, which never run
+    /// for a person's device — so a phone could `deliver: true, submit:
+    /// true` into any pane in the fleet. The gate belongs here, where every
+    /// other session-addressed call already is, and it carries
+    /// [`Reach::Drive`]: a message that pastes into a pane is `send_prompt`
+    /// by another route (spec §4.3, invariant 5).
+    ///
+    /// Three shapes of recipient, and only one of them is ours to judge:
+    ///
+    /// * no `to_addr` — a plain `to_session_id`, gated here;
+    /// * a `to_addr` naming a session of THIS fleet (no fleet part, or our
+    ///   own) — resolved by `(host, name)` through the same gate, because
+    ///   the address is only another spelling of the same local row;
+    /// * a `to_addr` naming another fleet, a client or a hub — not a local
+    ///   session, so there is no row here to judge. `send_remote` already
+    ///   refuses `deliver` outright and the receiving hub applies its own
+    ///   rules; a malformed address is left to `service/messages.rs`, which
+    ///   has the sentence for it.
+    ///
+    /// The local fleet id is read through its own short lock BEFORE the
+    /// store guard is taken: `Store` is a plain, non-reentrant
+    /// `std::sync::Mutex` and `stored_local_fleet_id` locks it itself.
+    pub(super) fn require_message_recipient(
+        &self,
+        caller: &Caller,
+        p: &SendMessageParams,
+    ) -> Result<(), McpError> {
+        let by_addr = match p.to_addr.as_deref() {
+            None => None,
+            Some(raw) => {
+                // A malformed address is not refused here: it reaches
+                // `service::messages`, which answers it by name.
+                let Ok(crate::service::address::Addr::Session { fleet, host, name }) =
+                    crate::service::address::parse(raw)
+                else {
+                    return Ok(());
+                };
+                let local = crate::service::address::stored_local_fleet_id(&self.store)
+                    .map_err(to_mcp_err)?;
+                if fleet.is_some() && fleet != local {
+                    // Another fleet's session: nothing local to gate.
+                    return Ok(());
+                }
+                Some((host, name))
+            }
+        };
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        // Person-gated without the host fence in front: a recipient this
+        // caller cannot reach — another person's, another org's, another
+        // host's — answers exactly as a session that does not exist, which
+        // is the answer `service/messages.rs` already gave for the two
+        // fences it had. See `resolve_row_person_gated` for why the host
+        // rule is not lost with it.
+        let row = match &by_addr {
+            Some((host, name)) => {
+                sessions::resolve_session_target(&s, None, Some(host.as_str()), Some(name.as_str()))
+            }
+            None => sessions::resolve_session_target(&s, Some(p.to_session_id), None, None),
+        }
+        .map_err(to_mcp_err)?;
+        require_person_sees(&s, caller, &row, Reach::Drive, "the message's recipient")
+    }
+
+    /// [`Self::resolve_target_row`] without [`require_host`] in front of it:
+    /// the person gate alone, which answers `E_NOTFOUND` for every row this
+    /// caller may not see — including one on another host.
+    ///
+    /// **Nothing is unfenced by leaving `require_host` out.**
+    /// [`crate::service::view_scope::ViewScope::sees_session_row`]'s host arm
+    /// already refuses a per-host token every row that is not on its own
+    /// host, so the only thing that changes is the CODE: `E_NOTFOUND`
+    /// instead of `E_FORBIDDEN`, and a sentence that does not name the other
+    /// host.
+    ///
+    /// That is the right trade wherever the only useful answer for a row this
+    /// caller cannot reach is "there is no such row":
+    ///
+    /// * **the `repo_*` reads and `session_history`**, whose subject IS the
+    ///   content of somebody else's session (spec §4.3, *What counts as
+    ///   content*), so a sentence naming the host it sits on tells a stranger
+    ///   it exists;
+    /// * **a BATCH item** — `work_link { tidy_apply }`, and the planned
+    ///   sessions of `restore_host_sessions` — where every item has always
+    ///   answered for itself and "another host's session reads as one that
+    ///   does not exist" is the rule the batch already followed;
+    /// * **`work_link { handover }`**, whose service fence answered the same
+    ///   way before this task, and whose refusal is compared against an
+    ///   unknown id by the isolation matrix (`same_as_unknown`) precisely so
+    ///   the two stay indistinguishable.
+    ///
+    /// Everywhere else the host fence runs first and says which host the
+    /// session is on, which is the more useful sentence for an agent that
+    /// named a real session on the wrong machine — and no secret, since a
+    /// host token has shell on its own box.
+    pub(super) fn resolve_row_person_gated(
+        &self,
+        caller: &Caller,
+        session_id: i64,
+        reach: Reach,
+        what: &str,
+    ) -> Result<crate::store::SessionRow, McpError> {
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let row = sessions::resolve_session_target(&s, Some(session_id), None, None)
+            .map_err(to_mcp_err)?;
+        require_person_sees(&s, caller, &row, reach, what)?;
+        Ok(row)
+    }
+
+    /// `Reach::Drive` on every live session linked to a local work item
+    /// (multi-user M1, T7).
+    ///
+    /// `work_link { name, item_id }` renames a local item, and a local item is
+    /// only ever reachable THROUGH the sessions linked to it
+    /// (`local::local_item_visible`, which returns `true` on `scope.is_all()` —
+    /// i.e. for every paired client bound to no org). The title it rewrites is
+    /// what the OWNER's sidebar shows for their own row, so it takes the same
+    /// level as the naming half of the same arm.
+    ///
+    /// The refusal is the ITEM's, never the session's: this arm is addressed by
+    /// an item id, and the org fence it composes with answers an out-of-scope
+    /// item as an unknown item (`tests_isolation`'s `same_as_unknown` holds the
+    /// two sentences equal). A refusal naming a session id here would break
+    /// that AND tell the caller a row exists.
+    ///
+    /// **An item with no CONFIRMED link at all is nobody's to prove, so it
+    /// is nobody's to write** (multi-user M1, T9e). This used to pass — "no
+    /// link, nothing to protect" — and the loop below is why that was wrong:
+    /// with an empty list the `for` body never runs and the gate returned
+    /// `Ok(())` without examining anything, so for such an item the whole
+    /// fence was [`crate::service::work::local::local_item_visible`]'s
+    /// `if scope.is_all() { return Ok(true) }`, and `OrgScope::All` is what
+    /// every person's own `full` device resolves to. The state is reachable
+    /// in two moves and both are ordinary: `Store::local_item_links` selects
+    /// `WHERE l.state = 'confirmed'`, so a merely SUGGESTED link does not
+    /// count, and `unlink_session_work_held` DELETEs the link row outright
+    /// (`DELETE FROM work_links WHERE id = ?1`) — so Ada's
+    /// `work_link { name }` followed by Ada's `work_link { unlink }` left a
+    /// `work_items` row any `full` device could rename and whose status any
+    /// `full` device could set, which `status_set_by = 'person'` makes FINAL
+    /// over the derived value.
+    ///
+    /// The answer is the one this milestone already settled for the other
+    /// "no record to judge" shape, and it is the SAME sentence:
+    /// [`crate::service::orgs::link_person_visible`]'s arm 3 (a link with no
+    /// live participant and not one recorded conversation id) answers
+    /// `view.host.is_some() || view.is_sole_person()` — rule 7 where it is
+    /// really about rule 7, and nothing wider. A per-host token passes for
+    /// §4.4's reason (a host's reach, no person dimension) and is then
+    /// refused downstream anyway, because `local_item_visible`'s own org
+    /// half finds no visible link for it either. Every other caller,
+    /// the master included, is answered as an unknown item. The cost is
+    /// stated plainly: an item whose last link its OWNER unlinked is no
+    /// longer renameable by its owner either — the same fail-closed
+    /// direction, and the same product cost, as a detached task
+    /// ([`crate::service::tasks::task_visible_in_scope_pure`]).
+    ///
+    /// An item whose links have all ENDED is still its owner's: multi-user M1
+    /// T9c added the second arm below, because
+    /// [`crate::store::Store::local_item_links`] joins participants only
+    /// `AND l.ended_at IS NULL`, so an ended link always yields
+    /// `session_id = None` — and collecting `filter_map(|l| l.session_id)`
+    /// therefore found NO occupants for an item every one of whose links had
+    /// been reaped, and `work_link { name, item_id }` renamed another
+    /// person's finished work. That is the same ended-half hole T9b closed
+    /// for the link READS, through the same predicate
+    /// ([`crate::service::orgs::link_person_visible`]).
+    ///
+    /// `local_item_links` is also a FOURTH store read that yields ended
+    /// `work_links` rows, alongside `scope_links_for`'s three; the by-id
+    /// `Store::get_work_link` and the live-only `live_work_sessions_for_key`
+    /// complete that enumeration.
+    pub(super) fn require_drive_on_item_sessions(
+        &self,
+        caller: &Caller,
+        item_id: i64,
+    ) -> Result<(), McpError> {
+        let s = lock(self.reader()).map_err(to_mcp_err)?;
+        let view = caller.view_scope(&s).map_err(to_mcp_err)?;
+        let links = s.local_item_links(Some(item_id)).map_err(to_mcp_err)?;
+        // Nothing confirmed to judge: fail CLOSED, as `link_person_visible`'s
+        // arm 3 does for a link with nothing recorded. An empty list is not
+        // "no owner to offend", it is "no evidence this is yours" — and it is
+        // reachable in two ordinary moves (name, then unlink). See the doc.
+        if links.is_empty() && !(view.host.is_some() || view.is_sole_person()) {
+            return Err(to_mcp_err(crate::service::orgs::not_found(
+                "work item",
+                item_id,
+            )));
+        }
+        for l in links {
+            match l.session_id {
+                Some(sid) => {
+                    let Some(row) = s
+                        .get_session_by_id(sid)
+                        .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                    else {
+                        continue;
+                    };
+                    if !reaches_row(&s, caller, &row, Reach::Drive)? {
+                        return Err(to_mcp_err(crate::service::orgs::not_found(
+                            "work item",
+                            item_id,
+                        )));
+                    }
+                }
+                // No live participant: the ended half, judged by the one
+                // ended-link predicate. `Reach::Drive` has no meaning for a
+                // session that no longer exists — there is nothing to drive
+                // — so the question is whether this caller may see the link
+                // at all, which is what `work { links }` asks of it too.
+                None => {
+                    if !crate::service::orgs::link_person_visible(&s, &view, &l.link)
+                        .map_err(to_mcp_err)?
+                    {
+                        return Err(to_mcp_err(crate::service::orgs::not_found(
+                            "work item",
+                            item_id,
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// [`Self::resolve_target`] returning the whole row.
@@ -1513,10 +2189,11 @@ impl FleetTools {
         session_id: Option<i64>,
         host_alias: Option<&str>,
         tmux_name: Option<&str>,
+        reach: Reach,
         what: &str,
     ) -> Result<crate::store::SessionRow, McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
-        resolve_row_and_gate(&s, caller, session_id, host_alias, tmux_name, what)
+        resolve_row_and_gate(&s, caller, session_id, host_alias, tmux_name, reach, what)
     }
 
     /// Deliver a (already marked) prompt to a resolved session and return
@@ -1631,6 +2308,19 @@ impl FleetTools {
             .map_err(to_mcp_err)
     }
 
+    /// Ask a long poll's [`tasks::AccessRecheck`] once, outside the wait,
+    /// under a fresh lock.
+    ///
+    /// Every long poll calls this immediately before it builds its
+    /// payload. The in-loop re-check cannot be the last word on its own:
+    /// between the final wake and `ok_json` a tool may take another await
+    /// (`wait_for_session`'s pane probe, `run_prompt`'s transcript read),
+    /// and that gap is exactly long enough for a revoke to land.
+    pub(super) fn recheck_now(&self, recheck: &dyn tasks::AccessRecheck) -> Result<(), McpError> {
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        recheck.check(&s).map_err(to_mcp_err)
+    }
+
     /// A long-poll permit for `caller`, or `E_RATE_LIMITED` when it already
     /// holds [`guard::MAX_LONG_POLLS_PER_CALLER`] bounded waits.
     pub(super) fn long_poll_permit(
@@ -1651,31 +2341,96 @@ impl FleetTools {
         })
     }
 
-    /// A task the caller may see: master sees all; a per-host token only
-    /// tasks it requested from its host or that target a worker on its
-    /// host. Unknown → E_NOTFOUND; invisible → E_FORBIDDEN.
+    /// A task the caller may see, and may reach this far into.
+    ///
+    /// A `TaskRow` carries `prompt`, `result` and `error` — the text one
+    /// session sent another and the paragraph it sent back. That is session
+    /// CONTENT, so the gate is the sessions' own: a task is visible when the
+    /// caller sees every session it names
+    /// (`service::tasks::task_visible_in_scope`), and the per-host token's
+    /// §4.4 clauses are the ones it already has everywhere else.
+    ///
+    /// Before M1 this fenced on `caller.host_alias` alone, and
+    /// `task_visible_to` opened with `let Some(host) = host else { return
+    /// Ok(true) }` — so a caller with no host binding, which is the master
+    /// AND every person's paired device, was handed every task in the fleet.
+    /// That was already an org leak; with two people it is a privacy one.
+    ///
+    /// Unknown → `E_NOTFOUND`; invisible → `E_NOTFOUND` as well, so an id
+    /// the caller may not see and an id that does not exist are the same
+    /// answer (the old `E_FORBIDDEN` was an existence oracle over the whole
+    /// task table). Visible but below `reach` → `E_FORBIDDEN`.
     pub(super) fn visible_task(
         &self,
         caller: &Caller,
         task_id: i64,
+        reach: Reach,
     ) -> Result<crate::store::TaskRow, McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
-        let task = s
-            .get_task(task_id)
-            .map_err(to_mcp_err)?
-            .ok_or_else(|| mcp_err("E_NOTFOUND", format!("task {task_id} not found"), None))?;
-        if !tasks::task_visible_to(&s, &task, caller.host_alias.as_deref()).map_err(to_mcp_err)? {
-            return Err(mcp_err(
-                "E_FORBIDDEN",
+        task_visible_at(&s, caller, task_id, reach).map_err(to_mcp_err)
+    }
+}
+
+/// [`FleetTools::visible_task`] against a store handle the caller already
+/// holds, in the service layer's error type.
+///
+/// Written once, here, for the same reason [`person_sees`] is: the
+/// `wait_for_task` long poll re-checks this on every wake from inside
+/// `service::tasks` (T11), where there is no `McpError` and no [`Caller`].
+pub(super) fn task_visible_at(
+    s: &Store,
+    caller: &Caller,
+    task_id: i64,
+    reach: Reach,
+) -> Result<crate::store::TaskRow, IpcError> {
+    let task = s
+        .get_task(task_id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("task {task_id} not found")))?;
+    let scope = caller.view_scope(s)?;
+    if !tasks::task_visible_in_scope(s, &task, &scope)? {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("task {task_id} not found"),
+        ));
+    }
+    // The reach is judged on the WORKER: a task's drive-level act
+    // (`cancel_task`) stops work on the worker's machine, and the
+    // requester is only the session that asked for it. A task with no
+    // worker row to judge is refused rather than allowed — there is
+    // nothing to be the owner of.
+    if reach != Reach::Read {
+        let worker = match task.worker_session_id {
+            Some(id) => s.get_session_by_id(id)?,
+            None => None,
+        };
+        let ok = match (&worker, reach) {
+            (Some(row), Reach::Drive) => {
+                // §4.4: a per-host token drives what it can reach, and
+                // the task's own visibility above is what it could
+                // reach. Without this clause the agent that dispatched
+                // a task could not cancel the worker it spawned — the
+                // worker inherits the REQUESTER's owner (T5), so it is
+                // not the machine's to own even though it is the
+                // machine's to run.
+                scope.may_drive(row) || scope.host.as_deref() == Some(row.host_alias.as_str())
+            }
+            // No equivalent for `own`: a pane proof is never ownership,
+            // and a per-host token is never an owner.
+            (Some(row), Reach::Own) => scope.may_own(row),
+            (Some(_), Reach::Read) | (None, _) => false,
+        };
+        if !ok {
+            return Err(IpcError::new(
+                codes::E_FORBIDDEN,
                 format!(
-                    "task {task_id} involves no session on this token's host ({})",
-                    caller.label()
+                    "task {task_id} needs {} on its worker session and this access \
+                         does not carry it",
+                    reach.needed()
                 ),
-                None,
             ));
         }
-        Ok(task)
     }
+    Ok(task)
 }
 
 // ---- smart caching (`fresh_for`) --------------------------------------------
@@ -1685,11 +2440,27 @@ impl FleetTools {
 /// (migration 044, `docs/control-api.md`: "your own session id"), so a
 /// foreign caller writing it would blind the reader to deltas — the silent
 /// skip the design forbids. A per-host token may only name a session on its
-/// own host (`E_FORBIDDEN` otherwise, like every other write it makes) and
-/// inside its org scope; the master and a paired client are unbound.
-/// `Ok(false)` — no such session — keeps the `reader_unknown` answer, under
-/// which no cursor is ever written. The ONE helper every `fresh_for` tool
-/// calls, so the five cannot drift.
+/// own host (`E_FORBIDDEN` otherwise, like every other write it makes); the
+/// row itself is then resolved through the caller's [`ViewScope`], which is
+/// the ONE visibility rule (org boundary, §4.4's host clauses, ownership
+/// and grants) rather than a second one written here.
+///
+/// The scope is consulted **unconditionally**, never behind
+/// `caller.is_scoped()`: that predicate is false for the master and for
+/// every person's paired device, so a guarded check left the cursor key
+/// — `(reader session id, tool, resource key)`, with no caller in it —
+/// shared between people. Person B naming a session of person A's wrote
+/// B's own page hash under A's cursor, and A's next identical read
+/// answered `unchanged` with no rows: exactly the blinding this helper
+/// exists to prevent, made cross-person the moment `list_sessions` began
+/// paging per person.
+///
+/// `Ok(false)` — the `reader_unknown` answer, under which no cursor is ever
+/// written — is returned for an invisible row as well as a missing one, so
+/// the two are indistinguishable and the call is no existence oracle. The
+/// ONE helper every `fresh_for` tool calls, so the five cannot drift.
+///
+/// [`ViewScope`]: crate::service::view_scope::ViewScope
 pub(super) fn resolve_reader(s: &Store, caller: &Caller, reader: i64) -> Result<bool, McpError> {
     let Some(row) = s
         .get_session_by_id(reader)
@@ -1697,18 +2468,17 @@ pub(super) fn resolve_reader(s: &Store, caller: &Caller, reader: i64) -> Result<
     else {
         return Ok(false);
     };
-    require_host(caller, &row.host_alias, "fresh_for's session")?;
-    if caller.is_scoped() {
-        let scope = caller.org_scope(s).map_err(to_mcp_err)?;
-        if !scope.sees_row(&row) {
-            return Err(mcp_err(
-                "E_FORBIDDEN",
-                format!("fresh_for's session {reader} is outside this token's org"),
-                None,
-            ));
-        }
-    }
-    Ok(true)
+    // The visibility check and NOTHING before it. `require_host` used to run
+    // first, and its refusal names the other host ("fresh_for's session is on
+    // host h2; this token is bound to h1"), so an agent probing ids learned
+    // which ones exist and which machine each lives on — a one-bit oracle over
+    // the whole `sessions` table, past the very doc comment above that says the
+    // two cases are indistinguishable. Nothing is lost by dropping it:
+    // `ViewScope::sees_session_row`'s host arm already refuses a per-host token
+    // every row that is not on its own host, which is the argument
+    // `resolve_row_person_gated` makes for itself.
+    let scope = caller.view_scope(s).map_err(to_mcp_err)?;
+    Ok(scope.sees_session_row(&row).is_visible())
 }
 
 /// The gate every `fresh_for`-aware tool applies before

@@ -10,6 +10,17 @@ use crate::ipc_error::codes;
 /// short enough that a name cannot be used to pad a log line or a prompt.
 pub const MAX_CLIENT_NAME_LEN: usize = 64;
 
+/// What a live client token is bound TO: its org (work graph M14) and its
+/// person (multi-user M1). Read together by
+/// [`Store::client_token_binding`], because the one caller that wants either
+/// — the `/events` beat — ends the stream when EITHER moved, and two reads
+/// could straddle a write that changed both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientBinding {
+    pub org_id: Option<i64>,
+    pub person_id: Option<i64>,
+}
+
 /// The modes a client token may carry. Anything else is refused at the
 /// insert: `TokenMode::parse_client` reads an unknown string as `readonly`,
 /// so a typo would silently downgrade a client rather than fail. `peer`
@@ -133,10 +144,10 @@ impl Store {
         include_revoked: bool,
     ) -> Result<Vec<ClientTokenRow>, crate::ipc_error::IpcError> {
         let sql = if include_revoked {
-            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
+            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at, person_id \
              FROM client_tokens ORDER BY id DESC"
         } else {
-            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
+            "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at, person_id \
              FROM client_tokens WHERE revoked_at IS NULL ORDER BY id DESC"
         };
         let mut stmt = self.conn.prepare(sql)?;
@@ -201,28 +212,12 @@ impl Store {
                 )
             })?;
         let tx = self.conn.unchecked_transaction()?;
-        let n = tx.execute(
-            "UPDATE client_tokens SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
-            rusqlite::params![id, at],
-        )?;
-        if n == 0 {
+        if revoke_client_token_row(&tx, id, at)? == 0 {
             return Err(crate::ipc_error::IpcError::new(
                 codes::E_NOTFOUND,
                 format!("no active client token named '{name}'"),
             ));
         }
-        // The client's update state (migration 079, target `client:<id>`)
-        // goes with it: a revoked id never reports again, so its observed
-        // row would count in `update_status` forever and its pin would
-        // steer nothing. The transition log is left to its retention.
-        tx.execute(
-            "DELETE FROM update_observed WHERE target = 'client:' || ?1",
-            [id],
-        )?;
-        tx.execute(
-            "DELETE FROM update_desired WHERE target = 'client:' || ?1",
-            [id],
-        )?;
         tx.commit()?;
         get_client_token_by_id(&self.conn, id)?.ok_or_else(|| {
             crate::ipc_error::IpcError::new(
@@ -288,7 +283,7 @@ impl Store {
         }
         self.conn
             .query_row(
-                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at, person_id \
                  FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
                 rusqlite::params![name],
                 map_client_token_row,
@@ -320,7 +315,7 @@ impl Store {
         let row = self
             .conn
             .query_row(
-                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at, person_id \
                  FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
                 rusqlite::params![name],
                 map_client_token_row,
@@ -561,7 +556,7 @@ impl Store {
         }
         self.conn
             .query_row(
-                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at, person_id \
                  FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
                 rusqlite::params![name],
                 map_client_token_row,
@@ -569,19 +564,32 @@ impl Store {
             .map_err(crate::ipc_error::IpcError::from)
     }
 
-    /// The org live client `id` is bound to: `Some(binding)` while it is
-    /// paired, `None` once it is revoked or gone. An open `/events` stream
-    /// compares it on every beat with the binding it started under.
-    pub fn client_token_org(
+    /// What live client `id` is bound to: `Some(binding)` while it is paired,
+    /// `None` once it is revoked or gone. An open `/events` stream compares
+    /// it on every beat with the binding it started under, and ends the
+    /// stream when either half moved — a device re-bound to another person
+    /// (multi-user M1) exactly as one re-bound to another org.
+    ///
+    /// This is the DEVICE mechanism and it knows nothing about grants (rule
+    /// 8): revoking a device and revoking a share are different events with
+    /// different mechanisms, and a stream that ended because a grant changed
+    /// would tell the wrong story to the wrong person.
+    pub fn client_token_binding(
         &self,
         id: i64,
-    ) -> Result<Option<Option<i64>>, crate::ipc_error::IpcError> {
+    ) -> Result<Option<ClientBinding>, crate::ipc_error::IpcError> {
         Ok(self
             .conn
             .query_row(
-                "SELECT org_id FROM client_tokens WHERE id = ?1 AND revoked_at IS NULL",
+                "SELECT org_id, person_id FROM client_tokens \
+                 WHERE id = ?1 AND revoked_at IS NULL",
                 [id],
-                |r| r.get::<_, Option<i64>>(0),
+                |r| {
+                    Ok(ClientBinding {
+                        org_id: r.get(0)?,
+                        person_id: r.get(1)?,
+                    })
+                },
             )
             .optional()?)
     }
@@ -613,15 +621,63 @@ fn map_client_token_row(row: &rusqlite::Row) -> rusqlite::Result<ClientTokenRow>
         trusted_at: row.get(7)?,
         org_id: row.get(8)?,
         assets_admin_at: row.get(9)?,
+        person_id: row.get(10)?,
     })
 }
 
-fn get_client_token_by_id(
+/// Revoke ONE live `client_tokens` row by id, and take its update state with
+/// it. The whole meaning of "revoked" lives here: [`Store::revoke_client_token`]
+/// (by name, the operator's `fleet-hub client revoke`) and
+/// `store::people::disable_person` (every device of a departing person) both go
+/// through it, so neither can drift from the other — a second raw
+/// `UPDATE client_tokens SET revoked_at` would have left the stale update rows
+/// behind.
+///
+/// Returns the number of rows revoked: 0 when the id is unknown or already
+/// revoked, so the caller decides whether that is an error (by name) or simply
+/// nothing to do (a sweep over a person's devices).
+///
+/// Takes a `&Connection` rather than `&self` so the caller supplies the
+/// transaction: both callers have one open, and `unchecked_transaction` inside
+/// an open transaction would fail.
+pub(super) fn revoke_client_token_row(
+    conn: &rusqlite::Connection,
+    id: i64,
+    at: i64,
+) -> rusqlite::Result<usize> {
+    // `revoked_at` is in migration 060's trigger column list, so this bumps
+    // the auth epoch and no cached caller survives it.
+    let n = conn.execute(
+        "UPDATE client_tokens SET revoked_at = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+        rusqlite::params![id, at],
+    )?;
+    if n == 0 {
+        return Ok(0);
+    }
+    // The client's update state (migration 079, target `client:<id>`) goes
+    // with it: a revoked id never reports again, so its observed row would
+    // count in `update_status` forever and its pin would steer nothing. The
+    // transition log is left to its retention.
+    conn.execute(
+        "DELETE FROM update_observed WHERE target = 'client:' || ?1",
+        [id],
+    )?;
+    conn.execute(
+        "DELETE FROM update_desired WHERE target = 'client:' || ?1",
+        [id],
+    )?;
+    Ok(n)
+}
+
+/// `pub(super)` rather than private: `store::people::set_client_person`
+/// writes `person_id` and reads the row back through here, so the column
+/// list stays in this file — the one place that knows it.
+pub(super) fn get_client_token_by_id(
     conn: &rusqlite::Connection,
     id: i64,
 ) -> rusqlite::Result<Option<ClientTokenRow>> {
     conn.query_row(
-        "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at \
+        "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at, person_id \
          FROM client_tokens WHERE id = ?1",
         rusqlite::params![id],
         map_client_token_row,

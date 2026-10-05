@@ -4,7 +4,11 @@
 use crate::config::{resolve, resolve_data_dir, HubOptions, Resolved};
 use crate::out;
 use fleet_core::events::{BroadcastEventBus, EventBus, NoopEventBus};
-use fleet_core::mcp::{self, settings::ensure_master_token, McpGuards};
+use fleet_core::mcp::{
+    self,
+    settings::{ensure_master_token, ensure_personal_owner},
+    McpGuards,
+};
 use fleet_core::service::hub::{
     SETTING_ALLOWED_HOSTS, SETTING_ALLOW_PLAINTEXT, SETTING_BIND, SETTING_LOCAL_HOST,
     SETTING_PUBLIC_URL, SETTING_TLS, SETTING_TLS_CERT, SETTING_TLS_KEY,
@@ -147,6 +151,12 @@ pub fn init(
             s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
                 .map_err(|e| e.to_string())?;
         }
+        // Multi-user M1: a hub knows whose it is before it serves anything.
+        // Migration 098 inserts the personal owner, so this is normally one
+        // index seek; it is called at every entry point that mints the
+        // master token because a store opened outside `init` must have one
+        // too, and no single entry point is guaranteed to run first.
+        ensure_personal_owner(&s).map_err(|e| e.message)?;
         ensure_master_token(&s).map_err(|e| e.message)?
     };
     out::line(&format!("data dir: {}", r.data_dir.display()));
@@ -191,6 +201,9 @@ pub fn token(
         s.set_setting(mcp::SETTING_TOKEN, &mcp::generate_token())
             .map_err(|e| e.to_string())?;
     }
+    // The write paths of `token` are the other place a fresh database can
+    // be minted into; give it its personal owner here too (see `init`).
+    ensure_personal_owner(&s).map_err(|e| e.message)?;
     out::line(&ensure_master_token(&s).map_err(|e| e.message)?);
     Ok(ExitCode::SUCCESS)
 }
@@ -857,6 +870,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         let s = store
             .lock()
             .map_err(|_| "store lock poisoned".to_string())?;
+        // Before the listener: every `Caller` this process resolves asks who
+        // the personal owner is, and a hub that cannot answer fails closed
+        // (see `ensure_personal_owner`). Serving without one would refuse
+        // every session read, which is safe but useless.
+        ensure_personal_owner(&s).map_err(|e| e.message)?;
         ensure_master_token(&s).map_err(|e| e.message)?
     };
     let base = r.base()?;

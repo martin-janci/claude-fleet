@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
+  import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -19,8 +20,11 @@
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
   import TransferChip from './TransferChip.svelte';
+  import MicToggle from './MicToggle.svelte';
+  import { voiceState, releaseVoice, followSession, abandonFollow } from './voice';
   import { fitCells } from './terminal_size';
-  import { ownsTheFleet } from './hub';
+  import { hubStatus, ownsTheFleet } from './hub';
+  import { accessOf, noAttachReason } from './access';
 
   // ─────────────────────────────────────────────────────────────────────
   // Terminal pane — minimal ANSI renderer.
@@ -71,6 +75,41 @@
       !!sess && screen !== null && sess.tmux_name === currentSession && sess.host_alias === currentHost
     );
   }
+
+  // ── Sharing never confers a terminal (multi-user M1, spec §4.3 inv. 4) ──
+  //
+  // `pty_open` spawns THIS machine's `ssh … tmux attach`. The hub is not in
+  // that path, so it cannot refuse the attach and cannot revoke it once it is
+  // up — which is exactly why a session reached through a grant must not
+  // attach at all. The gate is therefore here, on the client, and it is three
+  // things, because one of them alone leaks:
+  //
+  //   (a) `App.svelte` never MOUNTS this component for a row the client does
+  //       not own — so in normal use the PTY is never even asked for;
+  //   (b) an early return in `openTerm`, below, BEFORE its `repair_session`
+  //       probe (which respawns tmux and re-adds worktrees — not a thing to
+  //       run on a session you may only watch);
+  //   (c) the `$effect` below, which closes a LIVE pty the moment the derived
+  //       answer stops being `own` — a revoke otherwise leaves a read/write
+  //       channel into the owner's pane that nothing can reach, until a
+  //       30 s-throttled focus re-list happens to notice.
+  //
+  // Read through `$accessOf` (not `sessionAccess`) on purpose: the answer has
+  // THREE inputs — the row, this client's person id and its grant set — and a
+  // revoke moves only the last of them. A derivation that read the row alone
+  // would never fire, because a revoke changes no column on it.
+  const termAccess = $derived($accessOf($selectedSession));
+  const termOwned = $derived(termAccess === 'own');
+  const termNoAttachWhy = $derived(noAttachReason(termAccess, $hubStatus));
+
+  $effect(() => {
+    // Reading the derived subscribes this effect to all three of its sources.
+    if (termOwned) return;
+    // Harmless when nothing is attached: closeTerm no-ops unless there is
+    // something to tear down. When there IS, it bumps the open generation
+    // first, so an open suspended mid-`await` stands down too.
+    void closeTerm();
+  });
 
   /** Forward bytes to the PTY. A rejection (PTY gone, host dropped) used to be
    *  swallowed; now it surfaces once — the toast store dedupes repeats. */
@@ -292,6 +331,13 @@
   }
 
   async function handleDrop(paths: string[]) {
+    // `upload_to_session` scps arbitrary files onto the owner's host over this
+    // machine's own SSH, with no hub in the path — the same unrevocable
+    // channel the attach is, so the same rule: a grant never confers it.
+    // (`ptyOpen` already implies it today, since the grid is not rendered
+    // without an attach; stated anyway, because the one place a drop can race
+    // is a revoke that has not yet closed the PTY.)
+    if (!termOwned) return;
     if (!ptyOpen || !currentSession || !currentHost || paths.length === 0) return;
     // An scp of a large file takes many seconds. Pin the upload to the attach
     // that started it: pasting on arrival regardless typed host A's paths into
@@ -331,6 +377,8 @@
     const sess = $selectedSession;
     if (!sess) {
       void closeTerm();
+      // Nothing attached: the microphone has no session to serve.
+      if (get(voiceState).state !== 'off') void releaseVoice();
       return;
     }
     if (isAttachedTo(sess)) return;
@@ -416,6 +464,12 @@
     }
     const sess = $selectedSession;
     if (!sess) return;
+    // Before `container`, before the workspace probe, before any state write:
+    // a session this client does not own gets no PTY and no `repair_session`
+    // either. Normally unreachable (App does not mount us for such a row),
+    // but the window between a revoke landing and the unmount is real, and
+    // the two open-effects below re-run inside it.
+    if (!termOwned) return;
     if (!container) return;
     const target = { tmux_name: sess.tmux_name, host_alias: sess.host_alias };
     opening = true;
@@ -528,6 +582,7 @@
           scheduleAutoReconnect(target.tmux_name, target.host_alias);
         } else {
           openError = `PTY error: ${toIpcError(e).message}`;
+          abandonFollow(sess.id);
         }
         return;
       }
@@ -546,6 +601,9 @@
       currentHost = sess.host_alias;
       ptyOpen = true;
       attachedAt = Date.now();
+      // The microphone claim follows the attached session (closeTerm runs on
+      // every switch, so release lives on the deselect / destroy paths).
+      followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
       // Work graph M7: a person attaching is a touch — it un-archives the
       // session and keeps tidy-up off it for an hour. Not an automatic
       // reconnect. Best-effort: an older hub without the action refuses it.
@@ -978,6 +1036,7 @@
     destroyed = true;
     openGeneration += 1;
     void closeTerm();
+    if (get(voiceState).state !== 'off') void releaseVoice();
     mouse.dispose();
   });
 
@@ -1117,7 +1176,21 @@
   );
 </script>
 
-{#if $selectedSession}
+{#if $selectedSession && !termOwned}
+  <!-- The last line of the gate: App does not mount this component for a row
+       the client does not own, so reaching here means the answer changed under
+       a mounted pane (a revoke) — or that a future caller mounted us without
+       the check. Either way there is no grid, no IME proxy, no drop target and
+       no `pty_*` call: the markup that could reach the PTY is simply not
+       rendered. `WatchView` is what a watcher actually sees; this is the
+       explanation for the gap. -->
+  <div class="no-attach" data-testid="terminal-no-attach">
+    <p class="no-attach-head">No terminal for this session.</p>
+    {#if termNoAttachWhy}
+      <p class="no-attach-why">{termNoAttachWhy}</p>
+    {/if}
+  </div>
+{:else if $selectedSession}
   <div class="wrap">
     {#if autoReconnecting}
       <div class="reconnect-banner" data-testid="terminal-autoreconnect-banner">
@@ -1139,6 +1212,7 @@
         >{displayName($selectedSession, $showFriendlyNames)}</span
       >
       <TransferChip session={$selectedSession} />
+      <MicToggle session={$selectedSession} transport={selectedSessionHostTransport} />
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>
@@ -1311,6 +1385,29 @@
     height: 100%;
     width: 100%;
     min-height: 0;
+  }
+  .no-attach {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    justify-content: center;
+    align-items: center;
+    height: 100%;
+    width: 100%;
+    padding: 1.5rem;
+    box-sizing: border-box;
+    text-align: center;
+    color: var(--fg-muted);
+    font-size: 0.85rem;
+  }
+  .no-attach-head {
+    margin: 0;
+    font-weight: 600;
+  }
+  .no-attach-why {
+    margin: 0;
+    max-width: 46rem;
+    line-height: 1.5;
   }
   .reconnect-banner {
     position: absolute;

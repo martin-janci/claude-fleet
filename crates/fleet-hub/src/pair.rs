@@ -364,12 +364,21 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             .and_then(|v| v.as_i64())
             .map_or_else(|| "-".to_string(), |o| format!("org {o}"))
     };
-    let cells: Vec<[String; 8]> = rows
+    // Whose device it is (multi-user M1). A dash means nobody — a row the
+    // migration's backfill did not reach, or one `client unbind-person` cut
+    // loose — and such a device sees no private session at all.
+    let person = |r: &serde_json::Value| {
+        r.get("person_id")
+            .and_then(|v| v.as_i64())
+            .map_or_else(|| "-".to_string(), |p| format!("person {p}"))
+    };
+    let cells: Vec<Vec<String>> = rows
         .iter()
         .map(|r| {
-            [
+            vec![
                 field(r, "name"),
                 field(r, "mode"),
+                person(r),
                 org(r),
                 time(r, "trusted_at"),
                 time(r, "assets_admin_at"),
@@ -379,18 +388,30 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             ]
         })
         .collect();
-    let header = [
-        "NAME",
-        "MODE",
-        "ORG",
-        "TRUSTED",
-        "ASSETS",
-        "CREATED",
-        "LAST SEEN",
-        "REVOKED",
-    ];
-    let mut width = header.map(str::len);
-    for row in &cells {
+    table(
+        &[
+            "NAME",
+            "MODE",
+            "PERSON",
+            "ORG",
+            "TRUSTED",
+            "ASSETS",
+            "CREATED",
+            "LAST SEEN",
+            "REVOKED",
+        ],
+        &cells,
+    )
+}
+
+/// A header plus one line per row, columns padded to the widest cell.
+///
+/// The one table layout this CLI has: `client list` and `person list`
+/// (multi-user M1) both render through it, so a second copy cannot drift
+/// from this one on the two things that are easy to get wrong below.
+pub(crate) fn table(header: &[&str], rows: &[Vec<String>]) -> String {
+    let mut width: Vec<usize> = header.iter().map(|h| h.len()).collect();
+    for row in rows {
         for (w, c) in width.iter_mut().zip(row) {
             *w = (*w).max(display_width(c));
         }
@@ -399,9 +420,9 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
     // Padding is counted in terminal columns, not `char`s: `{:<w$}` pads to a
     // char count, which would under-pad a CJK or emoji name (two columns per
     // char) and misalign every column after it.
-    let line = |row: &[String; 8]| {
+    let line = |row: &[String]| {
         let mut s = String::new();
-        for (i, (cell, w)) in row.iter().zip(width).enumerate() {
+        for (i, (cell, w)) in row.iter().zip(&width).enumerate() {
             s.push_str(cell);
             if i + 1 == row.len() {
                 break;
@@ -411,9 +432,9 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
         }
         s
     };
-    let head = line(&header.map(str::to_string));
-    std::iter::once(head)
-        .chain(cells.iter().map(line))
+    let head: Vec<String> = header.iter().map(|h| (*h).to_string()).collect();
+    std::iter::once(line(&head))
+        .chain(rows.iter().map(|r| line(r)))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -421,9 +442,12 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
 // --- the commands ------------------------------------------------------------
 
 /// `fleet-hub pair --name <name> [--mode …] [--ttl …] [--trusted] [--org
-/// <id>]`: mint a code through the running hub and show the URL as a QR for a
-/// phone camera. `--org` binds the client to one org from its first request
-/// (work graph M14.1b).
+/// <id>] [--person <name>]`: mint a code through the running hub and show
+/// the URL as a QR for a phone camera. `--org` binds the client to one org
+/// from its first request (work graph M14.1b); `--person` says whose device
+/// it is (multi-user M1), and left out, the HUB defaults it to its own owner
+/// — this side never guesses a name.
+#[allow(clippy::too_many_arguments)]
 pub async fn pair(
     opts: &HubOptions,
     env: &HashMap<String, String>,
@@ -432,11 +456,18 @@ pub async fn pair(
     ttl: Option<u64>,
     trusted: bool,
     org: Option<i64>,
+    person: Option<&str>,
 ) -> Result<ExitCode, String> {
     let conn = hub_conn(opts, env)?;
     let mut args = serde_json::json!({ "name": name, "trusted": trusted });
     if let Some(o) = org {
         args["org_id"] = serde_json::Value::from(o);
+    }
+    // Left out entirely when the operator named nobody, so the HUB applies
+    // the default (its own owner): the CLI must not guess a name here, or a
+    // renamed owner would pair a second person under the old one.
+    if let Some(p) = person {
+        args["person"] = serde_json::Value::String(p.to_string());
     }
     if let Some(m) = mode {
         args["mode"] = serde_json::Value::String(m.to_string());
@@ -459,6 +490,12 @@ pub async fn pair(
             ""
         }
     ));
+    if let Some(p) = v["person"].as_str() {
+        out::line(&format!(
+            "person:  {p} — the sessions it starts are private to them, and it \
+             sees no session of anybody else's unless that person shares one"
+        ));
+    }
     if let Some(o) = v["org_id"].as_i64() {
         out::line(&format!(
             "org:     {o} — it reads only that org's work and sessions (and unassigned ones \
@@ -569,6 +606,84 @@ pub fn client_grant(
             });
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `fleet-hub client bind-person <name> <person>` / `client unbind-person
+/// <name>` (multi-user M1): hand a paired device to a person, or take it
+/// back.
+///
+/// Written straight to `state.db` like [`client_grant`], and deliberately
+/// NOT through `work_admin { assign_client }` the way [`client_bind`] does
+/// its org: `work_admin` is the org graph's tool, each of its actions is
+/// enumerated by the isolation matrix, and whose DEVICE this is is not an
+/// org-graph question. The auth-epoch trigger of migration 098 fires on the
+/// write, so a running hub resolves the device to its new person on its very
+/// next request and its open `/events` stream ends at the next beat
+/// (`mcp::events_route::client_is_live`) instead of reading on under the old
+/// binding — which is why no running hub is needed here.
+///
+/// The person is created when this hub has never heard of the name, the same
+/// "name it and it exists" the pairing path uses: handing a laptop to a new
+/// colleague is one command, not two.
+///
+/// Which is why the TARGET DEVICE is checked first. `create_person` is a
+/// write, and the two things that refuse a bind outright are about the
+/// DEVICE — an unknown name, or a `peer` / `updater` row, which is nobody's
+/// device. Creating the person before those checks left a `people` row behind
+/// for good on every such refusal, and the operator's retry then hit the
+/// live-name unique index. `Store::set_client_person` is still the gate that
+/// refuses both (it re-reads the row itself, and names the row it wrote);
+/// this read only decides whether a person is worth creating at all.
+pub fn client_bind_person(
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+    name: &str,
+    person: Option<&str>,
+) -> Result<ExitCode, String> {
+    crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
+    let store = crate::serve::open_store(opts, env)?;
+    // Names are stored trimmed (`store::validate_client_name`), and
+    // `set_client_person` trims what it is asked to bind; match it here so
+    // this pre-check cannot disagree with the write about which row is meant.
+    let wanted = name.trim();
+    let device = store
+        .active_client_tokens()
+        .map_err(|e| e.message)?
+        .into_iter()
+        .find(|c| c.name == wanted)
+        .ok_or_else(|| format!("no active client token named '{wanted}'"))?;
+    if let Some(what) = fleet_core::store::machine_token_kind(&device.mode) {
+        return Err(format!(
+            "'{}' is {what}; it is not a person's device",
+            device.name
+        ));
+    }
+    let target = match person {
+        Some(p) => {
+            let p = fleet_core::store::validate_person_name(p).map_err(|e| e.message)?;
+            Some(match store.get_person_by_name(&p).map_err(|e| e.message)? {
+                Some(existing) => existing,
+                None => store.create_person(&p, None).map_err(|e| e.message)?,
+            })
+        }
+        None => None,
+    };
+    let row = store
+        .set_client_person(name, target.as_ref().map(|p| p.id))
+        .map_err(|e| e.message)?;
+    out::line(&match &target {
+        Some(p) => format!(
+            "{} is {}'s device from its next request: it sees their sessions and the ones \
+             they have been shared, and no others",
+            row.name, p.name
+        ),
+        None => format!(
+            "{} belongs to nobody from its next request: it sees no private session at all. \
+             It is still paired — client revoke is what ends that",
+            row.name
+        ),
+    });
     Ok(ExitCode::SUCCESS)
 }
 
@@ -899,7 +1014,7 @@ mod tests {
                 "id": 2, "name": "phone", "mode": "full",
                 "created_at": 1_700_000_000, "last_seen_at": 1_700_000_600,
                 "revoked_at": serde_json::Value::Null,
-                "trusted_at": 1_700_000_300
+                "trusted_at": 1_700_000_300, "person_id": 1
             }),
             serde_json::json!({
                 "id": 1, "name": "old kiosk", "mode": "readonly",
@@ -923,6 +1038,8 @@ mod tests {
             "{t}"
         );
         assert!(lines[0].contains("ASSETS"), "{t}");
+        // Multi-user M1: whose device each row is.
+        assert!(lines[0].contains("PERSON"), "{t}");
         assert!(
             lines[1].contains("phone") && lines[1].contains("full"),
             "{t}"
@@ -931,10 +1048,13 @@ mod tests {
         // TRUSTED is a time for a vouched-for client, a dash otherwise (and
         // a dash for a row from a hub that predates the column).
         assert!(lines[1].contains("2023-11-14 22:18Z"), "{t}");
+        // PERSON is the person id for a bound device; a row from a hub that
+        // predates the column reads as a dash, counted above.
+        assert!(lines[1].contains("person 1"), "{t}");
         assert_eq!(
             lines[2].split_whitespace().filter(|c| *c == "-").count(),
-            4,
-            "a dash for ORG, TRUSTED, ASSETS and LAST SEEN:\n{t}"
+            5,
+            "a dash for PERSON, ORG, TRUSTED, ASSETS and LAST SEEN:\n{t}"
         );
         // A live client's revoked column is a dash, not an empty gap.
         assert!(lines[1].trim_end().ends_with('-'), "{t}");
@@ -1125,7 +1245,20 @@ mod tests {
 
         let (dir, shutdown, task) = running_hub(Some(tls)).await;
         let opts = opts_for(&dir, None);
-        let result = pair(&opts, &HashMap::new(), "phone", None, None, false, None).await;
+        // `person: None` — the hub defaults the device to its own owner, which is
+        // what an operator typing no `--person` gets; these two tests are about
+        // the transport, not about whose device it is.
+        let result = pair(
+            &opts,
+            &HashMap::new(),
+            "phone",
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await;
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         assert!(result.is_ok(), "pair over TLS must succeed: {result:?}");
@@ -1137,12 +1270,71 @@ mod tests {
     async fn pair_reaches_a_plaintext_hub() {
         let (dir, shutdown, task) = running_hub(None).await;
         let opts = opts_for(&dir, None);
-        let result = pair(&opts, &HashMap::new(), "phone", None, None, false, None).await;
+        // `person: None` — the hub defaults the device to its own owner, which is
+        // what an operator typing no `--person` gets; these two tests are about
+        // the transport, not about whose device it is.
+        let result = pair(
+            &opts,
+            &HashMap::new(),
+            "phone",
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await;
         shutdown.cancel();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), task).await;
         assert!(
             result.is_ok(),
             "pair over plaintext must succeed: {result:?}"
+        );
+    }
+    /// A REFUSED bind must leave nobody behind. `create_person` is a write,
+    /// so running it before the target device was checked meant binding an
+    /// unknown device name — or a `peer` / `updater` row, which is nobody's
+    /// device — created the person and then failed, permanently: the
+    /// operator's retry hit the live-name unique index and the orphan row
+    /// stayed in `people` for good.
+    #[test]
+    fn a_refused_bind_person_creates_nobody() {
+        let dir = data_dir_with_port("4180");
+        let env = HashMap::new();
+        let opts = opts_for(&dir, None);
+        {
+            let store = crate::serve::open_store(&opts, &env).expect("store");
+            store
+                .insert_client_token("hub-b", &"b".repeat(64), "peer")
+                .expect("a peer link");
+            store
+                .insert_client_token("laptop", &"c".repeat(64), "full")
+                .expect("a device");
+        }
+        for (device, person) in [("nobody", "ada"), ("hub-b", "bob")] {
+            assert!(
+                client_bind_person(&opts, &env, device, Some(person)).is_err(),
+                "{device} must be refused"
+            );
+            let store = crate::serve::open_store(&opts, &env).expect("store");
+            assert!(
+                store.get_person_by_name(person).expect("read").is_none(),
+                "the refused bind of {device} created {person}"
+            );
+        }
+        // The healthy path still creates the person and binds the device.
+        assert!(client_bind_person(&opts, &env, "laptop", Some("ada")).is_ok());
+        let store = crate::serve::open_store(&opts, &env).expect("store");
+        let ada = store.get_person_by_name("ada").expect("read").expect("ada");
+        assert_eq!(
+            store
+                .active_client_tokens()
+                .expect("clients")
+                .into_iter()
+                .find(|c| c.name == "laptop")
+                .expect("laptop")
+                .person_id,
+            Some(ada.id)
         );
     }
 

@@ -27,6 +27,7 @@
  */
 import { writable, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { sessionIdActionBlocked } from './share';
 import { sendPrompt, sessions } from './sessions';
 import { markNeedsReattach, type Attachment } from './attachments';
 import { withAttachments, tooLong } from './attach_prompt';
@@ -79,6 +80,26 @@ export interface OutboxDeps {
   send(host: string, tmux: string, body: string): Promise<Result<void>>;
   upload(host: string, tmux: string, localPaths: string[]): Promise<Result<string[]>>;
   row(sessionId: number): OutboxRow | undefined;
+  /**
+   * Why this client may not write to `sessionId` RIGHT NOW, or null.
+   *
+   * Multi-user M1 (F2c). The composer in front of the outbox gates the
+   * ENQUEUE, which is a different moment from the SEND — and the difference is
+   * the whole point of a queue. A message waiting behind a slow turn, behind an
+   * upload, or behind a failure the person has not decided yet goes out minutes
+   * later, from a `.finally` that no component is in; by then the grant it was
+   * typed under can have been narrowed to `watch` or revoked outright.
+   *
+   * So the queue asks for itself, at every dispatch, and refuses by FAILING the
+   * message with the reason rather than dropping it: everything behind a failed
+   * message is held (`isHeld`), so a revoke stops the line instead of letting
+   * the messages behind the refused one overtake it, and the person sees why.
+   * `retryable` stays true, so Retry works the moment the grant comes back.
+   *
+   * Optional, and `null` when absent: `createOutbox` is also the unit under
+   * test, and a test that is not about access should not have to wire one.
+   */
+  blocked?(sessionId: number): string | null;
 }
 
 export interface OutboxValue {
@@ -249,6 +270,15 @@ export function createOutbox(deps: OutboxDeps) {
     if (msgs.some((m) => m.state === 'failed')) return;
     const next = msgs.find((m) => m.state === 'waiting');
     if (!next) return;
+    // Asked HERE, at the dispatch, because `pump` is re-entered from three
+    // places — `enqueue`, the `.finally` of the previous send, and
+    // `retry` / `discard` / `edit` — and only one of them is a click a surface
+    // could have gated. See `OutboxDeps.blocked`.
+    const refused = deps.blocked?.(sid) ?? null;
+    if (refused !== null) {
+      patch(sid, next.id, { state: 'failed', error: refused, retryable: true, sendingSince: null });
+      return;
+    }
     running.add(sid);
     patch(sid, next.id, { state: 'sending', sendingSince: Date.now(), error: null });
     const mine = epoch;
@@ -286,6 +316,15 @@ export function createOutbox(deps: OutboxDeps) {
     const body = outboxBody({ ...m, paths });
     if (tooLong(body, target.host_alias === 'local')) {
       patch(sid, id, { state: 'failed', error: TOO_LONG, retryable: false });
+      return;
+    }
+
+    // Re-asked after the upload: `upload_attachments` is `same_in_both`, so it
+    // is not routed and the hub never sees it — but it can take seconds, and a
+    // grant narrowed during it must stop the prompt that follows.
+    const stillRefused = deps.blocked?.(sid) ?? null;
+    if (stillRefused !== null) {
+      patch(sid, id, { state: 'failed', error: stillRefused, retryable: true, sendingSince: null });
       return;
     }
 
@@ -412,6 +451,11 @@ export type Outbox = ReturnType<typeof createOutbox>;
  *  sessions store's row events. */
 export const outbox = createOutbox({
   send: (host, tmux, body) => sendPrompt(host, tmux, body),
+  // The access half, resolved from the id the queue carries. The pure form
+  // rather than the store: a send runs from a `.finally`, not from a reactive
+  // position, so the `get()` defaults are what is wanted — and a row the
+  // client can no longer see fails closed (`UNKNOWN_SESSION_REASON`).
+  blocked: (id) => sessionIdActionBlocked(id, 'send_prompt'),
   upload: (host, tmux, localPaths) =>
     invokeCmd<string[]>('upload_attachments', {
       args: { host_alias: host, session_name: tmux, local_paths: localPaths },

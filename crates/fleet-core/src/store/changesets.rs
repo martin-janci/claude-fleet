@@ -27,8 +27,8 @@ pub struct ChangesetRow {
     /// JSON `[HostLayerRow]`: the touched catalogs' `host_layers` before apply.
     pub layers_snapshot: Option<String>,
     pub error: Option<String>,
-    /// Assets M6 (migration 099, R3): when the system withdrew the card,
-    /// Unix seconds; `None` otherwise and for cards withdrawn before 099.
+    /// Assets M6 (migration 103, R3): when the system withdrew the card,
+    /// Unix seconds; `None` otherwise and for cards withdrawn before 103.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub withdrawn_at: Option<i64>,
 }
@@ -54,9 +54,9 @@ pub struct ChangesetItemRow {
     /// wire then, as before).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_at: Option<i64>,
-    /// Assets M6 (migration 098, R1): JSON `ItemOutcome` — what a
+    /// Assets M6 (migration 102, R1): JSON `ItemOutcome` — what a
     /// host-writing card left undone on this item's host; `None` when it
-    /// applied cleanly, and on items recorded before 098 (absent on the
+    /// applied cleanly, and on items recorded before 102 (absent on the
     /// wire then, as before).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
@@ -462,7 +462,7 @@ impl Store {
     /// Assets M5 (R9): delete the cards the system withdrew — `dismissed`
     /// with an error starting `withdrawn:` (the reconcile pass's R2, an
     /// undo's or a catalog removal's) — that were withdrawn before
-    /// `withdrawn_before` (Unix seconds; a card withdrawn before migration 099
+    /// `withdrawn_before` (Unix seconds; a card withdrawn before migration 103
     /// has no `withdrawn_at`, so its `created_at` stands in) and of which no item ever left
     /// `pending`: no apply, no skip, no person's rejection, so nothing undo,
     /// `rejected_rollouts` or `rolled_out_layers` reads. Their items go
@@ -1341,10 +1341,10 @@ mod tests {
         assert_eq!(s.prune_withdrawn_changesets(now_unix() + 1).unwrap(), 1);
     }
 
-    /// A card withdrawn before 099 has no `withdrawn_at`; its creation
+    /// A card withdrawn before 103 has no `withdrawn_at`; its creation
     /// stands in.
     #[test]
-    fn a_card_withdrawn_before_099_is_pruned_by_its_creation() {
+    fn a_card_withdrawn_before_103_is_pruned_by_its_creation() {
         let s = Store::open_in_memory().unwrap();
         let id = s
             .insert_changeset("new", "New on oci", &[sync_item("core", "oci")])

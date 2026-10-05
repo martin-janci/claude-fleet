@@ -83,6 +83,14 @@ pub(crate) fn sample_session() -> SessionRow {
         work_rev: 17,
         pr_evidence: None,
         pr_checked_at: None,
+        // Multi-user M1: BOTH non-`None`, deliberately. The invariant at the
+        // top of this file is that no key may be missing from the contract
+        // for want of a value, and the privacy-critical pair must not join
+        // `pr_evidence` / `pr_checked_at` in escaping it — a desktop that
+        // silently defaults `visibility` defaults it to the one value that
+        // means "anybody may look".
+        owner_person_id: Some(9),
+        visibility: fleet_core::store::VISIBILITY_PRIVATE.into(),
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -158,6 +166,10 @@ pub(crate) fn sample_host() -> HostRow {
         agent_version: Some("0.3.1".into()),
         provisioned_at: Some(1_725_000_000),
         provision_stale: true,
+        // Non-`None` on purpose: the key is only pinned by a sample that
+        // actually serialises it, and this one is the shape a one-person
+        // fleet sends (multi-user M1).
+        unclaimed_sessions: Some(3),
         harnesses: Some(vec!["claude".into(), "codex".into()]),
         // Some, so the golden records the field name: this sample exists to
         // pin every name the desktop reads, and the field is
@@ -205,6 +217,7 @@ pub(crate) fn sample_task() -> TaskRow {
         finished_at: Some(1_725_000_200),
         nonce: "secret-nonce".into(),
         worker_claude_session_id: Some("claude-uuid".into()),
+        detached_at: None,
     }
 }
 
@@ -244,6 +257,7 @@ fn sample_occupancy() -> WorktreeOccupancy {
         occupants: vec![WorktreeOccupant {
             host_alias: "trn".into(),
             tmux_name: "fleet-demo".into(),
+            session_id: 1,
         }],
     }
 }
@@ -605,11 +619,48 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("WorktreeOccupancy", wire_keys(&sample_occupancy()));
     put("HostWorktrees", wire_keys(&sample_host_worktrees()));
     put("GithubRepo", wire_keys(&sample_github_repo()));
+    // Multi-user M1 (T13): the two answers the sharing commands deserialise.
+    // `SessionGrantView`'s three `Option`s are `skip_serializing_if`, so the
+    // sample fills every one — a key the hub stops sending is the ordinary
+    // "no grant row for that person" case, while a key it RENAMES is what
+    // this file exists to catch.
+    put(
+        "SessionGrantView",
+        wire_keys(&fleet_core::service::sessions::SessionGrantView {
+            session_id: 7,
+            person_id: Some(3),
+            person_name: Some("jane".into()),
+            person_display_name: Some("Jane Q".into()),
+            level: "watch".into(),
+            granted_by: 1,
+            granted_at: 1_700_000_000,
+        }),
+    );
+    // `person_id: None` is a caller that proves no person, which answers an
+    // EMPTY grant list — so the key must be present and null, not absent.
+    put(
+        "MyGrants",
+        wire_keys(&fleet_core::service::sessions::MyGrants {
+            person_id: Some(1),
+            grants: vec![fleet_core::service::sessions::MyGrant {
+                session_id: 7,
+                level: "drive".into(),
+            }],
+        }),
+    );
+    put(
+        "MyGrants.grants",
+        wire_keys(&fleet_core::service::sessions::MyGrant {
+            session_id: 7,
+            level: "drive".into(),
+        }),
+    );
     put(
         "WorktreeOccupant",
         wire_keys(&WorktreeOccupant {
             host_alias: "trn".into(),
             tmux_name: "fleet-demo".into(),
+            session_id: 1,
         }),
     );
     put("Health", wire_keys(&sample_health()));
@@ -904,11 +955,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty-one keys nothing else would notice losing. Its list is a literal here,
-/// not only in the golden, so that a regenerate cannot quietly accept a
+/// sixty-three keys nothing else would notice losing. Its list is a literal
+/// here, not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty_one() {
+fn a_session_rows_wire_names_are_these_exact_sixty_three() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -938,6 +989,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
         "model",
         "notes",
         "org_id",
+        "owner_person_id",
         "parent_session_id",
         "pending_input",
         "pr_url",
@@ -965,6 +1017,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
         "usage_model",
         "usage_output_tokens",
         "usage_updated_at",
+        "visibility",
         "work",
         "work_rejected",
         "work_rev",
@@ -973,7 +1026,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 61, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 63, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 
@@ -983,6 +1036,15 @@ fn a_session_rows_wire_names_are_these_exact_sixty_one() {
 /// This is deliberately separate from the whole-contract test above: those
 /// three names must fail their own test with their own message, so whoever
 /// sees it red reads what breaks rather than a diff of forty keys.
+///
+/// Multi-user M1's two fields are deliberately NOT in this list, and the
+/// reason is worth writing down because a reader will reach for them: their
+/// absent-key default is the REFUSING one. A missing `visibility` reads
+/// `unclaimed` (`store/rows.rs::visibility_unclaimed`) and a missing
+/// `owner_person_id` reads `None`, which no ownership predicate matches — so
+/// a rename there hides sessions loudly instead of exposing them quietly.
+/// That is the whole design: spec §3.7 picked the NOT NULL column as the
+/// fence's key precisely so the failure mode would be this way round.
 #[test]
 fn the_three_fields_where_absent_means_fine_keep_their_names() {
     let keys = wire_keys(&sample_session());

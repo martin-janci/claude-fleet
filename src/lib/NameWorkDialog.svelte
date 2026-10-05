@@ -1,6 +1,9 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { sessionIdBlocked } from './share';
   import {
     LOCAL_WORK_TITLE_MAX,
     nameWorkForSessions,
@@ -20,11 +23,21 @@
     target,
     onclose,
     ondone,
+    accessBlocked = null,
   }: {
     target: Target;
     onclose: () => void;
     /** After a successful write, before the dialog closes. */
     ondone?: () => void;
+    /**
+     * Why this client may not write, when the dialog cannot work it out for
+     * itself (multi-user M1, F2b). `rename` mode is handed an ITEM id and no
+     * session at all, so there is no `owner_person_id` here to ask about —
+     * the caller holds the row and composes the answer (the `ReplyActions`
+     * shape, same reason). `name` mode needs no prop: it is given session ids
+     * and narrows them itself below.
+     */
+    accessBlocked?: string | null;
   } = $props();
 
   const naming = untrack(() => target.mode === 'name');
@@ -38,8 +51,52 @@
   let failure = $state<string | null>(null);
 
   const titleError = $derived(title.trim() === '' ? null : workTitleError(title));
+  /**
+   * Both halves, per target (multi-user M1, F2b/F2e). `name_session_work` and
+   * `link_session_work` are `drive` in `share.ts::SESSION_TIER` and both
+   * ROUTE, so the hub's half applies too. The dialog is given session IDS and
+   * never a row, so the answer comes from `share.ts::sessionIdBlocked` — and it
+   * re-asks rather than trusting the narrowing its caller did: this dialog stays
+   * open, and a grant can be narrowed while it is.
+   *
+   * An id whose row the store does not hold used to count as writable here, on
+   * the argument that this dialog and `$sessions` load independently. That was
+   * the escape hatch F2d deleted from `TidyReview`, `WorkReview`, `moves.ts` and
+   * `TasksPanel`, and it was no safer in this file: on a fleet this client does
+   * not own, the hub fences rows this person may not see off the stream, so "not
+   * in `$sessions`" reads as *someone else's, or gone* — and naming work for it
+   * is a write onto a session we cannot tell the owner of. `$sessionIdBlocked`
+   * holds the one rule instead: `UNKNOWN_SESSION_REASON` on a paired desktop,
+   * `null` on a standalone one, where the master owns every row and a store that
+   * lags this dialog therefore costs the owner nothing.
+   *
+   * Asked per id rather than once over the batch, so one unresolvable session
+   * narrows the write instead of refusing the whole dialog.
+   */
+  const writableIds = $derived(
+    new Set([...chosen].filter((id) => $sessionIdBlocked(id, 'name_session_work') === null)),
+  );
+  /** Sessions the person ticked that are somebody else's — named below rather
+   *  than dropped in silence. */
+  const notMine = $derived([...chosen].filter((id) => !writableIds.has(id)).length);
+  const hubBlocked = $derived(
+    hubActionBlocked(naming ? 'name_session_work' : 'rename_work_item', $hubStatus, $hubConnection),
+  );
+  const blocked = $derived(
+    hubBlocked ??
+      accessBlocked ??
+      (naming && chosen.size > 0 && writableIds.size === 0
+        ? ($sessionIdBlocked([...chosen][0] ?? null, 'name_session_work') ??
+          'None of these sessions are yours to name work for.')
+        : null),
+  );
+
   const canSubmit = $derived(
-    !busy && title.trim() !== '' && titleError === null && (!naming || chosen.size > 0),
+    !busy &&
+      blocked === null &&
+      title.trim() !== '' &&
+      titleError === null &&
+      (!naming || writableIds.size > 0),
   );
 
   function toggle(id: number) {
@@ -58,7 +115,7 @@
     const r =
       t.mode === 'name'
         ? await nameWorkForSessions(
-            t.sessions.map((s) => s.id).filter((id) => chosen.has(id)),
+            t.sessions.map((s) => s.id).filter((id) => writableIds.has(id)),
             title,
             key,
           )
@@ -127,13 +184,25 @@
     {:else if target.key}
       <p class="note">Key {target.key} stays; only the title changes.</p>
     {/if}
+    {#if blocked}
+      <p class="err" data-testid="name-work-blocked">{blocked}</p>
+    {:else if notMine > 0}
+      <p class="note" data-testid="name-work-not-mine">
+        {notMine} of the ticked sessions {notMine === 1 ? 'is' : 'are'} somebody else's and will be
+        left out — only the session's owner can name work for it.
+      </p>
+    {/if}
     {#if failure}
       <p class="err" role="alert" data-testid="name-work-error">{failure}</p>
     {/if}
     <div class="actions">
       <button type="button" onclick={onclose}>Cancel</button>
-      <button type="submit" class="primary" disabled={!canSubmit} data-testid="name-work-submit"
-        >{naming ? 'Name' : 'Rename'}</button
+      <button
+        type="submit"
+        class="primary"
+        disabled={!canSubmit}
+        title={blocked ?? ''}
+        data-testid="name-work-submit">{naming ? 'Name' : 'Rename'}</button
       >
     </div>
   </form>

@@ -1360,3 +1360,204 @@ async fn reconcile_one_host_refuses_local_when_hub_local_host_is_off() {
     assert_eq!(err.code, codes::E_NOTFOUND);
     assert!(f.fake.calls_for("local").is_empty());
 }
+
+// ── 5. ownership: a reconcile pass never names an owner ─────────────────────
+
+/// Multi-user M1, T5 and its review. `new_session` inserts no row of its own:
+/// it starts tmux and lets the reconcile upsert create the row — the SAME
+/// statement that creates a row for a session somebody started by hand (spec
+/// §3.1 / §3.2). The mechanism that used to tell the two apart at the moment
+/// of writing was a name-keyed owner intent, and it is deleted: a tmux name is
+/// not an identity.
+///
+/// So BOTH rows land `unclaimed`, which is the safe holding state (spec §4.3)
+/// and not a guess, and the create's owner is written afterwards against the
+/// row id. This drives the race the intent existed for — the FULL pass (the
+/// background tick) inserts the row before the create path's own single-host
+/// pass gets there, `reconcile_one_host` being deliberately ungated against
+/// the tick — and the answer is the same either way.
+#[tokio::test]
+async fn every_row_a_reconcile_pass_inserts_is_nobodys() {
+    let f = Fleet::new(&["alpha"]);
+    let ann = {
+        let s = f.store.lock().unwrap();
+        s.create_person("ann", None).unwrap().id
+    };
+    // `dev-o-r` is the session ann is creating through fleet; `by-hand` is one
+    // somebody started on the host themselves. One statement inserts both.
+    f.list(
+        "alpha",
+        "dev-o-r|1|2|0|/tmp/w|%3\nby-hand|1|2|0|/tmp/h|%4\n",
+    );
+    f.agents("alpha", "[]\n");
+
+    f.pass().await;
+    for name in ["dev-o-r", "by-hand"] {
+        let row = f.row(name, "alpha");
+        assert_eq!(
+            row.owner_person_id, None,
+            "{name}: a reconcile pass must name no owner"
+        );
+        assert_eq!(row.visibility, crate::store::VISIBILITY_UNCLAIMED);
+    }
+
+    // The create path's own pass, second: still nobody's.
+    reconcile_one_host_with_for_test(&f.store, &f.deps, "alpha")
+        .await
+        .unwrap();
+    let row = f.row("dev-o-r", "alpha");
+    assert_eq!(row.owner_person_id, None);
+
+    // What `finalize_new_session` then does, and the ONE mechanism that
+    // stamps an owner: keyed on the row id, so it cannot reach `by-hand`.
+    {
+        let s = f.store.lock().unwrap();
+        assert!(s.claim_if_unclaimed(row.id, Some(ann)).unwrap());
+    }
+    let owned = f.row("dev-o-r", "alpha");
+    assert_eq!(owned.owner_person_id, Some(ann));
+    assert_eq!(owned.visibility, crate::store::VISIBILITY_PRIVATE);
+    assert_eq!(f.row("by-hand", "alpha").owner_person_id, None);
+
+    // And no later pass moves either row.
+    f.pass().await;
+    f.pass().await;
+    assert_eq!(f.row("dev-o-r", "alpha").owner_person_id, Some(ann));
+    assert_eq!(
+        f.row("dev-o-r", "alpha").visibility,
+        crate::store::VISIBILITY_PRIVATE
+    );
+    assert_eq!(f.row("by-hand", "alpha").owner_person_id, None);
+}
+
+/// **The hole the intent kept re-opening, now closed by construction.** Person
+/// B asks to start a session named after person A's existing `unclaimed` row.
+/// With the intent, the upsert's `COALESCE(owner_person_id, ?28)` on its
+/// `DO UPDATE` branch stamped B onto A's row on the very next pass —
+/// deterministically, no race — and whether B's create then succeeded or
+/// failed made no difference.
+///
+/// There is nothing left to drive: no call can file such a statement, so the
+/// test asserts the consequence. The row stays nobody's through any number of
+/// passes, and `new_session` refuses the name outright rather than reaching
+/// the row at all (`reject_adoptable_session_name`, pinned in
+/// `lifecycle_tests`).
+#[tokio::test]
+async fn naming_an_existing_unclaimed_row_never_acquires_it() {
+    let f = Fleet::new(&["alpha"]);
+    f.list("alpha", "theirs|1|2|0|/tmp/w|%3\n");
+    f.agents("alpha", "[]\n");
+    f.pass().await;
+    let before = f.row("theirs", "alpha");
+    assert_eq!(before.owner_person_id, None);
+    assert_eq!(before.visibility, crate::store::VISIBILITY_UNCLAIMED);
+
+    // Everything bob's `new_session { name: "theirs" }` could do to the store
+    // before touching tmux — which is now exactly one thing: be refused.
+    {
+        let s = f.store.lock().unwrap();
+        let _bob = s.create_person("bob", None).unwrap().id;
+        let err = crate::service::sessions::reject_adoptable_session_name(&s, "alpha", "theirs")
+            .expect_err("a name with a row must be refused, not adopted");
+        assert_eq!(err.code, codes::E_EXISTS);
+    }
+
+    for _ in 0..3 {
+        f.pass().await;
+    }
+    let after = f.row("theirs", "alpha");
+    assert_eq!(
+        after.owner_person_id, None,
+        "asking to start a session under an unclaimed row's name must not claim it: {after:?}"
+    );
+    assert_eq!(after.visibility, crate::store::VISIBILITY_UNCLAIMED);
+    assert_eq!(after.id, before.id, "still the same row");
+}
+
+/// The case the last guard could not reach: a tmux session that is LIVE on the
+/// host and has no `sessions` row yet. `reserve_session_owner`'s final form
+/// refused a name that already had a row, which is precisely no help here —
+/// there is no row to find, so the intent stood, and the pass that discovered
+/// the hand-started session inserted it as the asking person's.
+///
+/// Now the discovery is one statement with no owner in it, so being named
+/// changes nothing about the row.
+#[tokio::test]
+async fn a_live_tmux_session_with_no_row_does_not_become_somebodys_by_being_named() {
+    let f = Fleet::new(&["alpha"]);
+    let bob = {
+        let s = f.store.lock().unwrap();
+        s.create_person("bob", None).unwrap().id
+    };
+    // Nothing has reconciled yet: `by-hand` is live on the host, fleet has no
+    // row for it, and bob asks for a session of that name. Nothing he can do
+    // leaves a statement about the name behind.
+    {
+        let s = f.store.lock().unwrap();
+        assert!(
+            s.get_session("by-hand", "alpha").unwrap().is_none(),
+            "the premise: no row yet, so the row-exists guard is no guard"
+        );
+    }
+    // The one thing his create path writes about the name — the kill memory,
+    // which says nothing about ownership. It takes the lock itself, so the
+    // guard above is dropped first (`std::sync::Mutex` is not reentrant).
+    crate::service::sessions::record_tmux_created(&f.store, "alpha", "by-hand");
+    f.list("alpha", "by-hand|1|2|0|/tmp/h|%4\n");
+    f.agents("alpha", "[]\n");
+    f.pass().await;
+    let row = f.row("by-hand", "alpha");
+    assert_eq!(
+        row.owner_person_id, None,
+        "a live session fleet did not start is nobody's, however it was named: {row:?}"
+    );
+    assert_eq!(row.visibility, crate::store::VISIBILITY_UNCLAIMED);
+    let _ = bob;
+}
+
+/// Two creates of ONE name, in flight together. The intent was a map with one
+/// slot per `(host, name)`, so the second reservation overwrote the first and
+/// whichever pass ran next stamped the LAST writer onto the row — ann's
+/// session coming up owned by bob, or the reverse, by nothing more than
+/// timing.
+///
+/// Against a row id there is no slot to overwrite: the row is claimed once,
+/// and the loser's claim is REFUSED rather than silently applied, so its
+/// create fails instead of handing back a session that is not its caller's.
+#[tokio::test]
+async fn two_concurrent_creates_of_one_name_do_not_cross_stamp() {
+    let f = Fleet::new(&["alpha"]);
+    let (ann, bob) = {
+        let s = f.store.lock().unwrap();
+        (
+            s.create_person("ann", None).unwrap().id,
+            s.create_person("bob", None).unwrap().id,
+        )
+    };
+    f.list("alpha", "dev-o-r|1|2|0|/tmp/w|%3\n");
+    f.agents("alpha", "[]\n");
+    f.pass().await;
+    let row = f.row("dev-o-r", "alpha");
+    assert_eq!(row.owner_person_id, None);
+
+    {
+        let s = f.store.lock().unwrap();
+        // ann's create finalises first.
+        assert!(s.claim_if_unclaimed(row.id, Some(ann)).unwrap());
+        // bob's arrives second and is refused outright — the row is not his,
+        // and his `new_session` fails with it (`finalize_new_session` uses
+        // `?`).
+        let err = s
+            .claim_if_unclaimed(row.id, Some(bob))
+            .expect_err("the second claim on one row must be refused");
+        assert_eq!(err.code, codes::E_FORBIDDEN);
+    }
+
+    let after = f.row("dev-o-r", "alpha");
+    assert_eq!(after.owner_person_id, Some(ann), "no cross-stamp");
+    assert_eq!(after.visibility, crate::store::VISIBILITY_PRIVATE);
+    // Order-independent: the same two calls the other way round claim for bob
+    // and refuse ann. What must never happen is the row changing hands.
+    f.pass().await;
+    assert_eq!(f.row("dev-o-r", "alpha").owner_person_id, Some(ann));
+}

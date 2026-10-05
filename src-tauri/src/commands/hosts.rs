@@ -15,6 +15,7 @@ use fleet_core::service::hosts::{
     self, AddHostArgs, HideHostArgs, HostAliasArgs, MergeHostArgs, ProbePreview, ProbeSshAliasArgs,
     SetAccountNicknameArgs,
 };
+use fleet_core::service::view_scope::ViewScope;
 use fleet_core::ssh::SshClient;
 use fleet_core::ssh_config::SshHost;
 use fleet_core::store::{AccountRow, HostRow, Store};
@@ -136,7 +137,12 @@ pub(crate) mod routed {
     ) -> Result<Vec<HostRow>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.list_hosts().await,
-            None => hosts::list_hosts(store),
+            // A standalone desktop is one person's machine: it is the hub's
+            // own reader here, and `ViewScope::internal` is the value that
+            // says so (multi-user M1). A desktop paired to a hub never
+            // reaches this arm — its `list_hosts` is the hub's, built from
+            // the device's own token and its person.
+            None => hosts::list_hosts(store, &ViewScope::internal()),
         }
     }
 

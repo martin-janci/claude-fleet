@@ -5,4 +5,4 @@
 -- migration. ADD COLUMN is not idempotent: guarded in schema.rs.
 ALTER TABLE changeset_items ADD COLUMN outcome TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (98);
+INSERT OR IGNORE INTO schema_version (version) VALUES (102);

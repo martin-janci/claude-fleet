@@ -79,6 +79,12 @@ pub(crate) const AG_FILES: &[(&str, &str)] = &[
         include_str!("../../../../tools/ag/lib/util.sh"),
     ),
 ];
+/// The `/voice` recorder stand-in (docs/voice.md). In the fingerprint, so a
+/// change re-provisions stale hosts.
+pub const VOICE_ARECORD: &str = include_str!("../../../../tools/voice/arecord");
+/// Where the stand-in (`bin/arecord`) and its `voice.env` live on a host.
+pub const VOICE_DIR: &str = "~/.claude-fleet/voice";
+
 /// Where provisioning stages [`AG_FILES`] before running their installer.
 const AG_STAGE_DIR: &str = "~/.local/share/fleet/ag-src";
 /// Where the installer puts the ag tree, passed to it EXPLICITLY.
@@ -114,10 +120,35 @@ label this session; it defines when to fire and how to look up your `host_alias`
 
 /// SHA-256 over everything provisioning ships that is CONTENT (not a
 /// secret, not a URL): both skills, the managed CLAUDE.md body, the
-/// hook shape, and the ag launcher. Stored per host by
+/// hook shape, the ag launcher and the `/voice` stand-in. Stored per host by
 /// `set_host_provisioned`; a host whose stored value differs is
 /// `provision_stale` (hosts F1: every host ran skills from 15 hub
 /// upgrades ago, and nothing compared).
+/// **What it does NOT cover: the `~/.claude.json` MCP entry**
+/// ([`merge_mcp_entry`]) — so multi-user M1's `X-Fleet-Pane` header arriving
+/// in that entry does not make an older provisioning read `provision_stale`,
+/// contrary to what T2's "Do." block in
+/// `docs/superpowers/plans/2026-09-30-multi-user-m1-private-sessions.md`
+/// assumed. Adding the entry's shape here is one line, and it would be WORSE
+/// than the gap: `provision_stale` is cleared by
+/// [`provision_content_only`] — the unattended sweep
+/// ([`spawn_reprovision_stale`]) and the `--content-only` command the plan
+/// itself tells the operator to run — which deliberately never rewrites
+/// `~/.claude.json` (no token minted, no user file that Claude Code writes
+/// concurrently touched). The mark would therefore be raised and cleared
+/// within one hub start, with the header still missing and the operator told
+/// nothing.
+///
+/// Telling the two apart needs TWO recorded fingerprints — the content a
+/// content-only pass ships, and the full set including the MCP entry — which
+/// is a column and a plumbing change, i.e. a decision for the plan's owner,
+/// not something to invent here. Until then what the operator is told is:
+/// nothing automatic. A host provisioned before the pane header keeps working
+/// and simply proves no pane (`Caller::pane` is `None`), so every rule that
+/// would have needed the proof refuses — fail-closed — and only a FULL
+/// provisioning (`provision_hosts` without `content_only`, `fleet-hub
+/// provision --host <alias>`) adds the header. `provision_content_only`'s
+/// own doc comment says so from the other side.
 pub fn fingerprint() -> &'static str {
     static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     FP.get_or_init(|| {
@@ -126,7 +157,7 @@ pub fn fingerprint() -> &'static str {
             .map(|(path, body)| format!("{path}\u{0}{body}\u{0}"))
             .collect();
         crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{VOICE_ARECORD}",
             crate::service::hooks_install::hook_shape()
         ))
     })
@@ -239,7 +270,45 @@ pub async fn provision_one_with(
         base.session_start_context,
     )
     .await?;
+    // 5. The `/voice` recorder stand-in and the URL it streams from.
+    provision_voice(ssh, host, base).await?;
     Ok(())
+}
+
+/// Voice relay F1: install fleet's `arecord` stand-in at
+/// `~/.claude-fleet/voice/bin/arecord` (executable; the pane command puts
+/// that dir first on `claude`'s PATH, `tmux::VOICE_PATH_PREFIX`) and
+/// `voice.env` with the hub URL it streams from. The bearer is not here:
+/// the stand-in reads the hook headers file `provision_hook` wrote.
+async fn provision_voice(ssh: &dyn SshExec, host: &str, base: &HubBase) -> Result<(), IpcError> {
+    let bin = format!("{VOICE_DIR}/bin");
+    let path = format!("{bin}/arecord");
+    write_host_file(ssh, host, &bin, &path, VOICE_ARECORD).await?;
+    let out = crate::ssh::run_shell(
+        ssh,
+        host,
+        &format!("chmod 755 {}", remote_path(&path)),
+        PROVISION_TIMEOUT,
+    )
+    .await?;
+    if !out.status.success() {
+        return Err(IpcError::new(
+            codes::E_PROVISION,
+            format!(
+                "chmod {path} on {host}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
+    let env = format!("FLEET_VOICE_URL={}\n", quote(&base.url));
+    write_host_file(
+        ssh,
+        host,
+        VOICE_DIR,
+        &format!("{VOICE_DIR}/voice.env"),
+        &env,
+    )
+    .await
 }
 
 /// Steps 0 and 1: refuse to write into somebody else's git checkout unless
@@ -298,6 +367,12 @@ async fn provision_skills(
 ///
 /// `Ok(Some(warning))` is refreshed but degraded: the `ag` launcher did not
 /// install ([`provision_ag`]); the host is still marked provisioned.
+///
+/// Because it does not rewrite `~/.claude.json`, it cannot add or repair the
+/// MCP entry — including multi-user M1's `X-Fleet-Pane` header
+/// ([`merge_mcp_entry`]) — yet it clears `provision_stale` for the host.
+/// That asymmetry is why [`fingerprint`] does not cover the MCP entry; read
+/// its doc comment before changing either.
 pub async fn provision_content_only(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
@@ -325,6 +400,7 @@ pub async fn provision_content_only(
         base.session_start_context,
     )
     .await?;
+    provision_voice(ssh, host, base).await?;
     let warning = if install_ag(store) {
         provision_ag(ssh, host).await
     } else {
@@ -1325,6 +1401,26 @@ pub(crate) fn parse_claude_json(existing: &str) -> Result<serde_json::Value, Ipc
 /// Merge the claude-fleet HTTP MCP server entry into a host's `~/.claude.json`
 /// content, preserving every existing key. Returns the new JSON (pretty).
 /// Errors if `existing` is non-empty and not valid JSON.
+///
+/// Two headers travel with every tool call the host's Claude makes:
+///
+/// - `Authorization`, the host's own bearer token; and
+/// - `X-Fleet-Pane`, the calling tmux pane — multi-user M1's pane proof
+///   (plan revision 6, R6-i). Because it is on the CONNECTION rather than an
+///   argument on a handful of tools, `mcp::authorize` can stamp
+///   `Caller::pane` and every tool can then ask "is this the one row whose
+///   pane the caller can prove it is in".
+///
+/// The pane header is written in the **braced** `${TMUX_PANE:-}` form, not
+/// the bare `$TMUX_PANE` the hooks entry uses
+/// (`service::hooks_install::hook_entry`). The two are not interchangeable:
+/// the hooks entry works only because it also carries
+/// `"allowedEnvVars": ["TMUX_PANE"]`, which is a HOOKS-only mechanism with no
+/// equivalent for an MCP server entry. Claude Code expands `${VAR}` and
+/// `${VAR:-default}` inside an MCP entry's `headers` with no allow-list key,
+/// and the `:-` default makes a host outside tmux send an empty value rather
+/// than an unexpanded literal — both of which `mcp::hooks::pane_header`
+/// refuses, so either way the caller simply proves no pane.
 pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String, IpcError> {
     let mut root = parse_claude_json(existing)?;
     let servers = root
@@ -1343,7 +1439,10 @@ pub fn merge_mcp_entry(existing: &str, url: &str, token: &str) -> Result<String,
         serde_json::json!({
             "type": "http",
             "url": url,
-            "headers": { "Authorization": format!("Bearer {token}") }
+            "headers": {
+                "Authorization": format!("Bearer {token}"),
+                "X-Fleet-Pane": "${TMUX_PANE:-}"
+            }
         }),
     );
     serde_json::to_string_pretty(&root)
@@ -1413,6 +1512,13 @@ mod tests {
             v["mcpServers"]["claude-fleet"]["headers"]["Authorization"],
             "Bearer tok"
         );
+        // Multi-user M1's pane proof, in the braced form — the bare
+        // `$TMUX_PANE` the hooks entry uses would arrive unexpanded here,
+        // since `allowedEnvVars` is a hooks-only mechanism.
+        assert_eq!(
+            v["mcpServers"]["claude-fleet"]["headers"]["X-Fleet-Pane"],
+            "${TMUX_PANE:-}"
+        );
     }
 
     #[test]
@@ -1431,6 +1537,12 @@ mod tests {
         assert_eq!(
             v2["mcpServers"]["claude-fleet"]["headers"]["Authorization"],
             "Bearer tok2"
+        );
+        // A re-merge over an existing file keeps the pane header — a host
+        // re-provisioned for a rotated token must not lose its pane proof.
+        assert_eq!(
+            v2["mcpServers"]["claude-fleet"]["headers"]["X-Fleet-Pane"],
+            "${TMUX_PANE:-}"
         );
         assert_eq!(v2["mcpServers"]["other"]["url"], "u");
     }
@@ -1982,7 +2094,27 @@ mod tests {
             &expected_settings(),
             true,
         ));
+        // 5. the `/voice` recorder stand-in and its config (voice relay F1)
+        steps.extend(voice_steps());
         steps
+    }
+
+    /// What [`provision_voice`] issues on a remote host for [`base`].
+    fn voice_steps() -> Vec<Step> {
+        use Step::*;
+        vec![
+            Script(remote_write_script(
+                "~/.claude-fleet/voice/bin",
+                "~/.claude-fleet/voice/bin/arecord",
+                VOICE_ARECORD,
+            )),
+            Script("chmod 755 \"$HOME\"/'.claude-fleet/voice/bin/arecord'".into()),
+            Script(remote_write_script(
+                "~/.claude-fleet/voice",
+                "~/.claude-fleet/voice/voice.env",
+                "FLEET_VOICE_URL='http://127.0.0.1:4180'\n",
+            )),
+        ]
     }
 
     /// Every argument the remote shell sees must be inert: `bash -lc` gets
@@ -2005,6 +2137,15 @@ mod tests {
                         !body.contains("'~"),
                         "no quoted tilde path may reach the remote: {body}"
                     );
+                    // Paths only: a written file's payload (the voice
+                    // stand-in names `$HOME/.claude/fleet-hook.headers`) is
+                    // data, not a path the remote shell resolves.
+                    let paths = match (body.find(" printf '%s' "), body.rfind("' > ")) {
+                        (Some(start), Some(end)) if start < end => {
+                            format!("{}{}", &body[..start], &body[end + 1..])
+                        }
+                        _ => body.clone(),
+                    };
                     for path in [
                         ".claude/skills",
                         ".claude/CLAUDE.md",
@@ -2013,9 +2154,9 @@ mod tests {
                         ".claude/settings.json",
                         ".claude/fleet-hook.headers",
                     ] {
-                        if body.contains(path) {
+                        if paths.contains(path) {
                             assert!(
-                                body.contains(&format!("\"$HOME\"/'{path}")),
+                                paths.contains(&format!("\"$HOME\"/'{path}")),
                                 "{path} must be \"$HOME\"/'…'-quoted in: {body}"
                             );
                         }
@@ -2041,6 +2182,13 @@ mod tests {
     }
 
     /// hosts F1: the content fingerprint that `provision_stale` compares.
+    ///
+    /// Pins exactly WHICH inputs it hashes, in both directions: the four it
+    /// covers, and — stated as an assertion rather than a sentence — that the
+    /// `~/.claude.json` MCP entry is not among them, so nobody reads
+    /// multi-user M1's pane header into a staleness signal it does not
+    /// produce. [`fingerprint`]'s doc comment says why that gap is where it
+    /// is and what would have to change to close it.
     #[test]
     fn fingerprint_is_stable_and_covers_skills_claude_md_the_hook_shape_and_ag() {
         let fp = fingerprint();
@@ -2051,7 +2199,7 @@ mod tests {
             .map(|(p, b)| format!("{p}\u{0}{b}\u{0}"))
             .collect();
         let expected = crate::mcp::auth::sha256_hex(&format!(
-            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}",
+            "{FLEET_SKILL}\u{0}{FRIENDLY_NAME_SKILL}\u{0}{CLAUDE_MD_BODY}\u{0}{}\u{0}{ag}\u{0}{VOICE_ARECORD}",
             crate::service::hooks_install::hook_shape()
         ));
         assert_eq!(fp, expected);
@@ -2070,6 +2218,36 @@ mod tests {
             fp, without_ag,
             "an ag change must make hosts provision_stale"
         );
+        // And the gap, pinned: the MCP entry is NOT an input. Changing the
+        // entry — as multi-user M1 did, adding `X-Fleet-Pane` — leaves the
+        // fingerprint of a host provisioned before it identical, so that host
+        // does not read `provision_stale` and the operator is not told.
+        // `merge_mcp_entry`'s own output is the witness: with the url and
+        // token held fixed, it is not reachable from `expected` above.
+        let entry = merge_mcp_entry("", "http://127.0.0.1:4180/mcp", "tok").unwrap();
+        assert!(
+            entry.contains("X-Fleet-Pane"),
+            "the entry carries the pane header"
+        );
+        // `AG_FILES` joined the fingerprint on `main`, so the launcher tree
+        // is an input too: the pin has to ask about every input, never a
+        // list that was complete when it was written.
+        let ag_bodies: Vec<&str> = AG_FILES.iter().map(|(_, b)| *b).collect();
+        for covered in [
+            FLEET_SKILL,
+            FRIENDLY_NAME_SKILL,
+            CLAUDE_MD_BODY,
+            &crate::service::hooks_install::hook_shape(),
+        ]
+        .into_iter()
+        .chain(ag_bodies)
+        {
+            assert!(
+                !covered.contains("\"X-Fleet-Pane\": \"${TMUX_PANE:-}\""),
+                "if an input ever carries the MCP entry's pane header, this \
+                 test is stale and so is `fingerprint`'s doc comment"
+            );
+        }
     }
 
     /// F2: every file of tools/ag (except README.md), at any depth, is
@@ -2237,6 +2415,12 @@ mod tests {
             FLEET_SKILL
         ))));
         assert!(steps.contains(&Step::Script(remote_read_script(SETTINGS_JSON))));
+        for step in voice_steps() {
+            assert!(
+                steps.contains(&step),
+                "content-only refreshes voice: {step:?}"
+            );
+        }
         assert!(
             !steps.contains(&Step::Script(remote_read_script(CLAUDE_JSON))),
             "content-only never reads or rewrites ~/.claude.json"
@@ -2307,6 +2491,40 @@ mod tests {
         provision_one_with(&forced, "h1", &base(), TOKEN, true)
             .await
             .unwrap();
+    }
+
+    /// Voice relay F1: the `arecord` stand-in lands executable under
+    /// `~/.claude-fleet/voice/bin`, and `voice.env` carries only the hub's
+    /// URL (the bearer is the hook headers file's).
+    #[tokio::test]
+    async fn provision_writes_the_voice_stand_in_and_env() {
+        let fake = fresh_host();
+        provision_one_with(&fake, "h-a", &HubBase::loopback(4180), "tok", false)
+            .await
+            .unwrap();
+        let steps: Vec<Step> = fake.calls().iter().map(step_of).collect();
+        let base = HubBase::loopback(4180);
+        let env = format!("FLEET_VOICE_URL={}\n", crate::shell::quote(&base.url));
+        assert_eq!(env, "FLEET_VOICE_URL='http://127.0.0.1:4180'\n");
+        let bin_write = Step::Script(remote_write_script(
+            "~/.claude-fleet/voice/bin",
+            "~/.claude-fleet/voice/bin/arecord",
+            VOICE_ARECORD,
+        ));
+        let chmod = Step::Script("chmod 755 \"$HOME\"/'.claude-fleet/voice/bin/arecord'".into());
+        let env_write = Step::Script(remote_write_script(
+            "~/.claude-fleet/voice",
+            "~/.claude-fleet/voice/voice.env",
+            &env,
+        ));
+        let pos = |want: &Step| {
+            steps
+                .iter()
+                .position(|s| s == want)
+                .unwrap_or_else(|| panic!("missing {want:?}"))
+        };
+        assert!(pos(&bin_write) < pos(&chmod), "chmod after the write");
+        pos(&env_write);
     }
 
     #[tokio::test]

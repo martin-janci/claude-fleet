@@ -237,7 +237,7 @@ pub struct HeldLine {
     pub why: HeldWhy,
 }
 
-/// What a host-writing card left undone on one item's host (migration 098).
+/// What a host-writing card left undone on one item's host (migration 102).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemOutcome {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

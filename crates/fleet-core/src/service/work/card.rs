@@ -262,7 +262,24 @@ pub fn composer_text(
 }
 
 /// `work { action: card, key }`: from the cache, under the caller's scope.
-pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketCard, IpcError> {
+///
+/// It takes the WHOLE [`ViewScope`] for one bit: `status_category` is the
+/// LIVE answer, lifted to `in_progress` when some session is working on the
+/// item, and until multi-user M1's T9c that lift was judged by the org half
+/// alone (`OrgScope::sees_row_org_only`, `true` for `OrgScope::All` — the
+/// master and every paired client bound to no org). So another person's
+/// private working session lifted the card, which is the same
+/// "someone is working on this" signal the same table already moved
+/// `work { reopened }` and `work { local_items }` out of its no-gate
+/// exemption for.
+///
+/// [`ViewScope`]: crate::service::view_scope::ViewScope
+pub fn card(
+    store: &Mutex<Store>,
+    key: &str,
+    reader: &crate::service::view_scope::ViewScope,
+) -> Result<TicketCard, IpcError> {
+    let scope = &reader.org;
     let key = crate::store::normalize_work_ref(key)?;
     let s = lock(store)?;
     orgs::require_key(&s, scope, &key)?;
@@ -336,13 +353,14 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
     // was always the raw value for a local item too, never hidden) — no
     // revert needed here, only the upgrade to the live answer.
     //
-    // Fenced by `scope` (fix round 3): a working session on the same item
-    // that this scope cannot see must not lift the card either — the same
-    // leak `Graph::load` closed for the Work view. This is cheap here
-    // (one extra `get_session_by_id` per session that matched, for a
-    // single-item lookup already drawn on every selection) unlike the
-    // per-row `SESSION_COLUMNS` path, where the same fence would cost a
-    // query per row of a list.
+    // Fenced by the whole `reader` (fix round 3's org half, T9c's person
+    // half): a working session on the same item that this reader cannot see
+    // must not lift the card either — the same leak `Graph::load` closed for
+    // the Work view, and `scope.sees_row_org_only` alone was only half of
+    // it. This is cheap here (one extra `get_session_by_id` per session that
+    // matched, for a single-item lookup already drawn on every selection)
+    // unlike the per-row `SESSION_COLUMNS` path, where the same fence would
+    // cost a query per row of a list.
     let has_working_session = s
         .work_items_with_working_session()?
         .into_iter()
@@ -351,7 +369,13 @@ pub fn card(store: &Mutex<Store>, key: &str, scope: &OrgScope) -> Result<TicketC
             s.get_session_by_id(session_id)
                 .ok()
                 .flatten()
-                .is_some_and(|row| scope.sees_row(&row))
+                .is_some_and(|row| {
+                    // The org half beside the person half: `sees_session_row`
+                    // composes the org answer for a caller-built scope, and
+                    // `sees_row_org_only` is what still fences an
+                    // internal-and-narrowed reader.
+                    scope.sees_row_org_only(&row) && reader.sees_session_row(&row).is_visible()
+                })
         });
     let status_category = super::status::effective_status(
         &item.status_category,
@@ -518,28 +542,53 @@ mod tests {
     #[test]
     fn the_card_reads_the_cache_and_an_agent_gets_only_the_fenced_text() {
         let st = store();
-        let c = card(&st, "pay-7", &OrgScope::All).unwrap();
+        let c = card(
+            &st,
+            "pay-7",
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+        )
+        .unwrap();
         assert!(c.cached);
         assert_eq!(c.acceptance, vec!["Refund issued"]);
         assert_eq!(c.status_name.as_deref(), Some("In Progress"));
         assert!(c.composer_text.contains("- Refund issued"));
 
         let host = OrgScope::for_host(&st.lock().unwrap(), "h").unwrap();
-        let a = card(&st, "PAY-7", &host).unwrap();
+        let a = card(
+            &st,
+            "PAY-7",
+            &crate::service::view_scope::org_only_view(&host),
+        )
+        .unwrap();
         assert!(a.acceptance.is_empty() && a.excerpt.is_none());
         assert_eq!(a.composer_text, c.composer_text);
 
         // Another host: the same refusal as a key nothing is linked to.
         let other = OrgScope::for_host(&st.lock().unwrap(), "h2").unwrap();
-        let hidden = card(&st, "PAY-7", &other).unwrap_err();
-        let unknown = card(&st, "ZZ-404", &other).unwrap_err();
+        let hidden = card(
+            &st,
+            "PAY-7",
+            &crate::service::view_scope::org_only_view(&other),
+        )
+        .unwrap_err();
+        let unknown = card(
+            &st,
+            "ZZ-404",
+            &crate::service::view_scope::org_only_view(&other),
+        )
+        .unwrap_err();
         assert_eq!(hidden.code, unknown.code);
         assert_eq!(
             hidden.message.replace("PAY-7", "<K>"),
             unknown.message.replace("ZZ-404", "<K>")
         );
 
-        let bare = card(&st, "LOC-1", &OrgScope::All).unwrap();
+        let bare = card(
+            &st,
+            "LOC-1",
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+        )
+        .unwrap();
         assert!(!bare.cached);
         assert_eq!(bare.composer_text, "Ticket LOC-1\n");
     }
@@ -575,7 +624,12 @@ mod tests {
             .unwrap();
         s.link_session_work(sid, crate::store::WorkTarget::Item(item), "manual")
             .unwrap();
-        card(&Mutex::new(s), "PAY-7", &OrgScope::All).unwrap()
+        card(
+            &Mutex::new(s),
+            "PAY-7",
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -618,14 +672,24 @@ mod tests {
             .unwrap();
 
         let st = Mutex::new(s);
-        let all = card(&st, "LOC-9", &OrgScope::All).unwrap();
+        let all = card(
+            &st,
+            "LOC-9",
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+        )
+        .unwrap();
         assert_eq!(all.status_category.as_deref(), Some("in_progress"));
 
         let bound_a = OrgScope::Org {
             org: org_a.id,
             sees_unassigned: true,
         };
-        let a = card(&st, "LOC-9", &bound_a).unwrap();
+        let a = card(
+            &st,
+            "LOC-9",
+            &crate::service::view_scope::org_only_view(&bound_a),
+        )
+        .unwrap();
         assert_eq!(
             a.status_category.as_deref(),
             Some("todo"),

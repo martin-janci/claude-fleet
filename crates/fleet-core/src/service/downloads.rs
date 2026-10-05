@@ -17,8 +17,8 @@
 
 use crate::ipc_error::{codes, IpcError};
 use crate::service::move_session::carry;
-use crate::service::orgs::OrgScope;
 use crate::service::settings;
+use crate::service::view_scope::ViewScope;
 use crate::shell::quote;
 use crate::ssh::SshExec;
 use crate::store::{DownloadRow, NewDownload, Store};
@@ -84,11 +84,59 @@ fn part_of(id: i64) -> Result<PathBuf, IpcError> {
     Ok(dir()?.join(format!("{id}.part")))
 }
 
-/// Whether `scope` may see `row`: its org boundary, and a per-host token's
-/// own host only.
-pub fn visible(scope: &OrgScope, row: &DownloadRow) -> bool {
-    scope.host().is_none_or(|h| h == row.host_alias)
-        && scope.sees_session(&row.host_alias, row.org_id)
+/// Whether `scope` may see `row`: its org boundary, a per-host token's own
+/// host only, and — multi-user M1 — the PERSON half, asked of the session
+/// the file came out of **at the `own` tier**.
+///
+/// **Why `may_own` and not `sees_session_row`.** A download is a file read
+/// off the session's host at an **unconstrained absolute path**: [`send`]
+/// resolves a RELATIVE path against the pane's `pwd`, but an ABSOLUTE one is
+/// taken as given — [`parse_stat`]'s success condition is
+/// `path.starts_with('/')`, with no canonicalisation against a root and no
+/// `starts_with(worktree)` check. So a download may be
+/// `~/.claude/.credentials.json` as easily as `out/report.pdf`, and
+/// [`crate::mcp::downloads_route`] hands its BYTES to whoever passes this
+/// predicate. An unconstrained read of the owner's host is a subset of what
+/// a terminal gives, and spec §4.3 invariant 5 — *sharing never confers a
+/// terminal* — exists to refuse that class, so a `watch` or even a `drive`
+/// grantee must not reach it. `list_downloads` is the INDEX into those bytes
+/// (its rows carry the absolute path) and `remove_download` destroys the
+/// owner's copy, so all three sit on the same tier.
+///
+/// **`repo_file` is not the precedent it looks like**: that one is confined
+/// to the worktree and this is not. If somebody who owns downloads later
+/// confines the path to the session's tree, `Reach::Read` becomes defensible
+/// and this predicate should be revisited. The reason it is not done here is
+/// that confining the path redesigns main's feature rather than fencing it,
+/// and an owner sending `/var/log/...` off their own machine is a use that
+/// survives intact under `own`.
+///
+/// When the session row is GONE (reaped, or a `session_id` of `None`) there
+/// is no person to ask and `DownloadRow.org_id` — recorded for exactly this
+/// case — is the whole of the fence: the org answer alone. The residue is
+/// BOUNDED rather than merely acknowledged: [`send`] is the `own` tier too,
+/// so every row that ever existed was created by the session's owner or by
+/// its own Claude, never by a grantee. A person's own device keeps seeing
+/// files it was sent; nobody inherits a file a grantee extracted, because a
+/// grantee can extract none.
+pub fn visible(s: &Store, scope: &ViewScope, row: &DownloadRow) -> bool {
+    if scope.host.as_deref().is_some_and(|h| h != row.host_alias) {
+        return false;
+    }
+    match row
+        .session_id
+        .and_then(|id| s.get_session_by_id(id).ok().flatten())
+    {
+        // The composition: `may_own` opens with `sees_session_row`, which
+        // opens with the org clause, so this one call is the org boundary,
+        // the person fence and the tier.
+        Some(sess) => scope.may_own(&sess),
+        // ORG-AUTHORITY question only, and the org claim is honest: nothing
+        // is left that names a person. `not a privacy fence` — the person
+        // half is `may_own` in the arm above, and a reaped session leaves
+        // none to ask.
+        None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),
+    }
 }
 
 /// The budget, as `list` reports it.
@@ -305,7 +353,7 @@ fn remove_files(id: i64) {
 pub async fn send(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
-    scope: &OrgScope,
+    scope: &ViewScope,
     source: &str,
     args: &SendFileArgs,
 ) -> Result<DownloadRow, IpcError> {
@@ -315,7 +363,30 @@ pub async fn send(
         let s = crate::ipc_error::lock(store)?;
         let row = s.get_session_by_id(args.session_id)?;
         match row {
-            Some(r) if scope.sees_row(&r) && scope.host().is_none_or(|h| h == r.host_alias) => r,
+            // Two arms, because two different callers send files and §4.4
+            // separates them:
+            //
+            // * a PERSON reaches the `own` tier and nothing less. This reads
+            //   an unconstrained absolute path off the session's host (see
+            //   [`visible`]), which is a subset of a terminal, and spec §4.3
+            //   invariant 5 says no grant confers one. A `watch` or `drive`
+            //   grantee is refused `E_NOTFOUND`, like any id that is not
+            //   theirs;
+            // * a per-host token is the session's OWN Claude, which is this
+            //   tool's headline use (`whoami` gives it its `session_id`).
+            //   `may_own` deliberately excludes it — the pane proof never
+            //   reaches that tier — so its arm is §4.4 clauses 1 and 2
+            //   instead, which `sees_session_row` already is: its own host,
+            //   and either an unclaimed row or the one pane this request
+            //   proves. Strictly tighter than main's host-only fence.
+            Some(r)
+                if (match scope.host.as_deref() {
+                    Some(h) => h == r.host_alias && scope.sees_session_row(&r).is_visible(),
+                    None => scope.may_own(&r),
+                }) =>
+            {
+                r
+            }
             _ => {
                 return Err(IpcError::new(
                     codes::E_NOTFOUND,
@@ -479,7 +550,7 @@ pub struct DownloadList {
 
 pub fn list(
     s: &Store,
-    scope: &OrgScope,
+    scope: &ViewScope,
     args: &ListDownloadsArgs,
 ) -> Result<DownloadList, IpcError> {
     let b = Budget::from_store(s);
@@ -492,7 +563,7 @@ pub fn list(
     let limit = args.limit.unwrap_or(LIST_LIMIT).clamp(1, LIST_LIMIT);
     let downloads = rows
         .into_iter()
-        .filter(|r| visible(scope, r))
+        .filter(|r| visible(s, scope, r))
         .filter(|r| args.session_id.is_none_or(|id| r.session_id == Some(id)))
         .take(limit)
         .map(|r| present(&b, r))
@@ -505,9 +576,9 @@ pub fn list(
     })
 }
 
-fn visible_row(s: &Store, scope: &OrgScope, id: i64) -> Result<DownloadRow, IpcError> {
+fn visible_row(s: &Store, scope: &ViewScope, id: i64) -> Result<DownloadRow, IpcError> {
     match s.download(id)? {
-        Some(r) if visible(scope, &r) => Ok(r),
+        Some(r) if visible(s, scope, &r) => Ok(r),
         _ => Err(IpcError::new(
             codes::E_NOTFOUND,
             format!("download {id} not found"),
@@ -517,7 +588,7 @@ fn visible_row(s: &Store, scope: &OrgScope, id: i64) -> Result<DownloadRow, IpcE
 
 /// Drop a download and its bytes. `false` when it was already gone. A copy
 /// still in flight finds no row when it ends and deletes what it wrote.
-pub fn remove(s: &Store, scope: &OrgScope, id: i64) -> Result<bool, IpcError> {
+pub fn remove(s: &Store, scope: &ViewScope, id: i64) -> Result<bool, IpcError> {
     let Ok(row) = visible_row(s, scope, id) else {
         return Ok(false);
     };
@@ -530,7 +601,7 @@ pub fn remove(s: &Store, scope: &OrgScope, id: i64) -> Result<bool, IpcError> {
 /// `downloaded_at`. `E_NOTFOUND` otherwise.
 pub fn open_ready(
     s: &Store,
-    scope: &OrgScope,
+    scope: &ViewScope,
     id: i64,
 ) -> Result<(DownloadRow, PathBuf), IpcError> {
     let row = visible_row(s, scope, id)?;

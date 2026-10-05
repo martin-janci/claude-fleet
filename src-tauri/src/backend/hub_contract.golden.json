@@ -1,5 +1,5 @@
 {
-  "revision": 7,
+  "revision": 8,
   "types": {
     "AccountRow": [
       "display_name",
@@ -178,6 +178,7 @@
       "model",
       "notes",
       "org_id",
+      "owner_person_id",
       "parent_session_id",
       "pending_input",
       "pr_url",
@@ -205,6 +206,7 @@
       "usage_model",
       "usage_output_tokens",
       "usage_updated_at",
+      "visibility",
       "work",
       "work_rejected",
       "work_rev",
@@ -335,6 +337,7 @@
       "ssh_alias",
       "tmux_version",
       "transport",
+      "unclaimed_sessions",
       "uptime_secs"
     ],
     "HostWorktrees": [
@@ -342,6 +345,14 @@
       "host_alias",
       "project_id",
       "worktrees"
+    ],
+    "MyGrants": [
+      "grants",
+      "person_id"
+    ],
+    "MyGrants.grants": [
+      "level",
+      "session_id"
     ],
     "ProjectRow": [
       "adopted",
@@ -410,6 +421,15 @@
       "kind",
       "session_id"
     ],
+    "SessionGrantView": [
+      "granted_at",
+      "granted_by",
+      "level",
+      "person_display_name",
+      "person_id",
+      "person_name",
+      "session_id"
+    ],
     "SessionRow": [
       "account_uuid",
       "ci_status",
@@ -439,6 +459,7 @@
       "model",
       "notes",
       "org_id",
+      "owner_person_id",
       "parent_session_id",
       "pending_input",
       "pr_url",
@@ -466,6 +487,7 @@
       "usage_model",
       "usage_output_tokens",
       "usage_updated_at",
+      "visibility",
       "work",
       "work_rejected",
       "work_rev",
@@ -526,6 +548,7 @@
     ],
     "WorktreeOccupant": [
       "host_alias",
+      "session_id",
       "tmux_name"
     ],
     "WorktreeRow": [

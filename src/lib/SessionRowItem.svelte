@@ -34,6 +34,7 @@
   import { isStale } from './evidence';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { sessionBlocked } from './share';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import NameWorkDialog from './NameWorkDialog.svelte';
   import { pendingInputFor } from './pending_input';
@@ -163,12 +164,18 @@
 
   async function doRecreate(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
+    // Re-asked at the call (multi-user M1, F2b): the button's `disabled` is
+    // reactive, but the keyboard and a stale render are not it.
+    if ($sessionBlocked(sess, 'recreate_session') !== null) return;
     const r = await recreateSession(sess.id);
     if (!r.ok) pushError(r.error, 'Recreate failed');
   }
 
   async function doDismissGhost(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
+    // Re-asked at the call (multi-user M1, F2b): the button's `disabled` is
+    // reactive, but the keyboard and a stale render are not it.
+    if ($sessionBlocked(sess, 'dismiss_ghost_session') !== null) return;
     const r = await dismissGhostSession(sess.id);
     if (!r.ok) {
       pushError(r.error, 'Dismiss failed');
@@ -181,6 +188,9 @@
    *  via the `session:removed` event the backend emits on success. */
   async function doDismissAgent(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
+    // Re-asked at the call (multi-user M1, F2b): the button's `disabled` is
+    // reactive, but the keyboard and a stale render are not it.
+    if ($sessionBlocked(sess, 'dismiss_agent_session') !== null) return;
     const r = await dismissAgentSession(sess.id);
     if (!r.ok) {
       pushError(r.error, 'Remove failed');
@@ -195,19 +205,99 @@
   // dismiss_agent_session does, but this row's Kill button is hidden for an
   // inactive one (`!isInactiveAgent(sess)` below) — so a paired client sees
   // the reason instead of a control that fails at the click.
-  const dismissAgentBlocked = $derived(hubBlock('dismiss_agent_session', $hubStatus));
-  // These route, so they only need the live connection to be up.
-  const killBlocked = $derived(hubActionBlocked('kill_session', $hubStatus, $hubConnection));
-  const restartBlocked = $derived(hubActionBlocked('restart_session', $hubStatus, $hubConnection));
-  const recreateBlocked = $derived(hubActionBlocked('recreate_session', $hubStatus, $hubConnection));
-  const labelBlocked = $derived(hubActionBlocked('set_friendly_name', $hubStatus, $hubConnection));
-  const tmuxRenameBlocked = $derived(hubActionBlocked('rename_session', $hubStatus, $hubConnection));
-  const ghostDismissBlocked = $derived(
-    hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection),
+  const dismissAgentBlocked = $derived(
+    hubBlock('dismiss_agent_session', $hubStatus) ?? $sessionBlocked(sess, 'dismiss_agent_session'),
   );
-  const workBlocked = $derived(hubActionBlocked('link_session_work', $hubStatus, $hubConnection));
-  const nameBlocked = $derived(hubActionBlocked('name_session_work', $hubStatus, $hubConnection));
-  const renameWorkBlocked = $derived(hubActionBlocked('rename_work_item', $hubStatus, $hubConnection));
+  // These route, so they only need the live connection to be up — plus, since
+  // multi-user M1, the client's own access to THIS row. The two predicates are
+  // composed rather than merged: `hubActionBlocked` takes an action name and no
+  // session (so a per-session refusal cannot ride it unnoticed) and
+  // `sessionBlocked` takes the row; the hub's half wins when both answer,
+  // because "the hub never accepts this from a client" is true of every session
+  // and so the more useful sentence. `$sessionBlocked` is read through its
+  // store on purpose: a revoke or a narrow changes no column on the row, so a
+  // version that read `sess` alone would leave these buttons enabled until the
+  // next re-list.
+  const killBlocked = $derived(
+    hubActionBlocked('kill_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'kill_session'),
+  );
+  const restartBlocked = $derived(
+    hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'restart_session'),
+  );
+  const recreateBlocked = $derived(
+    hubActionBlocked('recreate_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'recreate_session'),
+  );
+  const labelBlocked = $derived(
+    hubActionBlocked('set_friendly_name', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'set_friendly_name'),
+  );
+  const tmuxRenameBlocked = $derived(
+    hubActionBlocked('rename_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'rename_session'),
+  );
+  const ghostDismissBlocked = $derived(
+    hubActionBlocked('dismiss_ghost_session', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'dismiss_ghost_session'),
+  );
+  const workBlocked = $derived(
+    hubActionBlocked('link_session_work', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'link_session_work'),
+  );
+  const nameBlocked = $derived(
+    hubActionBlocked('name_session_work', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'name_session_work'),
+  );
+  const renameWorkBlocked = $derived(
+    hubActionBlocked('rename_work_item', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'rename_work_item'),
+  );
+  /** "Trust this project's branch names" writes fleet settings from inside the
+   *  work popover: `set_work_project_trust`, `drive`. It is the one control in
+   *  the popover that does not go through `workAction`. */
+  const trustBlocked = $derived(
+    hubActionBlocked('set_work_project_trust', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'set_work_project_trust'),
+  );
+  /** Whether this client may type into the row's pane at all — the gate on the
+   *  inline answer card below, which is a pane write (`send_prompt`), not a
+   *  status display. A watcher still sees the `blocked` chip; what they do not
+   *  get is the buttons that answer for the owner. */
+  const promptBlocked = $derived(
+    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'send_prompt'),
+  );
+  /**
+   * The row's privacy badge (multi-user M1). Read straight off the row —
+   * `visibility` plus whether an owner arrived with it — so it says the same
+   * thing to every viewer and needs no derivation: it is a fact about the
+   * session, not about who is looking at it.
+   *
+   * `null` renders nothing. That covers a hub older than M1 (neither field
+   * arrives) and the one inconsistent shape the wire can produce: `private`
+   * with no `owner_person_id`, because `strip_nulls` removes a null on the way
+   * out and an unowned private row cannot be described honestly. Guessing
+   * either way would be worse than saying nothing.
+   */
+  const privacyBadge = $derived.by((): { text: string; title: string } | null => {
+    if (sess.visibility === 'unclaimed') {
+      return {
+        text: 'unclaimed',
+        title:
+          'Fleet did not start this session and nobody has claimed it. Until someone does, all anyone sees of it is a per-host count.',
+      };
+    }
+    if (sess.visibility === 'private' && sess.owner_person_id != null) {
+      return {
+        text: 'private',
+        title:
+          'Private to its owner: only they, and the people they have shared it with, can see this session.',
+      };
+    }
+    return null;
+  });
 
   // ── Work menu (roadmap M1b.2): set the row's work, "Not this", "Clear". ──
   const rowWork = $derived(workOf === undefined ? workKey : workOf);
@@ -225,12 +315,28 @@
   // explains it and offers "Link anyway", which retries with the override.
   let crossOrg = $state<{ sentence: string; retry: () => Promise<Result<unknown>> } | null>(null);
 
+  /**
+   * Every work write this row can make goes through here, and the gate goes
+   * here with it (multi-user M1, F2b). The menu's ENTRANCE was gated and
+   * nothing inside it was: a `drive` grant narrowed to `watch` while the
+   * popover was open still landed a link, a rejection, a confirm or a clear,
+   * and `y`/`n` on the row reach these paths with no button in between.
+   *
+   * `workBlocked` is `link_session_work`, `drive` — the same tier as every
+   * other per-session work write this runner performs (`reject_session_work`,
+   * `unlink_session_work`, `confirm_session_work`), so one answer covers them:
+   * `share.ts`'s refusal is a function of the TIER, not of the action name,
+   * and a `watch` grantee is refused all four with the same sentence.
+   */
   async function workAction(
     run: () => Promise<Result<unknown>>,
     failure: string,
     forced?: { what: string; retry: () => Promise<Result<unknown>> },
   ) {
-    if (workBusy) return;
+    if (workBusy || workBlocked !== null) {
+      workMenuOpen = false;
+      return;
+    }
     workBusy = true;
     const r = await run();
     workBusy = false;
@@ -309,13 +415,14 @@
 
   function openNameWork(e: Event) {
     e.stopPropagation();
+    if (nameBlocked !== null) return;
     workMenuOpen = false;
     nameDialog = { mode: 'name', sessions: [{ id: sess.id, label: primaryName }] };
   }
 
   function openRenameWork(e: Event) {
     e.stopPropagation();
-    if (!localItem) return;
+    if (!localItem || renameWorkBlocked !== null) return;
     workMenuOpen = false;
     nameDialog = { mode: 'rename', ...localItem };
   }
@@ -396,6 +503,9 @@
     e.stopPropagation();
     const pid = sess.project_id;
     if (pid == null) return;
+    // `set_work_project_trust` is `drive` and does not go through
+    // `workAction`, so it carries its own re-ask (multi-user M1, F2b).
+    if (trustBlocked !== null) return;
     const on = (e.currentTarget as HTMLInputElement).checked;
     const r = await setWorkProjectTrust(pid, on);
     if (!r.ok) {
@@ -557,6 +667,13 @@
             <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
           {/if}
           <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
+          {#if privacyBadge}
+            <!-- Beside WorkChip in the line-1 chip strip: the same place every
+                 other fact about the row is drawn. -->
+            <span class="privacy-chip" data-testid="privacy-chip" title={privacyBadge.title}
+              >{privacyBadge.text}</span
+            >
+          {/if}
           {#if workKey}
             <WorkChip {workKey} />
           {/if}
@@ -677,10 +794,10 @@
                     {/each}
                     {#if l.state === 'suggested'}
                       <span class="why-actions">
-                        <button class="work-btn" data-testid="why-confirm" disabled={workBusy}
-                          title="Confirm (↵ / y)" onclick={(e) => confirmLink(l.id, e)}>Confirm</button>
-                        <button class="work-btn" data-testid="why-reject" disabled={workBusy}
-                          title="Not this (⌫ / n): never suggested again" onclick={(e) => rejectLink(l.id, e)}>Not this</button>
+                        <button class="work-btn" data-testid="why-confirm" disabled={workBusy || workBlocked !== null}
+                          title={workBlocked ?? 'Confirm (↵ / y)'} onclick={(e) => confirmLink(l.id, e)}>Confirm</button>
+                        <button class="work-btn" data-testid="why-reject" disabled={workBusy || workBlocked !== null}
+                          title={workBlocked ?? 'Not this (⌫ / n): never suggested again'} onclick={(e) => rejectLink(l.id, e)}>Not this</button>
                         <button class="work-btn" data-testid="why-pick" disabled={workBusy}
                           title="Type or paste another key or ticket URL" onclick={pickAnother}>Pick another…</button>
                       </span>
@@ -692,7 +809,14 @@
                        select the session); the checkbox is the control. -->
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
                   <label class="why-trust" onclick={(e) => e.stopPropagation()}>
-                    <input type="checkbox" data-testid="why-trust" checked={projectTrusted} onchange={toggleTrust} />
+                    <input
+                      type="checkbox"
+                      data-testid="why-trust"
+                      checked={projectTrusted}
+                      disabled={trustBlocked !== null}
+                      title={trustBlocked ?? ''}
+                      onchange={toggleTrust}
+                    />
                     Trust branch keys in this repo
                   </label>
                 {/if}
@@ -701,8 +825,12 @@
             {#if crossOrg}
               <div class="cross-org" data-testid="cross-org" role="alert">
                 <span>{crossOrg.sentence}</span>
-                <button class="work-btn" data-testid="cross-org-force" disabled={workBusy} onclick={linkAnyway}
-                  >Link anyway</button
+                <button
+                  class="work-btn"
+                  data-testid="cross-org-force"
+                  disabled={workBusy || workBlocked !== null}
+                  title={workBlocked ?? ''}
+                  onclick={linkAnyway}>Link anyway</button
                 >
                 <button
                   class="work-btn"
@@ -728,23 +856,25 @@
             <button
               class="work-btn"
               data-testid="work-set"
-              disabled={workBusy || !workDraft.trim()}
+              disabled={workBusy || workBlocked !== null || !workDraft.trim()}
+              title={workBlocked ?? ''}
               onclick={setWork}
             >Set</button>
             {#if rowWork}
               <button
                 class="work-btn"
                 data-testid="work-reject"
-                disabled={workBusy}
-                title="{rowWork.key} is not this session's work; it will not be suggested again"
+                disabled={workBusy || workBlocked !== null}
+                title={workBlocked ??
+                  `${rowWork.key} is not this session's work; it will not be suggested again`}
                 onclick={rejectWork}
               >Not {rowWork.key}</button>
               {#if rowWork.source === 'link' && sess.work}
                 <button
                   class="work-btn"
                   data-testid="work-unlink"
-                  disabled={workBusy}
-                  title="Remove the link (it may be recognised again)"
+                  disabled={workBusy || workBlocked !== null}
+                  title={workBlocked ?? 'Remove the link (it may be recognised again)'}
                   onclick={clearWork}
                 >Clear</button>
               {/if}
@@ -767,10 +897,14 @@
             {/if}
           </div>
         {/if}
-        {#if answerView}
+        {#if answerView && promptBlocked === null}
           <!-- Claude is asking this row a question. The "Needs you" filter
                shows exactly these rows, so the answer belongs here and not
-               only behind a click into the session. -->
+               only behind a click into the session.
+               Hidden rather than disabled when this client may not drive the
+               session (multi-user M1): the card is a set of answer buttons,
+               and a watcher pressing one would only earn an E_FORBIDDEN. The
+               `blocked` status chip above still says the session is waiting. -->
           <AnswerPrompt session={sess} view={answerView} compact />
         {/if}
         {#if $showRowDetails}
@@ -849,7 +983,15 @@
   {/if}
 </div>
 {#if nameDialog}
-  <NameWorkDialog target={nameDialog} onclose={() => (nameDialog = null)} />
+  <!-- `rename` mode is handed an item id and no session, so the dialog cannot
+       ask the access half for itself: this row holds the session, so the answer
+       goes in as a prop (multi-user M1, F2b). `name` mode narrows its own
+       session list and ignores it. -->
+  <NameWorkDialog
+    target={nameDialog}
+    accessBlocked={nameDialog.mode === 'rename' ? renameWorkBlocked : null}
+    onclose={() => (nameDialog = null)}
+  />
 {/if}
 {#if isRenaming && renameError}
   <p class="err inline-err">{renameError}</p>
@@ -1017,6 +1159,20 @@
     vertical-align: -1px;
   }
   .stuck-chip { font-weight: 600; }
+  /* The privacy badge (multi-user M1). Quiet on purpose: on a one-person
+     fleet every row carries it, so it has to read as a label and not as an
+     alert. */
+  .privacy-chip {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.05rem 0.28rem;
+    border-radius: 3px;
+    border: 1px solid color-mix(in srgb, var(--fg-muted) 35%, transparent);
+    color: var(--fg-muted);
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
   .inactive-chip {
     background: color-mix(in srgb, var(--fg-muted) 18%, transparent);
     color: var(--fg-muted);

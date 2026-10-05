@@ -12,7 +12,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::downloads::{self, DownloadList, ListDownloadsArgs, SendFileArgs};
-use fleet_core::service::orgs::OrgScope;
+use fleet_core::service::view_scope::ViewScope;
 use fleet_core::ssh::{SshClient, SshExec};
 use fleet_core::store::{DownloadRow, Store};
 use std::path::PathBuf;
@@ -95,7 +95,7 @@ pub(crate) mod routed {
             Some(hub) => hub.list_downloads(&args).await,
             None => {
                 let s = fleet_core::ipc_error::lock(store)?;
-                downloads::list(&s, &OrgScope::All, &args)
+                downloads::list(&s, &ViewScope::internal(), &args)
             }
         }
     }
@@ -112,7 +112,7 @@ pub(crate) mod routed {
         let row = downloads::send(
             store,
             &**ssh,
-            &OrgScope::All,
+            &ViewScope::internal(),
             downloads::SOURCE_PERSON,
             &args,
         )
@@ -131,7 +131,7 @@ pub(crate) mod routed {
             Some(hub) => hub.remove_download(id).await,
             None => {
                 let s = fleet_core::ipc_error::lock(store)?;
-                downloads::remove(&s, &OrgScope::All, id)
+                downloads::remove(&s, &ViewScope::internal(), id)
             }
         }
     }
@@ -162,7 +162,7 @@ pub(crate) mod routed {
             None => {
                 let (row, src) = {
                     let s = fleet_core::ipc_error::lock(store)?;
-                    downloads::open_ready(&s, &OrgScope::All, id)?
+                    downloads::open_ready(&s, &ViewScope::internal(), id)?
                 };
                 let Some(dest) = pick(row.name.clone()).await else {
                     return Ok(None);

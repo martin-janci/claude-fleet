@@ -70,6 +70,8 @@ pub mod transcript;
 pub mod tunnel;
 pub mod update;
 pub mod usage;
+pub mod view_scope;
+pub mod voice;
 pub mod work;
 pub mod worktree_prune;
 pub mod worktrees;

@@ -670,6 +670,9 @@ impl Store {
                 .collect::<Result<Vec<_>, _>>()?;
             ids
         };
+        // Their facts, while the rows are still there: `session:killed` is
+        // fenced by them (`store::sessions::killed_payloads`).
+        let dropped_killed = super::sessions::killed_payloads(&tx, &dropped)?;
         for id in &dropped {
             tx.execute("DELETE FROM session_events WHERE session_id = ?1", [id])?;
             tx.execute(
@@ -736,8 +739,8 @@ impl Store {
         )?;
         tx.execute("DELETE FROM hosts WHERE alias = ?1", [from])?;
         tx.commit()?;
-        for id in &dropped {
-            self.bus.session_killed(*id);
+        for killed in dropped_killed {
+            self.bus.session_killed(killed);
         }
         self.emit_sessions_updated(&moved);
         self.bus.host_removed(from);
@@ -768,6 +771,8 @@ impl Store {
                 .collect::<Result<Vec<_>, _>>()?;
             ids
         };
+        // Their facts, read before the rows go (see `killed_payloads`).
+        let orphan_killed = super::sessions::killed_payloads(&tx, &orphan_ids)?;
         // What dies with the sessions (as `delete_session` does): their
         // timeline.
         tx.execute(
@@ -842,8 +847,8 @@ impl Store {
             rusqlite::params![alias],
         )?;
         tx.commit()?;
-        for id in &orphan_ids {
-            self.bus.session_killed(*id);
+        for killed in orphan_killed {
+            self.bus.session_killed(killed);
         }
         self.emit_sessions_updated(&cleared);
         self.bus.host_removed(alias);

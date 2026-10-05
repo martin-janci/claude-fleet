@@ -161,7 +161,7 @@ Parameters: `all_catalogs`
 
 ### `list_clients`
 
-Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
+Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.
 
 Parameters: `include_revoked`
 
@@ -185,7 +185,7 @@ Parameters: `host_alias`, `project_id`
 
 ### `list_hosts`
 
-Registered hosts: reachability, claude/tmux versions, linked account.
+Registered hosts: reachability, claude/tmux versions, linked account. unclaimed_sessions is how many sessions on that host nobody owns, served only on a one-person fleet: null means you are not told, 0 means there are none.
 
 ### `list_layers`
 
@@ -235,6 +235,10 @@ Move a work session to another host, carrying its work as it is: the transcript,
 
 Parameters: `clean_target`, `confirm_nonce`, `dry_run`, `force_cross_org`, `keep_source`, `session_id`, `strict`, `target_host_alias`, `when`
 
+### `my_grants`
+
+Who you are on this fleet and every live grant TO you: { person_id, grants: [{ session_id, level }] }. With each row's owner_person_id and visibility, this is what a client derives its access from. Re-read after a reconnect the hub could not replay.
+
 ### `new_bg_session`
 
 Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }.
@@ -259,9 +263,9 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 ### `pair_client`
 
-Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id }.
+Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). person names whose device it is; the default is this hub's owner, and its sessions are private to that person. Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, person }.
 
-Parameters: `mode`, `name`, `org_id`, `trusted`, `ttl_s`
+Parameters: `mode`, `name`, `org_id`, `person`, `trusted`, `ttl_s`
 
 ### `peer_exchange`
 
@@ -469,11 +473,23 @@ Send and SUBMIT a prompt to a running Claude session's REPL (pasted, then one En
 
 Parameters: `client_msg_id`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `session_id`, `submit`, `tmux_name`
 
+### `session_access`
+
+Who holds a live grant on your session: person, level, who granted it and when. Owner only — the list names other people, so a grantee is not told. Errors: E_NOTFOUND, E_FORBIDDEN.
+
+Parameters: `session_id`
+
 ### `session_activity`
 
 What the session's pane shows now: claude_status, stuck_kind, current_activity, waiting_for and the spinner line. One capture, nothing stored: the cheap read behind a live indicator (capture_session is the whole pane). E_INVALID_STATE outside tmux.
 
 Parameters: `session_id`
+
+### `session_claim`
+
+Claim the unclaimed session THIS pane is in for a person: it becomes theirs and private. Only the session whose active pane this request's X-Fleet-Pane header names — being on the same host is not enough. Errors: E_NOTFOUND, E_INVALID_STATE (no pane of it proven), E_FORBIDDEN (another session's pane), E_EXISTS (owned).
+
+Parameters: `person`, `session_id`
 
 ### `session_conversation`
 
@@ -493,6 +509,18 @@ A session's recorded event timeline, newest first: status changes, prompts, stuc
 
 Parameters: `fresh_for`, `limit`, `session_id`
 
+### `session_narrow`
+
+Lower one person's grant on your session from drive to watch (owner only). Nothing raises a grant: widen by revoking and sharing again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
+
+Parameters: `person`, `session_id`
+
+### `session_share`
+
+Share a session you OWN with one person at watch (read it) or drive (also prompt it). Owner only — a grantee cannot share on — and there is no org recipient and no 'own' level. Sharing never gives a terminal. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
+
+Parameters: `level`, `person`, `session_id`
+
 ### `session_tool_detail`
 
 One tool call's input and result (omitted by session_conversation): { id, name, input, edit {file_path, old, new} | null, command | null, result | null, is_error }; texts capped at 8000 chars. Read-only. Errors: as session_conversation, E_NOTFOUND.
@@ -504,6 +532,12 @@ Parameters: `claude_session_id`, `session_id`, `tool_use_id`
 Read a session's Claude Code transcript (the JSONL, not the pane): the last assistant turn as plain text, text blocks verbatim, one line per tool call, no thinking. Errors: E_INVALID_STATE (no claude_session_id yet), E_NO_TRANSCRIPT (nothing written yet). Read-only; prefer it over capture_session for the reply. unchanged costs no transcript read.
 
 Parameters: `fresh_for`, `max_chars`, `session_id`, `since_turn`
+
+### `session_unshare`
+
+Revoke one person's grant on your session (owner only); the row is kept, revoked, for the audit trail. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
+
+Parameters: `person`, `session_id`
 
 ### `set_client_trust`
 
@@ -728,6 +762,12 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_conversation`
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
+- `commands::sessions::capture_session`
+- `commands::sessions::session_share`
+- `commands::sessions::session_unshare`
+- `commands::sessions::session_narrow`
+- `commands::sessions::session_access`
+- `commands::sessions::my_grants`
 - `commands::sessions::restart_session`
 - `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
@@ -875,5 +915,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_resize`
 - `pty::pty_close`
 - `pty::pty_drain`
+- `commands::voice::voice_claim`
+- `commands::voice::voice_release`
 - `cancel_command`
 

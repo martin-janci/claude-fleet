@@ -52,13 +52,20 @@ pub enum Access {
     /// (send / kill / new_session across hosts stay allowed by design), not
     /// fleet admin.
     Client,
-    /// Reachable by the master and by a PERSON's own paired device: a paired
-    /// client bound to no org (the desktop paired with `fleet-hub pair`, a
-    /// phone). Never a per-host token — its Claude is fenced to its host's
-    /// org, and these tools are fleet-wide — nor a client bound to an org
-    /// (M14). The fleet's settings (declarative pages P6): what the hub's
-    /// GC, playbooks and limits do to the sessions that device shows. A
-    /// write needs more than this row; see `set_setting`.
+    /// Reachable by the master and by THE HUB'S OWNER's own paired device: a
+    /// paired client bound to no org (the desktop paired with `fleet-hub
+    /// pair`, a phone) whose person is `Store::personal_owner_id()`. Never a
+    /// per-host token — its Claude is fenced to its host's org, and these
+    /// tools are fleet-wide — nor a client bound to an org (M14), nor (since
+    /// multi-user M1) a SECOND person's device. The fleet's settings
+    /// (declarative pages P6): what the hub's GC, playbooks and limits do to
+    /// the sessions that device shows. A write needs more than this row; see
+    /// `set_setting`.
+    ///
+    /// "Whose settings are these?" stays an M2 question: M1's answer is that
+    /// the fleet's settings belong to the fleet's owner, which is the state a
+    /// single-person hub was already in. What M1 changes is that a colleague
+    /// paired to the same hub no longer inherits them.
     Person,
     /// [`Access::Person`], but not served to the master: the operator has
     /// `fleet-hub settings` on the hub machine, and every byte of the
@@ -66,17 +73,82 @@ pub enum Access {
     /// (`the_served_definition_budget_stays_bounded`). The desktop's own
     /// commands, under their own names (`setting_proposals`, …).
     PersonDevice,
+    /// A **per-host token** and nothing else: not the master, not a paired
+    /// device, not the operator (multi-user M1, T12).
+    ///
+    /// It exists because `session_claim` is not expressible with the four
+    /// variants above. [`Access::Client`]'s own doc says it covers a
+    /// per-host token *as well as* every paired phone, and
+    /// [`access_allows`] answers `true` for it unconditionally — so "host
+    /// token only" could not be written as a row, and a claim tool with a
+    /// `Client` row would have been reachable by every paired device on the
+    /// fleet.
+    ///
+    /// The gate is one conjunct and it narrows WHAT the caller is:
+    /// `host_alias.is_some()` is true for exactly one of the three shapes a
+    /// [`crate::mcp::Caller`] has (its own doc enumerates them — master:
+    /// neither field; host: `host_alias`; paired client: `client`), so this
+    /// admits the per-host token and refuses the other two. The further
+    /// narrowing — *which* row that token may claim — is not an access
+    /// question and is not answered here: it is the pane proof
+    /// (`ViewScope::proven_session`), re-resolved per request.
+    ///
+    /// **The master is deliberately out.** Its path to a claim is
+    /// `fleet-hub session claim`, which writes through `state.db` on the hub
+    /// machine — shell access there being the authority §4.5 already
+    /// concedes — and every byte of the master's tool surface is budgeted
+    /// (`the_served_definition_budget_stays_bounded`), the same reasoning
+    /// [`Access::PersonDevice`] records one variant up.
+    HostToken,
 }
 
 /// Whether `caller` may call `tool` by its row's [`Access`] — the one
 /// predicate the call gate (`enforce_admin`) and the served list
 /// (`visible_to`) share. A tool with no row is the master's alone (fail
 /// closed).
+///
+/// **This function takes no store and must not grow one** (multi-user M1,
+/// R6-l). It is shared with `crate::mcp::tools::present::visible_to`, which
+/// has a `&Caller` and nothing else and runs over the whole router on every
+/// served list, so a lookup here would be a lock per request. Everything it
+/// needs about WHO the caller is was resolved once, where the token was
+/// resolved: [`crate::mcp::Caller::is_personal_owner`].
 pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
     match policy(tool).map(|p| p.access) {
         Some(Access::Client) => true,
-        Some(Access::Person) => caller.is_master() || caller.is_person_device(),
-        Some(Access::PersonDevice) => caller.is_person_device(),
+        // Multi-user M1 (T2a): the hub's OWNER, not any person. Without the
+        // boolean this arm read "any paired device bound to no org", which
+        // on a hub with a second person handed that person the whole fleet's
+        // settings. The boolean is false when the hub cannot say who its
+        // owner is, so that state refuses rather than opens.
+        Some(Access::Person) => {
+            caller.is_personal_owner && (caller.is_master() || caller.is_person_device())
+        }
+        // Two conjuncts, narrowing two different axes, and BOTH are needed:
+        //
+        // - `is_personal_owner` narrows WHOSE device it is. Without it this
+        //   arm read "any paired device bound to no org", so on a hub with a
+        //   second person that colleague's phone reached
+        //   `decide_setting_proposals` — which applies a proposed settings
+        //   change to the whole fleet. Same hole as `Access::Person` had, one
+        //   arm down.
+        // - `is_person_device` narrows WHAT the caller is: a paired client,
+        //   which is what keeps the MASTER out of this arm by design (the
+        //   operator has `fleet-hub settings` on the hub machine, and every
+        //   byte of the master's tool surface is budgeted —
+        //   `the_served_definition_budget_stays_bounded`). It also keeps out
+        //   a per-host token, an org-bound client and a single-purpose token.
+        //
+        // A device that reaches these still has to be trusted to write
+        // anything (`settings_writer`).
+        Some(Access::PersonDevice) => caller.is_personal_owner && caller.is_person_device(),
+        // Multi-user M1 (T12): a per-host token, and only one. `host_alias`
+        // is `Some` for exactly that shape of caller — the master carries
+        // neither field and a paired client carries `client` — so this arm
+        // admits the agent on a machine and refuses the master, every phone,
+        // every paired desktop and the operator's own client. WHICH row such
+        // a token may claim is the pane proof's question, not this one.
+        Some(Access::HostToken) => caller.host_alias.is_some(),
         Some(Access::Master) | None => caller.is_master(),
     }
 }
@@ -114,7 +186,7 @@ pub struct ToolPolicy {
 /// The single source of truth for every router tool's access, readonly,
 /// confirm and deadline classification. Adding a tool means adding exactly
 /// one row here; the exhaustiveness test in `tools::tests`
-/// (`every_router_tool_has_exactly_one_policy_row`) walks the real router and
+/// (`every_router_tool_has_exactly_one_tool_policy_row`) walks the real router and
 /// fails with the row to add when one is missing, duplicated, or names a tool
 /// that no longer exists.
 pub const TOOL_POLICIES: &[ToolPolicy] = &[
@@ -1032,6 +1104,66 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // sharing.rs — multi-user M1 (T12). The four sharing tools and the two
+    // reads are `Access::Client` so a paired device passes the central gate,
+    // and all five of them are in `NOT_FOR_HOST_TOKENS`: a per-host token has
+    // no person (`Caller::person` is `None` for it by construction), so it can
+    // never be an owner or a grantee and a definition it can never use would
+    // cost every host's Claude request bytes for nothing. Owner-only is NOT
+    // this row's job — it is `Reach::Own` in the handler and the
+    // `owner_person_id` comparison inside the store's own statements.
+    //
+    // None is confirm-gated: a share destroys nothing, and the one that takes
+    // reach away (`session_unshare`) is the recovery from the others.
+    ToolPolicy {
+        name: "session_share",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "session_unshare",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "session_narrow",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "session_access",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "my_grants",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // The claim path (spec §4.4, clause 1 + the pane proof). The ONE
+    // `Access::HostToken` row: see that variant's doc for why no existing one
+    // expresses it. Not readonly — it writes the owner and flips the row to
+    // `private` — and not confirm-gated, because the desktop confirmation is
+    // the operator's dialog and no operator is in this path: the caller is an
+    // agent in a pane, and the operator's own claim is `fleet-hub session
+    // claim`.
+    ToolPolicy {
+        name: "session_claim",
+        access: Access::HostToken,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
 ];
 
 /// This tool's full policy row, or `None` for a name the router does not
@@ -1094,10 +1226,15 @@ pub fn is_admin_tool(name: &str) -> bool {
 /// [`Access::Client`].
 ///
 /// Classification is MANDATORY, not a denylist: a tool with no
-/// [`TOOL_POLICIES`] row fails the exhaustiveness test in `tools::tests` (it
-/// walks the real router). Adding a tool means adding one row and picking
+/// [`TOOL_POLICIES`] row fails the exhaustiveness test in `tools::tests`
+/// (`every_router_tool_has_exactly_one_tool_policy_row`, which walks the real
+/// router). Adding a tool means adding one row and picking
 /// [`Access::Master`] if only the master may call it, [`Access::Client`]
-/// otherwise.
+/// otherwise — or one of the three narrow variants
+/// ([`Access::Person`], [`Access::PersonDevice`], [`Access::HostToken`])
+/// when the caller is a single named shape. This predicate answers `false`
+/// for all three of those, so a tool classified by one of them is neither
+/// "fleet admin" nor "client-callable" and neither list widens.
 pub fn is_client_tool(name: &str) -> bool {
     policy(name).is_some_and(|p| matches!(p.access, Access::Client))
 }
@@ -1112,12 +1249,24 @@ pub fn is_client_tool(name: &str) -> bool {
 /// catalog edits and rolls layers out to hosts, so it is refused alike, its
 /// `list` included (R25 amended). `list_downloads` / `remove_download` are a
 /// person's: a host's Claude only sends files.
+///
+/// The five sharing surfaces joined them in multi-user M1 (T12) for a
+/// different reason: a per-host token proves no PERSON
+/// ([`crate::mcp::Caller::person`] is `None` for it by construction), so it
+/// cannot own a session, cannot be granted one, and has no grant set of its
+/// own to read. `session_claim` is deliberately NOT here — it is the one tool
+/// a per-host token is the only caller of ([`Access::HostToken`]).
 pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "catalog_admin",
     "import_assets",
     "changesets",
     "list_downloads",
     "remove_download",
+    "session_share",
+    "session_unshare",
+    "session_narrow",
+    "session_access",
+    "my_grants",
 ];
 
 // --- legacy name lists -------------------------------------------------------
@@ -1127,7 +1276,9 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
 // Rather than touch every one of those (and risk drifting from
 // [`TOOL_POLICIES`] again), they stay as thin DERIVED views computed from the
 // table at compile time — not a second hand-maintained source. The
-// exhaustiveness test in `tools::tests` is what actually guards the table;
+// exhaustiveness test in `tools::tests`
+// (`every_router_tool_has_exactly_one_tool_policy_row`) is what actually
+// guards the table;
 // these are just `&[&str]` projections of it for callers that want a list to
 // iterate.
 

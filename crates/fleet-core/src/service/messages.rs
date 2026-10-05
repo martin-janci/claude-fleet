@@ -138,6 +138,10 @@ pub async fn send_message_scoped(
     // an unknown one — checked BEFORE the address is resolved, whose own
     // "retired" answer would otherwise tell the two apart. Another fleet's
     // address is not in any local org: it goes on to the link.
+    // This is the org boundary, not a privacy fence: which ORG's session an address may name.
+    // The PERSON half of the same recipient is `support::require_message_recipient`, at the tool
+    // layer and at `Reach::Drive` — the gate that was missing when a phone could type into any
+    // pane in the fleet.
     if !scope.is_all() {
         if let Some(Ok(crate::service::address::Addr::Session { fleet, host, name })) =
             args.to_addr.as_deref().map(crate::service::address::parse)
@@ -146,7 +150,10 @@ pub async fn send_message_scoped(
             if fleet.is_none() || fleet == local {
                 let s = lock(store)?;
                 if let Some(row) = s.get_session(&name, &host)? {
-                    if !scope.sees_row(&row) {
+                    // The org half; the person half is
+                    // `support::require_message_recipient` at the tool layer
+                    // (multi-user M1, T10's ORG_HALF_SITES row).
+                    if !scope.sees_row_org_only(&row) {
                         return Err(IpcError::new(
                             codes::E_PARTICIPANT_UNKNOWN,
                             format!("no session {name} on {host}"),
@@ -167,10 +174,14 @@ pub async fn send_message_scoped(
             return send_remote(args, link_id, &addr, &fleet, store);
         }
     };
+    // This is the org boundary, not a privacy fence: the same org question for a recipient named
+    // by id, with the same person half at the tool layer.
     if !scope.is_all() {
         let s = lock(store)?;
         if let Some(to) = s.get_session_by_id(to_session_id)? {
-            if !scope.sees_row(&to) {
+            // As above: the org half, with `require_message_recipient` as the
+            // person half at the tool layer.
+            if !scope.sees_row_org_only(&to) {
                 return Err(
                     match args.to_addr.as_deref().map(crate::service::address::parse) {
                         Some(Ok(crate::service::address::Addr::Session { host, name, .. })) => {
@@ -713,7 +724,10 @@ pub fn peer_status(
     // An isolated org's session (D7) reads exactly as a missing one.
     let row = s
         .get_session_by_id(session_id)?
-        .filter(|r| scope.sees_row(r))
+        // The org half. The person half is `resolve_row_person_gated(..,
+        // Reach::Read, ..)` in `mcp::tools::messaging::peer_status`, which
+        // runs before this call (multi-user M1, T9b/T10).
+        .filter(|r| scope.sees_row_org_only(r))
         .ok_or_else(|| {
             IpcError::new(
                 codes::E_NOTFOUND,
@@ -745,6 +759,7 @@ pub async fn wait_for_reply(
     session_id: i64,
     after_message_id: Option<i64>,
     timeout: std::time::Duration,
+    recheck: &dyn crate::service::tasks::AccessRecheck,
 ) -> Result<Option<SessionMessage>, IpcError> {
     let deadline = tokio::time::Instant::now() + timeout;
     // Take the handle (and validate the session) under one short lock window,
@@ -762,6 +777,11 @@ pub async fn wait_for_reply(
     loop {
         {
             let s = lock(store)?;
+            // T11: the access that opened the wait, re-checked in the SAME
+            // lock window that reads the inbox — and therefore before the
+            // message body can be returned. This is the highest-value one
+            // of the four: the payload here IS the content.
+            recheck.check(&s)?;
             // Id-ordered, not `sent_at`-ordered (`list_inbox`'s order): a
             // waiter's job is "is there anything newer than the last id I
             // saw", and only `id` (an `INTEGER PRIMARY KEY`, monotonic by
@@ -1915,10 +1935,16 @@ mod tests {
         send_message(args(a, b, "early"), &store, &ssh)
             .await
             .unwrap();
-        let got = wait_for_reply(&store, b, None, Duration::from_secs(5))
-            .await
-            .unwrap()
-            .expect("the already-waiting message");
+        let got = wait_for_reply(
+            &store,
+            b,
+            None,
+            Duration::from_secs(5),
+            &crate::service::tasks::NoRecheck,
+        )
+        .await
+        .unwrap()
+        .expect("the already-waiting message");
         assert_eq!(got.body, "early");
     }
 
@@ -1932,10 +1958,16 @@ mod tests {
             send_message(args(a, b, "late"), &s2, &ssh2).await.unwrap();
         });
         let started = std::time::Instant::now();
-        let got = wait_for_reply(&store, b, None, Duration::from_secs(5))
-            .await
-            .unwrap()
-            .expect("the message that arrived during the wait");
+        let got = wait_for_reply(
+            &store,
+            b,
+            None,
+            Duration::from_secs(5),
+            &crate::service::tasks::NoRecheck,
+        )
+        .await
+        .unwrap()
+        .expect("the message that arrived during the wait");
         sender.await.unwrap();
         assert_eq!(got.body, "late");
         assert!(
@@ -1948,9 +1980,15 @@ mod tests {
     #[tokio::test]
     async fn wait_for_reply_times_out_with_none_rather_than_an_error() {
         let (store, _ssh, _a, b) = fixture();
-        let got = wait_for_reply(&store, b, None, Duration::from_millis(150))
-            .await
-            .unwrap();
+        let got = wait_for_reply(
+            &store,
+            b,
+            None,
+            Duration::from_millis(150),
+            &crate::service::tasks::NoRecheck,
+        )
+        .await
+        .unwrap();
         assert!(got.is_none(), "a timeout is Ok(None), not an error");
     }
 
@@ -1958,27 +1996,45 @@ mod tests {
     async fn after_message_id_ignores_messages_the_caller_already_saw() {
         let (store, ssh, a, b) = fixture();
         let first = send_message(args(a, b, "one"), &store, &ssh).await.unwrap();
-        let got = wait_for_reply(&store, b, Some(first.id), Duration::from_millis(150))
-            .await
-            .unwrap();
+        let got = wait_for_reply(
+            &store,
+            b,
+            Some(first.id),
+            Duration::from_millis(150),
+            &crate::service::tasks::NoRecheck,
+        )
+        .await
+        .unwrap();
         assert!(
             got.is_none(),
             "the already-seen message must not satisfy the wait"
         );
         let second = send_message(args(a, b, "two"), &store, &ssh).await.unwrap();
-        let got = wait_for_reply(&store, b, Some(first.id), Duration::from_secs(5))
-            .await
-            .unwrap()
-            .expect("the newer message");
+        let got = wait_for_reply(
+            &store,
+            b,
+            Some(first.id),
+            Duration::from_secs(5),
+            &crate::service::tasks::NoRecheck,
+        )
+        .await
+        .unwrap()
+        .expect("the newer message");
         assert_eq!(got.id, second.id);
     }
 
     #[tokio::test]
     async fn wait_for_reply_rejects_an_unknown_session() {
         let (store, _ssh, _a, _b) = fixture();
-        let err = wait_for_reply(&store, 9999, None, Duration::from_millis(50))
-            .await
-            .unwrap_err();
+        let err = wait_for_reply(
+            &store,
+            9999,
+            None,
+            Duration::from_millis(50),
+            &crate::service::tasks::NoRecheck,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.code, "E_NOTFOUND");
     }
 }

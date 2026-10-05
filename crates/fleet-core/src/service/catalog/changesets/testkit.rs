@@ -125,6 +125,16 @@ pub(crate) fn ssh_with_home_running(bin_dir: &Path, home: &Path, before: &str) -
 /// A store with `personal` (a fresh checkout, loaded) and reachable hosts.
 /// The store is an `Arc` so the scan tick's hook (`after_scan_pass`) can
 /// take it too; everything else borrows it as `&Mutex<Store>`.
+///
+/// Each host serves `claude` only, pinned explicitly rather than left on
+/// auto (F3a). The fake `ssh` runs the remote script on this machine, so
+/// Codex's presence probe (`command -v codex`, `codex.rs`'s
+/// `CODEX_PRESENT_PROBE`) reads the *test process's* `PATH` — on a
+/// developer's box with the `codex` CLI installed the fixture host would
+/// silently serve two harnesses and plan every asset twice, while CI
+/// (no `codex` on `PATH`) serves one. `HOME` is already pinned to a
+/// tempdir for the same reason; this pins the harness set. A test that
+/// wants Codex asks for it with `set_host_harnesses`.
 #[cfg(unix)]
 pub(crate) struct Fleet {
     pub store: Arc<Mutex<Store>>,
@@ -144,6 +154,8 @@ impl Fleet {
         for h in hosts {
             s.insert_host(h, Some(h)).unwrap();
             s.update_host_probe(h, true, None, None, 1).unwrap();
+            s.set_host_harnesses(h, Some(&["claude".to_string()]))
+                .unwrap();
         }
         let personal = s.personal_catalog().unwrap().unwrap();
         let store = Arc::new(Mutex::new(s));

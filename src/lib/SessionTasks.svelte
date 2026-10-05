@@ -11,6 +11,7 @@
   import type { SessionRow } from './sessions';
   import { orgs } from './orgs';
   import { hubStatus, hubActionBlocked } from './hub';
+  import { sessionBlocked } from './share';
   import { hubConnection } from './hub_connection';
   import {
     confirmSessionWork,
@@ -41,8 +42,25 @@
 
   let { session, debounceMs = 500 }: { session: SessionRow; debounceMs?: number } = $props();
 
-  const linkBlocked = $derived(hubActionBlocked('link_session_work', $hubStatus, $hubConnection));
-  const primaryBlocked = $derived(hubActionBlocked('set_primary_work', $hubStatus, $hubConnection));
+  // Both halves (multi-user M1): the hub's own refusal first, then who this
+  // client is on THIS row. `link_session_work` is `drive` in
+  // `share.ts::SESSION_TIER`, and `SessionRowItem` has composed exactly these
+  // two for the same action since F2 — this panel asked only the hub's half,
+  // so the same control answered differently on the two surfaces and a watcher
+  // could still link, unlink, confirm or reject the owner's work here.
+  const linkBlocked = $derived(
+    hubActionBlocked('link_session_work', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'link_session_work'),
+  );
+  // The same two halves as `linkBlocked` above, for the same reason: Make
+  // primary is `set_primary_work`, `drive` in `share.ts::SESSION_TIER` (which
+  // of the session's links groups it is a per-session work-graph write, like
+  // `link_session_work`). This one line was the last of the file still asking
+  // the hub's half alone.
+  const primaryBlocked = $derived(
+    hubActionBlocked('set_primary_work', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'set_primary_work'),
+  );
 
   let data = $state<SessionTasks | null>(null);
   // An older hub (or a read that failed): the section stays out of the way;
@@ -121,8 +139,17 @@
   const grouped = $derived(groupSessionLinks(data?.links ?? []));
   const primaryId = $derived(data?.primary_link_id ?? null);
 
+  /**
+   * Every per-link write in this panel runs through here, and so does its gate
+   * (multi-user M1, F2b): the panel's controls are disabled, but a grant can be
+   * narrowed while the panel is open, and the control's `disabled` is not the
+   * only way into these handlers. `linkBlocked` is `link_session_work`,
+   * `drive` — the same tier as `set_primary_work`, `unlink_session_work`,
+   * `confirm_session_work` and `reject_session_work`, which is why one answer
+   * covers all five: `share.ts`' refusal is a function of the tier.
+   */
   async function act(what: string, call: () => Promise<Result<unknown>>, ok?: string) {
-    if (busy) return;
+    if (busy || linkBlocked !== null) return;
     busy = true;
     notice = null;
     const r = await call();
@@ -183,7 +210,9 @@
   // A second task never takes the primary; the first one (a session with no
   // primary) does, so the session is not left with work and no primary.
   async function add(ref: WorkRef, label: string, force = false) {
-    if (busy) return;
+    // The Add task… panel's entrance is gated; the panel is not, and it stays
+    // open across a narrowing. Re-asked here (multi-user M1, F2b).
+    if (busy || linkBlocked !== null) return;
     busy = true;
     notice = null;
     const r = await linkSessionWork(session.id, ref, { primary: primaryId == null, forceCrossOrg: force });

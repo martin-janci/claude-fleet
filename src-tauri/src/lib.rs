@@ -7,6 +7,7 @@ pub mod backend;
 mod bootstrap;
 mod commands;
 mod pty;
+mod voice;
 
 pub use app_events::AppHandleEventBus;
 
@@ -346,6 +347,7 @@ pub fn run() {
         .manage(reg)
         .manage(tunnels)
         .manage(upload_allow)
+        .manage(voice::VoiceState::default())
         // Drag-drop reaches a `WebviewWindow` as a window event (and, for a
         // standalone webview, as a webview event) — record dropped paths from
         // both so `upload_to_session` can verify them.
@@ -450,6 +452,12 @@ pub fn run() {
             commands::sessions::session_conversation,
             commands::sessions::session_tool_detail,
             commands::sessions::session_activity,
+            commands::sessions::capture_session,
+            commands::sessions::session_share,
+            commands::sessions::session_unshare,
+            commands::sessions::session_narrow,
+            commands::sessions::session_access,
+            commands::sessions::my_grants,
             commands::sessions::restart_session,
             commands::sessions::rewind_conversation,
             commands::sessions::send_prompt,
@@ -597,6 +605,8 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_close,
             pty::pty_drain,
+            commands::voice::voice_claim,
+            commands::voice::voice_release,
             cancel_command,
         ])
         .on_window_event(move |window, event| {

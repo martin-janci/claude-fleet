@@ -677,6 +677,13 @@ pub fn payload_fits(name: &str, payload: &Value) -> Result<(), String> {
         | "work:tracker_removed" => integer("id"),
         "host:added" | "host:probed" | "host:removed" => string("alias"),
         "work:changed" | "update:changed" => string("what"),
+        // `grant:changed` (multi-user M1): `src/lib/access.ts` reads both
+        // ids as numbers and drops the frame otherwise, so the bridge
+        // checks what the consumer requires. `level` is deliberately not
+        // checked: a missing or unknown level IS the revoke
+        // (`parseGrantChanged`), and the one direction a grant may move is
+        // downward.
+        "grant:changed" => integer("session_id").and_then(|()| integer("person_id")),
         "settings:changed" => string("key"),
         "session:event" | "session:conversations" => integer("session_id"),
         "account:upserted" => string("uuid"),

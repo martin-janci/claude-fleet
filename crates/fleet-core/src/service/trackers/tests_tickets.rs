@@ -5,10 +5,95 @@
 use super::*;
 use crate::net::https::{FakeTransport, Method, Response};
 use crate::service::orgs::OrgScope;
+use crate::service::view_scope::ViewScope;
 use crate::store::{TrackerConfig, TrackerItemWrite};
 use serde_json::json;
 
 const ME: &str = "acct-me";
+
+/// These tests are about the ORG boundary and the start's own race, and they
+/// pass an [`OrgScope`]; the start path takes a whole
+/// [`crate::service::view_scope::ViewScope`] since multi-user M1 (T9b — its
+/// `E_EXISTS` prose names a session, and its branch slug can land a pane in
+/// somebody's checkout). These three shadow the real functions with the org
+/// half wrapped in the hub's own reader, so the matrices below keep saying
+/// what they were written to say; the PERSON half is tested in
+/// `mcp::tools::tests` against real people rows.
+fn vs(store: &Mutex<Store>, scope: &OrgScope) -> ViewScope {
+    match scope.host() {
+        // A per-host token's §4.4 reach is part of what these matrices
+        // assert (D7's "an isolated org's winner is not named"), and
+        // `ViewScope::internal` would short-circuit the whole question — the
+        // hub's own reader sees every row. So build the real thing, through
+        // the ONE constructor a request may use
+        // (`view_scope_tests::only_caller_view_scope_constructs_a_view_scope`
+        // holds that true by reading this file too).
+        Some(h) => crate::mcp::auth::Caller {
+            host_alias: Some(h.to_string()),
+            client: None,
+            mode: crate::mcp::auth::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&store.lock().unwrap())
+        .expect("a host scope"),
+        // `All` here means the hub's own reader: these tests predate people.
+        None => ViewScope::internal().with_org(scope.clone()),
+    }
+}
+
+async fn plan_start(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    scope: &OrgScope,
+    net: &TrackerNet,
+) -> Result<StartPlan, IpcError> {
+    crate::service::trackers::tickets::plan_start(store, args, &vs(store, scope), net).await
+}
+
+async fn start_with<F, Fut>(
+    store: &Arc<Mutex<Store>>,
+    plan: &StartPlan,
+    brief: Option<String>,
+    scope: &OrgScope,
+    spawn: F,
+) -> Result<(SessionRow, bool), IpcError>
+where
+    F: FnOnce(crate::service::sessions::NewSessionArgs) -> Fut,
+    Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
+{
+    crate::service::trackers::tickets::start_with(store, plan, brief, &vs(store, scope), spawn)
+        .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_many<F, Fut, P>(
+    store: &Arc<Mutex<Store>>,
+    args: &StartArgs,
+    project_ids: &[i64],
+    scope: &OrgScope,
+    net: &TrackerNet,
+    deadline: tokio::time::Instant,
+    spawn: F,
+    started: P,
+) -> Result<MultiStart, IpcError>
+where
+    F: FnMut(crate::service::sessions::NewSessionArgs) -> Fut,
+    Fut: std::future::Future<Output = Result<SessionRow, IpcError>>,
+    P: FnMut(&SessionRow, &str),
+{
+    crate::service::trackers::tickets::start_many(
+        store,
+        args,
+        project_ids,
+        &vs(store, scope),
+        net,
+        deadline,
+        spawn,
+        started,
+    )
+    .await
+}
 
 struct Fx {
     store: Arc<Mutex<Store>>,
@@ -102,11 +187,18 @@ impl Fx {
     }
 
     fn keys(&self, view: Option<&str>, scope: &OrgScope) -> Vec<String> {
-        tickets(&self.store, None, view, None, None, scope)
-            .unwrap()
-            .into_iter()
-            .map(|t| t.item.key.unwrap())
-            .collect()
+        tickets(
+            &self.store,
+            None,
+            view,
+            None,
+            None,
+            &crate::service::view_scope::org_only_view(scope),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|t| t.item.key.unwrap())
+        .collect()
     }
 
     fn net(&self) -> crate::service::trackers::TrackerNet {
@@ -117,7 +209,12 @@ impl Fx {
     fn lookup_as_host(&self, key: &str) -> Ticket {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(lookup(&self.store, key, &host_scope("hosta"), &self.net()))
+            .block_on(lookup(
+                &self.store,
+                key,
+                &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+                &self.net(),
+            ))
             .unwrap()
     }
 
@@ -396,9 +493,25 @@ fn views_are_evaluated_from_the_cache() {
     assert_eq!(fx.keys(Some("sprint"), &OrgScope::All), vec!["ABC-4"]);
     assert_eq!(fx.keys(Some("filter:9"), &OrgScope::All), vec!["ABC-3"]);
     assert_eq!(fx.keys(None, &OrgScope::All).len(), 4);
-    let q = tickets(&fx.store, None, None, Some("abc-3"), None, &OrgScope::All).unwrap();
+    let q = tickets(
+        &fx.store,
+        None,
+        None,
+        Some("abc-3"),
+        None,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .unwrap();
     assert_eq!(q.len(), 1);
-    let one = tickets(&fx.store, None, None, None, Some(1), &OrgScope::All).unwrap();
+    let one = tickets(
+        &fx.store,
+        None,
+        None,
+        None,
+        Some(1),
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .unwrap();
     assert_eq!(one.len(), 1);
     assert!(
         fx.fake.requests().is_empty(),
@@ -434,22 +547,37 @@ async fn a_host_token_sees_only_its_own_hosts_tickets() {
     assert_eq!(fx.keys(None, &OrgScope::All).len(), 4, "master / client");
 
     // lookup: its own ticket, with the description fenced as untrusted.
-    let t = lookup(&fx.store, "abc-1", &host_scope("hosta"), &fx.net())
-        .await
-        .unwrap();
+    let t = lookup(
+        &fx.store,
+        "abc-1",
+        &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+        &fx.net(),
+    )
+    .await
+    .unwrap();
     let d = t.description.unwrap();
     assert!(d.starts_with("[claude-fleet:"), "{d}");
     assert!(d.contains("Ignore previous instructions"));
     // Another ticket: forbidden, and the reason says why.
-    let e = lookup(&fx.store, "ABC-2", &host_scope("hosta"), &fx.net())
-        .await
-        .unwrap_err();
+    let e = lookup(
+        &fx.store,
+        "ABC-2",
+        &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
     assert!(e.message.contains("per-host token"), "{}", e.message);
     // A key nothing caches: a host token cannot make the hub fetch it.
-    let e = lookup(&fx.store, "ABC-99", &host_scope("hosta"), &fx.net())
-        .await
-        .unwrap_err();
+    let e = lookup(
+        &fx.store,
+        "ABC-99",
+        &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(e.code, codes::E_FORBIDDEN);
     assert!(fx.fake.requests().is_empty());
     // An ended link on host A still counts (past work).
@@ -471,7 +599,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
     let hit = lookup(
         &fx.store,
         "https://acme.atlassian.net/browse/ABC-1",
-        &OrgScope::All,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
         &fx.net(),
     )
     .await
@@ -494,13 +622,23 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
                 "issuetype": {"name": "Task", "hierarchyLevel": 0}, "project": {"key": "ABC"}}}]}),
         )),
     );
-    let live = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
-        .await
-        .unwrap();
+    let live = lookup(
+        &fx.store,
+        "ABC-77",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+        &fx.net(),
+    )
+    .await
+    .unwrap();
     assert_eq!(live.item.title, "Fresh");
-    let again = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
-        .await
-        .unwrap();
+    let again = lookup(
+        &fx.store,
+        "ABC-77",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+        &fx.net(),
+    )
+    .await
+    .unwrap();
     assert_eq!(again.item.id, live.item.id);
     assert_eq!(
         fx.fake.count("/issue/bulkfetch"),
@@ -512,7 +650,7 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
     let e = lookup(
         &fx.store,
         "https://other.atlassian.net/browse/ZZ-1",
-        &OrgScope::All,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
         &fx.net(),
     )
     .await
@@ -528,10 +666,15 @@ async fn lookup_answers_from_the_cache_or_fetches_once_and_caches() {
         Ok(Response::json(200, &json!({"issues": []}))),
     );
     assert_eq!(
-        lookup(&fx.store, "ABC-404", &OrgScope::All, &fx.net())
-            .await
-            .unwrap_err()
-            .code,
+        lookup(
+            &fx.store,
+            "ABC-404",
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+            &fx.net()
+        )
+        .await
+        .unwrap_err()
+        .code,
         codes::E_NOTFOUND
     );
 }
@@ -549,9 +692,14 @@ async fn a_lookup_inside_the_retry_after_window_sends_nothing() {
         .unwrap()
         .set_tracker_not_before(t, Some(now + 600))
         .unwrap();
-    let e = lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
-        .await
-        .unwrap_err();
+    let e = lookup(
+        &fx.store,
+        "ABC-77",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(e.code, codes::E_TRACKER);
     assert!(e.message.contains("cannot be asked now"), "{}", e.message);
     let left = e.details.unwrap()["retry_after_secs"].as_i64().unwrap();
@@ -561,9 +709,14 @@ async fn a_lookup_inside_the_retry_after_window_sends_nothing() {
         "no request inside the window"
     );
     // The cache still answers.
-    assert!(lookup(&fx.store, "ABC-1", &OrgScope::All, &fx.net())
-        .await
-        .is_ok());
+    assert!(lookup(
+        &fx.store,
+        "ABC-1",
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+        &fx.net()
+    )
+    .await
+    .is_ok());
     // Past the window: the fetch happens.
     fx.store
         .lock()
@@ -576,10 +729,15 @@ async fn a_lookup_inside_the_retry_after_window_sends_nothing() {
         Ok(Response::json(200, &json!({"issues": []}))),
     );
     assert_eq!(
-        lookup(&fx.store, "ABC-77", &OrgScope::All, &fx.net())
-            .await
-            .unwrap_err()
-            .code,
+        lookup(
+            &fx.store,
+            "ABC-77",
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+            &fx.net()
+        )
+        .await
+        .unwrap_err()
+        .code,
         codes::E_NOTFOUND
     );
     assert_eq!(fx.fake.count("/issue/bulkfetch"), 1);
@@ -630,7 +788,7 @@ async fn a_lookup_by_url_answers_from_that_urls_tracker_only() {
     let mine = lookup(
         &fx.store,
         "https://acme.atlassian.net/browse/ABC-9",
-        &OrgScope::All,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
         &fx.net(),
     )
     .await
@@ -644,7 +802,7 @@ async fn a_lookup_by_url_answers_from_that_urls_tracker_only() {
     let theirs = lookup(
         &fx.store,
         "https://other.atlassian.net/browse/ABC-9",
-        &OrgScope::All,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
         &fx.net(),
     )
     .await
@@ -1134,10 +1292,17 @@ async fn another_orgs_bare_link_neither_blocks_a_start_nor_counts_as_live() {
         .unwrap()
         .id;
     let live_on_abc2 = |fx: &Fx| -> Vec<i64> {
-        tickets(&fx.store, None, None, Some("abc-2"), None, &OrgScope::All)
-            .unwrap()
-            .remove(0)
-            .live_session_ids
+        tickets(
+            &fx.store,
+            None,
+            None,
+            Some("abc-2"),
+            None,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+        )
+        .unwrap()
+        .remove(0)
+        .live_session_ids
     };
 
     // The A host's bare link: exactly what the store keeps for it.
@@ -1296,9 +1461,14 @@ async fn ticket_text_cannot_escape_the_fence() {
         .unwrap()
         .link_session_work(sid, WorkTarget::Key("ABC-66"), "manual")
         .unwrap();
-    let t = lookup(&fx.store, "ABC-66", &host_scope("hosta"), &fx.net())
-        .await
-        .unwrap();
+    let t = lookup(
+        &fx.store,
+        "ABC-66",
+        &crate::service::view_scope::org_only_view(&host_scope("hosta")),
+        &fx.net(),
+    )
+    .await
+    .unwrap();
     let d = t.description.unwrap();
     assert_eq!(d.matches(UNTRUSTED_END).count(), 1, "{d}");
     assert!(d.ends_with(UNTRUSTED_END), "{d}");
@@ -2453,7 +2623,7 @@ async fn an_unaccepted_proposal_cannot_be_started() {
             item_id: Some(p.id),
             ..Default::default()
         },
-        &OrgScope::All,
+        &vs(&store, &OrgScope::All),
         &crate::service::trackers::default_net(),
     )
     .await

@@ -50,6 +50,26 @@ pub struct NewSessionArgs {
     /// default. Rejected for a `"shell"` session.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Whose session this is to be (multi-user M1, T5): the `people` row the
+    /// new row is owned by, and therefore `private` to. `None` leaves it
+    /// `unclaimed` — the safe holding state (spec §4.3), never "everybody's".
+    ///
+    /// **`#[serde(skip_deserializing)]`, and that is the point.** A hub client
+    /// must not be able to name an owner over the wire: whose a session is
+    /// follows from the CONNECTION (`mcp::tools::fleet::owner_for`, which maps
+    /// a `Caller` to its person) or from the SOURCE row a create path derives
+    /// from, never from a field in the request. Every caller that may set it
+    /// does so in Rust, after the request has been authenticated;
+    /// `HubBackend::new_session` deliberately does not send it, and
+    /// `backend::tests_routing` asserts it is absent from the wire.
+    ///
+    /// It is read ONCE on the way through, after the row exists: the
+    /// hard-failing [`Store::claim_if_unclaimed`] in `finalize_new_session`.
+    /// There is no second, name-keyed mechanism ahead of the tmux create any
+    /// more — see the note on `finalize_new_session` and the long one in
+    /// `store::reconcile` for why that shape cannot be made sound.
+    #[serde(skip_deserializing)]
+    pub owner_person_id: Option<i64>,
 }
 
 /// An existing worktree to make sure is present on a remote host, ahead of
@@ -374,10 +394,16 @@ pub async fn new_session(
                 "resume_claude_session_id applies to Claude sessions, not shell sessions",
             ));
         }
-        reject_held_conversation(&*lock(store)?, &args.host_alias, id)?;
+        let s = lock(store)?;
+        reject_held_conversation(&s, &args.host_alias, id)?;
+        reject_foreign_conversation(&s, id, args.owner_person_id)?;
     }
     normalize_launch(&mut args)?;
-    reject_lost_session_name(&*lock(store)?, &args.host_alias, &args.name)?;
+    {
+        let s = lock(store)?;
+        reject_lost_session_name(&s, &args.host_alias, &args.name, args.owner_person_id)?;
+        reject_adoptable_session_name(&s, &args.host_alias, &args.name)?;
+    }
 
     if let Some(name) = args.new_worktree.as_deref() {
         validate_new_worktree_name(name)?;
@@ -407,21 +433,101 @@ pub async fn new_session(
 /// revive that row and `set_claude_session_id` would overwrite its id, losing
 /// the conversation `restore_host_sessions` could bring back. Runs before any
 /// tmux call and before the work/shell split.
+///
+/// It also refuses a name held by a lost row belonging to **another person**
+/// (multi-user M1, T5), resumable or not. The same `ON CONFLICT DO UPDATE`
+/// revives such a row with its `owner_person_id` intact, so without this
+/// refusal person B's `new_session` under a name person A once used comes back
+/// as a row owned by — and readable only to — A. `as_person` is the person the
+/// caller is acting as (`None` for a caller that is nobody); the store's
+/// comparison answers fail-closed for it, so a person-less caller is refused
+/// by every owned lost row rather than inheriting one.
 pub(crate) fn reject_lost_session_name(
     s: &Store,
     host_alias: &str,
     name: &str,
+    as_person: Option<i64>,
 ) -> Result<(), IpcError> {
-    match s.lost_resumable_session_named(host_alias, name)? {
-        Some(row) => Err(IpcError::new(
+    if s.lost_session_named_owned_by_other(host_alias, name, as_person)?
+        .is_some()
+    {
+        // Deliberately names neither the row nor the person: the caller may
+        // not see either, and "pick another name" is the whole of what they
+        // need to act on.
+        return Err(IpcError::new(
             codes::E_EXISTS,
             format!(
-                "{name} belongs to a lost session (id {}); restore it with restore_host_sessions or dismiss it first",
-                row.id
+                "{name} on {host_alias} belongs to another person's lost session; \
+                 pick a different name"
             ),
-        )),
-        None => Ok(()),
+        ));
     }
+    // Multi-user M1 (T10): the ROW's id is not in the message. The name is
+    // the caller's own argument and the advice is actionable without it —
+    // `restore_host_sessions` takes a host, and the ids a caller may see come
+    // from `discover_lost_sessions`, which is person-fenced. The owned-row
+    // arm above already named neither the row nor the person; this arm
+    // reached the same caller (`new_session`, before the work/shell split)
+    // and was naming a row id, so the two arms disagreed about the same
+    // question.
+    if s.lost_resumable_session_named(host_alias, name)?.is_some() {
+        return Err(IpcError::new(
+            codes::E_EXISTS,
+            format!(
+                "{name} belongs to a lost session; restore it with \
+                 restore_host_sessions or dismiss it first"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a name that ALREADY has a `sessions` row on this host, of any
+/// status (multi-user M1, T5's review).
+///
+/// `new_session` inserts no row: it starts tmux, runs a reconcile pass, and
+/// then finds "its" row **by name** (`list_sessions_for_host(...).find(|r|
+/// r.tmux_name == args.name)`), which is the `row_id`
+/// [`finalize_new_session`] claims. That lookup cannot tell the row this
+/// create caused from a row that was already there, and a pre-existing row
+/// under the same name reliably survives the create:
+///
+/// * a ghost / lost row is REVIVED by the reconcile upsert's `ON CONFLICT DO
+///   UPDATE` (`status='running'`, `lost_at=NULL`) — the same row id, with its
+///   `session_events` timeline, conversations, journal entries, work links and
+///   tags still attached;
+/// * a row still recorded `running` whose tmux session has in fact died takes
+///   that same `DO UPDATE` branch without even a revival.
+///
+/// Either way the create would hand back, as the session it just made, a row
+/// it did not make — and `claim_if_unclaimed` would stamp the caller as the
+/// owner of somebody's abandoned history. So the create FAILS here instead of
+/// adopting it, before any tmux call.
+///
+/// [`reject_lost_session_name`] runs first and keeps its two more specific
+/// messages (another person's lost session, a restorable one). What is left
+/// for this one is every other row: a live row, a ghost, an unclaimed lost
+/// row with no conversation to restore. It names neither the row nor its
+/// owner — the name is the caller's own argument and "pick another" is the
+/// whole of what they can act on (T10).
+///
+/// Nothing legitimate is refused by it. A minted name already avoids every
+/// row on the host ([`fill_session_name`] checks `list_sessions_for_host`), a
+/// killed session's row is hard-deleted by the kill's own reconcile pass, and
+/// a name whose tmux session is genuinely live could only ever have failed in
+/// `tmux new-session` with `duplicate session` — later, and less legibly.
+pub(crate) fn reject_adoptable_session_name(
+    s: &Store,
+    host_alias: &str,
+    name: &str,
+) -> Result<(), IpcError> {
+    if s.get_session(name, host_alias)?.is_some() {
+        return Err(IpcError::new(
+            codes::E_EXISTS,
+            format!("{name} on {host_alias} already names a session; pick a different name"),
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse to resume a conversation some session on the host already holds
@@ -432,16 +538,92 @@ pub(crate) fn reject_held_conversation(
     host_alias: &str,
     claude_id: &str,
 ) -> Result<(), IpcError> {
-    match s.session_with_claude_id(host_alias, claude_id)? {
-        Some(row) => Err(IpcError::new(
+    // Multi-user M1 (T10): the HOLDER's id and tmux name are not in the
+    // message. `claude_id` is the caller's own argument, so saying "something
+    // on this host already holds it" tells them nothing they did not supply;
+    // naming the row told them a private session's id and its tmux name,
+    // which in this fleet is a branch or a ticket key — spec §4.3 content,
+    // and the one thing this refusal must not disclose. The tool layer's
+    // `require_conversation_person` normally refuses a foreign conversation
+    // before this runs, but this function is also the desktop path's fence,
+    // where there is no `Caller` to ask, and an `unclaimed` holder on a
+    // multi-person hub reaches it either way.
+    if s.session_with_claude_id(host_alias, claude_id)?.is_some() {
+        return Err(IpcError::new(
             codes::E_EXISTS,
             format!(
-                "conversation {claude_id} already belongs to session {} ({}); restore it with restore_host_sessions instead",
-                row.id, row.tmux_name
+                "conversation {claude_id} is already held by a session on \
+                 {host_alias}; restore it with restore_host_sessions instead"
             ),
-        )),
-        None => Ok(()),
+        ));
     }
+    Ok(())
+}
+
+/// Multi-user M1 (T7, with T3's record): refuse to resume a conversation
+/// that belonged to somebody else.
+///
+/// **The attack works precisely when the session row is gone**, which is why
+/// a check against live rows cannot close it and why migration 099 records
+/// `conversation_owners` durably: A's session is reaped (a kill, a GC
+/// sweep, a `move_session`), B passes its `claude_session_id` to
+/// `new_session`, and the resumed session replays A's whole transcript into
+/// a pane B owns. `reject_held_conversation` above does not see it — there
+/// is no live row holding that conversation any more — and nothing else on
+/// this path asks whose it was.
+///
+/// The predicate has the shape every ownership comparison in M1 has, and for
+/// the same reason: a conversation nobody is recorded against (`None`) must
+/// never match a caller who is nobody (`None`). Written out rather than as
+/// `recorded == owner`, so it cannot be read as an identity check.
+///
+/// A conversation with no recorded owner is allowed through — that is the
+/// pre-M1 world and an `unclaimed` row's conversation, and refusing it would
+/// make every pre-upgrade transcript unresumable (rule 7: the upgrade widens
+/// nothing, and it must not narrow a single-person install into uselessness
+/// either).
+pub fn reject_foreign_conversation(
+    s: &Store,
+    claude_id: &str,
+    owner: Option<i64>,
+) -> Result<(), IpcError> {
+    if conversation_owner_allows(s, claude_id, owner)? {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_FORBIDDEN,
+        format!(
+            "conversation {claude_id} belongs to another person; a transcript is \
+             not resumed into somebody else's session"
+        ),
+    ))
+}
+
+/// The predicate half of [`reject_foreign_conversation`]: may `owner` take
+/// over the conversation `claude_id`?
+///
+/// Written out because two callers need the ANSWER rather than this
+/// function's refusal. `work_link { resume }` and `work_link { summarize }`
+/// are addressed by a work key and a link id, never by a session
+/// (multi-user M1, T7), so they must answer with the LINK's own
+/// `E_NOTFOUND` — a link whose conversation is not this caller's reads
+/// exactly like a link that does not exist — and not with an `E_FORBIDDEN`
+/// that confirms both the link and whose it is.
+///
+/// Every rule the doc above states holds here, because this is where it is
+/// written: a failed read is not a pass, `(None, None)` never matches, and a
+/// conversation with no recorded owner is allowed through.
+pub fn conversation_owner_allows(
+    s: &Store,
+    claude_id: &str,
+    owner: Option<i64>,
+) -> Result<bool, IpcError> {
+    // A failed read is NOT a pass: a conversation whose owner cannot be
+    // established is one this caller cannot show it owns.
+    Ok(match s.conversation_owner(claude_id)? {
+        None => true,
+        Some(o) => matches!(owner, Some(p) if p == o),
+    })
 }
 
 /// Blank `model` / `effort` mean the host's default (`None`); anything else
@@ -797,9 +979,16 @@ pub(super) async fn new_session_inner(
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
-    // The name is live again — a kill of it moments ago must not make the
-    // reconcile below refuse to insert the row this function returns.
+    // AFTER the create, like every other create site (the one rule, and
+    // `every_path_that_creates_a_tmux_session_forgets_the_kill_first` pins
+    // it): the forget is what lets the reconcile below insert a row for a
+    // name fleet killed moments ago, and a create that FAILED must not forget
+    // a real kill — a pass still carrying the old name would re-insert the
+    // dead row. Nothing rides this call any more besides the forget; the
+    // owner reservation that used to make this site the inverted one is gone
+    // (T5's review — see `store::reconcile`'s ownership note).
     record_tmux_created(store, &args.host_alias, &args.name);
+
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     if let Some(rep) = &repaired {
         // Same detail as every other workspace_repaired event (branch_source
@@ -849,6 +1038,7 @@ pub(super) async fn new_session_inner(
         derived_friendly.as_deref(),
         claude_id.as_deref(),
         is_shell,
+        args.owner_person_id,
     )
 }
 
@@ -891,7 +1081,12 @@ pub(super) fn link_new_session_worktree(
 /// so the returned row is the row as of the last write (the frontend merges
 /// it optimistically and orders it by `row_version`). Soft-fails the
 /// cosmetic writes (`started_at`, friendly name, claude id) with a warning;
-/// the `kind` tag and the final read are hard failures.
+/// the `kind` tag, the OWNERSHIP claim and the final read are hard failures.
+// Eight arguments: the row's identity, the three values to write and now the
+// owner. Grouping them into a struct would mean a type whose only purpose is
+// this one call, and every one of them is already named at the single call
+// site.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finalize_new_session(
     s: &Store,
     row_id: i64,
@@ -900,7 +1095,46 @@ pub(super) fn finalize_new_session(
     friendly_name: Option<&str>,
     claude_id: Option<&str>,
     is_shell: bool,
+    owner: Option<i64>,
 ) -> Result<SessionRow, IpcError> {
+    // Ownership (multi-user M1, T5), and a HARD failure — alone among the
+    // writes here, which are all soft because "the session is live either
+    // way". This one is not cosmetic: an unstamped row is `unclaimed`, which
+    // means the person who just started the session cannot read their own row
+    // (spec §4.3 serves an out-of-scope caller a count and nothing more) and
+    // an agent that can prove the pane could claim it for somebody else.
+    // Returning such a row as a success would be the privacy failure dressed
+    // as one.
+    //
+    // It is also the ONLY mechanism that stamps an owner (T5's review). The
+    // name-keyed intent reconcile used to read before the row existed is
+    // deleted: a tmux name is not an identity, and three attempts to guard
+    // that mechanism each moved its hole rather than closing it (the long
+    // note in `store::reconcile` records all three). So every row the
+    // reconcile upsert inserts is `unclaimed`, and this call does the work.
+    //
+    // **What that trades, written down rather than papered over.** The intent
+    // existed to close the window between the reconcile pass inserting the row
+    // and this claim: in that window the row is `unclaimed`, so an agent that
+    // can prove the pane (spec rule 6) could claim it first. That window is
+    // accepted, because it is not comparable to the hole it replaces:
+    //
+    // * the claimant must PROVE the pane — of a session that is still being
+    //   created, in which no agent is yet running and no prompt has been sent;
+    // * it is in-process and short: the pass that inserts the row and this
+    //   claim are separated only by `list_sessions_for_host`, one worktree
+    //   link and one friendly-name derivation, all under the same `Store`
+    //   lock this function already holds (the pass that inserted the row had
+    //   to release it, and nothing awaits in between);
+    // * losing it is loud, not silent — the claim then meets a row owned by
+    //   somebody else and `E_FORBIDDEN` fails the create, so the caller never
+    //   gets handed a session that is not theirs.
+    //
+    // Whereas the intent's hole needed no race at all: naming an existing
+    // `unclaimed` row, or a live tmux session fleet had no row for yet, was
+    // enough to be stamped its owner by the next pass. A smaller, loud,
+    // proof-gated window replaces a silent deterministic one.
+    s.claim_if_unclaimed(row_id, owner)?;
     // PROD-5: the fleet created this session now.
     if let Err(e) = s.set_started_at(row_id, now_unix()) {
         tracing::warn!(session = %name, error = %e, "[new_session] storing started_at failed");
@@ -1061,11 +1295,53 @@ pub(super) fn bg_kill_action(
 /// otherwise make the reconcile refuse the insert, and the caller would be
 /// left with a live tmux session and no row to return.
 ///
+/// It says nothing about WHOSE the next row under that name is, and there is
+/// no sibling call that does (multi-user M1, T5's review). A create path
+/// states its owner once, against a row id, through
+/// [`Store::claim_if_unclaimed`] — `new_session` in [`finalize_new_session`],
+/// `spawn_review` and `move_session` carrying their SOURCE row's owner. The
+/// name-keyed reservation this function used to file alongside the forget is
+/// deleted; `store::reconcile`'s ownership note says why a name cannot carry
+/// that statement.
+///
 /// Best-effort and lock-safe: the guard is taken and dropped inside, never
 /// held across an await, and a poisoned lock only costs one refused cycle.
 pub(crate) fn record_tmux_created(store: &Mutex<Store>, host_alias: &str, tmux_name: &str) {
     if let Ok(s) = store.lock() {
         s.forget_kill(host_alias, tmux_name);
+    }
+}
+
+/// The hub's own personal owner, for a create path that has no caller to ask
+/// (multi-user M1, T5).
+///
+/// Several service-layer paths build a `NewSessionArgs` far from any request:
+/// the operator session, the asset catalog's authoring session, a ticket start,
+/// a work resume. None of them carries a `Caller` — the person is known at the
+/// MCP / Tauri edge and the signature chain in between is long — and all of
+/// them are "fleet, acting for whoever runs this hub". That is
+/// `Store::personal_owner_id`, the same person `mcp::tools::fleet::owner_for`
+/// maps the master token to.
+///
+/// `None` on a hub that cannot say who its owner is (T1's fail-closed rule),
+/// which leaves the session `unclaimed` rather than guessing. A failed read is
+/// logged and treated the same way: this must never be the reason a start
+/// fails, and `unclaimed` is recoverable (the row can be claimed) where a
+/// wrong owner is not.
+///
+/// It is **not** a substitute for a caller's own person. On a hub with several
+/// people, a start made through one of these paths is the hub owner's; the
+/// paths that DO have a caller (`mcp::tools::session_ops`, `dispatch_task`)
+/// pass that caller's person instead, and a path that gains a caller later
+/// should stop calling this.
+pub fn hub_personal_owner(store: &Mutex<Store>) -> Option<i64> {
+    let s = store.lock().ok()?;
+    match s.personal_owner_id() {
+        Ok(owner) => owner,
+        Err(e) => {
+            tracing::warn!(error = %e.message, "[owner] reading the hub's personal owner failed");
+            None
+        }
     }
 }
 
@@ -1232,7 +1508,17 @@ pub(super) async fn rename_session_with(
         // tmux would accept the new name (a lost session is not in tmux),
         // and the row carry-over below would then dismiss the lost row —
         // its timeline, participant and restore entry. Refuse first.
-        reject_lost_session_name(&s, &args.host_alias, &args.new_name)?;
+        //
+        // The person the guard compares against is the RENAMED row's own owner
+        // (multi-user M1, T5): a rename is not a create path, it carries this
+        // row over, so "another person" means a lost row that is not this
+        // session's owner's. `rename_session_row` hard-DELETES the stale row
+        // standing under the new name, which is exactly what must not happen
+        // to a colleague's lost session.
+        let as_person = s
+            .get_session(&args.old_name, &args.host_alias)?
+            .and_then(|r| r.owner_person_id);
+        reject_lost_session_name(&s, &args.host_alias, &args.new_name, as_person)?;
     }
     tmux.rename_session(&args.old_name, &args.new_name).await?;
     // The session now answers to `new_name`, which may be a name fleet killed
@@ -1363,6 +1649,13 @@ pub async fn restart_session(
                 let launch = stored_launch(&s, r.id);
                 (r.kind, r.claude_session_id, Some(r.id), launch)
             }
+            // No row under that name: a restart is about to create a live
+            // tmux session fleet has no record of. It lands `unclaimed`
+            // (multi-user M1, T5) — `record_tmux_created` below reserves no
+            // owner for it. A restart is not a create path and carries no
+            // person; attributing the session to whoever pressed the button
+            // would be a guess, and `unclaimed` is the defined answer for a
+            // row nobody can speak for (spec §4.3).
             None => ("work".to_string(), None, None, Default::default()),
         }
     };

@@ -4,6 +4,9 @@
   // error/success), but the target list is fixed by the selection instead of
   // derived from a source session.
   import { sendPrompt, type SessionRow } from './sessions';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { bulkTargets, sessionBlocked } from './share';
   import Modal from './Modal.svelte';
 
   let {
@@ -19,10 +22,31 @@
   let errors = $state<Record<number, string>>({});
   let succeeded = $state<Record<number, boolean>>({});
 
-  const sendable = $derived(targets.filter((t) => t.kind !== 'shell' && t.status === 'running'));
-  const canSend = $derived(prompt.trim().length > 0 && sendable.length > 0 && !sending);
+  /**
+   * Narrowed per target, then again at the send (multi-user M1, F2b). Sidebar
+   * hands this dialog a selection it has already narrowed with `bulkTargets` —
+   * but this dialog re-derives its own fan-out from `targets` and the dialog
+   * stays open, so a grant narrowed while it is open would otherwise send a
+   * prompt into a session this client may no longer drive. `send_prompt` is
+   * `drive` in `share.ts::SESSION_TIER`; the narrowing is asked here, over the
+   * rows this dialog is actually going to write to.
+   */
+  const writable = $derived(bulkTargets(targets, 'send_prompt', $sessionBlocked));
+  const sendable = $derived(
+    writable.filter((t) => t.kind !== 'shell' && t.status === 'running'),
+  );
+  /** Rows the selection held that this client may not drive — counted so the
+   *  dialog says so rather than quietly sending to fewer sessions. */
+  const notMine = $derived(targets.length - writable.length);
+  const hubBlocked = $derived(hubActionBlocked('send_prompt', $hubStatus, $hubConnection));
+  const canSend = $derived(
+    prompt.trim().length > 0 && sendable.length > 0 && !sending && hubBlocked === null,
+  );
 
   async function send() {
+    // Re-asked at the call: `canSend` reads the same two halves, and the
+    // fan-out below walks `sendable`, which is the narrowed list.
+    if (!canSend) return;
     sending = true;
     errors = {};
     succeeded = {};
@@ -44,10 +68,15 @@
     <ul class="targets">
       {#each targets as t (t.id)}
         {@const skipped = !sendable.includes(t)}
+        {@const notYours = !writable.includes(t)}
         <li class:skipped data-testid="bulk-target-{t.id}">
           <span class="host-badge">[{t.host_alias}]</span>
           <span class="sess-name">{t.friendly_name ?? t.tmux_name}</span>
-          {#if skipped}
+          {#if notYours}
+            <span class="muted" data-testid="bulk-not-mine-{t.id}" title={$sessionBlocked(t, 'send_prompt') ?? ''}
+              >not yours</span
+            >
+          {:else if skipped}
             <span class="muted" title="shell or non-running sessions are skipped">skipped</span>
           {:else if succeeded[t.id]}
             <span class="ok">✓</span>
@@ -63,9 +92,23 @@
       placeholder="Prompt to send to every selected session…"
       data-testid="bulk-prompt-textarea"
     ></textarea>
+    {#if hubBlocked}
+      <p class="muted" data-testid="bulk-prompt-blocked">{hubBlocked}</p>
+    {:else if notMine > 0}
+      <p class="muted" data-testid="bulk-prompt-not-mine">
+        {notMine} of the selected sessions {notMine === 1 ? 'is' : 'are'} not yours to drive and
+        {notMine === 1 ? 'is' : 'are'} left out.
+      </p>
+    {/if}
     <div class="actions">
       <button onclick={onClose}>Cancel</button>
-      <button class="primary" disabled={!canSend} onclick={send} data-testid="bulk-prompt-send">
+      <button
+        class="primary"
+        disabled={!canSend}
+        title={hubBlocked ?? ''}
+        onclick={send}
+        data-testid="bulk-prompt-send"
+      >
         {sending ? 'Sending…' : 'Send →'}
       </button>
     </div>

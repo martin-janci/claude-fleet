@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -10,6 +10,7 @@ import { tasks, type TaskRow } from './tasks';
 import { sessions, type SessionRow } from './sessions';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 
 function session(over: Partial<SessionRow> = {}): SessionRow {
   return {
@@ -146,5 +147,107 @@ describe('TasksPanel: a hub contract skew', () => {
     tasks.set([]);
     render(TasksPanel, {});
     expect(screen.getByTestId('tasks-empty').textContent).toContain('No tasks dispatched yet');
+  });
+});
+
+// ── Multi-user M1 (F2a): a task has two session parties ─────────────────────
+//
+// `cancelBlocked` was `hubActionBlocked('cancel_task', …)` alone, while
+// `cancel_task` is `drive` in `share.ts::SESSION_TIER` (the inverse of
+// `dispatch_task`, which has no UI surface of its own) and marks the task ended
+// on BOTH parties' timelines. A `TaskRow` names them by session id only, so the
+// rows are resolved out of `$sessions` and narrowed per party.
+describe('TasksPanel cancel access gate (multi-user M1)', () => {
+  const paired: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  const own = (id: number, name: string, person: number) =>
+    session({ id, tmux_name: name, visibility: 'private', owner_person_id: person });
+  const btn = () => screen.getByTestId('task-cancel') as HTMLButtonElement;
+
+  beforeEach(() => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue(task({ id: 1, state: 'cancelled' }));
+    tasks.set([task({ id: 1, state: 'running', requester_session_id: 1, worker_session_id: 2 })]);
+    hubStatus.set(paired);
+    hubConnection.set({ state: 'connected' });
+    resetAccessForTests();
+  });
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    resetAccessForTests();
+  });
+
+  it('the owner of both parties can cancel (the positive control)', async () => {
+    sessions.set([own(1, 'ctl', 5), own(2, 'worker-a', 5)]);
+    setMyGrants(5, []);
+    render(TasksPanel, {});
+    await tick();
+    expect(btn().disabled).toBe(false);
+    await fireEvent.click(btn());
+    await fireEvent.click(screen.getByTestId('confirm-cancel-task'));
+    for (let i = 0; i < 4; i++) await tick();
+    expect(mockedInvoke).toHaveBeenCalledWith('cancel_task', { taskId: 1 });
+  });
+
+  it('a watcher of the worker cannot cancel, and the button says why', async () => {
+    sessions.set([own(1, 'ctl', 5), own(2, 'worker-a', 42)]);
+    setMyGrants(5, [{ session_id: 2, level: 'watch' }]);
+    render(TasksPanel, {});
+    await tick();
+    expect(btn().disabled).toBe(true);
+    expect(btn().title).toMatch(/needs drive/i);
+  });
+
+  it('a watcher of the REQUESTER cannot either — the narrowing covers both parties', async () => {
+    // The reason this is a per-target narrowing and not one lookup: a cancel
+    // ends the task on both timelines, so either party can refuse it.
+    sessions.set([own(1, 'ctl', 42), own(2, 'worker-a', 5)]);
+    setMyGrants(5, [{ session_id: 1, level: 'watch' }]);
+    render(TasksPanel, {});
+    await tick();
+    expect(btn().disabled).toBe(true);
+  });
+
+  it('a drive grantee on both parties can: cancelling is the drive tier', async () => {
+    sessions.set([own(1, 'ctl', 42), own(2, 'worker-a', 42)]);
+    setMyGrants(5, [
+      { session_id: 1, level: 'drive' },
+      { session_id: 2, level: 'drive' },
+    ]);
+    render(TasksPanel, {});
+    await tick();
+    expect(btn().disabled).toBe(false);
+  });
+
+  it('a revoke while the confirm dialog is open stops the call', async () => {
+    // The dialog carries no gate of its own, so `doCancel` re-asks.
+    sessions.set([own(1, 'ctl', 42), own(2, 'worker-a', 42)]);
+    setMyGrants(5, [
+      { session_id: 1, level: 'drive' },
+      { session_id: 2, level: 'drive' },
+    ]);
+    render(TasksPanel, {});
+    await tick();
+    await fireEvent.click(btn());
+    expect(screen.getByTestId('confirm-dialog')).toBeTruthy();
+    applyGrantChanges([{ session_id: 2, person_id: 5, level: null }]);
+    await tick();
+    await fireEvent.click(screen.getByTestId('confirm-cancel-task'));
+    for (let i = 0; i < 4; i++) await tick();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('cancel_task', expect.anything());
+  });
+
+  it('standalone is untouched, and so is a task whose parties are not in the store', async () => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    sessions.set([]);
+    render(TasksPanel, {});
+    await tick();
+    expect(btn().disabled).toBe(false);
   });
 });

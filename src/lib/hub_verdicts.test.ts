@@ -54,6 +54,39 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
     expect(allCommands.has('set_friendly_name')).toBe(false);
     expect(routedCommands.has('set_session_friendly_name')).toBe(true);
   });
+
+  // Multi-user M1 (F3): the sharing commands this file had to wait for.
+  // `session_share` / `session_unshare` / `session_narrow` are the three
+  // WRITES and are `ROUTED_ACTIONS` entries (checked above, like every other
+  // one). The three routed READS are not, by `ROUTED_ACTIONS`' own rule — a
+  // read has no control to disable — so this pins that they really are
+  // routed commands that were deliberately left out rather than names
+  // nobody noticed: `my_grants`'s failure is `access.ts`'s fail-closed arm,
+  // and `session_access` / `capture_session` are a list and a snapshot that
+  // simply show their error.
+  it('the routed sharing READS are real commands, left out of ROUTED_ACTIONS on purpose', () => {
+    const routedSet = new Set<string>(ROUTED_ACTIONS);
+    for (const command of ['session_access', 'my_grants', 'capture_session']) {
+      expect(routedCommands.has(command), `${command} is routed`).toBe(true);
+      expect(routedSet.has(command), `${command} is not a ROUTED_ACTIONS entry`).toBe(false);
+    }
+  });
+
+  // `claim_session` is the one M1 command the desktop does NOT have. The hub
+  // has the tool (an operator claims an unowned session), but T13 added no
+  // `#[tauri::command]` for it on purpose: F2 made the unclaimed surface a
+  // per-host COUNT with no rows and no expand, so there is no session id for
+  // a desktop command to pass, and spec §4.3 forbids the button that would
+  // supply one. The plan's revision 4 called it "UI-reachable" and would have
+  // had it allowlisted below as a `local_only` command the UI can reach —
+  // which would fail, because a command with no handler has no verdict row at
+  // all. This is the pin on that: if a `claim_session` command is ever added,
+  // this line fails, and whoever added it has to decide how it is gated — a
+  // `REASONS` entry, an allowlist line, or a `ROUTED_ACTIONS` entry if it
+  // routes — instead of inheriting a stale note either way.
+  it('claim_session has no desktop command at all, so there is nothing to gate', () => {
+    expect(allCommands.has('claim_session')).toBe(false);
+  });
 });
 
 // REASONS keys that name something other than a single Tauri command: each

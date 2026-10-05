@@ -2096,6 +2096,15 @@ fn carry_transport(step: &str, e: IpcError) -> IpcError {
 /// fails before that.
 pub(super) struct PartialCtx {
     pub from_host: String,
+    /// The SOURCE session's tmux name, so a later `resolve_move` can check
+    /// that the row it resolves by id really is the source (multi-user M1,
+    /// T9d). `sessions.id` is recycled, and the source's identity used to be
+    /// `(host, reused id)` and nothing else, while the target's was held to
+    /// id AND host AND tmux name — so a source ghosted and reaped between
+    /// the partial and the resolution handed `Finish` a brand-new session on
+    /// the same host to kill. Names are per-host unique and fleet-generated,
+    /// which is what makes the reuse detectable here.
+    pub from_tmux_name: String,
     pub to_host: String,
     pub to_tmux_name: String,
     pub claude_session_id: String,
@@ -2131,6 +2140,7 @@ fn partial(step: &str, ctx: &PartialCtx, target_id: Option<i64>, e: &IpcError) -
         // the run store is gone — see `record_partial`, which copies these
         // straight into the durable `session_move_partial` timeline event.
         "from_host": ctx.from_host,
+        "from_tmux_name": ctx.from_tmux_name,
         "to_tmux_name": ctx.to_tmux_name,
         "claude_session_id": ctx.claude_session_id,
         "branch": ctx.branch,
@@ -2204,6 +2214,7 @@ fn record_partial(store: &Mutex<Store>, source_id: i64, to_host: &str, e: &IpcEr
         "to_session_id": target_id,
         "cause_code": d["cause_code"],
         "from_host": d["from_host"],
+        "from_tmux_name": d["from_tmux_name"],
         "to_tmux_name": d["to_tmux_name"],
         "claude_session_id": d["claude_session_id"],
         "branch": d["branch"],
@@ -3185,6 +3196,9 @@ async fn move_session_inner(
     // `pick_target_name` only avoids names live on the target, so the one it
     // chose may be a name fleet killed there moments ago; the refresh below
     // has to be free to insert its row.
+    // The target row inherits the SOURCE row's owner through
+    // `claim_if_unclaimed` below, which is the move's one carry — against the
+    // row id, never the name.
     crate::service::sessions::record_tmux_created(store, &target, &tmux_name);
     // Built once the target session exists: every `partial(...)` call site
     // from here on shares it. The transcript facts are already known (the
@@ -3192,6 +3206,7 @@ async fn move_session_inner(
     // that row itself becomes known, below.
     let mut partial_ctx = PartialCtx {
         from_host: src.clone(),
+        from_tmux_name: snap.row.tmux_name.clone(),
         to_host: target.clone(),
         to_tmux_name: tmux_name.clone(),
         claude_session_id: id.clone(),
@@ -3219,6 +3234,50 @@ async fn move_session_inner(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
+        // ── Ownership: the one HARD failure in this block ────────────────
+        //
+        // Multi-user M1 (T5, spec §4.3 *A grant is on a row, so it does not
+        // travel*). Everything else here is soft-fail by design — "the session
+        // is live either way" — and this one cannot be: a target row left at
+        // the schema default is `unclaimed`, on a host the caller named, where
+        // an agent that can prove the pane claims it. A move whose carry
+        // soft-failed would turn a private session into an unowned one without
+        // telling anybody, which makes moving a session a silent privacy
+        // event. Abort instead, as a PARTIAL move (the target is live, so the
+        // operator has to choose) rather than pretending it worked.
+        //
+        // An unowned source carries nothing: the target stays `unclaimed`,
+        // which is the same answer, not a failure.
+        s.claim_if_unclaimed(row.id, snap.row.owner_person_id)
+            .map_err(|e| {
+                partial(
+                    "carrying the owner to the target row",
+                    &partial_ctx,
+                    Some(row.id),
+                    &e,
+                )
+            })?;
+        // The GRANTS, on the other hand, are DROPPED — the owner's decision of
+        // 2026-09-30 (spec §4.3). A grant is a statement about a ROW: it is
+        // keyed on `sessions.id`, the target is a new row with a new id, and
+        // the session the grantee was shown now lives on a different machine.
+        // Re-granting is one click for the owner; narrowing is the safe
+        // direction, so the move revokes rather than carries. This runs on the
+        // SOURCE row (`snap.row.id`) and holds whether or not the source is
+        // kept: a `keep_source` move leaves the old session running, and its
+        // shares end with the move the owner asked for, not silently with the
+        // row's reaping.
+        //
+        // Hard too, and for the same reason the carry is: a soft-failed revoke
+        // leaves a share live on a session the owner believes they have moved.
+        s.revoke_all_grants_on_session(snap.row.id).map_err(|e| {
+            partial(
+                "revoking the source session's grants",
+                &partial_ctx,
+                Some(row.id),
+                &e,
+            )
+        })?;
         // Soft-fail like new_session: the session is live either way.
         if let Err(e) = s.set_claude_session_id(row.id, &id) {
             tracing::warn!(
@@ -3574,6 +3633,12 @@ mod tests {
         /// What `pane_status` answers (the live pane of a stale-demoted
         /// source); `None` = cannot tell. Each ask is logged `pane <id>`.
         pane: Option<&'static str>,
+        /// When set, `refresh_host` stamps this person as the target row's
+        /// owner — a row that belongs to somebody else by the time the move
+        /// tries to carry the source's owner onto it. The one way to make the
+        /// carry fail without reaching into the store mid-move (multi-user M1,
+        /// T5).
+        target_owner: Option<i64>,
     }
 
     impl FakeHooks {
@@ -3594,6 +3659,7 @@ mod tests {
                 started: Mutex::new(Vec::new()),
                 log: Mutex::new(Vec::new()),
                 pane: None,
+                target_owner: None,
             }
         }
         fn log(&self) -> Vec<String> {
@@ -3683,7 +3749,7 @@ mod tests {
             let started = self.started.lock().unwrap().clone();
             let s = store.lock().unwrap();
             for (h, n) in started.iter().filter(|(h, _)| h == host) {
-                s.upsert_session(
+                let id = s.upsert_session(
                     n,
                     h,
                     Some(self.project_id),
@@ -3693,6 +3759,17 @@ mod tests {
                     self.target_status,
                     None,
                 )?;
+                // A target row that already belongs to somebody else, for the
+                // owner-carry failure test. `upsert_session` is the test
+                // helper, so it reads no owner reservation — which is why the
+                // real create path's claim is the thing under test here.
+                if let Some(other) = self.target_owner {
+                    s.conn_ref().execute(
+                        "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                          WHERE id = ?2",
+                        rusqlite::params![other, id],
+                    )?;
+                }
             }
             Ok(())
         }
@@ -3989,6 +4066,111 @@ mod tests {
         assert_eq!(v["target"]["kind"], rep.target.kind);
         let back: MoveOutcome = serde_json::from_value(v).unwrap();
         assert!(matches!(back, MoveOutcome::Moved(_)));
+    }
+
+    /// Multi-user M1 (T5, spec §4.3). A move carries the OWNER onto the target
+    /// row and DROPS the source row's shares. The two halves are one decision:
+    /// the session stays the owner's wherever it runs, and a grant is a
+    /// statement about a row — the target is a new row with a new id, on a
+    /// machine the grantee may be the unix owner of, so the shares end here and
+    /// the owner re-grants if they still want to.
+    ///
+    /// `keep: true` on purpose: with the source reaped, its grants would go by
+    /// cascade and the revoke would prove nothing.
+    #[tokio::test]
+    async fn a_move_carries_the_owner_and_drops_the_sources_shares() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let (ann, bob) = {
+            let s = f.store.lock().unwrap();
+            let ann = s.create_person("ann", None).unwrap().id;
+            let bob = s.create_person("bob", None).unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                      WHERE id = ?2",
+                    rusqlite::params![ann, f.source_id],
+                )
+                .unwrap();
+            s.grant_session(
+                f.source_id,
+                crate::store::GrantRecipient::Person(bob),
+                crate::store::GRANT_WATCH,
+                ann,
+            )
+            .expect("ann shares her session with bob");
+            (ann, bob)
+        };
+        let rep = run(&f, &hooks, true).await.expect("the fixture moves");
+        assert_eq!(
+            rep.target.owner_person_id,
+            Some(ann),
+            "the moved session is still ann's"
+        );
+        assert_eq!(rep.target.visibility, crate::store::VISIBILITY_PRIVATE);
+
+        let s = f.store.lock().unwrap();
+        assert!(
+            s.grants_for_person(bob).unwrap().is_empty(),
+            "bob's share does not follow the session to another host"
+        );
+        // Revoked, not deleted: "ann shared this and the move took it back"
+        // stays answerable.
+        let revoked: i64 = s
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM session_grants \
+                  WHERE session_id = ?1 AND person_id = ?2 AND revoked_at IS NOT NULL",
+                rusqlite::params![f.source_id, bob],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revoked, 1);
+    }
+
+    /// The carry is a HARD failure: it is the one write in the target-row block
+    /// that is not "soft-fail like new_session, the session is live either way".
+    /// A soft-failed carry would leave the target `unclaimed` on the host the
+    /// caller named, where an agent that can prove the pane claims it — a move
+    /// that silently gave a private session away.
+    ///
+    /// Driven through the hooks: the fake's reconcile stamps somebody else as
+    /// the target row's owner, which is exactly what `claim_if_unclaimed`
+    /// refuses.
+    #[tokio::test]
+    async fn a_move_whose_owner_carry_fails_aborts_rather_than_leaving_the_target_unclaimed() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        let ann = {
+            let s = f.store.lock().unwrap();
+            let ann = s.create_person("ann", None).unwrap().id;
+            let cat = s.create_person("cat", None).unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                      WHERE id = ?2",
+                    rusqlite::params![ann, f.source_id],
+                )
+                .unwrap();
+            hooks.target_owner = Some(cat);
+            ann
+        };
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL);
+        assert!(
+            err.message.contains("carrying the owner to the target row"),
+            "the refusal must name the step: {}",
+            err.message
+        );
+        // The source is untouched — the carry runs long before the kill — so
+        // the session is still ann's, still private, and still hers to move.
+        let s = f.store.lock().unwrap();
+        let src = s
+            .get_session_by_id(f.source_id)
+            .unwrap()
+            .expect("the source");
+        assert_eq!(src.owner_person_id, Some(ann));
+        assert_eq!(src.visibility, crate::store::VISIBILITY_PRIVATE);
     }
 
     #[tokio::test]
@@ -5051,6 +5233,11 @@ mod tests {
         assert_eq!(d["claude_session_id"], SID);
         assert_eq!(d["branch"], "feat");
         assert!(d["to_tmux_name"].is_string(), "{d}");
+        // The SOURCE's tmux name, so `resolve_move` can tell the source
+        // apart from whatever session inherits its rowid (multi-user M1,
+        // T9d). Without it the source's recorded identity was `(host, id)`,
+        // and `Finish` kills what it resolves.
+        assert!(d["from_tmux_name"].is_string(), "{d}");
         assert!(d["source_transcript_size"].is_u64(), "{d}");
         assert!(d["source_transcript_mtime"].is_i64(), "{d}");
         assert!(d["source_transcript_path"].is_string(), "{d}");

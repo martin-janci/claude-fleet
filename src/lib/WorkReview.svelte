@@ -15,6 +15,7 @@
   import { selectSessionExplicitly } from './selection';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { sessionIdBlocked } from './share';
   import {
     confirmSessionWork,
     linkSessionWork,
@@ -55,6 +56,44 @@
   }: { onchanged?: () => void; debounceMs?: number } = $props();
 
   const blocked = $derived(hubActionBlocked('decide_work_batch', $hubStatus, $hubConnection));
+  /**
+   * The access half (multi-user M1, F2a), per ITEM. A `ReviewItem` carries a
+   * `session_id` and a name, never the row's `owner_person_id`, so the row has
+   * to be resolved before the access half can be asked — the reason this
+   * surface was skipped by F2.
+   *
+   * Every decision here writes per session (`confirmSessionWork`,
+   * `rejectWorkLink`, `unlinkSessionWork`, `setPrimaryWork`, and the batch
+   * `decide_work_batch`), which `share.ts::SESSION_TIER` puts at `drive`. A
+   * list is narrowed per target rather than answered once: one review list
+   * mixes this person's sessions with the ones shared with them.
+   *
+   * ── Not knowing is not permission (F2d) ─────────────────────────────────
+   *
+   * F2a resolved the row by hand and let an item whose row this client does not
+   * hold through — `decidable` ended `|| !rowById.has(it.session_id)` — on the
+   * argument that the Review list and `$sessions` load independently. They do,
+   * and that is the hazard rather than the excuse: the Review read is the hub's
+   * own org-scoped one, so on a paired desktop an item here is not necessarily
+   * this person's, and an unresolvable row is *someone else's, or gone*.
+   *
+   * So it is `share.ts::sessionIdBlocked` that resolves now, once for the four
+   * surfaces that had hand-rolled it: it fails closed with
+   * `UNKNOWN_SESSION_REASON` on a fleet this client does not own and answers
+   * `null` on a standalone desktop, where the master owns everything
+   * (`access.ts::sessionAccess` rule 1), so a single-user install is untouched.
+   */
+  function accessBlocked(it: ReviewItem): string | null {
+    return $sessionIdBlocked(it.session_id, 'decide_work_batch');
+  }
+  /** One item's own gate: the hub's refusal first, then this client's access. */
+  function itemBlocked(it: ReviewItem): string | null {
+    return blocked ?? accessBlocked(it);
+  }
+  /** `list` narrowed to the items this client may decide, per target. */
+  function decidable(list: readonly ReviewItem[]): ReviewItem[] {
+    return list.filter((it) => accessBlocked(it) === null);
+  }
 
   let items = $state<ReviewItem[]>([]);
   let total = $state(0);
@@ -124,7 +163,9 @@
   }
 
   async function run(it: ReviewItem, what: string, call: () => Promise<Result<unknown>>, undoable?: Decision) {
-    if (busy || blocked !== null) return;
+    // Per item, and re-asked at the call: a revoke can arrive while the list
+    // is on screen, and y/n decide the focused row without touching a button.
+    if (busy || itemBlocked(it) !== null) return;
     busy = true;
     summary = null;
     const r = await call();
@@ -253,6 +294,12 @@
     had: SessionTaskLink | null,
   ): Promise<string | null> {
     if (had && had.state !== 'suggested') return null; // it was already linked: nothing changed
+    // `takeBack` is reached from inside `run`'s thunk, so it is not lexically
+    // inside the gate `run` asked — and it writes (`reconsider` or `unlink`).
+    // Re-asked here with the session's own row (multi-user M1, F2b).
+    if ($sessionIdBlocked(sessionId, 'decide_work_batch') !== null) {
+      return 'this session is not yours to change';
+    }
     const now = await workSessionTasks(sessionId);
     if (!now.ok) return now.error.message;
     const l = linkTo(now.value?.links ?? [], to);
@@ -265,10 +312,18 @@
 
   // ── several at once ──
   const pickedItems = $derived(items.filter((x) => picked.has(x.review_id)));
-  const pickedSuggestions = $derived(pickedItems.filter((x) => x.kind === 'suggestion'));
-  const pickedConflicts = $derived(pickedItems.filter((x) => x.kind === 'cross_org' || x.kind === 'unavailable'));
+  // The bulk buttons count what they will actually send (multi-user M1): an
+  // item this client may not decide is not ticked in the first place (the
+  // checkbox is disabled), and the narrowing holds even so.
+  const pickedSuggestions = $derived(decidable(pickedItems.filter((x) => x.kind === 'suggestion')));
+  const pickedConflicts = $derived(
+    decidable(pickedItems.filter((x) => x.kind === 'cross_org' || x.kind === 'unavailable')),
+  );
 
   function togglePick(it: ReviewItem) {
+    // x ticks the focused row from the keyboard, past the checkbox's own
+    // `disabled`, so the gate is here as well.
+    if (itemBlocked(it) !== null) return;
     const next = new Set(picked);
     if (next.has(it.review_id)) next.delete(it.review_id);
     else next.add(it.review_id);
@@ -276,7 +331,12 @@
   }
 
   async function batch(decision: Decision, list: ReviewItem[]) {
-    if (busy || blocked !== null || list.length === 0) return;
+    if (busy || blocked !== null) return;
+    // Narrowed per target, not answered once for the batch: `decide_work_batch`
+    // writes one decision per session, so a list mixing this person's sessions
+    // with ones shared at `watch` sends only the former.
+    list = decidable(list);
+    if (list.length === 0) return;
     // Only the first confirm of a session without a primary takes it.
     const tookPrimary = new Set<number>();
     const decisions: BatchDecision[] = list.map((it) => {
@@ -316,9 +376,21 @@
   async function runUndo() {
     const u = undo;
     if (!u || busy) return;
+    // Narrowed per target, then re-asked (multi-user M1, F2b): the Undo offer
+    // outlives the batch that made it, so a grant narrowed while it is on
+    // screen must not be undone through it. Every decision in `u` is a write to
+    // one session, so each is checked against that session's own row.
+    const mine = u.decisions.filter(
+      (d) => $sessionIdBlocked(d.session_id, 'decide_work_batch') === null,
+    );
+    if (mine.length === 0) {
+      undo = null;
+      summary = 'Nothing left to undo: those sessions are not yours any more.';
+      return;
+    }
     busy = true;
-    if (u.decisions.length === 1) {
-      const d = u.decisions[0];
+    if (mine.length === 1) {
+      const d = mine[0];
       const r = await reconsiderWorkLink(d.session_id, d.link_id, d.expected_version);
       busy = false;
       undo = null;
@@ -331,7 +403,7 @@
       await reload();
       return;
     }
-    const r = await decideWorkBatch(u.decisions);
+    const r = await decideWorkBatch(mine);
     busy = false;
     undo = null;
     if (!r.ok) {
@@ -340,7 +412,7 @@
       return;
     }
     // Each undo is checked on its own, like the batch it undoes.
-    const { ok, failed } = countBatch(u.decisions, r.value);
+    const { ok, failed } = countBatch(mine, r.value);
     summary =
       failed === 0
         ? `Undone: ${u.label} — back to suggestions`
@@ -457,6 +529,7 @@
     <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
     <ul class="items" tabindex="0" aria-label="Review items (j/k move, y confirm, n reject, x tick)" onkeydown={onKey}>
       {#each items as it, i (it.review_id)}
+        {@const mine = itemBlocked(it)}
         <li class="item" class:focused={i === focusIdx} data-testid="work-review-item" data-kind={it.kind} data-link-id={it.link_id}>
           <div class="head">
             <input
@@ -464,7 +537,8 @@
               aria-label={`Tick ${taskLabel(it.task)} for ${sessionName(it)}`}
               data-testid="work-review-pick"
               checked={picked.has(it.review_id)}
-              disabled={it.kind === 'no_primary'}
+              disabled={it.kind === 'no_primary' || mine !== null}
+              title={mine ?? ''}
               onchange={() => togglePick(it)}
             />
             <span class="kind kind--{it.kind}" data-testid="work-review-kind">{reviewKindLabel(it.kind)}</span>
@@ -487,15 +561,18 @@
             </p>
           {/if}
           <div class="actions">
+            {#if mine}
+              <p class="muted" data-testid="work-review-item-not-mine">{mine}</p>
+            {/if}
             {#if it.kind === 'suggestion'}
-              <button class="btn btn--primary" type="button" data-testid="work-review-confirm" disabled={busy || blocked !== null} onclick={() => void confirm(it)}>Confirm</button>
-              <button class="btn" type="button" data-testid="work-review-reject" disabled={busy || blocked !== null} onclick={() => void reject(it)}>Reject</button>
-              <button class="btn btn--quiet" type="button" data-testid="work-review-change" aria-expanded={changing === it.review_id} disabled={busy || blocked !== null} onclick={() => openChange(it)}>Change…</button>
+              <button class="btn btn--primary" type="button" data-testid="work-review-confirm" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void confirm(it)}>Confirm</button>
+              <button class="btn" type="button" data-testid="work-review-reject" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void reject(it)}>Reject</button>
+              <button class="btn btn--quiet" type="button" data-testid="work-review-change" aria-expanded={changing === it.review_id} disabled={busy || mine !== null} title={mine ?? ''} onclick={() => openChange(it)}>Change…</button>
             {:else if it.kind === 'no_primary'}
-              <button class="btn btn--primary" type="button" data-testid="work-review-make-primary" disabled={busy || blocked !== null} onclick={() => void makePrimary(it)}>Make primary</button>
+              <button class="btn btn--primary" type="button" data-testid="work-review-make-primary" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void makePrimary(it)}>Make primary</button>
             {:else}
-              <button class="btn" type="button" data-testid="work-review-keep" title="Keep it on purpose" disabled={busy || blocked !== null} onclick={() => void keep(it)}>Keep</button>
-              <button class="btn btn--quiet" type="button" data-testid="work-review-remove" disabled={busy || blocked !== null} onclick={() => void remove(it)}>Remove</button>
+              <button class="btn" type="button" data-testid="work-review-keep" title={mine ?? 'Keep it on purpose'} disabled={busy || mine !== null} onclick={() => void keep(it)}>Keep</button>
+              <button class="btn btn--quiet" type="button" data-testid="work-review-remove" disabled={busy || mine !== null} title={mine ?? ''} onclick={() => void remove(it)}>Remove</button>
             {/if}
           </div>
           {#if changing === it.review_id}

@@ -23,6 +23,7 @@ mod nl_census;
 mod orgs;
 mod participants;
 mod peer_links;
+mod people;
 mod projects;
 mod read_cursors;
 mod read_pool;
@@ -32,6 +33,7 @@ mod rows;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
 mod schema;
+mod session_grants;
 mod sessions;
 mod setting_review;
 mod tasks;
@@ -62,7 +64,8 @@ pub use changesets::{
     AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,
 };
 pub use clients::{
-    breaks_a_line, validate_client_mode, validate_client_name, CLIENT_MODES, LINE_SEPARATORS,
+    breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
+    LINE_SEPARATORS,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use decisions::{
@@ -88,6 +91,9 @@ pub use peer_links::{
     LINK_REFUSED, LINK_RETRYING, LINK_ROLE_DIALER, LINK_ROLE_LISTENER, LISTENER_STALE_SECS,
     PEER_PENDING_MAX_SECS,
 };
+pub use people::{
+    machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
+};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
@@ -95,6 +101,10 @@ pub use rows::*;
 pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
+pub use session_grants::{
+    grant_generation, validate_grant_level, GrantRecipient, SessionGrantRow, GRANT_DRIVE,
+    GRANT_LEVELS, GRANT_WATCH,
+};
 pub use sessions::PromptAckState;
 pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,

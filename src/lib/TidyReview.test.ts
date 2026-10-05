@@ -14,6 +14,8 @@ import { sessionFocus } from './session_focus';
 import { sessions, type SessionRow } from './sessions';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
+import { session as fixtureSession } from './hosts_fixture';
 
 /** A desktop paired with a hub whose live link is down: every routed
  *  mutation (tidy_apply, dismiss_reopened) is blocked with a reason. */
@@ -59,6 +61,10 @@ beforeEach(() => {
   sessions.set([]);
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
+  // Who this client is, forgotten between tests: since F2d an unresolvable
+  // candidate is REFUSED on a paired desktop, so a leaked identity would change
+  // what the next test's sheet offers.
+  resetAccessForTests();
   vi.mocked(invoke).mockReset();
   vi.mocked(invoke).mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -426,6 +432,16 @@ describe('TidyReview', () => {
     reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
     hubStatus.set(remote);
     hubConnection.set({ state: 'offline', attempt: 4, retry_in_secs: 30, reason: 'connect refused' });
+    // This test is about the HUB half alone, so the access half is satisfied:
+    // the rows are in the store and they are this person's. Without them F2d's
+    // fail-closed rule would refuse both candidates for a second, different
+    // reason and the assertion below would stop measuring what it names.
+    sessions.set(
+      candidates.map((c) =>
+        fixtureSession(c.host_alias, c.tmux_name, { id: c.session_id, owner_person_id: 1 }),
+      ),
+    );
+    setMyGrants(1, []);
     await mount();
     await fireEvent.click(await screen.findByTestId('tidy-pill'));
     await tick();
@@ -595,5 +611,140 @@ describe('TidyReview', () => {
       await tick();
       expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
     });
+  });
+});
+
+// ── Multi-user M1 (F2a): Tidy up can safe-kill, so it is the owner's ────────
+//
+// `blocked` here was `hubActionBlocked('tidy_apply', …)` and that was the whole
+// gate on `applyRow` and `apply` — a live write path, so this was one of the
+// task's two blockers: Tidy up could SAFE-KILL a session this client does not
+// own. `tidy_apply` is `own` in `share.ts::SESSION_TIER` because
+// `safe_kill_session` is.
+//
+// A `TidyCandidate` carries a session id, a host and a tmux name and no
+// `owner_person_id`, so the sheet resolves the row out of `$sessions` first —
+// the lookup that made every indirect surface get skipped by F2.
+describe('TidyReview access gate (multi-user M1)', () => {
+  const paired = () => {
+    hubStatus.set({ ...remote });
+    hubConnection.set({ state: 'connected' });
+  };
+  /** A candidate plus the session row it names, owned by `owner`. */
+  function withRow(id: number, owner: number | null, over: Partial<TidyCandidate> = {}) {
+    const c = cand(id, over);
+    const row = fixtureSession(c.host_alias, c.tmux_name, {
+      id,
+      status: 'running',
+      visibility: owner === null ? 'unclaimed' : 'private',
+      owner_person_id: owner,
+    }) as SessionRow;
+    return { c, row };
+  }
+  const dis = (el: Element) => (el as HTMLButtonElement | HTMLInputElement).disabled;
+
+  beforeEach(() => {
+    resetAccessForTests();
+  });
+
+  it('the owner keeps the whole sheet: ticks, Tidy n and the row buttons', async () => {
+    // The positive control. Without it, a gate that disabled everything for
+    // everybody would pass every assertion below.
+    const mine = withRow(7, 1, { reason: 'idle_unlinked', action: 'safe_kill' });
+    candidates = [mine.c];
+    sessions.set([mine.row]);
+    paired();
+    setMyGrants(1, []);
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-check'))).toBe(false);
+    expect(dis(screen.getByTestId('tidy-keep'))).toBe(false);
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(false);
+    expect(screen.queryByTestId('tidy-not-mine')).toBeNull();
+    await fireEvent.click(screen.getByTestId('tidy-check'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-apply'))).toBe(false);
+    expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
+  });
+
+  it('a drive grantee cannot safe-kill the owner’s session from the sheet', async () => {
+    // `drive` and not only `watch`: `tidy_apply` is the `own` tier, so a
+    // driver is barred too. The reason a gate on `watch` alone would be wrong.
+    const theirs = withRow(8, 42, { reason: 'idle_unlinked', action: 'safe_kill' });
+    candidates = [theirs.c];
+    sessions.set([theirs.row]);
+    paired();
+    setMyGrants(9, [{ session_id: 8, level: 'drive' }]);
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-check'))).toBe(true);
+    expect(dis(screen.getByTestId('tidy-keep'))).toBe(true);
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(true);
+    expect(screen.getByTestId('tidy-safe-kill').title).toMatch(/only the session’s owner/i);
+    expect(screen.getByTestId('tidy-not-mine')).toBeInTheDocument();
+    // And the two write paths refuse even when reached directly: Safe kill is
+    // two clicks, and ↵ applies from anywhere in the sheet.
+    await fireEvent.click(screen.getByTestId('tidy-safe-kill'));
+    await fireEvent.click(screen.getByTestId('tidy-safe-kill'));
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'Enter' });
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('tidy_apply', expect.anything());
+  });
+
+  it('a mixed sheet applies only the owner’s rows — narrowed per target', async () => {
+    // The fan-out half of the rule: one answer for the whole sheet would
+    // either kill somebody else's session or refuse the owner's own.
+    const mine = withRow(10, 1);
+    const theirs = withRow(11, 42);
+    candidates = [mine.c, theirs.c];
+    sessions.set([mine.row, theirs.row]);
+    paired();
+    setMyGrants(1, [{ session_id: 11, level: 'watch' }]);
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    // Both are preselected candidates; only the owner's is ticked.
+    expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
+    expect(screen.getByTestId('tidy-not-mine').textContent).toMatch(/1 session/);
+    await fireEvent.click(screen.getByTestId('tidy-apply'));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('tidy_apply', {
+        args: { items: [{ session_id: 10, action: 'safe_kill', link_id: 110 }] },
+      }),
+    );
+  });
+
+  it('a revoke while the sheet is open disables the row with no row event at all', async () => {
+    // A grant moves no column on any session, so nothing a `session:updated`
+    // could carry has changed here — the derivation is what re-answers.
+    const theirs = withRow(12, 42, { reason: 'idle_unlinked', action: 'safe_kill' });
+    candidates = [theirs.c];
+    sessions.set([theirs.row]);
+    paired();
+    setMyGrants(9, [{ session_id: 12, level: 'drive' }]);
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(true);
+    // (already blocked at drive; narrowing to watch keeps it blocked, and a
+    // revoke changes the sentence rather than the answer)
+    applyGrantChanges([{ session_id: 12, person_id: 9, level: null }]);
+    await tick();
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(true);
+    expect(screen.getByTestId('tidy-safe-kill').title).toMatch(/belongs to someone else/i);
+  });
+
+  it('standalone is untouched: every row stays the owner’s', async () => {
+    const mine = withRow(13, 1, { reason: 'idle_unlinked', action: 'safe_kill' });
+    candidates = [mine.c];
+    sessions.set([mine.row]);
+    // No hub, no `my_grants` answer at all — `access.ts`'s rule 1.
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(false);
+    expect(screen.queryByTestId('tidy-not-mine')).toBeNull();
   });
 });

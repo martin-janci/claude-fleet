@@ -5,4 +5,4 @@
 -- not idempotent: guarded in schema.rs.
 ALTER TABLE changesets ADD COLUMN withdrawn_at INTEGER;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (99);
+INSERT OR IGNORE INTO schema_version (version) VALUES (103);

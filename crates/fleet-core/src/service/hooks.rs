@@ -627,7 +627,7 @@ pub fn session_start_context(
     // never a ticket of another org a person force-linked here.
     crate::service::orgs::OrgScope::for_host(&s, &row.host_alias)
         .ok()?
-        .redact_row(&mut row);
+        .redact_row_org_only(&mut row);
     let w = row.work.as_ref()?;
     let key = w.key.as_deref().unwrap_or(w.title.as_str());
     let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1716,6 +1716,8 @@ mod tests {
             host_alias: Some("hosta".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         let err = apply_hook(
             &store,
@@ -1735,6 +1737,8 @@ mod tests {
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Readonly,
+            pane: None,
+            is_personal_owner: false,
         };
         apply_hook(
             &store,
@@ -2039,6 +2043,8 @@ mod tests {
             host_alias: Some("hosta".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         let err = apply_hook(
             &store,
@@ -2058,6 +2064,8 @@ mod tests {
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Readonly,
+            pane: None,
+            is_personal_owner: false,
         };
         apply_hook(
             &store,
@@ -2288,6 +2296,8 @@ mod tests {
             host_alias: Some(host.into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         }
     }
 
@@ -3103,6 +3113,8 @@ mod tests {
             host_alias: Some("hostb".into()),
             client: None,
             mode: crate::mcp::TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         for (event, field) in [
             ("SessionEnd", "reason"),

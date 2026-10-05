@@ -272,8 +272,11 @@ mod tests {
                 name: "phone".into(),
                 trusted: false,
                 org_id: None,
+                person_id: None,
             }),
             mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         let payload = HookPayload {
             session_id: Some("s1".into()),
@@ -631,8 +634,11 @@ mod tests {
                 name: "phone".into(),
                 trusted: false,
                 org_id: None,
+                person_id: None,
             }),
             mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
         };
         let res = handle_hook(
             State(state),

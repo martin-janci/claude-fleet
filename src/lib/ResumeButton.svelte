@@ -4,21 +4,38 @@
   // dialog; ▾ always opens it (every mode, its reason, the brief preview).
   // The tooltip names where it would land from the link's own snapshot.
   import ResumeDialog from './ResumeDialog.svelte';
-  import { resumeWork, workResumePlan, type WorkLink } from './work';
+  import { linkSessionId, resumeWork, workResumePlan, type WorkLink } from './work';
   import { selectSessionExplicitly } from './selection';
+  import { sessions } from './sessions';
+  import { sessionIdBlocked } from './share';
   import { pushError } from './toasts';
 
   let {
     workKey,
     link = null,
+    sessionId = null,
   }: {
     workKey: string;
     /** The ended link to resume from (default: the key's newest). */
     link?: WorkLink | null;
+    /** The SOURCE session, where the caller knows it (TidyReview does). Falls
+     *  back to resolving `link`'s snapshot. */
+    sessionId?: number | null;
   } = $props();
 
   let open = $state(false);
   let busy = $state(false);
+
+  /**
+   * Multi-user M1 (F2c): Resume is `resume_work`, `share.ts`'s `own` tier —
+   * it re-opens somebody's Claude conversation. The question is about the
+   * session the transcript belongs to, so the row is resolved from the link's
+   * snapshot (`linkSessionId`) and `$sessionIdBlocked` fails closed when it
+   * cannot be: the sidebar's past-work groups come from the hub's org-scoped
+   * `recent_ended` read, so a past link there is not necessarily this person's.
+   */
+  const sourceId = $derived(sessionId ?? linkSessionId(link, $sessions));
+  const shareBlocked = $derived($sessionIdBlocked(sourceId, 'resume_work'));
 
   const where = $derived(
     link
@@ -31,6 +48,8 @@
   async function quick(e: MouseEvent) {
     e.stopPropagation();
     if (busy) return;
+    // Re-asked at the write: the row sits in a list that outlives a revoke.
+    if (shareBlocked !== null) return;
     busy = true;
     const plan = await workResumePlan(workKey, { linkId: link?.id ?? null });
     const last = plan.ok ? plan.value.modes.find((m) => m.mode === 'last') : undefined;
@@ -56,8 +75,8 @@
   <button
     type="button"
     class="main"
-    disabled={busy}
-    title={where ? `Continue the last conversation on ${where}` : 'Continue the last conversation'}
+    disabled={busy || shareBlocked !== null}
+    title={shareBlocked ?? (where ? `Continue the last conversation on ${where}` : 'Continue the last conversation')}
     data-testid="resume-quick"
     onclick={quick}>{busy ? '…' : 'Resume'}</button
   ><button
@@ -71,7 +90,7 @@
 </span>
 
 {#if open}
-  <ResumeDialog {workKey} linkId={link?.id ?? null} onclose={() => (open = false)} />
+  <ResumeDialog {workKey} linkId={link?.id ?? null} sessionId={sourceId} onclose={() => (open = false)} />
 {/if}
 
 <style>

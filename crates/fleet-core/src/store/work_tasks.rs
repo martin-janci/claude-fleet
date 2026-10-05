@@ -193,6 +193,15 @@ impl Store {
     }
 
     /// Mirror a dispatched job as an `agent` subtask, once per job.
+    ///
+    /// **The mirror's `title` and `notes` are the dispatch PROMPT** — the
+    /// first line of it and the whole of it, respectively — which is what
+    /// makes them §4.3 content of both ends of the dispatch rather than
+    /// shared work structure (multi-user M1, T5's review). Any reader of a
+    /// mirror's text has to be fenced on the job itself; `Graph::job_states`
+    /// is where that fence is applied, and the `open_proposals` note beside
+    /// it records the reasoning that used to exempt "every item's title" and
+    /// should never have covered this one.
     pub fn create_agent_task_item(
         &self,
         task: &TaskRow,
@@ -253,11 +262,30 @@ impl Store {
         Ok(wrote)
     }
 
-    pub fn job_states_by_item(&self) -> Result<HashMap<i64, String>, IpcError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT w.id, t.state FROM work_items w JOIN tasks t ON t.id = w.task_id")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    /// Every job-mirror item with the **whole `tasks` row** behind it, keyed
+    /// by the mirror item's id.
+    ///
+    /// It used to answer `(item id, state)` and nothing else, and that is why
+    /// it is written this way now (multi-user M1, the review of main's new
+    /// `Graph` fields). A `tasks` row is a DISPATCH: both its ends are
+    /// sessions, and whether a caller may read it is
+    /// `service::tasks::task_visible_in_scope_pure` — which needs the row,
+    /// not a state string. Answering the state alone made the fence
+    /// unaskable, so `Graph::build` served another person's job state (and,
+    /// through `JobView`, its `result`) to anyone who could see the work item.
+    ///
+    /// One query, as before: the fence is applied in memory by the caller.
+    pub fn job_tasks_by_item(&self) -> Result<HashMap<i64, TaskRow>, IpcError> {
+        // The task columns FIRST, because `map_task_row` reads them by index;
+        // the item id rides last, at `TASK_COLUMNS`'s length.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {}, w.id FROM work_items w JOIN tasks t ON t.id = w.task_id",
+            super::rows::task_columns_t()
+        ))?;
+        const ITEM_ID: usize = 13;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, i64>(ITEM_ID)?, super::rows::map_task_row(r)?))
+        })?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }
 
@@ -358,6 +386,11 @@ impl Store {
     }
 
     /// Every native child of `parent_id`, proposals included, oldest first.
+    ///
+    /// `origin = 'agent'` rows are JOB MIRRORS, and their title and notes are
+    /// the dispatch prompt ([`Self::create_agent_task_item`]). A caller that
+    /// serves a child's text must fence those on the job
+    /// (`Graph::job_states`); this query applies no fence of its own.
     pub fn native_children(&self, parent_id: i64) -> Result<Vec<WorkItemRow>, IpcError> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ITEM_COLUMNS} FROM work_items \

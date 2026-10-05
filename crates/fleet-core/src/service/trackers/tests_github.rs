@@ -803,7 +803,7 @@ mod flow {
         let t = lookup(
             &st,
             "https://github.com/acme/api/issues/42",
-            &OrgScope::All,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
             &net,
         )
         .await
@@ -814,7 +814,7 @@ mod flow {
         let e = lookup(
             &st,
             "https://github.com/other/x/issues/1",
-            &OrgScope::All,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
             &net,
         )
         .await
@@ -829,7 +829,7 @@ mod flow {
                 host_alias: Some("h".into()),
                 ..Default::default()
             },
-            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
             &net,
         )
         .await
@@ -1146,13 +1146,20 @@ mod ghes {
             "https://ghe.corp.example:8443/Acme/API/issues/42",
             "ghe.corp.example/acme/api#42",
         ] {
-            let got = lookup(&st, r, &OrgScope::All, &net).await.unwrap();
+            let got = lookup(
+                &st,
+                r,
+                &crate::service::view_scope::org_only_view(&OrgScope::All),
+                &net,
+            )
+            .await
+            .unwrap();
             assert_eq!(got.item.id, id, "{r}");
         }
         let e = lookup(
             &st,
             "https://ghe.other.example/acme/api/issues/42",
-            &OrgScope::All,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
             &net,
         )
         .await
@@ -1162,7 +1169,7 @@ mod ghes {
         let e = lookup(
             &st,
             "https://github.com/acme/api/issues/42",
-            &OrgScope::All,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
             &net,
         )
         .await

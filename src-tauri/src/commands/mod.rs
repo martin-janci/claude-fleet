@@ -22,6 +22,7 @@ pub mod sessions;
 pub mod tasks;
 pub mod trackers;
 pub mod upload;
+pub mod voice;
 pub mod work;
 pub mod work_view;
 pub mod worktrees;

@@ -31,8 +31,11 @@ pub(super) fn client(id: i64, mode: TokenMode, org_id: Option<i64>) -> Caller {
             name: format!("client-{id}"),
             trusted: false,
             org_id,
+            person_id: None,
         }),
         mode,
+        pane: None,
+        is_personal_owner: false,
     }
 }
 
@@ -41,6 +44,8 @@ pub(super) fn host(alias: &str) -> Caller {
         host_alias: Some(alias.into()),
         client: None,
         mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
     }
 }
 

@@ -8,6 +8,12 @@ use super::*;
 use crate::service::work::structure::{LinkDecision, ViewInput};
 use crate::store::Decider;
 
+/// See `view_tests::vs`: these reads take the caller's whole scope now, and
+/// every case here is about the ORG half.
+fn vs(scope: &OrgScope) -> crate::service::view_scope::ViewScope {
+    crate::service::view_scope::ViewScope::internal().with_org(scope.clone())
+}
+
 fn set_primary(
     w: &W,
     scope: &OrgScope,
@@ -33,7 +39,7 @@ fn two_suggestions(w: &W, sid: i64) -> (ReviewItem, ReviewItem) {
         let s = w.st.lock().unwrap();
         crate::service::work::detect::on_prompt(&s, sid, "TK-3 and TK-2 both", false).unwrap();
     }
-    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
+    let r = review(&w.st, &vs(&OrgScope::All), None, None).unwrap();
     let mut it = r
         .items
         .into_iter()
@@ -189,7 +195,7 @@ fn work_rev_moves_on_a_secondary_link_only_the_row_shows() {
     );
     assert_ne!(second.work_rev, first.work_rev, "a secondary link moves it");
     let mut row = second.clone();
-    bound(w.org_a).redact_row(&mut row);
+    bound(w.org_a).redact_row_org_only(&mut row);
     assert_eq!(row.work_rev, 0, "never sent to a scoped caller");
 }
 
@@ -536,7 +542,7 @@ fn reconsider_round_trips_a_decision() {
             row.work.as_ref().is_none_or(|p| p.link_id != a.link_id),
             "{decision}: a suggestion is never the primary"
         );
-        assert!(review(&w.st, &OrgScope::All, None, None)
+        assert!(review(&w.st, &vs(&OrgScope::All), None, None)
             .unwrap()
             .items
             .iter()
@@ -587,7 +593,7 @@ fn a_forced_cross_org_link_is_reviewed_until_acked() {
         .link
         .clone();
     let in_review = || {
-        review(&w.st, &OrgScope::All, None, None)
+        review(&w.st, &vs(&OrgScope::All), None, None)
             .unwrap()
             .items
             .iter()
@@ -714,7 +720,7 @@ fn placement_and_rules_through_the_writes() {
     // A one-off correction of TK-2, compare-and-set.
     let t2 = structure::place(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         "item:2",
         Some("Security"),
         Some("why"),
@@ -729,11 +735,11 @@ fn placement_and_rules_through_the_writes() {
     // The answer carries the placement just written (patched into the
     // graph, not re-read), exactly as a fresh read shows it.
     assert_eq!(t2.placement_version, 1);
-    let fresh = task(&w.st, &OrgScope::All, "item:2").unwrap();
+    let fresh = task(&w.st, &vs(&OrgScope::All), "item:2").unwrap();
     assert_eq!(fresh.task.placement_version, 1);
     let err = structure::place(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         "item:2",
         Some("Other"),
         None,
@@ -743,14 +749,22 @@ fn placement_and_rules_through_the_writes() {
     .unwrap_err();
     assert_eq!(err.code, codes::E_CONFLICT);
     assert_eq!(err.details.as_ref().unwrap()["group"], "Security");
-    let err =
-        structure::place(&w.st, &OrgScope::All, "item:2", Some("x"), None, None, "me").unwrap_err();
+    let err = structure::place(
+        &w.st,
+        &vs(&OrgScope::All),
+        "item:2",
+        Some("x"),
+        None,
+        None,
+        "me",
+    )
+    .unwrap_err();
     assert_eq!(
         err.code,
         codes::E_INVALID,
         "a placement always names the version it saw"
     );
-    let d = task(&w.st, &OrgScope::All, "item:2").unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), "item:2").unwrap();
     assert_eq!(
         d.placement.as_ref().unwrap().updated_by.as_deref(),
         Some("me")
@@ -770,7 +784,7 @@ fn placement_and_rules_through_the_writes() {
     // Clearing falls back to the rule; disabling the rule to the tracker.
     let cleared = structure::place(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         "item:2",
         None,
         None,
@@ -855,7 +869,7 @@ fn placement_and_rules_through_the_writes() {
     let local_b = local_of_b(&w, "PL-1");
     let t = structure::place(
         &w.st,
-        &bound(w.org_a),
+        &vs(&bound(w.org_a)),
         "item:1",
         Some("Mine"),
         None,
@@ -864,7 +878,7 @@ fn placement_and_rules_through_the_writes() {
     )
     .unwrap();
     assert_eq!(t.group.label, "Mine");
-    let seen = task(&w.st, &bound(w.org_a), "item:1")
+    let seen = task(&w.st, &vs(&bound(w.org_a)), "item:1")
         .unwrap()
         .placement
         .unwrap();
@@ -872,7 +886,7 @@ fn placement_and_rules_through_the_writes() {
         seen.updated_by, None,
         "who placed it is not a scoped caller's to read"
     );
-    let all = task(&w.st, &OrgScope::All, "item:1")
+    let all = task(&w.st, &vs(&OrgScope::All), "item:1")
         .unwrap()
         .placement
         .unwrap();
@@ -880,7 +894,7 @@ fn placement_and_rules_through_the_writes() {
     let tid = format!("item:{local_b}");
     let hidden = structure::place(
         &w.st,
-        &bound(w.org_a),
+        &vs(&bound(w.org_a)),
         &tid,
         Some("x"),
         None,
@@ -890,7 +904,7 @@ fn placement_and_rules_through_the_writes() {
     .unwrap_err();
     let unknown = structure::place(
         &w.st,
-        &bound(w.org_a),
+        &vs(&bound(w.org_a)),
         "item:987654",
         Some("x"),
         None,
@@ -907,7 +921,8 @@ fn placement_and_rules_through_the_writes() {
         hidden.message.replace(&local_b.to_string(), "X"),
         unknown.message.replace("987654", "X")
     );
-    let err = structure::place(&w.st, &host, "item:1", Some("x"), None, Some(1), "h1").unwrap_err();
+    let err =
+        structure::place(&w.st, &vs(&host), "item:1", Some("x"), None, Some(1), "h1").unwrap_err();
     assert_eq!(
         err.code,
         codes::E_FORBIDDEN,
@@ -940,7 +955,7 @@ fn a_placement_on_a_bare_key_follows_the_bind() {
     bare(&w, w.s1, "TK-9");
     let placed = structure::place(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         "ref:TK-9",
         Some("Payments"),
         None,
@@ -975,7 +990,7 @@ fn an_items_own_placement_wins_over_the_bare_keys() {
     bare(&w, w.s1, "TK-9");
     structure::place(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         "ref:TK-9",
         Some("Payments"),
         None,
@@ -1020,7 +1035,7 @@ fn a_bare_key_of_another_org_keeps_its_placement() {
     bare(&w, s3, "TK-9");
     structure::place(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         "ref:TK-9",
         Some("Payments"),
         None,
@@ -1222,13 +1237,22 @@ fn a_local_task_moves_org_only_with_a_fresh_impact() {
     };
     let tid = format!("item:{local}");
     let bound_a = bound(w.org_a);
-    assert!(task(&w.st, &bound_a, &tid).is_ok(), "unassigned: visible");
+    assert!(
+        task(&w.st, &vs(&bound_a), &tid).is_ok(),
+        "unassigned: visible"
+    );
 
-    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(w.org_b)).unwrap();
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(w.org_b)).unwrap();
     assert!(imp.allowed);
     assert!(imp.links[0].becomes_cross_org, "s1 is org A's");
-    let err = structure::assign_org(&w.st, &OrgScope::All, &tid, Some(w.org_b), Some("stale"))
-        .unwrap_err();
+    let err = structure::assign_org(
+        &w.st,
+        &vs(&OrgScope::All),
+        &tid,
+        Some(w.org_b),
+        Some("stale"),
+    )
+    .unwrap_err();
     assert_eq!(err.code, codes::E_CONFLICT);
     assert_eq!(
         err.details.as_ref().unwrap()["impact_token"],
@@ -1243,28 +1267,34 @@ fn a_local_task_moves_org_only_with_a_fresh_impact() {
             isolated: Default::default(),
         },
     ] {
-        let err =
-            structure::assign_org(&w.st, &scope, &tid, Some(w.org_b), Some(&imp.impact_token))
-                .unwrap_err();
+        let err = structure::assign_org(
+            &w.st,
+            &vs(&scope),
+            &tid,
+            Some(w.org_b),
+            Some(&imp.impact_token),
+        )
+        .unwrap_err();
         assert_eq!(err.code, codes::E_FORBIDDEN, "{scope:?} moves no org");
     }
-    let err = structure::assign_org(&w.st, &OrgScope::All, &tid, Some(w.org_b), None).unwrap_err();
+    let err =
+        structure::assign_org(&w.st, &vs(&OrgScope::All), &tid, Some(w.org_b), None).unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
     // The impact changes when a session joins: the old token is refused.
     link(&w, w.s2, local, false);
     let err = structure::assign_org(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &tid,
         Some(w.org_b),
         Some(&imp.impact_token),
     )
     .unwrap_err();
     assert_eq!(err.code, codes::E_CONFLICT);
-    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(w.org_b)).unwrap();
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(w.org_b)).unwrap();
     let moved = structure::assign_org(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &tid,
         Some(w.org_b),
         Some(&imp.impact_token),
@@ -1276,15 +1306,15 @@ fn a_local_task_moves_org_only_with_a_fresh_impact() {
     );
     assert!(moved.sessions.iter().all(|l| l.cross_org));
     assert_eq!(
-        task(&w.st, &bound_a, &tid).unwrap_err().code,
+        task(&w.st, &vs(&bound_a), &tid).unwrap_err().code,
         codes::E_NOTFOUND
     );
-    assert!(session_tasks(&w.st, &bound_a, w.s1)
+    assert!(session_tasks(&w.st, &vs(&bound_a), w.s1)
         .unwrap()
         .links
         .is_empty());
     assert!(
-        review(&w.st, &OrgScope::All, None, None)
+        review(&w.st, &vs(&OrgScope::All), None, None)
             .unwrap()
             .items
             .iter()
@@ -1292,10 +1322,10 @@ fn a_local_task_moves_org_only_with_a_fresh_impact() {
         "D32: the move's cross-org links are reviewed"
     );
     // Back to no org.
-    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(0)).unwrap();
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(0)).unwrap();
     let back = structure::assign_org(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &tid,
         Some(0),
         Some(&imp.impact_token),
@@ -1307,10 +1337,10 @@ fn a_local_task_moves_org_only_with_a_fresh_impact() {
     );
     assert!(!back.org_fenced);
     // A tracker item's org is its tracker's; the same org is no move.
-    let t = structure::org_impact(&w.st, &OrgScope::All, "item:1", Some(w.org_b)).unwrap();
+    let t = structure::org_impact(&w.st, &vs(&OrgScope::All), "item:1", Some(w.org_b)).unwrap();
     let err = structure::assign_org(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         "item:1",
         Some(w.org_b),
         Some(&t.impact_token),
@@ -1358,13 +1388,13 @@ fn org_impact_counts_bound_clients_as_their_scope_sees() {
 
     // No org → A: A's client never saw unassigned work, so it gains the
     // task; B's did, so it loses it.
-    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(w.org_a)).unwrap();
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(w.org_a)).unwrap();
     assert_eq!(imp.from_org, None);
     assert_eq!(counts(&imp), (1, 1));
     assert_eq!(counts(&imp), expect(None, Some(w.org_a)));
     structure::assign_org(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &tid,
         Some(w.org_a),
         Some(&imp.impact_token),
@@ -1372,7 +1402,7 @@ fn org_impact_counts_bound_clients_as_their_scope_sees() {
     .unwrap();
 
     // A → no org: the mirror image.
-    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(0)).unwrap();
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(0)).unwrap();
     assert_eq!(imp.from_org, Some(w.org_a));
     assert_eq!(counts(&imp), (1, 1));
     assert_eq!(counts(&imp), expect(Some(w.org_a), None));
@@ -1383,7 +1413,7 @@ fn org_impact_counts_bound_clients_as_their_scope_sees() {
         .unwrap()
         .set_org_bound_sees_unassigned(w.org_a, true)
         .unwrap();
-    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(0)).unwrap();
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(0)).unwrap();
     assert_eq!(
         counts(&imp),
         (0, 1),
@@ -1407,7 +1437,7 @@ fn a_hidden_primary_neither_blocks_nor_leaks_to_a_bound_client() {
             .id;
     link(&w, w.s1, w.t1, false);
     let a = bound(w.org_a);
-    let st = session_tasks(&w.st, &a, w.s1).unwrap();
+    let st = session_tasks(&w.st, &vs(&a), w.s1).unwrap();
     assert_eq!(st.primary_link_id, None, "the hidden primary is not named");
     let mine = st.links[0].link.link_id;
     let err = set_primary(&w, &a, w.s1, mine, Some(mine)).unwrap_err();

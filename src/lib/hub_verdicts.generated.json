@@ -65,6 +65,7 @@
     "assets_scan_hosts",
     "assign_work_org",
     "cancel_task",
+    "capture_session",
     "catalog_add_catalog",
     "catalog_add_resource",
     "catalog_admit_catalog",
@@ -145,6 +146,7 @@
     "list_trackers",
     "list_worktrees",
     "move_session",
+    "my_grants",
     "name_session_work",
     "never_tidy",
     "new_bg_session",
@@ -184,11 +186,15 @@
     "save_work_view",
     "send_file",
     "send_prompt",
+    "session_access",
     "session_activity",
     "session_conversation",
     "session_conversations",
     "session_history",
+    "session_narrow",
+    "session_share",
     "session_tool_detail",
+    "session_unshare",
     "session_work_links",
     "set_fleet_setting",
     "set_primary_work",
@@ -251,6 +257,8 @@
     "pty_write",
     "report_client_error",
     "upload_attachments",
-    "upload_to_session"
+    "upload_to_session",
+    "voice_claim",
+    "voice_release"
   ]
 }

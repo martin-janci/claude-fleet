@@ -44,6 +44,8 @@ import { dispatchTimelineEvents, dispatchConversationsChanged } from './live_eve
 import type { SessionEvent } from './timeline';
 import { copyText } from './clipboard';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { myGrants, myPersonId, type GrantLevel } from './access';
+import { hubConnection } from './hub_connection';
 import { invoke } from '@tauri-apps/api/core';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
@@ -149,6 +151,11 @@ beforeEach(() => {
   ]);
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
+  // Multi-user M1: the identity half of the composer's gate. Standalone needs
+  // neither (every row reads as `own`), but a test that sets `REMOTE` does, so
+  // the two are reset together with it.
+  myPersonId.set(null);
+  myGrants.set(new Map());
   sessions.set([]);
   tasks.set([]);
 });
@@ -157,6 +164,8 @@ afterEach(() => {
   vi.useRealTimers();
   setVisibility('visible');
   hubStatus.set({ ...STANDALONE });
+  myPersonId.set(null);
+  myGrants.set(new Map());
 });
 
 describe('ConversationPanel', () => {
@@ -3957,9 +3966,15 @@ describe('ConversationPanel attachments', () => {
     return rerender;
   }
 
+  /** Hub mode on a row this client OWNS — which is what these two tests are
+   *  about: pairing hands the hub the fleet's database and hosts, not this
+   *  machine's disk. Who the device is has to be stated, because multi-user
+   *  M1 fails closed while the hub has not said (`access.ts` rule 2), and
+   *  "we cannot tell whose session this is" is not the state under test. */
   async function renderPanelInHubMode() {
     hubStatus.set(REMOTE);
-    await renderPanel();
+    myPersonId.set(7);
+    await renderPanel({ owner_person_id: 7 });
   }
 
   /**
@@ -4528,4 +4543,321 @@ describe('ConversationPanel attachments', () => {
     expect(tile.getAttribute('data-state')).toBe('error');
     expect(screen.getByTestId('conv-attach-error').textContent).toContain('attach it again');
   });
+});
+
+// Multi-user M1 (spec §4.3): the composer is a WRITE surface, and one of its
+// two wire calls does not go through the hub at all. `upload_attachments` is
+// `same_in_both` in `hub_verdicts.generated.json` — this desktop's own scp
+// onto the owner's host — and `outbox.ts` runs it BEFORE the routed
+// `send_prompt`. So a watch-only grantee who could still attach would land the
+// file in the owner's worktree and only then be refused the prompt, which is
+// the same unrevocable channel as TerminalView's drop handler and `pty_open`.
+describe('ConversationPanel composer access (multi-user M1)', () => {
+  const mockedInvoke = invoke as unknown as ReturnType<typeof vi.fn>;
+  type InvokeImpl = (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+  const baseInvoke = mockedInvoke.getMockImplementation() as unknown as InvokeImpl;
+
+  beforeEach(() => {
+    dragDrop = null;
+  });
+
+  afterEach(() => {
+    mockedInvoke.mockImplementation(baseInvoke);
+    hubConnection.set({ state: 'standalone' });
+  });
+
+  /** A paired desktop with a live link, this device known as person 3, holding
+   *  a row owned by person 7 (unless `over` says otherwise) at `level`. */
+  async function renderShared(level: GrantLevel | null, over: Partial<SessionRow> = {}) {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    myPersonId.set(3);
+    if (level) myGrants.set(new Map([[1, level]]));
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    // `visibility` stays `private`: a grant is not a visibility (there is no
+    // `shared` on the wire — `access.ts`), and that is exactly the row a
+    // watcher holds.
+    const row = session({ owner_person_id: 7, visibility: 'private', ...over });
+    // In the store as well as in the prop: the OUTBOX re-asks at the send
+    // (multi-user M1, F2c) and resolves the row by id out of `$sessions`,
+    // which is where the panel's own selection comes from in the app. A row
+    // the store has not got fails closed, by design.
+    sessions.set([row]);
+    render(ConversationPanel, { session: row, visible: true });
+    await settle();
+  }
+
+  const box = () => screen.getByTestId('conv-composer-input') as HTMLTextAreaElement;
+  const sendBtn = () => screen.getByTestId('conv-composer-send') as HTMLButtonElement;
+  const attachBtn = () => screen.getByTestId('conv-attach-button') as HTMLButtonElement;
+  const names = () => mockedInvoke.mock.calls.map((c) => c[0] as string);
+
+  it('a watch grantee gets no composer: every control is disabled and says why', async () => {
+    await renderShared('watch');
+    expect(box().disabled).toBe(true);
+    expect(sendBtn().disabled).toBe(true);
+    expect(attachBtn().disabled).toBe(true);
+    expect((screen.getByTestId('conv-model-pick') as HTMLSelectElement).disabled).toBe(true);
+    expect((screen.getByTestId('conv-effort-pick') as HTMLSelectElement).disabled).toBe(true);
+    expect(attachBtn().getAttribute('title')).toContain('Watch is read-only');
+    expect(screen.getByTestId('conv-composer-status').textContent).toContain('Watch is read-only');
+  });
+
+  it('a watch grantee cannot attach a file by any gesture — picker, drop or paste', async () => {
+    await renderShared('watch');
+    placeShellAt();
+    mockedInvoke.mockClear();
+
+    // The button is disabled, so drive the handler the way a stray click or a
+    // forced enable would: through the DOM event the markup binds.
+    await fireEvent.click(attachBtn());
+    for (let i = 0; i < 3; i++) await settle();
+
+    if (!dragDrop) throw new Error('the panel never subscribed to onDragDropEvent');
+    dragDrop({ payload: { type: 'drop', position: { x: 300, y: 450 }, paths: ['/tmp/a.png'] } });
+    for (let i = 0; i < 3; i++) await settle();
+
+    await fireEvent.paste(box(), {
+      clipboardData: {
+        types: ['Files'],
+        files: [{ name: 'shot.png', size: 32, type: 'image/png' }],
+        getData: () => '',
+      },
+    });
+    for (let i = 0; i < 3; i++) await settle();
+
+    expect(names()).not.toContain('pick_attachments');
+    expect(names()).not.toContain('attachment_describe');
+    expect(names()).not.toContain('upload_attachments');
+    expect(screen.queryByTestId('conv-attachments')).toBeNull();
+  });
+
+  it('a watch grantee cannot send: not Enter, not a chip, not the stuck key press', async () => {
+    await renderShared('watch', { claude_status: 'idle', stuck_kind: 'press_enter' });
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    await fireEvent.keyDown(box(), { key: 'Enter' });
+    await settle();
+    await fireEvent.click(sendBtn());
+    await settle();
+    // Auto-send chips degrade to a fill; neither path reaches the REPL.
+    await fireEvent.click(screen.getAllByTestId('conv-chip')[0], { shiftKey: true });
+    await settle();
+    const enter = screen.getByTestId('conv-chip-enter') as HTMLButtonElement;
+    expect(enter.disabled).toBe(true);
+    await fireEvent.click(enter);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(names()).not.toContain('upload_attachments');
+  });
+
+  // The other half of invariant 5: `drive` is "make this machine do work".
+  it('a drive grantee keeps the whole composer, and the prompt goes out', async () => {
+    await renderShared('drive');
+    expect(box().disabled).toBe(false);
+    expect(attachBtn().disabled).toBe(false);
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    expect(sendBtn().disabled).toBe(false);
+    await fireEvent.click(sendBtn());
+    for (let i = 0; i < 3; i++) await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(mockedSend.mock.calls[0][2]).toBe('ship it');
+  });
+
+  it('the owner’s own row on a paired desktop is untouched', async () => {
+    await renderShared(null, { owner_person_id: 3 });
+    expect(box().disabled).toBe(false);
+    expect(attachBtn().disabled).toBe(false);
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    expect(sendBtn().disabled).toBe(false);
+  });
+
+  // A hub that has not said who this device is: fail closed, with the sentence
+  // that sends someone to Settings → Hub rather than blaming the session.
+  it('fails closed, and honestly, while the hub has not said who this device is', async () => {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session({ owner_person_id: 7 }), visible: true });
+    await settle();
+    expect(box().disabled).toBe(true);
+    expect(screen.getByTestId('conv-composer-status').textContent).toContain('who this device is');
+  });
+
+  // Rule 1 of `access.ts`: a standalone desktop IS the fleet, so every row it
+  // holds is its own — no `my_grants`, no person id, nothing to wait for.
+  it('standalone is untouched even by a row that names another owner', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    mockedSend.mockResolvedValue({ ok: true, value: undefined });
+    render(ConversationPanel, { session: session({ owner_person_id: 99 }), visible: true });
+    await settle();
+    expect(box().disabled).toBe(false);
+    expect(attachBtn().disabled).toBe(false);
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    await fireEvent.click(sendBtn());
+    for (let i = 0; i < 3; i++) await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+  });
+
+  // Staging a file reads THIS machine's disk: a blinking hub link is no reason
+  // to refuse it, and the tray is what a reconnect then sends.
+  it('an offline hub link stops the send but not the tray', async () => {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'offline', attempt: 2, retry_in_secs: 5, reason: 'socket closed' });
+    myPersonId.set(3);
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, { session: session({ owner_person_id: 3 }), visible: true });
+    await settle();
+    expect(box().disabled).toBe(false);
+    expect(attachBtn().disabled).toBe(false);
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    expect(sendBtn().disabled).toBe(true);
+    await fireEvent.click(sendBtn());
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  // ── the rest of the write controls, which stayed live after F2 ──────────
+  //
+  // `SessionRowItem` has hidden this same card when `send_prompt` is blocked
+  // since F2; this panel rendered it regardless, so the two surfaces disagreed
+  // about one control. Every option in it is a key press into the owner's
+  // pane.
+  const DIALOG: NonNullable<SessionRow['pending_input']> = {
+    kind: 'permission',
+    question: 'Do you want to proceed?',
+    options: [
+      { n: 1, label: 'Yes', selected: true },
+      { n: 2, label: 'No', selected: false },
+    ],
+  };
+
+  it('a watch grantee gets no answer card for a blocked dialog', async () => {
+    await renderShared('watch', { claude_status: 'blocked', pending_input: DIALOG });
+    expect(screen.queryByTestId('answer-card')).toBeNull();
+    expect(screen.queryAllByTestId('answer-option')).toHaveLength(0);
+    // Still TOLD that the session is waiting — the card is the answer buttons,
+    // not the status.
+    expect(screen.getByTestId('conv-blocked').textContent).toContain('waiting for you');
+  });
+
+  it('the owner keeps the answer card on the same row', async () => {
+    await renderShared(null, {
+      owner_person_id: 3,
+      claude_status: 'blocked',
+      pending_input: DIALOG,
+    });
+    expect(screen.getByTestId('answer-card')).toBeTruthy();
+    expect(screen.getAllByTestId('answer-option')).toHaveLength(2);
+  });
+
+  // Fork / Rewind / Retry are `rewind_conversation`, which spec §4.3 puts in
+  // the `own` tier: each leaves a permanent verbatim copy of the owner's
+  // transcript behind, and a copy outlives the grant that allowed it. So a
+  // DRIVE grantee is barred too — the gate cannot be the composer's.
+  const twoTurns = () =>
+    conv({
+      truncated: false,
+      turns: [
+        { prompt: 'first', at: null, ended_at: null, items: [{ kind: 'text', text: 'reply one' }], prompt_uuid: 'a1' },
+        { prompt: 'second', at: null, ended_at: null, items: [{ kind: 'text', text: 'reply two' }], prompt_uuid: 'a2' },
+      ],
+    });
+
+  async function renderReplies(level: GrantLevel | null, over: Partial<SessionRow> = {}) {
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    myPersonId.set(3);
+    if (level) myGrants.set(new Map([[1, level]]));
+    mockedConv.mockReturnValue(ok(twoTurns()));
+    render(ConversationPanel, {
+      session: session({ owner_person_id: 7, visibility: 'private', ...over }),
+      visible: true,
+    });
+    await settle();
+  }
+
+  // Fork is offered on every turn; Rewind and Retry only on the second (the
+  // first turn of an untruncated conversation cannot be rewound away). So take
+  // the LAST fork button — the one on the turn that has all three.
+  const forkBtn = () =>
+    screen.getAllByTestId('reply-fork').at(-1) as HTMLButtonElement;
+  const rewindBtn = () => screen.getByTestId('reply-rewind') as HTMLButtonElement;
+  const retryBtn = () => screen.getByTestId('reply-retry') as HTMLButtonElement;
+
+  for (const level of ['watch', 'drive'] as const) {
+    it(`a ${level} grantee cannot fork, rewind or retry — it is the own tier`, async () => {
+      await renderReplies(level);
+      // Two turns, so the second offers all three.
+      expect(forkBtn().disabled).toBe(true);
+      expect(rewindBtn().disabled).toBe(true);
+      expect(retryBtn().disabled).toBe(true);
+      for (const b of [forkBtn(), rewindBtn(), retryBtn()]) {
+        expect(b.getAttribute('title')).toMatch(/only the session’s owner/i);
+      }
+      // And the Fork sheet cannot be opened past the disabled button either.
+      await fireEvent.click(forkBtn());
+      await settle();
+      expect(screen.queryByTestId('fork-sheet')).toBeNull();
+      await fireEvent.click(rewindBtn());
+      await settle();
+      expect(screen.queryByTestId('confirm-ok')).toBeNull();
+      await fireEvent.click(retryBtn());
+      await settle();
+      expect(names()).not.toContain('rewind_conversation');
+    });
+  }
+
+  it('the owner keeps fork, rewind and retry on a paired desktop', async () => {
+    await renderReplies(null, { owner_person_id: 3 });
+    expect(forkBtn().disabled).toBe(false);
+    expect(rewindBtn().disabled).toBe(false);
+    expect(retryBtn().disabled).toBe(false);
+  });
+
+  // ── F2a: the outbox's own Retry ─────────────────────────────────────────
+  //
+  // A different control from the reply Retry above: this one re-sends a FAILED
+  // outgoing message through the outbox, which is `send_prompt`, so it needs
+  // the composer's gate and not the rewind's. It is reachable exactly in the
+  // state the plan names — a drive→watch narrow with a failed message still in
+  // the queue — because the composer being disabled does not empty the queue.
+  const retryOutgoing = () => screen.getByTestId('conv-outgoing-retry') as HTMLButtonElement;
+
+  it('a narrow to watch disables the failed message’s Retry, and Edit/Discard stay', async () => {
+    await renderShared('drive');
+    mockedSend.mockResolvedValue({ ok: false, error: { code: 'E_TMUX', message: "can't find session" } });
+    await fireEvent.input(box(), { target: { value: 'ship it' } });
+    await fireEvent.click(sendBtn());
+    for (let i = 0; i < 3; i++) await settle();
+    // The positive control: a driver may retry their own failed send.
+    expect(retryOutgoing().disabled).toBe(false);
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+
+    // The narrow. No row event, no re-list: only the grant map moved.
+    myGrants.set(new Map([[1, 'watch']]));
+    await settle();
+    expect(retryOutgoing().disabled).toBe(true);
+    expect(retryOutgoing().title).toMatch(/needs drive/i);
+    await fireEvent.click(retryOutgoing());
+    for (let i = 0; i < 3; i++) await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+
+    // Edit and Discard are this client's own queue, not a write to the owner's
+    // machine, so they stay live: the message has to be takeable back.
+    expect((screen.getByTestId('conv-outgoing-edit') as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId('conv-outgoing-discard') as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.click(screen.getByTestId('conv-outgoing-discard'));
+    await settle();
+    expect(screen.queryByTestId('conv-outgoing')).toBeNull();
+  });
+
+  /** jsdom lays nothing out, so state the rect the Tauri drop is hit-tested
+   *  against (same shape as the attachments suite's `placeShell`). */
+  function placeShellAt() {
+    const shell = document.querySelector('.composer-shell') as HTMLElement;
+    const r = { left: 100, top: 400, right: 500, bottom: 500, width: 400, height: 100, x: 100, y: 400 };
+    shell.getBoundingClientRect = () => ({ ...r, toJSON: () => r }) as DOMRect;
+    return shell;
+  }
 });
