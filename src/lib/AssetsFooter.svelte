@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import Badge from './Badge.svelte';
   import CatalogChip from './CatalogChip.svelte';
   import JobChip from './JobChip.svelte';
@@ -36,18 +37,25 @@
     return [{ name: PERSONAL, head, state: 'loaded', problem: null }];
   });
 
-  // R24: an org catalog's dirty/ahead, read once per name; refused (no
-  // grant) leaves the chip at its HEAD.
+  // R24: an org catalog's dirty/ahead, read again with each listing the
+  // panel loads (mount, pull, push, every write) — without re-creating the
+  // chips, so an open popover stays open; refused (no grant) leaves the
+  // chip at its HEAD. A late answer of an older read never wins.
   let orgRepo = $state<Record<string, RepoStatus | null>>({});
+  const orgNames = $derived(chips.filter((c) => c.name !== PERSONAL).map((c) => c.name).join('\n'));
+  let readSeq = 0;
   $effect(() => {
-    if (readOnly) return;
-    for (const c of chips) {
-      if (c.name === PERSONAL || c.name in orgRepo) continue;
-      orgRepo[c.name] = null;
-      void repoStatusOf(c.name).then((r) => {
-        if (r.ok) orgRepo[c.name] = r.value;
-      });
-    }
+    void listing;
+    const names = orgNames ? orgNames.split('\n') : [];
+    if (readOnly || names.length === 0) return;
+    const seq = ++readSeq;
+    untrack(() => {
+      for (const name of names) {
+        void repoStatusOf(name).then((r) => {
+          if (r.ok && seq === readSeq) orgRepo[name] = r.value;
+        });
+      }
+    });
   });
 
   const JOB: Record<string, string> = {

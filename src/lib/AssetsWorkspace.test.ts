@@ -96,9 +96,10 @@ describe('AssetsWorkspace', () => {
 
   it('read-only: the Inbox and the Library rows offer no Import', async () => {
     render(AssetsWorkspace, { ...handlers(), readOnly: true, readOnlyClient: 'desk' });
-    expect(screen.getByTestId('inbox-row-identity:skill/fresh').textContent).not.toContain('Import');
+    // The Import sits beside a picker row, on its line.
+    expect(screen.getByTestId('inbox-row-identity:skill/fresh').parentElement!.textContent).not.toContain('Import');
     await fireEvent.click(screen.getByTestId('assets-rail-library'));
-    expect(screen.getByTestId('identity-row-skill-fresh').textContent).not.toContain('Import');
+    expect(screen.getByTestId('identity-row-skill-fresh').parentElement!.textContent).not.toContain('Import');
   });
 
   it('the Inbox’s Import on an identity row reaches the panel', async () => {
@@ -162,7 +163,7 @@ describe('AssetsWorkspace', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_get_asset', { args: { kind: 'skill', name: 'fine' } }));
   });
 
-  it('the footer re-reads an org catalog’s status when the listing reloads', async () => {
+  it('the footer re-reads an org catalog’s status when the listing reloads, without closing a popover', async () => {
     const acme: CatalogStatus = {
       id: 2, name: 'acme', org_id: 1, repo_path: '/a', remote_url: null, head_commit: 'aaaaaaa', last_loaded_at: 1, state: 'loaded', asset_count: 0,
     };
@@ -171,11 +172,16 @@ describe('AssetsWorkspace', () => {
       if (cmd === 'catalog_repo_status_in') return { head: 'aaaaaaa', dirty: 0, ahead: 0, behind: 0, has_upstream: true };
       throw { code: 'E_TEST', message: cmd };
     });
+    repoStatusStore.set({ head: 'abcdef1', dirty: 0, ahead: 0, behind: 0, has_upstream: true });
     render(AssetsWorkspace, handlers());
     const statusReads = () => invoke.mock.calls.filter((c) => c[0] === 'catalog_repo_status_in').length;
     await waitFor(() => expect(statusReads()).toBe(1));
+    // A reload while the personal popover is open leaves it open.
+    await fireEvent.click(screen.getByTestId('catalog-chip-personal'));
+    expect(screen.getByTestId('assets-pull')).toBeTruthy();
     catalog.set({ ...listing, loaded_at: 2 });
     await waitFor(() => expect(statusReads()).toBe(2));
+    expect(screen.getByTestId('assets-pull')).toBeTruthy();
   });
 
   it('the asset detail scrolls inside the Inspector only (no second scroller)', () => {

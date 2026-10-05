@@ -1,14 +1,15 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import {
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
     planSync, lastSync, lastSyncRun,
-    commitPending, pushCatalog, repoStatus, repoStatusStore,
+    commitPending, pushCatalog, repoStatus,
     type HostScanResult, type SyncPlan, type SyncRunSummary, type AssetKind, type AssetIdentity,
   } from './assets';
-  import { hosts } from './hosts';
-  import AssetList from './AssetList.svelte';
-  import AssetDetail from './AssetDetail.svelte';
+  import AssetsWorkspace from './AssetsWorkspace.svelte';
+  import { keyOf, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL } from './assets_workspace';
+  import { loadFleetSettings } from './fleet_settings';
+  import type { IpcError } from './result';
   import ImportDialog from './ImportDialog.svelte';
   import SyncPlanDialog from './SyncPlanDialog.svelte';
   import SecretsPanel from './SecretsPanel.svelte';
@@ -33,15 +34,15 @@
   let catalogLoad = $state<'idle' | 'loading' | 'loaded' | 'failed'>('idle');
   let catalogLoadError = $state<string | null>(null);
   let scanResults = $state<HostScanResult[] | null>(null);
-  let showProblems = $state(false);
   let showImport = $state(false);
   // Preset from clicking Import next to an unmanaged identity in AssetList:
   // which host to read and which single asset to limit the import to. Reset
   // to null (the dialog's own "local" / "everything" defaults) by the
-  // toolbar's own Import button and whenever the dialog closes.
+  // Library's own Import button and whenever the dialog closes.
   let importPreset = $state<{ host: string; only: string[] } | null>(null);
-  let filter = $state('');
-  let selected = $state<{ kind: string; name: string } | null>(null);
+  // The workspace's selection: one row key (`keyOf`), shared by every view
+  // and the Inspector.
+  let selectedKey = $state<string | null>(null);
   let syncPlan = $state<SyncPlan | null>(null);
   // The filter `syncPlan` was computed from, so SyncPlanDialog's "Plan
   // anyway" (on a skipped-unlayered host) can re-plan with the same scope
@@ -55,13 +56,24 @@
   let showNewAsset = $state(false);
   let showLintAll = $state(false);
   let showCommitPrompt = $state(false);
-  // Set (once) to `<kind>::<name>` right before selecting a just-created
-  // asset, so the detail pane opens straight into edit mode for it. Never
-  // cleared: a later re-selection of the same asset re-opening the editor
-  // is a harmless edge case, not a bug worth the extra bookkeeping.
+  // A just-created asset's key, set together with the selection so the
+  // Inspector opens it in Source, editing, and cleared once that happened:
+  // selecting the asset again later opens its Overview.
   let pendingAutoEdit = $state('');
 
+  async function openEditing(key: string) {
+    pendingAutoEdit = key;
+    selectedKey = key;
+    await tick();
+    if (pendingAutoEdit === key) pendingAutoEdit = '';
+  }
+
   async function refresh() {
+    // The workspace's own reads (R13, R14): best effort — a refusal shows
+    // less, never an error. The cards refresh with every panel refresh.
+    void loadCatalogStatuses();
+    void loadChangesets();
+    void loadLayers();
     const [a, i] = await Promise.all([loadAssets(), loadInventory()]);
     if (!a.ok) error = a.error.message;
     if (!i.ok) error = i.error.message;
@@ -69,15 +81,17 @@
 
   // Shared by every path that needs to re-read the catalog: `pull: false`
   // just reloads the working tree as-is (used after import, and on initial
-  // mount/setup); `pull: true` is only the explicit "Pull" button.
-  async function reload(pull: boolean) {
+  // mount/setup); `pull: true` is only the explicit "Pull" button. Answers
+  // the load's error, if any.
+  async function reload(pull: boolean): Promise<IpcError | null> {
     error = null;
     catalogLoad = 'loading';
     catalogLoadError = null;
     const l = await loadCatalog(pull);
-    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = l.error.message; return; }
+    if (!l.ok) { catalogLoad = 'failed'; catalogLoadError = l.error.message; return l.error; }
     catalogLoad = 'loaded';
     await refresh();
+    return null;
   }
 
   // Every authoring write (create/update/delete/resource/commit/push) goes
@@ -149,6 +163,11 @@
     const r = await loadAssets();
     if (r.ok) {
       overviewLoad = 'loaded';
+      // An ungranted client may list catalogs and cards when unbound (M3
+      // PF15) and is refused otherwise; never `catalog_last_sync` or
+      // `catalog_load`.
+      void loadCatalogStatuses();
+      void loadChangesets();
       return;
     }
     overviewLoad = 'failed';
@@ -170,6 +189,8 @@
   }
 
   onMount(async () => {
+    // The footer's `auto: on|off`.
+    void loadFleetSettings();
     if (!ownsTheFleet($hubStatus)) return;
     const c = await loadCatalogConfig();
     if (c.ok && c.value) {
@@ -200,10 +221,14 @@
     busy = '';
   }
 
+  // The personal chip's Pull. A failed pull leaves the listing as it was,
+  // so its reason (git's own stderr) goes on the error line — the
+  // failed-load block shows only while there is no listing at all.
   async function pull() {
     busy = 'pull';
-    await reload(true);
+    const e = await reload(true);
     busy = '';
+    if (e) error = withGitStderr(e);
   }
 
   async function scan() {
@@ -225,15 +250,22 @@
     showImport = true;
   }
 
+  // The workspace's Import: the Library's button (no identity — the dialog's
+  // own defaults) or an identity row, its Inspector, or the `a` key.
+  function importFrom(identity: AssetIdentity | null) {
+    if (identity) return onImportUnmanaged(identity);
+    importPreset = null;
+    showImport = true;
+  }
+
   function onAssetCreated(kind: AssetKind, name: string) {
     showNewAsset = false;
-    pendingAutoEdit = `${kind}::${name}`;
-    selected = { kind, name };
+    void openEditing(keyOf({ type: 'asset', catalog: PERSONAL, kind, name }));
     void afterWrite();
   }
 
   function onAssetDeleted() {
-    selected = null;
+    selectedKey = null;
     void afterWrite();
   }
 
@@ -270,7 +302,7 @@
 
   function onLintAllSelect(kind: string, name: string) {
     showLintAll = false;
-    selected = { kind, name };
+    selectedKey = keyOf({ type: 'asset', catalog: PERSONAL, kind, name });
   }
 
   async function requestSync(filter: { hostAlias?: string; kind?: string; name?: string }) {
@@ -297,14 +329,6 @@
     void refresh();
   }
 
-  function summarizeRun(run: SyncRunSummary): string {
-    const counts: Record<string, number> = {};
-    for (const h of run.hosts) counts[h.status] = (counts[h.status] ?? 0) + 1;
-    const parts = Object.entries(counts).map(([k, n]) => `${n} ${k}`);
-    return `${new Date(run.finished_at * 1000).toLocaleString()} — ${parts.join(', ') || 'no hosts'}`;
-  }
-
-  const shortHead = $derived(($catalogConfig?.head_commit ?? '').slice(0, 7));
   const secretNames = $derived(
     lastPlan
       ? Array.from(
@@ -322,52 +346,35 @@
         <p class="muted">Asking the hub…</p>
       </div>
     {:else if hubOverview}
-      <div class="hub-overview" data-testid="assets-remote">
-        <div class="toolbar">
-          <span class="path">Asset catalog on the hub{$hubStatus.url ? ` (${$hubStatus.url})` : ''}</span>
-          {#if $catalog}<span class="head" data-testid="assets-head">@ {$catalog.head.slice(0, 7) || '—'}</span>{/if}
-          <button onclick={() => void loadOverview()} disabled={busy !== '' || overviewLoad === 'loading'} data-testid="assets-hub-refresh">{overviewLoad === 'loading' ? 'Loading…' : 'Refresh'}</button>
-          <button onclick={scanOnHub} disabled={busy !== '' || overviewNotConfigured} data-testid="assets-scan">{busy === 'scan' ? 'Scanning…' : 'Scan hosts'}</button>
-          {#if $catalog && $catalog.problems.length > 0}
-            <button class="badge" onclick={() => (showProblems = !showProblems)} data-testid="assets-problems">{$catalog.problems.length} problems</button>
+      {#snippet hubFailed()}
+        <div class="load-failed pad" data-testid="assets-hub-failed">
+          {#if overviewNotConfigured}
+            <p class="muted">The hub has no asset catalog yet. It is a git checkout on the hub's machine, set there — then Refresh here:</p>
+            <pre class="cmd" data-testid="assets-hub-setup-cmd">fleet-hub catalog set ~/agent-assets --remote git@github.com:you/agent-assets.git</pre>
+            <p class="muted">The remote is cloned when the path is empty. In the Docker setup, prefix it with <code>docker compose exec fleet-hub</code> and keep the checkout on the data volume, e.g. <code>/var/lib/fleet-hub/agent-assets</code>.</p>
+          {:else}
+            <p class="muted">The hub's asset catalog could not be loaded.</p>
+            {#if overviewError}<p class="error">{overviewError}</p>{/if}
           {/if}
-          <input class="filter" placeholder="filter" bind:value={filter} />
         </div>
-        <p class="muted note" data-testid="assets-remote-note">
-          Read-only here: the hub has not granted this desktop the asset
-          catalog. To edit assets, Sync and manage Secrets from this window,
-          run on the hub's machine
-          <code data-testid="assets-grant-cmd">fleet-hub client grant &lt;this client's name&gt; assets</code>
-          (<code>fleet-hub client list</code> shows the name), then reopen
-          this tab.
-        </p>
-        {#if hubAdminError}<p class="error" data-testid="assets-grant-error">{hubAdminError}</p>{/if}
-        {#if error}<p class="error">{error}</p>{/if}
-        {#if scanResults}
-          <p class="scan-result" data-testid="assets-scan-result">{scanResults.map((r) => `${r.host}: ${r.status}${r.detail ? ` (${r.detail})` : ''}`).join(' · ')}</p>
-        {/if}
-        {#if showProblems && $catalog}
-          <ul class="problems">{#each $catalog.problems as p}<li><code>{p.path}</code> {p.message}</li>{/each}</ul>
-        {/if}
-        {#if overviewLoad === 'failed'}
-          <div class="load-failed" data-testid="assets-hub-failed">
-            {#if overviewNotConfigured}
-              <p class="muted">The hub has no asset catalog yet. It is a git checkout on the hub's machine, set there — then Refresh here:</p>
-              <pre class="cmd" data-testid="assets-hub-setup-cmd">fleet-hub catalog set ~/agent-assets --remote git@github.com:you/agent-assets.git</pre>
-              <p class="muted">The remote is cloned when the path is empty. In the Docker setup, prefix it with <code>docker compose exec fleet-hub</code> and keep the checkout on the data volume, e.g. <code>/var/lib/fleet-hub/agent-assets</code>.</p>
-            {:else}
-              <p class="muted">The hub's asset catalog could not be loaded.</p>
-              {#if overviewError}<p class="error">{overviewError}</p>{/if}
-            {/if}
-          </div>
-        {:else if $catalog}
-          <div class="overview-list">
-            <AssetList listing={$catalog} selected={null} {filter} readonly onselect={() => {}} onimport={() => {}} />
-          </div>
-        {:else}
-          <p class="muted">Loading…</p>
-        {/if}
-      </div>
+      {/snippet}
+      {#if hubAdminError}<p class="error" data-testid="assets-grant-error">{hubAdminError}</p>{/if}
+      <AssetsWorkspace
+        readOnly
+        readOnlyClient={$hubStatus.client_name}
+        {visible}
+        {busy}
+        {error}
+        {scanResults}
+        loading={overviewLoad === 'loading'}
+        scanDisabled={overviewNotConfigured}
+        failed={overviewLoad === 'failed' ? hubFailed : undefined}
+        bind:selectedKey
+        onscan={scanOnHub}
+        onsync={() => {}}
+        onimport={() => {}}
+        onrefresh={() => void loadOverview()}
+      />
     {:else}
       <div class="setup" data-testid="assets-remote">
         <h3>Asset catalog</h3>
@@ -384,81 +391,36 @@
       <button class="primary" onclick={setup} disabled={busy !== ''} data-testid="assets-setup-submit">{busy === 'setup' ? 'Setting up…' : 'Use this catalog'}</button>
     </div>
   {:else}
-    <div class="toolbar">
-      <span class="path" title={$catalogConfig.repo_path}>{$catalogConfig.repo_path}</span>
-      <span class="head" data-testid="assets-head">@ {shortHead || '—'}</span>
-      <button onclick={pull} disabled={busy !== ''}>{busy === 'pull' ? 'Pulling…' : 'Pull'}</button>
-      <button onclick={scan} disabled={busy !== ''} data-testid="assets-scan">{busy === 'scan' ? 'Scanning…' : 'Scan hosts'}</button>
-      <button onclick={() => { importPreset = null; showImport = true; }} disabled={busy !== '' || importBlocked !== null} title={importBlocked ?? ''} data-testid="assets-import">Import from host</button>
-      <button onclick={() => requestSync({})} disabled={busy !== ''} data-testid="assets-sync">{busy === 'plan' ? 'Planning…' : 'Sync'}</button>
-      <button onclick={() => (showSecrets = true)} disabled={busy !== ''} data-testid="assets-secrets">Secrets</button>
-      <button onclick={() => (showNewAsset = true)} disabled={busy !== ''} data-testid="assets-new">New asset</button>
-      <button onclick={() => (showLintAll = true)} disabled={busy !== ''} data-testid="assets-lint-all">Lint all</button>
-      {#if $repoStatusStore && $repoStatusStore.dirty > 0}
-        <button onclick={() => (showCommitPrompt = true)} disabled={busy !== ''} data-testid="assets-commit-pending">{busy === 'commit' ? 'Committing…' : 'Commit pending'}</button>
-      {/if}
-      <button
-        onclick={doPush}
-        disabled={busy !== '' || !$repoStatusStore?.has_upstream}
-        data-testid="assets-push"
-        title={$repoStatusStore?.has_upstream ? '' : 'no upstream configured'}
-      >{busy === 'push' ? 'Pushing…' : `Push${$repoStatusStore?.ahead ? ` ↑${$repoStatusStore.ahead}` : ''}`}</button>
-      {#if $lastSyncRun}
-        <span class="last-sync" data-testid="assets-last-sync">{summarizeRun($lastSyncRun)}</span>
-      {/if}
-      {#if $catalog && $catalog.problems.length > 0}
-        <button class="badge" onclick={() => (showProblems = !showProblems)} data-testid="assets-problems">{$catalog.problems.length} problems</button>
-      {/if}
-      <input class="filter" placeholder="filter" bind:value={filter} />
-    </div>
-    {#if $repoStatusStore}
-      <p class="repo-status" data-testid="assets-repo-status">
-        {$repoStatusStore.head.slice(0, 7)} · {$repoStatusStore.dirty} dirty
-        {#if $repoStatusStore.has_upstream}· ↑{$repoStatusStore.ahead ?? 0} ↓{$repoStatusStore.behind ?? 0}{:else}· no upstream{/if}
-      </p>
-    {/if}
-    {#if error}<p class="error">{error}</p>{/if}
-    {#if scanResults}
-      <p class="scan-result" data-testid="assets-scan-result">{scanResults.map((r) => `${r.host}: ${r.status}${r.detail ? ` (${r.detail})` : ''}`).join(' · ')}</p>
-    {/if}
-    {#if showProblems && $catalog}
-      <ul class="problems">{#each $catalog.problems as p}<li><code>{p.path}</code> {p.message}</li>{/each}</ul>
-    {/if}
-    <div class="body">
-      <div class="left">
-        {#if $catalog}
-          <AssetList listing={$catalog} {selected} {filter} onselect={(kind, name) => (selected = { kind, name })} onimport={onImportUnmanaged} />
-        {:else if catalogLoad === 'failed'}
-          <!-- `catalog` is only ever set on success, so a failed load used to
-               render the error line AND a permanent "Loading…" side by side,
-               with no way to try again but the panel header's ↻. This keys off
-               the load's OWN state, not the shared per-action `error`. -->
-          <div class="load-failed" data-testid="assets-load-failed">
-            <p class="muted">The asset catalog could not be loaded.</p>
-            {#if catalogLoadError}<p class="error" data-testid="assets-load-error">{catalogLoadError}</p>{/if}
-            <button class="btn" onclick={() => void reload(false)} data-testid="assets-retry">Retry</button>
-          </div>
-        {:else}
-          <p class="muted">Loading…</p>
-        {/if}
+    {#snippet loadFailed()}
+      <!-- `catalog` is only ever set on success; this keys off the load's
+           OWN state, not the shared per-action `error`. -->
+      <div class="load-failed pad" data-testid="assets-load-failed">
+        <p class="muted">The asset catalog could not be loaded.</p>
+        {#if catalogLoadError}<p class="error" data-testid="assets-load-error">{catalogLoadError}</p>{/if}
+        <button class="btn" onclick={() => void reload(false)} data-testid="assets-retry">Retry</button>
       </div>
-      <div class="right">
-        {#if selected}
-          {#key `${selected.kind}::${selected.name}`}
-            <AssetDetail
-              kind={selected.kind}
-              name={selected.name}
-              hosts={$hosts}
-              onsync={requestSync}
-              ondeleted={onAssetDeleted}
-              startInEdit={pendingAutoEdit === `${selected.kind}::${selected.name}`}
-            />
-          {/key}
-        {:else}
-          <p class="muted empty">Select an asset.</p>
-        {/if}
-      </div>
-    </div>
+    {/snippet}
+    <AssetsWorkspace
+      {visible}
+      {busy}
+      {error}
+      {scanResults}
+      loading={catalogLoad === 'loading'}
+      {importBlocked}
+      failed={!$catalog && catalogLoad === 'failed' ? loadFailed : undefined}
+      bind:selectedKey
+      autoEditKey={pendingAutoEdit}
+      onscan={scan}
+      onsync={requestSync}
+      onimport={importFrom}
+      onsecrets={() => (showSecrets = true)}
+      onnew={() => (showNewAsset = true)}
+      onlintall={() => (showLintAll = true)}
+      onpull={pull}
+      oncommit={() => (showCommitPrompt = true)}
+      onpush={doPush}
+      ondeleted={onAssetDeleted}
+    />
   {/if}
   {#if showImport}
     <ImportDialog
@@ -511,22 +473,8 @@
   .assets-panel { display: flex; flex-direction: column; height: 100%; }
   .setup { max-width: 480px; margin: 40px auto; display: flex; flex-direction: column; gap: 10px; }
   .setup label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
-  .toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border); font-size: 12px; }
-  .path { color: var(--fg-muted); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .head { font-family: ui-monospace, monospace; color: var(--fg-muted); }
-  .badge { color: var(--usage-warn); }
-  .last-sync { color: var(--fg-muted); font-size: 11px; white-space: nowrap; }
-  .repo-status { font-size: 11px; color: var(--fg-muted); margin: 0; padding: 2px 10px; font-family: ui-monospace, monospace; }
-  .filter { margin-left: auto; width: 160px; }
-  .hub-overview { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-  .hub-overview .note { margin: 6px 10px; font-size: 12px; }
   .cmd { margin: 0; padding: 6px 8px; font-family: ui-monospace, monospace; font-size: 12px; background: var(--bg-pane); border-radius: 4px; white-space: pre-wrap; word-break: break-all; user-select: text; }
-  .overview-list { flex: 1; min-height: 0; }
-  .body { display: grid; grid-template-columns: 300px 1fr; flex: 1; min-height: 0; }
-  .left { border-right: 1px solid var(--border); min-height: 0; overflow: auto; }
-  .right { min-height: 0; overflow: auto; }
-  .muted { color: var(--fg-muted); } .empty { padding: 14px; } .error { color: var(--usage-crit); padding: 4px 10px; margin: 0; }
-  .scan-result { font-size: 12px; padding: 4px 10px; margin: 0; color: var(--fg-muted); }
-  .problems { font-size: 12px; margin: 0; padding: 4px 10px 4px 28px; }
+  .muted { color: var(--fg-muted); } .error { color: var(--usage-crit); padding: 4px 10px; margin: 0; }
+  .pad { padding: 14px; }
   .primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 4px; padding: 6px 10px; }
 </style>

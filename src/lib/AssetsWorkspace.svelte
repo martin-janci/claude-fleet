@@ -277,11 +277,8 @@
   </div>
 
   <div class="foot">
-    <!-- Re-created with each listing the panel loads (mount, pull, push,
-         every write): an org chip reads its repo status once per mount. -->
-    {#key listing}
-      <AssetsFooter {readOnly} {listing} {busy} {onpull} {oncommit} {onpush} />
-    {/key}
+    <!-- Re-reads an org chip's repo status with each listing (R24). -->
+    <AssetsFooter {readOnly} {listing} {busy} {onpull} {oncommit} {onpush} />
   </div>
 </div>
 

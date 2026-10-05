@@ -71,6 +71,26 @@ describe('AssetsFooter', () => {
     render(AssetsFooter, props);
     await waitFor(() => expect(screen.getByTestId('catalog-chip-papayapos').textContent).toContain('↑4'));
   });
+  it('re-reads an org catalog\'s status with each listing the panel loads, keeping an open popover open', async () => {
+    catalogStatuses.set([status('personal', null, 'a1b2c3d9'), status('papayapos', 7, '9f0e1d2a')]);
+    repoStatusStore.set({ head: 'a1b2c3d9', dirty: 0, ahead: 0, behind: 0, has_upstream: true });
+    let ahead = 1;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_repo_status_in') return { head: '9f0e1d2a', dirty: 0, ahead, behind: 0, has_upstream: true };
+      throw { code: 'E_FORBIDDEN', message: 'no grant' };
+    });
+    const listing = (loaded_at: number) => ({ head: 'a1b2c3d9', loaded_at, assets: [], unmanaged: [], problems: [] });
+    const { rerender } = render(AssetsFooter, { ...props, listing: listing(1) });
+    await waitFor(() => expect(screen.getByTestId('catalog-chip-papayapos').textContent).toContain('↑1'));
+    await fireEvent.click(screen.getByTestId('catalog-chip-personal'));
+    expect(screen.getByTestId('assets-pull')).toBeTruthy();
+
+    ahead = 0;
+    await rerender({ ...props, listing: listing(2) });
+    await waitFor(() => expect(screen.getByTestId('catalog-chip-papayapos').textContent).not.toContain('↑'));
+    expect(screen.getByTestId('assets-pull')).toBeTruthy();
+    expect(invoke.mock.calls.filter((c) => c[0] === 'catalog_repo_status_in')).toHaveLength(2);
+  });
   it('shows the work in progress instead of the last sync', () => {
     syncProgress.set({ plan_id: 'p', host_alias: 'oci', harness: 'claude', done: 2, total: 5 });
     render(AssetsFooter, { ...props, busy: 'apply' });
