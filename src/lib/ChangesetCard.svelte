@@ -73,6 +73,7 @@
   class:failed
   class:banner
   aria-label={card.summary}
+  aria-current={selected ? 'true' : undefined}
   data-row-key={key}
   data-testid={`card-${card.id}`}
   tabindex="0"

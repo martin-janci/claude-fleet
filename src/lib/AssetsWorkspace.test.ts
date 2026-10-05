@@ -105,6 +105,70 @@ describe('AssetsWorkspace', () => {
     expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['assets-sync']);
   });
 
+  it('a selected card whose verb is not on screen leaves Sync the primary, and ⌘↵ runs Sync', async () => {
+    const APPLIED: ChangesetSummary = { id: 9, kind: 'new', summary: 'Applied one', state: 'applied', undoable: true, created_at: 1, catalogs: ['personal'] };
+    withCards([NEW_CARD, NEW_VIEW], [APPLIED, { ...NEW_VIEW, id: 9, state: 'applied', undoable: true }]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    const mainPrimaries = () => Array.from(document.querySelectorAll('.main .btn--primary')).map((b) => b.getAttribute('data-testid'));
+    // An applied banner has no verb: Sync stays the primary.
+    await fireEvent.click(screen.getByTestId('card-9'));
+    expect(mainPrimaries()).toEqual(['assets-sync']);
+    // An open card in the Library (not on screen): Sync is the primary and ⌘↵ syncs.
+    await fireEvent.click(screen.getByTestId('card-7'));
+    expect(mainPrimaries()).toEqual(['card-primary-7']);
+    await fireEvent.click(screen.getByTestId('assets-rail-library'));
+    expect(mainPrimaries()).toEqual(['assets-sync']);
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'Enter', metaKey: true });
+    expect(h.onsync).toHaveBeenCalledWith({});
+    expect(cardCalls('catalog_apply_changeset')).toHaveLength(0);
+  });
+
+  it('a query that hides the selected card gives Sync its primary and ⌘↵ back', async () => {
+    withCards([NEW_CARD, NEW_VIEW]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    await fireEvent.click(screen.getByTestId('card-7'));
+    await fireEvent.input(screen.getByTestId('assets-query'), { target: { value: 'zzz-nothing' } });
+    expect(screen.queryByTestId('card-7')).toBeNull();
+    expect(Array.from(document.querySelectorAll('.main .btn--primary')).map((b) => b.getAttribute('data-testid'))).toEqual(['assets-sync']);
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'Enter', metaKey: true });
+    expect(h.onsync).toHaveBeenCalledWith({});
+    expect(cardCalls('catalog_apply_changeset')).toHaveLength(0);
+  });
+
+  it('a hub client granted personal only: a card on acme shows no verbs and i does nothing on it', async () => {
+    const ACME: ChangesetSummary = { ...NEW_CARD, catalogs: ['acme'] };
+    withCards([ACME, { ...NEW_VIEW, catalogs: ['acme'] }]);
+    answerCards([[ACME, NEW_VIEW]]);
+    hubStatus.set({ ...STANDALONE, remote: true, client_name: 'desk', client_mode: 'full' });
+    catalogStatuses.set([
+      { id: 1, name: 'personal', org_id: null, repo_path: '/p', remote_url: null, head_commit: 'a', last_loaded_at: 1, state: 'loaded', asset_count: 0, granted: ['desk'] },
+      { id: 2, name: 'acme', org_id: 1, repo_path: '/a', remote_url: null, head_commit: 'a', last_loaded_at: 1, state: 'loaded', asset_count: 0, granted: ['someone-else'] },
+    ]);
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    expect(screen.getByTestId('card-7')).toBeTruthy();
+    expect(screen.queryByTestId('card-primary-7')).toBeNull();
+    expect(screen.queryByTestId('card-dismiss-7')).toBeNull();
+    await fireEvent.click(screen.getByTestId('card-7'));
+    expect(screen.queryByTestId('card-skip-7-core')).toBeNull();
+    expect(screen.queryByTestId('card-reject-7-0')).toBeNull();
+    const list = screen.getByTestId('assets-list');
+    await fireEvent.keyDown(list, { key: 'i' });
+    await fireEvent.keyDown(list, { key: 'Enter', metaKey: true });
+    expect(cardCalls('catalog_reject_changeset_items')).toHaveLength(0);
+    expect(cardCalls('catalog_apply_changeset')).toHaveLength(0);
+    // The identity the card covers: neither i nor a acts through it.
+    await fireEvent.click(screen.getByTestId('inbox-row-identity:skill/fresh'));
+    await fireEvent.keyDown(list, { key: 'i' });
+    await fireEvent.keyDown(list, { key: 'a' });
+    expect(cardCalls('catalog_reject_changeset_items')).toHaveLength(0);
+    expect(cardCalls('catalog_apply_changeset')).toHaveLength(0);
+  });
+
   it('the Library holds the authoring controls and every asset once', async () => {
     const h = handlers();
     render(AssetsWorkspace, h);

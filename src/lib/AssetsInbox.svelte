@@ -7,7 +7,7 @@
   import type { AssetIdentity } from './assets';
   import { keepCard, SECTION_LABEL, type Inbox, type InboxRow, type InboxSection } from './assets_inbox';
   import { keep, type ParsedQuery } from './assets_query';
-  import { scopeBadge, type ChangesetView } from './assets_workspace';
+  import { scopeBadge, type ChangesetSummary, type ChangesetView } from './assets_workspace';
   import type { CardVerbs } from './card_actions';
 
   const NO_CARD_VERBS: CardVerbs = { apply: () => {}, dismiss: () => {}, undo: () => {}, synchost: () => {} };
@@ -28,6 +28,8 @@
     readonly = false,
     views = {},
     busy = false,
+    primaryId = null,
+    canActOn = () => true,
     oncard = NO_CARD_VERBS,
   }: {
     inbox: Inbox;
@@ -43,6 +45,10 @@
     views?: Record<number, ChangesetView>;
     /** A card verb is running: the cards' verbs are disabled. */
     busy?: boolean;
+    /** The card whose verb is the main column's one `.btn--primary`, if any. */
+    primaryId?: number | null;
+    /** Whether this window may act on a card (a grant on every catalog it names). */
+    canActOn?: (c: ChangesetSummary) => boolean;
     /** What the cards' verbs do. */
     oncard?: CardVerbs;
   } = $props();
@@ -106,9 +112,9 @@
       card={c}
       view={views[c.id] ?? null}
       selected={selectedKey === r.key}
-      readOnly={readonly}
+      readOnly={readonly || !canActOn(c)}
       {busy}
-      primary={selectedKey === r.key}
+      primary={primaryId === c.id}
       onselect={() => onselect(r.key)}
       onapply={(p) => oncard.apply(c.id, p)}
       ondismiss={() => oncard.dismiss(c.id)}

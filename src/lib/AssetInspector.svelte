@@ -37,6 +37,7 @@
     oncard,
     onreject,
     cardBusy = false,
+    cardWritable = () => true,
   }: {
     selectedKey: string | null;
     listing: AssetListing | null;
@@ -59,6 +60,8 @@
     onreject: (id: number, positions: number[]) => void;
     /** A card verb is running. */
     cardBusy?: boolean;
+    /** Whether this window may act on a card (a grant on every catalog it names). */
+    cardWritable?: (c: ChangesetSummary) => boolean;
   } = $props();
 
   type Tab = 'overview' | 'source' | 'hosts' | 'history' | 'items';
@@ -87,21 +90,26 @@
   const full = $derived(!!asset && !readOnly && catalogOf(asset) === 'personal' && canOpen(asset));
   // A card in full: an open one from the store (the workspace loads those);
   // an applied one — an Undo banner — is read once when it is selected.
-  let fetched = $state<ChangesetView | null>(null);
+  // It is keyed by the card's state as well as its id: an Undo changes the
+  // state, and the Inspector must not keep offering the Undo it just ran.
+  let fetched = $state<{ key: string; view: ChangesetView } | null>(null);
+  const cardKey = $derived(card ? `${card.id}:${card.state}:${card.applied_at ?? ''}` : '');
   $effect(() => {
     const c = card;
+    const key = cardKey;
     if (!c || isOpenCard(c) || $cardViews[c.id]) {
       untrack(() => (fetched = null));
       return;
     }
-    if (untrack(() => fetched?.id) === c.id) return;
+    if (untrack(() => fetched?.key) === key) return;
     let live = true;
     void getChangeset(c.id).then((r) => {
-      if (live && r.ok) fetched = r.value;
+      if (live && r.ok) fetched = { key, view: r.value };
     });
     return () => (live = false);
   });
-  const cardView = $derived(card ? ($cardViews[card.id] ?? (fetched?.id === card.id ? fetched : null)) : null);
+  const cardView = $derived(card ? ($cardViews[card.id] ?? (fetched?.key === cardKey ? fetched.view : null)) : null);
+  const cardRo = $derived(readOnly || (!!card && !cardWritable(card)));
   const tabs = $derived.by((): Tab[] => {
     if (cardView) return cardView.kind === 'rollout' ? ['items', 'hosts'] : ['items'];
     if (asset) return full ? ['overview', 'source', 'hosts', 'history'] : readOnly ? ['overview', 'hosts'] : ['overview', 'hosts', 'history'];
@@ -281,7 +289,7 @@
         {#if cardView.error}<p class="error" role="alert">Failed: {cardView.error}</p>{/if}
         <ChangesetDetail
           view={cardView}
-          {readOnly}
+          readOnly={cardRo}
           busy={cardBusy}
           onreject={(positions) => onreject(cardView.id, positions)}
           onapply={(positions) => oncard.apply(cardView.id, positions)}

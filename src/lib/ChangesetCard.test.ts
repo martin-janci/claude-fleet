@@ -47,6 +47,13 @@ describe('ChangesetCard', () => {
     expect(p.onselect).toHaveBeenCalled();
     expect(p.onapply).not.toHaveBeenCalled();
   });
+  it('marks the selected card in words for assistive tech, not colour alone', () => {
+    const { unmount } = render(ChangesetCard, props({ selected: true }));
+    expect(screen.getByTestId('card-7').getAttribute('aria-current')).toBe('true');
+    unmount();
+    render(ChangesetCard, props());
+    expect(screen.getByTestId('card-7').getAttribute('aria-current')).toBeNull();
+  });
   it('clicking the card selects it', async () => {
     const p = props();
     render(ChangesetCard, p);

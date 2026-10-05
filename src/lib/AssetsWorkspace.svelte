@@ -15,11 +15,11 @@
   import {
     blockedOnSecrets, canWrite, cardViews, catalogStatuses, changesetSummaries, keyOf, layerListing, layersByCatalog, loadAllLayers,
     loadChangesets, parseKey, PERSONAL,
-    type WorkspaceView,
+    type ChangesetSummary, type WorkspaceView,
   } from './assets_workspace';
   import { coveringNewCard, primaryVerb } from './assets_cards';
   import { runCardVerb, type CardVerbs } from './card_actions';
-  import { buildInbox, hostOrderOf, lastScanOf, sentence } from './assets_inbox';
+  import { buildInbox, hostOrderOf, keepCard, lastScanOf, sentence } from './assets_inbox';
   import { keep, parseQuery, type QueryRow } from './assets_query';
   import { isEditable } from './terminal_keys';
 
@@ -184,6 +184,19 @@
     synchost: (host) => onsync({ hostAlias: host }),
   };
   const selectedCard = $derived(selection?.type === 'card' ? (($changesetSummaries ?? []).find((c) => c.id === selection.id) ?? null) : null);
+  /** R20 per catalog: a card is actionable when this window may write every
+   *  catalog its apply commits to (a card naming none needs personal). */
+  const cardWritable = (c: ChangesetSummary) => (c.catalogs?.length ? c.catalogs : [PERSONAL]).every((cat) => canWrite(cat, ctx));
+  /** The selected card's verb is on screen and runnable: the main column's one
+   *  primary then, and the target of ⌘↵. Otherwise Sync fleet is. */
+  const cardPrimary = $derived(
+    !!selectedCard &&
+      !readOnly &&
+      view === 'inbox' &&
+      cardWritable(selectedCard) &&
+      primaryVerb(selectedCard, $cardViews[selectedCard.id] ?? null) !== null &&
+      keepCard(query, selectedCard),
+  );
   const pendingOf = (id: number): number[] => ($cardViews[id]?.items ?? []).filter((i) => i.state === 'pending').map((i) => i.position);
 
   // ── The keyboard (Rulings R22) ────────────────────────────────────────
@@ -232,7 +245,7 @@
       // it applies (a review verb only selects, so there is nothing to run),
       // else Sync fleet.
       if (readOnly) return;
-      if (selectedCard) {
+      if (selectedCard && cardPrimary) {
         const v = primaryVerb(selectedCard, $cardViews[selectedCard.id] ?? null);
         if (v?.apply && !anyBusy) {
           e.preventDefault();
@@ -275,7 +288,7 @@
         // rather than opening Import for the same copy.
         const covering = coveringNewCard($changesetSummaries, $cardViews, sel.kind, sel.name);
         if (covering) {
-          if (!anyBusy) {
+          if (!anyBusy && cardWritable(covering)) {
             e.preventDefault();
             cardVerbs.apply(covering.id, null);
           }
@@ -306,10 +319,11 @@
         // New card that covers the selected identity. A person's verdict:
         // it sticks until the content changes.
         if (readOnly || anyBusy) break;
-        const id =
-          sel?.type === 'card' ? sel.id
-          : sel?.type === 'identity' ? (coveringNewCard($changesetSummaries, $cardViews, sel.kind, sel.name)?.id ?? null)
+        const target =
+          sel?.type === 'card' ? (($changesetSummaries ?? []).find((c) => c.id === sel.id) ?? null)
+          : sel?.type === 'identity' ? coveringNewCard($changesetSummaries, $cardViews, sel.kind, sel.name)
           : null;
+        const id = target && cardWritable(target) ? target.id : null;
         const positions = id === null ? [] : pendingOf(id);
         if (id === null || !positions.length) break;
         e.preventDefault();
@@ -380,8 +394,8 @@
           >{busy === 'scan' ? 'Scanning…' : 'Rescan'}</button
         >
         {#if !readOnly}
-          <button type="button" class="btn" class:btn--primary={!selectedCard} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
-            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !selectedCard} <kbd>⌘↵</kbd>{/if}</button
+          <button type="button" class="btn" class:btn--primary={!cardPrimary} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
+            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary} <kbd>⌘↵</kbd>{/if}</button
           >
         {/if}
       </div>
@@ -422,6 +436,8 @@
           readonly={readOnly}
           views={$cardViews}
           busy={anyBusy}
+          primaryId={cardPrimary ? (selectedCard?.id ?? null) : null}
+          canActOn={cardWritable}
           oncard={cardVerbs}
           onselect={select}
           onimport={(i) => onimport(i)}
@@ -462,6 +478,7 @@
       oncard={cardVerbs}
       onreject={cardVerbs.reject}
       cardBusy={anyBusy}
+      {cardWritable}
       ondeleted={() => {
         selectedKey = null;
         ondeleted();

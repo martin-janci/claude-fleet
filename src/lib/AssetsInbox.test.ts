@@ -54,8 +54,20 @@ describe('AssetsInbox', () => {
     const { unmount } = render(AssetsInbox, props());
     expect(screen.getByTestId('card-primary-7')).not.toHaveClass('btn--primary');
     unmount();
-    render(AssetsInbox, props({ selectedKey: 'card:7' }));
+    render(AssetsInbox, props({ selectedKey: 'card:7', primaryId: 7 }));
     expect(screen.getByTestId('card-primary-7')).toHaveClass('btn--primary');
+  });
+
+  it('a selected card that is not the primary one stays plain', () => {
+    render(AssetsInbox, props({ selectedKey: 'card:7', primaryId: null }));
+    expect(screen.getByTestId('card-primary-7')).not.toHaveClass('btn--primary');
+  });
+
+  it('a card the client may not write shows no verbs (per-catalog grants)', () => {
+    render(AssetsInbox, props({ canActOn: () => false }));
+    expect(screen.getByTestId('card-7')).toBeTruthy();
+    expect(screen.queryByTestId('card-primary-7')).toBeNull();
+    expect(screen.queryByTestId('card-dismiss-7')).toBeNull();
   });
 
   it('an applied undoable card is listed under Recently applied', async () => {
@@ -138,6 +150,7 @@ describe('AssetsInbox — cards are filtered by free words and catalog only (T7 
     render(AssetsInbox, props({ onselect, selectedKey: 'card:7' }));
     const row = screen.getByTestId('card-7');
     expect(row).toHaveClass('selected');
+    expect(row.getAttribute('aria-current')).toBe('true');
     expect(row.getAttribute('data-row-key')).toBe('card:7');
     expect(row.getAttribute('tabindex')).toBe('0');
     await fireEvent.click(row);

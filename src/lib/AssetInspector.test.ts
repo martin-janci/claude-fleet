@@ -217,6 +217,24 @@ describe('AssetInspector', () => {
     expect(invoke).toHaveBeenCalledWith('catalog_get_changeset', { args: { id: 7 } });
   });
 
+  it('after Undo the Inspector re-reads the card and no longer offers Undo', async () => {
+    const applied: ChangesetView = { ...view7, state: 'applied', undoable: true, commits: { personal: 'abcdef12' } };
+    let current: ChangesetView = applied;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_get_changeset') return current;
+      throw { code: 'E_TEST', message: cmd };
+    });
+    const oncard = { apply: vi.fn(), dismiss: vi.fn(), undo: vi.fn(), synchost: vi.fn() };
+    const card = { ...base.cards[0], state: 'applied' as const, undoable: true, applied_at: 5 };
+    const { rerender } = render(AssetInspector, { ...base, oncard, cards: [card], selectedKey: 'card:7' });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(oncard.undo).toHaveBeenCalledWith(7);
+    // The workspace reloads the cards: the card is now undone.
+    current = { ...applied, state: 'undone', undoable: false };
+    await rerender({ ...base, oncard, cards: [{ ...card, state: 'undone' as const, undoable: false }], selectedKey: 'card:7' });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull());
+  });
+
   it('opens a just-created asset straight into Source, editing', async () => {
     render(AssetInspector, { ...base, selectedKey: 'asset:personal:skill/w', autoEditKey: 'asset:personal:skill/w' });
     expect(screen.getByTestId('inspector-tab-source').getAttribute('aria-selected')).toBe('true');
