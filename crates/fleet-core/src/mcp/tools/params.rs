@@ -1081,7 +1081,7 @@ pub struct CatalogAdminParams {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ChangesetsParams {
-    /// list|propose|apply|undo|dismiss|reject_item
+    /// list|propose|propose_layer|apply|undo|dismiss|reject_item
     pub action: String,
     /// The card: list shows it in full; apply|undo|dismiss|reject_item need it.
     #[serde(default)]
@@ -1093,6 +1093,9 @@ pub struct ChangesetsParams {
     /// apply of a rollout or restore: nonce of an approved E_CONFIRM_REQUIRED.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
+    /// propose_layer: {op: create|rename|move, catalog?, layer, to?, member?, axis?, description?, members?}.
+    #[serde(default)]
+    pub change: Option<crate::service::catalog::changesets::LayerChange>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema, Default)]

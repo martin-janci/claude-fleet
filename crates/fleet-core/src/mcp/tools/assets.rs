@@ -313,9 +313,10 @@ impl FleetTools {
 
     #[tool(description = "Changeset cards that adopt, sync and fix assets: \
         list (one in full with id), propose (rebuild from the last scan), \
-        apply (positions picks items; a drift card takes one), undo (the \
-        latest applied card per catalog), dismiss, reject_item. Mutating \
-        actions need a grant on every catalog the card names.")]
+        propose_layer (a layer change as a card), apply (positions picks \
+        items; a drift card takes one), undo (the latest applied card per \
+        catalog), dismiss, reject_item. Mutating actions need a grant on \
+        every catalog the card names.")]
     pub(super) async fn changesets(
         &self,
         Extension(caller): Extension<Caller>,
@@ -351,6 +352,22 @@ impl FleetTools {
                 }
                 catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
                 ok_json_compact(&cs::propose(&self.store).await.map_err(to_mcp_err)?)
+            }
+            "propose_layer" => {
+                let change = p.change.ok_or_else(|| {
+                    mcp_err(codes::E_INVALID, "propose_layer needs a change", None)
+                })?;
+                // Assets M6 (R5): a grant on the catalog the change names
+                // (an unknown name is "no" for a client, R22).
+                let name = change.catalog().to_string();
+                if !may_admin_catalog(&caller, &self.store, &name)? {
+                    return Err(changesets_forbidden("propose_layer", Some(&name), &caller));
+                }
+                ok_json(
+                    &cs::propose_layer(change, &self.store)
+                        .await
+                        .map_err(to_mcp_err)?,
+                )
             }
             "apply" | "undo" | "dismiss" | "reject_item" => {
                 let id = p.id.ok_or_else(|| {
@@ -442,7 +459,7 @@ impl FleetTools {
                 codes::E_INVALID,
                 format!(
                     "unknown changesets action {other}: \
-                     list|propose|apply|undo|dismiss|reject_item"
+                     list|propose|propose_layer|apply|undo|dismiss|reject_item"
                 ),
                 None,
             )),

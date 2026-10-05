@@ -127,6 +127,13 @@ pub fn subject_of<'a>(kind: CardKind, items: impl IntoIterator<Item = SubjectIte
                 groups.into_iter().collect::<Vec<_>>().join(",")
             )
         }
+        // Assets M6 (R5): no rule proposes a layer card and the pass never
+        // matches one by subject (`reconcile::write`), so any stable string
+        // will do.
+        CardKind::Layer => match items.next() {
+            Some(i) => format!("layer:{}:{}/{}", i.catalog_id.unwrap_or(0), i.grp, i.name),
+            None => "layer:".to_string(),
+        },
     }
 }
 

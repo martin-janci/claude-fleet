@@ -829,6 +829,10 @@ async fn run_steps(
             .map_err(|e| fail(item, e))?;
     }
 
+    // 2d. Layer cards (Assets M6, R5): create / rename / move, every path
+    //     claimed before it is written or deleted.
+    let renames = apply_layer_items(selected, rows, progress)?;
+
     // 3. host_layers: append this card's contexts, keeping each host's role
     //    and the order of what it had. A layer the checkout does not define
     //    (its imports were rejected or deselected) is never assigned.
@@ -889,6 +893,41 @@ async fn run_steps(
             s.set_host_layers_for(&host, cid, role.as_deref(), &ctx)
                 .map_err(|e| fail_in(&group, e.into()))?;
         }
+        // Assets M6 (R5): a renamed layer's rows follow it. Only active rows
+        // are read and written back — `set_host_layers_for` rewrites the
+        // host's rows in that catalog, as the assignments above do, and
+        // nothing writes an inactive row; a host whose only row naming the
+        // old layer is inactive is left as it is. Step 1's snapshot covers
+        // this catalog, so a failure or an undo puts the rows back.
+        for (cid, old, new) in &renames {
+            let hosts: BTreeSet<String> = s
+                .list_all_host_layers()
+                .map_err(|e| fail_in(old, e.into()))?
+                .into_iter()
+                .filter(|r| r.active && r.catalog_id == *cid && &r.layer_name == old)
+                .map(|r| r.host_alias)
+                .collect();
+            for host in hosts {
+                let current = s
+                    .get_host_layers_for(&host, *cid)
+                    .map_err(|e| fail_in(old, e.into()))?;
+                let swap = |n: &str| if n == old { new.clone() } else { n.to_string() };
+                let role = current
+                    .iter()
+                    .find(|r| r.axis == "role")
+                    .map(|r| swap(&r.layer_name));
+                let mut contexts: Vec<String> = Vec::new();
+                for r in current.iter().filter(|r| r.axis == "context") {
+                    let name = swap(&r.layer_name);
+                    if role.as_ref() != Some(&name) && !contexts.contains(&name) {
+                        contexts.push(name);
+                    }
+                }
+                let ctx: Vec<&str> = contexts.iter().map(String::as_str).collect();
+                s.set_host_layers_for(&host, *cid, role.as_deref(), &ctx)
+                    .map_err(|e| fail_in(old, e.into()))?;
+            }
+        }
     }
 
     // 4. One commit per touched catalog (`fleet: <card summary>`), of the
@@ -922,6 +961,229 @@ async fn run_steps(
         }
     }
     Ok(())
+}
+
+/// A rename step 3 applies to host_layers: (catalog id, old name, new name).
+type Rename = (i64, String, String);
+
+/// What one layer item does to its catalog's checkout: files to write
+/// (path, content) and to delete, and the rename step 3 carries to
+/// host_layers.
+#[derive(Debug, Default)]
+struct LayerEdits {
+    writes: Vec<(String, String)>,
+    deletes: Vec<String>,
+    rename: Option<(String, String)>,
+}
+
+fn is_layer_action(action: &str) -> bool {
+    [
+        ItemAction::CreateLayer,
+        ItemAction::RenameLayer,
+        ItemAction::MoveMember,
+    ]
+    .iter()
+    .any(|a| a.as_str() == action)
+}
+
+fn layer_rel(name: &str) -> String {
+    format!("layers/{name}.yaml")
+}
+
+/// Whether anything — a file, a directory, a symlink, even a dangling one —
+/// is at `rel`.
+fn occupied(root: &Path, rel: &str) -> bool {
+    std::fs::symlink_metadata(root.join(rel)).is_ok()
+}
+
+/// `layers/<name>.yaml` as the checkout has it — a file a layer card will
+/// rewrite or delete, so never a symlink (a write would land wherever it
+/// points).
+fn read_layer_file(root: &Path, name: &str) -> Result<Layer, IpcError> {
+    let rel = layer_rel(name);
+    if std::fs::symlink_metadata(root.join(&rel)).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!("{rel} is a symlink; a card never writes through one"),
+        ));
+    }
+    let text = std::fs::read_to_string(root.join(&rel)).map_err(|_| {
+        IpcError::new(
+            codes::E_INVALID_STATE,
+            format!("no layer {name} in this catalog"),
+        )
+    })?;
+    Layer::from_yaml(&text).map_err(|e| IpcError::new(E_CATALOG_PARSE, format!("{rel}: {e}")))
+}
+
+/// A layer as its file will read, checked first: a layer that fails
+/// `validate` would be dropped at the next load.
+fn layer_yaml(l: &Layer) -> Result<String, IpcError> {
+    l.validate()
+        .map_err(|e| IpcError::new(codes::E_INVALID, e))?;
+    Ok(l.to_yaml())
+}
+
+/// What `item` (a layer card's one item) writes and deletes in `row`'s
+/// checkout at `root`. Reads only: every file it needs is read and every
+/// result checked before step 2d changes anything. Names are checked again
+/// here — they come from the store, and become paths.
+fn layer_edits(
+    item: &ChangesetItemRow,
+    row: &CatalogRow,
+    root: &Path,
+) -> Result<LayerEdits, IpcError> {
+    let p = ItemParams::parse(item.params.as_deref());
+    let already = |name: &str| {
+        IpcError::new(
+            codes::E_INVALID_STATE,
+            format!("catalog {} already has a layer {name}", row.name),
+        )
+    };
+    let mut edits = LayerEdits::default();
+    match item.action.as_str() {
+        a if a == ItemAction::CreateLayer.as_str() => {
+            check_layer_name(&item.name)?;
+            if occupied(root, &layer_rel(&item.name)) {
+                return Err(already(&item.name));
+            }
+            let axis = super::layers::parse_axis(p.axis.as_deref())?;
+            let l = super::layers::new_layer(&item.name, axis, p.description, p.members)?;
+            edits.writes.push((layer_rel(&item.name), layer_yaml(&l)?));
+        }
+        a if a == ItemAction::RenameLayer.as_str() => {
+            let old = item.name.as_str();
+            let to =
+                p.to.ok_or_else(|| IpcError::new(codes::E_INVALID, "rename names no target"))?;
+            check_layer_name(old)?;
+            check_layer_name(&to)?;
+            if old == to {
+                return Err(already(&to));
+            }
+            if occupied(root, &layer_rel(&to)) {
+                return Err(already(&to));
+            }
+            let mut l = read_layer_file(root, old)?;
+            l.name = to.clone();
+            edits.writes.push((layer_rel(&to), layer_yaml(&l)?));
+            edits.deletes.push(layer_rel(old));
+            // Its children in this catalog extend it by name: each one
+            // follows, or the next load would drop it as extending an
+            // unknown layer.
+            let mut stems: Vec<String> = Vec::new();
+            for entry in std::fs::read_dir(root.join("layers"))? {
+                let path = entry?.path();
+                if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                    continue;
+                }
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if stem != old {
+                        stems.push(stem.to_string());
+                    }
+                }
+            }
+            stems.sort();
+            for stem in stems {
+                let mut child = read_layer_file(root, &stem)?;
+                if child.extends.as_deref() == Some(old) {
+                    child.extends = Some(to.clone());
+                    edits.writes.push((layer_rel(&stem), layer_yaml(&child)?));
+                }
+            }
+            edits.rename = Some((old.to_string(), to));
+        }
+        a if a == ItemAction::MoveMember.as_str() => {
+            let (Some(member), Some(from), Some(to)) = (p.member, p.layer, p.to) else {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "move names no member, layer or target",
+                ));
+            };
+            check_layer_name(&from)?;
+            check_layer_name(&to)?;
+            if from == to {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("layer {to} already has {member}"),
+                ));
+            }
+            let mut a = read_layer_file(root, &from)?;
+            let mut b = read_layer_file(root, &to)?;
+            if !a.members.contains(&member) {
+                return Err(IpcError::new(
+                    codes::E_INVALID_STATE,
+                    format!("layer {from} no longer has {member}"),
+                ));
+            }
+            a.members.retain(|m| m != &member);
+            if !b.members.contains(&member) {
+                b.members.push(member);
+            }
+            edits.writes.push((layer_rel(&from), layer_yaml(&a)?));
+            edits.writes.push((layer_rel(&to), layer_yaml(&b)?));
+        }
+        other => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("{other} is not a layer action"),
+            ))
+        }
+    }
+    Ok(edits)
+}
+
+/// Step 2d (Assets M6, R5): each selected layer item's files. Every path is
+/// claimed (`Progress::claim`) before the item writes or deletes anything,
+/// so a file someone changed stops the item before its first change; then
+/// the writes, then the deletes. Answers the renames for step 3.
+fn apply_layer_items(
+    selected: &[&ChangesetItemRow],
+    rows: &[CatalogRow],
+    progress: &mut Progress,
+) -> Result<Vec<Rename>, Failure> {
+    let mut renames = Vec::new();
+    for &item in selected.iter().filter(|i| is_layer_action(&i.action)) {
+        let row = item
+            .catalog_id
+            .and_then(|id| rows.iter().find(|r| r.id == id))
+            .ok_or_else(|| {
+                fail(
+                    item,
+                    IpcError::new(
+                        codes::E_INVALID_STATE,
+                        format!("item {} names no catalog", item.position),
+                    ),
+                )
+            })?;
+        let root = Path::new(&row.repo_path);
+        let edits = layer_edits(item, row, root).map_err(|e| fail(item, e))?;
+        for rel in edits
+            .writes
+            .iter()
+            .map(|(rel, _)| rel)
+            .chain(&edits.deletes)
+        {
+            progress
+                .claim(row.id, root, rel)
+                .map_err(|e| fail(item, e))?;
+        }
+        for (rel, yaml) in &edits.writes {
+            progress
+                .write_file(row.id, root, rel, yaml.as_bytes())
+                .map_err(|e| fail(item, e))?;
+        }
+        for rel in &edits.deletes {
+            match std::fs::remove_file(root.join(rel)) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(fail(item, e.into())),
+            }
+        }
+        if let Some((old, new)) = edits.rename {
+            renames.push((row.id, old, new));
+        }
+    }
+    Ok(renames)
 }
 
 /// Task 4 review M2: the selected "needs a look" imports bound for personal
@@ -2546,8 +2808,6 @@ mod tests {
     use crate::service::catalog::changesets::testkit::*;
     use crate::service::catalog::lock_registry_for_test;
 
-    const DESC: &str = "A reasonably long description here.";
-
     /// The `changesets` tool (Task 9) awaits `apply` inside an MCP handler,
     /// which must be `Send`: no store guard lives across an await.
     #[test]
@@ -3371,31 +3631,6 @@ mod tests {
         );
     }
 
-    fn new_card(f: &Fleet, items: &[NewChangesetItem]) -> i64 {
-        f.store
-            .lock()
-            .unwrap()
-            .insert_changeset("new", "New", items)
-            .unwrap()
-            .id
-    }
-
-    async fn apply_all(
-        f: &Fleet,
-        id: i64,
-        ssh: &Arc<SshClient>,
-    ) -> Result<ChangesetView, IpcError> {
-        apply(
-            ApplyArgs {
-                id,
-                positions: None,
-            },
-            &f.store,
-            ssh,
-        )
-        .await
-    }
-
     /// PF7 guard (a): a file another process drops into the checkout while
     /// the apply runs is neither committed with the card nor removed.
     #[tokio::test]
@@ -4042,10 +4277,6 @@ mod tests {
             .id
     }
 
-    fn skill_yaml(name: &str) -> String {
-        format!("kind: skill\nname: {name}\ndescription: {DESC}\n")
-    }
-
     fn item_states(v: &ChangesetView) -> Vec<&str> {
         v.items.iter().map(|i| i.state.as_str()).collect()
     }
@@ -4278,31 +4509,6 @@ mod tests {
             .map(|r| r.id)
     }
 
-    /// A store with `w` in layer `core`, assigned to every host in `hosts`.
-    fn fleet_with_core(hosts: &[&str]) -> Fleet {
-        let f = Fleet::new(hosts);
-        let p = f.personal.id;
-        f.commit_files(
-            &f.personal_root,
-            p,
-            &[
-                ("skills/w/asset.yaml", skill_yaml("w").as_str()),
-                ("skills/w/body.md", "Steps.\n"),
-                (
-                    "layers/core.yaml",
-                    "kind: layer\nname: core\naxis: context\nmembers:\n- skill/w\n",
-                ),
-            ],
-        );
-        {
-            let s = f.store.lock().unwrap();
-            for h in hosts {
-                s.set_host_layers_for(h, p, None, &["core"]).unwrap();
-            }
-        }
-        f
-    }
-
     /// I1: a Rollout whose narrowed plan is empty (the host already has
     /// everything) is applied — the host counts as done — without applying
     /// anything: no sync_runs row.
@@ -4325,34 +4531,6 @@ mod tests {
         assert_eq!(v.state, "applied", "{:?}", v.error);
         assert_eq!(item_states(&v), ["applied"]);
         assert_eq!(last_run(&f), runs, "nothing applied, nothing recorded");
-    }
-
-    /// A person's own sync of everything planned for `oci` — no card, so no
-    /// layer counts as rolled out by it.
-    async fn person_syncs_oci(f: &Fleet, ssh: &Arc<SshClient>) {
-        let planned = sync::plan_sync(
-            PlanArgs {
-                host_alias: Some("oci".into()),
-                allow_unlayered: true,
-                ..Default::default()
-            },
-            &f.store,
-            ssh,
-        )
-        .await
-        .unwrap();
-        sync::apply_sync_with(
-            SyncApplyArgs {
-                plan_id: planned.id,
-                force_partial: false,
-                call_id: None,
-            },
-            &f.store,
-            ssh,
-            CancellationToken::new(),
-        )
-        .await
-        .unwrap();
     }
 
     /// Assets M5 fix round 1 (6): a copy fleet wrote and nobody touched,
@@ -5329,5 +5507,331 @@ mod tests {
         assert!(installed.is_file(), "SB6 ran detached and put w back");
         // Let the detached task finish before the registry guard drops.
         let _done = APPLY_LOCK.lock().await;
+    }
+
+    // ── Assets M6 (R5): layer cards ──────────────────────────────────────
+
+    use crate::service::catalog::changesets::{propose_layer, LayerChange};
+
+    async fn propose_and_apply(
+        f: &Fleet,
+        change: LayerChange,
+        ssh: &Arc<SshClient>,
+    ) -> ChangesetView {
+        let v = propose_layer(change, &f.store).await.unwrap();
+        apply_all(f, v.id, ssh).await.unwrap()
+    }
+
+    fn layer_in(f: &Fleet, name: &str) -> Layer {
+        let text =
+            std::fs::read_to_string(f.personal_root.join(format!("layers/{name}.yaml"))).unwrap();
+        Layer::from_yaml(&text).unwrap()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_create_layer_card_commits_the_layer_file_and_undoes() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let v = propose_and_apply(
+            &f,
+            LayerChange::Create {
+                catalog: None,
+                layer: "servers".into(),
+                axis: None,
+                description: Some("On the servers".into()),
+                members: vec!["skill/w".into()],
+            },
+            &ssh,
+        )
+        .await;
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert!(v.undoable);
+        let file = f.personal_root.join("layers/servers.yaml");
+        let l = layer_in(&f, "servers");
+        assert_eq!(
+            (l.axis, l.members.clone(), l.description.as_str()),
+            (Axis::Context, vec!["skill/w".to_string()], "On the servers")
+        );
+        assert_eq!(
+            subjects(&f.personal_root)[0],
+            "fleet: New layer servers in personal"
+        );
+        let u = crate::service::catalog::changesets::undo::undo(v.id, &f.store)
+            .await
+            .unwrap();
+        assert_eq!(u.state, "undone");
+        assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rename_layer_card_renames_the_file_its_children_and_host_layers() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[(
+                "layers/server.yaml",
+                "kind: layer\nname: server\naxis: role\n",
+            )],
+        );
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[(
+                "layers/edge.yaml",
+                "kind: layer\nname: edge\naxis: role\nextends: server\n",
+            )],
+        );
+        f.store
+            .lock()
+            .unwrap()
+            .set_host_layers_for("oci", p, Some("server"), &["core"])
+            .unwrap();
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let v = propose_and_apply(
+            &f,
+            LayerChange::Rename {
+                catalog: None,
+                layer: "server".into(),
+                to: "servers".into(),
+            },
+            &ssh,
+        )
+        .await;
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert!(!f.personal_root.join("layers/server.yaml").exists());
+        assert_eq!(layer_in(&f, "servers").name, "servers");
+        assert_eq!(layer_in(&f, "edge").extends.as_deref(), Some("servers"));
+        assert_eq!(v.commits.len(), 1, "one commit");
+        assert!(repo::is_clean(&f.personal_root).unwrap(), "all committed");
+        let rows = f
+            .store
+            .lock()
+            .unwrap()
+            .get_host_layers_for("oci", p)
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| r.axis == "role" && r.layer_name == "servers"));
+        assert!(rows
+            .iter()
+            .any(|r| r.axis == "context" && r.layer_name == "core"));
+        // Undo puts back the files and the host's role.
+        let u = crate::service::catalog::changesets::undo::undo(v.id, &f.store)
+            .await
+            .unwrap();
+        assert_eq!(u.state, "undone");
+        assert!(f.personal_root.join("layers/server.yaml").exists());
+        assert!(!f.personal_root.join("layers/servers.yaml").exists());
+        assert_eq!(layer_in(&f, "edge").extends.as_deref(), Some("server"));
+        let rows = f
+            .store
+            .lock()
+            .unwrap()
+            .get_host_layers_for("oci", p)
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|r| r.axis == "role" && r.layer_name == "server"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_move_member_card_moves_it_in_one_commit() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        f.add_layer("extra", &[]);
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let v = propose_and_apply(
+            &f,
+            LayerChange::Move {
+                catalog: None,
+                member: "skill/w".into(),
+                layer: "core".into(),
+                to: "extra".into(),
+            },
+            &ssh,
+        )
+        .await;
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert!(layer_in(&f, "core").members.is_empty());
+        assert_eq!(layer_in(&f, "extra").members, vec!["skill/w".to_string()]);
+        assert_eq!(v.commits.len(), 1);
+        assert_eq!(
+            subjects(&f.personal_root)[0],
+            "fleet: Move skill/w from core to extra in personal"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_layer_card_never_deletes_a_file_someone_changed() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let v = propose_layer(
+            LayerChange::Rename {
+                catalog: None,
+                layer: "core".into(),
+                to: "base".into(),
+            },
+            &f.store,
+        )
+        .await
+        .unwrap();
+        let before = head(&f.personal_root);
+        // An uncommitted edit makes the checkout dirty: refused before
+        // anything changes.
+        std::fs::write(
+            f.personal_root.join("layers/core.yaml"),
+            "kind: layer\nname: core\naxis: context\n# mine\n",
+        )
+        .unwrap();
+        let e = apply_all(&f, v.id, &ssh).await.unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID_STATE);
+        assert!(
+            std::fs::read_to_string(f.personal_root.join("layers/core.yaml"))
+                .unwrap()
+                .contains("# mine")
+        );
+        assert!(!f.personal_root.join("layers/base.yaml").exists());
+        assert_eq!(head(&f.personal_root), before);
+        let rows = f
+            .store
+            .lock()
+            .unwrap()
+            .get_host_layers_for("oci", f.personal.id)
+            .unwrap();
+        assert!(rows.iter().any(|r| r.layer_name == "core"));
+    }
+
+    /// R12 for a layer card: a rename that cannot read one of the
+    /// catalog's layer files fails before it writes or deletes anything, and
+    /// the checkout and host_layers stay exactly as they were.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rename_that_cannot_read_a_layer_file_fails_and_changes_nothing() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        // No axis: the catalog loads (it is a problem, not an error), but
+        // the rename cannot tell whether it extends `core`.
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[("layers/broken.yaml", "kind: layer\nname: broken\n")],
+        );
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let v = propose_layer(
+            LayerChange::Rename {
+                catalog: None,
+                layer: "core".into(),
+                to: "base".into(),
+            },
+            &f.store,
+        )
+        .await
+        .unwrap();
+        let before = head(&f.personal_root);
+        let layers_before = f.store.lock().unwrap().list_all_host_layers().unwrap();
+        let e = apply_all(&f, v.id, &ssh).await.unwrap_err();
+        assert!(e.message.contains("layers/broken.yaml"), "{}", e.message);
+        assert!(f.personal_root.join("layers/core.yaml").is_file());
+        assert!(!f.personal_root.join("layers/base.yaml").exists());
+        assert!(repo::is_clean(&f.personal_root).unwrap());
+        assert_eq!(head(&f.personal_root), before);
+        let s = f.store.lock().unwrap();
+        assert_eq!(s.list_all_host_layers().unwrap(), layers_before);
+        let card = s.get_changeset(v.id).unwrap().unwrap();
+        assert_eq!(card.state, "failed");
+    }
+
+    /// PF7 for a layer card: every path it writes or deletes is claimed
+    /// before the first change, so a child layer someone edited meanwhile
+    /// (a writer APPLY_LOCK cannot see) stops the rename before it writes
+    /// the new file or deletes the old one; the edit is never written over,
+    /// and the failed card resets nothing over it.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rename_never_writes_over_a_child_someone_edited() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[(
+                "layers/edge.yaml",
+                "kind: layer\nname: edge\naxis: context\nextends: core\n",
+            )],
+        );
+        let v = propose_layer(
+            LayerChange::Rename {
+                catalog: None,
+                layer: "core".into(),
+                to: "base".into(),
+            },
+            &f.store,
+        )
+        .await
+        .unwrap();
+        let before = head(&f.personal_root);
+        let layers_before = f.store.lock().unwrap().list_all_host_layers().unwrap();
+        // Step 2d as `run_steps` calls it, after the clean-checkout check —
+        // with the edit landing in between.
+        let mut progress = Progress {
+            pre: BTreeMap::from([(p, before.clone())]),
+            ..Default::default()
+        };
+        let edge = f.personal_root.join("layers/edge.yaml");
+        let mine = "kind: layer\nname: edge\naxis: context\nextends: core\n# mine\n";
+        std::fs::write(&edge, mine).unwrap();
+        let (card, items) = super::super::card(v.id, &f.store).unwrap();
+        let selected: Vec<&ChangesetItemRow> = items.iter().collect();
+        let rows = vec![f.personal.clone()];
+        let failure = match apply_layer_items(&selected, &rows, &mut progress) {
+            Ok(_) => panic!("the rename went ahead over an edited child"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.error.code, codes::E_INVALID_STATE);
+        assert!(
+            failure.error.message.contains("layers/edge.yaml"),
+            "{}",
+            failure.error.message
+        );
+        assert!(f.personal_root.join("layers/core.yaml").is_file());
+        assert!(!f.personal_root.join("layers/base.yaml").exists());
+        let e = fail_card(
+            &card,
+            &items,
+            &rows,
+            &progress.pre.clone(),
+            &progress,
+            &layers_before,
+            failure,
+            &f.store,
+        );
+        assert!(
+            e.message.contains("manual cleanup needed in personal"),
+            "{}",
+            e.message
+        );
+        assert_eq!(std::fs::read_to_string(&edge).unwrap(), mine);
+        assert!(f.personal_root.join("layers/core.yaml").is_file());
+        assert!(!f.personal_root.join("layers/base.yaml").exists());
+        assert_eq!(head(&f.personal_root), before, "nothing committed");
+        let s = f.store.lock().unwrap();
+        assert_eq!(s.list_all_host_layers().unwrap(), layers_before);
+        assert_eq!(s.get_changeset(v.id).unwrap().unwrap().state, "failed");
     }
 }

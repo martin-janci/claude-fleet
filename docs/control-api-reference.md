@@ -55,9 +55,9 @@ Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 
 ### `changesets`
 
-Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
+Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), propose_layer (a layer change as a card), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
 
-Parameters: `action`, `confirm_nonce`, `id`, `positions`
+Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
 
 ### `decide_setting_proposals`
 

@@ -4,11 +4,14 @@
 //! *Changesets (the cards)*. The rows are `store::changesets`.
 
 pub mod apply;
+mod layers;
 pub mod reconcile;
 pub mod rules;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod undo;
+
+pub use layers::{propose_layer, LayerChange};
 
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
@@ -54,14 +57,18 @@ pub enum CardKind {
     New,
     Drift,
     Rollout,
+    /// Assets M6 (R5): a person's create / rename / move-member change to a
+    /// catalog's layers.
+    Layer,
 }
 
 impl CardKind {
-    pub const ALL: [CardKind; 4] = [
+    pub const ALL: [CardKind; 5] = [
         CardKind::Bootstrap,
         CardKind::New,
         CardKind::Drift,
         CardKind::Rollout,
+        CardKind::Layer,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -70,6 +77,7 @@ impl CardKind {
             CardKind::New => "new",
             CardKind::Drift => "drift",
             CardKind::Rollout => "rollout",
+            CardKind::Layer => "layer",
         }
     }
 
@@ -89,6 +97,10 @@ pub enum ItemAction {
     TakeHost,
     Restore,
     Sync,
+    /// Assets M6 (R5): a layer card's three actions.
+    CreateLayer,
+    RenameLayer,
+    MoveMember,
 }
 
 impl ItemAction {
@@ -101,6 +113,9 @@ impl ItemAction {
             ItemAction::TakeHost => "take_host",
             ItemAction::Restore => "restore",
             ItemAction::Sync => "sync",
+            ItemAction::CreateLayer => "create_layer",
+            ItemAction::RenameLayer => "rename_layer",
+            ItemAction::MoveMember => "move_member",
         }
     }
 }
@@ -131,7 +146,9 @@ impl Decider {
 /// reads the ones it needs: import `from_host`, `layer`, `member`, `hash`,
 /// `reason`; assign_layer `host`, `layer`, `axis`; set_scope `scope`,
 /// `member`; hide `hash`, `reason`; take_host/restore `host`, `hash`,
-/// `harness`; sync `layer`, `assets`, `hash`.
+/// `harness`; sync `layer`, `assets`, `hash`; create_layer `axis`,
+/// `description`, `members`; rename_layer `to`; move_member `member`,
+/// `layer` (the one it leaves), `to`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -158,6 +175,15 @@ pub struct ItemParams {
     /// copy only. `None` = `claude` (the drift rule reads claude rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// Assets M6 (R5): rename_layer / move_member — the target layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// create_layer — its first members (`<kind>/<name>`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<String>,
+    /// create_layer — its description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl ItemParams {
@@ -438,7 +464,7 @@ pub fn writes_hosts(card: &ChangesetRow, selected: &[&ChangesetItemRow]) -> bool
 }
 
 /// A card that changed a catalog, so can be undone (R20): bootstrap, new,
-/// and a drift applied as take_host — and only when an applied item names a
+/// layer (Assets M6, R5), and a drift applied as take_host — and only when an applied item names a
 /// catalog. A hide-only card committed nothing, so there is nothing to undo
 /// (PF12).
 pub(crate) fn changes_catalog(card: &ChangesetRow, items: &[ChangesetItemRow]) -> bool {
@@ -446,7 +472,7 @@ pub(crate) fn changes_catalog(card: &ChangesetRow, items: &[ChangesetItemRow]) -
         return false;
     }
     match card.kind.as_str() {
-        "bootstrap" | "new" => true,
+        "bootstrap" | "new" | "layer" => true,
         "drift" => items
             .iter()
             .any(|i| i.action == ItemAction::TakeHost.as_str() && i.state == "applied"),

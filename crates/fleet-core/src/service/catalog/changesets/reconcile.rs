@@ -243,7 +243,8 @@ fn proposals(f: &PassFacts, auto: bool) -> (Vec<AssetIdentity>, Vec<ProposedCard
 
 /// The writes, under one fresh guard: automatic hides (auto on), then each
 /// proposed card inserted or refreshed in place, then the open cards no
-/// proposal named withdrawn (never a rollout, never one with applied items).
+/// proposal named withdrawn (never a rollout, never a person's layer card,
+/// never one with applied items).
 fn write(
     store: &Mutex<Store>,
     f: &PassFacts,
@@ -283,7 +284,13 @@ fn write(
     // duplicate — which the pass itself never creates — leaves the newest
     // card in charge and is logged; the older one is left as it is.
     let mut by_subject: BTreeMap<String, &OpenCard> = BTreeMap::new();
-    for o in &f.open {
+    // Assets M6 (R5): a person's layer card has no rule subject; only a
+    // person dismisses it, so it is never refreshed or withdrawn here.
+    for o in f
+        .open
+        .iter()
+        .filter(|o| o.0.kind != CardKind::Layer.as_str())
+    {
         let subject = subject_of_row(&o.0, &o.1);
         if let Some(kept) = by_subject.get(&subject) {
             tracing::warn!(
@@ -1208,5 +1215,33 @@ mod tests {
                 .is_none(),
             "pruned by the pass"
         );
+    }
+
+    /// Assets M6 (R5): a person's layer card has no rule subject, so no
+    /// pass ever withdraws it; only a person dismisses it.
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn the_pass_never_withdraws_a_persons_layer_card() {
+        use crate::service::catalog::changesets::testkit::fleet_with_core;
+        use crate::service::catalog::changesets::{propose_layer, LayerChange};
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let v = propose_layer(
+            LayerChange::Create {
+                catalog: None,
+                layer: "servers".into(),
+                axis: None,
+                description: None,
+                members: vec![],
+            },
+            &f.store,
+        )
+        .await
+        .unwrap();
+        reconcile(&f.store, true).unwrap();
+        reconcile(&f.store, true).unwrap();
+        let after = crate::service::catalog::changesets::get(v.id, &f.store).unwrap();
+        assert_eq!(after.state, "proposed", "{:?}", after.error);
     }
 }
