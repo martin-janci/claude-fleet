@@ -4,8 +4,21 @@
 //!
 //! PF8: everything but [`item`] is reachable only from `#[cfg(unix)]` tests
 //! (the fake `ssh` is a shell script), so it is gated the same way.
+//!
+//! Assets M6 (Task 3): the card fixtures the apply, layer and reconcile
+//! tests share — [`fleet_with_core`], [`new_card`], [`apply_all`],
+//! [`skill_yaml`], [`person_syncs_oci`] — live here, not in one module's
+//! tests.
 
+#[cfg(unix)]
+use super::apply::{apply, ApplyArgs};
+#[cfg(unix)]
+use super::ChangesetView;
 use super::{ItemAction, ItemParams};
+#[cfg(unix)]
+use crate::ipc_error::IpcError;
+#[cfg(unix)]
+use crate::service::catalog::sync::{self, ApplyArgs as SyncApplyArgs, PlanArgs};
 #[cfg(unix)]
 use crate::ssh::SshClient;
 use crate::store::NewChangesetItem;
@@ -15,6 +28,12 @@ use crate::store::{CatalogRow, Store};
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use tokio_util::sync::CancellationToken;
+
+/// A skill description long enough for every check.
+#[cfg(unix)]
+pub(crate) const DESC: &str = "A reasonably long description here.";
 
 #[cfg(unix)]
 pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
@@ -176,6 +195,140 @@ impl Fleet {
         git(root, &["commit", "-q", "-m", "seed"]);
         crate::service::catalog::load_catalog(id, false, &self.store).unwrap();
     }
+
+    /// Commit `layers/<name>.yaml` in personal — a context layer holding
+    /// `members` — and reload it.
+    pub(crate) fn add_layer(&self, name: &str, members: &[&str]) {
+        let list: String = members.iter().map(|m| format!("- {m}\n")).collect();
+        let members = if list.is_empty() {
+            "members: []\n".to_string()
+        } else {
+            format!("members:\n{list}")
+        };
+        self.commit_files(
+            &self.personal_root,
+            self.personal.id,
+            &[(
+                &format!("layers/{name}.yaml"),
+                &format!("kind: layer\nname: {name}\naxis: context\n{members}"),
+            )],
+        );
+    }
+
+    /// Commit `mcp/<name>.yaml` (an http MCP server) and add it to layer
+    /// `core`, next to skill `w`.
+    pub(crate) fn add_mcp_server_to_core(&self, name: &str) {
+        self.commit_files(
+            &self.personal_root,
+            self.personal.id,
+            &[
+                (
+                    &format!("mcp/{name}.yaml"),
+                    &format!(
+                        "kind: mcp_server\nname: {name}\ndescription: {DESC}\n\
+                         transport: http\nurl: https://example.com/mcp\n"
+                    ),
+                ),
+                (
+                    "layers/core.yaml",
+                    &format!(
+                        "kind: layer\nname: core\naxis: context\n\
+                         members:\n- skill/w\n- mcp_server/{name}\n"
+                    ),
+                ),
+            ],
+        );
+    }
+}
+
+/// `skills/<name>/asset.yaml` for a skill described by [`DESC`].
+#[cfg(unix)]
+pub(crate) fn skill_yaml(name: &str) -> String {
+    format!("kind: skill\nname: {name}\ndescription: {DESC}\n")
+}
+
+/// A store with `w` in layer `core`, assigned to every host in `hosts`.
+#[cfg(unix)]
+pub(crate) fn fleet_with_core(hosts: &[&str]) -> Fleet {
+    let f = Fleet::new(hosts);
+    let p = f.personal.id;
+    f.commit_files(
+        &f.personal_root,
+        p,
+        &[
+            ("skills/w/asset.yaml", skill_yaml("w").as_str()),
+            ("skills/w/body.md", "Steps.\n"),
+            (
+                "layers/core.yaml",
+                "kind: layer\nname: core\naxis: context\nmembers:\n- skill/w\n",
+            ),
+        ],
+    );
+    {
+        let s = f.store.lock().unwrap();
+        for h in hosts {
+            s.set_host_layers_for(h, p, None, &["core"]).unwrap();
+        }
+    }
+    f
+}
+
+/// A proposed `new` card holding `items`; answers its id.
+#[cfg(unix)]
+pub(crate) fn new_card(f: &Fleet, items: &[NewChangesetItem]) -> i64 {
+    f.store
+        .lock()
+        .unwrap()
+        .insert_changeset("new", "New", items)
+        .unwrap()
+        .id
+}
+
+/// Apply every pending item of card `id` (but "needs a look").
+#[cfg(unix)]
+pub(crate) async fn apply_all(
+    f: &Fleet,
+    id: i64,
+    ssh: &Arc<SshClient>,
+) -> Result<ChangesetView, IpcError> {
+    apply(
+        ApplyArgs {
+            id,
+            positions: None,
+        },
+        &f.store,
+        ssh,
+    )
+    .await
+}
+
+/// A person's own sync of everything planned for `oci` — no card, so no
+/// layer counts as rolled out by it.
+#[cfg(unix)]
+pub(crate) async fn person_syncs_oci(f: &Fleet, ssh: &Arc<SshClient>) {
+    let planned = sync::plan_sync(
+        PlanArgs {
+            host_alias: Some("oci".into()),
+            allow_unlayered: true,
+            ..Default::default()
+        },
+        &f.store,
+        ssh,
+    )
+    .await
+    .unwrap();
+    sync::apply_sync_with(
+        SyncApplyArgs {
+            plan_id: planned.id,
+            force_partial: false,
+            call_id: None,
+        },
+        &f.store,
+        ssh,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
 }
 
 #[cfg_attr(not(unix), allow(dead_code))]

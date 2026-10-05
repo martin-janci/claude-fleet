@@ -2,12 +2,14 @@
 // sentence header — pure functions over the listing and the cards.
 import { hostOrderOf, identitiesOf, oddHosts, type AssetIdentity, type AssetInventoryRow, type AssetListing, type AssetSummary, type HostState } from './assets';
 import type { DotState } from './assets_visual';
-import { ago, isOpenCard, keyOf, PERSONAL, type ChangesetSummary } from './assets_workspace';
-import { rowOfAsset, rowOfIdentity, rowOfOrphan, type QueryRow } from './assets_query';
+import { ago, heldBack, isOpenCard, keyOf, PERSONAL, type ChangesetSummary } from './assets_workspace';
+import { isUndoBanner } from './assets_cards';
+import { rowOfAsset, rowOfIdentity, rowOfOrphan, type ParsedQuery, type QueryRow } from './assets_query';
 
-export type InboxSection = 'cards' | 'needs' | 'drifted' | 'behind' | 'fresh' | 'insync';
+export type InboxSection = 'cards' | 'applied' | 'needs' | 'drifted' | 'behind' | 'fresh' | 'insync';
 export const SECTION_LABEL: Record<InboxSection, string> = {
   cards: 'Proposed',
+  applied: 'Recently applied',
   needs: 'Needs you',
   drifted: 'Drifted',
   behind: 'Behind the catalog',
@@ -32,7 +34,8 @@ export interface Inbox {
   sections: Record<InboxSection, InboxRow[]>;
   /** Fleet internals (`fleet_internal`, `harness_internal`): counted, not listed. */
   hidden: number;
-  /** Cards + needs you + drifted: what the rail's Inbox count says. */
+  /** Open cards + needs you + drifted: what the rail's Inbox count says
+   *  (an applied card with an Undo banner needs nothing). */
   needCount: number;
 }
 
@@ -64,6 +67,12 @@ export function driftSideWords(side?: string | null): string | null {
   return side === 'host' ? 'edited on host' : side === 'catalog' ? 'behind the catalog' : null;
 }
 
+/** What happens to a copy that is only behind the catalog (nobody edited it
+ *  on the host): the catalog's auto-sync brings it up, or the next Sync. */
+export function behindWords(auto: boolean): string {
+  return `Behind the catalog — ${auto ? 'fleet updates it automatically' : 'your next Sync updates it'}`;
+}
+
 /** One catalog asset's dots: differs over missing over in sync; a host with
  *  no row is `na`; a row on an unreachable host is `stale`. */
 export function assetDots(a: AssetSummary, order: string[], stale: ReadonlySet<string>): Record<string, DotState> {
@@ -90,10 +99,13 @@ function identityDots(id: AssetIdentity, order: string[], stale: ReadonlySet<str
 
 export function buildInbox(input: InboxInput): Inbox {
   const { listing, order, stale } = input;
-  const sections: Record<InboxSection, InboxRow[]> = { cards: [], needs: [], drifted: [], behind: [], fresh: [], insync: [] };
+  const sections: Record<InboxSection, InboxRow[]> = { cards: [], applied: [], needs: [], drifted: [], behind: [], fresh: [], insync: [] };
 
-  for (const c of (input.cards ?? []).filter(isOpenCard)) {
-    sections.cards.push({
+  for (const c of input.cards ?? []) {
+    // An applied card that held hosts back stays too (final review I1): its
+    // held lines and Sync {host} buttons are what the person acts on.
+    const section = isOpenCard(c) ? sections.cards : isUndoBanner(c) || heldBack(c) ? sections.applied : null;
+    section?.push({
       key: keyOf({ type: 'card', id: c.id }), kind: c.kind, name: c.summary, why: c.error ?? '',
       dots: {}, query: { kind: c.kind, name: c.summary, hosts: [] }, card: c,
     });
@@ -159,6 +171,18 @@ export function buildInbox(input: InboxInput): Inbox {
   }
 
   return { sections, hidden, needCount: sections.cards.length + sections.needs.length + sections.drifted.length };
+}
+
+/** Whether the query keeps a card (T7 ruling, M6 R2). A card has no host,
+ *  scope, layer or state of its own, so only free words (against its
+ *  sentence) and `catalog:` (against the catalogs its apply commits to) can
+ *  hide it. A card that names no catalog cannot be excluded by one. */
+export function keepCard(query: ParsedQuery, c: ChangesetSummary): boolean {
+  const cats = (c.catalogs ?? []).map((x) => x.toLowerCase());
+  if (cats.length) {
+    for (const t of query.tokens) if (t.key === 'catalog' && !t.values.some((v) => cats.includes(v))) return false;
+  }
+  return !query.text || query.text.split(' ').every((w) => c.summary.toLowerCase().includes(w));
 }
 
 /** The newest scan the window knows of (Unix seconds), or null. */

@@ -511,6 +511,7 @@ fn cancelled_result(host: &HostPlan) -> HostSyncResult {
                 op: a.op,
                 outcome: "skipped".into(),
                 detail: Some("cancelled".into()),
+                catalog: a.catalog.clone(),
             })
             .collect(),
     }

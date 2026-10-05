@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import {
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
     planSync, lastSync, lastSyncRun,
@@ -7,11 +8,16 @@
     type HostScanResult, type SyncPlan, type SyncRunSummary, type AssetKind, type AssetIdentity,
   } from './assets';
   import AssetsWorkspace from './AssetsWorkspace.svelte';
-  import { keyOf, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL } from './assets_workspace';
+  import {
+    canWrite, catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL,
+    type WorkspaceView,
+  } from './assets_workspace';
+  import { proposeAndReload } from './assets_cards';
+  import { assetsViewRequest, type AssetsViewRequest } from './app_views';
+  import { push } from './toasts';
   import { loadFleetSettings } from './fleet_settings';
   import type { IpcError } from './result';
   import ImportDialog from './ImportDialog.svelte';
-  import SyncPlanDialog from './SyncPlanDialog.svelte';
   import SecretsPanel from './SecretsPanel.svelte';
   import NewAssetDialog from './NewAssetDialog.svelte';
   import LintAllDialog from './LintAllDialog.svelte';
@@ -24,7 +30,10 @@
 
   let setupPath = $state('~/agent-assets');
   let setupRemote = $state('');
-  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push'>('');
+  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push' | 'propose'>('');
+  // The workspace's own card verbs (apply, dismiss, undo, admit, propose
+  // again), bound up so the switcher's commands wait for them too.
+  let cardBusy = $state('');
   // Per-ACTION error only (setup / scan / plan / commit / push). Four unrelated
   // toolbar handlers clear this on entry, so the catalog's own load state must
   // never be inferred from it — doing that made a successful Sync turn the
@@ -43,12 +52,15 @@
   // The workspace's selection: one row key (`keyOf`), shared by every view
   // and the Inspector.
   let selectedKey = $state<string | null>(null);
+  // The workspace's view, bound so a switcher request can show the row it
+  // selects (`library`) or the cards it proposes (`inbox`).
+  let view = $state<WorkspaceView>('inbox');
   let syncPlan = $state<SyncPlan | null>(null);
-  // The filter `syncPlan` was computed from, so SyncPlanDialog's "Plan
+  // The filter `syncPlan` was computed from, so the plan view's "Plan
   // anyway" (on a skipped-unlayered host) can re-plan with the same scope
   // plus allowUnlayered.
   let syncFilter = $state<{ hostAlias?: string; kind?: string; name?: string }>({});
-  // The most recent plan computed (kept after the dialog closes) so the
+  // The most recent plan computed (kept after the plan view closes) so the
   // SecretsPanel can offer the names its blocked/missing-secret actions
   // named, without recomputing a plan just to open it.
   let lastPlan = $state<SyncPlan | null>(null);
@@ -71,7 +83,8 @@
   async function refresh() {
     // The workspace's own reads (R13, R14): best effort — a refusal shows
     // less, never an error. The cards refresh with every panel refresh.
-    void loadCatalogStatuses();
+    // Every loaded catalog's layers (R17) follow the statuses that name them.
+    void loadCatalogStatuses().then(() => loadAllLayers(get(catalogStatuses)));
     void loadChangesets();
     void loadLayers();
     const [a, i] = await Promise.all([loadAssets(), loadInventory()]);
@@ -188,17 +201,79 @@
     await loadOverview();
   }
 
+  // Whether this machine's own catalog config has been read (the fleet owner's
+  // path); a hub client settles through the grant probe instead.
+  let configRead = $state(false);
   onMount(async () => {
     // The footer's `auto: on|off`.
     void loadFleetSettings();
-    if (!ownsTheFleet($hubStatus)) return;
+    if (!ownsTheFleet($hubStatus)) { configRead = true; return; }
     const c = await loadCatalogConfig();
+    configRead = true;
     if (c.ok && c.value) {
       await reload(false);
       void repoStatus();
     }
     void lastSync();
   });
+
+  // ── A request from the quick switcher (Assets M6, R19) ──────────────────
+  // The panel mounts only while the overlay is open, so a request made first
+  // is read here on mount; it waits until the panel knows what this client
+  // may do (the grant probe, the config read), then is taken once. A request
+  // left over when the panel goes away is dropped, not run at the next open.
+  const settled = $derived(hubUnavailable !== null || (hubOverview ? hubAdmin === 'granted' || hubAdmin === 'denied' : configRead));
+  // The workspace is on screen: the full one, or the hub's read-only overview.
+  const workspaceShown = $derived(catalogBlocked ? hubOverview : !!$catalogConfig);
+  $effect(() => {
+    const r = $assetsViewRequest;
+    if (!r || !settled) return;
+    untrack(() => {
+      assetsViewRequest.set(null);
+      void runAssetsRequest(r);
+    });
+  });
+  onDestroy(() => assetsViewRequest.set(null));
+
+  async function runAssetsRequest(r: AssetsViewRequest) {
+    // An open sync plan covers the list; it yields to what was asked for,
+    // except mid-apply.
+    const clearPlan = () => { if (busy !== 'apply') syncPlan = null; };
+    if (r.select && workspaceShown) {
+      clearPlan();
+      view = 'library';
+      selectedKey = r.select;
+    }
+    // Rescan, Sync and Propose change things: a client without the grant (the
+    // read-only overview) or without a catalog, or a panel or a card verb
+    // that is busy, does nothing.
+    if (!r.command || catalogBlocked || !$catalogConfig || busy !== '' || cardBusy !== '') return;
+    if (r.command === 'rescan') {
+      void scan();
+    } else if (r.command === 'sync') {
+      void requestSync({});
+    } else {
+      // The hub's propose needs the personal grant (final review minor 6).
+      const ctx = { readOnly: catalogBlocked, remote: $hubStatus.remote, clientName: $hubStatus.client_name, statuses: $catalogStatuses };
+      if (!canWrite(PERSONAL, ctx)) return;
+      clearPlan();
+      await proposeCards();
+    }
+  }
+
+  /** "Propose cards": the hub derives its cards from the hosts as they are. */
+  async function proposeCards() {
+    busy = 'propose';
+    let n;
+    try {
+      n = await proposeAndReload();
+    } finally {
+      busy = '';
+    }
+    if (n === null) return;
+    view = 'inbox';
+    push({ kind: 'info', message: `Proposed: ${n} open cards` });
+  }
 
   // Tab-focus reload: a session delegated via "Open in session" edits the
   // catalog repo directly, outside any authoring command, so nothing else
@@ -322,10 +397,10 @@
   }
 
   function onSyncApplied(summary: SyncRunSummary) {
-    // Keep the dialog mounted: it renders the per-action outcome badges and
+    // Keep the plan view open: it renders the per-action outcome badges and
     // the "restart Claude on <host>" strip from this same `summary`, and it
-    // now disables its own Apply button and relabels Close to "Done" once
-    // `summary` is set. The user dismisses it explicitly.
+    // now disables its own Apply button once `summary` is set. The user
+    // dismisses it with Back.
     lastSyncRun.set(summary);
     void refresh();
   }
@@ -371,6 +446,8 @@
         scanDisabled={overviewNotConfigured}
         failed={overviewLoad === 'failed' ? hubFailed : undefined}
         bind:selectedKey
+        bind:view
+        bind:cardBusy
         onscan={scanOnHub}
         onsync={() => {}}
         onimport={() => {}}
@@ -410,7 +487,15 @@
       {importBlocked}
       failed={!$catalog && catalogLoad === 'failed' ? loadFailed : undefined}
       bind:selectedKey
+      bind:view
+      bind:cardBusy
       autoEditKey={pendingAutoEdit}
+      plan={syncPlan}
+      planFilter={syncFilter}
+      onplanclose={() => (syncPlan = null)}
+      onapplied={onSyncApplied}
+      onapplying={(a) => (busy = a ? 'apply' : '')}
+      onreplanned={onSyncReplanned}
       onscan={scan}
       onsync={requestSync}
       onimport={importFrom}
@@ -429,17 +514,6 @@
       only={importPreset?.only ?? []}
       onclose={() => { showImport = false; importPreset = null; }}
       ondone={() => { showImport = false; importPreset = null; reload(false); void repoStatus(); }}
-    />
-  {/if}
-  {#if syncPlan}
-    <SyncPlanDialog
-      plan={syncPlan}
-      filter={syncFilter}
-      onclose={() => (syncPlan = null)}
-      onapplied={onSyncApplied}
-      onopensecrets={() => (showSecrets = true)}
-      onapplying={(a) => (busy = a ? 'apply' : '')}
-      onreplanned={onSyncReplanned}
     />
   {/if}
   {#if showSecrets}

@@ -16,17 +16,18 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::catalog::{
     self,
     admin::{
-        AdminCall, CatalogNameArgs, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs,
-        LoadArgs, ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs,
-        WriteLayerArgs,
+        AdminCall, AdmitArgs, CatalogNameArgs, DeleteSecretArgs, GetAssetArgs, LayerRef,
+        LayerTemplateArgs, LoadArgs, ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs,
+        SetSecretArgs, WriteLayerArgs,
     },
     author::{
         self, AddResourceArgs, AddResourceBytesArgs, AssetRef, CommitPendingArgs, CreateArgs,
         LintAll, LintReport, RemoveResourceArgs, UpdateArgs, WriteResult,
     },
     author_session::{self, SpawnAuthorArgs},
-    catalogs::CatalogStatus,
-    changesets::ChangesetSummary,
+    catalogs::{AddCatalogArgs, CatalogStatus},
+    changesets::{self, ChangesetSummary, ChangesetView, LayerChange},
+    drift_diff::{self, DriftDiff, DriftDiffArgs},
     import::ImportReport,
     inventory,
     model::{Asset, Kind},
@@ -37,7 +38,8 @@ use fleet_core::service::catalog::{
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{
-    AssetInventoryRow, CatalogConfigRow, HostLayerRow, HostRow, SecretRow, SessionRow, Store,
+    AssetInventoryRow, CatalogConfigRow, CatalogRemoval, HostLayerRow, HostRow, SecretRow,
+    SessionRow, Store,
 };
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -337,13 +339,210 @@ pub async fn catalog_list_catalogs(
 }
 
 /// Assets M5 (R13, R14): the changeset cards, read only — the Inbox's
-/// proposed cards. Apply / undo / dismiss are M6.
+/// proposed cards. Opening, applying, undoing and dismissing one, rejecting
+/// its items and proposing new ones are the card-verb commands below
+/// (`catalog_get_changeset` … `catalog_propose_changesets`).
 #[tauri::command]
 pub async fn catalog_list_changesets(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<ChangesetSummary>, IpcError> {
     routed::catalog_list_changesets(&backend, &store).await
+}
+
+/// `catalog_get_changeset` / `_undo_` / `_dismiss_`'s arguments.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChangesetIdArgs {
+    pub id: i64,
+}
+
+/// `catalog_apply_changeset`'s arguments: the card and, optionally, the
+/// items to run (default: every pending item but "needs a look"; a drift
+/// card needs exactly one).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApplyChangesetArgs {
+    pub id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions: Option<Vec<i64>>,
+}
+
+/// `catalog_reject_changeset_items`' arguments.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RejectItemsArgs {
+    pub id: i64,
+    pub positions: Vec<i64>,
+}
+
+/// `catalog_propose_layer_change`'s arguments.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LayerChangeArgs {
+    pub change: LayerChange,
+}
+
+/// Assets M6 (R8): one card in full — the Inspector's Items / Hosts / Diff.
+#[tauri::command]
+pub async fn catalog_get_changeset(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ChangesetIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_get_changeset(&backend, args, &store).await
+}
+
+/// Assets M6 (R8): apply a card (or the named items) — on a hub, its
+/// `changesets { apply }`, which checks the caller's grant on every catalog
+/// the items touch and, for a rollout or restore, the hub's confirm gate.
+#[tauri::command]
+pub async fn catalog_apply_changeset(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ApplyChangesetArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_apply_changeset(&backend, args, &store, &ssh).await
+}
+
+/// Assets M6 (R8): undo an applied card — its commits are reverted and the
+/// host-layer snapshot restored; allowed only for the latest applied card in
+/// each catalog it touched.
+#[tauri::command]
+pub async fn catalog_undo_changeset(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ChangesetIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_undo_changeset(&backend, args, &store).await
+}
+
+/// Assets M6 (R8): dismiss a proposed card; nothing is written.
+#[tauri::command]
+pub async fn catalog_dismiss_changeset(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ChangesetIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_dismiss_changeset(&backend, args, &store).await
+}
+
+/// Assets M6 (R8): a person's no to some of a card's items; the card is
+/// dismissed once nothing is pending.
+#[tauri::command]
+pub async fn catalog_reject_changeset_items(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: RejectItemsArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_reject_changeset_items(&backend, args, &store).await
+}
+
+/// Assets M6 (R5): run the proposers now — the new cards, newest first.
+#[tauri::command]
+pub async fn catalog_propose_changesets(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<ChangesetSummary>, IpcError> {
+    routed::catalog_propose_changesets(&backend, &store).await
+}
+
+/// Assets M6 (R5): a layer change (create, rename, move a member) as a
+/// proposed card — never a direct commit.
+#[tauri::command]
+pub async fn catalog_propose_layer_change(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: LayerChangeArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_propose_layer_change(&backend, args, &store).await
+}
+
+/// `catalog_drift_diff`'s arguments: the host and the asset, and the
+/// asset's catalog (`None` or `personal` = the personal catalog).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DriftDiffCmdArgs {
+    pub host_alias: String,
+    pub kind: Kind,
+    pub name: String,
+    #[serde(default)]
+    pub harness: Option<String>,
+    #[serde(default)]
+    pub catalog: Option<String>,
+}
+
+/// Assets M6 (R9): add an org catalog (name, checkout path, remote, org) —
+/// on a hub, the master's alone.
+#[tauri::command]
+pub async fn catalog_add_catalog(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: AddCatalogArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<CatalogStatus, IpcError> {
+    routed::catalog_add_catalog(&backend, args, &store).await
+}
+
+/// Assets M6 (R9): remove an org catalog — config only, the checkout stays.
+#[tauri::command]
+pub async fn catalog_remove_catalog(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: CatalogNameArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<CatalogRemoval, IpcError> {
+    routed::catalog_remove_catalog(&backend, args, &store).await
+}
+
+/// Assets M6 (R9): a host with no org accepts an org catalog. Answers the
+/// host's admitted catalogs.
+#[tauri::command]
+pub async fn catalog_admit_catalog(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: AdmitArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<String>, IpcError> {
+    routed::catalog_admit_catalog(&backend, args, &store).await
+}
+
+/// Assets M6 (R9): take an admission back. Answers the host's remaining
+/// admitted catalogs.
+#[tauri::command]
+pub async fn catalog_unadmit_catalog(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: AdmitArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<String>, IpcError> {
+    routed::catalog_unadmit_catalog(&backend, args, &store).await
+}
+
+/// Assets M6 (R9): one catalog's layers and the hosts' assignments in it,
+/// by name (`personal` = the personal catalog).
+#[tauri::command]
+pub async fn catalog_list_layers_in(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: CatalogNameArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::LayerListing, IpcError> {
+    routed::catalog_list_layers_in(&backend, args, &store).await
+}
+
+/// Assets M6 (R9): one host's effective set with provenance — the summary
+/// view (no asset bodies), the same answer as the MCP `resolve_preview`.
+#[tauri::command]
+pub async fn catalog_host_provenance(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ResolvePreviewArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<catalog::resolve::ResolutionView, IpcError> {
+    routed::catalog_host_provenance(&backend, args, &store).await
+}
+
+/// Assets M6 (R7, R9): the catalog's and the host's text of a drifted
+/// asset's files, for the Drift card's DiffView.
+#[tauri::command]
+pub async fn catalog_drift_diff(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: DriftDiffCmdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<DriftDiff, IpcError> {
+    routed::catalog_drift_diff(&backend, args, &store, &ssh).await
 }
 
 /// Assets M5 (R13, R24): one catalog's dirty / ahead / behind, by name.
@@ -976,6 +1175,285 @@ pub(crate) mod routed {
                 .await
             }
             None => catalog::changesets::list(store),
+        }
+    }
+
+    /// Hub tool arguments for the card verbs that take only a card id.
+    fn card_call(action: &str, id: i64) -> serde_json::Value {
+        serde_json::json!({ "action": action, "id": id })
+    }
+
+    pub async fn catalog_get_changeset(
+        backend: &FleetBackend,
+        args: ChangesetIdArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_get_changeset", &card_call("list", args.id))
+                    .await
+            }
+            None => changesets::get(args.id, store),
+        }
+    }
+
+    pub async fn catalog_apply_changeset(
+        backend: &FleetBackend,
+        args: ApplyChangesetArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let mut body = card_call("apply", args.id);
+                if let Some(p) = &args.positions {
+                    body["positions"] = serde_json::json!(p);
+                }
+                hub.route("catalog_apply_changeset", &body).await
+            }
+            None => {
+                changesets::apply::apply(
+                    changesets::apply::ApplyArgs {
+                        id: args.id,
+                        positions: args.positions,
+                    },
+                    store,
+                    ssh,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn catalog_undo_changeset(
+        backend: &FleetBackend,
+        args: ChangesetIdArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_undo_changeset", &card_call("undo", args.id))
+                    .await
+            }
+            None => changesets::undo::undo(args.id, store).await,
+        }
+    }
+
+    pub async fn catalog_dismiss_changeset(
+        backend: &FleetBackend,
+        args: ChangesetIdArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_dismiss_changeset", &card_call("dismiss", args.id))
+                    .await
+            }
+            None => changesets::undo::dismiss(args.id, store).await,
+        }
+    }
+
+    pub async fn catalog_reject_changeset_items(
+        backend: &FleetBackend,
+        args: RejectItemsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let mut body = card_call("reject_item", args.id);
+                body["positions"] = serde_json::json!(args.positions);
+                hub.route("catalog_reject_changeset_items", &body).await
+            }
+            None => changesets::undo::reject_items(args.id, &args.positions, store).await,
+        }
+    }
+
+    pub async fn catalog_propose_changesets(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<ChangesetSummary>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "catalog_propose_changesets",
+                    &serde_json::json!({ "action": "propose" }),
+                )
+                .await
+            }
+            None => changesets::propose(store).await,
+        }
+    }
+
+    pub async fn catalog_propose_layer_change(
+        backend: &FleetBackend,
+        args: LayerChangeArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let change = serde_json::to_value(&args.change).map_err(|e| {
+                    IpcError::new(
+                        fleet_core::ipc_error::codes::E_INTERNAL,
+                        format!("the layer change could not be encoded for the hub: {e}"),
+                    )
+                })?;
+                hub.route(
+                    "catalog_propose_layer_change",
+                    &serde_json::json!({ "action": "propose_layer", "change": change }),
+                )
+                .await
+            }
+            None => changesets::propose_layer(args.change, store).await,
+        }
+    }
+
+    pub async fn catalog_add_catalog(
+        backend: &FleetBackend,
+        args: AddCatalogArgs,
+        store: &Mutex<Store>,
+    ) -> Result<CatalogStatus, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_add_catalog", &AdminCall::AddCatalog(args))
+                    .await
+            }
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                catalog::catalogs::add_catalog(args, store)
+            }
+        }
+    }
+
+    pub async fn catalog_remove_catalog(
+        backend: &FleetBackend,
+        args: CatalogNameArgs,
+        store: &Mutex<Store>,
+    ) -> Result<CatalogRemoval, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_remove_catalog", &AdminCall::RemoveCatalog(args))
+                    .await
+            }
+            None => {
+                // PF7: waits for a changeset apply in flight.
+                let _busy = catalog::changesets::authoring_lock().await;
+                catalog::catalogs::remove_catalog(&args.name, store)
+            }
+        }
+    }
+
+    pub async fn catalog_admit_catalog(
+        backend: &FleetBackend,
+        args: AdmitArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<String>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_admit_catalog", &AdminCall::AdmitCatalog(args))
+                    .await
+            }
+            None => catalog::catalogs::admit(&args.host_alias, &args.catalog, store),
+        }
+    }
+
+    pub async fn catalog_unadmit_catalog(
+        backend: &FleetBackend,
+        args: AdmitArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<String>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_unadmit_catalog", &AdminCall::UnadmitCatalog(args))
+                    .await
+            }
+            None => catalog::catalogs::unadmit(&args.host_alias, &args.catalog, store),
+        }
+    }
+
+    pub async fn catalog_list_layers_in(
+        backend: &FleetBackend,
+        args: CatalogNameArgs,
+        store: &Mutex<Store>,
+    ) -> Result<catalog::LayerListing, IpcError> {
+        let personal = args.name == catalog::catalogs::PERSONAL;
+        match backend.hub() {
+            // Personal sends no `catalog`, exactly `catalog_list_layers`.
+            Some(hub) if personal => {
+                hub.route("catalog_list_layers_in", &AdminCall::ListLayers)
+                    .await
+            }
+            Some(hub) => {
+                hub.route(
+                    "catalog_list_layers_in",
+                    &in_catalog(&AdminCall::ListLayers, &args.name)?,
+                )
+                .await
+            }
+            None if personal => catalog::list_layers(store),
+            None => {
+                let row = catalog::catalogs::catalog_named(&args.name, store)?;
+                catalog::list_layers_for(&row, store)
+            }
+        }
+    }
+
+    pub async fn catalog_host_provenance(
+        backend: &FleetBackend,
+        args: ResolvePreviewArgs,
+        store: &Mutex<Store>,
+    ) -> Result<catalog::resolve::ResolutionView, IpcError> {
+        match backend.hub() {
+            // The MCP `resolve_preview` tool, whose answer is this view.
+            Some(hub) => {
+                hub.route(
+                    "catalog_host_provenance",
+                    &serde_json::json!({ "host_alias": args.host_alias }),
+                )
+                .await
+            }
+            None => {
+                let res = catalog::resolve_preview(&args.host_alias, store)?;
+                Ok(catalog::resolve::ResolutionView::of(&res))
+            }
+        }
+    }
+
+    pub async fn catalog_drift_diff(
+        backend: &FleetBackend,
+        args: DriftDiffCmdArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<DriftDiff, IpcError> {
+        check_name(&args.name)?;
+        let named = args
+            .catalog
+            .filter(|c| c.as_str() != catalog::catalogs::PERSONAL);
+        let call = DriftDiffArgs {
+            host_alias: args.host_alias,
+            kind: args.kind,
+            name: args.name,
+            harness: args.harness,
+        };
+        match (backend.hub(), named) {
+            (Some(hub), Some(c)) => {
+                hub.route(
+                    "catalog_drift_diff",
+                    &in_catalog(&AdminCall::DriftDiff(call), &c)?,
+                )
+                .await
+            }
+            (Some(hub), None) => {
+                hub.route("catalog_drift_diff", &AdminCall::DriftDiff(call))
+                    .await
+            }
+            (None, Some(c)) => {
+                let row = catalog::catalogs::catalog_named(&c, store)?;
+                drift_diff::drift_diff(catalog::CatalogTarget::Row(&row), call, store, ssh).await
+            }
+            (None, None) => {
+                drift_diff::drift_diff(catalog::CatalogTarget::Personal, call, store, ssh).await
+            }
         }
     }
 

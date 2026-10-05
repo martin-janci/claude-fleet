@@ -3,11 +3,19 @@
   import Inspector from './Inspector.svelte';
   import AssetDetail from './AssetDetail.svelte';
   import Badge from './Badge.svelte';
+  import ChangesetDetail from './ChangesetDetail.svelte';
+  import DriftPanel from './DriftPanel.svelte';
   import HostStrip from './HostStrip.svelte';
   import { identitiesOf, catalogOf, type AssetIdentity, type AssetListing, type AssetSummary } from './assets';
-  import { assetDots, driftSideWords } from './assets_inbox';
+  import { assetDots, behindWords, driftSideWords } from './assets_inbox';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
   import type { HostRow } from './hosts';
-  import { ago, assetHistory, parseKey, scopeBadge, type ChangesetSummary, type CommitEntry } from './assets_workspace';
+  import { heldWords } from './assets_cards';
+  import {
+    ago, assetHistory, cardViews, getChangeset, isOpenCard, parseKey, scopeBadge,
+    type ChangesetSummary, type ChangesetView, type CommitEntry,
+  } from './assets_workspace';
+  import type { CardVerbs } from './card_actions';
   import type { IpcError } from './result';
 
   /** What the Inspector shows for the selected row (Rulings R19): a pane of
@@ -28,6 +36,12 @@
     onsync,
     ondeleted,
     onimport,
+    oncard,
+    onreject,
+    onreview,
+    onselect,
+    cardBusy = false,
+    cardWritable = () => true,
   }: {
     selectedKey: string | null;
     listing: AssetListing | null;
@@ -44,10 +58,22 @@
     onsync: (f: { hostAlias?: string; kind?: string; name?: string }) => void;
     ondeleted: () => void;
     onimport: (id: AssetIdentity) => void;
+    /** What a card's verbs do (Undo, here). */
+    oncard: CardVerbs;
+    /** Reject a card's pending items (✕, Skip this group). */
+    onreject: (id: number, positions: number[]) => void;
+    /** A Rollout card's Review plan: the workspace plans its hosts. */
+    onreview?: (id: number) => void;
+    /** Select another row (a drifted host's link to its Drift card). */
+    onselect?: (key: string) => void;
+    /** A card verb is running. */
+    cardBusy?: boolean;
+    /** Whether this window may act on a card (a grant on every catalog it names). */
+    cardWritable?: (c: ChangesetSummary) => boolean;
   } = $props();
 
-  type Tab = 'overview' | 'source' | 'hosts' | 'history';
-  const LABEL: Record<Tab, string> = { overview: 'Overview', source: 'Source', hosts: 'Hosts', history: 'History' };
+  type Tab = 'overview' | 'source' | 'hosts' | 'history' | 'items' | 'diff';
+  const LABEL: Record<Tab, string> = { overview: 'Overview', source: 'Source', hosts: 'Hosts', history: 'History', items: 'Items', diff: 'Diff' };
 
   const sel = $derived(selectedKey ? parseKey(selectedKey) : null);
   const asset = $derived.by((): AssetSummary | null => {
@@ -70,7 +96,31 @@
   // Defence in depth: only a personal asset is ever read through
   // `catalog_get_asset`, whatever `canOpen` says.
   const full = $derived(!!asset && !readOnly && catalogOf(asset) === 'personal' && canOpen(asset));
+  // A card in full: an open one from the store (the workspace loads those);
+  // an applied one — an Undo banner — is read once when it is selected.
+  // It is keyed by the card's state as well as its id: an Undo changes the
+  // state, and the Inspector must not keep offering the Undo it just ran.
+  let fetched = $state<{ key: string; view: ChangesetView } | null>(null);
+  const cardKey = $derived(card ? `${card.id}:${card.state}:${card.applied_at ?? ''}` : '');
+  $effect(() => {
+    const c = card;
+    const key = cardKey;
+    if (!c || isOpenCard(c) || $cardViews[c.id]) {
+      untrack(() => (fetched = null));
+      return;
+    }
+    if (untrack(() => fetched?.key) === key) return;
+    let live = true;
+    void getChangeset(c.id).then((r) => {
+      if (live && r.ok) fetched = { key, view: r.value };
+    });
+    return () => (live = false);
+  });
+  const cardView = $derived(card ? ($cardViews[card.id] ?? (fetched?.key === cardKey ? fetched.view : null)) : null);
+  const cardRo = $derived(readOnly || (!!card && !cardWritable(card)));
   const tabs = $derived.by((): Tab[] => {
+    // A Drift card opens on its diff (Take / Restore); once applied or dismissed there is nothing left to choose.
+    if (cardView) return cardView.kind === 'rollout' ? ['items', 'hosts'] : cardView.kind === 'drift' && isOpenCard(cardView) ? ['diff', 'items'] : ['items'];
     if (asset) return full ? ['overview', 'source', 'hosts', 'history'] : readOnly ? ['overview', 'hosts'] : ['overview', 'hosts', 'history'];
     if (identity) return ['overview', 'hosts'];
     return ['overview'];
@@ -109,7 +159,7 @@
   });
   // The tab the person picked, unless this row has no such tab (a selection
   // change or a read-only flip took it away).
-  const tab = $derived<Tab>(tabs.includes(pick) ? pick : 'overview');
+  const tab = $derived<Tab>(tabs.includes(pick) ? pick : tabs[0]);
 
   // ── History ──────────────────────────────────────────────────────────
   type HistoryState = { key: string; rows: CommitEntry[] | null; error: string | null };
@@ -142,6 +192,27 @@
       history = r.ok ? { key, rows: r.value, error: null } : { key, rows: null, error: historyError(r.error, catalogOf(a)) };
     });
   });
+
+  // ── Drifted copies: a link to the card that decides, or what will happen ──
+  const auto = $derived(settingBool($fleetSettings, SETTING_KEYS.catalogAuto));
+  /** The open Drift card for this asset on each host, by `host:harness`. */
+  const driftCardOf = $derived.by((): Map<string, number> => {
+    const m = new Map<string, number>();
+    if (!asset) return m;
+    for (const v of Object.values($cardViews)) {
+      if (v.kind !== 'drift' || !isOpenCard(v)) continue;
+      for (const i of v.items) {
+        if (i.kind === asset.kind && i.name === asset.name && (i.catalog ?? 'personal') === catalogOf(asset) && i.params.host) {
+          m.set(`${i.params.host}:${i.params.harness ?? 'claude'}`, v.id);
+        }
+      }
+    }
+    return m;
+  });
+  /** A host copy that needs a word: edited on the host (its card) or behind the catalog. */
+  const noted = $derived(
+    (asset?.hosts ?? []).filter((h) => h.state === 'drifted' && (h.drift_side === 'catalog' || (h.drift_side === 'host' && driftCardOf.has(`${h.host_alias}:${h.harness}`)))),
+  );
 
   const now = Math.floor(Date.now() / 1000);
   const sideWords = (side?: string | null) => {
@@ -192,6 +263,13 @@
         </div>
       {/key}
     {/if}
+    {#if asset && full && tab === 'hosts' && noted.length}
+      <ul class="pad hosts notes" data-testid="inspector-host-notes">
+        {#each noted as h (`${h.host_alias}:${h.harness}`)}
+          <li>{h.host_alias}{h.harness === 'claude' ? '' : ` (${h.harness})`}: {@render hostNote(h)}</li>
+        {/each}
+      </ul>
+    {/if}
     {#if asset && tab === 'history'}
       <div class="pad" data-testid="inspector-history">
         {#if !history || (history.rows === null && history.error === null)}
@@ -211,7 +289,7 @@
     {:else if asset && !full && tab === 'hosts'}
       <ul class="pad hosts" data-testid="inspector-hosts">
         {#each asset.hosts as h (`${h.host_alias}:${h.harness}`)}
-          <li>{h.host_alias}: {h.state.replace('_', ' ')}{sideWords(h.drift_side)}{h.harness === 'claude' ? '' : ` (${h.harness})`}</li>
+          <li>{h.host_alias}: {h.state.replace('_', ' ')}{sideWords(h.drift_side)}{h.harness === 'claude' ? '' : ` (${h.harness})`}{@render hostNote(h)}</li>
         {/each}
         {#if asset.hosts.length === 0}<li class="muted">Not scanned on any host.</li>{/if}
       </ul>
@@ -229,6 +307,48 @@
             ? 'Read-only: this window has no grant on this catalog.'
             : 'Managed in catalog ' + catalogOf(asset) + ': this window shows where it is installed and its History; editing it comes later.'}
         </p>
+      </div>
+    {:else if card && cardView && tab === 'hosts'}
+      <ul class="pad hosts" data-testid="inspector-hosts">
+        {#each cardView.items as h (h.position)}
+          <li>
+            <b>{h.name}</b> {h.state}
+            {#each h.outcome?.held ?? [] as l (`${l.kind}/${l.name}`)}
+              <span class="muted">{l.kind}/{l.name} — {heldWords(l.why)} · sync it yourself</span>
+            {/each}
+            {#if h.outcome?.note}<span class="muted">{h.outcome.note}</span>{/if}
+          </li>
+        {/each}
+        {#if isOpenCard(cardView) && cardView.kind === 'rollout' && onreview && !cardRo}
+          <li><button type="button" class="btn" data-testid={`card-review-${cardView.id}`} disabled={cardBusy} onclick={() => onreview(cardView.id)}>Review plan</button></li>
+        {/if}
+      </ul>
+    {:else if card && cardView}
+      <div class="pad" data-testid="inspector-card">
+        <p class="sentence">{cardView.summary}</p>
+        {#if cardView.error}
+          {#if cardView.state === 'failed'}
+            <p class="error" role="alert">Failed: {cardView.error}</p>
+          {:else if cardView.withdrawn || cardView.error.startsWith('withdrawn:')}
+            <p class="muted">Withdrawn: {cardView.error.replace(/^withdrawn:\s*/, '')}</p>
+          {:else}
+            <p class="muted">Note: {cardView.error}</p>
+          {/if}
+        {/if}
+        {#if tab === 'diff'}
+          <DriftPanel view={cardView} readOnly={cardRo} busy={cardBusy} onapply={(p) => oncard.apply(cardView.id, p)} />
+        {:else}
+          <ChangesetDetail
+            view={cardView}
+            readOnly={cardRo}
+            busy={cardBusy}
+            onreject={(positions) => onreject(cardView.id, positions)}
+            onapply={(positions) => oncard.apply(cardView.id, positions)}
+            onundo={() => oncard.undo(cardView.id)}
+            onsynchost={oncard.synchost}
+            onreview={onreview ? () => onreview(cardView.id) : undefined}
+          />
+        {/if}
       </div>
     {:else if identity && tab === 'hosts'}
       <ul class="pad hosts" data-testid="inspector-hosts">
@@ -257,7 +377,10 @@
         <dl class="kv">
           <dt>State</dt><dd>{card.state}</dd>
           <dt>Proposed</dt><dd>{ago(card.created_at, now)}</dd>
-          {#if card.error}<dt>Error</dt><dd class="error">{card.error}</dd>{/if}
+          {#if card.error}
+            {#if card.state === 'failed'}<dt>Error</dt><dd class="error">{card.error}</dd>
+            {:else}<dt>{card.withdrawn ? 'Withdrawn' : 'Note'}</dt><dd>{card.error}</dd>{/if}
+          {/if}
         </dl>
         <ul class="groups">
           {#each Object.entries(card.groups ?? {}) as [g, n] (g)}<li><Badge label={`${g} ${n}`} /></li>{/each}
@@ -266,6 +389,14 @@
     {/if}
   </Inspector>
 {/if}
+
+{#snippet hostNote(h: { host_alias: string; harness: string; state: string; drift_side?: string | null })}
+  {#if h.state === 'drifted' && h.drift_side === 'catalog'}
+    <span class="muted" data-testid={`inspector-behind-${h.host_alias}`}> {behindWords(auto)}</span>
+  {:else if h.state === 'drifted' && h.drift_side === 'host' && driftCardOf.has(`${h.host_alias}:${h.harness}`)}
+    <button type="button" class="btn btn--quiet is-bounded" data-testid={`inspector-drift-link-${h.host_alias}`} onclick={() => onselect?.(`card:${driftCardOf.get(`${h.host_alias}:${h.harness}`)}`)}>Review the diff</button>
+  {/if}
+{/snippet}
 
 <style>
   .empty { padding: 14px; color: var(--fg-muted); }
@@ -279,5 +410,6 @@
   .groups { list-style: none; display: flex; gap: 4px; flex-wrap: wrap; margin: 0; padding: 0; }
   .sentence { font-weight: 600; }
   .muted { color: var(--fg-muted); }
+  .notes li { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .error { color: var(--usage-crit); }
 </style>

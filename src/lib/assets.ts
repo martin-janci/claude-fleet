@@ -168,6 +168,22 @@ export async function loadAssets(): Promise<Result<AssetListing>> {
   return r;
 }
 
+/** Fill the `catalog` store once at launch, so the quick switcher (⌘K) lists
+ *  assets before the Assets tab was ever opened — the panel is the only other
+ *  thing that loads it. Silent: a failure (no catalog configured, an ungranted
+ *  hub client's refusal) leaves the store as it was. A hub loaded its own
+ *  catalog at boot, so a hub client only reads the listing; a standalone
+ *  window first loads its configured catalog, as the panel's mount does
+ *  (nothing else has by then). */
+export async function primeCatalog(remote: boolean): Promise<void> {
+  if (!remote) {
+    const c = await loadCatalogConfig();
+    if (!c.ok || !c.value) return;
+    if (!(await loadCatalog(false)).ok) return;
+  }
+  await loadAssets();
+}
+
 export function getAsset(kind: string, name: string): Promise<Result<AssetDetail>> {
   return invokeCmd<AssetDetail>('catalog_get_asset', { args: { kind, name } });
 }
@@ -274,6 +290,10 @@ export interface SyncAction {
   backup: boolean;
   secrets: string[];
   missing_secrets: string[];
+  /** The catalog the asset comes from (absent from an older hub). */
+  catalog?: string | null;
+  /** What the planner found of the host's copy of an `update`/`overwrite`. */
+  host_copy?: 'unchanged' | 'edited' | 'unverified';
 }
 
 export interface HostPlan {
@@ -297,6 +317,8 @@ export interface ActionResult {
   op: ActionOp;
   outcome: string;
   detail: string | null;
+  /** The catalog the planned action came from; absent from a hub before M6. */
+  catalog?: string | null;
 }
 
 export interface HostSyncResult {
@@ -336,7 +358,7 @@ export interface SyncProgress {
 export const lastSyncRun = writable<SyncRunSummary | null>(null);
 
 /** The latest `sync:progress` event forwarded by `App.svelte`'s row-event
- *  subscription, for `SyncPlanDialog` to render a progress line during an
+ *  subscription, for `SyncPlanView` to render a progress line during an
  *  in-flight apply. */
 export const syncProgress = writable<SyncProgress | null>(null);
 
@@ -378,7 +400,7 @@ export function deleteSecret(name: string, hostAlias?: string): Promise<Result<b
 }
 
 /** Whether applying `plan` would overwrite a host-edited asset or remove a
- *  manifest entry — the cases `SyncPlanDialog` renders its Apply button red
+ *  manifest entry — the cases `SyncPlanView` renders its Apply button red
  *  for. */
 export function isDestructive(plan: SyncPlan): boolean {
   return plan.hosts.some((h) => h.actions.some((a) => a.op === 'overwrite' || a.op === 'remove'));

@@ -69,11 +69,30 @@
   const JOB: Record<string, string> = {
     scan: 'Scanning hosts', plan: 'Planning a sync', apply: 'Syncing', pull: 'Pulling', commit: 'Committing', push: 'Pushing',
   };
+  // The persistent live region (R16): it is always in the DOM, so a screen
+  // reader hears its text change. It names the job and its progress, says
+  // "Finished." when the work ends (neutral: a failure is announced by its own alert), and clears when the next job starts.
+  const working = $derived(busy !== '' && !!JOB[busy]);
+  const progressText = $derived(
+    busy === 'apply' && $syncProgress && $syncProgress.total > 0 ? `Syncing ${$syncProgress.done} of ${$syncProgress.total} hosts…` : null,
+  );
+  let finished = $state(false);
+  let wasWorking = untrack(() => working);
+  $effect(() => {
+    const on = working;
+    untrack(() => {
+      if (on) finished = false;
+      else if (wasWorking) finished = true;
+      wasWorking = on;
+    });
+  });
+  const liveText = $derived(working ? (progressText ?? `${JOB[busy]}…`) : finished ? 'Finished.' : '');
   const auto = $derived(settingBool($fleetSettings, SETTING_KEYS.catalogAuto));
   const blockedCount = $derived(blockedSecretKeys($lastSyncRun).length);
 </script>
 
 <footer class="foot" data-testid="assets-footer">
+  <span class="sr-only" role="status" aria-live="polite" data-testid="assets-live">{liveText}</span>
   {#each chips as c (c.name)}
     <CatalogChip
       name={c.name}
@@ -120,5 +139,6 @@
     border-top: 1px solid var(--border); background: var(--bg-pane); color: var(--fg-muted); font-size: 11.5px;
   }
   .grow { flex: 1; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; border: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .last { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 </style>

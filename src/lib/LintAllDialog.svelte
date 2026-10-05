@@ -64,15 +64,15 @@
 <style>
   .counts { display: flex; gap: 6px; margin-bottom: 8px; }
   .chip { border: 1px solid var(--border); border-radius: 8px; padding: 1px 8px; font-size: 12px; }
-  .chip.errors { color: #dc2626; } .chip.warnings { color: #d97706; }
+  .chip.errors { color: var(--usage-crit); } .chip.warnings { color: var(--usage-warn); }
   .list { margin: 0 0 8px; padding-left: 18px; font-size: 12px; }
   .assets { display: flex; flex-direction: column; gap: 10px; max-height: 50vh; overflow: auto; }
   .asset-block { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
   .link { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; font-family: ui-monospace, monospace; font-size: 13px; }
   .finding { margin: 4px 0 0; font-size: 12px; }
-  .finding.error { color: #dc2626; } .finding.warn { color: #d97706; }
+  .finding.error { color: var(--usage-crit); } .finding.warn { color: var(--usage-warn); }
   .muted { color: var(--fg-muted); font-size: 12px; }
-  .error { color: #dc2626; }
+  .error { color: var(--usage-crit); }
   .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
   .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
 </style>

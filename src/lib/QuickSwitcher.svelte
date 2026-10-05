@@ -14,7 +14,8 @@
   import { sessions, type SessionRow } from './sessions';
   import { projects } from './projects';
   import { hosts } from './hosts';
-  import { requestHostsView } from './app_views';
+  import { requestAssetsView, requestHostsView } from './app_views';
+  import { catalog } from './assets';
   import { selectedSession, selectSessionExplicitly } from './selection';
   import { requestNewSession } from './new_session_request';
   import { detectMac } from './terminal_keys';
@@ -28,6 +29,8 @@
     chordLabel,
     ticketEntries,
     lookupEntry,
+    assetEntries,
+    commandEntries,
     placeForTicket,
     type SwitcherEntry,
     type SwitcherTicket,
@@ -116,7 +119,13 @@
   const trackerOrg = $derived(new Map($trackers.map((t) => [t.id, t.org_id ?? null])));
   const entries = $derived(
     scopeEntries(
-      [...buildEntries($sessions, $projects, $hosts), ...ticketRows, ...(lookupRow ? [lookupRow] : [])],
+      [
+        ...buildEntries($sessions, $projects, $hosts),
+        ...assetEntries($catalog),
+        ...commandEntries(),
+        ...ticketRows,
+        ...(lookupRow ? [lookupRow] : []),
+      ],
       $effectiveScope,
       $scopeOf,
       trackerOrg,
@@ -139,7 +148,11 @@
               ? (e.section ?? 'Tickets')
               : e.kind === 'lookup'
                 ? 'Lookup'
-                : 'Projects',
+                : e.kind === 'asset'
+                  ? 'Assets'
+                  : e.kind === 'command'
+                    ? 'Commands'
+                    : 'Projects',
       testid: `switcher-${e.kind}`,
     })),
   );
@@ -208,6 +221,14 @@
       openTicket(e.ticket);
     } else if (e.kind === 'lookup' && e.lookup) {
       void lookupThenOpen(e.lookup);
+    } else if (e.kind === 'asset' && e.asset) {
+      const select = e.asset.key;
+      hide();
+      void tick().then(() => requestAssetsView({ select }));
+    } else if (e.kind === 'command' && e.command) {
+      const command = e.command;
+      hide();
+      void tick().then(() => requestAssetsView({ command }));
     } else if (e.kind === 'host' && e.host) {
       const alias = e.host.alias;
       hide();
@@ -339,7 +360,7 @@
       aria-activedescendant={activeKey !== null ? optionId(LIST_ID, activeKey) : undefined}
       bind:value={query}
       onkeydown={onInputKeydown}
-      placeholder="Jump to a session, host or ticket… (name, key, project, host, branch, status, or paste a ticket URL)"
+      placeholder="Jump to a session, host, ticket or asset… (name, key, project, host, branch, status, or paste a ticket URL)"
       autocomplete="off"
       spellcheck="false"
     />

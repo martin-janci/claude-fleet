@@ -3,11 +3,11 @@ import { describe, it, expect } from 'vitest';
 import JobChip from './JobChip.svelte';
 
 describe('JobChip', () => {
-  it('announces the work politely, without a bar when it does not count', () => {
+  it('is visual only (the footer’s live region announces), without a bar when it does not count', () => {
     render(JobChip, { label: 'Scanning hosts' });
     const chip = screen.getByTestId('assets-job');
-    expect(chip.getAttribute('role')).toBe('status');
-    expect(chip.getAttribute('aria-live')).toBe('polite');
+    expect(chip.getAttribute('role')).toBeNull();
+    expect(chip.getAttribute('aria-live')).toBeNull();
     expect(chip.textContent).toContain('Scanning hosts');
     expect(chip.querySelector('[role="progressbar"]')).toBeNull();
   });

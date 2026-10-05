@@ -142,8 +142,8 @@ describe('formatting', () => {
 });
 
 describe('resources on a paired desktop', () => {
-  it('every resource update names a command the hub reasons explain', async () => {
-    const { hubBlock } = await import('../hub');
+  it('every resource names a command the hub reasons explain: its update, else its create or delete', async () => {
+    const { resourceBlock } = await import('../hub');
     const remote = {
       remote: true,
       url: 'https://fleet.example.com',
@@ -157,10 +157,14 @@ describe('resources on a paired desktop', () => {
       unavailable: null,
     };
     for (const r of bundle.resources) {
-      if (!r.update) continue;
-      const reason = hubBlock(r.update.command as Parameters<typeof hubBlock>[0], remote);
+      const reason = resourceBlock(r, remote);
       expect(reason, r.id).toBeTruthy();
+      // Standalone: nothing is blocked.
+      expect(resourceBlock(r, { ...remote, remote: false, url: null }), r.id).toBeNull();
     }
+    const catalog = bundle.resources.find((r) => r.id === 'catalog')!;
+    expect(catalog.update).toBeUndefined();
+    expect(resourceBlock(catalog, remote)).toContain('fleet-hub catalog add');
   });
 });
 

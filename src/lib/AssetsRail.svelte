@@ -29,6 +29,8 @@
       class:on={view === r.id}
       aria-current={view === r.id ? 'page' : undefined}
       onclick={() => onview(r.id)}
+      aria-label={counts[r.id] ? `${r.label}, ${counts[r.id]}` : r.label}
+      title={r.label}
       data-testid={`assets-rail-${r.id}`}
     >
       <Icon name={r.id} size={15} />
@@ -38,7 +40,7 @@
   {/each}
   {#if !readOnly}
     <div class="sep" role="separator"></div>
-    <button type="button" onclick={onsecrets} disabled={busy} data-testid="assets-secrets">
+    <button type="button" onclick={onsecrets} disabled={busy} aria-label="Secrets" title="Secrets" data-testid="assets-secrets">
       <Icon name="key" size={15} /><span class="lbl">Secrets</span>
     </button>
   {/if}
@@ -57,4 +59,11 @@
   .ct { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--fg-muted); font-weight: 400; }
   .on .ct { color: var(--accent); }
   .sep { height: 1px; margin: 8px 4px; background: var(--border); }
+  /* Narrow: an icon strip. The buttons keep their names (aria-label, title). */
+  @media (max-width: 1100px) {
+    .rail { padding: 10px 6px; }
+    .rail button { justify-content: center; gap: 4px; padding: 0 4px; }
+    .lbl { display: none; }
+    .ct { margin-left: 0; }
+  }
 </style>

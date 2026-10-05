@@ -655,7 +655,7 @@ fn git_head(root: &std::path::Path) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_string()
 }
 
-fn json_of(r: Result<CallToolResult, McpError>) -> Value {
+pub(super) fn json_of(r: Result<CallToolResult, McpError>) -> Value {
     let r = r.unwrap_or_else(|e| panic!("{}", e.message));
     let text = r.content[0].as_text().expect("text content").text.clone();
     serde_json::from_str(&text).expect("tool result is JSON")

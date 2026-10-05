@@ -120,7 +120,7 @@ fn part_of(id: i64) -> Result<PathBuf, IpcError> {
 /// files it was sent; nobody inherits a file a grantee extracted, because a
 /// grantee can extract none.
 pub fn visible(s: &Store, scope: &ViewScope, row: &DownloadRow) -> bool {
-    if !scope.host.as_deref().is_none_or(|h| h == row.host_alias) {
+    if scope.host.as_deref().is_some_and(|h| h != row.host_alias) {
         return false;
     }
     match row

@@ -98,12 +98,16 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 //   repo_write  -> the ten git-write commands FilesPanel.svelte fans
 //                  `hubBlock('repo_write', …)` out to (FileList,
 //                  RemoteToolbar, BranchList, CommitGraph)
+//   catalog_registry -> catalog_add_catalog / catalog_remove_catalog, which
+//                  ROUTE (master-only on the hub): Settings → Catalogs shows
+//                  this reason to a paired desktop through `resourceBlock`
 //   host_tokens -> list_host_tokens / set_host_token_mode / rotate_host_token
 //                  (HostDetail.svelte's per-host token controls)
 const REASONS_KEYS_THAT_ARE_NOT_COMMANDS: ReadonlySet<string> = new Set([
   'repo_write',
   'fleet_settings',
   'host_tokens',
+  'catalog_registry',
 ]);
 
 describe('REASONS against the generated local_only commands', () => {
