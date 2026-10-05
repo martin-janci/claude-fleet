@@ -416,9 +416,11 @@ pub(crate) mod routed {
         backend: &FleetBackend,
         store: &Mutex<Store>,
     ) -> Result<AssetListing, IpcError> {
+        // Assets M5: this desktop lists every catalog (fix round 1: opt-in,
+        // so an older desktop keeps the personal-only listing).
         match backend.hub() {
             Some(hub) => hub.catalog_list_assets().await,
-            None => catalog::list_assets(store),
+            None => catalog::list_assets_in(store, catalog::ListingScope::Every),
         }
     }
 

@@ -333,7 +333,9 @@ Index by area (names only; see the reference for details):
   `repo_commit_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
 - **Asset catalog** — `list_assets` (catalog assets with per-host drift
-  state, unmanaged assets and parse problems), `scan_assets` (re-scan hosts,
+  state, unmanaged assets and parse problems; the personal catalog only
+  unless `all_catalogs` is set, which lists every catalog for the master
+  or an unbound full client and still personal only for anyone else), `scan_assets` (re-scan hosts,
   read-only on the hosts, and recompute asset states), `import_assets`
   (import the controller's `~/.claude` into the catalog working tree;
   `dry_run` supported), `plan_sync` (compute a fleet-wide sync plan with

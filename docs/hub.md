@@ -2629,8 +2629,10 @@ standalone exactly as before.
   file you add is read on this machine and its bytes sent to the hub. For
   any other client the hub answers `E_FORBIDDEN`
   and the tab is a read-only overview: the hub's catalog through
-  `list_assets` (each asset's per-host state, unmanaged assets, problems)
-  and a Scan hosts button through `scan_assets`, with the grant command to
+  `list_assets` (each asset's per-host state, unmanaged assets, problems;
+  the desktop sends `all_catalogs`, which the hub honours for an unbound
+  full client and answers personal-only for anyone else, as it does
+  without the flag) and a Scan hosts button through `scan_assets`, with the grant command to
   ask the operator for. The catalog itself can also be set on the hub's
   machine with `fleet-hub catalog set` (see *Asset catalog*).
 - **The setup checklist** is about the machine that owns the fleet, so it

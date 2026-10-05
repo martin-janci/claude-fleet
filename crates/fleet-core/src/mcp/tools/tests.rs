@@ -3451,7 +3451,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// downloads (`send_file`, `list_downloads`, `remove_download`, +1,170
     /// bytes). Measured at 72,701 on 2026-10-04 after Assets M5 Task 4
     /// (`asset_history` in `CatalogAdminParams::action`, +14 bytes).
-    const BUDGET_BYTES: usize = 72_801;
+    /// Measured at 72,827 on 2026-10-05 after its fix round 1
+    /// (`list_assets` takes `all_catalogs`, +126 bytes).
+    const BUDGET_BYTES: usize = 72_927;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

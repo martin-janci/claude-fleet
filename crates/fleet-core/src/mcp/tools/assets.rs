@@ -14,12 +14,21 @@ impl FleetTools {
     pub(super) async fn list_assets(
         &self,
         Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ListAssetsParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("list_assets", &format!("caller={}", caller.label()));
+        audit(
+            "list_assets",
+            &format!("all_catalogs={} caller={}", p.all_catalogs, caller.label()),
+        );
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
-        ok_json_compact(
-            &catalog::list_assets_in(&self.store, listing_scope(&caller)).map_err(to_mcp_err)?,
-        )
+        // Fix round 1: personal-only unless asked — an older desktop keys
+        // its list by name and must never get a second catalog's asset.
+        let scope = if p.all_catalogs {
+            listing_scope(&caller)
+        } else {
+            catalog::ListingScope::Personal
+        };
+        ok_json_compact(&catalog::list_assets_in(&self.store, scope).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Scan hosts for installed skills/agents/hooks/MCP \

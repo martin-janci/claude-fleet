@@ -1077,10 +1077,12 @@ fn git_catalog_with_skill(tag: &str) -> std::path::PathBuf {
 }
 
 /// Assets M5 (R11), the security boundary, per caller class through the
-/// tool: the master and an unbound full device (granted or not — the
-/// `list_catalogs` audience) see acme's asset with its catalog; a readonly
-/// or org-bound client and a per-host token see personal's only, exactly as
-/// before — never acme's name.
+/// tool. Fix round 1: without `all_catalogs` every caller gets personal's
+/// listing exactly as before (an older desktop never asks); with it, the
+/// master and an unbound full device (granted or not — the `list_catalogs`
+/// audience) see acme's asset with its catalog, while a readonly or
+/// org-bound client and a per-host token still see personal's only —
+/// never acme's name.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn the_list_assets_tool_shows_org_catalogs_only_to_who_may_list_every_catalog() {
@@ -1118,22 +1120,31 @@ async fn the_list_assets_tool_shows_org_catalogs_only_to_who_may_list_every_cata
         ),
         ("per-host token", host("h1"), &["personal"]),
     ];
-    for (who, caller, want) in cases {
-        let r = t.list_assets(Extension(caller)).await;
-        let text = r
-            .as_ref()
-            .map(|r| r.content[0].as_text().expect("text").text.clone())
-            .unwrap_or_else(|e| panic!("{who}: {}", e.message));
-        let listing: Value = serde_json::from_str(&text).unwrap();
-        let catalogs: Vec<&str> = listing["assets"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|a| a["catalog"].as_str().unwrap())
-            .collect();
-        assert_eq!(catalogs, want, "{who}");
-        if want.len() == 1 {
-            assert!(!text.contains("acme"), "{who} never sees acme: {text}");
+    for (who, caller, wide) in cases {
+        for all_catalogs in [false, true] {
+            let p = ListAssetsParams { all_catalogs };
+            let r = t
+                .list_assets(Extension(caller.clone()), Parameters(p))
+                .await;
+            let text = r
+                .as_ref()
+                .map(|r| r.content[0].as_text().expect("text").text.clone())
+                .unwrap_or_else(|e| panic!("{who}: {}", e.message));
+            let listing: Value = serde_json::from_str(&text).unwrap();
+            let catalogs: Vec<&str> = listing["assets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["catalog"].as_str().unwrap_or("personal"))
+                .collect();
+            let want: &[&str] = if all_catalogs { wide } else { &["personal"] };
+            assert_eq!(catalogs, want, "{who} all_catalogs={all_catalogs}");
+            if want.len() == 1 {
+                assert!(
+                    !text.contains("acme"),
+                    "{who} all_catalogs={all_catalogs} never sees acme: {text}"
+                );
+            }
         }
     }
 }

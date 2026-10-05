@@ -861,6 +861,13 @@ pub struct RepairSessionParams {
 // --- asset catalog ---------------------------------------------------------
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListAssetsParams {
+    /// Every catalog, not only personal (master/unbound full only).
+    #[serde(default)]
+    pub all_catalogs: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ScanAssetsParams {
     /// Only this host; omit for every reachable one.
     #[serde(default)]

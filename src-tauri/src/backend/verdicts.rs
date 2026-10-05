@@ -1069,8 +1069,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     // The overview's read, open to every paired client: the hub's
-    // `list_assets` answers `catalog::list_assets` over its own catalog and
-    // inventory — the same `AssetListing`.
+    // `list_assets` over its own catalogs and inventory — the same
+    // `AssetListing`. Assets M5: this desktop sends `all_catalogs: true`;
+    // the hub lists every catalog for the master or an unbound full client
+    // and personal only for anyone else (or when the flag is absent).
     (
         "catalog_list_assets",
         Verdict::Routed {

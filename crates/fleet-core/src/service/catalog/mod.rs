@@ -385,13 +385,19 @@ pub struct AssetSummary {
     pub scope: model::Scope,
     /// Assets M5 (R11): the catalog this asset is in — `personal`, or an org
     /// catalog's name. A hub before M5 listed the personal catalog only, so
-    /// an absent key reads as `personal`.
-    #[serde(default = "personal_label")]
+    /// an absent key reads as `personal`; and `personal` is never written
+    /// (fix round 1), so the default, personal-only listing is byte for byte
+    /// what it was before M5.
+    #[serde(default = "personal_label", skip_serializing_if = "is_personal")]
     pub catalog: String,
 }
 
 fn personal_label() -> String {
     catalogs::PERSONAL.to_string()
+}
+
+fn is_personal(catalog: &str) -> bool {
+    catalog == catalogs::PERSONAL
 }
 
 /// Assets M5 (R11): which catalogs a listing spans.
@@ -463,12 +469,14 @@ pub fn inventory(store: &Mutex<Store>) -> Result<Vec<AssetInventoryRow>, IpcErro
     Ok(lock(store)?.list_inventory()?)
 }
 
-/// Every loaded catalog's assets (Assets M5, R11) with their per-host state
-/// from the last scan, plus the unmanaged and orphan rows and the personal
-/// catalog's problems. The desktop's own listing; the MCP tool scopes it by
-/// caller (`mcp::tools::assets::listing_scope`).
+/// The personal catalog's assets with their per-host state from the last
+/// scan, plus the unmanaged and orphan rows and its problems — the listing
+/// as it was before Assets M5. Every catalog's is opt-in (fix round 1):
+/// [`list_assets_in`] with [`ListingScope::Every`], which the M5 desktop
+/// asks for and the MCP tool grants by caller
+/// (`mcp::tools::assets::listing_scope`).
 pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
-    list_assets_in(store, ListingScope::Every)
+    list_assets_in(store, ListingScope::Personal)
 }
 
 /// [`list_assets`] over `scope`'s catalogs, personal first
@@ -1784,7 +1792,21 @@ mod tests {
                 .unwrap();
         }
 
-        let every = list_assets(&store).unwrap();
+        // Fix round 1: the default listing is personal's, exactly as before
+        // M5 — not even a `catalog` key — so an older desktop keyed by name
+        // never sees a second `s`. The wide listing is opt-in.
+        let default = list_assets(&store).unwrap();
+        assert_eq!(default.assets.len(), 1);
+        assert_eq!(default.assets[0].catalog, "personal");
+        let wire = serde_json::to_value(&default).unwrap();
+        assert!(
+            !wire["assets"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("catalog"),
+            "{wire}"
+        );
+        let every = list_assets_in(&store, ListingScope::Every).unwrap();
         let hosts_of = |catalog: &str| -> Vec<(String, String, Option<String>)> {
             every
                 .assets

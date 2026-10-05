@@ -1230,7 +1230,9 @@ fn routed_read_cases() -> Vec<Case> {
         (
             "catalog_list_assets",
             "list_assets",
-            json!({}),
+            // Assets M5 fix round 1: this desktop asks for every catalog; an
+            // older one sends `{}` and gets personal's listing.
+            json!({ "all_catalogs": true }),
             r#"{"head":"abc","loaded_at":1,"assets":[{"kind":"skill","name":"worktree","version":"1","description":"d","tags":[],"hosts":[{"host_alias":"nas","harness":"claude","state":"in_sync"}]}],"unmanaged":[{"host_alias":"nas","harness":"claude","kind":"skill","name":"extra","state":"unmanaged","scanned_at":1,"managed":false}],"problems":[]}"#,
             Box::new(|b, s, _| {
                 block_on(commands::assets::routed::catalog_list_assets(b, s)).map(|_| ())
