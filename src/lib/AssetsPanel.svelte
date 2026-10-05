@@ -9,12 +9,12 @@
   } from './assets';
   import AssetsWorkspace from './AssetsWorkspace.svelte';
   import {
-    catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, isOpenCard, loadLayers, PERSONAL, proposeChangesets,
+    catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL,
     type WorkspaceView,
   } from './assets_workspace';
-  import { olderHubWords } from './assets_cards';
+  import { proposeAndReload } from './assets_cards';
   import { assetsViewRequest, type AssetsViewRequest } from './app_views';
-  import { push, pushError } from './toasts';
+  import { push } from './toasts';
   import { loadFleetSettings } from './fleet_settings';
   import type { IpcError } from './result';
   import ImportDialog from './ImportDialog.svelte';
@@ -30,7 +30,10 @@
 
   let setupPath = $state('~/agent-assets');
   let setupRemote = $state('');
-  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push'>('');
+  let busy = $state<'' | 'setup' | 'pull' | 'scan' | 'plan' | 'apply' | 'commit' | 'push' | 'propose'>('');
+  // The workspace's own card verbs (apply, dismiss, undo, admit, propose
+  // again), bound up so the switcher's commands wait for them too.
+  let cardBusy = $state('');
   // Per-ACTION error only (setup / scan / plan / commit / push). Four unrelated
   // toolbar handlers clear this on entry, so the catalog's own load state must
   // never be inferred from it — doing that made a successful Sync turn the
@@ -242,8 +245,9 @@
       selectedKey = r.select;
     }
     // Rescan, Sync and Propose change things: a client without the grant (the
-    // read-only overview) or without a catalog, or a busy panel, does nothing.
-    if (!r.command || catalogBlocked || !$catalogConfig || busy !== '') return;
+    // read-only overview) or without a catalog, or a panel or a card verb
+    // that is busy, does nothing.
+    if (!r.command || catalogBlocked || !$catalogConfig || busy !== '' || cardBusy !== '') return;
     if (r.command === 'rescan') {
       void scan();
     } else if (r.command === 'sync') {
@@ -256,16 +260,15 @@
 
   /** "Propose cards": the hub derives its cards from the hosts as they are. */
   async function proposeCards() {
-    const r = await proposeChangesets();
-    if (!r.ok) {
-      const older = olderHubWords(r.error, 'propose changes');
-      if (older) push({ kind: 'error', message: older });
-      else pushError(r.error, 'Propose');
-      return;
+    busy = 'propose';
+    let n;
+    try {
+      n = await proposeAndReload();
+    } finally {
+      busy = '';
     }
-    const loaded = await loadChangesets();
+    if (n === null) return;
     view = 'inbox';
-    const n = (loaded.ok ? loaded.value : r.value).filter(isOpenCard).length;
     push({ kind: 'info', message: `Proposed: ${n} open cards` });
   }
 
@@ -441,6 +444,7 @@
         failed={overviewLoad === 'failed' ? hubFailed : undefined}
         bind:selectedKey
         bind:view
+        bind:cardBusy
         onscan={scanOnHub}
         onsync={() => {}}
         onimport={() => {}}
@@ -481,6 +485,7 @@
       failed={!$catalog && catalogLoad === 'failed' ? loadFailed : undefined}
       bind:selectedKey
       bind:view
+      bind:cardBusy
       autoEditKey={pendingAutoEdit}
       plan={syncPlan}
       planFilter={syncFilter}

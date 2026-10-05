@@ -21,11 +21,11 @@
   import { hubStatus } from './hub';
   import { orgs } from './orgs';
   import {
-    admitCatalog, blockedOnSecrets, canWrite, cardViews, catalogStatuses, changesetSummaries, isOpenCard, keyOf, layerListing, layersByCatalog, loadAllLayers,
-    loadCatalogStatuses, loadChangesets, parseKey, PERSONAL, proposeChangesets, proposeLayerChange, unadmitCatalog,
+    admitCatalog, blockedOnSecrets, canWrite, cardViews, catalogStatuses, changesetSummaries, keyOf, layerListing, layersByCatalog, loadAllLayers,
+    loadCatalogStatuses, loadChangesets, parseKey, PERSONAL, proposeLayerChange, unadmitCatalog,
     type ChangesetSummary, type LayerChange, type WorkspaceView,
   } from './assets_workspace';
-  import { coveringNewCard, mergePlans, olderHubWords, primaryVerb } from './assets_cards';
+  import { coveringNewCard, mergePlans, olderHubWords, primaryVerb, proposeAndReload } from './assets_cards';
   import { runCardVerb, type CardVerbs } from './card_actions';
   import { buildInbox, hostOrderOf, keepCard, lastScanOf, sentence } from './assets_inbox';
   import { keep, parseQuery, type QueryRow } from './assets_query';
@@ -50,6 +50,7 @@
     failed,
     selectedKey = $bindable(null),
     view = $bindable('inbox'),
+    cardBusy = $bindable(''),
     autoEditKey = '',
     plan = null,
     planFilter = {},
@@ -84,6 +85,9 @@
     selectedKey?: string | null;
     /** The rail's view; bound so `AssetsPanel` can show a requested row. */
     view?: WorkspaceView;
+    /** A card verb is running (apply, dismiss, undo, admit, propose); bound so
+     *  the panel holds the quick switcher's commands meanwhile. */
+    cardBusy?: string;
     /** A just-created asset's key: the Inspector opens it in Source, editing. */
     autoEditKey?: string;
     /** An open sync plan: it takes the main column until it is closed (Back, Esc). */
@@ -194,9 +198,10 @@
     selectedKey = key;
   }
   // An asset selected from outside (the quick switcher) leaves a Rollout
-  // review, which would otherwise keep covering the list it is in.
+  // review, which would otherwise keep covering the list it is in — except
+  // while a card verb runs (the review's own apply is in flight).
   $effect(() => {
-    if (selection?.type === 'asset') untrack(() => (review = null));
+    if (selection?.type === 'asset') untrack(() => { if (cardBusy === '') review = null; });
   });
 
   // ── The sync plan and the Rollout review take the main column ──────────
@@ -264,7 +269,6 @@
   }
 
   // ── Card verbs (R12, R13): run, reload, toast (`card_actions`) ─────────
-  let cardBusy = $state('');
   const anyBusy = $derived(busy !== '' || cardBusy !== '');
   async function changed() {
     await loadChangesets();
@@ -342,21 +346,13 @@
   async function proposeAgain() {
     if (anyBusy) return;
     cardBusy = 'card';
-    let r;
+    let n;
     try {
-      r = await proposeChangesets();
+      n = await proposeAndReload();
     } finally {
       cardBusy = '';
     }
-    if (!r.ok) {
-      const older = olderHubWords(r.error, 'propose changes');
-      if (older) push({ kind: 'error', message: older });
-      else pushError(r.error, 'Propose');
-      return;
-    }
-    const loaded = await loadChangesets();
-    const n = (loaded.ok ? loaded.value : r.value).filter(isOpenCard).length;
-    push({ kind: 'info', message: `Proposed again: ${n} open cards` });
+    if (n !== null) push({ kind: 'info', message: `Proposed again: ${n} open cards` });
   }
 
   // ── Hosts (R18): the admission toggles ─────────────────────────────────

@@ -866,6 +866,65 @@ describe('AssetsPanel switcher requests', () => {
     expect(calls('assets_scan_hosts')).toHaveLength(0);
   });
 
+  it('a command does nothing while a card verb is running (a card apply in flight)', async () => {
+    const card = { id: 7, kind: 'new', summary: 'New on oci: skill/fresh', state: 'proposed', created_at: 1, catalogs: ['personal'] };
+    const cardView = { ...card, commits: {}, undoable: false, items: [
+      { position: 0, grp: 'core', catalog: 'personal', kind: 'skill', name: 'fresh', action: 'import', params: {}, decider: 'rule', state: 'pending' },
+    ] };
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_apply_changeset') return new Promise(() => {});
+      if (cmd === 'catalog_list_changesets') return [card];
+      if (cmd === 'catalog_get_changeset') return cardView;
+      if (cmd in base) return (base as Record<string, unknown>)[cmd];
+      throw { code: 'E_TEST', message: `unexpected ${cmd}` };
+    });
+    render(AssetsPanel, { visible: true });
+    await fireEvent.click(await screen.findByTestId('card-primary-7'));
+    await waitFor(() => expect(calls('catalog_apply_changeset')).toHaveLength(1));
+    requestAssetsView({ command: 'sync' });
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+    requestAssetsView({ command: 'propose' });
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+    requestAssetsView({ command: 'rescan' });
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+    expect(calls('catalog_plan_sync')).toHaveLength(0);
+    expect(calls('catalog_propose_changesets')).toHaveLength(0);
+    expect(calls('assets_scan_hosts')).toHaveLength(0);
+  });
+
+  it('two Propose requests in a row make one propose call while the first is in flight', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_propose_changesets') return new Promise(() => {});
+      if (cmd in base) return (base as Record<string, unknown>)[cmd];
+      throw { code: 'E_TEST', message: `unexpected ${cmd}` };
+    });
+    render(AssetsPanel, { visible: true });
+    await screen.findByTestId('assets-sync');
+    requestAssetsView({ command: 'propose' });
+    await waitFor(() => expect(calls('catalog_propose_changesets')).toHaveLength(1));
+    requestAssetsView({ command: 'propose' });
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+    expect(calls('catalog_propose_changesets')).toHaveLength(1);
+  });
+
+  it('Propose marks the panel busy and frees it again', async () => {
+    let release: (v: unknown) => void = () => {};
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_propose_changesets') return new Promise((r) => { release = r; });
+      if (cmd in base) return (base as Record<string, unknown>)[cmd];
+      throw { code: 'E_TEST', message: `unexpected ${cmd}` };
+    });
+    render(AssetsPanel, { visible: true });
+    await screen.findByTestId('assets-sync');
+    requestAssetsView({ command: 'propose' });
+    await waitFor(() => expect(screen.getByTestId('assets-sync')).toBeDisabled());
+    release([]);
+    await waitFor(() => expect(screen.getByTestId('assets-sync')).not.toBeDisabled());
+    // A second Propose runs now.
+    requestAssetsView({ command: 'propose' });
+    await waitFor(() => expect(calls('catalog_propose_changesets')).toHaveLength(2));
+  });
+
   it('a hub client without the grant: rescan, sync and propose do nothing and are cleared', async () => {
     hubStatus.set({ ...STANDALONE, remote: true, client_name: 'desk', client_mode: 'full' });
     byCmd({

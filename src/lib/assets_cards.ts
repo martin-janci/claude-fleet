@@ -2,8 +2,9 @@
 // why a copy was held (R1), and the Rollout review's mirror of the
 // backend's Additive filter (R15: `action_allowed` in changesets/apply.rs).
 import type { ChangesetSummary, ChangesetView, HeldWhy } from './assets_workspace';
-import { isOpenCard } from './assets_workspace';
+import { isOpenCard, loadChangesets, proposeChangesets } from './assets_workspace';
 import type { IpcError } from './result';
+import { push, pushError } from './toasts';
 import type { SyncAction, SyncPlan } from './assets';
 
 export const NEEDS_A_LOOK = 'needs a look';
@@ -103,4 +104,22 @@ export function isUndoBanner(c: ChangesetSummary): boolean {
 /** Whether applying the card writes a catalog (a commit), as opposed to recording verdicts or syncing hosts. */
 export function catalogChanging(view: ChangesetView): boolean {
   return view.items.some((i) => CATALOG_ACTIONS.has(i.action));
+}
+
+/**
+ * "Propose": the hub derives its cards from the hosts as they are, then the
+ * cards are re-read. Answers the number of open cards, or null after a
+ * refusal (already toasted: an older hub gets its own words). The caller owns
+ * its busy state and its own success message.
+ */
+export async function proposeAndReload(): Promise<number | null> {
+  const r = await proposeChangesets();
+  if (!r.ok) {
+    const older = olderHubWords(r.error, 'propose changes');
+    if (older) push({ kind: 'error', message: older });
+    else pushError(r.error, 'Propose');
+    return null;
+  }
+  const loaded = await loadChangesets();
+  return (loaded.ok ? loaded.value : r.value).filter(isOpenCard).length;
 }
