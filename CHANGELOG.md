@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.9] - 2026-10-05
+
+### Fixed
+- **mobile:** pairs fleet-mobile 0.4.9, which accepts hub contract 8 — fleet-mobile 0.4.8 refused the 0.4.8 hub as "this app is too old" (fleet-mobile #104). No claude-fleet code changes since 0.4.8.
+
 ## [0.4.8] - 2026-10-05
 
 ### Added
@@ -2656,6 +2661,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.9]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.9
 [0.4.8]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.8
 [0.4.7]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.7
 [0.4.6]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.6
