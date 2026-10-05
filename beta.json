@@ -1,16 +1,21 @@
 {
   "schema": 1,
   "track": "beta",
-  "sequence": 8,
-  "generated_at": "2026-10-05T07:00:46Z",
-  "expires_at": "2026-10-19T07:00:46Z",
-  "current": "0.4.7",
-  "recommended": "0.4.7",
+  "sequence": 9,
+  "generated_at": "2026-10-05T10:25:50Z",
+  "expires_at": "2026-10-19T10:25:50Z",
+  "current": "0.4.8",
+  "recommended": "0.4.8",
   "minimum_supported": {},
   "mandatory": [],
   "rollback": null,
   "withdrawn": [],
   "releases": [
+    {
+      "version": "0.4.8",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.4.8/release-manifest.json",
+      "manifest_sha256": "e5baf8939caf607c924aee779a7c82c74ddc6b8e6478b2ab1b2064ba1532b8a0"
+    },
     {
       "version": "0.4.7",
       "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.4.7/release-manifest.json",
