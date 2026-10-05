@@ -213,3 +213,294 @@ describe('AssetsWorkspace', () => {
     expect(rule).not.toMatch(/height/);
   });
 });
+
+describe('AssetsWorkspace keyboard', () => {
+  const rowKey = () => (document.activeElement as HTMLElement | null)?.getAttribute('data-row-key');
+
+  it('j/k move focus through the rows in display order; Enter selects', async () => {
+    render(AssetsWorkspace, handlers());
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'j' });
+    expect(rowKey()).toBe('asset:personal:skill/edited');
+    await fireEvent.keyDown(document.activeElement!, { key: 'j' });
+    expect(rowKey()).toBe('identity:skill/fresh');
+    await fireEvent.keyDown(document.activeElement!, { key: 'k' });
+    expect(rowKey()).toBe('asset:personal:skill/edited');
+    await fireEvent.click(document.activeElement!);
+    expect(screen.getByTestId('inbox-row-asset:personal:skill/edited').getAttribute('aria-current')).toBe('true');
+  });
+
+  it('s syncs the focused asset, a adopts the focused identity, ⌘↵ runs the primary', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'j' });
+    await fireEvent.keyDown(document.activeElement!, { key: 's' });
+    expect(h.onsync).toHaveBeenCalledWith({ kind: 'skill', name: 'edited' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'j' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'a' });
+    expect(h.onimport).toHaveBeenCalledWith(expect.objectContaining({ kind: 'skill', name: 'fresh' }));
+    await fireEvent.keyDown(document.activeElement!, { key: 'Enter', metaKey: true });
+    expect(h.onsync).toHaveBeenLastCalledWith({});
+  });
+
+  it('/ focuses the query; keys typed there are the field’s', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: '/' });
+    const q = screen.getByTestId('assets-query');
+    expect(document.activeElement).toBe(q);
+    await fireEvent.keyDown(q, { key: 's' });
+    expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('read-only: moving and selecting only', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, { ...h, readOnly: true });
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'j' });
+    expect(rowKey()).toBe('asset:personal:skill/edited');
+    await fireEvent.keyDown(document.activeElement!, { key: 's' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'Enter', ctrlKey: true });
+    expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('read-only: a and e do nothing', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, { ...h, readOnly: true });
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'j' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'e' });
+    expect(screen.queryByTestId('inspector-tab-source')).toBeNull();
+    await fireEvent.keyDown(document.activeElement!, { key: 'j' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'a' });
+    expect(h.onimport).not.toHaveBeenCalled();
+  });
+
+  it('k from the list goes to the last row; j/k stop at the ends', async () => {
+    render(AssetsWorkspace, handlers());
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'k' });
+    expect(rowKey()).toBe('identity:skill/fresh');
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(rowKey()).toBe('identity:skill/fresh');
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' });
+    expect(rowKey()).toBe('asset:personal:skill/edited');
+  });
+
+  it('j starts after the selected row when focus is on the list', async () => {
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('inbox-row-asset:personal:skill/edited'));
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'j' });
+    expect(rowKey()).toBe('identity:skill/fresh');
+  });
+
+  it('j/k bring the row into view in the Inbox and in the Library', async () => {
+    const seen: string[] = [];
+    const spy = vi.fn(function (this: HTMLElement) {
+      seen.push(this.getAttribute('data-row-key') ?? '');
+    });
+    const had = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
+    Element.prototype.scrollIntoView = spy as unknown as Element['scrollIntoView'];
+    try {
+      render(AssetsWorkspace, handlers());
+      const list = screen.getByTestId('assets-list');
+      list.focus();
+      await fireEvent.keyDown(list, { key: 'j' });
+      expect(seen).toEqual(['asset:personal:skill/edited']);
+      expect(spy).toHaveBeenLastCalledWith({ block: 'nearest' });
+      await fireEvent.click(screen.getByTestId('assets-rail-library'));
+      list.focus();
+      await fireEvent.keyDown(list, { key: 'j' });
+      expect(rowKey()).toBe('asset:personal:skill/edited');
+      await fireEvent.keyDown(document.activeElement!, { key: 'j' });
+      expect(rowKey()).toBe('asset:personal:skill/fine');
+      expect(seen.slice(1)).toEqual(['asset:personal:skill/edited', 'asset:personal:skill/fine']);
+    } finally {
+      if (had) Object.defineProperty(Element.prototype, 'scrollIntoView', had);
+      else delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+    }
+  });
+
+  it('the Library has one scroller, the list body (j/k scroll the same element in both views)', () => {
+    const css = readFileSync('src/lib/AssetList.svelte', 'utf8').match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';
+    const rule = /\.asset-list\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(rule).not.toMatch(/overflow/);
+    expect(rule).not.toMatch(/height/);
+  });
+
+  it('e opens the focused personal asset in Source, editing', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_get_asset') return { asset: { kind: 'skill', name: 'edited', version: '1', description: 'd', tags: [], body: '# b' }, previews: [], hosts: [] };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'j' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'e' });
+    expect(screen.getByTestId('inbox-row-asset:personal:skill/edited').getAttribute('aria-current')).toBe('true');
+    expect(screen.getByTestId('inspector-tab-source').getAttribute('aria-selected')).toBe('true');
+    expect(await screen.findByTestId('editor-save')).toBeTruthy();
+  });
+
+  it('e on the already-selected asset opens it in Source too', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_get_asset') return { asset: { kind: 'skill', name: 'edited', version: '1', description: 'd', tags: [], body: '# b' }, previews: [], hosts: [] };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    const row = screen.getByTestId('inbox-row-asset:personal:skill/edited');
+    await fireEvent.click(row);
+    expect(screen.getByTestId('inspector-tab-overview').getAttribute('aria-selected')).toBe('true');
+    row.focus();
+    await fireEvent.keyDown(row, { key: 'e' });
+    expect(screen.getByTestId('inspector-tab-source').getAttribute('aria-selected')).toBe('true');
+    expect(await screen.findByTestId('editor-save')).toBeTruthy();
+  });
+
+  it('e and s leave an org catalog asset and an identity alone', async () => {
+    catalog.set({
+      ...listing,
+      assets: [...listing.assets, { kind: 'skill', name: 'shared-one', version: '2', description: 'org', tags: [], catalog: 'acme', hosts: [] }],
+    });
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    await fireEvent.click(screen.getByTestId('assets-rail-library'));
+    const org = screen.getByTestId('asset-row-acme-skill-shared-one');
+    org.focus();
+    await fireEvent.keyDown(org, { key: 'e' });
+    await fireEvent.keyDown(org, { key: 's' });
+    expect(screen.queryByTestId('inspector-tab-source')).toBeNull();
+    expect(h.onsync).not.toHaveBeenCalled();
+    const id = screen.getByTestId('identity-row-skill-fresh');
+    id.focus();
+    await fireEvent.keyDown(id, { key: 'e' });
+    await fireEvent.keyDown(id, { key: 's' });
+    expect(screen.queryByTestId('inspector-tab-source')).toBeNull();
+    expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('a on an asset row and s on an identity row do nothing; i is not bound in M5', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'j' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'a' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'i' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'j' });
+    await fireEvent.keyDown(document.activeElement!, { key: 's' });
+    await fireEvent.keyDown(document.activeElement!, { key: 'i' });
+    expect(h.onimport).not.toHaveBeenCalled();
+    expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('the arrows scroll the Inspector natively; j there still walks the list', async () => {
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('inbox-row-identity:skill/fresh'));
+    const panel = screen.getByTestId('inspector').querySelector<HTMLElement>('[role="tabpanel"]')!;
+    panel.focus();
+    const ev = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true });
+    panel.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(panel);
+    await fireEvent.keyDown(panel, { key: 'k' });
+    expect(rowKey()).toBe('asset:personal:skill/edited');
+  });
+
+  it('keys with a modifier other than ⌘↵ are not taken', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    for (const mod of ['altKey', 'metaKey', 'ctrlKey']) {
+      const ev = new KeyboardEvent('keydown', { key: 'j', bubbles: true, cancelable: true, [mod]: true });
+      list.dispatchEvent(ev);
+      expect(ev.defaultPrevented, mod).toBe(false);
+    }
+    expect(document.activeElement).toBe(list);
+  });
+
+  it('keys inside a dialog (the catalog chip popover) stay the dialog’s', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    await fireEvent.click(screen.getByTestId('inbox-row-asset:personal:skill/edited'));
+    await fireEvent.click(screen.getByTestId('catalog-chip-personal'));
+    const inPopover = screen.getByTestId('assets-pull');
+    expect(inPopover.closest('[role="dialog"]')).toBeTruthy();
+    await fireEvent.keyDown(inPopover, { key: 's' });
+    await fireEvent.keyDown(inPopover, { key: 'Enter', metaKey: true });
+    await fireEvent.keyDown(inPopover, { key: 'j' });
+    expect(h.onsync).not.toHaveBeenCalled();
+    expect(rowKey()).not.toBe('asset:personal:skill/edited');
+    // The same s on the list acts on the selection.
+    const list = screen.getByTestId('assets-list');
+    await fireEvent.keyDown(list, { key: 's' });
+    expect(h.onsync).toHaveBeenCalledWith({ kind: 'skill', name: 'edited' });
+  });
+
+  it('⌘↵ waits while the panel is busy', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, { ...h, busy: 'scan' });
+    const list = screen.getByTestId('assets-list');
+    await fireEvent.keyDown(list, { key: 'Enter', metaKey: true });
+    await fireEvent.keyDown(list, { key: 'Enter', ctrlKey: true });
+    expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('a hidden panel takes no keys', async () => {
+    const h = handlers();
+    render(AssetsWorkspace, { ...h, visible: false });
+    const list = screen.getByTestId('assets-list');
+    list.focus();
+    await fireEvent.keyDown(list, { key: 'j' });
+    await fireEvent.keyDown(list, { key: 'Enter', metaKey: true });
+    expect(document.activeElement).toBe(list);
+    expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('a visible panel puts focus on the list, so j works at once', () => {
+    render(AssetsWorkspace, handlers());
+    expect(document.activeElement).toBe(screen.getByTestId('assets-list'));
+  });
+
+  it('Esc in the query: clears, then gives the list its focus back; Esc never leaves the field', async () => {
+    render(AssetsWorkspace, handlers());
+    const list = screen.getByTestId('assets-list');
+    await fireEvent.keyDown(list, { key: '/' });
+    const q = screen.getByTestId('assets-query') as HTMLInputElement;
+    await fireEvent.input(q, { target: { value: 'kind:' } });
+    expect(screen.getByTestId('assets-query-completions')).toBeTruthy();
+    const outside = vi.fn();
+    document.addEventListener('keydown', outside);
+    try {
+      await fireEvent.keyDown(q, { key: 'Escape' }); // closes the completions
+      expect(screen.queryByTestId('assets-query-completions')).toBeNull();
+      expect(q.value).toBe('kind:');
+      await fireEvent.keyDown(q, { key: 'Escape' }); // clears
+      expect(q.value).toBe('');
+      expect(document.activeElement).toBe(q);
+      await fireEvent.keyDown(q, { key: 'Escape' }); // back to the list
+      expect(document.activeElement).toBe(list);
+      expect(outside).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener('keydown', outside);
+    }
+  });
+
+  it('the list shows a focus ring when it has the keyboard', () => {
+    const css = readFileSync('src/lib/AssetsWorkspace.svelte', 'utf8').match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';
+    expect(css).toMatch(/\.body:focus-visible\s*\{[^}]*outline:\s*var\(--ring-w\) solid var\(--ring\)/);
+  });
+});

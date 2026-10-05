@@ -59,6 +59,8 @@
     } else if ((e.key === 'Tab' || e.key === 'Enter') && options.length) {
       if (take(active)) e.preventDefault();
     } else if (e.key === 'Escape') {
+      // Every Esc here is the field's (R22): it never reaches the App, which
+      // would close the Assets overlay. The next one, on the list, does.
       e.preventDefault();
       e.stopPropagation();
       if (options.length) open = false;

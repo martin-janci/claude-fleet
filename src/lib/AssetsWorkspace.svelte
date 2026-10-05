@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import AssetsRail from './AssetsRail.svelte';
   import AssetsInbox from './AssetsInbox.svelte';
   import AssetList from './AssetList.svelte';
@@ -18,6 +18,7 @@
   } from './assets_workspace';
   import { buildInbox, hostOrderOf, lastScanOf, sentence } from './assets_inbox';
   import { keep, parseQuery, type QueryRow } from './assets_query';
+  import { isEditable } from './terminal_keys';
 
   /** The Assets workspace (spec, Workspace shell): rail · list with a
    *  sentence header and the query · Inspector, over a footer. It owns the
@@ -26,6 +27,7 @@
   let {
     readOnly = false,
     readOnlyClient = null,
+    visible = true,
     busy = '',
     error = null,
     scanResults = null,
@@ -49,7 +51,7 @@
   }: {
     readOnly?: boolean;
     readOnlyClient?: string | null;
-    /** Whether the Assets tab is shown; read by the keyboard (Task 12). */
+    /** Whether the Assets tab is shown: a hidden one takes no keys. */
     visible?: boolean;
     busy?: string;
     error?: string | null;
@@ -82,9 +84,12 @@
   let showGrant = $state(false);
   const uid = $props.id();
   const grantNoteId = `${uid}-grant`;
-  // Bumped by the `e` key (Task 12): open the selected asset in Source.
+  // Bumped by the `e` key: open the selected asset in Source. `editKey` is
+  // set with the selection and cleared once the Inspector has read it.
   let editNonce = $state(0);
+  let editKey = $state('');
   let listEl: HTMLElement | undefined = $state();
+  let queryEl: ReturnType<typeof QueryInput> | undefined = $state();
   let now = $state(Math.floor(Date.now() / 1000));
   $effect(() => {
     const t = setInterval(() => (now = Math.floor(Date.now() / 1000)), 30_000);
@@ -153,9 +158,118 @@
   function select(key: string) {
     selectedKey = key;
   }
+
+  // ── The keyboard (Rulings R22) ────────────────────────────────────────
+  // Focus moves between rows: the DOM order is the display order, a folded
+  // section renders no rows. Space/Enter select natively (a static row
+  // handles both itself). Esc is the App's (it closes the Assets overlay),
+  // except in the query, which keeps it (QueryInput).
+  function rows(): HTMLElement[] {
+    return listEl ? Array.from(listEl.querySelectorAll<HTMLElement>('[data-row-key]')).filter((r) => r.matches('button, [tabindex]')) : [];
+  }
+  function focusedKey(): string | null {
+    const el = document.activeElement as HTMLElement | null;
+    return el && el !== listEl && listEl?.contains(el) ? (el.dataset.rowKey ?? null) : null;
+  }
+  function move(delta: 1 | -1) {
+    const all = rows();
+    if (!all.length) return;
+    const at = all.findIndex((r) => r.dataset.rowKey === (focusedKey() ?? selectedKey));
+    const next = at < 0 ? (delta > 0 ? 0 : all.length - 1) : Math.min(all.length - 1, Math.max(0, at + delta));
+    all[next].focus();
+    // The Inbox and the Library scroll the same element (`.body`).
+    all[next].scrollIntoView?.({ block: 'nearest' });
+  }
+  /** The listed asset behind a key, when this window may open and write it
+   *  (`s` and `e` act where the Inspector offers Sync and Edit). */
+  function ownAsset(key: string | null): AssetSummary | null {
+    const sel = key ? parseKey(key) : null;
+    if (readOnly || !listing || sel?.type !== 'asset') return null;
+    const a = listing.assets.find((x) => x.kind === sel.kind && x.name === sel.name && (x.catalog ?? PERSONAL) === sel.catalog);
+    return a && canOpen(a) ? a : null;
+  }
+  async function editAsset(key: string) {
+    editKey = key;
+    selectedKey = key;
+    editNonce += 1;
+    await tick();
+    if (editKey === key) editKey = '';
+  }
+  function onKeydown(e: KeyboardEvent) {
+    const target = e.target as HTMLElement | null;
+    // PF10: a dialog (a modal or the catalog chip's popover) and a field
+    // keep their keys.
+    if (!visible || e.defaultPrevented || target?.closest?.('dialog,[role="dialog"]') || isEditable(target)) return;
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'Enter') {
+      // The one primary (R18): Sync fleet.
+      if (!readOnly && busy === '') {
+        e.preventDefault();
+        onsync({});
+      }
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const key = focusedKey() ?? selectedKey;
+    const sel = key ? parseKey(key) : null;
+    // The arrows move rows in the list only; elsewhere (the Inspector's
+    // scrolling tab panel) they keep scrolling natively.
+    const inList = !!target && !!listEl?.contains(target);
+    switch (e.key) {
+      case 'j':
+      case 'ArrowDown':
+        if (e.key === 'ArrowDown' && !inList) break;
+        e.preventDefault();
+        move(1);
+        break;
+      case 'k':
+      case 'ArrowUp':
+        if (e.key === 'ArrowUp' && !inList) break;
+        e.preventDefault();
+        move(-1);
+        break;
+      case '/':
+        e.preventDefault();
+        queryEl?.focus();
+        break;
+      case 'a': {
+        if (readOnly || sel?.type !== 'identity' || !listing) break;
+        const id = identitiesOf(listing).find((i) => i.kind === sel.kind && i.name === sel.name);
+        // As the row's own Import: never a fleet or harness internal.
+        if (id && id.class !== 'fleet_internal' && id.class !== 'harness_internal') {
+          e.preventDefault();
+          onimport(id);
+        }
+        break;
+      }
+      case 's': {
+        const a = busy === '' ? ownAsset(key) : null;
+        if (!a) break;
+        e.preventDefault();
+        onsync({ kind: a.kind, name: a.name });
+        break;
+      }
+      case 'e':
+        if (!key || !ownAsset(key)) break;
+        e.preventDefault();
+        void editAsset(key);
+        break;
+      // `i` (ignore) is a card verb — reject_item — bound with the cards in M6.
+    }
+  }
+
+  // A shown panel gives the list the keyboard, unless focus is already
+  // inside (`j` works the moment Assets opens).
+  let rootEl: HTMLElement | undefined = $state();
+  $effect(() => {
+    if (!visible || !listEl) return;
+    untrack(() => {
+      if (!rootEl?.contains(document.activeElement)) listEl?.focus({ preventScroll: true });
+    });
+  });
 </script>
 
-<div class="ws" data-testid="assets-workspace">
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div class="ws" data-testid="assets-workspace" role="group" aria-label="Assets workspace" bind:this={rootEl} onkeydown={onKeydown}>
   <AssetsRail {view} {counts} {readOnly} busy={busy !== ''} onview={(v) => (view = v)} {onsecrets} />
 
   <div class="main">
@@ -210,7 +324,7 @@
         {/if}
       </div>
       <div class="line">
-        <QueryInput bind:value={queryText} {vocab} onescape={() => listEl?.focus()} />
+        <QueryInput bind:this={queryEl} bind:value={queryText} {vocab} onescape={() => listEl?.focus()} />
         {#if view === 'library' && !readOnly}
           <button type="button" class="btn btn--quiet" onclick={onnew} disabled={busy !== ''} data-testid="assets-new">New asset</button>
           <button
@@ -269,7 +383,7 @@
       {order}
       {readOnly}
       {canOpen}
-      {autoEditKey}
+      autoEditKey={editKey || autoEditKey}
       {editNonce}
       {onsync}
       ondeleted={() => {
@@ -307,6 +421,7 @@
   .grant code, .problems code { font-family: var(--mono); font-size: 11.5px; user-select: text; }
   kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 4px; border-radius: 3px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); opacity: 0.85; }
   .body { flex: 1; min-height: 0; overflow: auto; outline: 0; }
+  .body:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .error { margin: 0; padding: 4px 14px; color: var(--usage-crit); }
   .scan-result { margin: 0; padding: 4px 14px; font-size: 12px; color: var(--fg-muted); }
   .problems { margin: 0; padding: 4px 14px 4px 32px; font-size: 12px; }

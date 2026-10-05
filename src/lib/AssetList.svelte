@@ -244,7 +244,8 @@
 </div>
 
 <style>
-  .asset-list { overflow: auto; height: 100%; font-size: 13px; }
+  /* Scrolls inside its one home, the workspace's list body. */
+  .asset-list { font-size: 13px; }
   .group-header { padding: 8px 10px 4px; color: var(--fg-muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
   .count { opacity: 0.7; margin-left: 4px; }
   .row {
