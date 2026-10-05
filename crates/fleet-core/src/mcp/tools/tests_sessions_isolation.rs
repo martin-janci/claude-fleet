@@ -351,17 +351,28 @@ fn tier(reach: Reach, who: Who) -> Out {
     }
 }
 
-/// The five person-facing sharing surfaces, which a per-host token is never
-/// a caller of: it proves no person, so it can be neither an owner nor a
-/// grantee (`sharing.rs`'s header, spec §4.3). They are refused BEFORE the
-/// session gate, by `enforce_admin`, so a host caller's cell is
-/// `E_FORBIDDEN` whatever the tier says.
+/// Tools a per-host token is never a caller of. They are refused BEFORE the
+/// session gate, by `enforce_admin` reading `guard::NOT_FOR_HOST_TOKENS`, so
+/// a host caller's cell is `E_FORBIDDEN` whatever the tier says — and
+/// `the_pre_gate_policy_fences_are_what_the_cells_assume` holds every name
+/// here to that table rather than to behaviour.
+///
+/// Two different reasons, both worth keeping legible:
+///
+/// * the five person-facing SHARING surfaces, because a per-host token
+///   proves no person and so can be neither an owner nor a grantee
+///   (`sharing.rs`'s header, spec §4.3);
+/// * `list_downloads`, because listing and removing sent files is a
+///   person's half of the downloads feature — a host's Claude only SENDS one
+///   (`send_file`, which is deliberately NOT here: the session's own agent
+///   is that tool's headline caller).
 const NEVER_A_HOST_TOKENS: &[&str] = &[
     "session_share",
     "session_unshare",
     "session_narrow",
     "session_access",
     "my_grants",
+    "list_downloads",
 ];
 
 /// The one tool a per-host token is the only caller of (`Access::HostToken`,
@@ -438,9 +449,34 @@ struct Fx {
     task: i64,
     /// A work link on `row`, under [`WORK_KEY`].
     link: i64,
+    /// A `downloads` row taken OUT of `row` — a file `send_file` copied off
+    /// the owner's host, in state `ready`, so `list_downloads` has something
+    /// to hide. Without it that row would assert over an empty page and
+    /// measure nothing.
+    download: i64,
+}
+
+/// Set the process-global downloads directory, which
+/// `service::downloads::send` demands (`dir()?`) **before** it resolves the
+/// session.
+///
+/// Without it every caller gets `E_UNSUPPORTED` from a line above the gate
+/// and the whole `send_file` row would pass while measuring nothing — and
+/// which way it went would depend on whether `service::downloads`' own tests
+/// happened to run first in this process, since the directory is a
+/// `OnceLock`. The same shape as `downloads_tests::test_dir`: one temp
+/// directory per process, kept.
+fn downloads_dir() -> &'static std::path::Path {
+    static D: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    D.get_or_init(|| {
+        let tmp = tempfile::tempdir().unwrap().keep();
+        let s = Store::open_in_memory().unwrap();
+        crate::service::downloads::init(&tmp, &s).unwrap()
+    })
 }
 
 fn fixture() -> Fx {
+    downloads_dir();
     let s = Store::open_in_memory().unwrap();
     // No `local` host, for the reason the org matrix states: with one,
     // `list_sessions`' reconcile pass adopts whatever tmux sessions the
@@ -565,6 +601,27 @@ fn fixture() -> Fx {
         .unwrap()
         .id;
 
+    // One file sent out of the private row. `session_name` is the row's own
+    // `tmux_name` — what `downloads::send` records — so it is a MARKER, and
+    // the leak check over `list_downloads` is a real one rather than a walk
+    // over an empty page. `ready`, because a ready row is the dangerous one:
+    // its bytes are what `GET /downloads/<id>` serves.
+    let download = s
+        .insert_download(&crate::store::NewDownload {
+            host_alias: HOST,
+            session_id: Some(row),
+            session_name: Some(LEAK_TMUX),
+            org_id: None,
+            path: "/src/acme/wt/out/report.pdf",
+            name: "report.pdf",
+            size: 11,
+            source: crate::service::downloads::SOURCE_AGENT,
+            note: None,
+        })
+        .unwrap()
+        .id;
+    s.finish_download(download, "da39a3ee").unwrap();
+
     let t = FleetTools::new(
         Arc::new(Mutex::new(s)),
         Arc::new(SshClient::new()),
@@ -586,6 +643,7 @@ fn fixture() -> Fx {
         worktree,
         task,
         link,
+        download,
     }
 }
 
@@ -694,6 +752,9 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "session_access" => fx.t.session_access(ext, p!()).await,
         "session_claim" => fx.t.session_claim(ext, p!()).await,
         "my_grants" => fx.t.my_grants(ext).await,
+        // ---- downloads.rs -------------------------------------------------
+        "send_file" => fx.t.send_file(ext, p!()).await,
+        "list_downloads" => fx.t.list_downloads(ext, p!()).await,
         // ---- fleet.rs -----------------------------------------------------
         "fleet_health" => fx.t.fleet_health(ext).await,
         "usage_report" => fx.t.usage_report(ext, p!()).await,
@@ -978,6 +1039,79 @@ async fn run_matrix() {
         .await;
     }
     m.gated("session_access", Reach::Own, row).await;
+    // `send_file` is the `own` tier, and the reason is the FILE's path
+    // rather than anything about the session: `send_file { session_id, path }`
+    // copies a file off the session's host at an UNCONSTRAINED absolute path
+    // — `downloads::parse_stat`'s whole success condition is
+    // `path.starts_with('/')`, with no canonicalisation against a root and no
+    // `starts_with(worktree)` — and `GET /downloads/<id>` then hands the
+    // BYTES to whoever `downloads::visible` admits. That is a subset of what
+    // a terminal gives, which §4.3 invariant 5 says no grant ever confers, so
+    // the confined `repo_file`'s `Reach::Read` is not the precedent it looks
+    // like. (If somebody later confines the path to the session's tree,
+    // `Read` becomes defensible and this row moves with it.)
+    //
+    // Its cells depart from [`tier`] three times, and each departure is
+    // recorded here rather than smoothed into the tier it nearly matches:
+    //
+    // * **every refusal is `E_NOTFOUND`, never `E_FORBIDDEN`.**
+    //   `downloads::send` has ONE `_ =>` arm answering
+    //   `session {id} not found`, so a WATCHER and a DRIVER are told the row
+    //   does not exist rather than told the level they lack. Stricter than
+    //   §4.3, which would merely refuse them, and the no-oracle sweep below
+    //   is what keeps that strictness honest instead of accidental;
+    // * **`HostNoPane` is that same `E_NOTFOUND`**, not the
+    //   `E_PANE_UNPROVEN` every `person_sees` path answers: the per-host arm
+    //   is `sees_session_row(..).is_visible()`, a boolean with no third "on
+    //   the right host, proving no pane" answer to return. Stricter again,
+    //   and strictly less informative;
+    // * **`HostPane` PASSES**, which `tier(Own, ..)` refuses. That is
+    //   deliberate and is `send`'s second arm: the session's own Claude is
+    //   this tool's headline caller (`whoami` hands it the `session_id`), and
+    //   the pane proof never reaches `may_own`, so its gate is §4.4 clauses 1
+    //   and 2 through `sees_session_row` — its own host, and the one pane
+    //   this request proves. `SESSION_REACH`'s row and `reaches_in`'s
+    //   `downloads::send(` clause in `tests.rs` both say so.
+    m.at(
+        "send_file",
+        Reach::Own,
+        |fx, _| json!({ "session_id": fx.row, "path": "out/report.pdf" }),
+        |who| match who {
+            Who::Owner | Who::HostPane => Out::Pass,
+            _ => Out::Gate(codes::E_NOTFOUND),
+        },
+    )
+    .await;
+    // No oracle on any of those seven refusals. The sentence is the gate's
+    // one `session {id} not found`, which is byte-identical to the one an id
+    // nobody ever used produces — so walking session ids with `send_file`
+    // tells a watcher, a driver, a stranger, the master and a host token
+    // elsewhere exactly nothing about which ids exist.
+    for who in [
+        Who::Watcher,
+        Who::Driver,
+        Who::Stranger,
+        Who::HostNoPane,
+        Who::HostElsewhere,
+        Who::Master,
+        Who::Legacy,
+    ] {
+        let hidden = call(
+            &fx,
+            who,
+            "send_file",
+            json!({ "session_id": fx.row, "path": "out/report.pdf" }),
+        )
+        .await;
+        let unknown = call(
+            &fx,
+            who,
+            "send_file",
+            json!({ "session_id": 999999, "path": "out/report.pdf" }),
+        )
+        .await;
+        same_as_unknown(&hidden, &unknown, &fx.row.to_string(), "999999");
+    }
     // The umbrella's `own` arms (`resume`, `summarize`) are addressed by a
     // work key and a `link_id`, not by a session, and they answer
     // `summary::no_such_link` rather than naming a tier — a caller not
@@ -1366,6 +1500,93 @@ async fn run_matrix() {
     .await;
     m.row("fleet_health", |_, _| json!({}), open).await;
     m.row("usage_report", |_, _| json!({}), open).await;
+    // `list_downloads` is the INDEX into the bytes `send_file` copied — its
+    // rows carry the file's absolute path on the owner's host — and it gates
+    // no single row: it FILTERS, which is why `tests::NO_PER_ROW_GATE` holds
+    // its reason and it has no `SESSION_REACH` row for `gated` to measure
+    // against. That table's claim is "the page is cut by
+    // `downloads::visible`, which asks `ViewScope::may_own` on the session
+    // each row came out of — the same `own` tier `send_file` gates one row
+    // with", and these cells plus the sweep below are the CHECKING of it: a
+    // "it filters instead of gating" claim is exactly the kind a per-caller
+    // row should test rather than accept.
+    //
+    // **The T8 result gate is no net underneath it.** A serialised
+    // `DownloadRow` is `{id, at, host_alias, session_id, session_name, path,
+    // …}`, and `looks_like_session_row` wants `visibility`, or `host_alias`
+    // AND `tmux_name` — the download spells that key `session_name`, so the
+    // gate does not recognise the shape and drops nothing. `visible` is the
+    // whole of the fence, which is what makes this row load-bearing rather
+    // than decorative.
+    //
+    // `session_id` is OPTIONAL, so both shapes run: the fleet-wide page, and
+    // the session-addressed one naming a row the caller may not own — which
+    // must yield an empty page and not a refusal, so it is no existence
+    // oracle either. The three host callers never read either shape:
+    // `list_downloads` is in `guard::NOT_FOR_HOST_TOKENS` (a host's Claude
+    // only sends), recorded in `NEVER_A_HOST_TOKENS` above and refused by
+    // `enforce_admin` before any row is read.
+    //
+    // What is deliberately NOT fenced: `total_bytes`, `max_total_bytes` and
+    // `max_file_bytes`. Those are the MACHINE's budget, computed over every
+    // row on purpose — a sender has to be told the disk is full by somebody
+    // else's file — and they name no host, no session, no path and no person.
+    let no_host_token = |who: Who| match who {
+        w if w.is_host() => Out::Code(codes::E_FORBIDDEN),
+        _ => Out::Pass,
+    };
+    m.row("list_downloads", |_, _| json!({}), no_host_token)
+        .await;
+    m.row(
+        "list_downloads",
+        |fx, _| json!({ "session_id": fx.row }),
+        no_host_token,
+    )
+    .await;
+    // The row above is held by `MARKERS` for the five callers that may not
+    // read the session at all — but a WATCHER and a DRIVER may read it, so
+    // the leak check is silent about precisely the two callers the `own` tier
+    // exists to refuse. So the PAGE is asserted instead: only the owner's
+    // `list_downloads` carries the file, in either shape. The owner's half is
+    // not symmetry for its own sake — without it "the page is empty" would
+    // pass for a fixture whose download nobody can see at all.
+    for &who in EVERYONE {
+        for args in [json!({}), json!({ "session_id": fx.row })] {
+            let a = call(&fx, who, "list_downloads", args.clone()).await;
+            if who.is_host() {
+                assert_eq!(code(&a), codes::E_FORBIDDEN, "{who:?}: {a:?}");
+                continue;
+            }
+            if who == Who::Owner {
+                // Both halves: the ROW is there (by its own id, so a
+                // same-shaped row of somebody else's cannot stand in for it)
+                // and it carries the session's name — which is the marker
+                // every other caller must not see.
+                assert!(
+                    text(&a).contains(&format!("\"id\":{}", fx.download))
+                        && text(&a).contains(LEAK_TMUX),
+                    "the owner's own file must still be served, or the \
+                     emptiness below means nothing ({args}): {a:?}"
+                );
+                continue;
+            }
+            assert!(
+                text(&a).contains("\"downloads\":[]"),
+                "{who:?} does not own the session this file came out of, so \
+                 the page must be EMPTY rather than merely redacted \
+                 ({args}): {a:?}"
+            );
+        }
+    }
+    {
+        // And the budget really is served to everyone, so the emptiness above
+        // is the ROWS being cut and not the whole answer being withheld.
+        let a = call(&fx, Who::Stranger, "list_downloads", json!({})).await;
+        assert!(
+            text(&a).contains("\"total_bytes\":11"),
+            "the machine's budget is nobody's secret: {a:?}"
+        );
+    }
     m.row(
         "list_worktrees",
         |fx, _| json!({ "project_id": fx.project, "summary": false }),
@@ -1535,8 +1756,12 @@ async fn a_watcher_and_a_stranger_are_told_apart_only_by_e_forbidden_vs_e_notfou
 
 /// Spec §4.3 invariant 5, as the one list T7 cites and this test drives: a
 /// `drive` grantee is refused **every** tool in the `own` tier, and the
-/// refusal is a LEVEL (`E_FORBIDDEN`), never a missing row — the driver can
-/// see the session, it simply may not dispose of it.
+/// refusal is normally a LEVEL (`E_FORBIDDEN`) rather than a missing row —
+/// the driver can see the session, it simply may not dispose of it. Two tools
+/// are STRICTER than that and say so in the `want` list below
+/// (`work_link`'s conversation arms, and `send_file`, whose gate has one
+/// refusing arm): being told less than the tier would tell you is never the
+/// failure this test is looking for.
 ///
 /// The list is read off `SESSION_REACH`, not retyped: a tool whose row moves
 /// to `Own` joins this test automatically, which is the only way a tier
@@ -1557,7 +1782,7 @@ async fn a_driver_is_refused_every_owner_only_tool() {
     for tool in &own_tier {
         let args = own_tier_args(&fx, tool);
         let a = call(&fx, Who::Driver, tool, args).await;
-        // Three shapes of "no", and each one is the tool's own design:
+        // Four shapes of "no", and each one is the tool's own design:
         //
         // * `restore_host_sessions` is the BATCH, addressed by host: it never
         //   refuses, it reports the row as a `skip` reading `not found on
@@ -1567,6 +1792,12 @@ async fn a_driver_is_refused_every_owner_only_tool() {
         //   `link_id`, so the refusal is `summary::no_such_link`: the driver
         //   reads as if the link were not there rather than being told a tier
         //   it lacks;
+        // * `send_file` is addressed by `session_id` like most of the tier,
+        //   but its gate lives in `service::downloads::send` rather than in
+        //   `resolve_row_and_gate`, and that gate has a single refusing arm:
+        //   the driver reads as if the session were not there. Stricter than
+        //   the tier, since a download is an unconstrained read of the
+        //   owner's host;
         // * everything else names the tier, which reveals nothing the driver
         //   could not already see.
         if *tool == "restore_host_sessions" {
@@ -1577,10 +1808,17 @@ async fn a_driver_is_refused_every_owner_only_tool() {
             );
             continue;
         }
-        let want: &[&str] = if *tool == "work_link" {
-            &[codes::E_FORBIDDEN, codes::E_NOTFOUND]
-        } else {
-            &[codes::E_FORBIDDEN]
+        let want: &[&str] = match *tool {
+            "work_link" => &[codes::E_FORBIDDEN, codes::E_NOTFOUND],
+            // `send_file` is the fourth shape, and the STRICTEST: its gate
+            // (`downloads::send`) has one `_ =>` arm answering
+            // `session {id} not found`, so the driver — who can see the
+            // session perfectly well — is told the row does not exist. More
+            // than §4.3 asks for, recorded rather than smoothed; the matrix
+            // row above pins the whole column and a no-oracle sweep next to
+            // it pins the sentence.
+            "send_file" => &[codes::E_NOTFOUND],
+            _ => &[codes::E_FORBIDDEN],
         };
         assert!(
             want.contains(&code(&a)),
@@ -1615,6 +1853,11 @@ fn own_tier_args(fx: &Fx, tool: &str) -> Value {
         "work_link" => {
             json!({ "action": "summarize", "key": WORK_KEY, "link_id": fx.link })
         }
+        // A RELATIVE path, which is the shape the tool is documented with and
+        // the only one that could plausibly be innocent: the point is that
+        // the driver is refused before `stat_script` is ever built, so which
+        // file was asked for never matters.
+        "send_file" => json!({ "session_id": fx.row, "path": "out/report.pdf" }),
         other => panic!("no `own`-tier arguments for {other}"),
     }
 }
