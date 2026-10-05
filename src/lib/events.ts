@@ -10,6 +10,7 @@ import type { AssetInventoryRow, CatalogSummary, SyncProgress } from './assets';
 import type { MoveProgress } from './moveProgress';
 import type { TrackerRow, WorkEvent, WorkItemRow } from './trackers';
 import { parseWorkChanged, type WorkChanged } from './work_view';
+import { parseGrantChanged, type GrantChanged } from './access';
 
 /**
  * How long a flush waits for more events after the first one arrives. Tauri
@@ -85,6 +86,15 @@ export type RowEventHandlers = {
   /** One call per flush with the id of every `download:changed` (file
    *  downloads: ids only), in order: re-read `list_downloads`. */
   onDownloadsChanged?: (ids: number[]) => void;
+  /**
+   * One call per flush with every well-formed `grant:changed` (multi-user M1:
+   * ids only), in order. A grant mutates no `sessions` column, so sharing and
+   * revoking emit NOTHING a row event could carry — this frame is how a
+   * client keeps its own grant set current (`access.ts::applyGrantChanges`)
+   * without re-fetching, and it is what makes a revoke close an attached
+   * terminal rather than waiting for a re-list.
+   */
+  onGrantChanged?: (changes: GrantChanged[]) => void;
 };
 
 /** The payload of `update:changed`: what moved, never the row itself. */
@@ -125,7 +135,8 @@ type Queued =
   | { name: 'work:changed'; payload: unknown }
   | { name: 'settings:changed'; payload: { key: string } }
   | { name: 'update:changed'; payload: UpdateChanged }
-  | { name: 'download:changed'; payload: { id: number } };
+  | { name: 'download:changed'; payload: { id: number } }
+  | { name: 'grant:changed'; payload: unknown };
 
 /**
  * Subscribe to every row-change event from the backend. Returns a single
@@ -167,6 +178,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const settingsKeys: string[] = [];
     const updateChanges: UpdateChanged[] = [];
     const downloadIds: number[] = [];
+    const grantChanges: GrantChanged[] = [];
     for (const ev of batch) {
       switch (ev.name) {
         case 'session:created':
@@ -273,6 +285,11 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'download:changed':
           if (typeof ev.payload?.id === 'number') downloadIds.push(ev.payload.id);
           break;
+        case 'grant:changed': {
+          const g = parseGrantChanged(ev.payload);
+          if (g) grantChanges.push(g);
+          break;
+        }
       }
     }
     if (sessionEvents.length > 0) handlers.onSessionEvents?.(sessionEvents);
@@ -288,6 +305,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
     if (updateChanges.length > 0) handlers.onUpdateChanged?.(updateChanges);
     if (downloadIds.length > 0) handlers.onDownloadsChanged?.(downloadIds);
+    if (grantChanges.length > 0) handlers.onGrantChanged?.(grantChanges);
   };
 
   const enqueue = (ev: Queued) => {
@@ -329,6 +347,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     settingsChanged: !!handlers.onSettingsChanged,
     updateChanged: !!handlers.onUpdateChanged,
     downloadsChanged: !!handlers.onDownloadsChanged,
+    grantChanged: !!handlers.onGrantChanged,
   };
 
   const sub = <N extends Queued['name']>(
@@ -370,6 +389,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('settings:changed', wanted.settingsChanged),
     sub('update:changed', wanted.updateChanged),
     sub('download:changed', wanted.downloadsChanged),
+    sub('grant:changed', wanted.grantChanged),
   ]);
   return () => {
     disposed = true;

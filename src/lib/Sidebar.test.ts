@@ -73,6 +73,7 @@ import { toasts, clearToasts } from './toasts';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { workFilters, mineItemIds, mineLoaded, DEFAULT_WORK_FILTERS } from './work_filters';
+import { resetAccessForTests, setMyGrants } from './access';
 import { trackers } from './trackers';
 
 /** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
@@ -141,6 +142,10 @@ beforeEach(() => {
   sessionFocus.set(null);
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
+  // Multi-user M1: forget who this client is, the way a fresh launch has not
+  // asked yet. Standalone (the default above) owns every row regardless, so
+  // every existing test in this file is unaffected by the access gate.
+  resetAccessForTests();
   // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
   // (check_local_prereqs, tunnel_status, mcp_status).
   onboardingDismissed.set(true);
@@ -2077,6 +2082,114 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     });
   });
 
+  // Multi-user M1: `name_session_work` is `drive` in `share.ts::SESSION_TIER`,
+  // and `SessionRowItem`'s per-session "Rename…" has composed both halves since
+  // F2 while this group header asked only the hub's — the same control, two
+  // surfaces, two answers. Narrowed the way select mode's `bulkKillTargets`
+  // narrows, so a mixed group still names the sessions that ARE this client's.
+  it('work mode: the group header only names work for sessions this client may drive', async () => {
+    const REMOTE: HubStatus = {
+      ...STANDALONE,
+      remote: true,
+      url: 'https://fleet.example.com',
+      configured_url: 'https://fleet.example.com',
+    };
+    const mineA = { ...sessionFor(2, 'dev-mine-a'), owner_person_id: 7 };
+    const mineB = { ...sessionFor(2, 'dev-mine-b'), owner_person_id: 7 };
+    const theirs = { ...sessionFor(2, 'dev-theirs'), owner_person_id: 9 };
+    mockBackend(workProjects, [mineA, mineB, theirs]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    // Watch on the other person's row: a read, so no work link may be written.
+    setMyGrants(7, [{ session_id: theirs.id, level: 'watch' }]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    const button = (await screen.findAllByTestId('name-work-group'))[0] as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    // Two of the three, not all three: the watched row is not a target.
+    expect(button.getAttribute('title')).toContain('2 sessions with no work');
+    await fireEvent.click(button);
+    await tick();
+    const dialog = screen.getByTestId('name-work-dialog');
+    expect(within(dialog).getAllByTestId('name-work-session')).toHaveLength(2);
+    expect(dialog.textContent).toContain('dev-mine-a');
+    expect(dialog.textContent).toContain('dev-mine-b');
+    expect(dialog.textContent).not.toContain('dev-theirs');
+  });
+
+  it('work mode: with nothing in the group to drive, the header says why', async () => {
+    const REMOTE: HubStatus = {
+      ...STANDALONE,
+      remote: true,
+      url: 'https://fleet.example.com',
+      configured_url: 'https://fleet.example.com',
+    };
+    const theirs = { ...sessionFor(2, 'dev-theirs'), owner_person_id: 9 };
+    mockBackend(workProjects, [theirs]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [{ session_id: theirs.id, level: 'watch' }]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    const button = (await screen.findAllByTestId('name-work-group'))[0] as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute('title')).toMatch(/watch is read-only/i);
+    await fireEvent.click(button);
+    await tick();
+    expect(screen.queryByTestId('name-work-dialog')).toBeNull();
+  });
+
+  // Multi-user M1, F2b: the Done section's `archived · show` chip was gated by
+  // NEITHER half — `unarchive_session_work` is `drive` and ROUTES, so both
+  // apply. Asked per row, because one group's Done can hold rows of more than
+  // one owner.
+  it('work mode: the archived chip is per row, and a watcher cannot un-archive', async () => {
+    const REMOTE: HubStatus = {
+      ...STANDALONE,
+      remote: true,
+      url: 'https://fleet.example.com',
+      configured_url: 'https://fleet.example.com',
+    };
+    const work = (archived: number | null) => ({
+      link_id: 5, item_id: 9, key: 'PAY-7', title: 'Retry', source: 'manual',
+      status_category: 'done', status_name: 'Done', archived_at: archived,
+    });
+    const mine = { ...sessionFor(1, 'dev-mine'), owner_person_id: 7, work: work(1_700_000_000) };
+    const theirs = { ...sessionFor(1, 'dev-theirs'), owner_person_id: 9, work: work(1_700_000_000) };
+    mockBackend(workProjects, [mine, theirs]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [{ session_id: theirs.id, level: 'watch' }]);
+    sidebarGroupBy.set('work');
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(await screen.findByTestId('work-done'));
+    await tick();
+    const rows = screen.getAllByTestId('archived-session');
+    expect(rows).toHaveLength(2);
+    const byName = (name: string) =>
+      rows.find((r) => r.textContent?.includes(name))!;
+    // The positive control: the owner's own row keeps its chip.
+    const ownChip = within(byName('dev-mine')).getByTestId('archived-chip') as HTMLButtonElement;
+    expect(ownChip.disabled).toBe(false);
+    // The watched row's chip carries the reason and sends nothing.
+    const theirChip = within(byName('dev-theirs')).getByTestId('archived-chip') as HTMLButtonElement;
+    expect(theirChip.disabled).toBe(true);
+    expect(theirChip.title).toMatch(/watch is read-only/i);
+    await fireEvent.click(theirChip);
+    await tick();
+    expect(mockedInvoke).not.toHaveBeenCalledWith('unarchive_session_work', expect.anything());
+    // …and the owner's does send.
+    await fireEvent.click(ownChip);
+    await waitFor(() =>
+      expect(mockedInvoke).toHaveBeenCalledWith('unarchive_session_work', {
+        args: { session_id: mine.id },
+      }),
+    );
+  });
+
   it('rolls up PRs and the worst CI state on the group header', async () => {
     const a = { ...sessionFor(1, 'dev-a'), tags: ['PAY-7'], pr_url: 'https://x/pull/1', ci_status: 'passing' as const };
     const b = { ...sessionFor(1, 'dev-b'), tags: ['PAY-7'], pr_url: 'https://x/pull/2', ci_status: 'failing' as const };
@@ -2726,5 +2839,161 @@ describe('Sidebar filters: one set of rules for every section', () => {
     await tick();
     expect(screen.queryByTestId('past-work-group')).toBeNull();
     expect(names()).toHaveLength(1);
+  });
+});
+
+// ── Multi-user M1 (F2): the bulk paths, and the unclaimed count ─────────────
+describe('bulk actions and a shared session', () => {
+  /** A paired desktop that knows who it is: person 9, who owns nothing here. */
+  function paired(grants: { session_id: number; level: string }[]) {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://fleet.example.com' });
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(9, grants);
+  }
+  /** A row owned by somebody else, so the grant map is what decides. */
+  const owned = (projectId: number, name: string) => ({
+    ...sessionFor(projectId, name),
+    visibility: 'private' as const,
+    owner_person_id: 1,
+  });
+
+  it('bulk kill skips a shared row and says how many it left alone', async () => {
+    // Kill is in the spec §4.3 `own` tier: a `drive` grant does not reach it,
+    // which is the case this test uses deliberately — a watch-only row would
+    // also be skipped by the bulk PROMPT, and then the test would not show
+    // that the two actions ask different questions of the same selection.
+    const mine = owned(1, 'dev-mine');
+    const theirs = owned(1, 'dev-theirs');
+    mockBackend(fakeProjects, [mine, theirs]);
+    paired([{ session_id: mine.id, level: 'drive' }, { session_id: theirs.id, level: 'drive' }]);
+    sessions.set([mine, theirs]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('2 selected');
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    await tick();
+    // Nothing to kill, and the dialog says so rather than offering a confirm
+    // whose click would do nothing.
+    expect(screen.getByTestId('bulk-kill-none').textContent).toMatch(/never killed/i);
+    await fireEvent.click(screen.getByTestId('confirm-bulk-kill'));
+    await tick(); await tick();
+    const kills = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0] === 'kill_session',
+    );
+    expect(kills).toHaveLength(0);
+  });
+
+  it('bulk prompt fans out to the drive rows and leaves a watch-only one out', async () => {
+    const driveable = owned(1, 'dev-drive');
+    const watchOnly = owned(1, 'dev-watch');
+    mockBackend(fakeProjects, [driveable, watchOnly]);
+    paired([
+      { session_id: driveable.id, level: 'drive' },
+      { session_id: watchOnly.id, level: 'watch' },
+    ]);
+    sessions.set([driveable, watchOnly]);
+    render(Sidebar);
+    await tick(); await tick();
+
+    await fireEvent.click(screen.getByTestId('select-mode'));
+    await tick();
+    for (const box of screen.getAllByTestId('select-box')) await fireEvent.click(box);
+    await tick();
+    expect(screen.getByTestId('bulk-bar')).toHaveTextContent('2 selected');
+    await fireEvent.click(screen.getByTestId('bulk-send'));
+    await tick();
+    // One rule, two answers: the selection is the same, the targets are not.
+    expect(screen.getByTestId('bulk-target-' + driveable.id)).toBeInTheDocument();
+    expect(screen.queryByTestId('bulk-target-' + watchOnly.id)).toBeNull();
+  });
+
+  it('the bulk paths are untouched when every row is this client’s own', async () => {
+    // The single-user shape, pinned so the gate cannot quietly start excluding
+    // rows a standalone desktop owns.
+    const a = sessionFor(1, 'dev-a');
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-kill'));
+    await tick();
+    expect(screen.queryByTestId('bulk-kill-none')).toBeNull();
+    expect(screen.queryByTestId('bulk-kill-skipped')).toBeNull();
+    await fireEvent.click(screen.getByTestId('confirm-bulk-kill'));
+    await tick(); await tick();
+    const kills = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter(
+      (c) => c[0] === 'kill_session',
+    );
+    expect(kills).toHaveLength(2);
+  });
+});
+
+describe('the per-host unclaimed count', () => {
+  // A count with no rows and no expand: an unclaimed session is one fleet did
+  // not start, and the only thing anyone out of its scope may learn about it is
+  // the number (multi-user M1, rule 6).
+  const h = (alias: string, unclaimed: number | null | undefined) => ({
+    alias,
+    ssh_alias: null,
+    reachable: true,
+    claude_version: null,
+    tmux_version: null,
+    hidden: false,
+    last_pinged_at: 1,
+    account_uuid: null,
+    provisioned: true,
+    transport: 'ssh' as const,
+    ...(unclaimed === undefined ? {} : { unclaimed_sessions: unclaimed }),
+  });
+
+  it('renders the count, per host, with nothing to click', async () => {
+    mockBackend(fakeProjects, []);
+    hosts.set([h('mefistos', 2), h('turanga', 1)]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('unclaimed-count').textContent).toContain('Unclaimed (3)');
+    const perHost = screen.getByTestId('unclaimed-hosts').textContent ?? '';
+    expect(perHost).toContain('mefistos');
+    expect(perHost).toContain('turanga');
+    // No rows, and nothing that could open any: the section is a label.
+    const section = screen.getByTestId('unclaimed-section');
+    expect(section.querySelectorAll('[data-testid="sess-row"]')).toHaveLength(0);
+    expect(section.querySelectorAll('button')).toHaveLength(0);
+  });
+
+  it('renders NOTHING when the hub sends null — not a zero, not a dash', async () => {
+    // The normal case on a hub with more than one person (R5-d): a zero would
+    // itself be a claim about the host, so the backend serves null and this
+    // surface must say nothing at all.
+    mockBackend(fakeProjects, []);
+    hosts.set([h('mefistos', null), h('turanga', undefined)]);
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('unclaimed-section')).toBeNull();
+    expect(screen.queryByTestId('unclaimed-count')).toBeNull();
+  });
+
+  it('a real zero is not rendered either, and the host filter applies', async () => {
+    mockBackend(fakeProjects, []);
+    hosts.set([h('mefistos', 0)]);
+    const first = render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('unclaimed-section')).toBeNull();
+    first.unmount();
+
+    hosts.set([h('mefistos', 2), h('turanga', 5)]);
+    hostFilter.set('mefistos');
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.getByTestId('unclaimed-count').textContent).toContain('Unclaimed (2)');
   });
 });

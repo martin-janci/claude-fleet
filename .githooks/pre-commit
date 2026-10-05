@@ -11,10 +11,13 @@
 #   staged path matches src-tauri/, crates/, Cargo.toml, Cargo.lock, deny.toml,
 #   rust-toolchain.toml
 #       -> cargo fmt --all --check, cargo clippy --workspace --all-targets -- -D warnings
-#          On a box without the Tauri system libs (no gtk+-3.0 via pkg-config),
-#          falls back to cargo clippy -p fleet-core -p fleet-hub --all-targets
-#          -- -D warnings instead, so a headless fleet-hub-only change lints
-#          clean without them.
+#          On Linux without the Tauri system libs (no gtk+-3.0 via pkg-config),
+#          falls back to clippy over the crates that build without them
+#          (fleet-core, fleet-hub, fleet-proto, fleet-agent, fleet-update), so
+#          a headless change lints clean. Only Linux needs those libs: macOS
+#          has no gtk, and a fallback there would lint another feature world
+#          of fleet-core on every commit. Either selection is the one
+#          scripts/verify.sh lints, so after it this step is a no-op.
 #   staged path matches src/, package.json, pnpm-lock.yaml, pnpm-workspace.yaml,
 #   vite/vitest/svelte/tsconfig config files or index.html
 #       -> scripts/ci-local.sh --frontend-only  (install, check, test, build, audit)
@@ -75,10 +78,10 @@ while IFS= read -r path; do
 done <<< "$staged"
 
 if [[ "$run_rust" == 1 ]]; then
-  if ! pkg-config --exists gtk+-3.0 2>/dev/null; then
-    echo "pre-commit: no Tauri system libs (gtk+-3.0); linting fleet-core + fleet-hub only"
+  if [[ "$(uname -s)" == Linux ]] && ! pkg-config --exists gtk+-3.0 2>/dev/null; then
+    echo "pre-commit: no Tauri system libs (gtk+-3.0); linting the headless crates only"
     cargo fmt --all --check
-    cargo clippy -p fleet-core -p fleet-hub --all-targets -- -D warnings
+    cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update --all-targets -- -D warnings
   else
     echo "pre-commit: rust files staged -> cargo fmt --check, cargo clippy"
     cargo fmt --all --check

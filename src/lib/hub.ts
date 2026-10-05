@@ -253,8 +253,16 @@ export function ownsTheFleet(status: HubStatus = get(hubStatus)): boolean {
  * F1's sentence, shared by `hubBlock` and `hubActionBlocked`: a hub is
  * configured but THIS launch could not use it, so the backend owns no fleet
  * at all and refuses every command — routed or refused — the same way.
+ *
+ * **Exported because it is the only copy.** `access.ts::noAttachReason` and
+ * `share.ts::sessionActionBlocked` both have to say this — a terminal pane and
+ * a disabled button owe the same explanation, and the one thing neither may
+ * say is "this session is not yours" when the hub is the problem. They used to
+ * hand-copy the sentence, with a comment claiming it mirrored this one;
+ * nothing held the copies together, so the next edit here would have left the
+ * other surfaces saying the old thing. One function, three callers.
  */
-function unavailableReason(status: HubStatus): string | null {
+export function unavailableReason(status: HubStatus): string | null {
   if (!status.unavailable) return null;
   // Not "do it on the hub": the hub is the problem, and every action is
   // refused until it is fixed.
@@ -309,6 +317,11 @@ export const ROUTED_ACTIONS = [
   'rewind_conversation',
   'spawn_review',
   'recreate_session',
+  // `restore_host_sessions` batches `recreate_session` over a host's lost
+  // rows and is `routed` in `verdicts.rs` like it — it was missing here, so
+  // HostDetail's "Restore n lost sessions…" could not ask the hub half at all
+  // (multi-user M1, F2b).
+  'restore_host_sessions',
   'dismiss_ghost_session',
   'new_bg_session',
   'delete_worktree',
@@ -347,6 +360,20 @@ export const ROUTED_ACTIONS = [
   'save_work_view',
   'delete_work_view',
   'add_project',
+  // Multi-user M1 (F3): the Share sheet's three writes. They route to the
+  // hub's sharing tools (T13), so a paired desktop can take them while the
+  // live link is up and must not offer them while it is down.
+  //
+  // The milestone's three routed READS are deliberately absent, by this
+  // list's own rule above: `session_access` (the sheet's grant list),
+  // `capture_session` (the watcher's pane snapshot) and `my_grants` have no
+  // control to disable. `my_grants` failing is a different surface again —
+  // `access.ts`'s fail-closed arm, which disables what it cannot vouch for
+  // and says the hub has not told this device who it is, rather than "try
+  // again once connected".
+  'session_share',
+  'session_unshare',
+  'session_narrow',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

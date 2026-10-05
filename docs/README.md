@@ -13,5 +13,6 @@ A Tauri 2 desktop app for managing long-lived Claude Code sessions in tmux acros
 - **[Voice relay](voice.md)** — talk to a remote session with `/voice` through the app's microphone.
 - **[fleet-hub](hub.md)** — run the fleet headless as a daemon, without the desktop app.
 - **[Releasing](RELEASING.md)** — versioning & changelog automation.
+- **[Buildkite builder](buildkite.md)** — the persistent builder that runs an agent's full verification (`scripts/verify.sh remote`), and how to set it up.
 
 **For contributors:** start with [CLAUDE.md](../CLAUDE.md) for repo orientation, then browse [specs/](specs/) for per-iteration design documents and [plans/](plans/) for implementation plans.

@@ -487,6 +487,7 @@ fn plugin_entry(
         }],
         synced_at: now,
         catalog: catalog.to_string(),
+        file_hashes: BTreeMap::new(),
     }
 }
 
@@ -2280,8 +2281,10 @@ mod tests {
                 merges: Vec::new(),
                 synced_at: 1,
                 catalog: "personal".into(),
+                file_hashes: BTreeMap::new(),
             }),
             plugin: None,
+            host_copy: None,
         };
         let plan = HostPlan {
             host_alias: "local".into(),
@@ -2624,6 +2627,7 @@ mod tests {
             secret_files: BTreeSet::new(),
             remove_entry: None,
             plugin: None,
+            host_copy: None,
         };
         let plan = HostPlan {
             host_alias: "local".into(),
@@ -2709,6 +2713,7 @@ mod tests {
                 secret_files: BTreeSet::new(),
                 remove_entry: None,
                 plugin: None,
+                host_copy: None,
             }],
             snapshot: HostSnapshot::default(),
             manifest: Manifest::default(),

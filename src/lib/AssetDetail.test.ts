@@ -54,3 +54,58 @@ describe('AssetDetail install_as', () => {
     expect(screen.queryByTestId('asset-install-as')).toBeNull();
   });
 });
+
+describe('AssetDetail sections (Assets M5)', () => {
+  const detail = {
+    asset: { kind: 'skill', name: 'w', version: '1', description: 'Make one.', tags: [], body: '# b' },
+    previews: [{ harness: 'claude', plan: { files: [{ path: '~/.claude/skills/w/SKILL.md', bytes: 'x' }], merges: [], placeholders: [], warnings: [] }, unsupported: null }],
+    hosts: [{ host_alias: 'local', harness: 'claude', state: 'in_sync' }],
+  };
+
+  it('shows only the section it is asked for', async () => {
+    byCmd({ catalog_get_asset: detail });
+    const { rerender } = render(AssetDetail, { kind: 'skill', name: 'w', hosts: [], section: 'overview' });
+    expect(await screen.findByTestId('asset-detail-title')).toBeTruthy();
+    expect(screen.queryByTestId('preview-file-path')).toBeNull();
+    await rerender({ kind: 'skill', name: 'w', hosts: [], section: 'source' });
+    expect(screen.queryByTestId('asset-detail-title')).toBeNull();
+    expect(screen.getByTestId('preview-file-path').textContent).toContain('SKILL.md');
+    expect(invoke.mock.calls.filter((c) => c[0] === 'catalog_get_asset')).toHaveLength(1);
+  });
+
+  it('Edit asks for the Source section', async () => {
+    byCmd({ catalog_get_asset: detail });
+    const onsection = vi.fn();
+    render(AssetDetail, { kind: 'skill', name: 'w', hosts: [], section: 'overview', onsection });
+    (await screen.findByTestId('asset-edit')).click();
+    expect(onsection).toHaveBeenCalledWith('source');
+  });
+
+  it('hosts shows the matrix and nothing else', async () => {
+    byCmd({ catalog_get_asset: detail });
+    render(AssetDetail, { kind: 'skill', name: 'w', hosts: [{ alias: 'local', reachable: true } as never], section: 'hosts' });
+    expect(await screen.findByTestId('matrix-cell-local-claude')).toBeTruthy();
+    expect(screen.queryByTestId('asset-detail-title')).toBeNull();
+    expect(screen.queryByTestId('preview-file-path')).toBeNull();
+  });
+
+  it('a drifted cell says which side moved (final review minor 2)', async () => {
+    byCmd({
+      catalog_get_asset: {
+        ...detail,
+        hosts: [
+          { host_alias: 'local', harness: 'claude', state: 'drifted', drift_side: 'host' },
+          { host_alias: 'oci', harness: 'claude', state: 'drifted', drift_side: 'catalog' },
+          { host_alias: 'gpu', harness: 'claude', state: 'drifted' },
+        ],
+      },
+    });
+    const up = (alias: string) => ({ alias, reachable: true }) as never;
+    render(AssetDetail, { kind: 'skill', name: 'w', hosts: [up('local'), up('oci'), up('gpu')], section: 'hosts' });
+    const local = await screen.findByTestId('matrix-cell-local-claude');
+    expect(local.textContent).toContain('drifted — edited on host');
+    expect(local.className).toContain('state-drifted');
+    expect(screen.getByTestId('matrix-cell-oci-claude').textContent).toContain('drifted — behind the catalog');
+    expect(screen.getByTestId('matrix-cell-gpu-claude').textContent).not.toContain('—');
+  });
+});

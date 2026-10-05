@@ -31,8 +31,11 @@ pub(super) fn client(id: i64, mode: TokenMode, org_id: Option<i64>) -> Caller {
             name: format!("client-{id}"),
             trusted: false,
             org_id,
+            person_id: None,
         }),
         mode,
+        pane: None,
+        is_personal_owner: false,
     }
 }
 
@@ -41,6 +44,8 @@ pub(super) fn host(alias: &str) -> Caller {
         host_alias: Some(alias.into()),
         client: None,
         mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
     }
 }
 
@@ -778,6 +783,7 @@ fn host_plan_writing(catalog: &str) -> crate::service::catalog::sync::plan::Host
             secret_files: Default::default(),
             remove_entry: None,
             plugin: None,
+            host_copy: None,
         }],
         snapshot: Default::default(),
         manifest: Default::default(),
@@ -1029,4 +1035,274 @@ async fn importing_an_outside_host_into_an_org_catalog_needs_the_personal_grant_
         "an admitted host: {:?}",
         r.err()
     );
+}
+
+/// Assets M5 (R11): `list_assets` spans every catalog only for the callers
+/// that may list every catalog — the master and an unbound full device.
+#[test]
+fn list_assets_spans_every_catalog_only_for_the_master_and_unbound_full_devices() {
+    use super::assets::listing_scope;
+    use crate::service::catalog::ListingScope;
+    assert_eq!(listing_scope(&Caller::master()), ListingScope::Every);
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Full, None)),
+        ListingScope::Every
+    );
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Readonly, None)),
+        ListingScope::Personal
+    );
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Updater, None)),
+        ListingScope::Personal
+    );
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Peer, None)),
+        ListingScope::Personal
+    );
+    assert_eq!(
+        listing_scope(&client(1, TokenMode::Full, Some(7))),
+        ListingScope::Personal
+    );
+    assert_eq!(listing_scope(&host("oci")), ListingScope::Personal);
+}
+
+/// Final review minor 3: the `list_assets` audience and the
+/// `list_catalogs` audience (`Touches::Nothing`) are one predicate, so they
+/// cannot drift apart.
+#[test]
+fn list_assets_and_list_catalogs_share_one_audience() {
+    use super::assets::{listing_scope, may_list_every_catalog};
+    use crate::service::catalog::ListingScope;
+    let callers = [
+        Caller::master(),
+        client(1, TokenMode::Full, None),
+        client(1, TokenMode::Readonly, None),
+        client(1, TokenMode::Updater, None),
+        client(1, TokenMode::Peer, None),
+        client(1, TokenMode::Full, Some(7)),
+        host("oci"),
+    ];
+    let every: Vec<bool> = callers.iter().map(may_list_every_catalog).collect();
+    assert_eq!(every, [true, true, false, false, false, false, false]);
+    for c in &callers {
+        assert_eq!(
+            listing_scope(c) == ListingScope::Every,
+            may_list_every_catalog(c),
+            "{}",
+            c.label()
+        );
+    }
+}
+
+/// A [`git_catalog`] that also holds skill `s` (uncommitted: a load reads
+/// the working tree).
+fn git_catalog_with_skill(tag: &str) -> std::path::PathBuf {
+    let root = git_catalog(tag);
+    std::fs::create_dir_all(root.join("skills/s")).unwrap();
+    std::fs::write(
+        root.join("skills/s/asset.yaml"),
+        "kind: skill\nname: s\ndescription: d\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+    root
+}
+
+/// Assets M5 (R11), the security boundary, per caller class through the
+/// tool. Fix round 1: without `all_catalogs` every caller gets personal's
+/// listing exactly as before (an older desktop never asks); with it, the
+/// master and an unbound full device (granted or not — the `list_catalogs`
+/// audience) see acme's asset with its catalog, while a readonly or
+/// org-bound client and a per-host token still see personal's only —
+/// never acme's name.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn the_list_assets_tool_shows_org_catalogs_only_to_who_may_list_every_catalog() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let personal = git_catalog_with_skill("m5-list-personal");
+    let acme_root = git_catalog_with_skill("m5-list-acme");
+    let s = Store::open_in_memory().unwrap();
+    s.set_catalog_config(&personal.to_string_lossy(), None)
+        .unwrap();
+    let org = s.add_org("acme", None, false).unwrap();
+    s.upsert_catalog("acme", &acme_root.to_string_lossy(), None, Some(org.id))
+        .unwrap();
+    let plain = s.insert_client_token("plain", "aa11", "full").unwrap();
+    let kiosk = s.insert_client_token("kiosk", "bb22", "readonly").unwrap();
+    let bound = s.insert_client_token("bound", "cc33", "full").unwrap();
+    s.set_client_org("bound", Some(org.id)).unwrap();
+    let t = tools(s);
+
+    let cases: Vec<(&str, Caller, &[&str])> = vec![
+        ("master", Caller::master(), &["personal", "acme"]),
+        (
+            "unbound full client",
+            client(plain.id, TokenMode::Full, None),
+            &["personal", "acme"],
+        ),
+        (
+            "readonly client",
+            client(kiosk.id, TokenMode::Readonly, None),
+            &["personal"],
+        ),
+        (
+            "org-bound client",
+            client(bound.id, TokenMode::Full, Some(org.id)),
+            &["personal"],
+        ),
+        ("per-host token", host("h1"), &["personal"]),
+    ];
+    for (who, caller, wide) in cases {
+        for all_catalogs in [false, true] {
+            let p = ListAssetsParams { all_catalogs };
+            let r = t
+                .list_assets(Extension(caller.clone()), Parameters(p))
+                .await;
+            let text = r
+                .as_ref()
+                .map(|r| r.content[0].as_text().expect("text").text.clone())
+                .unwrap_or_else(|e| panic!("{who}: {}", e.message));
+            let listing: Value = serde_json::from_str(&text).unwrap();
+            let catalogs: Vec<&str> = listing["assets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["catalog"].as_str().unwrap_or("personal"))
+                .collect();
+            let want: &[&str] = if all_catalogs { wide } else { &["personal"] };
+            assert_eq!(catalogs, want, "{who} all_catalogs={all_catalogs}");
+            if want.len() == 1 {
+                assert!(
+                    !text.contains("acme"),
+                    "{who} all_catalogs={all_catalogs} never sees acme: {text}"
+                );
+            }
+        }
+    }
+}
+
+/// Commit `kind`'s asset `s` into the [`git_catalog`] at `root` as
+/// `subject`.
+fn commit_skill(root: &std::path::Path, subject: &str) {
+    std::fs::create_dir_all(root.join("skills/s")).unwrap();
+    std::fs::write(
+        root.join("skills/s/asset.yaml"),
+        format!("kind: skill\nname: s\ndescription: {subject}\n"),
+    )
+    .unwrap();
+    std::fs::write(root.join("skills/s/body.md"), "b\n").unwrap();
+    for args in [&["add", "."][..], &["commit", "-q", "-m", subject]] {
+        let o = crate::proc::std_command("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    }
+}
+
+/// Assets M5 (R13, R19): `asset_history` is a per-catalog read behind the
+/// same gate as `repo_status` — the master, or a client granted the catalog
+/// it names — and answers that catalog's log, never another's. Per caller
+/// class: an ungranted, readonly or org-bound client and a per-host token
+/// are refused; a client cannot tell an unknown catalog from an ungranted
+/// one; the master naming an unknown one is told so.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn asset_history_reads_the_named_catalogs_log_for_a_granted_caller_only() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let personal = git_catalog("m5-history-personal");
+    let acme_root = git_catalog("m5-history-acme");
+    commit_skill(&personal, "personal s");
+    commit_skill(&acme_root, "acme s");
+    let s = Store::open_in_memory().unwrap();
+    s.set_catalog_config(&personal.to_string_lossy(), None)
+        .unwrap();
+    let org = s.add_org("acme", None, false).unwrap();
+    let acme = s
+        .upsert_catalog("acme", &acme_root.to_string_lossy(), None, Some(org.id))
+        .unwrap();
+    let desk = s.insert_client_token("desk", "aa11", "full").unwrap();
+    s.set_client_assets_admin("desk", true).unwrap();
+    let ops = s.insert_client_token("ops", "bb22", "full").unwrap();
+    s.set_client_catalog_grant("ops", acme.id, true).unwrap();
+    let plain = s.insert_client_token("plain", "cc33", "full").unwrap();
+    // A readonly client cannot even be granted (the store refuses).
+    let kiosk = s.insert_client_token("kiosk", "dd44", "readonly").unwrap();
+    let bound = s.insert_client_token("bound", "ee55", "full").unwrap();
+    s.set_client_assets_admin("bound", true).unwrap();
+    s.set_client_catalog_grant("bound", acme.id, true).unwrap();
+    s.set_client_org("bound", Some(org.id)).unwrap();
+    let t = tools(s);
+    let skill = || Some(json!({ "kind": "skill", "name": "s" }));
+    let subjects = |v: Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["subject"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    let m = Caller::master();
+    let desk = client(desk.id, TokenMode::Full, None);
+    let ops = client(ops.id, TokenMode::Full, None);
+    for (who, caller, catalog, want) in [
+        ("master", &m, None, "personal s"),
+        ("master", &m, Some("acme"), "acme s"),
+        ("personal grant", &desk, None, "personal s"),
+        ("acme grant", &ops, Some("acme"), "acme s"),
+    ] {
+        let got = json_of(call_on(&t, caller, "asset_history", skill(), catalog).await);
+        assert_eq!(subjects(got), [want], "{who} {catalog:?}");
+    }
+
+    let plain = client(plain.id, TokenMode::Full, None);
+    let kiosk = client(kiosk.id, TokenMode::Readonly, None);
+    let bound = client(bound.id, TokenMode::Full, Some(org.id));
+    let h = host("h1");
+    for (who, caller, catalog) in [
+        ("personal grant on acme", &desk, Some("acme")),
+        ("acme grant on personal", &ops, None),
+        ("ungranted", &plain, None),
+        ("ungranted", &plain, Some("acme")),
+        ("readonly", &kiosk, None),
+        ("org-bound", &bound, None),
+        ("org-bound", &bound, Some("acme")),
+        ("per-host token", &h, None),
+    ] {
+        let r = call_on(&t, caller, "asset_history", skill(), catalog).await;
+        assert_eq!(
+            code_of(&r),
+            "E_FORBIDDEN",
+            "{who} {catalog:?}: {:?}",
+            r.err()
+        );
+        assert!(
+            !message_of(r).contains("acme s"),
+            "{who} {catalog:?} reads no history"
+        );
+    }
+
+    // No leak: an unknown catalog reads exactly like an ungranted one.
+    let known = call_on(&t, &desk, "asset_history", skill(), Some("acme")).await;
+    let unknown = call_on(&t, &desk, "asset_history", skill(), Some("nope")).await;
+    assert_eq!(code_of(&unknown), "E_FORBIDDEN");
+    assert_eq!(
+        message_of(unknown),
+        message_of(known).replace("acme", "nope")
+    );
+    let r = call_on(&t, &m, "asset_history", skill(), Some("nope")).await;
+    assert_eq!(code_of(&r), "E_NOTFOUND");
+
+    // The name is checked before any git runs.
+    let bad = Some(json!({ "kind": "skill", "name": "../s" }));
+    let r = call_on(&t, &m, "asset_history", bad, None).await;
+    assert_eq!(code_of(&r), "E_INVALID", "{:?}", r.err());
+    // An asset with no commit has no history.
+    let none = Some(json!({ "kind": "agent", "name": "s" }));
+    let got = json_of(call_on(&t, &m, "asset_history", none, None).await);
+    assert_eq!(got, json!([]));
 }

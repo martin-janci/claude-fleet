@@ -621,6 +621,22 @@ pub fn status(
     keys: &TrustedKeys,
     now: i64,
 ) -> Result<UpdateStatus, IpcError> {
+    // This is the org boundary, not a privacy fence: a caller behind an org boundary sees its
+    // own update target only, as the doc above says.
+    //
+    // **The narrower question is an OWNER DECISION, and it is the page the
+    // `check_for` and `health` guards below follow** (multi-user M1, T9e).
+    // `update_status` is `Access::Client`, and an UNBOUND paired client — a
+    // person's own phone — has `is_scoped() == false`, so `own` is `None`,
+    // `target_rows` skips nothing, and that caller is handed every observed
+    // target: `client:<id>` / `agent:<host>` / `hub:self`, each with its
+    // `version`, `platform`, `phase` and `last_error`. That is an inventory
+    // of every other person's DEVICES. It is the same question
+    // `work::view::task` carries for one `Placement.updated_by` string, in
+    // the strictly larger case, and the eight rules do not cover device
+    // identity — so it is recorded as open here and in `OPEN_QUESTIONS`
+    // rather than settled by silence. The fence if the answer is no is this
+    // same line with a person predicate instead of `is_scoped()`.
     let own = if caller.is_scoped() {
         Some(identity(caller)?.target)
     } else {
@@ -689,6 +705,7 @@ pub fn check_for(
     keys: &TrustedKeys,
     now: i64,
 ) -> Result<Decision, IpcError> {
+    // This is the org boundary, not a privacy fence: the same rule, asked of one named target.
     if caller.is_scoped() && identity(caller)?.target != target {
         return Err(IpcError::new(
             codes::E_FORBIDDEN,
@@ -796,6 +813,8 @@ pub fn health(
     keys: &TrustedKeys,
     now: i64,
 ) -> Result<UpdatesHealth, IpcError> {
+    // This is the org boundary, not a privacy fence: the same rule for the `fleet_health` roll-
+    // up.
     let own = if caller.is_scoped() {
         Some(identity(caller)?.target)
     } else {

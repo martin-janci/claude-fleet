@@ -493,6 +493,52 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "session_activity",
         },
     ),
+    // Multi-user M1 (T13): sharing a session, and the one view of a live pane
+    // a watcher gets. All six route — each command's argument struct is its
+    // tool's params field for field — and all six are gated on the hub per
+    // request, which is the point: a revoked grant stops the next call.
+    //
+    // `capture_session` is here for the WATCHER (R5-e). Sharing never confers
+    // a terminal (spec §4.3 invariant 5), so `pty_open` is not a watcher's
+    // path to the pane; this read-only snapshot is, and unlike an SSH
+    // attach the hub can refuse the next poll. The owner still attaches.
+    //
+    // `session_claim` has no row because it has no command: parity fails on
+    // the CALLER (the tool is `Access::HostToken`, which a desktop's client
+    // token can never satisfy), and a UI claim button for an arbitrary org
+    // member is what spec §4.3 forbids outright. `fleet-hub session claim`
+    // is the operator's path.
+    (
+        "capture_session",
+        Verdict::Routed {
+            tool: "capture_session",
+        },
+    ),
+    (
+        "session_share",
+        Verdict::Routed {
+            tool: "session_share",
+        },
+    ),
+    (
+        "session_unshare",
+        Verdict::Routed {
+            tool: "session_unshare",
+        },
+    ),
+    (
+        "session_narrow",
+        Verdict::Routed {
+            tool: "session_narrow",
+        },
+    ),
+    (
+        "session_access",
+        Verdict::Routed {
+            tool: "session_access",
+        },
+    ),
+    ("my_grants", Verdict::Routed { tool: "my_grants" }),
     (
         "restart_session",
         Verdict::Routed {
@@ -1069,8 +1115,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     // The overview's read, open to every paired client: the hub's
-    // `list_assets` answers `catalog::list_assets` over its own catalog and
-    // inventory — the same `AssetListing`.
+    // `list_assets` over its own catalogs and inventory — the same
+    // `AssetListing`. Assets M5: this desktop sends `all_catalogs: true`;
+    // the hub lists every catalog for the master or an unbound full client
+    // and personal only for anyone else (or when the flag is absent).
     (
         "catalog_list_assets",
         Verdict::Routed {
@@ -1259,6 +1307,38 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "catalog_admin",
         },
     ),
+    // Assets M5 (R13): the workspace's reads. The footer's catalog chips:
+    // `catalog_admin { list_catalogs }`, the master's or an unbound full
+    // client's — no grant (M3 PF15).
+    (
+        "catalog_list_catalogs",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // The Inbox's cards, read only until M6: `changesets { list }`, the
+    // master's or an unbound full client's.
+    (
+        "catalog_list_changesets",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    // One catalog's repo status by name: `catalog_admin { repo_status }`
+    // with the tool's `catalog` parameter; needs a grant on that catalog.
+    (
+        "catalog_repo_status_in",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // The Inspector's History: `catalog_admin { asset_history }`, per
+    // catalog, with a grant on it. A hub before M5 refuses the action with
+    // E_INVALID (unknown variant) — no contract bump (R13).
+    (
+        "catalog_asset_history",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
     (
         "catalog_spawn_author_session",
         Verdict::LocalOnly {
@@ -1272,18 +1352,26 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     (
         "pty_open",
         Verdict::SameInBoth {
-            why: "the attach is this machine's own `ssh … tmux attach`, built from the alias \
-                  and tmux name passed in; it reads no state.db and the hub is not in the \
-                  path, so a paired client attaches exactly as a standalone app does. The \
-                  session it cannot attach is one on an AGENT host, which has no SSH route \
-                  from anywhere — the terminal pane declines that one itself",
+            why: "the attach is this machine's own `ssh … tmux attach`, built from the \
+                  alias and tmux name passed in; it reads no state.db and the hub is not \
+                  in the path, so a paired client attaches exactly as a standalone app \
+                  does. That is also why it is NOT where a grant is enforced: the hub \
+                  cannot refuse this attach and cannot revoke it once it is up, so \
+                  sharing never confers a terminal (multi-user M1) and the pane itself \
+                  declines to attach a session this client does not own, offering \
+                  capture_session's read-only snapshot instead. A session on an AGENT \
+                  host is attempted like any other — that transport says the HUB cannot \
+                  dial the host, not that this machine cannot — and a failure is \
+                  explained after it happens",
         },
     ),
     (
         "pty_write",
         Verdict::SameInBoth {
-            why: "acts on whatever is attached; with pty_open refused nothing ever is, so \
-                  E_PTY_CLOSED is the true answer",
+            why: "acts on the one pty THIS process opened, and pty_open is the same in \
+                  both modes, so there is one answer either way; E_PTY_CLOSED when \
+                  nothing is attached, which includes every session the pane declined \
+                  to attach",
         },
     ),
     (

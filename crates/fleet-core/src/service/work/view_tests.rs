@@ -22,6 +22,15 @@ struct W {
     t3: i64,
 }
 
+/// Multi-user M1 (T7): these reads take the caller's whole scope now. Every
+/// case here is about the ORG half, so the person half is the hub's own
+/// unrestricted reader — `ViewScope::internal()` — with the org under test
+/// put back on it. The person half has its own tests (`view_scope_tests`, and
+/// the behavioural matrix in `mcp::tools::tests`).
+fn vs(scope: &OrgScope) -> crate::service::view_scope::ViewScope {
+    crate::service::view_scope::ViewScope::internal().with_org(scope.clone())
+}
+
 fn item(s: &Store, tracker: i64, ext: &str, key: &str, title: &str, project: &str) -> i64 {
     s.upsert_tracker_item(
         tracker,
@@ -88,7 +97,7 @@ fn world() -> W {
 fn page(w: &W, scope: &OrgScope, filters: WorkTreeFilters) -> TreePage {
     tree(
         &w.st,
-        scope,
+        &vs(scope),
         &TreeArgs {
             filters,
             limit: Some(200),
@@ -149,7 +158,7 @@ fn strict(org: i64) -> OrgScope {
 }
 
 fn links_of(w: &W, sid: i64) -> SessionTasks {
-    session_tasks(&w.st, &OrgScope::All, sid).unwrap()
+    session_tasks(&w.st, &vs(&OrgScope::All), sid).unwrap()
 }
 
 /// UC1 + UC2: one session on tasks A and B shows under both, with ONE
@@ -209,7 +218,7 @@ fn a_task_shows_active_and_past_sessions_apart() {
     assert!(!past.primary && past.session_id.is_none());
     assert_eq!(past.name, "two");
     assert_eq!(t.sessions[0].state, "active", "active first");
-    let d = task(&w.st, &OrgScope::All, "item:1").unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), "item:1").unwrap();
     assert_eq!(d.last_outcome.unwrap().name, "two");
     // Filters: with an active session / past only.
     let has = |h: &str| WorkTreeFilters {
@@ -373,7 +382,7 @@ fn a_suggestion_is_distinct_explained_and_decided() {
     );
     assert!(t3.review);
 
-    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
+    let r = review(&w.st, &vs(&OrgScope::All), None, None).unwrap();
     let it = r
         .items
         .iter()
@@ -397,7 +406,7 @@ fn a_suggestion_is_distinct_explained_and_decided() {
         let s = w.st.lock().unwrap();
         crate::service::work::detect::on_prompt(&s, w.s1, "TK-3 again", false).unwrap();
     }
-    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
+    let r = review(&w.st, &vs(&OrgScope::All), None, None).unwrap();
     assert!(
         !r.items
             .iter()
@@ -455,7 +464,7 @@ fn a_sync_updates_the_ticket_and_keeps_local_decisions() {
         Some(w.s1),
         "still the same task's session"
     );
-    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
+    let r = review(&w.st, &vs(&OrgScope::All), None, None).unwrap();
     assert!(r
         .items
         .iter()
@@ -493,8 +502,8 @@ fn a_session_with_tasks_of_two_orgs_shows_each_side_only_its_own() {
     }
 
     let pa = page(&w, &a, WorkTreeFilters::default());
-    let ra = review(&w.st, &a, None, None).unwrap();
-    let sa = session_tasks(&w.st, &a, w.s1).unwrap();
+    let ra = review(&w.st, &vs(&a), None, None).unwrap();
+    let sa = session_tasks(&w.st, &vs(&a), w.s1).unwrap();
     for text in [dump(&pa), dump(&ra), dump(&sa)] {
         assert!(
             !text.contains("SECRET-9") && !text.contains("Beta secret"),
@@ -521,14 +530,14 @@ fn a_session_with_tasks_of_two_orgs_shows_each_side_only_its_own() {
         .sessions
         .iter()
         .any(|l| l.session_id == Some(w.s1) && l.cross_org));
-    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
+    let r = review(&w.st, &vs(&OrgScope::All), None, None).unwrap();
     assert!(r
         .items
         .iter()
         .any(|i| i.kind == "cross_org" && i.link_id == forced));
     // A kept conflict (M14.1c's `ack`) leaves the inbox.
     w.st.lock().unwrap().seed_review_ack(forced);
-    let r = review(&w.st, &OrgScope::All, None, None).unwrap();
+    let r = review(&w.st, &vs(&OrgScope::All), None, None).unwrap();
     assert!(!r.items.iter().any(|i| i.link_id == forced));
 }
 
@@ -550,7 +559,7 @@ fn pages_cover_every_task_once_and_the_cursor_is_bound_to_its_filters() {
     loop {
         let p = tree(
             &w.st,
-            &OrgScope::All,
+            &vs(&OrgScope::All),
             &TreeArgs {
                 cursor: cursor.clone(),
                 limit: Some(7),
@@ -573,7 +582,7 @@ fn pages_cover_every_task_once_and_the_cursor_is_bound_to_its_filters() {
     assert_eq!(unique.len(), 33, "no task twice, none missing");
     let first = tree(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &TreeArgs {
             limit: Some(7),
             ..Default::default()
@@ -582,7 +591,7 @@ fn pages_cover_every_task_once_and_the_cursor_is_bound_to_its_filters() {
     .unwrap();
     let err = tree(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &TreeArgs {
             filters: WorkTreeFilters {
                 status: Some("open".into()),
@@ -597,7 +606,7 @@ fn pages_cover_every_task_once_and_the_cursor_is_bound_to_its_filters() {
     assert_eq!(err.code, codes::E_INVALID);
     let bad = tree(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &TreeArgs {
             filters: WorkTreeFilters {
                 has: Some("everything".into()),
@@ -615,7 +624,7 @@ fn pages_cover_every_task_once_and_the_cursor_is_bound_to_its_filters() {
     // One section at a time.
     let tp = tree(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &TreeArgs {
             filters: WorkTreeFilters {
                 group: Some(format!("tracker:{}:TP", w.tracker)),
@@ -642,13 +651,13 @@ fn a_bare_key_bound_by_a_sync_still_opens() {
         &OrgScope::All,
     )
     .unwrap();
-    assert!(task(&w.st, &OrgScope::All, "ref:ZZ-5").is_ok());
+    assert!(task(&w.st, &vs(&OrgScope::All), "ref:ZZ-5").is_ok());
     let local =
         w.st.lock()
             .unwrap()
             .create_local_work_item(Some("ZZ-5"), "Now named")
             .unwrap();
-    let d = task(&w.st, &OrgScope::All, "ref:zz-5").unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), "ref:zz-5").unwrap();
     assert!(d.task.task_id == format!("item:{}", local.id) || d.task.task_id == "ref:ZZ-5");
     assert!(parse_task_id("bogus").is_err());
 }
@@ -754,7 +763,7 @@ fn dump_wire_samples_when_asked() {
     );
     write(
         "task",
-        serde_json::to_value(task(&w.st, &OrgScope::All, "item:2").unwrap()).unwrap(),
+        serde_json::to_value(task(&w.st, &vs(&OrgScope::All), "item:2").unwrap()).unwrap(),
     );
     write(
         "session_tasks",
@@ -762,7 +771,7 @@ fn dump_wire_samples_when_asked() {
     );
     write(
         "review",
-        serde_json::to_value(review(&w.st, &OrgScope::All, None, None).unwrap()).unwrap(),
+        serde_json::to_value(review(&w.st, &vs(&OrgScope::All), None, None).unwrap()).unwrap(),
     );
     let local =
         w.st.lock()
@@ -776,7 +785,7 @@ fn dump_wire_samples_when_asked() {
         serde_json::to_value(
             structure::org_impact(
                 &w.st,
-                &OrgScope::All,
+                &vs(&OrgScope::All),
                 &format!("item:{local}"),
                 Some(w.org_b),
             )
@@ -832,7 +841,7 @@ fn placement_and_rules_explain_the_group() {
         "what the tracker says stays visible"
     );
     assert_eq!(
-        task(&w.st, &OrgScope::All, "item:2").unwrap().rules,
+        task(&w.st, &vs(&OrgScope::All), "item:2").unwrap().rules,
         vec![rule]
     );
     let rules = structure::rules(&w.st, &OrgScope::All).unwrap();
@@ -842,7 +851,7 @@ fn placement_and_rules_explain_the_group() {
     w.st.lock()
         .unwrap()
         .seed_placement("item:2", Some("Security"), None);
-    let d = task(&w.st, &OrgScope::All, "item:2").unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), "item:2").unwrap();
     assert_eq!(
         (d.task.group.source.as_str(), d.task.group.label.as_str()),
         ("manual", "Security")
@@ -889,22 +898,22 @@ fn the_org_impact_names_the_move_for_an_unrestricted_caller_only() {
     };
     let tid = format!("item:{local}");
     assert!(
-        task(&w.st, &bound(w.org_a), &tid).is_ok(),
+        task(&w.st, &vs(&bound(w.org_a)), &tid).is_ok(),
         "unassigned: visible"
     );
-    let imp = structure::org_impact(&w.st, &OrgScope::All, &tid, Some(w.org_b)).unwrap();
+    let imp = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, Some(w.org_b)).unwrap();
     assert!(imp.allowed);
     assert_eq!((imp.from_org, imp.to_org), (None, Some(w.org_b)));
     assert!(imp.links[0].becomes_cross_org, "s1 is org A's");
     assert_eq!(imp.hosts_losing, vec!["h1".to_string()]);
     assert!(!imp.impact_token.is_empty());
     for scope in [bound(w.org_a), strict(w.org_a)] {
-        let err = structure::org_impact(&w.st, &scope, &tid, Some(w.org_b)).unwrap_err();
+        let err = structure::org_impact(&w.st, &vs(&scope), &tid, Some(w.org_b)).unwrap_err();
         assert_eq!(err.code, codes::E_FORBIDDEN);
     }
-    let err = structure::org_impact(&w.st, &OrgScope::All, &tid, None).unwrap_err();
+    let err = structure::org_impact(&w.st, &vs(&OrgScope::All), &tid, None).unwrap_err();
     assert_eq!(err.code, codes::E_INVALID, "org_id is required (0: none)");
-    let t = structure::org_impact(&w.st, &OrgScope::All, "item:1", Some(w.org_b)).unwrap();
+    let t = structure::org_impact(&w.st, &vs(&OrgScope::All), "item:1", Some(w.org_b)).unwrap();
     assert_eq!(
         (t.allowed, t.reason.as_deref()),
         (false, Some("tracker_controlled"))
@@ -914,9 +923,9 @@ fn the_org_impact_names_the_move_for_an_unrestricted_caller_only() {
     w.st.lock()
         .unwrap()
         .seed_local_item_org(local, Some(w.org_b));
-    let err = task(&w.st, &bound(w.org_a), &tid).unwrap_err();
+    let err = task(&w.st, &vs(&bound(w.org_a)), &tid).unwrap_err();
     assert_eq!(err.code, codes::E_NOTFOUND, "answered as unknown");
-    let st = session_tasks(&w.st, &bound(w.org_a), w.s1).unwrap();
+    let st = session_tasks(&w.st, &vs(&bound(w.org_a)), w.s1).unwrap();
     assert!(st.links.is_empty(), "A's session no longer names B's task");
 }
 
@@ -941,12 +950,12 @@ fn a_hidden_primary_is_neither_named_nor_reported_missing_to_a_bound_client() {
             .id;
     link(&w, w.s1, w.t1, false);
     let a = bound(w.org_a);
-    let st = session_tasks(&w.st, &a, w.s1).unwrap();
+    let st = session_tasks(&w.st, &vs(&a), w.s1).unwrap();
     assert_eq!(st.primary_link_id, None, "the hidden primary is not named");
     assert_eq!(st.links.len(), 1);
     let text = serde_json::to_string(&st).unwrap();
     assert!(!text.contains("HID-1") && !text.contains(&format!("\"link_id\":{hidden}")));
-    let r = review(&w.st, &a, None, None).unwrap();
+    let r = review(&w.st, &vs(&a), None, None).unwrap();
     assert!(
         !r.items.iter().any(|i| i.kind == "no_primary"),
         "{:?}",
@@ -987,8 +996,8 @@ fn d31_decides_whether_a_bound_client_sees_unassigned_work() {
     };
     let on = keys(&bound(w.org_a));
     assert!(on.contains("TK-1") && on.contains("LOOSE-1") && on.contains("FREE-7"));
-    assert!(session_tasks(&w.st, &bound(w.org_a), h2_session).is_ok());
-    assert!(task(&w.st, &bound(w.org_a), bare).is_ok());
+    assert!(session_tasks(&w.st, &vs(&bound(w.org_a)), h2_session).is_ok());
+    assert!(task(&w.st, &vs(&bound(w.org_a)), bare).is_ok());
 
     let off = keys(&strict(w.org_a));
     assert!(off.contains("TK-1") && off.contains("TK-3"), "{off:?}");
@@ -1003,10 +1012,10 @@ fn d31_decides_whether_a_bound_client_sees_unassigned_work() {
         (format!("item:{loose}"), "a loose item"),
         (bare.into(), "a bare key"),
     ] {
-        let err = task(&w.st, &strict(w.org_a), &tid).unwrap_err();
+        let err = task(&w.st, &vs(&strict(w.org_a)), &tid).unwrap_err();
         assert_eq!(err.code, codes::E_NOTFOUND, "{what}");
     }
-    let err = session_tasks(&w.st, &strict(w.org_a), h2_session).unwrap_err();
+    let err = session_tasks(&w.st, &vs(&strict(w.org_a)), h2_session).unwrap_err();
     assert_eq!(err.code, codes::E_NOTFOUND, "an unassigned session");
     // Org B's client, either way, sees none of A's.
     for b in [bound(w.org_b), strict(w.org_b)] {
@@ -1116,7 +1125,7 @@ fn a_cursor_is_stable_under_concurrent_change() {
         per_task: Some(0),
         ..Default::default()
     };
-    let first = tree(&w.st, &OrgScope::All, &args(None)).unwrap();
+    let first = tree(&w.st, &vs(&OrgScope::All), &args(None)).unwrap();
     let seen_first: BTreeSet<String> = first.tasks.iter().map(|t| t.task_id.clone()).collect();
     // Meanwhile: new tasks arrive and one on the first page gains a session
     // (it moves up the order).
@@ -1131,7 +1140,7 @@ fn a_cursor_is_stable_under_concurrent_change() {
     let mut seen: Vec<String> = Vec::new();
     let mut cursor = first.next_cursor.clone();
     while let Some(c) = cursor {
-        let p = tree(&w.st, &OrgScope::All, &args(Some(c))).unwrap();
+        let p = tree(&w.st, &vs(&OrgScope::All), &args(Some(c))).unwrap();
         seen.extend(p.tasks.iter().map(|t| t.task_id.clone()));
         cursor = p.next_cursor;
     }
@@ -1142,14 +1151,14 @@ fn a_cursor_is_stable_under_concurrent_change() {
         "a later page never repeats the first page"
     );
     // The same cursor, replayed, answers the same page.
-    let again = tree(&w.st, &OrgScope::All, &args(first.next_cursor.clone())).unwrap();
-    let again2 = tree(&w.st, &OrgScope::All, &args(first.next_cursor)).unwrap();
+    let again = tree(&w.st, &vs(&OrgScope::All), &args(first.next_cursor.clone())).unwrap();
+    let again2 = tree(&w.st, &vs(&OrgScope::All), &args(first.next_cursor)).unwrap();
     assert_eq!(again.tasks, again2.tasks);
     // A cursor that is not the hub's is refused, never read as a start.
-    let err = tree(&w.st, &OrgScope::All, &args(Some("bogus".into()))).unwrap_err();
+    let err = tree(&w.st, &vs(&OrgScope::All), &args(Some("bogus".into()))).unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
     // The review inbox pages the same way.
-    let err = review(&w.st, &OrgScope::All, Some("bogus"), None).unwrap_err();
+    let err = review(&w.st, &vs(&OrgScope::All), Some("bogus"), None).unwrap_err();
     assert_eq!(err.code, codes::E_INVALID);
 }
 
@@ -1191,7 +1200,7 @@ fn a_host_token_is_told_when_the_task_detail_cut_the_description() {
     recache_tk1_description(&w, &"x".repeat(DESCRIPTION_MAX_CHARS), Some(6812));
     let tid = format!("item:{}", w.t1);
     let host = OrgScope::for_host(&w.st.lock().unwrap(), "h1").unwrap();
-    let d = task(&w.st, &host, &tid).unwrap().description.unwrap();
+    let d = task(&w.st, &vs(&host), &tid).unwrap().description.unwrap();
     // This path's cap is the Work view's own (`DESCRIPTION_MAX_CHARS` = 600
     // here, not the trackers' 2000), so the notice names what THIS answer
     // shows of the tracker's 6812.
@@ -1205,7 +1214,7 @@ fn a_host_token_is_told_when_the_task_detail_cut_the_description() {
     assert!(d.find("shown 600 of").unwrap() > end, "{d}");
     // A person (the desktop, a phone, bound or not) still reads it plain:
     // no fence, no notice.
-    let plain = task(&w.st, &OrgScope::All, &tid)
+    let plain = task(&w.st, &vs(&OrgScope::All), &tid)
         .unwrap()
         .description
         .unwrap();
@@ -1223,7 +1232,7 @@ fn a_whole_description_reaches_the_task_detail_without_a_notice() {
     let text = "Login fails on partial captures.";
     recache_tk1_description(&w, text, Some(text.chars().count() as i64));
     let host = OrgScope::for_host(&w.st.lock().unwrap(), "h1").unwrap();
-    let d = task(&w.st, &host, &format!("item:{}", w.t1))
+    let d = task(&w.st, &vs(&host), &format!("item:{}", w.t1))
         .unwrap()
         .description
         .unwrap();
@@ -1248,7 +1257,7 @@ fn the_task_detail_says_how_much_of_the_description_it_shows() {
     let tid = format!("item:{}", w.t1);
     // Longer than the cap, with no count from the tracker: the excerpt's.
     recache_tk1_description(&w, &"y".repeat(900), None);
-    let d = task(&w.st, &OrgScope::All, &tid).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &tid).unwrap();
     assert_eq!(
         d.description.as_deref().map(|t| t.chars().count()),
         Some(DESCRIPTION_MAX_CHARS)
@@ -1257,13 +1266,13 @@ fn the_task_detail_says_how_much_of_the_description_it_shows() {
     assert!(d.description_truncated);
     // Under the cap, but the cache kept less than the tracker holds.
     recache_tk1_description(&w, "short excerpt", Some(6812));
-    let d = task(&w.st, &OrgScope::All, &tid).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &tid).unwrap();
     assert_eq!(d.description_chars, Some(6812));
     assert!(d.description_truncated);
     // Whole: counted, not flagged, and the flag stays off the wire.
     let text = "Login fails on partial captures.";
     recache_tk1_description(&w, text, Some(text.chars().count() as i64));
-    let d = task(&w.st, &OrgScope::All, &tid).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &tid).unwrap();
     assert_eq!(d.description_chars, Some(text.chars().count()));
     assert!(!d.description_truncated);
     let wire = serde_json::to_value(&d).unwrap();
@@ -1350,7 +1359,7 @@ fn a_done_task_without_an_active_session_is_archived() {
     assert_eq!(done.archived_hidden, 0);
 
     // Only the tree hides it.
-    let d = task(&w.st, &OrgScope::All, &format!("item:{t9}")).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{t9}")).unwrap();
     assert!(d.task.archived);
 }
 
@@ -1456,7 +1465,7 @@ fn archived_hidden_counts_the_whole_result() {
     }
     let p = tree(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &TreeArgs {
             filters: hiding(),
             limit: Some(1),
@@ -1524,7 +1533,7 @@ fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
         assert!(!asks.is_empty(), "scope {n}");
         let batched = tree(
             &w.st,
-            &scope,
+            &vs(&scope),
             &TreeArgs {
                 filters: filters.clone(),
                 limit: Some(1),
@@ -1539,7 +1548,7 @@ fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
             let own_filters = section_filters(&filters, ask.org_id, &ask.group_id);
             let own = tree(
                 &w.st,
-                &scope,
+                &vs(&scope),
                 &TreeArgs {
                     filters: own_filters.clone(),
                     limit: ask.limit,
@@ -1557,7 +1566,7 @@ fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
             if let Some(c) = &got.next_cursor {
                 let next = tree(
                     &w.st,
-                    &scope,
+                    &vs(&scope),
                     &TreeArgs {
                         filters: own_filters,
                         cursor: Some(c.clone()),
@@ -1568,14 +1577,14 @@ fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
                 assert!(!next.tasks.is_empty(), "scope {n}: {ask:?}");
             }
         }
-        let inbox = review(&w.st, &scope, None, Some(1)).unwrap();
+        let inbox = review(&w.st, &vs(&scope), None, Some(1)).unwrap();
         assert_eq!(batched.review_total, Some(inbox.total), "scope {n}");
         if n == 0 {
             assert!(inbox.total > 0, "the suggestions are in the inbox");
         }
     }
     // Asked for neither, a read answers as before.
-    let plain = tree(&w.st, &OrgScope::All, &TreeArgs::default()).unwrap();
+    let plain = tree(&w.st, &vs(&OrgScope::All), &TreeArgs::default()).unwrap();
     assert!(plain.sections.is_empty());
     assert_eq!(plain.review_total, None);
     let json = serde_json::to_value(&plain).unwrap();
@@ -1583,7 +1592,7 @@ fn a_tree_read_pages_its_sections_and_review_total_as_their_own_reads() {
     // Too many sections is refused, never cut short.
     let err = tree(
         &w.st,
-        &OrgScope::All,
+        &vs(&OrgScope::All),
         &TreeArgs {
             sections: vec![
                 SectionAsk {
@@ -1735,9 +1744,9 @@ fn a_working_session_on_a_bare_ref_key_link_does_not_break_the_view() {
     // None of these may error.
     let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
     assert!(!p.tasks.is_empty());
-    assert!(task(&w.st, &OrgScope::All, "ref:BARE-9").is_ok());
-    assert!(session_tasks(&w.st, &OrgScope::All, w.s1).is_ok());
-    assert!(review(&w.st, &OrgScope::All, None, None).is_ok());
+    assert!(task(&w.st, &vs(&OrgScope::All), "ref:BARE-9").is_ok());
+    assert!(session_tasks(&w.st, &vs(&OrgScope::All), w.s1).is_ok());
+    assert!(review(&w.st, &vs(&OrgScope::All), None, None).is_ok());
 }
 
 /// Fix round 2 (C3): the live signal must not leak "someone is working on
@@ -1924,7 +1933,7 @@ fn proposals_are_not_tasks_and_native_children_name_their_parent() {
         (tracker.origin.as_str(), tracker.parent_task_id.as_deref()),
         ("detected", None)
     );
-    let d = task(&w.st, &OrgScope::All, &format!("item:{}", parent.id)).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
     assert_eq!(d.notes.as_deref(), Some("n"));
     assert_eq!(
         d.subtasks.iter().map(|x| x.item_id).collect::<Vec<_>>(),
@@ -1947,7 +1956,7 @@ fn proposals_are_not_tasks_and_native_children_name_their_parent() {
     w.st.lock().unwrap().decide_proposal(prop.id, true).unwrap();
     let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
     assert!(p.tasks.iter().any(|t| t.item_id == Some(prop.id)));
-    let d = task(&w.st, &OrgScope::All, &format!("item:{}", parent.id)).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
     assert_eq!(
         d.subtasks.iter().map(|x| x.item_id).collect::<Vec<_>>(),
         vec![sub.id, prop.id]
@@ -1994,7 +2003,7 @@ fn a_task_page_shows_the_jobs_result_and_its_sessions_steps() {
             .unwrap();
         (parent, job_item)
     };
-    let d = task(&w.st, &OrgScope::All, &format!("item:{}", parent.id)).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
     assert_eq!(d.jobs.len(), 1);
     assert_eq!(d.jobs[0].item_id, job_item.id);
     assert_eq!(d.jobs[0].state, "done");
@@ -2019,7 +2028,7 @@ fn a_task_page_shows_the_jobs_result_and_its_sessions_steps() {
     assert_eq!(d.steps[0].claude_session_id, "c-s1");
 
     // The job mirror's own page carries its result; the tree its state.
-    let jd = task(&w.st, &OrgScope::All, &format!("item:{}", job_item.id)).unwrap();
+    let jd = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", job_item.id)).unwrap();
     assert_eq!(jd.job_result.as_deref(), Some("CHANGELOG.md written"));
     assert_eq!(jd.task.job_state.as_deref(), Some("done"));
     assert_eq!(jd.task.origin, "agent");
@@ -2058,7 +2067,7 @@ fn a_subtasks_steps_roll_up_to_its_parent_and_count_its_live_sessions() {
         .unwrap();
         (parent, sub)
     };
-    let d = task(&w.st, &OrgScope::All, &format!("item:{}", parent.id)).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
     assert_eq!(d.subtasks[0].item_id, sub.id);
     assert_eq!(d.subtasks[0].live_sessions, 1);
     assert_eq!(d.steps.len(), 1);
@@ -2108,7 +2117,7 @@ fn a_per_host_token_reads_agent_text_fenced() {
     };
     let end = crate::mcp::guard::UNTRUSTED_END;
     let host = OrgScope::for_host(&w.st.lock().unwrap(), "h1").unwrap();
-    let d = task(&w.st, &host, &format!("item:{}", parent.id)).unwrap();
+    let d = task(&w.st, &vs(&host), &format!("item:{}", parent.id)).unwrap();
     let notes = d.notes.unwrap();
     assert!(
         notes.contains("the notes") && notes.contains(end),
@@ -2120,7 +2129,7 @@ fn a_per_host_token_reads_agent_text_fenced() {
     assert!(text.contains("the step") && text.contains(end), "{text}");
 
     // A person reads it as is.
-    let d = task(&w.st, &OrgScope::All, &format!("item:{}", parent.id)).unwrap();
+    let d = task(&w.st, &vs(&OrgScope::All), &format!("item:{}", parent.id)).unwrap();
     assert_eq!(d.notes.as_deref(), Some("the notes"));
     assert_eq!(d.steps[0].steps[0].text, "the step");
 }

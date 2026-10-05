@@ -443,3 +443,122 @@ describe('a configured hub this launch cannot use', () => {
     }
   });
 });
+
+// Multi-user M1 (R5-e): what the Session tab shows for a session somebody
+// SHARED with this person.
+//
+// There is no Attach button to hide — the terminal is a pane that attaches
+// automatically the moment a row is selected, so the gate is a mount
+// condition: TerminalView is not mounted at all for such a row, and the
+// read-only pane snapshot takes its place. Without that branch, DoD 3 and 4
+// have no UI deliverable and a watcher would be shown an empty row.
+describe('the Session tab for a shared session', () => {
+  const ME = 7;
+  const OTHER = 9;
+
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: 70, tmux_name: 'dev-theirs', host_alias: 'trn', project_id: null, worktree_id: null,
+    created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
+    kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
+    claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
+    current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
+    safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null,
+    idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null,
+    started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null,
+    parent_session_id: null, tags: [], model: null, context_tokens: null, context_window: null,
+    context_source: null, context_at: null, context_stale: false, tmux_pane_id: null,
+    pending_input: null, owner_person_id: OTHER, visibility: 'private',
+    ...over,
+  });
+
+  async function mount(answers: (cmd: string) => unknown | undefined) {
+    const { restore, inv } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return remote;
+      return answers(cmd);
+    });
+    const { selectSession, clearSelection } = await import('./lib/selection');
+    // The Terminal sub-view, so the assertions are about the pane slot itself
+    // rather than about the Conversation overlay that can cover it.
+    const { sessionView } = await import('./lib/prefs');
+    sessionView.set('terminal');
+    return { restore, inv, selectSession, clearSelection };
+  }
+
+  it('mounts no terminal and shows the read-only snapshot instead', async () => {
+    const theirs = row();
+    const { restore, inv, selectSession, clearSelection } = await mount((cmd) => {
+      if (cmd === 'list_sessions') return [theirs];
+      if (cmd === 'my_grants') return { person_id: ME, grants: [{ session_id: 70, level: 'watch' }] };
+      if (cmd === 'capture_session') return 'claude> …\n';
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
+      selectSession(theirs as never);
+      await screen.findByTestId('watch-view');
+      // The component that attaches is not in the DOM at all — not hidden,
+      // not disabled, not mounted. `pty_open` is therefore never reached.
+      expect(screen.queryByTestId('terminal-host')).toBeNull();
+      expect(inv.mock.calls.map((c) => c[0])).not.toContain('pty_open');
+      expect(screen.getByTestId('watch-reason').textContent).toContain('revoke');
+    } finally {
+      clearSelection();
+      restore();
+    }
+  });
+
+  it('mounts the real terminal for a session this person owns', async () => {
+    const mine = row({ id: 71, tmux_name: 'dev-mine', owner_person_id: ME });
+    const { restore, selectSession, clearSelection } = await mount((cmd) => {
+      if (cmd === 'list_sessions') return [mine];
+      if (cmd === 'my_grants') return { person_id: ME, grants: [] };
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
+      selectSession(mine as never);
+      await screen.findByTestId('terminal-host');
+      expect(screen.queryByTestId('watch-view')).toBeNull();
+    } finally {
+      clearSelection();
+      restore();
+    }
+  });
+
+  // The watcher's slot has to be REACHABLE, not merely mounted. A shared row
+  // that has not reported a `claude_session_id` yet is the case that gets this
+  // wrong: the missing-transcript fallback used to force Terminal, F1 made it
+  // return the stored preference instead — and if the preference is then not
+  // writable, a watcher whose last choice was Conversation can never get to
+  // the snapshot and ⌘J does nothing.
+  it('lets a watcher switch to the snapshot on a row with no transcript yet', async () => {
+    const theirs = row({ id: 72, tmux_name: 'dev-notyet' });
+    const { restore, selectSession, clearSelection } = await mount((cmd) => {
+      if (cmd === 'list_sessions') return [theirs];
+      if (cmd === 'my_grants')
+        return { person_id: ME, grants: [{ session_id: 72, level: 'watch' }] };
+      if (cmd === 'capture_session') return 'claude> …\n';
+      return undefined;
+    });
+    try {
+      const { sessionView } = await import('./lib/prefs');
+      sessionView.set('conversation');
+      render(App);
+      await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
+      selectSession(theirs as never);
+      await waitFor(() =>
+        expect(screen.getByTestId('subtab-terminal').getAttribute('aria-checked')).toBe('false'),
+      );
+      await fireEvent.click(screen.getByTestId('subtab-terminal'));
+      await waitFor(() =>
+        expect(screen.getByTestId('subtab-terminal').getAttribute('aria-checked')).toBe('true'),
+      );
+      expect(screen.queryByTestId('terminal-host')).toBeNull();
+    } finally {
+      clearSelection();
+      restore();
+    }
+  });
+});

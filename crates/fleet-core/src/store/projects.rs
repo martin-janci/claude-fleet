@@ -287,7 +287,7 @@ impl Store {
         project_id: Option<i64>,
     ) -> Result<Vec<crate::service::worktrees::WorktreeOccupancy>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {wcols}, s.host_alias, s.tmux_name
+            "SELECT {wcols}, s.host_alias, s.tmux_name, s.id
                FROM worktrees w
                JOIN projects p ON p.id = w.project_id
           LEFT JOIN sessions s ON s.worktree_id = w.id
@@ -302,12 +302,13 @@ impl Store {
                 worktree_from_row(row)?,
                 row.get::<_, Option<String>>(6)?,
                 row.get::<_, Option<String>>(7)?,
+                row.get::<_, Option<i64>>(8)?,
             ))
         })?;
         let mut out: Vec<crate::service::worktrees::WorktreeOccupancy> = Vec::new();
         let mut last_wid: Option<i64> = None;
         for r in rows {
-            let (w, host, tmux) = r?;
+            let (w, host, tmux, session_id) = r?;
             if last_wid != Some(w.id) {
                 last_wid = Some(w.id);
                 out.push(crate::service::worktrees::WorktreeOccupancy {
@@ -315,11 +316,13 @@ impl Store {
                     occupants: Vec::new(),
                 });
             }
-            if let (Some(host_alias), Some(tmux_name)) = (host, tmux) {
+            if let (Some(host_alias), Some(tmux_name), Some(session_id)) = (host, tmux, session_id)
+            {
                 out.last_mut().unwrap().occupants.push(
                     crate::service::worktrees::WorktreeOccupant {
                         host_alias,
                         tmux_name,
+                        session_id,
                     },
                 );
             }
@@ -505,6 +508,60 @@ impl Store {
 
     /// Return the names + hosts of alive (non-ghost, non-dead) sessions
     /// currently attached to a worktree id. Empty when the worktree is free.
+    /// The ids of the alive sessions in one worktree — the same rows as
+    /// [`Self::alive_sessions_for_worktree`], by id rather than by
+    /// `(host, tmux_name)`.
+    ///
+    /// Multi-user M1 (T7): `delete_worktree` gates every occupant through
+    /// `ViewScope`, which judges a ROW, so the ids are what it needs; the pair
+    /// form stays for the refusal message and for the host the removal runs
+    /// on.
+    pub fn alive_session_ids_for_worktree(
+        &self,
+        worktree_id: i64,
+    ) -> Result<Vec<i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id
+               FROM sessions
+              WHERE worktree_id=?1 AND status='running' AND lost_at IS NULL
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![worktree_id], |row| row.get::<_, i64>(0))?;
+        rows.collect()
+    }
+
+    /// Every session row that still OCCUPIES a worktree as the GC and the
+    /// recovery paths understand it: the running ones
+    /// ([`Self::alive_session_ids_for_worktree`]) plus every row the host
+    /// LOST while it was pointing there.
+    ///
+    /// Multi-user M1 (T8d). `delete_worktree`'s person gate runs over this
+    /// set, not over the alive one, and the difference is a whole class of
+    /// defect: a host reboot sets `status='ghost', lost_at=now` while the
+    /// checkout and its uncommitted work stay on disk, and host-reboot
+    /// survival plus `restore_host_sessions` make that a routine state, not
+    /// an exotic one. Gated on the alive set alone, the loop iterated nothing
+    /// for exactly those rows, so the `Reach::Own` check silently did not run
+    /// and anybody could remove another person's checkout — and
+    /// `restore_host_sessions` would then have nothing to restore into.
+    ///
+    /// A row with no `lost_at` and a status other than `running` is NOT an
+    /// occupant: it was reaped or dismissed deliberately, and nothing is
+    /// waiting to be restored into its tree.
+    pub fn occupant_session_ids_for_worktree(
+        &self,
+        worktree_id: i64,
+    ) -> Result<Vec<i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT id
+               FROM sessions
+              WHERE worktree_id=?1 AND (status='running' OR lost_at IS NOT NULL)
+              ORDER BY id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![worktree_id], |row| row.get::<_, i64>(0))?;
+        rows.collect()
+    }
+
     pub fn alive_sessions_for_worktree(
         &self,
         worktree_id: i64,

@@ -530,11 +530,12 @@ pub async fn work_context(
     args: &WorkArgs,
     store: &Mutex<Store>,
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<WorkContext, IpcError> {
+    let scope = &view.org;
     let key = crate::store::normalize_work_ref(args.required_key()?)?;
     orgs::require_key(&*lock(store)?, scope, &key)?;
-    let input = handover::gather_handover(store, ssh.as_ref(), &key, None, scope).await?;
+    let input = handover::gather_handover(store, ssh.as_ref(), &key, None, view).await?;
     Ok(WorkContext {
         text: handover::build_context(&input),
         key,
@@ -546,7 +547,7 @@ pub async fn work_resume_plan(
     args: &WorkArgs,
     store: &Mutex<Store>,
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<resume::ResumePlan, IpcError> {
     resume::resume_plan(
         store,
@@ -555,7 +556,7 @@ pub async fn work_resume_plan(
         args.link_id,
         args.host_alias.as_deref(),
         args.with_brief.unwrap_or(false),
-        scope,
+        view,
     )
     .await
 }
@@ -583,6 +584,34 @@ pub fn work_purge_impact(
     }
     let s = lock(store)?;
     let mut keys = s.work_keys_for_purge(pid, &hosts)?;
+    // This is the org boundary, not a privacy fence: which KEYS a purge may name. `PurgeImpact`
+    // carries keys and no session row.
+    //
+    // **Open, and recorded as an owner decision** (multi-user M1, T9d; the
+    // table row is in `scope_guard_tests::OPEN_QUESTIONS`). For a person's
+    // own device `is_all()` is true, so no retention runs and `keys` is
+    // every work key `Store::work_keys_for_purge` found on the project and
+    // hosts — other people's included. A ticket key is a company's; a LOCAL
+    // item's key is a sentence a person typed about their own work, which is
+    // why this is still the owner's and not settled here.
+    //
+    // **It is the WHOLE of that residual** (multi-user M1, T10). T9b/T9c
+    // attributed the same "key-level residual" to `orgs::require_key` /
+    // `require_key_bound`, and T10 traced those: for a per-host token or an
+    // org-bound client they answer an org question (does this key have work
+    // in YOUR scope), and for every other caller — a person's own device
+    // included — `require_key` returns `Ok(())` unconditionally and
+    // discloses nothing. So this site is not "the third call site" of a
+    // shared question; it is the only one, and `require_key`'s doc records
+    // the decision that closes its half.
+    //
+    // Why it is not simply fenced by person here: the natural fix is to keep
+    // a key only when the caller can see some link on it
+    // (`orgs::scope_links_for`), and that would fence the OPERATOR too — the
+    // master's `ViewScope` carries the personal owner as its person, so on a
+    // multi-person hub the purge warning would stop naming the work the
+    // purge is about to destroy, which §4.5 deliberately does not do to the
+    // hub operator. Keys, never session rows.
     if !scope.is_all() {
         keys.retain(|k| orgs::require_key(&s, scope, k).is_ok());
     }
@@ -596,8 +625,9 @@ pub async fn work_resume(
     ssh: &std::sync::Arc<crate::ssh::SshClient>,
     reg: &std::sync::Arc<crate::cancel::CancellationRegistry>,
     scope: &OrgScope,
+    reader: &crate::service::view_scope::ViewScope,
 ) -> Result<SessionRow, IpcError> {
-    resume::resume_work(store, ssh, reg, &resume_args(args)?, scope).await
+    resume::resume_work(store, ssh, reg, &resume_args(args)?, scope, reader).await
 }
 
 /// `work { action: lookup }`'s reference: `url`, else `key`.
@@ -610,8 +640,25 @@ pub fn lookup_reference(args: &WorkArgs) -> Result<&str, IpcError> {
 
 /// The start half of [`WorkLinkArgs`] (work graph M3.4): a PERSON's start
 /// (the desktop's); an agent's goes through [`start_args_as`].
+///
+/// No owner: the desktop is one person at the keyboard and the hub's own
+/// person is the right answer there (`hub_personal_owner`). The hub's own path
+/// goes through [`start_args_owned`] with the CALLER's person.
 pub fn start_args(args: &WorkLinkArgs) -> crate::service::trackers::tickets::StartArgs {
     start_args_as(args, Decider::Person)
+}
+
+/// [`start_args_as`] with the caller's person (multi-user M1, T5): whose the
+/// started session is.
+pub fn start_args_owned(
+    args: &WorkLinkArgs,
+    decider: Decider,
+    owner: Option<i64>,
+) -> crate::service::trackers::tickets::StartArgs {
+    crate::service::trackers::tickets::StartArgs {
+        owner,
+        ..start_args_as(args, decider)
+    }
 }
 
 /// [`start_args`] started by `decider`, which decides the link's source:
@@ -622,6 +669,7 @@ pub fn start_args_as(
 ) -> crate::service::trackers::tickets::StartArgs {
     crate::service::trackers::tickets::StartArgs {
         decider,
+        owner: None,
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,
@@ -638,6 +686,7 @@ pub fn start_args_as(
 /// The resume half of [`WorkLinkArgs`].
 pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> {
     Ok(resume::ResumeArgs {
+        owner: None,
         key: args
             .key
             .clone()
@@ -654,17 +703,31 @@ pub fn resume_args(args: &WorkLinkArgs) -> Result<resume::ResumeArgs, IpcError> 
 pub const RECENT_LINKS_MAX: i64 = 200;
 
 /// `{session_id}` → that session's live links (confirmed and rejected,
-/// primary first); `{key}` → ended links to the key (past work). Exactly one.
+/// primary first); `{key}` → ended links to the key (past work); neither →
+/// every link that ended recently. At most one of the two arguments.
 /// A per-host token reads only links inside its orgs, and past links only of
 /// its own host's sessions (`orgs::scope_links`).
+///
+/// Multi-user M1 (T8d): it takes the caller's WHOLE scope, not its org half.
+/// Two of the three forms answer a PAGE — a key's ended links, and the
+/// fleet-wide recent page a bare `work {}` returns — and a `WorkLinkRow`
+/// carries `snap_tmux`, `snap_name`, `snap_branch`, `snap_worktree`,
+/// `snap_pr_url` and `snap_claude_ids`, which spec §4.3 calls content. The
+/// `{session_id}` form is gated per row in the handler as well, and the fence
+/// here is harmless to it (the caller's own row is visible to the caller);
+/// the two page forms had no person fence at all, because
+/// `orgs::scope_links`' `OrgScope::All` arm is `{}` and `All` is what every
+/// paired client bound to no org resolves to. T8's result gate could not net
+/// them either: a `WorkLinkRow` spells the session `snap_host` / `snap_tmux`
+/// and carries no `visibility`, so `looks_like_session_row` is false for it.
 pub fn work(
     args: &WorkArgs,
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<WorkLinkRow>, IpcError> {
     let s = lock(store)?;
     let mut links = work_unscoped(args, &s)?;
-    orgs::scope_links(&s, scope, &mut links)?;
+    orgs::scope_links_for(&s, view, &mut links)?;
     Ok(links)
 }
 
@@ -810,7 +873,11 @@ fn work_link_locked<'a>(
     if matches!(scope, OrgScope::Org { .. })
         && !s
             .get_session_by_id(session_id)?
-            .is_some_and(|row| scope.sees_row(&row))
+            // The org half. The person half is the transport's session gate
+            // (`resolve_row_person_gated`), which every `work_link` entry
+            // point takes before reaching here; this keeps the SERVICE's own
+            // answer the same for the batch path.
+            .is_some_and(|row| scope.sees_row_org_only(&row))
     {
         return Err(IpcError::new(
             codes::E_NOTFOUND,
@@ -862,6 +929,9 @@ fn work_link_locked<'a>(
     // linked work, as the store does for a session without any.
     let tidy_target = || -> Result<i64, IpcError> {
         let link_id = s.tidy_link(session_id, args.link_id)?;
+        // This is the org boundary, not a privacy fence: the session was already reached through
+        // the tool layer's `Reach::Drive` person gate; what is left to ask is whether the LINK
+        // is this caller's org's.
         if !scope.is_all() && visible_link(link_id).is_err() {
             return Err(IpcError::new(
                 codes::E_NOTFOUND,
@@ -878,6 +948,8 @@ fn work_link_locked<'a>(
     match args.action.as_str() {
         "archive" => {
             // A per-host token stamps only the links it sees.
+            // This is the org boundary, not a privacy fence: which of an already-reached
+            // session's links an archive stamps, by org.
             let only = if scope.is_all() {
                 None
             } else {
@@ -950,6 +1022,8 @@ fn work_link_locked<'a>(
             // nor be told that link's id. The store's own check then runs
             // on the actual primary, under this same lock.
             let actual = s.current_primary_link(session_id)?;
+            // This is the org boundary, not a privacy fence: the same org question about the
+            // primary link.
             let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
             if let Some(expected) = args.expected_primary {
                 if seen.unwrap_or(0) != expected {
@@ -1009,6 +1083,8 @@ fn work_link_locked<'a>(
         // `reject { key | item_id }` any target.
         "reject" if args.link_id.is_some() && args.key.is_none() && args.item_id.is_none() => {
             let link_id = args.link_id.unwrap_or_default();
+            // This is the org boundary, not a privacy fence: the same org question before a
+            // reject by link id.
             if !scope.is_all() || args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
@@ -1031,6 +1107,8 @@ fn work_link_locked<'a>(
                     &format!("work link {link_id}"),
                     force,
                 )?;
+            // This is the org boundary, not a privacy fence: the same org question before a
+            // confirm by link id.
             } else if !scope.is_all() {
                 visible_link(link_id)?;
             }
@@ -1043,6 +1121,8 @@ fn work_link_locked<'a>(
             let link_id = args
                 .link_id
                 .ok_or_else(|| IpcError::new(codes::E_INVALID, "unlink needs link_id"))?;
+            // This is the org boundary, not a privacy fence: the same org question before an
+            // unlink by link id.
             if !scope.is_all() || args.expected_version.is_some() {
                 checked_link(link_id)?;
             }
@@ -1234,7 +1314,7 @@ mod tests {
                 ..Default::default()
             },
             &st,
-            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
         )
         .unwrap();
         assert_eq!(links.len(), 1);
@@ -1276,7 +1356,7 @@ mod tests {
                 ..Default::default()
             },
             &st,
-            &OrgScope::All,
+            &crate::service::view_scope::ViewScope::internal(),
         )
         .unwrap();
         assert_eq!(links[0].state, "rejected");
@@ -1695,9 +1775,13 @@ mod tests {
             assert_eq!(err.code, codes::E_INVALID, "{args:?}");
         }
         assert!(
-            work(&WorkArgs::default(), &st, &OrgScope::All)
-                .unwrap()
-                .is_empty(),
+            work(
+                &WorkArgs::default(),
+                &st,
+                &crate::service::view_scope::ViewScope::internal()
+            )
+            .unwrap()
+            .is_empty(),
             "recent: none"
         );
         let both = WorkArgs {
@@ -1706,7 +1790,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            work(&both, &st, &OrgScope::All).unwrap_err().code,
+            work(
+                &both,
+                &st,
+                &crate::service::view_scope::ViewScope::internal()
+            )
+            .unwrap_err()
+            .code,
             codes::E_INVALID
         );
         let err = work_link(

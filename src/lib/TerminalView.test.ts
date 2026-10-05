@@ -300,6 +300,37 @@ describe('TerminalView run boxes are pinned to the cell grid (F3)', () => {
   });
 });
 
+// Multi-user M1, in the spirit of `hub_verdicts.test.ts`'s sweeps: the two
+// calls that reach the owner's host outside the hub are gated once each
+// (`openTerm` and `handleDrop`), and a SECOND call site would be a second
+// thing to gate. This is a count, not a behaviour — the behaviour is pinned in
+// `TerminalView.hub.test.ts` — and its job is to make whoever adds the next
+// one come and read the gate instead of discovering it in review.
+describe('the unrevocable calls stay single-sited', () => {
+  it('has exactly one pty_open and one upload_to_session call site', () => {
+    const count = (needle: string) => terminalViewSource.split(needle).length - 1;
+    expect(count("invoke('pty_open'")).toBe(1);
+    expect(count("'upload_to_session'")).toBe(1);
+  });
+
+  it('checks the derived access before the workspace probe, not after it', () => {
+    // `repair_session` respawns tmux and re-adds worktrees: order is the whole
+    // point of the early return, so pin it against the source as well as
+    // against behaviour. A grep for the names is enough — the probe and the
+    // guard each appear once in `openTerm`.
+    // Anchored inside `openTerm`: the same guard also sits in `handleDrop`,
+    // which is declared earlier in the file, so a bare indexOf would pass
+    // while saying nothing about the attach path.
+    const fn = terminalViewSource.indexOf('async function openTerm(');
+    expect(fn).toBeGreaterThan(0);
+    const guard = terminalViewSource.indexOf('if (!termOwned) return;', fn);
+    const probe = terminalViewSource.indexOf('const rep = await repairSession(', fn);
+    expect(guard).toBeGreaterThan(0);
+    expect(probe).toBeGreaterThan(0);
+    expect(guard).toBeLessThan(probe);
+  });
+});
+
 describe('TerminalView drain resilience (F1)', () => {
   it('runs the rest of the tick after a chunk blows up the parser', async () => {
     // The bytes are already consumed, so the eof the same drain reported must

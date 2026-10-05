@@ -56,6 +56,9 @@ import { selectedSession, selectSession } from './selection';
 import { toasts, clearToasts } from './toasts';
 import { hubConnection } from './hub_connection';
 import type { HubConnection } from './hub_connection';
+import { hubStatus, STANDALONE } from './hub';
+import { UNKNOWN_SESSION_REASON } from './share';
+import { resetAccessForTests, setMyGrants } from './access';
 import {
   requestPreflight,
   resetPreflightsForTest,
@@ -1019,5 +1022,374 @@ describe('TransferSheet: preflight', () => {
     hubConnection.set({ state: 'connected' });
     await tick();
     expect(requestPreflight).toHaveBeenLastCalledWith(7, 'beta');
+  });
+});
+
+// Multi-user M1: the move lifecycle is spec §4.3's `own` tier, and this sheet
+// is where `startMove` / `retryMove` / `resolveMoveRun` are actually called —
+// so the gate has to hold here and not only on the chip and the details-panel
+// button that open it. It asked the hub's half only, which left it disagreeing
+// with those two surfaces.
+describe('TransferSheet access gate (multi-user M1)', () => {
+  const REMOTE = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+
+  beforeEach(() => {
+    resetAccessForTests();
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+  });
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    resetAccessForTests();
+  });
+
+  for (const level of ['watch', 'drive'] as const) {
+    it(`a ${level} grantee cannot start the move from the sheet`, async () => {
+      const theirs = { ...source, owner_person_id: 9 } as SessionRow;
+      sessions.set([theirs]);
+      setMyGrants(7, [{ session_id: theirs.id, level }]);
+      transferSheetFor.set(theirs.id);
+      render(TransferSheet);
+      await tick();
+      const go = (await screen.findByTestId('confirm-move')) as HTMLButtonElement;
+      expect(go.disabled).toBe(true);
+      expect(go.title).toMatch(/only the session’s owner/i);
+      await fireEvent.click(go);
+      await tick();
+      expect(mockInvoke).not.toHaveBeenCalledWith('move_session', expect.anything());
+    });
+  }
+
+  it('the owner’s own row still starts it on a paired desktop', async () => {
+    pendingMove();
+    const mine = { ...source, owner_person_id: 7 } as SessionRow;
+    sessions.set([mine]);
+    setMyGrants(7, []);
+    transferSheetFor.set(mine.id);
+    render(TransferSheet);
+    await tick();
+    const go = (await screen.findByTestId('confirm-move')) as HTMLButtonElement;
+    expect(go.disabled).toBe(false);
+    await fireEvent.click(go);
+    expect(mockInvoke).toHaveBeenCalledWith('move_session', expect.anything());
+  });
+
+  // F2a: the previous round disabled `confirm-move` and the four recovery
+  // controls, and this file tested only `confirm-move`. The recovery view is
+  // the one that matters most, because it is reached WITHOUT this client having
+  // started anything: a run belongs to the session, and the sheet opens on it
+  // from the terminal-header chip.
+  describe('the recovery view’s controls', () => {
+    const run = (status: 'partial' | 'failed', over: Partial<MoveRun> = {}): MoveRun => ({
+      sessionId: source.id,
+      sessionName: 'sess7',
+      fromHost: 'alpha',
+      toHost: 'beta',
+      keepSource: null,
+      origin: 'local',
+      steps: MOVE_STEPS.map((step) => ({ step, state: 'pending' as const, detail: null })),
+      status,
+      report: null,
+      error: {
+        code: status === 'partial' ? 'E_MOVE_PARTIAL' : 'E_MOVE_CARRY',
+        message: 'x',
+        details:
+          status === 'partial'
+            ? { step: 'confirming the target is running', target_session_id: 8 }
+            : { step: 'apply' },
+      },
+      resolveError: null,
+      startedAt: Date.now(),
+      settledAt: Date.now(),
+      cleanTarget: false,
+      forceCrossOrg: false,
+      attempt: 1,
+      resolving: false,
+      awaitingStart: false,
+      deadlineUnix: null,
+      waitEnded: null,
+      waitRefusal: null,
+      ...over,
+    });
+
+    function open(owner: number, level: 'watch' | 'drive' | null, r: MoveRun) {
+      const row = { ...source, owner_person_id: owner } as SessionRow;
+      sessions.set([row]);
+      setMyGrants(7, level ? [{ session_id: row.id, level }] : []);
+      putRunForTest(r);
+      transferSheetFor.set(row.id);
+      return render(TransferSheet);
+    }
+    const dis = (el: Element) => (el as HTMLButtonElement).disabled;
+
+    beforeEach(() => {
+      resetMovesForTest();
+      vi.mocked(retryMove).mockClear();
+      vi.mocked(resolveMoveRun).mockClear();
+      vi.mocked(cancelWait).mockClear();
+      hosts.set([host('alpha'), host('beta')]);
+    });
+
+    it('the owner keeps Finish, Undo, Retry, Move anyway and Clean up', async () => {
+      // The positive control for all five at once.
+      const partial = open(7, null, run('partial'));
+      await tick();
+      expect(dis(screen.getByTestId('transfer-finish'))).toBe(false);
+      expect(dis(screen.getByTestId('transfer-undo'))).toBe(false);
+      partial.unmount();
+      resetMovesForTest();
+
+      const failed = open(7, null, run('failed'));
+      await tick();
+      expect(dis(screen.getByTestId('transfer-retry'))).toBe(false);
+      await fireEvent.click(screen.getByTestId('transfer-retry'));
+      expect(retryMove).toHaveBeenCalledWith(source.id, { cleanTarget: false });
+      failed.unmount();
+      resetMovesForTest();
+
+      orgs.set([
+        { id: 1, name: 'A', created_at: 1, rules: [], hosts: [], trackers: [] },
+        { id: 2, name: 'B', created_at: 1, rules: [], hosts: [], trackers: [] },
+      ]);
+      const cross = open(
+        7,
+        null,
+        run('failed', {
+          error: {
+            code: 'E_FORBIDDEN',
+            message: 'x',
+            details: { cross_org: true, work_org_id: 1, session_org_id: 2 },
+          },
+        }),
+      );
+      await tick();
+      expect(dis(screen.getByTestId('transfer-force-cross-org'))).toBe(false);
+      cross.unmount();
+      orgs.set([]);
+      resetMovesForTest();
+
+      open(
+        7,
+        null,
+        run('failed', {
+          error: {
+            code: 'E_MOVE_TARGET_DIRTY',
+            message: 'x',
+            details: { leftovers: 'ours', ours: ['src/lib.rs'] },
+          },
+        }),
+      );
+      await tick();
+      expect(dis(screen.getByTestId('transfer-clean'))).toBe(false);
+    });
+
+    for (const level of ['watch', 'drive'] as const) {
+      it(`a ${level} grantee cannot finish or undo somebody else’s partial move`, async () => {
+        open(9, level, run('partial'));
+        await tick();
+        const finish = screen.getByTestId('transfer-finish');
+        const undo = screen.getByTestId('transfer-undo');
+        expect(dis(finish)).toBe(true);
+        expect(dis(undo)).toBe(true);
+        expect(finish.title).toMatch(/only the session’s owner/i);
+        // And the second line of defence: `fireEvent` dispatches past a
+        // `disabled` attribute (a real click does not), so arm the confirm the
+        // way a reason arriving mid-gesture would leave it, and press it. The
+        // call itself has to refuse — a disabled button alone is a display.
+        await fireEvent.click(finish);
+        await tick();
+        const confirm = screen.queryByTestId('transfer-finish-confirm');
+        if (confirm) await fireEvent.click(confirm);
+        await tick();
+        expect(resolveMoveRun).not.toHaveBeenCalled();
+      });
+
+      it(`a ${level} grantee cannot Retry, Move anyway or Clean up and retry`, async () => {
+        // "Move anyway" and "Clean up … and retry" were the two the previous
+        // round left live: both end in `retryMove`, the same `move_session`.
+        const plain = open(9, level, run('failed'));
+        await tick();
+        expect(dis(screen.getByTestId('transfer-retry'))).toBe(true);
+        await fireEvent.click(screen.getByTestId('transfer-retry'));
+        plain.unmount();
+        resetMovesForTest();
+
+        orgs.set([
+          { id: 1, name: 'A', created_at: 1, rules: [], hosts: [], trackers: [] },
+          { id: 2, name: 'B', created_at: 1, rules: [], hosts: [], trackers: [] },
+        ]);
+        const cross = open(
+          9,
+          level,
+          run('failed', {
+            error: {
+              code: 'E_FORBIDDEN',
+              message: 'x',
+              details: { cross_org: true, work_org_id: 1, session_org_id: 2 },
+            },
+          }),
+        );
+        await tick();
+        const anyway = screen.getByTestId('transfer-force-cross-org');
+        expect(dis(anyway)).toBe(true);
+        expect(anyway.title).toMatch(/only the session’s owner/i);
+        await fireEvent.click(anyway);
+        cross.unmount();
+        orgs.set([]);
+        resetMovesForTest();
+
+        open(
+          9,
+          level,
+          run('failed', {
+            error: {
+              code: 'E_MOVE_TARGET_DIRTY',
+              message: 'x',
+              details: { leftovers: 'ours', ours: ['src/lib.rs'] },
+            },
+          }),
+        );
+        await tick();
+        const clean = screen.getByTestId('transfer-clean');
+        expect(dis(clean)).toBe(true);
+        expect(clean.title).toMatch(/only the session’s owner/i);
+        await fireEvent.click(clean);
+        await tick();
+        const cleanConfirm = screen.queryByTestId('transfer-clean-confirm');
+        if (cleanConfirm) await fireEvent.click(cleanConfirm);
+        await tick();
+
+        // None of the three reached `retryMove`, which is the `move_session`.
+        expect(retryMove).not.toHaveBeenCalled();
+      });
+    }
+
+    // F2b: the WAIT view's two controls were the last live ones. They are the
+    // clearest case for resolving the row from the RUN: a waiting run outlives
+    // its row in this sheet, so the sheet's own `blocked` (which reads
+    // `$transferSheetFor`'s row) answered `null` for them.
+    for (const level of ['watch', 'drive'] as const) {
+      it(`a ${level} grantee cannot Cancel or retry somebody else’s wait`, async () => {
+        const waiting = open(9, level, run('failed', { status: 'waiting', deadlineUnix: null }));
+        await tick();
+        const cancel = screen.getByTestId('transfer-cancel-wait');
+        expect(dis(cancel)).toBe(true);
+        expect(cancel.title).toMatch(/only the session’s owner/i);
+        await fireEvent.click(cancel);
+        await tick();
+        expect(cancelWait).not.toHaveBeenCalled();
+        waiting.unmount();
+        resetMovesForTest();
+
+        open(9, level, run('failed', { waitEnded: 'timed_out', deadlineUnix: null }));
+        await tick();
+        const again = screen.getByTestId('transfer-wait-retry');
+        expect(dis(again)).toBe(true);
+        expect(again.title).toMatch(/only the session’s owner/i);
+        await fireEvent.click(again);
+        await tick();
+        expect(retryMove).not.toHaveBeenCalled();
+      });
+    }
+
+    it('the owner keeps Cancel and Transfer again', async () => {
+      const waiting = open(7, null, run('failed', { status: 'waiting', deadlineUnix: null }));
+      await tick();
+      expect(dis(screen.getByTestId('transfer-cancel-wait'))).toBe(false);
+      await fireEvent.click(screen.getByTestId('transfer-cancel-wait'));
+      expect(cancelWait).toHaveBeenCalledWith(source.id);
+      waiting.unmount();
+      resetMovesForTest();
+
+      open(7, null, run('failed', { waitEnded: 'timed_out', deadlineUnix: null }));
+      await tick();
+      expect(dis(screen.getByTestId('transfer-wait-retry'))).toBe(false);
+      await fireEvent.click(screen.getByTestId('transfer-wait-retry'));
+      expect(retryMove).toHaveBeenCalledWith(source.id);
+    });
+
+    // F2d: a run outlives its row BY DESIGN — `adoptPartial` rebuilds a partial
+    // from a recorded event after a restart, and the sheet opens on it from the
+    // header chip. With no row, `$sessionBlocked(undefined, …)` answered `null`,
+    // so every control here was live on a session this client cannot even see.
+    /** Open the sheet on a run whose session is NOT in `$sessions`. */
+    function openWithoutRow(r: MoveRun) {
+      sessions.set([]);
+      setMyGrants(7, []);
+      putRunForTest(r);
+      transferSheetFor.set(source.id);
+      return render(TransferSheet);
+    }
+
+    it('a paired desktop disables the whole recovery view for a run whose row it has not got', async () => {
+      const partial = openWithoutRow(run('partial'));
+      await tick();
+      const finish = screen.getByTestId('transfer-finish');
+      expect(dis(finish)).toBe(true);
+      expect(finish.title).toBe(UNKNOWN_SESSION_REASON);
+      expect(dis(screen.getByTestId('transfer-undo'))).toBe(true);
+      await fireEvent.click(finish);
+      await tick();
+      const confirm = screen.queryByTestId('transfer-finish-confirm');
+      if (confirm) await fireEvent.click(confirm);
+      await tick();
+      expect(resolveMoveRun).not.toHaveBeenCalled();
+      partial.unmount();
+      resetMovesForTest();
+
+      openWithoutRow(run('failed'));
+      await tick();
+      expect(dis(screen.getByTestId('transfer-retry'))).toBe(true);
+      await fireEvent.click(screen.getByTestId('transfer-retry'));
+      await tick();
+      expect(retryMove).not.toHaveBeenCalled();
+    });
+
+    it('…and the WAIT view too, which is the view a run outlives its row in', async () => {
+      const waiting = openWithoutRow(run('failed', { status: 'waiting', deadlineUnix: null }));
+      await tick();
+      const cancel = screen.getByTestId('transfer-cancel-wait');
+      expect(dis(cancel)).toBe(true);
+      expect(cancel.title).toBe(UNKNOWN_SESSION_REASON);
+      await fireEvent.click(cancel);
+      await tick();
+      expect(cancelWait).not.toHaveBeenCalled();
+      waiting.unmount();
+      resetMovesForTest();
+
+      openWithoutRow(run('failed', { waitEnded: 'timed_out', deadlineUnix: null }));
+      await tick();
+      expect(dis(screen.getByTestId('transfer-wait-retry'))).toBe(true);
+      await fireEvent.click(screen.getByTestId('transfer-wait-retry'));
+      await tick();
+      expect(retryMove).not.toHaveBeenCalled();
+    });
+
+    it('a STANDALONE desktop keeps the same view, because it owns every row', async () => {
+      // The positive control for the fail-closed rule: a single-user install
+      // must be untouched by it, row in the list or not.
+      hubStatus.set({ ...STANDALONE });
+      hubConnection.set({ state: 'standalone' });
+      resetAccessForTests();
+      const partial = openWithoutRow(run('partial'));
+      await tick();
+      expect(dis(screen.getByTestId('transfer-finish'))).toBe(false);
+      expect(dis(screen.getByTestId('transfer-undo'))).toBe(false);
+      partial.unmount();
+      resetMovesForTest();
+
+      openWithoutRow(run('failed', { status: 'waiting', deadlineUnix: null }));
+      await tick();
+      expect(dis(screen.getByTestId('transfer-cancel-wait'))).toBe(false);
+      await fireEvent.click(screen.getByTestId('transfer-cancel-wait'));
+      expect(cancelWait).toHaveBeenCalledWith(source.id);
+    });
   });
 });

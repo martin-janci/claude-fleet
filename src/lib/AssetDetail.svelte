@@ -6,6 +6,7 @@
   import AssetEditor from './AssetEditor.svelte';
   import AuthorSessionDialog from './AuthorSessionDialog.svelte';
   import { hubStatus, hubBlock } from './hub';
+  import { driftSideWords } from './assets_inbox';
 
   let {
     kind,
@@ -14,6 +15,16 @@
     onsync,
     ondeleted,
     startInEdit = false,
+    /** Assets M5 (R19): which part the Inspector shows — `overview` (title,
+     *  actions, lint, description, tags), `hosts` (the host × harness
+     *  matrix), `source` (the editor or the rendered preview). `all` (the
+     *  default) is the whole detail, as before. Switching it never refetches. */
+    section = 'all',
+    /** Edit lives in Source: ask the Inspector to show it. */
+    onsection,
+    /** Whether the editor is open, on mount and on every change (final
+     *  review I2: the Inspector's `e` must not re-create an open editor). */
+    onediting,
   }: {
     kind: string;
     name: string;
@@ -29,7 +40,12 @@
      *  this component by kind+name so a fresh instance — and a fresh read
      *  of this prop — is created per selection. */
     startInEdit?: boolean;
+    section?: 'all' | 'overview' | 'hosts' | 'source';
+    onsection?: (s: 'source') => void;
+    onediting?: (editing: boolean) => void;
   } = $props();
+
+  const show = (s: 'overview' | 'hosts' | 'source') => section === 'all' || section === s;
 
   let detail = $state<AssetDetail | null>(null);
   let error = $state<string | null>(null);
@@ -40,8 +56,12 @@
   // change.
   let reloadKey = $state(0);
 
+  // Only a real change of asset (or a write) refetches — not a re-render of
+  // the same props (a `$derived` is equality-checked; the Inspector flips
+  // `section` per tab without ever reading the asset again).
+  const target = $derived(JSON.stringify([kind, name]));
   $effect(() => {
-    const k = kind, n = name;
+    const [k, n] = JSON.parse(target) as [string, string];
     void reloadKey;
     detail = null; error = null;
     getAsset(k, n).then((r) => {
@@ -52,6 +72,10 @@
 
   // ── Edit ─────────────────────────────────────────────────────────────
   let editing = $state(untrack(() => startInEdit));
+  $effect.pre(() => {
+    const on = editing;
+    untrack(() => onediting?.(on));
+  });
   let lastCommit = $state<string | null>(null);
 
   function onSaved(result: WriteResult) {
@@ -136,6 +160,12 @@
     return s ? s.replace('_', ' ') : 'not scanned';
   }
 
+  /** Which side moved, for a drifted cell (final review, minor 2). */
+  function side(hostAlias: string, harness: string): string | null {
+    if (rawState(hostAlias, harness) !== 'drifted') return null;
+    return driftSideWords(detail?.hosts.find((h) => h.host_alias === hostAlias && h.harness === harness)?.drift_side);
+  }
+
   // `orphan` deliberately excluded: it only ever appears on an unmanaged
   // inventory row (AssetsPanel's "On hosts, not in catalog" list), never in
   // a catalog asset's own `hosts` — the array this component reads — so it
@@ -154,6 +184,7 @@
   {:else if !detail}
     <p class="muted">Loading…</p>
   {:else}
+    {#if show('overview')}
     <div class="title-row">
       <h3 data-testid="asset-detail-title"><span class="kind">{detail.asset.kind}</span> {detail.asset.name} <span class="ver">v{detail.asset.version}</span></h3>
       <div class="title-actions">
@@ -166,7 +197,7 @@
         <button class="sync-btn" onclick={() => (showAuthorDialog = true)} disabled={authorBlocked !== null} title={authorBlocked ?? ''} data-testid="asset-open-session">Open in session</button>
         <button class="sync-btn" onclick={toggleLint} data-testid="asset-lint">{lintBusy ? 'Linting…' : 'Lint'}</button>
         {#if !editing}
-          <button class="sync-btn" onclick={() => (editing = true)} data-testid="asset-edit">Edit</button>
+          <button class="sync-btn" onclick={() => { editing = true; onsection?.('source'); }} data-testid="asset-edit">Edit</button>
         {/if}
         <button class="sync-btn danger" onclick={() => (showDeleteConfirm = true)} data-testid="asset-delete">Delete</button>
       </div>
@@ -188,6 +219,9 @@
     {#if detail.asset.install_as}<p class="install-as" data-testid="asset-install-as">installs as <code>{detail.asset.install_as}</code></p>{/if}
     {#if detail.asset.tags?.length}<p class="tags">{#each detail.asset.tags ?? [] as t}<span class="tag">{t}</span>{/each}</p>{/if}
 
+    {/if}
+
+    {#if show('hosts')}
     <h4>Hosts</h4>
     <table class="matrix">
       <thead><tr><th>host</th>{#each harnesses as h}<th>{h}</th>{/each}</tr></thead>
@@ -198,8 +232,9 @@
             {#each harnesses as h}
               {@const s = cell(host.alias, h)}
               {@const raw = rawState(host.alias, h)}
-              <td class={`state-${s.replace(' ', '-')}`} data-testid={`matrix-cell-${host.alias}-${h}`} title={s === 'skipped' ? 'host unreachable' : ''}>
-                {s}
+              {@const moved = side(host.alias, h)}
+              <td class={`state-${s.replace(' ', '-')}`} data-testid={`matrix-cell-${host.alias}-${h}`} title={s === 'skipped' ? 'host unreachable' : (moved ?? '')}>
+                {s}{#if moved}<span class="side">{` — ${moved}`}</span>{/if}
                 {#if raw && SYNCABLE_STATES.has(raw)}
                   <button class="cell-sync" onclick={() => requestSync(host.alias)} data-testid={`cell-sync-${host.alias}-${h}`}>Sync</button>
                 {/if}
@@ -209,11 +244,17 @@
         {/each}
       </tbody>
     </table>
+    {/if}
 
+    <!-- The editor stays mounted for as long as `editing` (hidden, not
+         unmounted, under another section) so an unsaved draft survives a
+         visit to Overview or Hosts. -->
     {#if editing}
-      <h4>Edit</h4>
-      <AssetEditor asset={detail.asset} onsaved={onSaved} oncancel={onEditCancel} />
-    {:else}
+      <div class="edit-pane" hidden={!show('source')}>
+        <h4>Edit</h4>
+        <AssetEditor asset={detail.asset} onsaved={onSaved} oncancel={onEditCancel} />
+      </div>
+    {:else if show('source')}
       <h4>Preview</h4>
       <div class="tabs" role="tablist">
         {#each harnesses as h}
@@ -264,25 +305,26 @@
 {/if}
 
 <style>
-  .detail { padding: 10px 14px; overflow: auto; height: 100%; font-size: 13px; }
+  /* No scroller of its own: it lives in the Inspector's tab panel, which scrolls. */
+  .detail { padding: 10px 14px; font-size: 13px; }
   .title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
   .title-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .commit { font-size: 11px; color: #16a34a; }
+  .commit { font-size: 11px; color: var(--usage-ok); }
   .sync-btn { font-size: 11px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; background: transparent; color: var(--fg); cursor: pointer; }
-  .sync-btn.danger { color: #e64a4a; border-color: #e64a4a; }
+  .sync-btn.danger { color: var(--usage-crit); border-color: var(--usage-crit); }
   .lint-report { margin: 6px 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 4px; }
   .lint-summary { margin: 0 0 4px; font-weight: 600; }
-  .lint-error { color: #dc2626; margin: 2px 0; font-size: 12px; }
-  .lint-warn { color: #d97706; margin: 2px 0; font-size: 12px; }
+  .lint-error { color: var(--usage-crit); margin: 2px 0; font-size: 12px; }
+  .lint-warn { color: var(--usage-warn); margin: 2px 0; font-size: 12px; }
   .cell-sync { margin-left: 6px; font-size: 10px; padding: 0 4px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--accent); cursor: pointer; }
   h3 { margin: 0 0 4px; font-size: 15px; font-family: ui-monospace, monospace; }
   .kind, .ver { color: var(--fg-muted); font-size: 11px; font-family: system-ui; }
   h4 { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }
   .desc { margin: 0; } .install-as { margin: 4px 0 0; font-size: 11px; color: var(--fg-muted); } .tags { margin: 4px 0 0; } .tag { border: 1px solid var(--border); border-radius: 8px; padding: 0 6px; font-size: 11px; margin-right: 4px; }
   .matrix { border-collapse: collapse; } .matrix th, .matrix td { text-align: left; padding: 3px 10px 3px 0; border-bottom: 1px solid var(--border); }
-  .state-in-sync { color: #16a34a; } .state-drifted { color: #d97706; } .state-skipped, .state-not-scanned, .state-missing, .state-unsupported, .state-orphan { color: var(--fg-muted); }
+  .state-in-sync { color: var(--usage-ok); } .state-drifted { color: var(--usage-warn); } .state-skipped, .state-not-scanned, .state-missing, .state-unsupported, .state-orphan { color: var(--fg-muted); }
   .tabs { display: flex; gap: 2px; margin-bottom: 6px; } .tabs button { background: none; border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; color: var(--fg-muted); cursor: pointer; } .tabs button.active { color: var(--fg); border-color: var(--accent); }
   .file { margin: 6px 0; } .path { font-family: ui-monospace, monospace; font-size: 12px; color: var(--fg-muted); } .mode { opacity: 0.7; }
   pre { margin: 2px 0 0; padding: 8px; background: var(--bg-pane); border: 1px solid var(--border); border-radius: 4px; overflow: auto; max-height: 320px; font-size: 12px; }
-  .muted { color: var(--fg-muted); } .warn { color: #d97706; margin: 2px 0; } .error { color: #dc2626; }
+  .muted { color: var(--fg-muted); } .warn { color: var(--usage-warn); margin: 2px 0; } .error { color: var(--usage-crit); }
 </style>

@@ -118,7 +118,19 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// Raised to 7 for revision 7: file downloads (`list_downloads`,
 /// `send_file`, `remove_download`, `GET /downloads/<id>`). A revision-6 hub
 /// serves none of them, so the Downloads sheet would fail every action.
-pub const MIN_HUB_CONTRACT: u32 = 7;
+///
+/// Raised to 8 for revision 8: multi-user M1's sharing commands route to the
+/// five new tools `session_share`, `session_unshare`, `session_narrow`,
+/// `session_access` and `my_grants`. A revision-7 hub serves none of them, so
+/// a desktop paired with one would open the Share sheet and fail every button
+/// with an unknown tool — and `my_grants` is the one place this client learns
+/// its own person id and grant set, so without it `src/lib/access.ts` keeps
+/// its previous (empty) answer rather than widening and a session shared with
+/// this person never becomes reachable at all. A watcher would see a row it
+/// may read and no way to read it. Refusing that hub with the skew banner
+/// says what to do (update the hub); leaving it `InRange` would ship a
+/// sharing UI that silently does nothing.
+pub const MIN_HUB_CONTRACT: u32 = 8;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -127,11 +139,15 @@ pub const MIN_HUB_CONTRACT: u32 = 7;
 /// Moves in lockstep with [`fleet_core::wire_contract::CONTRACT_REVISION`]:
 /// this build's own hub must be `InRange`, so bumping the revision without
 /// bumping this is a shipped outage against itself.
-pub const MAX_HUB_CONTRACT: u32 = 7;
+///
+/// Raised to 8 with revision 8 (multi-user M1's five sharing tools), in that
+/// lockstep: this build's own `fleet-hub` reports 8, and leaving this at 7
+/// would make every desktop refuse the hub it ships beside as `TooNew`.
+pub const MAX_HUB_CONTRACT: u32 = 8;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `7..=7` today, and unlike the original `0..=1` range this one CAN
+/// are `8..=8` today, and unlike the original `0..=1` range this one CAN
 /// exercise "too old" through a live `u32` (a hub reporting `0`…`3` is below
 /// `4`) — see `tests_contract.rs`, independent of whichever bounds
 /// a future release ships.

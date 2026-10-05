@@ -1021,13 +1021,17 @@ impl HubBackend {
         self.route("ensure_operator", &json!({})).await
     }
 
-    /// `commands::assets::catalog_list_assets`: the hub's catalog with each
+    /// `commands::assets::catalog_list_assets`: the hub's catalogs with each
     /// asset's per-host state, the same `AssetListing` the local command
-    /// builds.
+    /// builds. Assets M5: `all_catalogs` asks for every catalog, which the
+    /// hub grants the master and an unbound full client and answers
+    /// personal-only for anyone else; without it (an older desktop) the hub
+    /// answers personal-only for everyone.
     pub async fn catalog_list_assets(
         &self,
     ) -> Result<fleet_core::service::catalog::AssetListing, IpcError> {
-        self.route("catalog_list_assets", &json!({})).await
+        self.route("catalog_list_assets", &json!({ "all_catalogs": true }))
+            .await
     }
 
     /// `commands::assets::assets_scan_hosts`: `None` scans every reachable
@@ -1060,6 +1064,15 @@ impl HubBackend {
     /// cancellation-registry key (`cancel_command`) and has no hub
     /// counterpart, so it is never sent — which is why this spells the
     /// arguments out rather than serialising `NewSessionArgs`.
+    ///
+    /// `owner_person_id` is the second field deliberately absent, and for a
+    /// stronger reason (multi-user M1, T5): whose a session is follows from the
+    /// CONNECTION, so the hub resolves it from the token that reached it and a
+    /// client that could name an owner would be a client that could create a
+    /// session in somebody else's name. The field is `skip_deserializing` on
+    /// `NewSessionArgs` for the same reason, and
+    /// `tests_routing::new_session_never_sends_an_owner_over_the_wire` holds
+    /// this list to it.
     pub async fn new_session(
         &self,
         args: &sessions::NewSessionArgs,

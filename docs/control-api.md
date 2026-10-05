@@ -63,6 +63,17 @@ the host's detail in the **Hosts** view (⌘I):
   agent on a `readonly` host cannot set its sidebar label) returns
   `E_FORBIDDEN`.
 
+Since multi-user M1 a host token's reach inside its own host is narrower
+still: it addresses a session only when that session is `unclaimed`, or when
+the request proves it is standing in that session's pane (the
+`X-Fleet-Pane` header the provisioned MCP entry carries). Another person's
+private session on the same machine answers `E_PANE_UNPROVEN` — its own
+code, because the ordinary cause is an agent in a second split of the same
+tmux window rather than an attack, and it says nothing about whose the
+session is. A session on another host still answers `E_FORBIDDEN`, and one
+outside the caller's reach entirely answers `E_NOTFOUND`, exactly as an id
+that does not exist.
+
 The fleet-admin tools — `provision_hosts`, `add_host`, `remove_host`,
 `merge_host`, `hide_host`, `forget_project` — are **master-token only** in either mode: a token lifted from
 one host must not be able to rotate, re-provision or remove the others.
@@ -274,6 +285,21 @@ Index by area (names only; see the reference for details):
   `set_friendly_name`, `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
+- **Sharing & ownership** (multi-user M1) — `session_share` (give one
+  person `watch` or `drive` on a session you own), `session_unshare` (take it
+  back), `session_narrow` (`drive` → `watch`; there is deliberately no tool
+  that raises a grant — widen by revoking and sharing again),
+  `session_access` (who holds a live grant on your session), `my_grants`
+  (who *you* are on this fleet and every live grant to you, which is what a
+  client derives access from together with each row's `owner_person_id` and
+  `visibility`), and `session_claim` (give an `unclaimed` session to a
+  person). The first five are a person's device and the master; a per-host
+  token is refused all of them, because it proves no person. `session_claim`
+  is the mirror image: a **per-host token only**, and only for the session
+  whose active pane its `X-Fleet-Pane` header names — the operator's own
+  claim is `fleet-hub session claim <id> --person <name>`, beside
+  `fleet-hub session unclaimed`. Sharing never confers a terminal: a
+  terminal is this machine's own SSH, which no revoke could reach.
 - **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
   presets the desktop and the phone both draw above their text box, in list
   order, each with `auto_send`: a tap sends at once rather than filling the
@@ -333,7 +359,9 @@ Index by area (names only; see the reference for details):
   `repo_commit_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
 - **Asset catalog** — `list_assets` (catalog assets with per-host drift
-  state, unmanaged assets and parse problems), `scan_assets` (re-scan hosts,
+  state, unmanaged assets and parse problems; the personal catalog only
+  unless `all_catalogs` is set, which lists every catalog for the master
+  or an unbound full client and still personal only for anyone else), `scan_assets` (re-scan hosts,
   read-only on the hosts, and recompute asset states), `import_assets`
   (import the controller's `~/.claude` into the catalog working tree;
   `dry_run` supported), `plan_sync` (compute a fleet-wide sync plan with
@@ -740,17 +768,19 @@ Index by area (names only; see the reference for details):
   already has is `E_INVALID`; a newer proposal for a key replaces its
   pending one, and at most 50 wait (`E_RATE_LIMITED`). `why` is at most
   500 characters and shown to the person as written.
-  **Who** (declarative pages P6): the master token, and a person's own
-  paired device — a client bound to no org, such as the desktop paired with
-  a hub or a phone — reach `get_settings` and `set_setting`; a per-host token
-  and an org-bound client never do (the settings are the whole fleet's). A
+  **Who** (declarative pages P6): the master token, and the HUB OWNER's own
+  paired device — a client bound to no org whose person is this hub's owner
+  (multi-user M1), such as the desktop paired with a hub or a phone — reach
+  `get_settings` and `set_setting`; a per-host token, an org-bound client and
+  a second person's device never do (the settings are the whole fleet's). A
   device of either mode reads; a `full` device proposes; only a device the
   operator **trusts** (`fleet-hub client trust <name>`) writes directly and
   decides proposals, and its writes are audited as `person` with `client
   <name>`. The UX agent's operator client is an agent: it proposes only.
   Four more tools are served to a paired device and not to the master (who
   has `fleet-hub settings` on the hub machine, and whose tool list is
-  budgeted): `setting_proposals` (pending, each with the key's value now,
+  budgeted), on the same terms — the owner's own device, never a
+  colleague's: `setting_proposals` (pending, each with the key's value now,
   and `can_write` for this device), `setting_history` (`key`, `limit`),
   `decide_setting_proposals` (`accept`, `reject`; trusted only) and
   `list_pages` (the page specs, data source shapes, resources and page
@@ -880,10 +910,15 @@ itself, never a token or host identifier. An id that names no session gets a
 full read with `cursor_reset: "reader_unknown"` — nothing is stored, so the
 next call with the same bad id behaves identically rather than compounding.
 The reader is fenced like a target: a per-host token may only name a session
-on its own host (and inside its org scope), else `E_FORBIDDEN` before any
-read and no cursor is written — a token on host A can never advance a host-B
-session's watermark and blind it to its deltas. The master and a paired
-client are unbound.
+on its own host, else `E_FORBIDDEN` before any read and no cursor is written
+— a token on host A can never advance a host-B session's watermark and blind
+it to its deltas. Every caller is then held to what it may SEE: a reader the
+caller cannot see (another person's private session, a row outside its org,
+an `unclaimed` row a host token's request proves no pane for) is answered
+exactly like an id that names nothing — a full read with
+`cursor_reset: "reader_unknown"` and no cursor written. The two are
+deliberately indistinguishable, so the call is no existence oracle, and
+nobody can write a cursor under somebody else's session id.
 
 **Two answer shapes.** `session_history`, `inbox`, `repo_diff` and
 `list_sessions` answer with a JSON envelope `{unchanged, cursor_reset, more,

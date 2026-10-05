@@ -1,7 +1,7 @@
 // Work graph M4.4: the batch review of link suggestions (pill, sheet, j/k and
 // y/n) and the Undo toast of an automatic link.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 
@@ -16,6 +16,7 @@ import { sessionFocus } from './session_focus';
 import { selectedSession, selectSession } from './selection';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { resetAccessForTests, setMyGrants } from './access';
 
 /** A desktop paired with a hub whose live link is down: confirm_session_work
  *  and reject_session_work are routed mutations, blocked with a reason. */
@@ -270,8 +271,67 @@ describe('LinkReview', () => {
     });
   });
 
+  // F2b: the auto-link toast outlives the render that made it, so its Undo asks
+  // when it is PRESSED. `rejectWorkLink` is `reject_session_work`, `drive`.
+  it('the auto-link toast’s Undo refuses a session this client may only watch', async () => {
+    const base = session('h', 'a', {
+      id: 1,
+      status: 'running',
+      friendly_name: 'blue-sirius',
+      visibility: 'private',
+      owner_person_id: 9,
+    });
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(1, [{ session_id: 1, level: 'watch' }]);
+    sessions.set([base]);
+    sessionsLoaded.set(true);
+    render(LinkReview);
+    sessions.set([
+      {
+        ...base,
+        work: {
+          link_id: 21, item_id: null, key: 'ABC-123', title: '', source: 'branch',
+          state: 'confirmed', strength: 'strong', rule: 'R3',
+        },
+      },
+    ]);
+    await tick();
+    const t = get(toasts);
+    expect(t).toHaveLength(1);
+    expect(t[0].action?.label).toBe('Undo');
+    runToastAction(t[0].id);
+    await tick();
+    expect(invoke).not.toHaveBeenCalledWith('reject_session_work', expect.anything());
+    // …and it says why rather than failing in silence.
+    expect(get(toasts).some((x) => /watch is read-only/i.test(x.message))).toBe(true);
+  });
+
+  // F2b made `rowBlocked` take the action, so `n` is gated on
+  // `reject_session_work` rather than on `confirm_session_work`. Both are
+  // `drive`, so no behaviour changes — this only pins that the owner's `n`
+  // still rejects through the action-parameterised gate.
+  it('the owner’s n still rejects, through the per-action gate', async () => {
+    sessions.set(rows().map((r) => ({ ...r, visibility: 'private', owner_person_id: 1 })));
+    setMyGrants(1, []);
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'connected' });
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+    const sheet = screen.getByTestId('link-review-sheet');
+    await fireEvent.keyDown(sheet, { key: 'n' });
+    await tick();
+    expect(invoke).toHaveBeenCalledWith('reject_session_work', expect.anything());
+  });
+
   it('a hub that cannot be reached blocks the sheet: the note, disabled buttons, and no chord', async () => {
-    sessions.set(rows());
+    // Owned by this device's person (multi-user M1): what is under test here is
+    // the LINK being down, and a paired desktop that does not know who it is
+    // fails closed on every row — a different state, pinned in the access-gate
+    // suite at the bottom of this file.
+    sessions.set(rows().map((r) => ({ ...r, visibility: 'private', owner_person_id: 1 })));
+    setMyGrants(1, []);
     hubStatus.set(remote);
     hubConnection.set({ state: 'reconnecting', attempt: 2, retry_in_secs: 5, reason: 'socket closed' });
     render(LinkReview);
@@ -327,5 +387,100 @@ describe('work helpers', () => {
     });
     expect(newAutoLinks(new Map(), [r])).toEqual([]);
     expect(autoLinkSnapshot([r]).size).toBe(0);
+  });
+});
+
+// ── Multi-user M1 (F2a): per ROW, because the sheet is per session ──────────
+//
+// `blocked` here was `hubActionBlocked('confirm_session_work', …)` and nothing
+// else, while every decision writes to one session —
+// `confirmSessionWork(r.id, …)` / `rejectWorkLink(r.id, …)`, both `drive` in
+// `share.ts::SESSION_TIER` and both already composed by `SessionRowItem`'s own
+// work chip. On a paired desktop this sheet mixes this person's sessions with
+// the ones shared with them, so one answer for the sheet gates the wrong thing.
+describe('LinkReview access gate (multi-user M1)', () => {
+  const paired: HubStatus = { ...remote };
+  const owned = (r: SessionRow, person: number): SessionRow => ({
+    ...r,
+    visibility: 'private',
+    owner_person_id: person,
+  });
+  const dis = (el: Element) => (el as HTMLButtonElement).disabled;
+
+  beforeEach(() => {
+    hubStatus.set(paired);
+    hubConnection.set({ state: 'connected' });
+    resetAccessForTests();
+  });
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    resetAccessForTests();
+  });
+
+  async function openSheet() {
+    render(LinkReview);
+    await fireEvent.click(screen.getByTestId('link-review-pill'));
+    await tick();
+  }
+
+  it('the owner decides both of their own rows (the positive control)', async () => {
+    const [a, b] = rows();
+    sessions.set([owned(a, 1), owned(b, 1)]);
+    setMyGrants(1, []);
+    await openSheet();
+    for (const btn of screen.getAllByTestId('link-review-yes')) expect(dis(btn)).toBe(false);
+    expect(screen.queryByTestId('link-review-not-mine')).toBeNull();
+    await fireEvent.click(screen.getAllByTestId('link-review-yes')[0]);
+    await tick();
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 1, link_id: 11 },
+    });
+  });
+
+  it('a watcher’s row is disabled while the owner’s stays live, and y does not decide it', async () => {
+    const [a, b] = rows();
+    sessions.set([owned(a, 1), owned(b, 42)]);
+    setMyGrants(1, [{ session_id: 2, level: 'watch' }]);
+    await openSheet();
+    const yes = screen.getAllByTestId('link-review-yes');
+    const no = screen.getAllByTestId('link-review-no');
+    expect(dis(yes[0])).toBe(false);
+    expect(dis(yes[1])).toBe(true);
+    expect(dis(no[1])).toBe(true);
+    expect(yes[1].title).toMatch(/needs drive/i);
+    expect(screen.getByTestId('link-review-not-mine')).toBeInTheDocument();
+    // The keyboard path, which consults no button at all.
+    vi.mocked(invoke).mockClear();
+    const sheet = screen.getByTestId('link-review-sheet');
+    await fireEvent.keyDown(sheet, { key: 'j' });
+    await fireEvent.keyDown(sheet, { key: 'y' });
+    await fireEvent.keyDown(sheet, { key: 'n' });
+    await tick();
+    expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).toEqual([]);
+  });
+
+  it('a drive grantee decides it: a work link is a write, not a disposal', async () => {
+    const [a, b] = rows();
+    sessions.set([owned(a, 1), owned(b, 42)]);
+    setMyGrants(1, [{ session_id: 2, level: 'drive' }]);
+    await openSheet();
+    const yes = screen.getAllByTestId('link-review-yes');
+    expect(dis(yes[1])).toBe(false);
+    await fireEvent.click(yes[1]);
+    await tick();
+    expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
+      args: { session_id: 2, link_id: 12 },
+    });
+  });
+
+  it('standalone is untouched: every row decidable, no grants at all', async () => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    const [a, b] = rows();
+    sessions.set([owned(a, 99), owned(b, 99)]);
+    await openSheet();
+    for (const btn of screen.getAllByTestId('link-review-yes')) expect(dis(btn)).toBe(false);
   });
 });

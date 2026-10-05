@@ -1230,7 +1230,9 @@ fn routed_read_cases() -> Vec<Case> {
         (
             "catalog_list_assets",
             "list_assets",
-            json!({}),
+            // Assets M5 fix round 1: this desktop asks for every catalog; an
+            // older one sends `{}` and gets personal's listing.
+            json!({ "all_catalogs": true }),
             r#"{"head":"abc","loaded_at":1,"assets":[{"kind":"skill","name":"worktree","version":"1","description":"d","tags":[],"hosts":[{"host_alias":"nas","harness":"claude","state":"in_sync"}]}],"unmanaged":[{"host_alias":"nas","harness":"claude","kind":"skill","name":"extra","state":"unmanaged","scanned_at":1,"managed":false}],"problems":[]}"#,
             Box::new(|b, s, _| {
                 block_on(commands::assets::routed::catalog_list_assets(b, s)).map(|_| ())
@@ -1406,6 +1408,57 @@ fn routed_read_cases() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // ── multi-user M1 (T13): the watcher's pane, and the two reads ──
+        //
+        // `capture_session` is the WATCHER's view of a live pane, which is
+        // the only one sharing gives: `pty_open` would be a direct SSH into
+        // the owner's pane that the hub could neither refuse nor revoke. Its
+        // two optional arguments are passed as `Some` here on purpose — a
+        // mapping that dropped them would still have "worked", with the
+        // watcher silently looking at the visible pane and a different cap.
+        (
+            "capture_session",
+            "capture_session",
+            json!({ "session_id": 42, "scrollback_lines": 400, "max_lines": 120 }),
+            "claude> working on the ticket\n",
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::capture_session(
+                    b,
+                    commands::sessions::CaptureSessionArgs {
+                        session_id: 42,
+                        scrollback_lines: Some(400),
+                        max_lines: Some(120),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_access",
+            "session_access",
+            json!({ "session_id": 42 }),
+            r#"[{"session_id":42,"person_id":3,"person_name":"jane","level":"watch","granted_by":1,"granted_at":1700000000}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_access(
+                    b,
+                    commands::sessions::SessionAccessArgs { session_id: 42 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // No arguments, and the empty object is the assertion: "whose grants"
+        // is the CONNECTION's own person on the hub, never a parameter this
+        // side could point at someone else.
+        (
+            "my_grants",
+            "my_grants",
+            json!({}),
+            r#"{"person_id":1,"grants":[{"session_id":42,"level":"drive"}]}"#,
+            Box::new(|b, s, _| block_on(commands::sessions::routed::my_grants(b, s)).map(|_| ())),
+        ),
     ]
 }
 
@@ -1415,6 +1468,56 @@ fn routed_read_cases() -> Vec<Case> {
 #[test]
 fn every_routed_mutation_names_its_tool_and_arguments() {
     check(routed_mutation_cases());
+}
+
+/// Multi-user M1 (T5): a hub client may not name the OWNER of the session it
+/// asks the hub to create.
+///
+/// `NewSessionArgs::owner_person_id` is `#[serde(skip_deserializing)]` and
+/// `HubBackend::new_session` spells its arguments out one by one, so the field
+/// has two independent reasons never to cross the wire — and this is the
+/// assertion that notices if somebody "fixes" the spelled-out list by
+/// serialising the struct instead. Whose a session is follows from the
+/// connection the hub authenticated, never from a field in the request; a
+/// client that could set it could create a session in a colleague's name.
+///
+/// The table row above carries `owner_person_id: Some(42)` and asserts the JSON
+/// whole, which proves the same thing; this test states it on its own so the
+/// failure message names the rule rather than a diff.
+#[test]
+fn new_session_never_sends_an_owner_over_the_wire() {
+    let fake = Fake::answering(SESSION_PAYLOAD);
+    let (_dir, st) = store();
+    block_on(commands::sessions::routed::new_session(
+        &remote_backend(&fake),
+        fleet_core::service::sessions::NewSessionArgs {
+            host_alias: "trn".into(),
+            project_id: 4,
+            worktree_id: None,
+            name: "demo".into(),
+            call_id: None,
+            new_worktree: None,
+            base_branch: None,
+            kind: None,
+            start_command: None,
+            friendly_name: None,
+            resume_claude_session_id: None,
+            model: None,
+            effort: None,
+            owner_person_id: Some(42),
+        },
+        &st,
+        &ssh(),
+        &fleet_core::cancel::CancellationRegistry::new(),
+    ))
+    .expect("the hub answers with a row");
+    let (tool, args) = fake.only_call();
+    assert_eq!(tool, "new_session");
+    assert!(
+        args.get("owner_person_id").is_none(),
+        "the owner must never cross the wire — the hub resolves it from the \
+         connection's own person: {args}"
+    );
 }
 
 /// The table [`every_routed_mutation_names_its_tool_and_arguments`] runs; also run against a configured hub this
@@ -2427,6 +2530,12 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         ),
                         model: Some("opus".into()),
                         effort: Some("high".into()),
+                        // Set, and absent from the asserted JSON above: whose
+                        // a session is follows from the CONNECTION, never from
+                        // an argument a client could choose (multi-user M1,
+                        // T5). `new_session_never_sends_an_owner_over_the_wire`
+                        // says it in one assertion as well.
+                        owner_person_id: Some(42),
                     },
                     s,
                     h,
@@ -2690,6 +2799,64 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::work_view::DeleteWorkViewArgs {
                         view_id: 9,
                         expected_version: Some(1),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // ── multi-user M1 (T13): the three sharing mutations ─────────────
+        //
+        // `level` crosses as the string the user chose and is validated by
+        // the store, so this case proves the field arrives at all; `narrow`
+        // carries no level BECAUSE there is only one direction a grant moves
+        // (spec §4.3 invariant 3), and no tool raises one.
+        (
+            "session_share",
+            "session_share",
+            json!({ "session_id": 42, "person": "jane", "level": "drive" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_share(
+                    b,
+                    commands::sessions::SessionShareArgs {
+                        session_id: 42,
+                        person: "jane".into(),
+                        level: "drive".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_unshare",
+            "session_unshare",
+            json!({ "session_id": 42, "person": "jane" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_unshare(
+                    b,
+                    commands::sessions::SessionGrantArgs {
+                        session_id: 42,
+                        person: "jane".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "session_narrow",
+            "session_narrow",
+            json!({ "session_id": 42, "person": "jane" }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::session_narrow(
+                    b,
+                    commands::sessions::SessionGrantArgs {
+                        session_id: 42,
+                        person: "jane".into(),
                     },
                     s,
                 ))
@@ -3039,6 +3206,135 @@ fn standalone_reads_still_come_from_the_local_store() {
     ))
     .expect("history");
     assert!(events.is_empty());
+}
+
+/// Multi-user M1 (T13): the standalone arm of the sharing commands.
+///
+/// The thing under test is the one decision this layer makes that the hub
+/// makes differently — **who the caller is**. On a hub the person comes off
+/// the connection; standalone there is no connection, so the `None` arm has
+/// to resolve the fleet's own personal owner (migration 100). Getting that
+/// wrong is not a visible error: `person_id: null` is exactly what
+/// `src/lib/access.ts` reads as "we are nobody", and a client that is nobody
+/// holds no grants, so every session shared with this person would quietly
+/// stop being reachable while nothing failed.
+///
+/// A session row cannot be seeded from this crate (`Store::upsert_session` is
+/// `#[cfg(test)]` inside fleet-core), so the grant list is empty here by
+/// construction; `store/session_grants.rs` owns the filled case. What this
+/// proves is the identity, and that the local path ran at all.
+#[test]
+fn the_standalone_sharing_arm_is_this_fleets_own_person() {
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+
+    let owner = st
+        .lock()
+        .unwrap()
+        .personal_owner_id()
+        .unwrap()
+        .expect("a fresh store has a personal owner (migration 100)");
+
+    let mine = block_on(commands::sessions::routed::my_grants(&local, &st)).expect("my_grants");
+    assert_eq!(
+        mine.person_id,
+        Some(owner),
+        "the standalone arm must answer the fleet's own person; None here reads as \
+         `we are nobody` on the client and silently drops every grant"
+    );
+    assert!(mine.grants.is_empty(), "a fresh store has no grants");
+
+    // The local path ran, rather than a hub answering: `person_named` is the
+    // local store's own refusal for a name nobody holds.
+    let err = block_on(commands::sessions::routed::session_share(
+        &local,
+        commands::sessions::SessionShareArgs {
+            session_id: 1,
+            person: "nobody-by-that-name".into(),
+            level: "watch".into(),
+        },
+        &st,
+    ))
+    .expect_err("sharing with a person this fleet does not know must refuse");
+    assert_eq!(
+        err.code,
+        fleet_core::ipc_error::codes::E_NOTFOUND,
+        "{err:?}"
+    );
+
+    // And the owner's own grant list for a session that does not exist is
+    // empty, not an error and not someone else's.
+    let grants = block_on(commands::sessions::routed::session_access(
+        &local,
+        commands::sessions::SessionAccessArgs { session_id: 1 },
+        &st,
+    ))
+    .expect("session_access");
+    assert!(grants.is_empty());
+}
+
+/// Multi-user M1 (T13): **every sharing command addresses its session by ROW
+/// ID only.**
+///
+/// The `host_alias` + `tmux_name` pair every other session command accepts is
+/// reusable — the next session started on a host can take a dead one's tmux
+/// name — so a grant resolved by name could land on a different row than the
+/// one the owner was looking at. The tools refuse the pair for exactly this
+/// reason (`mcp/tools/sharing.rs`'s header); this holds the desktop's
+/// argument structs to the same shape, because an added field here would be
+/// serialised straight through `route` to a tool that would then have to
+/// start ignoring it.
+#[test]
+fn the_sharing_commands_address_a_session_by_id_and_nothing_reusable() {
+    use commands::sessions::{
+        CaptureSessionArgs, SessionAccessArgs, SessionGrantArgs, SessionShareArgs,
+    };
+
+    fn keys<T: serde::Serialize>(v: &T) -> BTreeSet<String> {
+        match serde_json::to_value(v).expect("the args must serialise") {
+            Value::Object(m) => m.keys().cloned().collect(),
+            other => panic!("expected an object on the wire, got {other}"),
+        }
+    }
+    fn want(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    assert_eq!(
+        keys(&SessionShareArgs {
+            session_id: 1,
+            person: "jane".into(),
+            level: "watch".into(),
+        }),
+        want(&["session_id", "person", "level"])
+    );
+    assert_eq!(
+        keys(&SessionGrantArgs {
+            session_id: 1,
+            person: "jane".into(),
+        }),
+        want(&["session_id", "person"])
+    );
+    assert_eq!(
+        keys(&SessionAccessArgs { session_id: 1 }),
+        want(&["session_id"])
+    );
+    assert_eq!(
+        keys(&CaptureSessionArgs {
+            session_id: 1,
+            scrollback_lines: None,
+            max_lines: None,
+        }),
+        want(&["session_id", "scrollback_lines", "max_lines"])
+    );
+
+    // A client that sends the reusable pair anyway gets it DROPPED, not
+    // forwarded: the structs have no field for it, so it never reaches a tool.
+    let a: SessionGrantArgs = serde_json::from_value(
+        json!({ "session_id": 1, "person": "jane", "host_alias": "trn", "tmux_name": "demo" }),
+    )
+    .expect("unknown keys are ignored, as every args struct in this file does");
+    assert_eq!(keys(&a), want(&["session_id", "person"]));
 }
 
 /// The work-link commands answer from the local store when standalone.
@@ -3967,6 +4263,93 @@ fn registered_commands() -> Vec<(String, String)> {
     entries
 }
 
+/// **The desktop half of multi-user M1's review of what `main` added** — the
+/// nine commands that reached this table while M1 was being built, with the
+/// person-fence judgement each one was missing, and what it acts on.
+///
+/// Why it is needed at all. `every_command_has_a_verdict` holds this crate to
+/// a ROUTING decision per command; it has nothing to say about privacy. The
+/// routing verdict is nonetheless where the privacy answer lives for a hub
+/// client, because `Routed` means the hub's own tool runs the call — and the
+/// hub is where M1's fences are. So the row for each of these is a pair of
+/// claims a reader can check: the verdict is `Routed` to the named tool, and
+/// the fence is that tool's (recorded in `fleet_core`'s
+/// `SESSION_REACH` / `WORK_ACTION_REACH` / `WORK_ACTION_NO_GATE` /
+/// `REVIEWED_WITHOUT_A_SESSION`).
+///
+/// **A standalone desktop adds no fence of its own, and that is deliberate.**
+/// Its store has one person — the owner `personal_owner_id` mints — so there
+/// is nobody for a fence to keep out; spec §4.3's D1 promises exactly that
+/// nothing changes for a single user. The moment this desktop is a window onto
+/// a hub, every one of these calls is the hub's to judge.
+const M1_REVIEWED_DESKTOP_COMMANDS: &[(&str, &str, &str)] = &[
+    (
+        "create_work_task",
+        "work_link",
+        "a NEW work item (a task or subtask). No session is named; `work::local::create_task` refuses every scoped caller outright",
+    ),
+    (
+        "accept_work_proposal",
+        "work_link",
+        "a person's decision on an agent's proposal, by `item_id` — `work::local::decide`, which refuses every scoped caller because an agent never accepts its own proposal",
+    ),
+    (
+        "reject_work_proposal",
+        "work_link",
+        "the same decision, the other way. In its session-addressed shape `reject` is the LINK decision instead and takes the hub tail's `Reach::Drive`",
+    ),
+    (
+        "list_guides",
+        "guide",
+        "the fleet's page catalog, read: the live guides and the proposals \
+         waiting. A `guide_proposals` row records the proposing caller's \
+         LABEL (`host:<alias>`, `client:<name>`, `master` — \
+         `Caller::label`) and never a session, a pane or a tmux name. There \
+         is no desktop command for the agent's own `propose`: that arm is \
+         reached over the control API by the host session carrying the \
+         fleet-guides skill, and its row is `fleet_core`'s \
+         `REVIEWED_WITHOUT_A_SESSION`",
+    ),
+    (
+        "decide_guide",
+        "guide",
+        "approving or rejecting one guide — a person's, through the hub's `guide_decider`",
+    ),
+    ("remove_guide", "guide", "retiring one live guide"),
+    (
+        "catalog_set_host_harnesses",
+        "catalog_admin",
+        "which harnesses a HOST serves, i.e. what the next `apply_sync` \
+         writes to that host's filesystem. It is one of the dozen \
+         `catalog_*` commands that route to the hub's `catalog_admin`, which \
+         the operator's per-client `assets` grant fences and a person never \
+         does: the catalog is layers, checkouts, secrets and syncs, and the \
+         one place `service/catalog/` touches a session row is \
+         `catalog_spawn_author_session`, which CREATES one and stamps \
+         `hub_personal_owner` on it",
+    ),
+];
+
+/// Every row of [`M1_REVIEWED_DESKTOP_COMMANDS`] still describes the command
+/// it names: the table has a verdict for it, and that verdict routes to the
+/// tool the reason rests on.
+///
+/// A command that changes from `Routed` to `LocalOnly` (or routes somewhere
+/// else) fails here, because then the reason — "the hub's tool applies the
+/// fence" — has stopped being true and the judgement has to be made again.
+#[test]
+fn the_commands_main_added_carry_an_m1_person_fence_judgement() {
+    for (command, tool, why) in M1_REVIEWED_DESKTOP_COMMANDS {
+        let v = verdicts::verdict(command)
+            .unwrap_or_else(|| panic!("{command} is reviewed here but has no verdict row ({why})"));
+        assert_eq!(
+            v.tool(),
+            Some(*tool),
+            "{command} no longer routes to {tool}, so its M1 person-fence judgement ({why}) rests on a tool that does not run it any more"
+        );
+    }
+}
+
 /// **The test that matters six months from now.**
 ///
 /// Reads the `generate_handler!` list out of `lib.rs` and holds it to exactly
@@ -4464,8 +4847,8 @@ fn payload_of<T: serde::Serialize>(value: &T) -> &'static str {
 fn catalog_admin_cases() -> Vec<Case> {
     use commands::assets::routed as r;
     use fleet_core::service::catalog::admin::{
-        DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs, ResolvePreviewArgs,
-        SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        CatalogNameArgs, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs,
+        ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
     };
     use fleet_core::service::catalog::author::{
         self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
@@ -4912,6 +5295,77 @@ fn catalog_admin_cases() -> Vec<Case> {
             json!({ "action": "template", "args": { "kind": "skill", "name": "s" } }),
             asset,
             Box::new(move |b, _, _| block_on(r::catalog_template(b, skill("s"))).map(|_| ())),
+        ),
+        // Assets M5 (R13): the workspace's reads. A named catalog travels as
+        // the tool's own top-level `catalog`, never inside `args`.
+        (
+            "catalog_list_catalogs",
+            "catalog_admin",
+            json!({ "action": "list_catalogs" }),
+            "[]",
+            Box::new(|b, s, _| block_on(r::catalog_list_catalogs(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_list_changesets",
+            "changesets",
+            json!({ "action": "list" }),
+            r#"[{"id":3,"kind":"new","summary":"New on oci: skill/w → core","state":"proposed","created_at":1,"groups":{"core":1},"pending":1,"undoable":false}]"#,
+            Box::new(|b, s, _| block_on(r::catalog_list_changesets(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_repo_status_in",
+            "catalog_admin",
+            json!({ "action": "repo_status", "catalog": "acme" }),
+            STATUS,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_repo_status_in(
+                    b,
+                    CatalogNameArgs {
+                        name: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_asset_history",
+            "catalog_admin",
+            json!({ "action": "asset_history",
+                    "args": { "kind": "skill", "name": "s" },
+                    "catalog": "acme" }),
+            r#"[{"sha":"abc","at":1,"author":"a","subject":"edit s"}]"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_asset_history(
+                    b,
+                    commands::assets::AssetHistoryArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                        catalog: Some("acme".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Personal (named or not) sends no `catalog`, exactly the pre-M5 shape.
+        (
+            "catalog_asset_history",
+            "catalog_admin",
+            json!({ "action": "asset_history", "args": { "kind": "skill", "name": "s" } }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_asset_history(
+                    b,
+                    commands::assets::AssetHistoryArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                        catalog: Some("personal".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
         ),
     ]
 }

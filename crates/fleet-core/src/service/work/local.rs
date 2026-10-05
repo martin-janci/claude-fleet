@@ -11,6 +11,16 @@
 //! `orgs::require_key`). An item outside that answers exactly as an item id
 //! that does not exist.
 //!
+//! **Who may WRITE one** is a narrower question, answered at the tool layer
+//! by `support::require_drive_on_item_sessions`: every live session linked
+//! to the item must be this caller's to drive, every ended link must be one
+//! it may see — and an item with no CONFIRMED link at all is refused to
+//! everybody but a per-host token and a one-person install, because there
+//! is then no record of whose work it was (multi-user M1, T9e). An item
+//! whose last link was unlinked therefore stops being renameable by its own
+//! owner too; it is still listed, and linking a session to it again makes
+//! it writable again.
+//!
 //! **A key that is taken.** Naming work with a key a tracker item the
 //! caller can see already carries (by key or alias) is refused with
 //! `E_EXISTS` — that work has a ticket; link it (`work_link { action: link,
@@ -47,11 +57,27 @@ pub struct LocalWorkItem {
 /// The links of one item this scope may count: all of them for `All`; for
 /// a per-host token, live links on its own host's sessions and ended links
 /// whose session ran there, inside its orgs.
+///
+/// The ORG half only. Two callers, and they take different halves on top of
+/// it: [`person_visible_links`] is the half every READ of a count takes, and
+/// [`local_item_visible`] — the "does this item exist for this caller"
+/// question, which stays on this org half because what it answers is about
+/// the ITEM — has its person half at the tool layer instead
+/// (`support::require_drive_on_item_sessions`).
+///
+/// [`local_item_visible`] has THREE call sites, not two (T9e corrected an
+/// undercount here and in `scope_guard_tests.rs`): [`rename_local_item`],
+/// `status::set_status`, and [`name_session_work_as`]. The first two carry
+/// the tool-layer person gate; the third does not, and what fences it is
+/// written at the guard itself.
 fn visible_links(
     s: &Store,
     scope: &OrgScope,
     links: Vec<LocalItemLink>,
 ) -> Result<Vec<LocalItemLink>, IpcError> {
+    // This is the org boundary, not a privacy fence: the doc above says the same thing at
+    // length: this is the ORG half, and `person_visible_links` is the half every READ of a count
+    // takes on top of it.
     if scope.is_all() {
         return Ok(links);
     }
@@ -81,6 +107,47 @@ fn visible_links(
     Ok(out)
 }
 
+/// [`visible_links`], then the PERSON fence
+/// ([`orgs::link_person_visible`]) — multi-user M1, T8d.
+///
+/// `LocalWorkItem::live_sessions` is the "someone is working on this" bit, and
+/// `Graph::build` person-fences that exact signal one directory away,
+/// deliberately and with a comment saying why (`working_session_items`). Here
+/// it was counted over every link that survived `visible_links`' first line,
+/// `if scope.is_all() { return Ok(links) }` — and `All` is what every paired
+/// client bound to no org resolves to, so a second person's phone was told how
+/// many live sessions the fleet was running on each named item. Rule 6's
+/// allowance is a per-host count of `unclaimed` rows, not a per-item count of
+/// somebody's live work.
+///
+/// The ITEM is not fenced here: a local item's title and key are item data,
+/// and the Work view already shows a task while dropping the links under it.
+/// So this keeps the item and zeroes the count.
+///
+/// **One kind of local item is the exception, and the sentence above used to
+/// be written as though there were none** (multi-user M1, T5's review): a JOB
+/// MIRROR, whose title is the first line of the dispatch prompt
+/// (`Store::create_agent_task_item`). Its title is withheld in
+/// [`local_items`] itself, on the same fence every other surface of a mirror
+/// asks (`view::visible_job_states`).
+fn person_visible_links(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    links: Vec<LocalItemLink>,
+) -> Result<Vec<LocalItemLink>, IpcError> {
+    let kept = visible_links(s, &view.org, links)?;
+    if view.is_internal() {
+        return Ok(kept);
+    }
+    let mut out = Vec::with_capacity(kept.len());
+    for l in kept {
+        if orgs::link_person_visible(s, view, &l.link)? {
+            out.push(l);
+        }
+    }
+    Ok(out)
+}
+
 fn live_count(links: &[LocalItemLink]) -> u32 {
     links
         .iter()
@@ -92,23 +159,43 @@ fn live_count(links: &[LocalItemLink]) -> u32 {
 
 /// `work { action: local_items }`: the local items this scope sees, most
 /// recently changed first.
-pub fn local_items(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<LocalWorkItem>, IpcError> {
+pub fn local_items(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<LocalWorkItem>, IpcError> {
+    let scope = &view.org;
     let s = lock(store)?;
     let mut by_item: BTreeMap<i64, Vec<LocalItemLink>> = BTreeMap::new();
-    for l in visible_links(&s, scope, s.local_item_links(None)?)? {
+    for l in person_visible_links(&s, view, s.local_item_links(None)?)? {
         by_item.entry(l.item_id).or_default().push(l);
     }
+    // The dispatch fence, for the job mirrors among these items: this list
+    // has no `Graph`, so it asks the same predicate directly.
+    let jobs = crate::service::work::view::visible_job_states(&s, view)?;
     Ok(s.local_work_items()?
         .into_iter()
         .filter_map(|i| {
             let links = by_item.get(&i.id);
+            // This is the org boundary, not a privacy fence: it decides whether the ITEM is
+            // listed, and a local item's key and title are item data. The count beside it is
+            // person-fenced, by `person_visible_links`.
             if !scope.is_all() && links.is_none() {
                 return None;
             }
+            // A job mirror's title is the dispatch PROMPT's first line, so it
+            // is content of both ends of the dispatch and not item data. The
+            // row stays — the key still names it, and that is what a caller
+            // links by — under the same withheld label every other surface
+            // uses.
+            let hidden = i.origin.as_deref() == Some("agent") && !jobs.contains_key(&i.id);
             Some(LocalWorkItem {
                 id: i.id,
                 key: i.key,
-                title: i.title,
+                title: if hidden {
+                    crate::service::work::view::JOB_TITLE_WITHHELD.to_string()
+                } else {
+                    i.title
+                },
                 created_at: i.created_at,
                 updated_at: i.updated_at,
                 live_sessions: links.map_or(0, |l| live_count(l)),
@@ -152,7 +239,11 @@ pub fn name_session_work_as(
     let visible = s
         .get_session_by_id(sid)?
         .is_some_and(|r| match scope.host() {
-            None => scope.sees_row(&r) && scope.sees_org(r.org_id),
+            // The org half. The person half is `resolve_row_person_gated(..,
+            // Reach::Drive, ..)` in `work_link { action: name }`, taken
+            // without the host gate in front so an unreachable session
+            // answers as an unknown id.
+            None => scope.sees_row_org_only(&r) && scope.sees_org(r.org_id),
             Some(h) => r.host_alias == h && scope.sees_org(r.org_id),
         });
     if !visible {
@@ -278,6 +369,9 @@ pub fn create_task(
     let parent = parent_id(args)?;
     let s = lock(store)?;
     match parent {
+        // This is the org boundary, not a privacy fence: a standalone task has
+        // no links and no sessions, so there is no row and nobody to fence —
+        // the question is authority to add top-level work.
         None if !scope.is_all() => {
             return Err(IpcError::new(
                 codes::E_FORBIDDEN,
@@ -285,6 +379,9 @@ pub fn create_task(
                  token); add a subtask under a task you work on instead",
             ))
         }
+        // This is the org boundary, not a privacy fence: it asks whether the
+        // PARENT ITEM exists for this caller, and an item's key and title are
+        // work data that survive the person fence (as `task_visible`'s do).
         Some(p) if !scope.is_all() => visible_parent(&s, scope, p)?,
         _ => {}
     }
@@ -312,6 +409,10 @@ pub fn propose(
     let parent =
         parent_id(args)?.ok_or_else(|| IpcError::new(codes::E_INVALID, "propose needs parent"))?;
     let s = lock(store)?;
+    // This is the org boundary, not a privacy fence: the same parent-ITEM
+    // question `create_task` asks. The person half of a proposal is at the
+    // tool layer, where the session that gets the credit passes
+    // `resolve_target_row` at `Reach::Drive` before `proposer` is built.
     if !scope.is_all() {
         visible_parent(&s, scope, parent)?;
     }
@@ -333,6 +434,9 @@ pub fn decide(
     scope: &OrgScope,
     accept: bool,
 ) -> Result<WorkItemRow, IpcError> {
+    // This is the org boundary, not a privacy fence: deciding a proposal is a
+    // PERSON's act by design (an agent never accepts its own), so every scoped
+    // caller is refused outright and no row is reached to fence.
     if !scope.is_all() {
         return Err(IpcError::new(
             codes::E_FORBIDDEN,
@@ -352,11 +456,41 @@ pub fn decide(
 /// rather than a second copy of it (a tracker item's is `Store::item_org` +
 /// `OrgScope::sees_org`, applied at that call site the way `rename_local_item`
 /// below does).
+///
+/// THREE call sites, enumerated at the guard inside: the two writes
+/// ([`rename_local_item`], `status::set_status`) and
+/// [`name_session_work_as`], which has no item-level person gate. Read that
+/// comment before adding a fourth.
 pub(super) fn local_item_visible(
     s: &Store,
     scope: &OrgScope,
     item_id: i64,
 ) -> Result<bool, IpcError> {
+    // This is the org boundary, not a privacy fence: what this answers is
+    // about the ITEM, as the doc above says.
+    //
+    // THREE call sites, enumerated because the count itself has been wrong
+    // twice. The two WRITES — `local::rename_local_item` and
+    // `status::set_status` — carry the person fence
+    // `require_drive_on_item_sessions`, threaded at the tool layer
+    // (`mcp/tools/orchestration.rs`'s `name` and `set_status` arms). T9c's
+    // row said "the two writes" while the gate was on the rename half only,
+    // so `set_status` had no person gate at all and a stranger could mark
+    // another person's work done (fixed in T9d); T9d's row then still said
+    // "both writes that ask it" while a THIRD site existed (T9e).
+    //
+    // The third site is `local::name_session_work_as`, and it has NO
+    // item-level person gate — stated here rather than left to be
+    // rediscovered. What fences it: the caller has already been gated at
+    // `Reach::Drive` on its OWN session (orchestration.rs's
+    // `resolve_row_person_gated` in the `name` + `session_id` arm), and the
+    // only item-derived output under this shortcut is the `item_id` in an
+    // `E_EXISTS` reply — an id `work { local_items }` deliberately lists to
+    // every caller, because a local item's key and title are item data and
+    // only the live-session COUNT beside them is person-fenced
+    // (`person_visible_links`). So the shortcut discloses nothing there that
+    // the same caller cannot list by name. A write at that site would need
+    // the gate; a disclosure wider than an id would too.
     if scope.is_all() {
         return Ok(true);
     }

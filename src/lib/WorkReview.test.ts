@@ -3,7 +3,7 @@
 // several at once with a count and per-item results (what failed stays,
 // with the hub's sentence), and Undo back to a suggestion.
 import { render, screen, fireEvent, within } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -13,6 +13,9 @@ import { get } from 'svelte/store';
 import { sessions } from './sessions';
 import { session } from './hosts_fixture';
 import type { ReviewItem, SessionTaskLink } from './work_view';
+import { hubStatus, STANDALONE, type HubStatus } from './hub';
+import { hubConnection } from './hub_connection';
+import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 
 const item = (over: Partial<ReviewItem> = {}): ReviewItem => ({
   review_id: 'link:42',
@@ -370,5 +373,179 @@ describe('WorkReview', () => {
     render(WorkReview);
     await flush();
     expect(screen.getByTestId('work-review-error').textContent).toContain('Needs a newer hub');
+  });
+});
+
+// ── Multi-user M1 (F2a): per-ITEM, because the list is per session ──────────
+//
+// `blocked` here was `hubActionBlocked('decide_work_batch', …)` and that was the
+// whole gate, while every decision writes per session through
+// `confirmSessionWork(it.session_id, …)`. A `ReviewItem` carries a session id
+// and a name and no `owner_person_id`, so the row is resolved out of `$sessions`
+// first — the lookup that made this surface get skipped by F2.
+describe('WorkReview access gate (multi-user M1)', () => {
+  const paired: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  const dis = (el: Element) => (el as HTMLButtonElement | HTMLInputElement).disabled;
+  const row = (id: number, owner: number, name: string) =>
+    session('mefistos', name, { id, visibility: 'private', owner_person_id: owner });
+
+  /** Two suggestions on two sessions: 7 is mine, 8 is somebody else's. */
+  const twoItems: ReviewItem[] = [
+    item({ review_id: 'link:42', session_id: 7, session_name: 'api', link_id: 42, link_version: 2 }),
+    item({ review_id: 'link:50', session_id: 8, session_name: 'web', link_id: 50, link_version: 1 }),
+  ];
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    pending = [...twoItems];
+    sessionLinks = {};
+    sessions.set([row(7, 1, 'api'), row(8, 42, 'web')]);
+    hubStatus.set(paired);
+    hubConnection.set({ state: 'connected' });
+    resetAccessForTests();
+    handlers = {
+      work_review: () => ({ items: pending, total: pending.length, next_cursor: null }),
+      confirm_session_work: () => session('mefistos', 'api', { id: 7 }),
+      reject_session_work: () => session('mefistos', 'api', { id: 7 }),
+      decide_work_batch: () => ({ results: [] }),
+      work_session_tasks: (a) => ({ session_id: a.session_id, links: [] }),
+    };
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      const h = handlers[cmd];
+      return h ? h((raw as { args: Record<string, unknown> } | undefined)?.args ?? {}) : null;
+    });
+  });
+
+  afterEach(() => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    resetAccessForTests();
+  });
+
+  it('the owner decides both of their own items', async () => {
+    // The positive control. A gate that disabled everything would otherwise
+    // satisfy every assertion below.
+    sessions.set([row(7, 1, 'api'), row(8, 1, 'web')]);
+    setMyGrants(1, []);
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    for (const r of rows) {
+      expect(dis(within(r).getByTestId('work-review-confirm'))).toBe(false);
+      expect(dis(within(r).getByTestId('work-review-pick'))).toBe(false);
+      expect(within(r).queryByTestId('work-review-item-not-mine')).toBeNull();
+    }
+    await fireEvent.click(within(rows[0]).getByTestId('work-review-confirm'));
+    await flush();
+    expect(calls('confirm_session_work')).toHaveLength(1);
+  });
+
+  it('a watcher’s item is disabled with the reason, and y does not decide it', async () => {
+    setMyGrants(1, [{ session_id: 8, level: 'watch' }]);
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    // Mine stays live; theirs is off, with the sentence on the row itself.
+    expect(dis(within(rows[0]).getByTestId('work-review-confirm'))).toBe(false);
+    expect(dis(within(rows[1]).getByTestId('work-review-confirm'))).toBe(true);
+    expect(dis(within(rows[1]).getByTestId('work-review-reject'))).toBe(true);
+    expect(dis(within(rows[1]).getByTestId('work-review-change'))).toBe(true);
+    expect(dis(within(rows[1]).getByTestId('work-review-pick'))).toBe(true);
+    expect(within(rows[1]).getByTestId('work-review-item-not-mine').textContent).toMatch(
+      /needs drive/i,
+    );
+    // The keyboard path: j moves onto the second item, y would confirm it.
+    const list = screen.getByRole('list', { name: /Review items/i });
+    await fireEvent.keyDown(list, { key: 'j' });
+    await fireEvent.keyDown(list, { key: 'y' });
+    await flush();
+    expect(calls('confirm_session_work')).toHaveLength(0);
+    // And x cannot tick it either, so the bulk buttons never see it.
+    await fireEvent.keyDown(list, { key: 'x' });
+    await flush();
+    expect(screen.queryByTestId('work-review-bulk')).toBeNull();
+  });
+
+  it('a drive grantee decides it: these writes are the drive tier', async () => {
+    // The counter-test. `decide_work_batch` is a batch of `confirm_session_work`,
+    // which has been `drive` since F2 — putting it in `own` would make the
+    // drive level meaningless for the work graph.
+    setMyGrants(1, [{ session_id: 8, level: 'drive' }]);
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    expect(dis(within(rows[1]).getByTestId('work-review-confirm'))).toBe(false);
+    await fireEvent.click(within(rows[1]).getByTestId('work-review-confirm'));
+    await flush();
+    expect(calls('confirm_session_work')[0]).toMatchObject({ session_id: 8 });
+  });
+
+  it('a batch is narrowed per target: a grant lost after the tick drops that item', async () => {
+    // Ticked while drivable, then narrowed to watch with the list still open —
+    // the batch must send only what is still this client's to decide.
+    setMyGrants(1, [{ session_id: 8, level: 'drive' }]);
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    await fireEvent.click(within(rows[0]).getByTestId('work-review-pick'));
+    await fireEvent.click(within(rows[1]).getByTestId('work-review-pick'));
+    await flush();
+    expect(screen.getByTestId('work-review-confirm-n').textContent).toContain('Confirm 2');
+    applyGrantChanges([{ session_id: 8, person_id: 1, level: 'watch' }]);
+    await flush();
+    expect(screen.getByTestId('work-review-confirm-n').textContent).toContain('Confirm 1');
+    await fireEvent.click(screen.getByTestId('work-review-confirm-n'));
+    await flush();
+    expect(calls('decide_work_batch')[0]).toEqual({
+      decisions: [{ session_id: 7, link_id: 42, decision: 'confirm', expected_version: 2, primary: true }],
+    });
+  });
+
+  // F2b: the Undo offer outlives the batch that made it, so `runUndo` narrows
+  // its decisions the way the batch did — it was the one write in this file
+  // with no access answer anywhere near it.
+  it('Undo narrows too: a grant lost after the batch drops that decision', async () => {
+    sessions.set([row(7, 1, 'api'), row(8, 1, 'web')]);
+    setMyGrants(1, []);
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    await fireEvent.click(within(rows[0]).getByTestId('work-review-pick'));
+    await fireEvent.click(within(rows[1]).getByTestId('work-review-pick'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-review-confirm-n'));
+    await flush();
+    const undo = screen.queryByTestId('work-review-undo');
+    if (!undo) return; // no undoable version came back: nothing to narrow
+    // One of the two sessions becomes somebody else's before Undo is pressed.
+    sessions.set([row(7, 1, 'api'), row(8, 42, 'web')]);
+    setMyGrants(1, [{ session_id: 8, level: 'watch' }]);
+    await flush();
+    const before = calls('decide_work_batch').length;
+    await fireEvent.click(screen.getByTestId('work-review-undo'));
+    await flush();
+    const sent = calls('decide_work_batch').slice(before);
+    for (const batch of sent) {
+      for (const d of (batch as { decisions: { session_id: number }[] }).decisions) {
+        expect(d.session_id).not.toBe(8);
+      }
+    }
+    // A single-decision undo takes the `reconsider_work_link` path instead;
+    // either way, nothing names session 8.
+    for (const a of calls('reconsider_work_link')) expect(a.session_id).not.toBe(8);
+  });
+
+  it('standalone is untouched: every item decidable with no grants at all', async () => {
+    hubStatus.set({ ...STANDALONE });
+    hubConnection.set({ state: 'standalone' });
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    for (const r of rows) expect(dis(within(r).getByTestId('work-review-confirm'))).toBe(false);
   });
 });

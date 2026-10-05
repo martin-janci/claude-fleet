@@ -744,14 +744,47 @@ pub async fn send_system_prompt(
 /// Filter narrowing which work sessions a broadcast targets. Any field left
 /// `None` is not constrained. `status` compares against a session's
 /// `claude_status`.
-#[derive(Debug, Default, Clone)]
+///
+/// **Deliberately not `Default`.** The person half below has no value that
+/// means "everybody", so there is no safe field to default it to: a
+/// `#[derive(Default)]` on this struct would make `..Default::default()` —
+/// the spelling every construction site reaches for — mean *every session in
+/// the fleet*, and a mis-threaded or dropped `view` would then widen the
+/// fan-out silently instead of failing to compile. `BroadcastFilter::internal`
+/// is the named form for the hub's own callers.
+#[derive(Debug, Clone)]
 pub struct BroadcastFilter {
     pub host: Option<String>,
     pub project_id: Option<i64>,
     pub status: Option<String>,
-    /// Work graph M5 (D7): a per-host token's broadcast never reaches a
-    /// session isolated from its host. `None` = every org.
-    pub scope: Option<crate::service::orgs::OrgScope>,
+    /// Multi-user M1 (T7): WHO is broadcasting. A fan-out reaches only the
+    /// sessions that caller could have prompted one at a time — the owner's
+    /// own, and the ones they hold a `drive` grant on.
+    ///
+    /// Not an `Option`: the hub's own readers say so by name
+    /// ([`crate::service::view_scope::ViewScope::internal`]), and every other
+    /// construction site has to produce a real caller's scope or fail to
+    /// compile. It was an `Option<ViewScope>` whose `None` meant "every
+    /// session", with one production site setting it and no test covering the
+    /// wiring — a fence that could not fail.
+    pub view: crate::service::view_scope::ViewScope,
+}
+
+impl BroadcastFilter {
+    /// The hub's OWN fan-out: no filters, and the hub's own reader.
+    ///
+    /// Named rather than derived, so that "whose broadcast is this?" is a
+    /// question every construction site answers out loud. The only callers
+    /// are the ones spec §3.3 keeps unscoped (a tick, a playbook) and the
+    /// tests of the pure selector.
+    pub fn internal() -> Self {
+        BroadcastFilter {
+            host: None,
+            project_id: None,
+            status: None,
+            view: crate::service::view_scope::ViewScope::internal(),
+        }
+    }
 }
 
 /// PURE selector: pick the session ids a broadcast should target.
@@ -764,6 +797,19 @@ pub struct BroadcastFilter {
 ///     broadcast never fans back into the session driving it.
 ///   - the operator session `(host_alias, tmux_name)`, when recorded, is
 ///     excluded so a fan-out never prompts the UX agent that may have sent it.
+///   - multi-user M1 (T7): a session the broadcaster could not have
+///     prompted one at a time is not reached by the fan-out either. The
+///     predicate is `ViewScope::may_drive` — the same one `send_prompt`
+///     answers — because a broadcast IS `send_prompt`, fanned out, and
+///     refusing it to a driver while allowing the single call would be
+///     theatre (spec §4.3, invariant 5's closing paragraph). A row the
+///     scope cannot see at all fails `may_drive` first, so the privacy case
+///     needs no clause of its own. The ORG filter work graph M5 kept beside
+///     it (`BroadcastFilter.scope`, D7) is gone with T10: `may_drive` opens
+///     with `sees_session_row`, which opens with the org boundary and whose
+///     host arm refuses another host's row outright, so the field was a
+///     second copy of an answer this predicate already gives — and an
+///     `Option` one, which is the shape that cannot fail loudly.
 pub fn select_targets(
     sessions: &[SessionRow],
     f: &BroadcastFilter,
@@ -779,7 +825,7 @@ pub fn select_targets(
             f.status.as_deref() == Some("blocked")
                 || (s.claude_status.as_deref() != Some("blocked") && s.stuck_kind.is_none())
         })
-        .filter(|s| f.scope.as_ref().is_none_or(|sc| sc.sees_row(s)))
+        .filter(|s| f.view.may_drive(s))
         .filter(|s| match &f.host {
             Some(h) => &s.host_alias == h,
             None => true,
@@ -821,10 +867,56 @@ pub struct BroadcastSummary {
     pub results: Vec<BroadcastResult>,
 }
 
+/// Where ONE broadcast delivery is going, resolved from the session ID at the
+/// moment of delivery and re-gated there (multi-user M1, the T7 review).
+///
+/// **Why this is a function and not two lines in the loop.** The gate and the
+/// action had different subjects: [`select_targets`] judged rows in a snapshot
+/// read once, and delivery named a `(host_alias, tmux_name)` pair — a
+/// REUSABLE identifier — one SSH round trip at a time. A session killed and
+/// re-created under the same tmux name mid-fan-out is a different session,
+/// possibly another person's, and the prompt would have landed in it on the
+/// authority of a judgement made about the dead one. Resolving the id again
+/// here makes the delivery's subject the same row the gate's answer is about,
+/// and returns the host and name THAT row carries now.
+///
+/// What it deliberately does not re-read is the SCOPE (the grant set, read
+/// once per request at the tool layer): that is the same freshness a
+/// single-target `send_prompt` has, and a broadcast is `send_prompt` fanned
+/// out, not a stricter thing.
+pub(crate) fn delivery_target(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    sid: i64,
+) -> Result<(String, String), IpcError> {
+    let fresh = {
+        let s = lock(store)?;
+        s.get_session_by_id(sid)?
+    };
+    match fresh {
+        Some(row) if view.may_drive(&row) => Ok((row.host_alias, row.tmux_name)),
+        Some(_) => Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!("session {sid} is no longer yours to drive; nothing was sent to it"),
+        )),
+        None => Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {sid} is gone; nothing was sent to it"),
+        )),
+    }
+}
+
 /// Fan the same `prompt` out to every work session matching `filter`,
 /// excluding the controller. Resolves targets via [`select_targets`] (reading
 /// the controller from the store), then delivers via the existing
 /// [`send_prompt`] per target, collecting one result each.
+///
+/// **The target list is a list of IDs, and every delivery re-reads its row.**
+/// [`select_targets`] is pure and judges a snapshot; delivery is one SSH round
+/// trip per target, so by the time the fifth one is sent the snapshot can be
+/// minutes old. The loop below therefore re-resolves each id and re-asks
+/// `may_drive` before it sends, and sends to the host and tmux name that came
+/// back — the comment there has the reasoning.
 ///
 /// `submit` mirrors `send_prompt`'s submit semantics (Enter after the literal
 /// text). It is threaded through for API parity; the current delivery path
@@ -858,19 +950,51 @@ pub async fn broadcast_prompt(
 
     let targets = select_targets(&sessions, &filter, controller.as_ref(), operator.as_ref());
 
-    // Map session id -> (host_alias, tmux_name) for delivery.
     let mut results: Vec<BroadcastResult> = Vec::with_capacity(targets.len());
     let mut sent: u32 = 0;
     let mut failed: u32 = 0;
     for sid in targets {
-        let Some(row) = sessions.iter().find(|s| s.id == sid) else {
-            continue;
+        // **Re-resolve the row by ID, under the lock, immediately before this
+        // target's send** (multi-user M1, the T7 review).
+        //
+        // The gate and the action had different subjects. `select_targets`
+        // judged a row in a SNAPSHOT taken once, while delivery named a
+        // `(host_alias, tmux_name)` pair and took one SSH round trip per
+        // target — so the longer the fan-out, the longer the window in which
+        // the snapshot is no longer true. A tmux name is reusable and
+        // `sessions.id` is not: a session killed and re-created under the same
+        // name mid-broadcast is a DIFFERENT session, possibly another
+        // person's, and the prompt would have landed in it on the authority of
+        // a judgement made about the dead one. The same window covers a row
+        // claimed, a grant revoked and a session moved between hosts while the
+        // fan-out walks.
+        //
+        // So the row is read again by id and `may_drive` asked again, and the
+        // host and name used for the send are the ones that came back with it
+        // — never the snapshot's. What remains unrepeated is the SCOPE itself
+        // (the grant set, read once per request at the tool layer): that is
+        // the same freshness every single-target `send_prompt` has, and this
+        // call is "`send_prompt`, fanned out".
+        let (host_alias, tmux_name) = match delivery_target(store, &filter.view, sid) {
+            Ok(t) => t,
+            // Gone, or no longer this caller's to drive. Reported rather than
+            // skipped: the caller asked for this session and must not read a
+            // short result as "it was delivered".
+            Err(e) => {
+                failed += 1;
+                results.push(BroadcastResult {
+                    session_id: sid,
+                    ok: false,
+                    error: Some(format!("{}: {}", e.code, e.message)),
+                });
+                continue;
+            }
         };
         let res = send_prompt_inner(
             store,
             ssh,
-            &row.host_alias,
-            &row.tmux_name,
+            &host_alias,
+            &tmux_name,
             &prompt,
             submit,
             Origin::Unlabeled,
@@ -934,6 +1058,64 @@ pub async fn capture_session_output(
         Some(n) => tmux.capture_pane_scrollback(&name, n).await,
         None => tmux.capture_pane(&name).await,
     }
+}
+
+/// Default `max_lines` for a pane capture: the tail of the pane returned when
+/// the caller chooses no cap.
+///
+/// In the service layer rather than in `mcp/tools/support.rs`, where it and
+/// [`capture_response`] used to live, because the desktop's routed
+/// `capture_session` command has a standalone arm: with two copies of the
+/// shaping, a watcher's pane on a standalone desktop and the same pane
+/// through a hub would be capped differently and noted differently, and
+/// nothing would have failed. One implementation, both callers.
+pub const CAPTURE_DEFAULT_MAX_LINES: u32 = 200;
+
+/// The text a blank pane answers with. Returning the empty capture verbatim
+/// puts an empty block into an MCP caller's conversation and an empty box
+/// into the watcher's pane view; neither says "there is nothing on screen".
+pub const CAPTURE_EMPTY_PANE: &str = "(session pane is empty — nothing to capture)";
+
+/// Keep only the last `max` lines of `text`. Returns the kept text plus the
+/// total line count so the caller can say how much was dropped. `max == 0`
+/// means no cap.
+pub fn tail_lines(text: &str, max: u32) -> (String, usize) {
+    let lines: Vec<&str> = text.lines().collect();
+    let total = lines.len();
+    if max == 0 || total <= max as usize {
+        return (text.to_string(), total);
+    }
+    (lines[total - max as usize..].join("\n"), total)
+}
+
+/// Render a pane capture for the caller: the last `max` lines, prefixed with
+/// a truncation note when lines were dropped.
+pub fn capture_response(text: &str, max: u32) -> String {
+    let (kept, total) = tail_lines(text, max);
+    if total > kept.lines().count() {
+        format!(
+            "[capture_session: showing the last {} of {} lines — raise max_lines \
+             (0 = no cap) to see more]\n{}",
+            kept.lines().count(),
+            total,
+            kept
+        )
+    } else {
+        kept
+    }
+}
+
+/// One capture, shaped for whoever asked: [`CAPTURE_EMPTY_PANE`] for a blank
+/// pane, otherwise the last `max_lines` (default
+/// [`CAPTURE_DEFAULT_MAX_LINES`]) with [`capture_response`]'s note.
+///
+/// The MCP tool and the desktop command both end here, so the bytes a
+/// watcher reads do not depend on which of the two asked.
+pub fn shape_capture(text: &str, max_lines: Option<u32>) -> String {
+    if text.trim().is_empty() {
+        return CAPTURE_EMPTY_PANE.to_string();
+    }
+    capture_response(text, max_lines.unwrap_or(CAPTURE_DEFAULT_MAX_LINES))
 }
 
 #[cfg(test)]

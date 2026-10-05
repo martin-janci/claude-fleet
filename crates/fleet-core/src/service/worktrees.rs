@@ -25,6 +25,22 @@ pub struct WorktreeOccupancy {
 pub struct WorktreeOccupant {
     pub host_alias: String,
     pub tmux_name: String,
+    /// The occupant's `sessions` row (multi-user M1, T8d).
+    ///
+    /// Carried for two reasons, and both are the fence rather than the
+    /// feature. `mcp::tools::repo`'s `list_worktrees` needs the ROW to ask
+    /// `sees_session_row`, because an occupant is a private session's host and
+    /// tmux name — and a tmux name in this fleet is a branch or a ticket key,
+    /// which spec §4.3 calls content. And with all three keys present the
+    /// shape is finally one `view_scope::looks_like_session_row` recognises
+    /// (`host_alias` + `tmux_name` + `session_id`), so T8's result gate is a
+    /// net under it too instead of walking straight past a projection that
+    /// happened to spell the id nothing at all.
+    ///
+    /// `#[serde(default)]` so an older hub's answer still parses, where it
+    /// reads `0` — an id no row has.
+    #[serde(default)]
+    pub session_id: i64,
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -358,14 +374,20 @@ pub async fn delete_worktree(
         if !args.force {
             let occupants = s.alive_sessions_for_worktree(wt.id)?;
             if !occupants.is_empty() {
-                let who = occupants
-                    .iter()
-                    .map(|(h, n)| format!("{h}/{n}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                // A COUNT, never the names (multi-user M1, T7). This message
+                // used to list `host/tmux_name` per occupant, and a tmux name
+                // is a branch or a ticket key — content by spec §4.3 — in an
+                // error string, which the result gate cannot reach (it
+                // rewrites JSON, not prose). The caller that may act on those
+                // rows learns which they are from `list_sessions`, where the
+                // person fence applies; a caller that may not learns only
+                // that the tree is busy.
                 return Err(IpcError::new(
                     codes::E_WORKTREE_BUSY,
-                    format!("worktree is in use by session(s): {who}"),
+                    format!(
+                        "worktree is in use by {} running session(s)",
+                        occupants.len()
+                    ),
                 ));
             }
         }

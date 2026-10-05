@@ -18,6 +18,9 @@
   // approve a permission dialog the user never saw — or press a digit into
   // the REPL of a session that has already moved on.
   import { sessionActivity } from './conversation';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { sessionBlocked } from './share';
   import { sendPrompt, type SessionRow } from './sessions';
   import { answerFingerprint, pendingInputFor, type AnswerOption, type AnswerView } from './pending_input';
 
@@ -38,6 +41,20 @@
    *  question that is answered. The sidebar row has no probe of its own, so
    *  without this its buttons would stay live until the next 20 s tick. */
   let sent = $state<string | null>(null);
+
+  /**
+   * Why this client may not answer (multi-user M1, F2b). Both of this card's
+   * callers hide it when the client may not write to the row — but the card
+   * itself asked neither half, and it is the thing that sends: a key into the
+   * pane is `send_prompt`, `drive` in `share.ts::SESSION_TIER`. The gate
+   * belongs here for the same reason the freshness re-read does (see the
+   * header): this is the one place the send happens, and a second caller must
+   * not be able to forget it. It also closes the window the re-read opens — a
+   * revoke that lands during `await reread()` is seen by the check below it.
+   */
+  const writeBlocked = $derived(
+    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'send_prompt'),
+  );
 
   // A new question is a new card: whatever the last one answered is spent.
   const identity = $derived(answerFingerprint(view));
@@ -80,7 +97,7 @@
   }
 
   async function press(key: string, label: string) {
-    if (busy) return;
+    if (busy || writeBlocked !== null) return;
     busy = true;
     errorMsg = null;
     staleMsg = null;
@@ -96,6 +113,12 @@
       staleMsg = fresh.view === null
         ? 'That dialog is gone — nothing was sent.'
         : 'The dialog changed — nothing was sent.';
+      busy = false;
+      return;
+    }
+    // Asked again after the await: the re-read is a round trip to the host, and
+    // a revoke can land inside it.
+    if (writeBlocked !== null) {
       busy = false;
       return;
     }
@@ -146,8 +169,8 @@
         data-n={o.n}
         data-selected={o.selected || undefined}
         data-sticky={isSticky(o) || undefined}
-        disabled={busy || o.key === null}
-        title={optionTitle(o)}
+        disabled={busy || writeBlocked !== null || o.key === null}
+        title={writeBlocked ?? optionTitle(o)}
         onclick={(e) => mine(e, () => choose(o))}
       ><span class="ordinal" aria-hidden="true">{o.n}</span><span class="label">{o.label}</span></button>
     {/each}
@@ -158,8 +181,8 @@
         type="button"
         class="btn btn--chip btn--quiet"
         data-testid="answer-esc"
-        disabled={busy}
-        title="Dismiss the dialog (Escape)"
+        disabled={busy || writeBlocked !== null}
+        title={writeBlocked ?? 'Dismiss the dialog (Escape)'}
         onclick={(e) => mine(e, () => void press('Escape', 'Dismissed'))}>Esc — dismiss</button>
       {#if onOpenTerminal}
         <button

@@ -31,27 +31,45 @@ the first time, then every edit paid once per copy
 `.cargo/config.toml`. Times are for a fleet-core edit on 4 cores.
 
 ```bash
-# 1. while you work, after every edit (≈ 13 s; libraries and binaries only)
+# 1. while you work, after every edit (≈ 15 s; libraries and binaries only)
 cargo fleet-fast-check                  # check --workspace --profile fast-check
 pnpm check                              # frontend edits: svelte-check
-# 2. at a checkpoint: before committing, and after any change to an API that
-#    tests use (≈ 19 s; = rust-analyzer's own check)
-cargo fleet-check                       # check --workspace --all-targets
-# 3. the tests of what you touched (module path filter; ≈ 30 s build + the run)
-cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
-pnpm exec vitest run src/lib/foo.test.ts
-# 4. before committing (also what .githooks/pre-commit runs)
+# 2. before committing (≈ 65 s: fmt 3 s, lint 27 s, tests 33 s)
+scripts/verify.sh                       # fmt, lint and the tests of the modules
+                                        # the change touches, each once; --dry-run
+                                        # prints the plan
+# 3. before pushing / marking a PR ready (≈ 3 min warm)
+scripts/verify.sh full                  # = scripts/ci-local.sh, narrowed to the jobs
+                                        # the change touches; the suite runs once
+#    or, with BUILDKITE_API_TOKEN / BUILDKITE_ORG set, after pushing the branch:
+scripts/verify.sh remote                # the same `full` on the persistent Buildkite
+                                        # builder; waits, exit 0 iff it passed
+                                        # (docs/buildkite.md)
+```
+
+What `verify.sh` runs, for running a piece of it by hand:
+
+```bash
 cargo fmt --all --check
 cargo fleet-lint                        # clippy --workspace --all-targets -- -D warnings
-# 5. before pushing / marking a PR ready (≈ 2.5 min warm)
-cargo test --workspace                  # full suite, what CI runs
+cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
+pnpm exec vitest related --run src/lib/foo.ts
+cargo fleet-check                       # check --workspace --all-targets (= rust-analyzer's check)
+cargo test --workspace                  # the full suite, what CI runs
 scripts/ci-local.sh                     # everything in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
 
 `fleet-fast-check` does not type-check test code: a signature change that
-breaks a test passes it and fails `fleet-check`. rust-analyzer stays on the
-full check. `target/fast-check/` costs ~2 GB once and is never cleaned
-automatically.
+breaks a test passes it and fails `fleet-lint` / `fleet-check`. rust-analyzer
+stays on the full check. `target/fast-check/` costs ~2 GB once and is never
+cleaned automatically.
+
+`fleet-lint` reports everything `fleet-check` does (clippy is the compiler
+plus lints, test code included), but the two compile separately: running
+both after an edit costs ~22 s more than lint alone. `verify.sh` lints and
+does not check, and the pre-commit hook's clippy is then a no-op. Likewise
+`scripts/ci-local.sh` runs `cargo test --workspace` itself, so running both
+pays the ~2 min suite twice.
 
 Rules:
 
@@ -103,10 +121,65 @@ in `App.test.ts` and `clipboard_native.test.ts` — that is a dependency gap, no
 code error. (`localStorage` is polyfilled in `vitest.setup.ts`; there are no
 known pre-existing frontend test failures.)
 
+**`src-tauri`'s test target parks on a loaded box, and `TMPDIR` fixes it.**
+`claude_fleet_lib`'s ~700 tests each build a temp SQLite store through
+`tempfile::tempdir()`, so on the root ext4 filesystem they serialise behind one
+journal: threads sit in `jbd2_log_wait_commit` with `/proc/pressure/io` at
+35–83% and `cargo test --workspace` never finishes. Point `TMPDIR` at tmpfs and
+the same binary runs the whole target in ~80–120 s:
+
+```bash
+mkdir -p /dev/shm/fleet-tests
+TMPDIR=/dev/shm/fleet-tests cargo fleet-test -- backend::
+```
+
+Two traps when running a test binary directly rather than through cargo:
+`ls -t target/debug/deps/<crate>-*` can hand you a STALE binary (several hashes
+live there and the newest-written is not always first) — use
+`find target/debug/deps -name '<crate>-*' ! -name '*.d' -printf '%T@ %p\n' | sort -rn | head -1`;
+and a stale `claude_fleet_lib` fails `verdict_gen` for the right reason, because
+it renders the table it was compiled with against the file on disk.
+
+**A `REGEN_*` run is MEANT to fail.** `REGEN_HUB_VERDICTS=1` /
+`REGEN_DOCS=1` / `REGEN_HUB_CONTRACT=1` write the file and then panic on
+purpose, telling you to read the diff and run again without the variable. The
+failure is the receipt, not a problem.
+
 Known Rust flakes — timing-sensitive, so they fail on a loaded box; re-run
 alone before blaming your change: `rewind::tests::the_removal_script_leaves_a_tree_a_live_pane_is_in`,
 `work::scale_tests::*`, the `CHAIN_BUDGET` migration tests in
-`store/schema/tests_upgrade.rs`, and `service::add_project`. Not a flake:
+`store/schema/tests_upgrade.rs`, `service::add_project`, and
+`fleet-agent`'s `conn::tests::report_frames_stay_under_the_frame_cap_and_carry_the_rest_over`
+(it fails `Elapsed(())` in a parallel run and passes alone in 0.15 s). Two of the others
+moved and neither is now fixed: `work::scale_tests::*` each take their own
+fixture copy since the suite cut, so they no longer queue behind one another
+— their 3,000 ms budgets are still wall-clock and still fail under load; and
+`FILE_OPEN_BUDGET` lifted the file-based upgrade test to 30 s **on Windows
+only**, so on Linux `opening_a_pre_work_graph_file_upgrades_it_within_budget`
+and the two in-memory chains still hold `CHAIN_BUDGET` at 5 s.
+
+Two more, added 2026-10-05, both with THIN margins rather than large ones —
+worth knowing before you spend an hour on either:
+`service::transcript::tests::fetch_maps_a_missing_local_transcript_to_e_no_transcript`
+and its `fetch_conversation_` twin answer **`E_TIMEOUT` instead of
+`E_NO_TRANSCRIPT`** on a loaded box, so the failure names the wrong cause.
+The reason, measured: they do **not** override `HOME`, so they read the
+developer's real `~/.claude/projects` (1.4 GB, 432 project directories, ~3,000
+transcripts on mercury) under `transcript.rs`'s `READ_WALL_CLOCK = 20 s`. At
+`loadavg` ~7 that takes **0.05 s**; at ~20 it blows the wall clock. Fixing
+them means pinning `HOME` in those two tests. And
+`mcp::tools::tests::a_one_person_fleet_still_sees_its_unclaimed_rows` is the
+opposite shape: it **passes in the full suite and fails run alone**, where
+`list_sessions` answers 12 rows for a store holding 2. Not a leak (the master
+is unrestricted by design and these are unclaimed rows it may see) and not
+caused by T14, whose only edit to that file is three `pub(super)` keywords —
+but a test that only pins under load pins nothing, so it is a real defect in
+the test and not yet diagnosed. Ruled out already: cross-test pollution (it
+fails with `--exact` alone), the machine's tmux server (`TMUX_TMPDIR` at an
+empty dir changes nothing), and a seeded template (no migration inserts
+`sessions`).
+
+Not a flake:
 `cargo test -p fleet-core --lib -- --test-threads=1` takes 23–25 minutes
 (4.5k tests; measured on mercury, 2026-10-02), so a `timeout 600` wrapper
 kills it mid-run and the last `test … ...` line names whichever test was in
@@ -421,6 +494,47 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   `fleet-hub catalog list` reads only (`probe_catalogs`: never clones or
   records a load) and `catalog remove` reports the open cards it withdrew.
   No Tauri command or verdict row yet (M6).
+- **Assets M5 — the workspace shell** (plan
+  `docs/superpowers/plans/2026-10-04-assets-m5-workspace.md`): a manifest
+  entry records the sha256 of every file it wrote (`file_hashes`), so
+  `ManifestEntry::host_copy_for` tells a copy fleet left untouched
+  (`Unchanged`) from one a person edited (`Edited`) or one an entry from
+  before M5 cannot vouch for (`Unverified`); rule 4 of the planner turns an
+  edited copy into an `overwrite` (never an `update`), and Rollout/SB6
+  (`OpFilter::Additive`, `action_allowed`) apply an `update`, or delete a
+  moved asset's old location, only over a verified `Unchanged` copy.
+  Migration 096 stores
+  `asset_inventory.drift_side` (`host` | `catalog`; also on `HostState`): a
+  copy only behind its catalog opens no Drift card, shows under *Behind the
+  catalog* in the Inbox whatever `catalog.auto` says, and SB6 brings it up
+  (`sb6_due`). Migration 097 stamps `changeset_items.decided_at`;
+  `rejected_rollouts` orders by it. Slug collisions in a Bootstrap card
+  (per destination catalog, kind and slug) need a look; `changesets::list`
+  computes undoability once (`undoable_ids`); the pass prunes an untouched
+  withdrawn card once it is older than a week, counted from its creation,
+  not its withdrawal (`WITHDRAWN_RETENTION_SECS`); `last_sync`
+  prefers a person's run. `list_assets` takes an opt-in `all_catalogs`
+  (default personal-only, as before, for every caller; with it, every
+  loaded catalog — `AssetSummary.catalog`, host states per catalog — for
+  the master and unbound full person devices, personal for everyone
+  else); this desktop asks for it locally and through the hub.
+  `catalog_admin { asset_history }` lists an asset's commits. Four read-only desktop
+  commands route to the hub (`catalog_list_catalogs`,
+  `catalog_list_changesets`, `catalog_repo_status_in`,
+  `catalog_asset_history`); card verbs stay M6. Frontend: `AssetsPanel`
+  keeps loading, probing and every dialog and renders `AssetsWorkspace`
+  (rail Inbox/Library/Secrets, a sentence header, `QueryInput`, the Inbox's
+  sections with open cards read-only, `AssetList` as the Library, the
+  tabbed `AssetInspector` over `AssetDetail`'s `section`s and History, a
+  footer of `CatalogChip`s, `auto` and `JobChip`; Sync fleet the one
+  primary; a hub client without a grant gets one read-only scope chip); one
+  `Badge`, `HostStrip` states, no hex colour in Assets components
+  (`assets_tokens.test.ts`). Keyboard (R22, on the workspace while shown):
+  `j`/`k` (arrows in the list) move between rows, Space/Enter select, `/`
+  focuses the query (Esc there closes, clears, then returns to the list),
+  `a` adopts an identity, `s` syncs and `e` edits a personal asset, `⌘↵`
+  runs Sync fleet; never inside a field or a dialog; read-only windows move
+  and select only; `i` waits for M6's card verbs.
 - **File downloads** (spec
   `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
   095, contract revision 7): `send_file { session_id, path }` (a host's

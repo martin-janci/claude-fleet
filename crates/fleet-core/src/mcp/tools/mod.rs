@@ -49,6 +49,7 @@ mod peer;
 mod present;
 mod repo;
 mod session_ops;
+mod sharing;
 mod support;
 #[cfg(test)]
 mod tests;
@@ -60,6 +61,8 @@ mod tests_changesets;
 mod tests_isolation;
 #[cfg(test)]
 mod tests_read_pool;
+#[cfg(test)]
+mod tests_sessions_isolation;
 mod updates;
 mod views;
 
@@ -356,6 +359,7 @@ impl FleetTools {
             + Self::peer_router()
             + Self::updates_router()
             + Self::downloads_router()
+            + Self::sharing_router()
     }
 }
 
@@ -410,20 +414,27 @@ impl ServerHandler for FleetTools {
             Ok(result) => Ok(result),
             Err(e) => tool_error_result(e),
         };
-        // Work graph M5: whatever tool answered — a result or an error's
-        // details — a per-host token never receives session rows' work of
-        // another org.
-        // A client bound to an org (M14) is gated the same way.
-        if let (Ok(result), true) = (out.as_mut(), caller.is_scoped()) {
+        // Choke point 3 (spec §5.1): whatever tool answered — a result or an
+        // error's details — this is the last net under it. A session row the
+        // caller may not see is dropped (multi-user M1, T8) and a row it may
+        // see loses another org's work (work graph M5 / M14).
+        //
+        // UNCONDITIONAL, and that is the whole of T8's first half: the
+        // condition here used to be `caller.is_scoped()`, which is false for
+        // the master and for every paired client bound to no org — so for a
+        // person's own phone, the caller M1 exists for, the backstop ran
+        // never. `fence_result_via` decides what each caller may keep; the
+        // call site decides nothing.
+        if let Ok(result) = out.as_mut() {
             // A tool that wrote nothing has no write of its own to see, so
             // its gate reads the pool too; every other tool's reads the
             // writer, after its own writes.
-            let orgs = if POOLED_READ_TOOLS.contains(&tool.as_str()) {
+            let gate = if POOLED_READ_TOOLS.contains(&tool.as_str()) {
                 self.reader()
             } else {
                 &self.store
             };
-            self.redact_work_via(orgs, &caller, result);
+            self.fence_result_via(gate, &caller, result);
         }
         out
     }

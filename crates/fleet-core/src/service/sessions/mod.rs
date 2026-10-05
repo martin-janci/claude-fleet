@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 mod activity;
+mod claim;
 mod discover;
 mod lifecycle;
 mod paths;
@@ -25,6 +26,7 @@ mod prompt;
 mod reconcile;
 mod restore;
 mod review;
+mod sharing;
 mod targeting;
 
 #[cfg(test)]
@@ -37,6 +39,7 @@ mod lifecycle_tests;
 mod tests;
 
 pub use self::activity::*;
+pub use self::claim::*;
 pub use self::discover::*;
 pub use self::lifecycle::*;
 // `paths` has no `pub` item — its widest is `pub(crate)` — so the re-export
@@ -50,6 +53,7 @@ pub use self::reconcile::*;
 pub(crate) use self::reconcile::{HOST_PROBE_TIMEOUT, PR_PROBE_TIMEOUT};
 pub use self::restore::*;
 pub use self::review::*;
+pub use self::sharing::*;
 pub use self::targeting::*;
 
 fn now_unix() -> i64 {

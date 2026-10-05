@@ -104,8 +104,11 @@ mod tests {
                 name: "hub-b".into(),
                 trusted: false,
                 org_id: None,
+                person_id: None,
             }),
             mode: TokenMode::Peer,
+            pane: None,
+            is_personal_owner: false,
         }
     }
 

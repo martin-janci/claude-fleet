@@ -159,6 +159,51 @@ pub fn session_satisfies(row: &SessionRow, cond: WaitCond) -> bool {
     }
 }
 
+/// Does the caller that STARTED a bounded wait still reach what it is
+/// waiting on? Asked again on every wake, inside the same lock window that
+/// reads the row, and once more immediately before the payload is built
+/// (multi-user M1, T11; rule 8, "A revokes the share, B loses access").
+///
+/// A long poll is the one request that outlives its own authorisation: the
+/// gate ran once, at the top, and then the call sat for up to ten minutes.
+/// Without this a grantee calls a 600-second wait, the owner revokes the
+/// share, and the hub hands over the payload anyway.
+///
+/// `fleet-core`'s service layer must not know what a `Caller` is, so this
+/// is a `&dyn` predicate the MCP layer supplies — exactly as [`PaneProbe`]
+/// is for the pane.
+///
+/// **The contract is "refuse unless proven".** `check` returns the refusal
+/// it would have returned at the top of the call; it does not return a
+/// `bool`, and it does not return an `Option` whose absent arm could be
+/// read as permission. An implementation that cannot answer — the row is
+/// gone, the store read failed — must propagate that as the error, never
+/// swallow it into `Ok(())`.
+pub trait AccessRecheck: Send + Sync {
+    /// `Ok(())` while the access that opened this wait still holds.
+    ///
+    /// Called under the caller's lock on the store, so it must not lock
+    /// again and must not block.
+    fn check(&self, s: &Store) -> Result<(), IpcError>;
+}
+
+/// No re-check, for fleet's own engine. The one production user is the
+/// move waiter (`service::move_session::wait`), which is not a *caller*:
+/// there is no grant behind a move to revoke, and the operator who started
+/// it is the one it runs for. The service layer's own tests are the other.
+///
+/// Deliberately **not** reachable from `mcp/`: every long poll a token can
+/// reach must name a real re-check, and the source-level
+/// `no_long_poll_tool_waives_its_access_recheck` fails the build if a tool
+/// under `mcp/` picks this up.
+pub struct NoRecheck;
+
+impl AccessRecheck for NoRecheck {
+    fn check(&self, _s: &Store) -> Result<(), IpcError> {
+        Ok(())
+    }
+}
+
 /// A live look at a session's pane: its `claude_status` as the pane shows
 /// it now, or `None` when it cannot tell (unreachable host, blank pane, no
 /// pane). What a turn-over check asks before believing a stale-demoted
@@ -212,8 +257,9 @@ pub async fn wait_for_session(
     session_id: i64,
     cond: WaitCond,
     timeout: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<SessionRow>, IpcError> {
-    wait_for_session_with(store, session_id, cond, timeout, POLL_INTERVAL).await
+    wait_for_session_with(store, session_id, cond, timeout, POLL_INTERVAL, recheck).await
 }
 
 pub async fn wait_for_session_with(
@@ -222,6 +268,7 @@ pub async fn wait_for_session_with(
     cond: WaitCond,
     timeout: Duration,
     poll: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<SessionRow>, IpcError> {
     wait_for_session_probed(
         store,
@@ -231,12 +278,14 @@ pub async fn wait_for_session_with(
         poll,
         &NoPaneProbe,
         STALE_PANE_PROBE_EVERY,
+        recheck,
     )
     .await
 }
 
 /// [`wait_for_session_with`] that asks `probe` about a stale-demoted row
 /// (at most once per `probe_every`) and takes a quiet pane as `Idle`.
+#[allow(clippy::too_many_arguments)]
 pub async fn wait_for_session_probed(
     store: &Mutex<Store>,
     session_id: i64,
@@ -245,14 +294,22 @@ pub async fn wait_for_session_probed(
     poll: Duration,
     probe: &dyn PaneProbe,
     probe_every: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<SessionRow>, IpcError> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last_probe: Option<tokio::time::Instant> = None;
     loop {
         // Lock, read one row, unlock — never across the sleep or the probe.
-        let row = lock(store)?.get_session_by_id(session_id)?.ok_or_else(|| {
-            IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
-        })?;
+        // The access re-check (T11) rides the SAME lock window as the row
+        // read, so a grant revoked between two wakes cannot be read as
+        // still held; `?` on it ends the wait with the refusal.
+        let row = {
+            let s = lock(store)?;
+            recheck.check(&s)?;
+            s.get_session_by_id(session_id)?.ok_or_else(|| {
+                IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+            })?
+        };
         if session_satisfies(&row, cond) {
             return Ok(WaitOutcome {
                 satisfied: true,
@@ -289,8 +346,9 @@ pub async fn wait_for_task(
     store: &Mutex<Store>,
     task_id: i64,
     timeout: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<TaskRow>, IpcError> {
-    wait_for_task_with(store, task_id, timeout, POLL_INTERVAL).await
+    wait_for_task_with(store, task_id, timeout, POLL_INTERVAL, recheck).await
 }
 
 pub async fn wait_for_task_with(
@@ -298,11 +356,16 @@ pub async fn wait_for_task_with(
     task_id: i64,
     timeout: Duration,
     poll: Duration,
+    recheck: &dyn AccessRecheck,
 ) -> Result<WaitOutcome<TaskRow>, IpcError> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let row = {
             let s = lock(store)?;
+            // T11: the same lock window that reads the task re-checks the
+            // access that opened the wait. A task's `prompt` and `result`
+            // are the text two sessions exchanged — session content.
+            recheck.check(&s)?;
             let row = s.get_task(task_id)?.ok_or_else(|| {
                 IpcError::new(codes::E_NOTFOUND, format!("task {task_id} not found"))
             })?;
@@ -499,6 +562,16 @@ fn note_finished(s: &Store, row: &TaskRow, kind: &str, detail: &str) {
 /// Per-host token scoping (E3): a per-host caller may only see / wait on
 /// tasks it requested from its host or that target a worker on its host.
 /// PURE over the two endpoint rows.
+///
+/// `#[cfg(test)]` so the pre-M1 shape cannot be reached by a new tool at all
+/// (multi-user M1, T8d) — the treatment
+/// `service::sessions::targeting::find_session_by_tmux_name` already carries,
+/// for the same reason. [`task_visible_in_scope_pure`] replaced both of these
+/// at every caller-facing site; left `pub` in a library crate they fired no
+/// dead-code warning and stayed one `use` away from re-answering the
+/// superseded rule, which is "a task is visible when it touches your HOST"
+/// rather than "when its reader sees every session it names".
+#[cfg(test)]
 pub fn task_visible_from_host(
     task: &TaskRow,
     requester: Option<&SessionRow>,
@@ -511,7 +584,9 @@ pub fn task_visible_from_host(
     on_host(requester, task.requester_session_id) || on_host(worker, task.worker_session_id)
 }
 
-/// `task_visible_from_host` resolved against the store.
+/// `task_visible_from_host` resolved against the store. `#[cfg(test)]` for the
+/// reason above.
+#[cfg(test)]
 pub fn task_visible_to(s: &Store, task: &TaskRow, host: Option<&str>) -> Result<bool, IpcError> {
     let Some(host) = host else {
         return Ok(true);
@@ -532,14 +607,141 @@ pub fn task_visible_to(s: &Store, task: &TaskRow, host: Option<&str>) -> Result<
     ))
 }
 
-/// Tasks visible to a caller: all of them for the master token, host-scoped
-/// for a per-host token.
+/// Multi-user M1 (T7): may `scope` see this task at all?
+///
+/// A `TaskRow` is not metadata about a session — it carries the `prompt` one
+/// session sent another, the `result` paragraph that came back and the
+/// `error` that did not. That is session content under spec §4.3's
+/// definition, so the rule is **the sessions' own**: a task is visible when
+/// its reader sees EVERY session it names. Fail-closed on an endpoint whose
+/// row cannot be read: a task that names a session nobody can resolve is
+/// nobody's to read.
+///
+/// PURE over the two endpoint rows, like `task_visible_from_host` which it
+/// replaces at the caller-facing sites (that one is `#[cfg(test)]` now, so
+/// nothing in a request path can reach the host-only rule), so the rule can be
+/// tested without a
+/// fixture that can serve a real dispatch.
+///
+/// **The one clause that is not simply "sees both".** A per-host token that
+/// proves one endpoint's pane also reaches the other endpoint on its own
+/// host. Without it the agent-facing half of `dispatch_task` stops working
+/// the day ownership exists: the worker a dispatch spawns inherits the
+/// REQUESTER's owner (T5), so an agent standing in a person's private
+/// session dispatches a task and then cannot read back the result of the
+/// worker it just created — the exact §4.4 failure ("refuses every agent its
+/// own row") that the pane proof exists to prevent.
+///
+/// **What the clause's bound actually is** (restated in fix round 3, after a
+/// review read it as broader than it is). `proves_an_end` requires
+/// `scope.proven_session` to BE one of this task's own two endpoints, so the
+/// clause never applies to a task the requesting pane is not itself an end of
+/// — it is not "any task on my host", it is "the task I am one end of". Within
+/// that it reaches the OTHER end of the same task and no further, and only on
+/// this token's own host. The residue is real and is written down here rather
+/// than papered over: an agent standing in one end of a dispatch can read the
+/// other end's `prompt`, `result` and `error` even when that other end is
+/// another person's `private` session. That is the pane-proof deployment rule
+/// again (§4.4: one fleet alias per unix account), not a second hole — and it
+/// cannot be narrowed to "the end that is actually proven" without breaking
+/// the dispatcher reading back the answer of the worker it created, which is
+/// the whole reason the clause exists.
+pub fn task_visible_in_scope_pure(
+    task: &TaskRow,
+    requester: Option<&SessionRow>,
+    worker: Option<&SessionRow>,
+    scope: &crate::service::view_scope::ViewScope,
+) -> bool {
+    // `is_unrestricted`, not `is_internal`: a hub reader NARROWED by
+    // `with_org` has an org boundary, and skipping the whole predicate for it
+    // would skip that boundary having examined nothing (multi-user M1, the T6
+    // review — the same shape `ViewScope::sees_session_facts` had). A narrowed
+    // reader falls through instead, and `sees_session_row` on each end applies
+    // its org.
+    if scope.is_unrestricted() {
+        return true;
+    }
+    // **A task whose ends no longer identify anybody is the hub's alone**
+    // (multi-user M1, T9d). `tasks` outlives its sessions and `sessions.id`
+    // is reused, so an id kept past the row's death resolves to whoever
+    // holds it NOW — which is how a reaped session's task came to be judged
+    // against the stranger who inherited its rowid, handing them `prompt`
+    // and `result` on the live stream and through `list_tasks`. Migration
+    // 099's trigger NULLs the id and stamps `detached_at`; this refuses the
+    // row rather than reading the NULL as "no end to check", which the
+    // `(None, _) => true` arm below would, and which would WIDEN. Both
+    // sessions are over: there is nothing left for a person to drive.
+    if task.detached_at.is_some() {
+        return false;
+    }
+    let ends = [
+        (task.requester_session_id, requester),
+        (task.worker_session_id, worker),
+    ];
+    // A task naming no session at all has no owner to inherit, so nobody but
+    // the hub's own readers reads it. `dispatch_task` always records a
+    // worker, so this is a guard against a future shape rather than a case
+    // that exists today.
+    if ends.iter().all(|(id, _)| id.is_none()) {
+        return false;
+    }
+    let proves_an_end = ends
+        .iter()
+        .any(|(id, _)| id.is_some() && *id == scope.proven_session);
+    ends.iter().all(|(id, row)| match (id, row) {
+        (None, _) => true,
+        // Named but unreadable: fail closed.
+        (Some(_), None) => false,
+        (Some(_), Some(r)) => {
+            scope.sees_session_row(r).is_visible()
+                || (proves_an_end && scope.host.as_deref() == Some(r.host_alias.as_str()))
+        }
+    })
+}
+
+/// [`task_visible_in_scope_pure`] resolved against the store.
+pub fn task_visible_in_scope(
+    s: &Store,
+    task: &TaskRow,
+    scope: &crate::service::view_scope::ViewScope,
+) -> Result<bool, IpcError> {
+    let requester = match task.requester_session_id {
+        Some(id) => s.get_session_by_id(id)?,
+        None => None,
+    };
+    let worker = match task.worker_session_id {
+        Some(id) => s.get_session_by_id(id)?,
+        None => None,
+    };
+    Ok(task_visible_in_scope_pure(
+        task,
+        requester.as_ref(),
+        worker.as_ref(),
+        scope,
+    ))
+}
+
+/// Tasks visible to a caller.
+///
+/// The host filter stays in SQL (`store::list_tasks`, where it has always
+/// been), and the person half is applied to the page it returns: `store/`
+/// has no `ViewScope` to compare against and must not grow one (R6-l — the
+/// ownership rule is written once per layer, and `store/` compares columns).
+///
+/// **The page is filtered after the LIMIT, so a caller can get back fewer
+/// rows than it asked for.** That is the honest shape here: paging the
+/// filter into SQL would mean teaching the query about grants and about the
+/// pane proof, which is the second implementation of the rule this task
+/// exists to avoid. `list_tasks` is a newest-first page over a small table,
+/// and a short page is a cosmetic cost against a leak of every task's prompt
+/// and result fleet-wide.
 pub fn list_tasks_for(
     store: &Mutex<Store>,
     requester_session_id: Option<i64>,
     state: Option<&str>,
     limit: i64,
     host: Option<&str>,
+    scope: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<TaskRow>, IpcError> {
     if let Some(st) = state {
         if !crate::store::TASK_STATES.contains(&st) {
@@ -555,7 +757,14 @@ pub fn list_tasks_for(
     let s = lock(store)?;
     // Converge stale tasks before reporting them (cheap; see sweep_open_tasks).
     let _ = sweep_open_tasks(&s, now_unix());
-    s.list_tasks(requester_session_id, state, host, clamp_task_limit(limit))
+    let rows = s.list_tasks(requester_session_id, state, host, clamp_task_limit(limit))?;
+    let mut kept = Vec::with_capacity(rows.len());
+    for t in rows {
+        if task_visible_in_scope(&s, &t, scope)? {
+            kept.push(t);
+        }
+    }
+    Ok(kept)
 }
 
 /// Hard bounds for a `list_tasks` page.
@@ -640,6 +849,16 @@ pub fn liveness_verdict(
         return Some(format!(
             "task exceeded tasks.max_age_secs ({max_age_secs}s) without reporting {DONE_PREFIX}<nonce>"
         ));
+    }
+    // De-identified by migration 101's trigger: a session this task named
+    // was DELETED, so its id was NULLed out rather than left to resolve
+    // against whoever SQLite hands it to next (multi-user M1, T9d). With
+    // `dispatch_task` always recording a worker, "detached and no worker id"
+    // IS "the worker is gone" — and it has to be read here rather than from
+    // `worker_session_id`, because the `?` below would otherwise answer
+    // `None` and leave the task open for ever.
+    if task.detached_at.is_some() && task.worker_session_id.is_none() {
+        return Some("the worker session is gone (killed or dismissed)".to_string());
     }
     let wid = task.worker_session_id?;
     let Some(w) = worker else {
@@ -886,6 +1105,57 @@ mod tests {
             .unwrap()
     }
 
+    /// **A hub reader narrowed by `with_org` is fenced here too** (multi-user
+    /// M1, the T6 review). `task_visible_in_scope_pure` opened with
+    /// `if scope.is_internal() { return true }`, which answered for a
+    /// NARROWED reader as well, having examined neither end of the dispatch —
+    /// the same shape `ViewScope::sees_session_facts` had, and the reason the
+    /// predicate now asks `is_unrestricted`.
+    ///
+    /// It is not hypothetical: `Graph::build` fences its `job_states` through
+    /// exactly this call, and `work::today` / `work::nudge` / `work::resume`
+    /// all build narrowed hub readers.
+    #[test]
+    fn a_narrowed_hub_reader_sees_only_its_own_hosts_tasks() {
+        let s = Store::open_in_memory().unwrap();
+        let mine = seed(&s, "alpha", "a-dev");
+        let theirs = seed(&s, "beta", "b-dev");
+        let on = |id: i64| s.get_session_by_id(id).unwrap().unwrap();
+        let task_on = |id: i64| create_task(&s, Some(id), Some(id), "do it").unwrap();
+        let (t_mine, t_theirs) = (task_on(mine), task_on(theirs));
+
+        let narrowed = crate::service::view_scope::ViewScope::internal().with_org(
+            crate::service::orgs::OrgScope::Host {
+                alias: "alpha".into(),
+                org: None,
+                isolated: Default::default(),
+            },
+        );
+        assert!(task_visible_in_scope_pure(
+            &t_mine,
+            Some(&on(mine)),
+            Some(&on(mine)),
+            &narrowed
+        ));
+        assert!(
+            !task_visible_in_scope_pure(&t_theirs, Some(&on(theirs)), Some(&on(theirs)), &narrowed),
+            "beta's dispatch — its prompt and its result — is not alpha's \
+             reader's to read"
+        );
+
+        // The hub's own UNnarrowed reader is untouched: it is the one scope
+        // for which skipping the whole predicate is the whole truth.
+        let hub = crate::service::view_scope::ViewScope::internal();
+        for (t, id) in [(&t_mine, mine), (&t_theirs, theirs)] {
+            assert!(task_visible_in_scope_pure(
+                t,
+                Some(&on(id)),
+                Some(&on(id)),
+                &hub
+            ));
+        }
+    }
+
     // ---- shared work context: job mirrors ----
 
     #[test]
@@ -1084,6 +1354,7 @@ mod tests {
             WaitCond::TurnGt(0),
             Duration::from_millis(30),
             fast,
+            &NoRecheck,
         )
         .await
         .unwrap();
@@ -1101,6 +1372,7 @@ mod tests {
             WaitCond::TurnGt(0),
             Duration::from_secs(5),
             fast,
+            &NoRecheck,
         )
         .await
         .unwrap();
@@ -1109,7 +1381,7 @@ mod tests {
         assert_eq!(out.row.turn_seq, 1);
         assert!(out.row.last_stop_at.is_some());
         assert_eq!(
-            wait_for_session_with(&store, 9999, WaitCond::Idle, fast, fast)
+            wait_for_session_with(&store, 9999, WaitCond::Idle, fast, fast, &NoRecheck)
                 .await
                 .unwrap_err()
                 .code,
@@ -1155,14 +1427,14 @@ mod tests {
         let short = Duration::from_millis(40);
         let every = Duration::from_secs(60);
 
-        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast)
+        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast, &NoRecheck)
             .await
             .unwrap();
         assert!(!out.satisfied, "no probe: the stored idle is not believed");
         // An attach acknowledges the attention stamp; the demotion (and so
         // the guess) stands.
         assert!(store.lock().unwrap().touch_session(id).unwrap());
-        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast)
+        let out = wait_for_session_with(&store, id, WaitCond::Idle, short, fast, &NoRecheck)
             .await
             .unwrap();
         assert_eq!(out.row.stale_working_at, None, "the attach acknowledged it");
@@ -1181,10 +1453,18 @@ mod tests {
                 answer,
                 asks: Default::default(),
             };
-            let out =
-                wait_for_session_probed(&store, id, WaitCond::Idle, short, fast, &pane, every)
-                    .await
-                    .unwrap();
+            let out = wait_for_session_probed(
+                &store,
+                id,
+                WaitCond::Idle,
+                short,
+                fast,
+                &pane,
+                every,
+                &NoRecheck,
+            )
+            .await
+            .unwrap();
             assert_eq!(out.satisfied, satisfied, "{answer:?}");
             assert_eq!(
                 pane.asks.load(std::sync::atomic::Ordering::SeqCst),
@@ -1197,10 +1477,18 @@ mod tests {
             answer: Some("idle"),
             asks: Default::default(),
         };
-        let out =
-            wait_for_session_probed(&store, id, WaitCond::TurnGt(5), short, fast, &pane, every)
-                .await
-                .unwrap();
+        let out = wait_for_session_probed(
+            &store,
+            id,
+            WaitCond::TurnGt(5),
+            short,
+            fast,
+            &pane,
+            every,
+            &NoRecheck,
+        )
+        .await
+        .unwrap();
         assert!(!out.satisfied);
         assert_eq!(pane.asks.load(std::sync::atomic::Ordering::SeqCst), 0);
 
@@ -1210,9 +1498,16 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             bg.lock().unwrap().record_stop_hook("uuid-w").unwrap();
         });
-        let out = wait_for_session_with(&store, id, WaitCond::Idle, Duration::from_secs(5), fast)
-            .await
-            .unwrap();
+        let out = wait_for_session_with(
+            &store,
+            id,
+            WaitCond::Idle,
+            Duration::from_secs(5),
+            fast,
+            &NoRecheck,
+        )
+        .await
+        .unwrap();
         stopper.await.unwrap();
         assert!(out.satisfied);
         assert_eq!(out.row.stale_working_at, None);
@@ -1365,7 +1660,7 @@ mod tests {
         let t = create_task(&s, None, Some(w), "slow").unwrap();
         let store = Arc::new(Mutex::new(s));
         let fast = Duration::from_millis(5);
-        let out = wait_for_task_with(&store, t.id, Duration::from_millis(30), fast)
+        let out = wait_for_task_with(&store, t.id, Duration::from_millis(30), fast, &NoRecheck)
             .await
             .unwrap();
         assert!(!out.satisfied);
@@ -1378,14 +1673,14 @@ mod tests {
             let task = s.get_task(tid).unwrap().unwrap();
             complete_task(&s, &task, "finished").unwrap();
         });
-        let out = wait_for_task_with(&store, t.id, Duration::from_secs(5), fast)
+        let out = wait_for_task_with(&store, t.id, Duration::from_secs(5), fast, &NoRecheck)
             .await
             .unwrap();
         finisher.await.unwrap();
         assert!(out.satisfied);
         assert_eq!(out.row.state, "done");
         assert_eq!(
-            wait_for_task_with(&store, 9999, fast, fast)
+            wait_for_task_with(&store, 9999, fast, fast, &NoRecheck)
                 .await
                 .unwrap_err()
                 .code,
@@ -1432,6 +1727,18 @@ mod tests {
         let t_rec = create_task(&s, None, Some(rec), "x").unwrap();
         let t_fine = create_task(&s, None, Some(fine), "x").unwrap();
         s.delete_session(gone).unwrap();
+        // Migration 101's trigger de-identified the task's worker end rather
+        // than leaving a recyclable id behind (T9d) — and the sweep must
+        // still fail it, which is what `liveness_verdict`'s `detached_at`
+        // arm is for. Without that arm `worker_session_id?` answers `None`
+        // and the task stays `queued` for ever.
+        {
+            let row = s.get_task(t_gone.id).unwrap().unwrap();
+            assert_eq!(
+                (row.worker_session_id, row.detached_at.is_some()),
+                (None, true)
+            );
+        }
         s.conn_ref()
             .execute(
                 "UPDATE sessions SET status='ghost', lost_at=1 WHERE id=?1",
@@ -1585,6 +1892,7 @@ mod tests {
             t.id,
             Duration::from_secs(5),
             Duration::from_millis(5),
+            &NoRecheck,
         )
         .await
         .unwrap();
@@ -1633,8 +1941,12 @@ mod tests {
         let foreign = create_task(&s, Some(ctl_b), Some(w_b), "b internal").unwrap();
         let orphan = create_task(&s, None, None, "unassigned").unwrap();
         let store = Mutex::new(s);
+        // `ViewScope::internal()` is the hub's own reader: it sees every
+        // row, so what this test measures is still exactly the HOST fence
+        // (multi-user M1's person half has its own test below).
+        let view = crate::service::view_scope::ViewScope::internal();
         let ids = |host: Option<&str>| -> Vec<i64> {
-            let mut v: Vec<i64> = list_tasks_for(&store, None, None, 50, host)
+            let mut v: Vec<i64> = list_tasks_for(&store, None, None, 50, host, &view)
                 .unwrap()
                 .iter()
                 .map(|t| t.id)
@@ -1652,19 +1964,19 @@ mod tests {
         assert!(task_visible_to(&s, &orphan, None).unwrap());
         drop(s);
         assert_eq!(
-            list_tasks_for(&store, Some(ctl_b), None, 50, Some("hosta"))
+            list_tasks_for(&store, Some(ctl_b), None, 50, Some("hosta"), &view)
                 .unwrap()
                 .len(),
             1
         );
         assert_eq!(
-            list_tasks_for(&store, None, Some("bogus"), 50, None)
+            list_tasks_for(&store, None, Some("bogus"), 50, None, &view)
                 .unwrap_err()
                 .code,
             "E_INVALID"
         );
         assert_eq!(
-            list_tasks_for(&store, None, Some("queued"), 50, None)
+            list_tasks_for(&store, None, Some("queued"), 50, None, &view)
                 .unwrap()
                 .len(),
             4

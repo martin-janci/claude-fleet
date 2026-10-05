@@ -29,10 +29,32 @@
   import { push, pushError } from './toasts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { sessionBlocked, type SessionAction } from './share';
   import { clearSessionFocus, focusSession } from './session_focus';
 
   const pending = $derived(rowsWithSuggestions($sessions));
   const blocked = $derived(hubActionBlocked('confirm_session_work', $hubStatus, $hubConnection));
+  /**
+   * The access half (multi-user M1, F2a), per ROW: this sheet holds every
+   * session with a suggestion, which on a paired desktop mixes this person's
+   * sessions with the ones shared with them, so one answer for the sheet would
+   * gate the wrong thing. `confirm_session_work` / `reject_session_work` are
+   * `drive` in `share.ts::SESSION_TIER`, the same pair `SessionRowItem` asks
+   * about for its own work chip.
+   */
+  /**
+   * Why this client may not decide `r`'s suggestion. Asked for the action it is
+   * actually about to perform (multi-user M1, F2b): `y` confirms and `n`
+   * rejects, two different `SESSION_TIER` rows, and this used to answer for
+   * `confirm_session_work` in both cases. Both are `drive`, so the sentence
+   * does not change — but a table that stops being read is a table that stops
+   * being true, and the sweep now keys on the write.
+   */
+  function rowBlocked(r: SessionRow, action: SessionAction = 'confirm_session_work'): string | null {
+    return blocked ?? $sessionBlocked(r, action);
+  }
+  /** How many rows here belong to somebody else, so the hint can say so. */
+  const notMine = $derived(pending.filter((r) => rowBlocked(r) !== null).length);
   let open = $state(false);
   let cursor = $state(0);
   let busy = $state(false);
@@ -68,7 +90,10 @@
   async function decideAt(i: number, yes: boolean) {
     const r = pending[i];
     const sg = r?.work_suggested;
-    if (!r || !sg || busy || blocked !== null) return;
+    // Per row, re-asked at the call: y/n decide the cursor row from the
+    // keyboard, past any button's `disabled`.
+    if (!r || !sg || busy || rowBlocked(r, yes ? 'confirm_session_work' : 'reject_session_work') !== null)
+      return;
     busy = true;
     const name = rowName(r);
     const key = sg.key ?? sg.title;
@@ -159,6 +184,15 @@
           action: {
             label: 'Undo',
             run: () => {
+              // The toast outlives the render that made it, so the gate is
+              // asked when Undo is pressed and not when the link appeared
+              // (multi-user M1, F2b). `rejectWorkLink` is `reject_session_work`,
+              // `drive`.
+              const why = $sessionBlocked(r, 'reject_session_work');
+              if (why !== null) {
+                push({ kind: 'error', message: why });
+                return;
+              }
               void rejectWorkLink(r.id, linkId).then((res) => {
                 if (!res.ok) pushError(res.error, 'Undo failed');
               });
@@ -195,9 +229,16 @@
       <button class="pill" data-testid="link-review-close" onclick={closeSheet}>close</button>
     </div>
     {#if blocked}<p class="hint" role="note">{blocked}</p>{/if}
+    {#if !blocked && notMine > 0}
+      <p class="hint" data-testid="link-review-not-mine">
+        {notMine} of these session{notMine === 1 ? ' is' : 's are'} shared with you: deciding its
+        work needs drive.
+      </p>
+    {/if}
     {#each pending as r, i (r.id)}
       {@const sg = r.work_suggested}
       {#if sg}
+        {@const mine = rowBlocked(r)}
         <div
           class="review-row"
           class:cursor={i === cursor}
@@ -213,9 +254,9 @@
           <span class="name">{rowName(r)}</span>
           <span class="key">{sg.key ?? sg.title}?</span>
           <span class="why">{workWhy({ ...sg, state: 'suggested' })}{(sg.suggestions ?? 1) > 1 ? ` · ${sg.suggestions} suggestions` : ''}</span>
-          <button class="pill" data-testid="link-review-yes" disabled={busy || blocked !== null}
+          <button class="pill" data-testid="link-review-yes" disabled={busy || mine !== null} title={mine ?? ''}
             onclick={(e) => { e.stopPropagation(); void decideAt(i, true); }}>Confirm</button>
-          <button class="pill" data-testid="link-review-no" disabled={busy || blocked !== null}
+          <button class="pill" data-testid="link-review-no" disabled={busy || mine !== null} title={mine ?? ''}
             onclick={(e) => { e.stopPropagation(); void decideAt(i, false); }}>Not this</button>
         </div>
       {/if}

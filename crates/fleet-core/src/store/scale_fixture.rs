@@ -7,8 +7,9 @@
 //! trigger included) so building the fixture costs well under a second
 //! instead of the minutes the event-emitting writers would take.
 //!
-//! Volumes: 20 hosts, 3 orgs, 40 projects, 2,000 sessions (with their
-//! participants and worktrees), 5,000 tracker items over three trackers,
+//! Volumes: 20 hosts, 3 orgs, 4 people, 40 projects, 2,000 sessions (with
+//! their participants, worktrees and owners), 5,000 tracker items over three
+//! trackers,
 //! 20,000 work links in every state (about 4,000 live, the rest ended on
 //! retired participants), 50,000 journal rows, 4,000 conversations and
 //! 40,000 timeline events.
@@ -20,6 +21,10 @@ use std::collections::HashMap;
 
 pub(crate) const HOSTS: usize = 20;
 pub(crate) const ORGS: i64 = 3;
+/// People on this hub, migration 098's personal owner (id 1) included.
+/// More than one, because the reads multi-user M1 adds are per PERSON
+/// and a single-person fixture measures them against a constant.
+pub(crate) const PEOPLE: usize = 4;
 pub(crate) const PROJECTS: usize = 40;
 pub(crate) const SESSIONS: usize = 2_000;
 pub(crate) const ITEMS: usize = 5_000;
@@ -70,6 +75,20 @@ pub(crate) fn host_org(i: usize) -> Option<i64> {
     (!i.is_multiple_of(4)).then_some((i % 4) as i64)
 }
 
+/// A session's owner and visibility (multi-user M1, migration 099): every
+/// fifth session is `unclaimed` — the shape reconcile leaves for a
+/// hand-started tmux session nobody can speak for — and the rest are spread
+/// over the fixture's [`PEOPLE`], so `idx_sessions_owner` is measured against
+/// real cardinality instead of 2,000 identical NULLs.
+///
+/// Derived from `i` rather than from the `Rng`, exactly as [`host_org`] is:
+/// taking a number from the generator here would shift every later draw and
+/// silently reshape the work links this fixture's other budgets are written
+/// against.
+pub(crate) fn session_owner(i: usize) -> Option<i64> {
+    (!i.is_multiple_of(5)).then_some((i % PEOPLE) as i64 + 1)
+}
+
 /// What the benchmarks need to find their way in the fixture.
 pub(crate) struct ScaleFixture {
     pub store: Store,
@@ -111,6 +130,22 @@ pub(crate) fn build(seed: u64, now: i64) -> ScaleFixture {
             "INSERT INTO org_rules (org_id, owner, repo, path_prefix, host_alias) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![org, owner, repo, path, host],
+        )
+        .unwrap();
+    }
+    // People. Migration 098 minted the personal owner as id 1, so this adds
+    // the colleagues: `session_owner` spreads the sessions over all of them.
+    assert_eq!(
+        tx.query_row("SELECT COUNT(*) FROM people", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1,
+        "096 mints exactly one person"
+    );
+    for n in 2..=PEOPLE {
+        tx.execute(
+            "INSERT INTO people (id, name, is_personal_owner, created_at) \
+             VALUES (?1, ?2, 0, ?3)",
+            params![n as i64, format!("dev{n}"), now - 400 * day],
         )
         .unwrap();
     }
@@ -241,12 +276,15 @@ pub(crate) fn build(seed: u64, now: i64) -> ScaleFixture {
         .unwrap();
         let status = *rng.pick(&statuses);
         let last = now - rng.below(30 * 86_400) as i64;
+        let owner = session_owner(i);
         tx.execute(
             "INSERT INTO sessions (id, tmux_name, host_alias, project_id, worktree_id, \
                                    created_at, last_activity_at, status, kind, worktree_key, \
                                    lost_at, claude_session_id, claude_status, pr_url, \
-                                   current_branch, idle_since, last_touch_at, friendly_name) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?7, ?17)",
+                                   current_branch, idle_since, last_touch_at, friendly_name, \
+                                   owner_person_id, visibility) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?7, \
+                     ?17, ?18, ?19)",
             params![
                 i as i64 + 1,
                 format!("s{i}"),
@@ -266,6 +304,12 @@ pub(crate) fn build(seed: u64, now: i64) -> ScaleFixture {
                 branch,
                 rng.pct(50).then_some(last),
                 format!("session {i}"),
+                owner,
+                if owner.is_some() {
+                    super::VISIBILITY_PRIVATE
+                } else {
+                    super::VISIBILITY_UNCLAIMED
+                },
             ],
         )
         .unwrap();
@@ -736,6 +780,40 @@ mod tests {
         };
         assert_eq!(digest(&a), digest(&b));
         assert_eq!(a.busiest_session, b.busiest_session);
+        // Multi-user M1: the owners are varied, so the per-person reads and
+        // `idx_sessions_owner` are measured against real cardinality. Every
+        // person owns a share, and the unclaimed rows are a real population
+        // rather than a rounding error.
+        assert_eq!(count(&a, "people"), PEOPLE as i64);
+        let owned = |f: &ScaleFixture, person: i64| -> i64 {
+            f.store
+                .conn_for_test()
+                .query_row(
+                    "SELECT COUNT(*) FROM sessions WHERE owner_person_id = ?1 \
+                     AND visibility = 'private'",
+                    [person],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let mut attributed = 0;
+        for person in 1..=PEOPLE as i64 {
+            let n = owned(&a, person);
+            assert!(n > 100, "person {person} owns {n} sessions");
+            attributed += n;
+        }
+        let unclaimed: i64 = a
+            .store
+            .conn_for_test()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions \
+                 WHERE owner_person_id IS NULL AND visibility = 'unclaimed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(attributed + unclaimed, SESSIONS as i64);
+        assert!(unclaimed > 300, "unclaimed {unclaimed}");
         let live: i64 = a
             .store
             .conn_for_test()

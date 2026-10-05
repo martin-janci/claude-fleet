@@ -22,6 +22,17 @@ function byCmd(map: Record<string, unknown>) {
   });
 }
 
+/** The Library rail entry: where the catalog's rows, New asset, Import and
+ *  Lint all live since Assets M5 (Rulings R17). */
+async function openLibrary() {
+  await fireEvent.click(await screen.findByTestId('assets-rail-library'));
+}
+/** The personal catalog chip's popover: Pull, Commit pending, Push and the
+ *  repo status line (R17, R24). */
+async function openPersonalChip() {
+  await fireEvent.click(await screen.findByTestId('catalog-chip-personal'));
+}
+
 const listing = {
   head: 'abcdef1234567890', loaded_at: 1, problems: [{ path: 'hooks/bad.yaml', message: 'name' }],
   unmanaged: [{ host_alias: 'local', harness: 'claude', kind: 'skill', name: 'extra', state: 'unmanaged', catalog_hash: null, host_hash: null, scanned_at: 1 }],
@@ -109,6 +120,7 @@ describe('AssetsPanel', () => {
   it('lists assets grouped by kind with state chips, unmanaged group and problems badge', async () => {
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'abcdef1234567890', last_loaded_at: 1 }, catalog_load: { head: 'abcdef1234567890', loaded_at: 1, asset_count: 2, problem_count: 1 }, catalog_list_assets: listing, assets_inventory: [] });
     render(AssetsPanel);
+    await openLibrary();
     expect(await screen.findByText('Skills')).toBeTruthy();
     expect(screen.getByText('MCP servers')).toBeTruthy();
     expect(screen.getByTestId('asset-row-skill-worktree').textContent).toContain('1 in sync');
@@ -134,13 +146,16 @@ describe('AssetsPanel', () => {
       },
     });
     render(AssetsPanel);
+    await openLibrary();
     expect(await screen.findByTestId('asset-row-skill-worktree')).toBeTruthy();
     await fireEvent.click(screen.getByTestId('asset-row-skill-worktree'));
     expect(await screen.findByTestId('asset-detail-title')).toBeTruthy();
     expect(invoke).toHaveBeenCalledWith('catalog_get_asset', { args: { kind: 'skill', name: 'worktree' } });
     expect(screen.getByTestId('asset-detail-title').textContent).toContain('worktree');
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
     expect(screen.getByTestId('matrix-cell-local-claude').textContent).toContain('in sync');
     expect(screen.getByTestId('matrix-cell-mefistos-claude').textContent).toContain('skipped');
+    await fireEvent.click(screen.getByTestId('inspector-tab-source'));
     expect(screen.getByTestId('preview-file-path').textContent).toContain('SKILL.md');
     await fireEvent.click(screen.getByTestId('preview-tab-codex'));
     expect(await screen.findByText(/codex cannot render/)).toBeTruthy();
@@ -161,6 +176,7 @@ describe('AssetsPanel', () => {
       },
     });
     render(AssetsPanel);
+    await openLibrary();
     expect(await screen.findByTestId('asset-row-skill-worktree')).toBeTruthy();
     await fireEvent.click(screen.getByTestId('asset-row-skill-worktree'));
     expect(await screen.findByTestId('asset-detail-title')).toBeTruthy();
@@ -176,8 +192,9 @@ describe('AssetsPanel', () => {
       catalog_repo_status: { head: 'h', dirty: 1, ahead: 0, behind: 0, has_upstream: true },
     });
     render(AssetsPanel);
-    expect(await screen.findByText('Import from host')).toBeTruthy();
-    await fireEvent.click(screen.getByText('Import from host'));
+    await openLibrary();
+    expect(screen.getByTestId('assets-import').textContent).toBe('Import from host');
+    await fireEvent.click(screen.getByTestId('assets-import'));
     await fireEvent.click(screen.getByTestId('import-dry-run'));
     await waitFor(() => expect(screen.getByTestId('import-confirm')).not.toBeDisabled());
 
@@ -200,9 +217,11 @@ describe('AssetsPanel', () => {
       catalog_import_host: { created: [['skill', 'extra']], problems: [], flagged_secrets: [], dry_run: true },
     });
     render(AssetsPanel);
+    await openLibrary();
     const row = await screen.findByTestId('identity-row-skill-extra');
 
-    await fireEvent.click(within(row).getByText('Import'));
+    // The row is a picker since M5; its Import sits beside it, on its line.
+    await fireEvent.click(within(row.parentElement!).getByText('Import'));
 
     expect(await screen.findByTestId('import-dialog')).toBeTruthy();
     expect(screen.getByTestId('import-only').textContent).toContain('skill:extra');
@@ -219,7 +238,7 @@ describe('AssetsPanel', () => {
     // it with the plain defaults, not the last identity's.
     await fireEvent.click(screen.getByText('Close'));
     expect(screen.queryByTestId('import-dialog')).toBeNull();
-    await fireEvent.click(screen.getByText('Import from host'));
+    await fireEvent.click(screen.getByTestId('assets-import'));
     expect(screen.queryByTestId('import-only')).toBeNull();
     expect((screen.getByTestId('import-host') as HTMLSelectElement).value).toBe('local');
   });
@@ -244,13 +263,14 @@ describe('AssetsPanel', () => {
     };
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: withOrphan, assets_inventory: [], catalog_last_sync: null });
     render(AssetsPanel);
+    await openLibrary();
 
     const row = await screen.findByTestId('unmanaged-row-mefistos-claude-skill-ghost');
     expect(row.textContent).toContain('orphan');
     expect(screen.getByTestId('orphan-badge-mefistos-claude-skill-ghost')).toBeTruthy();
     expect(within(row).queryByText('Import')).toBeNull();
     // The plain unmanaged row from `listing` still gets its Import button.
-    expect(screen.getByTestId('identity-row-skill-extra').textContent).toContain('Import');
+    expect(screen.getByTestId('identity-row-skill-extra').parentElement!.textContent).toContain('Import');
   });
 
   it('the filter matches an orphan row case-insensitively, like it does identity rows', async () => {
@@ -263,11 +283,13 @@ describe('AssetsPanel', () => {
     };
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: withOrphan, assets_inventory: [], catalog_last_sync: null });
     render(AssetsPanel);
+    await openLibrary();
     await screen.findByTestId('unmanaged-row-mefistos-claude-skill-ghost');
 
-    await fireEvent.input(screen.getByPlaceholderText('filter'), { target: { value: 'GHOST' } });
+    await fireEvent.input(screen.getByTestId('assets-query'), { target: { value: 'GHOST' } });
 
     expect(screen.getByTestId('unmanaged-row-mefistos-claude-skill-ghost')).toBeTruthy();
+    expect(screen.queryByTestId('asset-row-skill-worktree')).toBeNull();
   });
 
   it('hides fleet internals behind a toggle', async () => {
@@ -280,6 +302,7 @@ describe('AssetsPanel', () => {
     };
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: withInternal, assets_inventory: [], catalog_last_sync: null });
     render(AssetsPanel);
+    await openLibrary();
     expect(await screen.findByTestId('identity-row-skill-extra')).toBeTruthy();
     expect(screen.queryByTestId('identity-row-hook-stop')).toBeNull();
     await fireEvent.click(screen.getByRole('button', { name: /Show 1 fleet internal/ }));
@@ -374,6 +397,7 @@ describe('AssetsPanel authoring', () => {
       },
     });
     render(AssetsPanel, { visible: true });
+    await openLibrary();
     expect(await screen.findByTestId('assets-new')).toBeTruthy();
 
     await fireEvent.click(screen.getByTestId('assets-new'));
@@ -381,9 +405,98 @@ describe('AssetsPanel authoring', () => {
     await fireEvent.input(screen.getByTestId('new-asset-name'), { target: { value: 'my-new-skill' } });
     await fireEvent.click(screen.getByTestId('new-asset-create'));
 
-    await waitFor(() => expect(screen.getByTestId('asset-detail-title').textContent).toContain('my-new-skill'));
+    // Opens in Source, where AssetDetail's title row (an Overview part) is
+    // not shown: the Inspector's own title names it.
+    await waitFor(() => expect(screen.getByTestId('inspector').textContent).toContain('my-new-skill'));
     // A freshly created asset opens straight into edit mode.
     expect(await screen.findByTestId('editor-save')).toBeTruthy();
+  });
+
+  it('a created asset opens in the editor once; selecting it again later opens its Overview', async () => {
+    const withNew = {
+      ...listing,
+      assets: [...listing.assets, { kind: 'skill', name: 'my-new-skill', version: '1', description: 'd', tags: [], hosts: [] }],
+    };
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 3, problem_count: 0 },
+      catalog_list_assets: withNew, assets_inventory: [], catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
+      catalog_create_asset: { commit: 'sha-new', lint: { errors: [], warnings: [] } },
+      catalog_lint_asset: { errors: [], warnings: [] },
+      catalog_get_asset: {
+        asset: { kind: 'skill', name: 'my-new-skill', version: '1', description: 'd', tags: [], body: '# b\n', allowed_tools: [], user_invocable: true, triggers: [] },
+        previews: [], hosts: [],
+      },
+    });
+    render(AssetsPanel, { visible: true });
+    await openLibrary();
+    await fireEvent.click(await screen.findByTestId('assets-new'));
+    await fireEvent.input(await screen.findByTestId('new-asset-name'), { target: { value: 'my-new-skill' } });
+    await fireEvent.click(screen.getByTestId('new-asset-create'));
+    expect(await screen.findByTestId('editor-save')).toBeTruthy();
+
+    await fireEvent.click(screen.getByTestId('asset-row-skill-worktree'));
+    await fireEvent.click(screen.getByTestId('asset-row-skill-my-new-skill'));
+    await screen.findByTestId('asset-detail-title');
+    expect(screen.getByTestId('inspector-tab-overview').getAttribute('aria-selected')).toBe('true');
+    expect(screen.queryByTestId('editor-save')).toBeNull();
+  });
+
+  it('Pull on the personal chip pulls and reloads the catalog', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [],
+      catalog_repo_status: { head: 'h', dirty: 0, ahead: 0, behind: 1, has_upstream: true },
+    });
+    render(AssetsPanel, { visible: true });
+    await waitFor(() => expect(screen.getByTestId('assets-head').textContent).toContain('personal @h'));
+    await openPersonalChip();
+    await fireEvent.click(await screen.findByTestId('assets-pull'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_load', { args: { pull: true } }));
+  });
+
+  it('a pull failure renders the git stderr, keeping the listing', async () => {
+    let pulls = 0;
+    invoke.mockImplementation(async (cmd: string, a?: { args?: { pull?: boolean } }) => {
+      switch (cmd) {
+        case 'catalog_config': return { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 };
+        case 'catalog_load':
+          if (a?.args?.pull) {
+            pulls += 1;
+            throw { code: 'E_CATALOG_GIT', message: 'git pull: failed', details: { stderr: 'fatal: Not possible to fast-forward, aborting.' } };
+          }
+          return { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 };
+        case 'catalog_list_assets': return listing;
+        case 'assets_inventory': return [];
+        case 'catalog_repo_status': return { head: 'h', dirty: 0, ahead: 0, behind: 1, has_upstream: true };
+        default: throw { code: 'E_TEST', message: `unexpected ${cmd}` };
+      }
+    });
+    render(AssetsPanel, { visible: true });
+    await waitFor(() => expect(screen.getByTestId('assets-head').textContent).toContain('personal @h'));
+    await openPersonalChip();
+    await fireEvent.click(await screen.findByTestId('assets-pull'));
+    const err = await screen.findByText(/git pull: failed/);
+    expect(err.textContent).toContain('Not possible to fast-forward');
+    expect(pulls).toBe(1);
+    expect(screen.getByTestId('assets-inbox')).toBeTruthy();
+  });
+
+  it('the Inbox’s cards are re-read whenever the panel refreshes (R14)', async () => {
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: null,
+      catalog_list_changesets: [{ id: 7, kind: 'new', summary: 'Import 1 new skill', state: 'proposed', created_at: 1 }],
+      assets_scan_hosts: [{ host: 'local', status: 'scanned', detail: null, rows: 3 }],
+    });
+    render(AssetsPanel, { visible: true });
+    expect(await screen.findByTestId('inbox-row-card:7')).toBeTruthy();
+    const reads = () => invoke.mock.calls.filter((c) => c[0] === 'catalog_list_changesets').length;
+    const before = reads();
+    await fireEvent.click(screen.getByTestId('assets-scan'));
+    await waitFor(() => expect(reads()).toBe(before + 1));
   });
 
   it('Delete asks for confirmation, then clears the selection on success', async () => {
@@ -398,6 +511,7 @@ describe('AssetsPanel authoring', () => {
       catalog_delete_asset: 'sha-del',
     });
     render(AssetsPanel, { visible: true });
+    await openLibrary();
     await fireEvent.click(await screen.findByTestId('asset-row-skill-worktree'));
     await screen.findByTestId('asset-detail-title');
 
@@ -422,6 +536,7 @@ describe('AssetsPanel authoring', () => {
       catalog_lint_asset: { errors: [{ field: 'description', message: 'must not be empty' }], warnings: [] },
     });
     render(AssetsPanel, { visible: true });
+    await openLibrary();
     await fireEvent.click(await screen.findByTestId('asset-row-skill-worktree'));
     await screen.findByTestId('asset-detail-title');
 
@@ -438,6 +553,8 @@ describe('AssetsPanel authoring', () => {
       catalog_repo_status: { head: 'abcdef1234567890', dirty: 3, ahead: 2, behind: 0, has_upstream: true },
     });
     render(AssetsPanel, { visible: true });
+    await waitFor(() => expect(screen.getByTestId('assets-head').textContent).toContain('abcdef1'));
+    await openPersonalChip();
 
     expect(await screen.findByTestId('assets-repo-status')).toBeTruthy();
     expect(screen.getByTestId('assets-repo-status').textContent).toContain('3 dirty');
@@ -454,6 +571,8 @@ describe('AssetsPanel authoring', () => {
       catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
     });
     render(AssetsPanel, { visible: true });
+    await screen.findByTestId('assets-inbox');
+    await openPersonalChip();
     expect(await screen.findByTestId('assets-push')).toBeDisabled();
   });
 
@@ -466,6 +585,8 @@ describe('AssetsPanel authoring', () => {
       catalog_commit_pending: 'sha-commit',
     });
     render(AssetsPanel, { visible: true });
+    await waitFor(() => expect(screen.getByTestId('assets-head').textContent).toContain('±2'));
+    await openPersonalChip();
     await fireEvent.click(await screen.findByTestId('assets-commit-pending'));
 
     expect(await screen.findByTestId('prompt-dialog')).toBeTruthy();
@@ -484,8 +605,13 @@ describe('AssetsPanel authoring', () => {
       catalog_push: { head: 'h2', dirty: 0, ahead: 0, behind: 0, has_upstream: true },
     });
     render(AssetsPanel, { visible: true });
+    await waitFor(() => expect(screen.getByTestId('assets-head').textContent).toContain('↑3'));
+    await openPersonalChip();
     await fireEvent.click(await screen.findByTestId('assets-push'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_push', undefined));
+    // Acting closes the popover; open it again to read the fresh status.
+    await waitFor(() => expect(screen.getByTestId('assets-head').textContent).not.toContain('↑3'));
+    await openPersonalChip();
     await waitFor(() => expect(screen.getByTestId('assets-repo-status').textContent).not.toContain('↑3'));
   });
 
@@ -502,6 +628,8 @@ describe('AssetsPanel authoring', () => {
       },
     });
     render(AssetsPanel, { visible: true });
+    await waitFor(() => expect(screen.getByTestId('assets-head').textContent).toContain('↑3'));
+    await openPersonalChip();
     await fireEvent.click(await screen.findByTestId('assets-push'));
 
     const err = await screen.findByText(/git push: failed/);
@@ -523,6 +651,7 @@ describe('AssetsPanel authoring', () => {
       },
     });
     render(AssetsPanel, { visible: true });
+    await openLibrary();
     await fireEvent.click(await screen.findByTestId('assets-lint-all'));
     await fireEvent.click(await screen.findByTestId('lint-all-select-skill-worktree'));
 
@@ -542,6 +671,7 @@ describe('AssetsPanel authoring', () => {
       catalog_spawn_author_session: { id: 1, tmux_name: 'catalog-skill-worktree' },
     });
     const { rerender } = render(AssetsPanel, { visible: true });
+    await openLibrary();
     await fireEvent.click(await screen.findByTestId('asset-row-skill-worktree'));
     await screen.findByTestId('asset-detail-title');
 
@@ -566,7 +696,7 @@ describe('AssetsPanel authoring', () => {
       catalog_list_assets: listing, assets_inventory: [], catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
     });
     const { rerender } = render(AssetsPanel, { visible: true });
-    await screen.findByTestId('assets-new');
+    await screen.findByTestId('assets-sync');
     invoke.mockClear();
 
     await rerender({ visible: false });

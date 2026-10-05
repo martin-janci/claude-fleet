@@ -69,6 +69,13 @@ async fn hub(voice_enabled: bool) -> Hub {
         s.insert_client_token("stranger", &sha256_hex(STRANGER), "full")
             .unwrap();
         s.set_client_org("stranger", Some(other)).unwrap();
+        // Multi-user M1: a single-person hub. The devices are the owner's,
+        // so `phone` sees and drives the unclaimed `s1` (rule 7); `stranger`
+        // is still fenced out by its org.
+        let owner = s.mint_personal_owner().unwrap();
+        for name in ["phone", "viewer", "stranger"] {
+            s.set_client_person(name, Some(owner)).unwrap();
+        }
         let id = s
             .upsert_session("s1", "h-a", None, None, 0, 0, "running", None)
             .unwrap();
@@ -487,6 +494,45 @@ async fn source_refuses_host_and_readonly_tokens() {
     assert_eq!(dial(&h, HOST_A).await.err(), Some(403));
     assert_eq!(dial(&h, VIEWER).await.err(), Some(403));
     assert_eq!(registry().owner(h.session_id), None);
+}
+
+/// Multi-user M1: a microphone feeds the session's prompt, so it is a
+/// drive-level reach. A colleague holding only a WATCH grant on the owner's
+/// session is refused; the owner's own device still claims it.
+#[tokio::test]
+async fn source_refuses_a_watch_grantee_and_admits_the_owner() {
+    const GUEST: &str = "voice-guest-token";
+    let h = hub(true).await;
+    {
+        let s = h.store.lock().unwrap();
+        let owner = s.personal_owner_id().unwrap().unwrap();
+        let colleague = s.create_person("colleague", None).unwrap().id;
+        s.insert_client_token("guest", &sha256_hex(GUEST), "full")
+            .unwrap();
+        s.set_client_person("guest", Some(colleague)).unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?2, visibility = 'private' WHERE id = ?1",
+                rusqlite::params![h.session_id, owner],
+            )
+            .unwrap();
+        s.grant_session(
+            h.session_id,
+            crate::store::GrantRecipient::Person(colleague),
+            crate::store::GRANT_WATCH,
+            owner,
+        )
+        .unwrap();
+    }
+    assert_eq!(dial(&h, GUEST).await.err(), Some(403));
+    assert_eq!(registry().owner(h.session_id), None);
+    let ws = dial(&h, PHONE).await.expect("the owner's device");
+    let sid = h.session_id;
+    eventually(PATIENCE, "the owner's socket never claimed", || {
+        registry().owner(sid).as_deref() == Some("client:phone")
+    })
+    .await;
+    drop(ws);
 }
 
 #[tokio::test]

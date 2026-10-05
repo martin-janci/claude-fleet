@@ -114,6 +114,9 @@
   import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
   import { outbox, isHeld, receipt, outboxBody } from './outbox';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { sessionBlocked } from './share';
 
   let {
     session,
@@ -149,7 +152,8 @@
     // restriction nobody asked for, so the scope is an explicit prop rather
     // than a rule this component invents for both surfaces.
     //
-    // A bare key press is never gated — see `sendText`.
+    // A bare key press is never held by THIS gate — see `sendText`. Access
+    // is a different question and bars it with everything else.
     blockWhileBusy = false,
     // Rendered directly above the composer, inside the panel's own layout
     // (AgentPanel's removable context chip). Only shown when there IS a
@@ -1097,7 +1101,62 @@
   // read yet is the mangled line the gate exists to prevent.
   const outboxBusy = $derived(outgoing.some((m) => m.state === 'waiting' || m.state === 'sending' || m.state === 'sent'));
   const busyBlocked = $derived(blockWhileBusy && (busyNote !== null || outboxBusy));
-  const canSend = $derived(draft.trim().length > 0 && viewing === null && !busyBlocked);
+
+  // ── May this client write into this session at all? (multi-user M1) ─────
+  //
+  // Two questions, deliberately kept apart, because they gate different
+  // controls:
+  //
+  //  - `shareBlocked` — this client's ACCESS to this row (`share.ts`): own,
+  //    drive, watch, or nothing. A `watch` grantee may not write to the
+  //    owner's REPL at all, and a paired desktop that does not yet know who
+  //    it is fails closed. Null for an owned row and null on a standalone
+  //    desktop (`access.ts::sessionAccess` rule 1), so a single-user install
+  //    is untouched.
+  //  - `writeBlocked` — that, plus what the hub refuses a client outright and
+  //    whether the link is even up, composed with `??` in the precedence
+  //    `share.ts` documents (refusal over "this session is not yours").
+  //
+  // The split matters for the attachment tray. Staging a file reads THIS
+  // machine's disk (`pick_attachments`, `attachment_describe`): pairing with
+  // a hub hands the hub the fleet's database and hosts, not this disk, so a
+  // blinking hub link must not take the tray away. Access must, and for a
+  // sharper reason than tidiness: the composer's second wire call is
+  // `upload_attachments` (`outbox.ts`), which `hub_verdicts.generated.json`
+  // lists under `same_in_both` — this desktop's own scp onto the OWNER's
+  // host with no hub in the path, the same unrevocable channel as
+  // TerminalView's drop handler and `pty_open` (spec §4.3 invariant 4). The
+  // outbox uploads BEFORE it calls the routed `send_prompt`, so a composer
+  // left open to a watcher would land the file in the owner's worktree and
+  // only then be refused the prompt. Hence every attach origin is gated
+  // below, not just Send.
+  //
+  // `send_prompt` is the action to ask about: it is `drive` in
+  // `share.ts::SESSION_TIER`, so a `drive` grantee keeps the whole composer
+  // and a `watch` grantee loses it.
+  const shareBlocked = $derived($sessionBlocked(session, 'send_prompt'));
+  const writeBlocked = $derived(
+    hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? shareBlocked,
+  );
+  /**
+   * The reply actions' own question, which is a DIFFERENT one: Fork, Rewind
+   * and Retry are `rewind_conversation`, which `share.ts::SESSION_TIER` puts
+   * in the `own` tier — each leaves a permanent verbatim copy of the owner's
+   * transcript behind, and a copy outlives the grant that allowed it. So they
+   * are barred for a `drive` grantee as well, not only a watcher, and asking
+   * `writeBlocked` (a `drive` question) would have let a driver through.
+   *
+   * `ReplyActions` composes the hub half itself; the access half has to be
+   * handed down, because it needs the session ROW and that component is given
+   * only an id, a host and a tmux name.
+   */
+  const rewindShareBlocked = $derived($sessionBlocked(session, 'rewind_conversation'));
+  const rewindBlocked = $derived(
+    hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ?? rewindShareBlocked,
+  );
+  const canSend = $derived(
+    draft.trim().length > 0 && viewing === null && !busyBlocked && writeBlocked === null,
+  );
   // A one-gesture chip send is held while the session is waiting on an
   // answer: a permission or choice prompt (`blocked`) or any stuck screen.
   // What a chip types there lands in the prompt's menu, not in the REPL, and
@@ -1117,7 +1176,9 @@
   let effortSent = $state<Record<number, string>>({});
   const currentModel = $derived(modelShortLabel(session.model));
   const currentEffort = $derived(effortSent[session.id] ?? session.effort_level ?? '');
-  const pickersDisabled = $derived(viewing !== null || busyBlocked);
+  // Each picker sends `/model` or `/effort` through the outbox, so it is a
+  // write like any other.
+  const pickersDisabled = $derived(viewing !== null || busyBlocked || writeBlocked !== null);
   function pickSetting(cmd: 'model' | 'effort', e: Event) {
     const el = e.currentTarget as HTMLSelectElement;
     const line = pickerCommand(cmd, el.value);
@@ -1127,11 +1188,15 @@
     void sendText(line);
   }
   const statusNote = $derived(
-    viewing !== null
-      ? 'Viewing an earlier conversation — go back to current to send.'
-      : chipHeld && chipHold
-        ? 'The session is waiting on an answer, so the chip filled the box instead of sending. Answer it in the terminal, then press Send.'
-        : busyNote,
+    // First: a composer that cannot send at all owes that sentence before any
+    // sentence about the turn in progress.
+    writeBlocked !== null
+      ? writeBlocked
+      : viewing !== null
+        ? 'Viewing an earlier conversation — go back to current to send.'
+        : chipHeld && chipHold
+          ? 'The session is waiting on an answer, so the chip filled the box instead of sending. Answer it in the terminal, then press Send.'
+          : busyNote,
   );
   // The context meter lives in the header; at warn/crit the Compact chip is
   // suggested, since that is the one-click remedy.
@@ -1200,7 +1265,7 @@
     // The same degrade applies while the session waits on an answer (see
     // `chipHold`), on every composer: an auto-send chip must not type into a
     // permission prompt.
-    if (sendNow && !busyBlocked && !chipHold) {
+    if (sendNow && !busyBlocked && !chipHold && writeBlocked === null) {
       void sendText(p.text.trim() || p.text);
       return;
     }
@@ -1231,8 +1296,10 @@
    *
    *  - `key`     — a bare key press (the press_enter chip's `''`). Not a
    *                prompt at all: no prefix, no attachments, nothing pending,
-   *                and never gated, because it is the recovery path OUT of
-   *                the stuck state a gate would be reading.
+   *                and never held by the BUSY gate, because it is the
+   *                recovery path OUT of the stuck state that gate would be
+   *                reading. Access is not a busy state: a key press is a pane
+   *                write, so `writeBlocked` bars it like everything else.
    *  - `command` — a slash command. The REPL reads the line exactly as
    *                typed, so nothing may be glued to its nose.
    *  - `prompt`  — text Claude reads. The only kind the context prefix rides
@@ -1252,6 +1319,9 @@
    *  moment Enter is pressed. */
   async function sendText(text: string, opts: { fromDraft?: boolean } = {}) {
     if (viewing !== null) return;
+    // Before the key branch, not after it: every kind here ends in a pane
+    // write, and the outbox's upload runs ahead of the routed send.
+    if (writeBlocked !== null) return;
     const kind = sendKind(text);
     if (kind === 'key') {
       await sendKey();
@@ -1304,7 +1374,11 @@
    *  bubble, never gated — it is the way out of the stuck state a gate
    *  would be reading. */
   async function sendKey() {
-    if (sending) return;
+    // `writeBlocked` is composed of the hub's half and the access half; the
+    // chip that calls this is disabled by it, and the keyboard path checks it
+    // too — but the write itself is here, so the re-ask is here (multi-user
+    // M1, F2b). A bare Enter into the pane is `send_prompt`, `drive`.
+    if (sending || writeBlocked !== null) return;
     sending = true;
     sendError = null;
     const id = session.id;
@@ -1499,7 +1573,9 @@
    *  and neither can clear the other's state. */
   let dragOverShell = $state(false);
   let shellEl = $state<HTMLDivElement | null>(null);
-  const dragging = $derived(dragDepth > 0 || dragOverShell);
+  // `shareBlocked`, not `writeBlocked`: staging a file is local, and an
+  // offline hub link is no reason to refuse the drop (see the gate above).
+  const dragging = $derived(shareBlocked === null && (dragDepth > 0 || dragOverShell));
 
   /**
    * Every sentence the composer owes the user about attaching: the
@@ -1520,6 +1596,12 @@
   }
 
   async function attach(picked: PickedFile[]) {
+    // The one place the access gate has to hold for attachments: the OS
+    // picker, Tauri's drop and a paste all funnel through here. A file
+    // accepted into the tray is a file `outbox.ts` scps onto the owner's host
+    // with `upload_attachments` — no hub in the path — the moment anything is
+    // sent, so this is the gate, not the Send button (see `writeBlocked`).
+    if (shareBlocked !== null) return;
     const { next, rejected } = addFiles(attachments, picked);
     // Appended, not replaced: two gestures that each rejected a file owe the
     // user two sentences. `attachNotes` dedupes, so a repeat says it once,
@@ -1559,6 +1641,9 @@
   }
 
   async function pickFiles() {
+    // The button is disabled; this is the keyboard/programmatic path, kept
+    // from opening a native dialog whose result `attach` would then drop.
+    if (shareBlocked !== null) return;
     const r = await invokeCmd<PickedFile[]>('pick_attachments', {});
     if (r.ok) await attach(r.value ?? []);
     else attachErrors = [r.error.message];
@@ -1622,6 +1707,9 @@
 
   function onDroppedPaths(paths: string[]) {
     if (paths.length === 0) return;
+    // Ahead of `attachment_describe`: no veil was drawn for this drop (see
+    // `dragging`), so nothing should measure the files either.
+    if (shareBlocked !== null) return;
     // These paths are already on the Rust allow-list — `lib.rs` recorded them
     // from this very event before the webview heard about it.
     const real = paths.filter((p) => p !== '');
@@ -1669,6 +1757,10 @@
   function onComposerPaste(e: ClipboardEvent) {
     const dt = e.clipboardData;
     if (!dt || dt.files.length === 0) return;
+    // A file paste is an attach by another gesture. Returning before
+    // `preventDefault` leaves the event alone, which is right: the box is
+    // disabled in this state and a file paste puts no text in it anyway.
+    if (shareBlocked !== null) return;
     // A rich-text paste carries both; the text half wins.
     if (dt.getData('text/plain').trim().length > 0) return;
     e.preventDefault();
@@ -1733,6 +1825,10 @@
   let forkOpen = $state(false);
 
   function openForkSheet(anchor: string | null) {
+    // The sheet itself calls `rewind_conversation` (mode `fork`), so the gate
+    // belongs in front of it too and not only on the button that opens it: a
+    // sheet left open across a revoke would still have a live Fork in it.
+    if (rewindBlocked !== null) return;
     forkAnchor = anchor;
     forkOpen = true;
   }
@@ -2035,6 +2131,7 @@
                           hostAlias={session.host_alias}
                           tmuxName={session.tmux_name}
                           supported={viewing === null}
+                          accessBlocked={rewindShareBlocked}
                           onFork={(anchor) => openForkSheet(anchor)}
                         />
                       </div>
@@ -2077,7 +2174,22 @@
                 {#if m.state === 'failed'}
                   <span class="receipt-actions">
                     {#if m.retryable}
-                      <button type="button" class="linkish" data-testid="conv-outgoing-retry" onclick={() => outbox.retry(session.id, m.id)}>Retry</button>
+                      <!-- Retry re-sends through the outbox, which is
+                           `send_prompt`, so it needs the same gate as the
+                           composer (multi-user M1, F2a): a drive→watch narrow
+                           with a failed message still in the outbox is exactly
+                           the state that reaches this button. Edit and Discard
+                           are local-only — one puts the text back in this
+                           client's composer, the other drops this client's own
+                           queue entry — so they stay live. -->
+                      <button
+                        type="button"
+                        class="linkish"
+                        data-testid="conv-outgoing-retry"
+                        disabled={writeBlocked !== null}
+                        title={writeBlocked ?? ''}
+                        onclick={() => writeBlocked === null && outbox.retry(session.id, m.id)}
+                        >Retry</button>
                     {/if}
                     <button type="button" class="linkish" data-testid="conv-outgoing-edit" onclick={() => editOutgoing(m.id)}>Edit</button>
                     <button type="button" class="linkish" data-testid="conv-outgoing-discard" onclick={() => outbox.discard(session.id, m.id)}>Discard</button>
@@ -2088,7 +2200,14 @@
           {/each}
         {/if}
         {#if viewing === null}
-        {#if answerView}
+        {#if answerView && writeBlocked === null}
+          <!-- Hidden rather than disabled when this client may not write to
+               the session (multi-user M1), the same shape `SessionRowItem`
+               uses for the same card: it is a set of answer BUTTONS, each one
+               a pane write, and a watcher pressing one would only earn an
+               E_FORBIDDEN. The two surfaces rendered the same card with
+               different gating until this; the `blocked` notice below (and the
+               row's status chip) still says the session is waiting. -->
           <AnswerPrompt {session} view={answerView} {onOpenTerminal} />
         {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
@@ -2212,8 +2331,8 @@
             type="button"
             class="btn btn--chip btn--warn"
             data-testid="conv-chip-enter"
-            title="The session is waiting on a key press. Sends a bare Enter."
-            disabled={sending || viewing !== null}
+            title={writeBlocked ?? 'The session is waiting on a key press. Sends a bare Enter.'}
+            disabled={sending || viewing !== null || writeBlocked !== null}
             onclick={() => void sendText('')}>⏎ Press Enter</button>
         </div>
       {/if}
@@ -2234,7 +2353,7 @@
                 ? 'Click sends now; Shift+click fills the box.'
                 : 'Click fills the box; Shift+click sends now.'}`}
               aria-label={p.auto_send ? `${p.label}, sends immediately` : undefined}
-              disabled={viewing !== null}
+              disabled={viewing !== null || shareBlocked !== null}
               onclick={(e) => usePreset(p, presetSendsNow(p, e.shiftKey))}
               >{p.label}{#if p.auto_send}<span class="chip-send" aria-hidden="true">&nbsp;↵</span>{/if}</button
             >
@@ -2307,7 +2426,8 @@
           use:autoGrow={draft}
           onpaste={onComposerPaste}
           placeholder="Send a prompt…"
-          disabled={viewing !== null}
+          title={shareBlocked ?? undefined}
+          disabled={viewing !== null || shareBlocked !== null}
         ></textarea>
         <div class="composer-actions">
           <button
@@ -2315,7 +2435,8 @@
             class="btn btn--icon btn--quiet"
             data-testid="conv-attach-button"
             aria-label="Attach files"
-            title="Attach files"
+            title={shareBlocked ?? 'Attach files'}
+            disabled={shareBlocked !== null}
             onclick={pickFiles}>⌾</button>
           <select
             class="composer-pick"
@@ -2351,7 +2472,7 @@
             class="btn btn--icon btn--primary composer-send"
             data-testid="conv-composer-send"
             aria-label="Send prompt"
-            title="Send (Enter)"
+            title={writeBlocked ?? 'Send (Enter)'}
             aria-keyshortcuts="Enter"
             disabled={!canSend}>↑</button>
         </div>

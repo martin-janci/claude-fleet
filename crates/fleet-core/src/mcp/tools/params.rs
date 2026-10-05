@@ -861,6 +861,13 @@ pub struct RepairSessionParams {
 // --- asset catalog ---------------------------------------------------------
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListAssetsParams {
+    /// Every catalog, not only personal (master/unbound full only).
+    #[serde(default)]
+    pub all_catalogs: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ScanAssetsParams {
     /// Only this host; omit for every reachable one.
     #[serde(default)]
@@ -927,6 +934,9 @@ pub struct PairClientParams {
     /// Bind to this org: it reads only that org's and unassigned work.
     #[serde(default)]
     pub org_id: Option<i64>,
+    /// Whose device it is. Default: this hub's owner.
+    #[serde(default)]
+    pub person: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1056,7 +1066,7 @@ pub struct CatalogAdminParams {
     /// apply_sync|last_sync|list_secrets|set_secret|delete_secret|
     /// list_layers|resolve_preview|propose_layers|set_host_layers|set_host_harnesses|
     /// layer_template|write_layer|delete_layer|list_catalogs|add_catalog|
-    /// remove_catalog|admit_catalog|unadmit_catalog
+    /// remove_catalog|admit_catalog|unadmit_catalog|asset_history
     pub action: String,
     /// The desktop command's own argument object.
     #[serde(default)]
@@ -1120,4 +1130,47 @@ pub struct UpdateAdminParams {
 pub struct RemoveDownloadParams {
     /// The download's id (`list_downloads`).
     pub id: i64,
+}
+
+// --- sharing a session (multi-user M1, T12) --------------------------------
+//
+// **Every one of these addresses the session by ROW ID and by nothing else.**
+// No `host_alias` + `tmux_name` fallback, which every other session-addressed
+// tool offers: that pair is REUSABLE — a killed session's tmux name is taken
+// by the next one started on that host — so a share or a claim resolved by
+// name could be written against a different session than the one the caller
+// read. An id names one row for the life of the row.
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionShareParams {
+    /// The session to share, by fleet row id.
+    pub session_id: i64,
+    /// Who to share it with, by person name (`fleet-hub pair --person`).
+    pub person: String,
+    /// watch (read it) or drive (also prompt it). Nothing else — "own" is
+    /// not a grantable level.
+    pub level: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionGrantParams {
+    /// The session, by fleet row id.
+    pub session_id: i64,
+    /// Whose grant, by person name.
+    pub person: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionAccessParams {
+    /// The session, by fleet row id.
+    pub session_id: i64,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct SessionClaimParams {
+    /// The session to claim, by fleet row id (`fleet-hub session unclaimed`
+    /// counts them per host).
+    pub session_id: i64,
+    /// Whose it becomes, by person name. The person must already exist.
+    pub person: String,
 }

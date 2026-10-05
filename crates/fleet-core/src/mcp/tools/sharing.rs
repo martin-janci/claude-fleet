@@ -1,0 +1,222 @@
+//! MCP tools: sharing a session, reading who holds what, and claiming an
+//! unclaimed row (multi-user M1, T12).
+//!
+//! Six tools, two audiences, and the split is the design:
+//!
+//! * the five sharing surfaces answer a PERSON's device (and the master).
+//!   They are `Access::Client` so a paired device passes the central gate,
+//!   and every one of them is in `guard::NOT_FOR_HOST_TOKENS` — a per-host
+//!   token proves no person, so it can never be an owner or a grantee and a
+//!   definition it could never use would cost every host's Claude request
+//!   bytes;
+//! * `session_claim` answers a per-host token and nothing else
+//!   (`Access::HostToken`, the one row of that variant). The operator's own
+//!   claim is `fleet-hub session claim`, which writes through `state.db` on
+//!   the hub machine.
+//!
+//! **Every tool here addresses its session by ROW ID only.** The
+//! `host_alias` + `tmux_name` fallback every other session tool offers is
+//! deliberately absent: that pair is reusable — the next session started on
+//! a host can take a dead one's tmux name — so a grant or a claim resolved by
+//! name could land on a different row than the one the caller read. See the
+//! comment above the param structs in `params.rs`.
+//!
+//! **Where the owner-only rule is enforced, twice.** `Reach::Own` in each
+//! handler, so a caller who is not the owner is refused by the one gate every
+//! session-addressed tool passes through (and a caller who cannot see the row
+//! at all gets `E_NOTFOUND`, not a refusal that tells them it exists); and
+//! again inside the store's own statements, whose `WHERE` carries
+//! `sessions.owner_person_id = ?granter`. The two are the same rule at the
+//! two layers that each need it (spec §4.3), not a duplication to collapse.
+
+use super::*;
+use crate::ipc_error::lock;
+
+#[tool_router(router = sharing_router, vis = "pub(super)")]
+impl FleetTools {
+    #[tool(description = "Share a session you OWN with one person at watch \
+        (read it) or drive (also prompt it). Owner only — a grantee cannot \
+        share on — and there is no org recipient and no 'own' level. Sharing \
+        never gives a terminal. Returns the session row. \
+        Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.")]
+    pub(super) async fn session_share(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionShareParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_share",
+            &format!(
+                "session_id={} person={:?} level={:?}",
+                p.session_id, p.person, p.level
+            ),
+        );
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        // `Reach::Own`: re-sharing is the `own` tier (spec §4.3 invariant 5),
+        // which is where "a grantee cannot grant on" is enforced — a `drive`
+        // grantee reaches `may_drive` and never `may_own`.
+        resolve_row_and_gate(
+            &s,
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Own,
+            "the session to share",
+        )?;
+        let granter = super::fleet::owner_for(&caller, &s);
+        let row = sessions::share_session(&s, p.session_id, &p.person, &p.level, granter)
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Revoke one person's grant on your session (owner \
+        only); the row is kept, revoked, for the audit trail. Returns the \
+        session row. Errors: E_NOTFOUND, E_FORBIDDEN.")]
+    pub(super) async fn session_unshare(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionGrantParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_unshare",
+            &format!("session_id={} person={:?}", p.session_id, p.person),
+        );
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        resolve_row_and_gate(
+            &s,
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Own,
+            "the session to unshare",
+        )?;
+        let granter = super::fleet::owner_for(&caller, &s);
+        let row =
+            sessions::unshare_session(&s, p.session_id, &p.person, granter).map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Lower one person's grant on your session from \
+        drive to watch (owner only). Nothing raises a grant: widen by \
+        revoking and sharing again. Returns the session row. \
+        Errors: E_NOTFOUND, E_FORBIDDEN.")]
+    pub(super) async fn session_narrow(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionGrantParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_narrow",
+            &format!("session_id={} person={:?}", p.session_id, p.person),
+        );
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        resolve_row_and_gate(
+            &s,
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Own,
+            "the session to narrow a grant on",
+        )?;
+        let granter = super::fleet::owner_for(&caller, &s);
+        let row = sessions::narrow_session_share(&s, p.session_id, &p.person, granter)
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "Who holds a live grant on your session: person, \
+        level, who granted it and when. Owner only — the list names other \
+        people, so a grantee is not told. Errors: E_NOTFOUND, E_FORBIDDEN.")]
+    pub(super) async fn session_access(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionAccessParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("session_access", &format!("session_id={}", p.session_id));
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        // `Own` and not `Read`, though this is a read: the answer names OTHER
+        // PEOPLE who hold a grant, which is not part of what a `watch` grant
+        // promised and not the grantee's to learn. `readonly: true` in
+        // `TOOL_POLICIES` answers the different question of whether a
+        // readonly TOKEN may call it at all.
+        resolve_row_and_gate(
+            &s,
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Own,
+            "the session whose grants to read",
+        )?;
+        let grants = sessions::session_access(&s, p.session_id).map_err(to_mcp_err)?;
+        ok_json_compact(&grants)
+    }
+
+    #[tool(description = "Who you are on this fleet and every live grant TO \
+        you: { person_id, grants: [{ session_id, level }] }. With each row's \
+        owner_person_id and visibility, this is what a client derives its \
+        access from. Re-read after a reconnect the hub could not replay.")]
+    pub(super) async fn my_grants(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("my_grants", "");
+        let s = lock(self.reader()).map_err(to_mcp_err)?;
+        // The caller's own person and nothing else: a device carries it on
+        // the connection, and the master's is the hub's personal owner (one
+        // mapping, in `owner_for`). `None` — a device no pairing bound, a hub
+        // that cannot say whose it is — answers an EMPTY list, never every
+        // grant.
+        let who = super::fleet::owner_for(&caller, &s);
+        let answer = sessions::my_grants(&s, who).map_err(to_mcp_err)?;
+        ok_json(&answer)
+    }
+
+    #[tool(description = "Claim the unclaimed session THIS pane is in for a \
+        person: it becomes theirs and private. Only the session whose active \
+        pane this request's X-Fleet-Pane header names — being on the same \
+        host is not enough. Errors: E_NOTFOUND, E_INVALID_STATE (no pane of \
+        it proven), E_FORBIDDEN (another session's pane), E_EXISTS (owned).")]
+    pub(super) async fn session_claim(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionClaimParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_claim",
+            &format!("session_id={} person={:?}", p.session_id, p.person),
+        );
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        // `Reach::Read` is the only reach that can stand here, and the reason
+        // is worth writing down: `may_own` is false for a per-host token
+        // whatever it proves (the pane says "I am standing in this session",
+        // never "this session is mine"), so `Reach::Own` would refuse the one
+        // caller this tool exists for. What authorises the WRITE is not the
+        // reach at all — it is `claim::claim_session`'s pane check plus the
+        // row being unowned, both below.
+        //
+        // The gate is still load-bearing: it applies `require_host` and the
+        // org boundary, and it answers `E_NOTFOUND` for a row this token may
+        // not see — which is what keeps the refusals below from being an
+        // existence oracle over another person's private sessions.
+        resolve_row_and_gate(
+            &s,
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session to claim",
+        )?;
+        // Built off the SAME handle the row came from: a scope read through
+        // the other one races the reconcile pass that rewrites
+        // `tmux_pane_id`, which is the pane this is about to trust.
+        let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
+        let row = sessions::claim_session(&s, p.session_id, &p.person, &scope, &caller.label())
+            .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+}

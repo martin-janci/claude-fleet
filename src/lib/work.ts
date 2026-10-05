@@ -626,6 +626,88 @@ export async function workResumePlan(key: string, opts: ResumePlanOpts = {}): Pr
   return r;
 }
 
+/**
+ * The conversation ids an ended link's snapshot names.
+ *
+ * `snap_claude_ids` is written by SQLite's `json_group_array` over the session's
+ * conversations (migration 046, and `store/work_detect.rs` on every re-snap), so
+ * it is a JSON array of strings on the wire. Anything this build cannot parse
+ * names NOTHING rather than something: the only caller uses the answer to
+ * CONFIRM an identity, so an empty list fails closed.
+ */
+function snapClaudeIds(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const v: unknown = JSON.parse(raw);
+    if (!Array.isArray(v)) return [];
+    return v.filter((x): x is string => typeof x === 'string' && x !== '');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The session an ended link came from — or `null` when this client cannot
+ * identify it, which is not the same as "there is none".
+ *
+ * Multi-user M1 (F2c). `resume_work` is `share.ts`'s `own` tier: it re-opens a
+ * past session's conversation, and the question "whose?" is about that SOURCE
+ * session. `WorkLink` names no `session_id` (the link rows predate the
+ * question), so the row has to be found from the snapshot it does carry.
+ *
+ * ── Why a name match is not an identity (F2d) ──────────────────────────────
+ *
+ * F2c matched on `snap_host` + `snap_tmux` alone. A tmux name is NOT a session
+ * identity over time: this repo's own reconcile logic treats a lost row's name
+ * as reusable, so `(host, tmux)` can name a row today that merely INHERITED the
+ * pane name from the session the link came from. Resolving to it answers the
+ * access question about the wrong row — and in the direction that matters, since
+ * the inheriting row is typically the one the current person just started, so an
+ * `own` answer would be handed out for somebody else's transcript.
+ *
+ * Two rows can hold one `(host, tmux)` at once as well (a lost row plus the live
+ * one that reused its name), and `find` would silently take whichever came
+ * first in the list.
+ *
+ * So the match has to be CORROBORATED, and the link carries the one thing that
+ * does it: `snap_claude_ids`, the conversation ids the session had when the link
+ * ended. A Claude conversation id is a uuid, so a row whose current
+ * `claude_session_id` is one of them is the same session and not a namesake.
+ * Three refusals, all answering `null`:
+ *
+ *   1. more than one row holds the name — ambiguous, so unidentifiable;
+ *   2. the snapshot names no conversation (an older hub, or a session that
+ *      never ran one) — nothing to corroborate with;
+ *   3. the row's conversation is not among them — either a namesake, or the
+ *      same session long since moved on by a `/clear`.
+ *
+ * (3) is the price: a live session that started a new conversation after the
+ * link ended stops being identifiable from the link, so a paired desktop loses
+ * Resume on it. That is the fail-closed direction and the undo is the backend's
+ * — the plan's T7 handoff asks for the link to carry its session (or its owner)
+ * — not a wider match here.
+ *
+ * `null` is NOT "nothing to check" either: the hub fences rows this client may
+ * not see off the stream, so an unresolvable link is one whose owner we cannot
+ * vouch for. `share.ts::sessionIdActionBlocked` reads it that way and fails
+ * closed on a paired desktop, while answering `null` on a standalone one, where
+ * the master owns every row.
+ */
+export function linkSessionId(
+  link: Pick<WorkLink, 'snap_host' | 'snap_tmux' | 'snap_claude_ids'> | null | undefined,
+  rows: readonly Pick<SessionRow, 'id' | 'host_alias' | 'tmux_name' | 'claude_session_id'>[],
+): number | null {
+  const host = link?.snap_host;
+  const tmux = link?.snap_tmux;
+  if (!host || !tmux) return null;
+  const named = rows.filter((r) => r.host_alias === host && r.tmux_name === tmux);
+  if (named.length !== 1) return null;
+  const row = named[0];
+  const conv = row.claude_session_id;
+  if (!conv) return null;
+  return snapClaudeIds(link?.snap_claude_ids).includes(conv) ? row.id : null;
+}
+
 export interface ResumeWorkArgs {
   key: string;
   mode: 'last' | 'brief' | 'fresh';

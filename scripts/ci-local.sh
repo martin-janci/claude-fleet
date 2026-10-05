@@ -26,8 +26,9 @@
 #                  build with neither the Tauri libs nor fleet-core)
 #                  scripts/release-update-scripts-test.sh (same job; skipped
 #                  without minisign)
-#                  On a box without the Tauri system libs (no gtk+-3.0 via
-#                  pkg-config), --rust-only instead runs a headless subset:
+#                  On Linux without the Tauri system libs (no gtk+-3.0 via
+#                  pkg-config; macOS and Windows need none), it runs a
+#                  headless subset instead:
 #                  fmt, clippy/test/build scoped to fleet-core, fleet-hub,
 #                  fleet-proto and fleet-agent, and cargo deny check.
 #   frontend job:  pnpm install --frozen-lockfile
@@ -131,7 +132,7 @@ run_rust() {
     echo "ci-local: cargo-deny is not installed; run: cargo install cargo-deny --locked" >&2
     exit 1
   fi
-  if ! pkg-config --exists gtk+-3.0 2>/dev/null; then
+  if [[ "$(uname -s)" == Linux ]] && ! pkg-config --exists gtk+-3.0 2>/dev/null; then
     echo "ci-local: no Tauri system libs (gtk+-3.0); running the headless subset only" >&2
     step cargo fmt --all --check
     step cargo clippy -p fleet-core -p fleet-hub -p fleet-proto -p fleet-agent -p fleet-update --all-targets -- -D warnings
@@ -218,6 +219,13 @@ step release_assets_smoke
 # The hub deploy scripts (backup.sh / upgrade.sh) against a fake docker:
 # bash + sqlite3 only, a few seconds.
 step bash scripts/hub-deploy-scripts-test.sh
+
+# scripts/verify.sh's plan (which checks a set of changed files selects),
+# dry runs only: about a second.
+step bash scripts/verify-test.sh
+
+# scripts/buildkite-verify.sh against a fake Buildkite API: a few seconds.
+step bash scripts/buildkite-verify-test.sh
 
 # tools/ag (the agent launcher) against fake claude/codex binaries. bash +
 # a few seconds; see .github/workflows/ci.yml's ag job for the matching

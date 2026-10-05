@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
-use crate::service::tasks::PaneProbe as _;
+use crate::service::tasks::{AccessRecheck as _, PaneProbe as _};
 
 #[tool_router(router = orchestration_router, vis = "pub(super)")]
 impl FleetTools {
@@ -26,10 +26,27 @@ impl FleetTools {
                 p.session_id, p.until, p.turn, p.timeout_s
             ),
         );
-        let row =
-            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        // `watch`: a bounded wait reports the row's status and turn count
+        // and writes nothing.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session",
+        )?;
         let _permit = self.long_poll_permit(&caller, "wait_for_session")?;
         let cond = tasks::WaitCond::parse(&p.until, p.turn).map_err(to_mcp_err)?;
+        // T11: this wait can sit for ten minutes, so the gate above is not
+        // the last word — `recheck` runs it again on every wake and once
+        // more below, before the payload.
+        let recheck = SessionRecheck {
+            caller: &caller,
+            session_id: row.id,
+            reach: Reach::Read,
+            what: "the session",
+        };
         // A stale-demoted row's `idle` is a guess: the wait asks its pane.
         let out = tasks::wait_for_session_probed(
             &self.store,
@@ -42,9 +59,14 @@ impl FleetTools {
                 ssh: &self.ssh,
             },
             tasks::STALE_PANE_PROBE_EVERY,
+            &recheck,
         )
         .await
         .map_err(to_mcp_err)?;
+        // The pane probe above is the one await the wait takes OUTSIDE its
+        // own lock window, so the last wake's re-check is not quite the
+        // last word either. One more, immediately before `ok_json`.
+        self.recheck_now(&recheck)?;
         ok_json(&serde_json::json!({
             "status": if out.satisfied { "satisfied" } else { "timeout" },
             "claude_status": out.row.claude_status,
@@ -72,8 +94,16 @@ impl FleetTools {
                 p.session_id, p.since_turn, p.max_chars, p.fresh_for
             ),
         );
-        let row =
-            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        // `watch`: the transcript is the clearest case of what a watch
+        // grant is FOR (spec §4.3, *What counts as content*).
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session",
+        )?;
 
         // fresh_for absent: today's default, byte-identical, no cursor
         // touched — this branch must stay a straight pass-through.
@@ -241,8 +271,15 @@ impl FleetTools {
                 p.session_id, p.turns, p.since_turn, p.claude_session_id, p.events_limit
             ),
         );
-        let row =
-            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        // `watch`: the transcript, rendered as turns.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session",
+        )?;
         let (turns, max_chars) = transcript::conv_limits(transcript::conv_turns_for(
             p.turns,
             p.since_turn,
@@ -278,8 +315,15 @@ impl FleetTools {
                 p.session_id, p.tool_use_id, p.claude_session_id
             ),
         );
-        let row =
-            self.resolve_target_row(&caller, Some(p.session_id), None, None, "the session")?;
+        // `watch`: one tool call out of the same transcript.
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session",
+        )?;
         let detail = transcript::fetch_tool_detail(
             &self.store,
             &self.ssh,
@@ -312,6 +356,9 @@ impl FleetTools {
             Some(p.session_id),
             None,
             None,
+            // `drive`: `run_prompt` is `send_prompt` plus a wait and a
+            // transcript read, so it cannot be narrower than `send_prompt`.
+            Reach::Drive,
             "the session to prompt",
         )?;
         // A stale-demoted row reads `idle` only because nothing moved; a
@@ -330,6 +377,21 @@ impl FleetTools {
         };
         run_prompt_ready(&row, live.as_deref())?;
         let _permit = self.long_poll_permit(&caller, "run_prompt")?;
+        // T11, and the honest limit of it. `run_prompt` is three acts:
+        // deliver, wait, read the transcript. The LAST TWO are recalled by
+        // a revoke; the first is not. The pane probe above took an await
+        // between the gate and here, so this re-check is what stands
+        // between a share revoked during that probe and a prompt typed
+        // into the owner's session — but once the keys are in the pane
+        // there is no un-sending them, and nothing below pretends there
+        // is (`docs/hub.md` → *A revoked share, precisely*, DoD 6).
+        let recheck = SessionRecheck {
+            caller: &caller,
+            session_id: row.id,
+            reach: Reach::Drive,
+            what: "the session to prompt",
+        };
+        self.recheck_now(&recheck)?;
         let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
         let before = row.turn_seq;
         self.deliver_prompt(&row, prompt, true, false).await?;
@@ -338,9 +400,14 @@ impl FleetTools {
             row.id,
             tasks::WaitCond::TurnGt(before),
             tasks::wait_timeout(p.timeout_s),
+            &recheck,
         )
         .await
         .map_err(to_mcp_err)?;
+        // Before the transcript is even READ, let alone returned: the
+        // reply to a prompt this caller may no longer drive is content it
+        // may no longer have.
+        self.recheck_now(&recheck)?;
         let (transcript, transcript_error) = match self
             .transcript_for(&out.row, Some(before), p.max_chars)
             .await
@@ -392,13 +459,58 @@ impl FleetTools {
         }
         // The requester (when given) must exist and, for a per-host caller,
         // live on that host — otherwise any agent could file tasks as anyone.
-        if let Some(req) = p.requester_session_id {
-            self.resolve_target_row(&caller, Some(req), None, None, "requester_session_id")?;
-        }
+        // Its OWNER is kept (multi-user M1, T5): a worker spawned for a task
+        // does the requester's work in the requester's name, so the row
+        // belongs to whoever owns the requesting session — not to the per-host
+        // token that asked, which is a machine and owns nothing.
+        let requester_owner = match p.requester_session_id {
+            Some(req) => {
+                self.resolve_target_row(
+                    &caller,
+                    Some(req),
+                    None,
+                    None,
+                    // `drive` on the REQUESTER, not `watch`. Naming a
+                    // session as requester WRITES to it three ways: a
+                    // `tasks` row bound to it, a `task_done` row on its
+                    // timeline, and — on the worker's next Stop — an INBOX
+                    // MESSAGE whose body came out of the worker
+                    // (`service::tasks::complete_task`). With `new_worker`
+                    // it also decides whose the new session is: the worker
+                    // inherits the requester's `owner_person_id` below, so a
+                    // watcher could otherwise start a session owned by the
+                    // grantor, on a host the watcher picked, running the
+                    // watcher's prompt and spending the grantor's AI account.
+                    //
+                    // T7's mechanical rule — anything that writes to a pane,
+                    // a row, a task or a tmux server is `Drive` — and what
+                    // `share.ts` already says (`dispatch_task: 'drive'`).
+                    // Writing a message body into another person's inbox is
+                    // exactly what `require_message_recipient`'s `Drive`
+                    // exists to refuse; this is the same write by another
+                    // route. The agent inside the requesting session keeps
+                    // reaching it: a per-host token `may_drive` the one row
+                    // its pane proves (§4.4 clause 2).
+                    Reach::Drive,
+                    "requester_session_id",
+                )?
+                .owner_person_id
+            }
+            None => None,
+        };
         // Resolve or spawn the worker.
         let (worker, spawned) = match (p.worker_session_id, p.new_worker) {
             (Some(id), _) => (
-                self.resolve_target_row(&caller, Some(id), None, None, "the worker session")?,
+                self.resolve_target_row(
+                    &caller,
+                    Some(id),
+                    None,
+                    None,
+                    // `drive`: a dispatch makes the worker's machine do
+                    // work — a prompt into its pane, by way of a task row.
+                    Reach::Drive,
+                    "the worker session",
+                )?,
                 false,
             ),
             (None, Some(spec)) => {
@@ -432,6 +544,16 @@ impl FleetTools {
                         resume_claude_session_id: None,
                         model: None,
                         effort: None,
+                        // The requester's owner (above), else this
+                        // connection's own person. A dispatch with no
+                        // requester is somebody asking fleet directly, so it
+                        // is theirs; a per-host token resolves to neither and
+                        // the worker lands `unclaimed`.
+                        owner_person_id: requester_owner.or_else(|| {
+                            lock(self.reader())
+                                .ok()
+                                .and_then(|s| super::fleet::owner_for(&caller, &s))
+                        }),
                     },
                     &self.store,
                     &self.ssh,
@@ -496,13 +618,34 @@ impl FleetTools {
             "wait_for_task",
             &format!("task_id={} timeout_s={:?}", p.task_id, p.timeout_s),
         );
+        // The visibility check comes FIRST, and the permit second. This is
+        // the only long poll where the order mattered: a caller who may not
+        // see the task was burning one of its
+        // `guard::MAX_LONG_POLLS_PER_CALLER` slots on the way to being
+        // refused (multi-user M1, T7). `watch`: the wait reads the task and
+        // its result.
+        let task = self.visible_task(&caller, p.task_id, Reach::Read)?;
         let _permit = self.long_poll_permit(&caller, "wait_for_task")?;
-        let task = self.visible_task(&caller, p.task_id)?;
-        let out = tasks::wait_for_task(&self.store, task.id, tasks::wait_timeout(p.timeout_s))
-            .await
-            .map_err(to_mcp_err)?;
+        // T11: re-checked on every wake and once more below. `task.result`
+        // is the worker's own paragraph, so a share revoked on either of
+        // the task's sessions must end the wait, not complete it.
+        let recheck = TaskRecheck {
+            caller: &caller,
+            task_id: task.id,
+            reach: Reach::Read,
+        };
+        let out = tasks::wait_for_task(
+            &self.store,
+            task.id,
+            tasks::wait_timeout(p.timeout_s),
+            &recheck,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         let row = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
+            // Same lock window as the row that is about to be returned.
+            recheck.check(&s).map_err(to_mcp_err)?;
             tasks::mark_task_result(&s, out.row)
         };
         ok_json(&serde_json::json!({
@@ -526,12 +669,22 @@ impl FleetTools {
                 p.requester_session_id, p.state, p.limit
             ),
         );
+        // A `TaskRow` carries the `prompt` one session sent another and
+        // the `result` that came back: session content, so the page is cut
+        // against the caller's own view scope and not against its host
+        // alias alone (multi-user M1, T7). The host filter stays where it
+        // was — in SQL — and composes with it.
+        let view = {
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            caller.view_scope(&s).map_err(to_mcp_err)?
+        };
         let rows = tasks::list_tasks_for(
             &self.store,
             p.requester_session_id,
             p.state.as_deref(),
             p.limit.unwrap_or(50),
             caller.host_alias.as_deref(),
+            &view,
         )
         .map_err(to_mcp_err)?;
         let rows: Vec<crate::store::TaskRow> = {
@@ -554,7 +707,10 @@ impl FleetTools {
         Parameters(p): Parameters<CancelTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         audit("cancel_task", &format!("task_id={}", p.task_id));
-        let task = self.visible_task(&caller, p.task_id)?;
+        // `drive` on the worker: cancelling stops work on somebody's
+        // machine, which is what a `drive` grant is for and what a `watch`
+        // grant is not.
+        let task = self.visible_task(&caller, p.task_id, Reach::Drive)?;
         self.confirm_gate(
             "cancel_task",
             p.confirm_nonce.as_deref(),
@@ -587,6 +743,9 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.tmux_name.as_deref(),
+            // `own`: the spec's invariant names `set_session_tags` beside
+            // `rename_session` — a label on somebody's row is content.
+            Reach::Own,
             "the session to tag",
         )?;
         let tags = normalize_tags(p.tags)?;
@@ -622,21 +781,44 @@ impl FleetTools {
         // The one scope every action below runs under (work graph M5):
         // `All` for the master and clients, the host's org boundary for a
         // per-host token. The service functions filter with it.
-        let scope = self.org_scope(&caller)?;
+        //
+        // Multi-user M1 (T7): the org half alone cannot tell two people on
+        // one hub apart, so the arms that answer a PAGE of session-derived
+        // rows — `today`, `tree`, `task`, `review`, `context`, `resume_plan`,
+        // `tidy` — take the WHOLE scope (`view_scope`), which carries this
+        // one as `.org`. Everything else keeps the org scope, either because
+        // it names one row and is gated per row, or because it answers no
+        // session at all (both tables in
+        // `tests::every_session_addressed_tool_declares_its_reach`).
+        let view_scope = self.view_scope(&caller)?;
+        let scope = view_scope.org.clone();
         match args.parsed_action().map_err(to_mcp_err)? {
             WorkAction::Links => {
                 if let Some(id) = args.session_id {
-                    self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
+                    // `watch`: `work { links }` reads one session's links.
+                    self.resolve_target_row(
+                        &caller,
+                        Some(id),
+                        None,
+                        None,
+                        Reach::Read,
+                        "the session",
+                    )?;
                 }
-                ok_json_compact(&w::work(&args, &self.store, &scope).map_err(to_mcp_err)?)
+                // And the TWO OTHER forms of the same arm — `{ key }` and no
+                // argument at all — answer a PAGE of links, so they take the
+                // whole `view_scope` like every other page below (T8d). The
+                // per-row gate above cannot cover them: neither names a
+                // session.
+                ok_json_compact(&w::work(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
             }
             WorkAction::Context => ok_json(
-                &w::work_context(&args, &self.store, &self.ssh, &scope)
+                &w::work_context(&args, &self.store, &self.ssh, &view_scope)
                     .await
                     .map_err(to_mcp_err)?,
             ),
             WorkAction::ResumePlan => ok_json_compact(
-                &w::work_resume_plan(&args, &self.store, &self.ssh, &scope)
+                &w::work_resume_plan(&args, &self.store, &self.ssh, &view_scope)
                     .await
                     .map_err(to_mcp_err)?,
             ),
@@ -650,7 +832,7 @@ impl FleetTools {
                     args.view.as_deref(),
                     args.query.as_deref(),
                     args.limit,
-                    &scope,
+                    &view_scope,
                 )
                 .map_err(to_mcp_err)?;
                 ok_json_compact(&rows)
@@ -660,7 +842,7 @@ impl FleetTools {
                 let t = crate::service::trackers::tickets::lookup(
                     &self.store,
                     reference,
-                    &scope,
+                    &view_scope,
                     &crate::service::trackers::default_net(),
                 )
                 .await
@@ -672,17 +854,22 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             ),
             WorkAction::Scopes => ok_json_compact(
-                &crate::service::orgs::scopes(&self.store, &scope).map_err(to_mcp_err)?,
+                &crate::service::orgs::scopes(&self.store, &view_scope).map_err(to_mcp_err)?,
             ),
             WorkAction::OrgSuggestions => ok_json_compact(
-                &crate::service::orgs::org_suggestions(&self.store, &scope).map_err(to_mcp_err)?,
+                &crate::service::orgs::org_suggestions(&self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
             ),
             WorkAction::Orgs => ok_json_compact(
                 &crate::service::orgs::org_details(&self.store, &scope).map_err(to_mcp_err)?,
             ),
             WorkAction::Card => ok_json(
-                &w::card::card(&self.store, args.key.as_deref().unwrap_or_default(), &scope)
-                    .map_err(to_mcp_err)?,
+                &w::card::card(
+                    &self.store,
+                    args.key.as_deref().unwrap_or_default(),
+                    &view_scope,
+                )
+                .map_err(to_mcp_err)?,
             ),
             WorkAction::Describe => {
                 let key = args
@@ -701,21 +888,25 @@ impl FleetTools {
                 )
             }
             WorkAction::Today => ok_json_compact(
-                &w::today::today(&self.store, args.since, &scope).map_err(to_mcp_err)?,
+                &w::today::today(&self.store, args.since, &view_scope).map_err(to_mcp_err)?,
             ),
             WorkAction::Tidy => ok_json_compact(
                 &crate::service::work::tidy::work_tidy(
                     &self.store,
-                    &scope,
+                    &view_scope,
                     crate::service::catalog::now_secs(),
                 )
                 .map_err(to_mcp_err)?,
             ),
+            // Both carry session-DERIVED counts (and `reopened` the host of
+            // one specific past session), so both take the whole scope: the
+            // counts are recomputed over the links this caller may see (T8d).
             WorkAction::Reopened => ok_json_compact(
-                &crate::service::work::tidy::reopened(&self.store, &scope).map_err(to_mcp_err)?,
+                &crate::service::work::tidy::reopened(&self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
             ),
             WorkAction::LocalItems => ok_json_compact(
-                &crate::service::work::local::local_items(&self.store, &scope)
+                &crate::service::work::local::local_items(&self.store, &view_scope)
                     .map_err(to_mcp_err)?,
             ),
             // Work graph M14: the Work view. Its reads build from the read
@@ -723,7 +914,7 @@ impl FleetTools {
             WorkAction::Tree => ok_json_compact(
                 &w::view::tree(
                     self.reader(),
-                    &scope,
+                    &view_scope,
                     &w::view::TreeArgs {
                         filters: args.filters.clone().unwrap_or_default(),
                         cursor: args.cursor.clone(),
@@ -740,20 +931,28 @@ impl FleetTools {
                     .task_id
                     .as_deref()
                     .ok_or_else(|| mcp_err("E_INVALID", "task needs task_id", None))?;
-                ok_json_compact(&w::view::task(self.reader(), &scope, task_id).map_err(to_mcp_err)?)
+                ok_json_compact(
+                    &w::view::task(self.reader(), &view_scope, task_id).map_err(to_mcp_err)?,
+                )
             }
             WorkAction::SessionTasks => {
                 let id = args
                     .session_id
                     .ok_or_else(|| mcp_err("E_INVALID", "session_tasks needs session_id", None))?;
-                self.resolve_target_row(&caller, Some(id), None, None, "the session")?;
+                // `watch`: the Work view's read of one session's tasks.
+                self.resolve_target_row(&caller, Some(id), None, None, Reach::Read, "the session")?;
                 ok_json_compact(
-                    &w::view::session_tasks(self.reader(), &scope, id).map_err(to_mcp_err)?,
+                    &w::view::session_tasks(self.reader(), &view_scope, id).map_err(to_mcp_err)?,
                 )
             }
             WorkAction::Review => ok_json_compact(
-                &w::view::review(self.reader(), &scope, args.cursor.as_deref(), args.limit)
-                    .map_err(to_mcp_err)?,
+                &w::view::review(
+                    self.reader(),
+                    &view_scope,
+                    args.cursor.as_deref(),
+                    args.limit,
+                )
+                .map_err(to_mcp_err)?,
             ),
             WorkAction::Rules => {
                 ok_json_compact(&w::structure::rules(self.reader(), &scope).map_err(to_mcp_err)?)
@@ -775,8 +974,11 @@ impl FleetTools {
                     .task_id
                     .as_deref()
                     .ok_or_else(|| mcp_err("E_INVALID", "org_impact needs task_id", None))?;
+                // A page of `ImpactLink { session_id, name, host }`, so the
+                // whole `view_scope` (T8d): the `is_all()` check inside is the
+                // authority to MOVE an org, never a privacy fence.
                 ok_json_compact(
-                    &w::structure::org_impact(self.reader(), &scope, task_id, args.org_id)
+                    &w::structure::org_impact(self.reader(), &view_scope, task_id, args.org_id)
                         .map_err(to_mcp_err)?,
                 )
             }
@@ -874,12 +1076,31 @@ impl FleetTools {
                     &caller,
                 )?;
             }
+            // Multi-user M1 (T7): whose conversation this is, before the
+            // model call that reads the whole of it. The link is resolved
+            // once, by `summary`'s own function, so the gate and the run
+            // cannot disagree about which conversation is meant; the
+            // confirmation above comes first so that the operator's
+            // approve-then-refuse path keeps answering in that order.
+            // The WHOLE scope (T9c): the link is resolved through
+            // `scope_links_for`, so another person's ended link answers
+            // `no_such_link` here rather than leaking its host and
+            // resumability through a different refusal.
+            let view_scope = self.view_scope(&caller)?;
+            let past = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                crate::service::work::summary::planned_conversation(&s, key, link_id, &view_scope)
+                    .map_err(to_mcp_err)?
+            };
+            self.require_conversation_person(&caller, Some(&past.claude_session_id), || {
+                crate::service::work::summary::no_such_link(&past.key, link_id)
+            })?;
             let out = crate::service::work::summary::summarize(
                 &self.store,
                 self.ssh.as_ref(),
                 key,
                 link_id,
-                &scope,
+                &view_scope,
             )
             .await
             .map_err(to_mcp_err)?;
@@ -891,6 +1112,22 @@ impl FleetTools {
             let sid = args
                 .session_id
                 .ok_or_else(|| mcp_err("E_INVALID", "handover needs session_id", None))?;
+            // `drive`: a handover request TYPES A PROMPT into the session's
+            // pane and waits for the reply — the same pane write
+            // `send_message { deliver, submit }` is, so it takes the same
+            // level (and the desktop's `SESSION_TIER` agrees: F2c put
+            // `request_work_handover` at `drive` for this reason).
+            //
+            // Person-gated WITHOUT the host fence in front, so a session
+            // this caller may not reach answers exactly as an unknown id —
+            // the answer the service fence already gave here, and the one
+            // the isolation matrix compares against an unknown id.
+            self.resolve_row_person_gated(
+                &caller,
+                sid,
+                Reach::Drive,
+                "the session to ask for a handover",
+            )?;
             let row =
                 crate::service::work::agent_handover::request(&self.store, &self.ssh, sid, &scope)
                     .await
@@ -900,13 +1137,47 @@ impl FleetTools {
         if args.action == "resume" {
             // The host fence (a per-host token resumes only onto its own
             // host) and the org fence are inside `resume_work`'s scope.
-            let ra = crate::service::work::resume_args(&args).map_err(to_mcp_err)?;
+            let mut ra = crate::service::work::resume_args(&args).map_err(to_mcp_err)?;
+            // Whose resume this is (multi-user M1, T5): the fallback when the
+            // candidate names no conversation at all. The conversation's own
+            // owner still wins, and the gate below has already refused a
+            // conversation that is not this caller's.
+            ra.owner = {
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
+                super::fleet::owner_for(&caller, &s)
+            };
+            // Multi-user M1 (T7): the PERSON fence, which no scope carries.
+            // A resume replays the candidate's whole transcript into a new
+            // session on its host and answers that row, so it is the `own`
+            // tier and it is checked against the conversation's own owner.
+            // T5's `reject_foreign_conversation` does not reach this path:
+            // `resume_session_args` derives the new row's `owner_person_id`
+            // FROM the conversation, so there it compares a value with
+            // itself. The candidate is chosen exactly as the resume chooses
+            // it (`resume_source` is `plan_resume`), in every mode.
+            let (link_id, cid) = {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                crate::service::work::resume::resume_source(&s, &ra.key, ra.link_id, &scope)
+                    .map_err(to_mcp_err)?
+            };
+            self.require_conversation_person(&caller, cid.as_deref(), || {
+                crate::service::work::resume::no_such_ended_link(
+                    &ra.key,
+                    link_id.unwrap_or_default(),
+                )
+            })?;
+            // The WHOLE scope (T9c), for the words of the two concurrency
+            // refusals: the guards inside plan with `ViewScope::internal()`
+            // so they see every live session on the key, and this is what
+            // decides whether the `E_EXISTS` may name one.
+            let view_scope = self.view_scope(&caller)?;
             let row = crate::service::work::resume::resume_work(
                 &self.store,
                 &self.ssh,
                 &self.reg,
                 &ra,
                 &scope,
+                &view_scope,
             )
             .await
             .map_err(to_mcp_err)?;
@@ -915,6 +1186,9 @@ impl FleetTools {
         if args.action == "trust_project" {
             // Trust is fleet configuration, not one host's (nor one bound
             // client's, M14) to change.
+            // This is the org boundary, not a privacy fence: `trust_project` names no session:
+            // it asks whether this caller may change FLEET configuration, which a per-host token
+            // and an org-bound client may not.
             if caller.is_scoped() {
                 return Err(mcp_err(
                     "E_FORBIDDEN",
@@ -929,6 +1203,8 @@ impl FleetTools {
         if args.action == "dismiss" {
             // Reopened work is fleet-wide, not one host's (nor one bound
             // client's, M14) to dismiss.
+            // This is the org boundary, not a privacy fence: the same fleet-wide configuration
+            // question for `dismiss`.
             if caller.is_scoped() {
                 return Err(mcp_err(
                     "E_FORBIDDEN",
@@ -955,10 +1231,22 @@ impl FleetTools {
             // caller's label.
             let proposer = match args.session_id {
                 Some(sid) => {
-                    let r =
-                        self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
-                    let name = r.friendly_name.unwrap_or(r.tmux_name);
-                    format!("{name} · {}", r.host_alias)
+                    let r = self.resolve_target_row(
+                        &caller,
+                        Some(sid),
+                        None,
+                        None,
+                        // `drive`, like every other `work` action that
+                        // writes a row about one session: the proposal is
+                        // STORED in this session's name, so a caller who
+                        // may only watch it cannot put words in its mouth.
+                        Reach::Drive,
+                        "the session",
+                    )?;
+                    // ONE spelling, shared with the fence that has to
+                    // recognise it again (multi-user M1):
+                    // `work::view::proposer_label`, whose doc says why.
+                    crate::service::work::view::proposer_label(&r)
                 }
                 None => caller.label(),
             };
@@ -967,14 +1255,23 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             );
         }
-        // `reject` without a session, a link or a key is a person's decision
-        // on a proposal; with one it is the link decision below (which
-        // always needs `session_id`).
-        let proposal_reject = args.action == "reject"
-            && args.session_id.is_none()
+        // A proposal decision is `accept` or `reject` with nothing else named;
+        // `reject` WITH a session, a link or a key is the link decision, which
+        // falls through to the shared tail below and takes its `Reach::Drive`.
+        //
+        // Spelled with `matches!` rather than `args.action == "reject"`: that
+        // literal is how `mcp::tools::tests`' `umbrella_arms` finds the ARM
+        // that serves an action, and a bare one in this CONDITION made the
+        // scanner read `reject` as having its own arm — hiding the fact that
+        // its session-addressed shape is gated by the tail, which is the claim
+        // `WORK_ACTION_REACH` and `WORK_LINK_TAIL_ACTIONS` carry for it.
+        // Identical in behaviour: the `if` short-circuits on `accept`, so
+        // widening this binding to cover `accept` changes no outcome.
+        let proposal_decision = args.session_id.is_none()
             && args.link_id.is_none()
-            && args.key.is_none();
-        if args.action == "accept" || proposal_reject {
+            && args.key.is_none()
+            && matches!(args.action.as_str(), "accept" | "reject");
+        if args.action == "accept" || proposal_decision {
             return ok_json(
                 &crate::service::work::local::decide(
                     &args,
@@ -994,13 +1291,48 @@ impl FleetTools {
             // `agent`, never a person's `manual`.
             use crate::service::work::local;
             return match (args.session_id, args.item_id) {
-                (Some(_), None) => ok_json(
-                    &local::name_session_work_as(&args, &self.store, &scope, caller.work_decider())
+                (Some(sid), None) => {
+                    // `drive`: naming work ON a session writes that session's
+                    // work graph — a `manual`/`agent` link, a settled
+                    // suggestion and a row-version bump the owner's sidebar
+                    // re-groups on. The same level as every other
+                    // per-session work write in this handler, and what
+                    // `share.ts` already says (`name_session_work: 'drive'`).
+                    //
+                    // Person-gated WITHOUT the host fence in front, so a
+                    // session this caller may not reach answers exactly as an
+                    // unknown id — the answer `name_session_work_as`'s own
+                    // service fence already gives (multi-user M1, T7).
+                    self.resolve_row_person_gated(
+                        &caller,
+                        sid,
+                        Reach::Drive,
+                        "the session to name work on",
+                    )?;
+                    ok_json(
+                        &local::name_session_work_as(
+                            &args,
+                            &self.store,
+                            &scope,
+                            caller.work_decider(),
+                        )
                         .map_err(to_mcp_err)?,
-                ),
-                (None, Some(_)) => ok_json(
-                    &local::rename_local_item(&args, &self.store, &scope).map_err(to_mcp_err)?,
-                ),
+                    )
+                }
+                (None, Some(item_id)) => {
+                    // The rename half addresses a local work ITEM, not a
+                    // session, and `local_item_visible` fences it by the
+                    // item's links. A local item is reached through the
+                    // sessions linked to it, so every live one of them must be
+                    // this caller's to drive — the same level as the naming
+                    // half, since the title it rewrites is what the owner's
+                    // sidebar shows for their own row.
+                    self.require_drive_on_item_sessions(&caller, item_id)?;
+                    ok_json(
+                        &local::rename_local_item(&args, &self.store, &scope)
+                            .map_err(to_mcp_err)?,
+                    )
+                }
                 _ => Err(mcp_err(
                     "E_INVALID",
                     "name takes exactly one of session_id (name new work) or item_id (rename)",
@@ -1010,7 +1342,7 @@ impl FleetTools {
         }
         if args.action == "set_status" {
             // A person's status for work with no ticket (design
-            // 2026-09-28 §2). The fence is inside `set_status`: an item
+            // 2026-09-28 §2). The ORG fence is inside `set_status`: an item
             // outside the scope answers as an unknown id, and a tracker
             // item is `E_INVALID`, naming the ticket.
             let item_id = args
@@ -1020,13 +1352,82 @@ impl FleetTools {
                 .status
                 .as_deref()
                 .ok_or_else(|| mcp_err("E_INVALID", "set_status needs status", None))?;
+            // And the PERSON fence, which this arm did not have (multi-user
+            // M1, T9d). The org fence inside `set_status` opens with
+            // `if scope.is_all() { return Ok(true) }`, and `OrgScope::All`
+            // is what an ordinary person's own device resolves to — so for
+            // every person on the hub it was a no-op. `work { local_items }`
+            // lists every local item's id by design, so any `full` device
+            // could pick another person's item and set its status, which
+            // `status_set_by = 'person'` makes FINAL over the derived value:
+            // a stranger permanently marking somebody else's live work done.
+            // The same gate and the same level as the rename half above —
+            // the status is what the owner's own sidebar shows for their row.
+            self.require_drive_on_item_sessions(&caller, item_id)?;
             return ok_json(
                 &crate::service::work::status::set_status(&self.store, &scope, item_id, status)
                     .map_err(to_mcp_err)?,
             );
         }
         if args.action == "tidy_apply" {
-            let items = args.items.clone().unwrap_or_default();
+            let mut items = args.items.clone().unwrap_or_default();
+            // The batch's size is the size the CALLER asked for, judged
+            // before the gate below thins it: a batch every item of which
+            // the gate refused is a batch that was asked, and must answer
+            // per item, not `E_INVALID`.
+            crate::service::work::tidy::check_apply_items(items.len()).map_err(to_mcp_err)?;
+            // Multi-user M1 (T7), per item and by the item's own action.
+            //
+            // `kill` and `safe_kill` are the spec's `own` tier —
+            // `kill_session` / `safe_kill_session` are named there, and the
+            // batch form of an operation can never be wider than the
+            // single-session one (F2a took the same decision on the desktop
+            // side, which is why `tidy_apply` is `own` in `SESSION_TIER`).
+            // `archive`, `unarchive`, `snooze`, `never` and `keep` are the
+            // UI-only bookkeeping the standalone `work_link` actions are,
+            // so they take the same `drive` those do: a tier is decided by
+            // what the call DOES, and reading one as `own` because its
+            // siblings are would refuse a driver a snooze.
+            //
+            // A refused item is a refused ITEM, not a refused call: this
+            // batch has always answered per item ("session N not found"),
+            // and failing the whole call would turn one unreachable row
+            // into a tidy-up a person cannot run at all. The gate's own
+            // sentence rides the item's `error`.
+            //
+            // Both run BEFORE the confirmation, so a request that can only
+            // be refused is never put to a person — the same ordering the
+            // multi-repo start above uses.
+            let mut refused: Vec<crate::service::work::tidy::TidyApplyResult> = Vec::new();
+            items.retain(|item| {
+                let reach = match item.action.as_str() {
+                    "kill" | "safe_kill" => Reach::Own,
+                    _ => Reach::Drive,
+                };
+                match self.resolve_row_person_gated(
+                    &caller,
+                    item.session_id,
+                    reach,
+                    "a session to tidy up",
+                ) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        refused.push(crate::service::work::tidy::TidyApplyResult {
+                            session_id: item.session_id,
+                            action: item.action.clone(),
+                            ok: false,
+                            outcome: None,
+                            error: Some(e.message.to_string()),
+                        });
+                        false
+                    }
+                }
+            });
+            if items.is_empty() {
+                // Every item was refused above. The batch still answers,
+                // per item, as it always has.
+                return ok_json(&crate::service::work::tidy::TidyApplyReport { results: refused });
+            }
             let summary = format!(
                 "tidy_apply {}",
                 items
@@ -1051,7 +1452,7 @@ impl FleetTools {
                 store: std::sync::Arc::clone(&self.store),
                 ssh: std::sync::Arc::clone(&self.ssh),
             };
-            let report = crate::service::work::tidy::tidy_apply(
+            let mut report = crate::service::work::tidy::tidy_apply(
                 &self.store,
                 &exec,
                 &items,
@@ -1060,20 +1461,42 @@ impl FleetTools {
             )
             .await
             .map_err(to_mcp_err)?;
+            report.results.extend(refused);
             return ok_json(&report);
         }
         if args.action == "start" {
             // The caller decides whose start it is (D34): an agent's links
             // `agent_started`, never a person's `started`.
+            //
+            // And WHOSE the new session is (multi-user M1, T5): this
+            // connection's own person. Without it `start_one` fell back to
+            // `hub_personal_owner`, so a second person's start created a
+            // private session owned by the HUB's owner — readable by somebody
+            // who did not ask for it, and `null` in the answer to the person
+            // who did, because T8 drops a row the caller may not see.
+            let owner = {
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
+                super::fleet::owner_for(&caller, &s)
+            };
+            // The whole scope, for the two things a start does that reach an
+            // EXISTING row (multi-user M1, T9b): its `E_EXISTS` prose names
+            // the session already on the key, and the branch slug it plans
+            // can resolve to a checkout somebody else's session is working
+            // in, where the new pane would land. Both are fenced inside
+            // `tickets::plan_resolved` — the landing one by
+            // `service::sessions::require_may_land_in_worktree`, at
+            // `may_drive` strength, per planned sibling for the multi-repo
+            // form, which is why the gate is there and not here.
+            let view_scope = self.view_scope(&caller)?;
             if let Some(ids) = multi.as_deref() {
                 // Work graph M9.6: one sibling per repository, same branch.
                 let out = crate::service::trackers::tickets::start_work_many(
                     &self.store,
                     &self.ssh,
                     &self.reg,
-                    &crate::service::work::start_args_as(&args, caller.work_decider()),
+                    &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
                     ids,
-                    &scope,
+                    &view_scope,
                     &crate::service::trackers::default_net(),
                 )
                 .await
@@ -1086,8 +1509,8 @@ impl FleetTools {
                 &self.store,
                 &self.ssh,
                 &self.reg,
-                &crate::service::work::start_args_as(&args, caller.work_decider()),
-                &scope,
+                &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
+                &view_scope,
                 &crate::service::trackers::default_net(),
             )
             .await
@@ -1107,10 +1530,16 @@ impl FleetTools {
             };
             match args.action.as_str() {
                 "place" => {
+                    // The whole scope, because what `place` ANSWERS is the
+                    // task — `WorkTask.sessions: Vec<TaskLink>`, every link
+                    // of it with its name, host, branch and live
+                    // `claude_status` (T9b). The write is a group; the answer
+                    // is a page of sessions.
+                    let view_scope = self.view_scope(&caller)?;
                     return ok_json(
                         &st::place(
                             &self.store,
-                            &scope,
+                            &view_scope,
                             need_task()?,
                             args.group.as_deref(),
                             args.note.as_deref(),
@@ -1118,19 +1547,24 @@ impl FleetTools {
                             &caller.label(),
                         )
                         .map_err(to_mcp_err)?,
-                    )
+                    );
                 }
                 "assign_org" => {
+                    // The whole scope, because the `E_CONFLICT` this answers
+                    // when the preview went stale carries a FRESH `OrgImpact`
+                    // in its details, links and all, and because the impact
+                    // token it compares is a hash over that list (T8d).
+                    let view_scope = self.view_scope(&caller)?;
                     return ok_json(
                         &st::assign_org(
                             &self.store,
-                            &scope,
+                            &view_scope,
                             need_task()?,
                             args.org_id,
                             args.impact_token.as_deref(),
                         )
                         .map_err(to_mcp_err)?,
-                    )
+                    );
                 }
                 "rule_save" => {
                     let rule = args
@@ -1170,9 +1604,20 @@ impl FleetTools {
                     // decision's does (the host fence, the bound client's
                     // session fence), with the gate's own code and sentence.
                     let gate = |sid: i64| -> Result<(), IpcError> {
-                        self.resolve_target_row(&caller, Some(sid), None, None, "the session")
-                            .map(|_| ())
-                            .map_err(ipc_of_mcp)
+                        self.resolve_target_row(
+                            &caller,
+                            Some(sid),
+                            None,
+                            None,
+                            // `drive`, per item: a batch of per-session
+                            // work-graph decisions cannot be wider than
+                            // the single decision below, which is the
+                            // same write by another name.
+                            Reach::Drive,
+                            "the session",
+                        )
+                        .map(|_| ())
+                        .map_err(ipc_of_mcp)
                     };
                     return ok_json(
                         &st::decide_batch(
@@ -1195,7 +1640,19 @@ impl FleetTools {
                 None,
             )
         })?;
-        self.resolve_target_row(&caller, Some(sid), None, None, "the session")?;
+        // `drive`: every `work_link` action that reaches here writes the
+        // session's own work graph — link, reject, confirm, unlink, ack,
+        // reconsider, set_primary, archive, snooze. They are row writes
+        // about one session, and none of them is in the spec's `own` list.
+        //
+        // The actions that ARE have already returned above, each gated where
+        // it returns, and the three are not gated the same way because they
+        // are not addressed the same way: `tidy_apply` names sessions, so it
+        // takes this very gate per item at `Reach::Own`; `summarize` and
+        // `resume` name a work key and a link id, so no session gate can see
+        // them and they are checked against the CONVERSATION's owner instead
+        // (`require_conversation_person`).
+        self.resolve_target_row(&caller, Some(sid), None, None, Reach::Drive, "the session")?;
         // The caller, not the `source` it passes, decides whether this is a
         // person's decision or an agent's (D34). A decision on one link by
         // id also answers that link's new version (`link_version`).
@@ -1261,6 +1718,71 @@ impl FleetTools {
         }
     }
 
+    /// The person gate for the two `work_link` actions that take over a
+    /// CONVERSATION without naming a session row (multi-user M1, T7).
+    ///
+    /// `resume` replays a transcript into a new session on its host, spending
+    /// that host's AI account, and answers the new `SessionRow`; `summarize`
+    /// forks the conversation for a model-written précis and stores it as a
+    /// durable journal row. Both are the spec's `own` tier — §4.3 invariant 5
+    /// names `work_link { summarize }` outright, and the plan's T7 handoff
+    /// table puts `resume_work` there ("it takes over a conversation, like
+    /// `rewind_conversation`"). Neither carries a `session_id`: they are
+    /// addressed by a work key and a link id, so `resolve_target_row`'s gate
+    /// below never sees them, and the only identity that outlives the dead
+    /// row they act on is T3's durable `conversation_owners` record.
+    ///
+    /// The predicate is
+    /// [`crate::service::view_scope::ViewScope::sees_past_conversation`], and
+    /// it asks three questions in order so that the two mechanisms M1 has
+    /// cannot disagree: a SURVIVING `sessions` row decides first
+    /// (`may_own` — the same answer `session_transcript` gives for that row),
+    /// then T3's durable `conversation_owners` record, and only a conversation
+    /// with neither passes.
+    ///
+    /// That order matters for an `unclaimed` row, and it is the half this gate
+    /// first shipped without. Migration 099's triggers record an owner only
+    /// `WHEN NEW.owner_person_id IS NOT NULL`, so every reconcile-discovered
+    /// session has a real transcript and NO record — and
+    /// `conversation_owner_allows` answers `None => true`. On a hub with two
+    /// people that made the same past work `E_NOTFOUND` through
+    /// `session_transcript` and summarisable through `work_link { summarize }`.
+    /// Rule 7 ("the upgrade widens nothing", and must not narrow a
+    /// single-person install) is what the bare pass-through is for, and it is
+    /// kept for exactly the case rule 7 is about: nothing recorded AND no
+    /// surviving row, i.e. a genuinely pre-M1 conversation whose row was
+    /// reaped. `ViewScope::is_sole_person` keeps the one-person install whole
+    /// on the first arm.
+    ///
+    /// A per-host token proves no person, so it reaches a conversation only
+    /// through the pane it is standing in — a pane proof says "I am standing
+    /// in this session", never whose work it is, and `may_own` refuses it
+    /// (`ViewScope::may_own`'s own reasoning).
+    ///
+    /// `not_found` is the LINK's own refusal, never `E_FORBIDDEN`: the thing
+    /// addressed here is a link, and one whose conversation is not this
+    /// caller's must read exactly like a link that does not exist — the
+    /// answer its org fence already gives.
+    pub(super) fn require_conversation_person(
+        &self,
+        caller: &Caller,
+        claude_session_id: Option<&str>,
+        not_found: impl FnOnce() -> IpcError,
+    ) -> Result<(), McpError> {
+        let Some(cid) = claude_session_id else {
+            // No conversation recorded, so nothing to own: the action says so
+            // itself further in ("no Claude conversation was recorded",
+            // `E_NO_TRANSCRIPT`), and inventing a refusal here would hide it.
+            return Ok(());
+        };
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        let view = caller.view_scope(&s).map_err(to_mcp_err)?;
+        if view.sees_past_conversation(&s, cid).map_err(to_mcp_err)? {
+            return Ok(());
+        }
+        Err(to_mcp_err(not_found()))
+    }
+
     /// `id:owner/repo` for each project id, for a confirm summary; an
     /// unknown id is shown bare (the start refuses it later).
     fn repo_labels(&self, ids: &[i64]) -> Result<Vec<String>, McpError> {
@@ -1284,6 +1806,27 @@ impl FleetTools {
     ) -> Result<crate::service::orgs::OrgScope, McpError> {
         let s = lock(&self.store).map_err(to_mcp_err)?;
         caller.org_scope(&s).map_err(to_mcp_err)
+    }
+
+    /// The caller's FULL scope — org and person (multi-user M1, T6) — read
+    /// under the same short lock as [`Self::org_scope`], whose answer it
+    /// carries as its `.org` field.
+    ///
+    /// A handler that answers a PAGE of session-derived rows takes this and
+    /// nothing else: `Caller::org_scope` cannot tell two people on one hub
+    /// apart (it is `OrgScope::All` for every paired client bound to no org
+    /// and for the master alike), so an arm fenced by the org scope alone
+    /// serves every private session in the fleet to anybody's phone. The
+    /// coverage gate holds each such arm to the word `view_scope` by name
+    /// (`mcp::tools::tests::every_session_addressed_tool_declares_its_reach`,
+    /// clause 4), which is why this is threaded rather than rebuilt inside
+    /// each service function.
+    pub(super) fn view_scope(
+        &self,
+        caller: &Caller,
+    ) -> Result<crate::service::view_scope::ViewScope, McpError> {
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        caller.view_scope(&s).map_err(to_mcp_err)
     }
 }
 

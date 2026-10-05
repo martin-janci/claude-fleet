@@ -39,6 +39,12 @@ impl Hub {
         call_at(self.addr, token).await
     }
 
+    /// The same, with an `X-Fleet-Pane` header — what a host's Claude sends
+    /// once its `~/.claude.json` carries `"X-Fleet-Pane": "${TMUX_PANE:-}"`.
+    async fn call_from_pane(&self, token: &str, pane: &str) -> String {
+        call_with_pane(self.addr, token, Some(pane)).await
+    }
+
     async fn accepted(&self, token: &str) -> String {
         let r = self.call(token).await;
         assert!(
@@ -59,9 +65,15 @@ impl Hub {
 }
 
 async fn call_at(addr: SocketAddr, token: &str) -> String {
+    call_with_pane(addr, token, None).await
+}
+
+async fn call_with_pane(addr: SocketAddr, token: &str, pane: Option<&str>) -> String {
+    let pane_header = pane.map_or(String::new(), |p| format!("X-Fleet-Pane: {p}\r\n"));
     let req = format!(
         "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
-         Content-Length: 2\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n{{}}"
+         Content-Length: 2\r\n{pane_header}Authorization: Bearer {token}\r\n\
+         Connection: close\r\n\r\n{{}}"
     );
     let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
     s.write_all(req.as_bytes()).await.unwrap();
@@ -94,10 +106,12 @@ async fn hub() -> Hub {
         },
         axum::routing::any(|axum::Extension(c): axum::Extension<Caller>| async move {
             format!(
-                "caller={} mode={:?} trusted={}",
+                "caller={} mode={:?} trusted={} pane={:?} owner={}",
                 c.label(),
                 c.mode,
-                c.is_trusted_client()
+                c.is_trusted_client(),
+                c.pane,
+                c.is_personal_owner
             )
         }),
         None,
@@ -263,5 +277,59 @@ async fn authorize_never_waits_on_the_writer() {
     assert!(
         seen.is_some(),
         "the retried liveness stamp was never written"
+    );
+}
+
+/// Multi-user M1, over the real `authorize` layer: what the CONNECTION
+/// carries besides the token.
+///
+/// The pane proof is a header, validated by the same
+/// `mcp::hooks::pane_header` the `/hook` path uses, so an unexpanded
+/// `${TMUX_PANE:-}` (a host whose MCP entry predates the expansion) and an
+/// empty value (a host outside tmux) both prove nothing rather than proving
+/// something wrong. And `is_personal_owner` is resolved off the cache's own
+/// read of `Store::personal_owner_id`, without the writer's lock.
+#[tokio::test]
+async fn the_connection_carries_the_pane_and_whether_this_is_the_hubs_owner() {
+    let hub = hub().await;
+    // The master token is the fleet's own: it is the personal owner, and it
+    // sends no pane.
+    let r = hub.accepted(MASTER_TOK).await;
+    assert!(r.contains("owner=true") && r.contains("pane=None"), "{r}");
+
+    // A well-formed tmux pane id lands on the caller.
+    let r = hub.call_from_pane(HOST_TOK, "%17").await;
+    assert!(r.contains("200 OK"), "{r}");
+    assert!(r.contains(r#"pane=Some("%17")"#), "{r}");
+    // A machine's token is never a person, so never this hub's owner.
+    assert!(r.contains("owner=false"), "{r}");
+
+    // Everything that is not a pane id proves nothing: the literal an
+    // unexpanding client would send, an empty value, and a bare `%`.
+    for bad in ["${TMUX_PANE:-}", "", "%", "%1;rm -rf /"] {
+        let r = hub.call_from_pane(HOST_TOK, bad).await;
+        assert!(r.contains("200 OK"), "{bad:?}: {r}");
+        assert!(r.contains("pane=None"), "{bad:?} proved a pane: {r}");
+    }
+
+    // A paired device is the owner's own only while it is bound to the
+    // owner. Unbound by `client unbind-person`, it is nobody's.
+    let owner = hub.store.lock().unwrap().personal_owner_id().unwrap();
+    hub.store
+        .lock()
+        .unwrap()
+        .set_client_person("phone", owner)
+        .unwrap();
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(r.contains("owner=true"), "{r}");
+    hub.store
+        .lock()
+        .unwrap()
+        .set_client_person("phone", None)
+        .unwrap();
+    let r = hub.accepted(PHONE_TOK).await;
+    assert!(
+        r.contains("owner=false"),
+        "an unbound device is nobody, never everybody: {r}"
     );
 }

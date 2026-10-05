@@ -12,7 +12,7 @@
 //! link, never from a filter):
 //!
 //! * a link is visible when its org is ([`OrgScope::sees_org`]) and so is
-//!   its session: the live row ([`OrgScope::sees_row`]), or for a past
+//!   its session: the live row ([`OrgScope::sees_row_org_only`]), or for a past
 //!   session its snapshot's host and org — for a per-host token only its own
 //!   host's past sessions (M2's fence);
 //! * a task with an org of its own (a tracker's, or a local item's, M14) is
@@ -49,6 +49,12 @@ pub const REVIEW_DEFAULT_LIMIT: usize = 50;
 pub const DESCRIPTION_MAX_CHARS: usize = 600;
 /// A last-outcome summary, in characters.
 pub const OUTCOME_MAX_CHARS: usize = 600;
+/// What a job mirror's title reads as when the reader may not read the
+/// dispatch behind it (multi-user M1, T5's review). Deliberately the same
+/// words `Store::job_title` falls back to for a prompt with no first line, so
+/// a withheld title is indistinguishable from an unremarkable one and the
+/// fence leaks nothing by its own shape.
+pub const JOB_TITLE_WITHHELD: &str = "Delegated job";
 
 // ---------------------------------------------------------------------------
 // Wire types
@@ -598,21 +604,146 @@ pub(crate) struct Graph {
     /// "someone is working on this" never leaks through a task the caller
     /// can otherwise see.
     pub(crate) working_session_items: BTreeSet<i64>,
+    /// Session rows that EXIST and this reader may not see (multi-user M1,
+    /// T7) — the ids [`Self::load_for`] took out of [`Self::sessions`].
+    ///
+    /// Kept as a set rather than simply dropped, because "no row" and "a row
+    /// you may not see" answer differently: a link whose live session is
+    /// merely absent from the graph is judged by its snapshot (`snap_host`,
+    /// `snap_org_id`) and would be shown with a name out of the snapshot,
+    /// which is the leak this fence exists to close. [`Self::link_visible`]
+    /// refuses such a link outright.
+    pub(crate) hidden_sessions: BTreeSet<i64>,
+    /// `work_links.id` of every link this reader may not see **whose live
+    /// participant is gone** (multi-user M1, T9b) — the ENDED half of
+    /// [`Self::hidden_sessions`].
+    ///
+    /// It exists because [`Self::hidden_sessions`] could only ever answer for
+    /// a link that still names a row. `ViewLink.session_id` is NULL for every
+    /// link of a reaped session (`store/work_view.rs`'s `LEFT JOIN
+    /// participants p … AND p.retired_at IS NULL`), so such a link skipped
+    /// the fence, fell through to the snapshot arm and was then passed by
+    /// `scope.is_all()` — i.e. served, by its `snap_name` / `snap_host` /
+    /// `snap_branch`, to every paired client bound to no org. Both sets are
+    /// filled by [`crate::service::orgs::link_person_visible_at`], which is
+    /// the one statement of the rule, so the Work view and `work { links }`
+    /// cannot answer differently for the same link.
+    pub(crate) hidden_links: BTreeSet<i64>,
     /// A job mirror's item id → its job's `state`.
     pub(crate) job_states: HashMap<i64, String>,
     /// A task's item id → its proposals waiting for a decision.
     pub(crate) open_proposals: HashMap<i64, u32>,
+    /// The [`proposer_label`] of every session row that SURVIVED the person
+    /// fence, or `None` on the ORG-only load — the text half of
+    /// [`Self::hidden_sessions`], for `work_items.proposed_by` (multi-user
+    /// M1). See [`Self::proposer_visible`].
+    pub(crate) visible_proposers: Option<BTreeSet<String>>,
 }
 
+/// How a session is named when an agent proposes a subtask in its name:
+/// `"<friendly name, else tmux name> · <host alias>"`.
+///
+/// **One spelling, two readers** (multi-user M1): `work_link { propose }`
+/// writes it into `work_items.proposed_by`, and [`Graph::build`] computes it
+/// again for the rows the person fence hides, so that
+/// [`Graph::proposer_hidden`] can recognise one. The two were the same
+/// `format!` in two files, which is how the fence would have drifted into
+/// passing everything the first time somebody added a space.
+pub(crate) fn proposer_label(row: &SessionRow) -> String {
+    let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+    format!("{name}{SEPARATOR}{}", row.host_alias)
+}
+
+/// What a [`proposer_label`] puts between the session and its host, and
+/// therefore the one mark that says a stored `proposed_by` is a SESSION's
+/// label rather than a caller's (`master`, `client:phone`).
+const SEPARATOR: &str = " · ";
+
 impl Graph {
+    /// The ORG-only load: for the reads and writes that answer a TASK and
+    /// never a session row — `service::work::structure`'s rules, saved
+    /// views, placements and org moves, whose exemptions are written down in
+    /// `mcp::tools::tests`'s `WORK_ACTION_NO_GATE`.
+    ///
+    /// Every Work-view read that answers session rows takes
+    /// [`Self::load_for`] instead.
     pub(crate) fn load(s: &Store, scope: &OrgScope) -> Result<Graph, IpcError> {
-        let sessions: HashMap<i64, SessionRow> = s
+        Self::build(s, scope, None)
+    }
+
+    /// The load every Work-view READ uses: the caller's WHOLE scope, so a
+    /// session this person may not see is not in the graph at all and no
+    /// projection built off the graph can carry it (multi-user M1, T7) —
+    /// **for both shapes a session reaches a projection in**: a LIVE row
+    /// (taken out of [`Graph::sessions`] into [`Graph::hidden_sessions`]) and
+    /// an ENDED link whose participant has been reaped, which has no live row
+    /// to take out and is listed in [`Graph::hidden_links`] instead (T9b).
+    ///
+    /// The second half was missing, and the doc promised it anyway: `tree`,
+    /// `task`, `review` and `org_impact` all rest on this sentence.
+    pub(crate) fn load_for(
+        s: &Store,
+        view: &crate::service::view_scope::ViewScope,
+    ) -> Result<Graph, IpcError> {
+        Self::build(s, &view.org, Some(view))
+    }
+
+    fn build(
+        s: &Store,
+        scope: &OrgScope,
+        view: Option<&crate::service::view_scope::ViewScope>,
+    ) -> Result<Graph, IpcError> {
+        let mut sessions: HashMap<i64, SessionRow> = s
             .list_all_sessions()?
             .into_iter()
             .map(|r| (r.id, r))
             .collect();
+        // The PERSON fence, before anything is derived from a row: whose row
+        // it is, what was shared with this caller, and §4.4's host clauses —
+        // none of which an `OrgScope` can express (it is `All` for the master
+        // and for every paired client bound to no org alike).
+        let hidden_sessions: BTreeSet<i64> = match view {
+            Some(v) => {
+                let hidden: BTreeSet<i64> = sessions
+                    .values()
+                    .filter(|r| !v.sees_session_row(r).is_visible())
+                    .map(|r| r.id)
+                    .collect();
+                sessions.retain(|id, _| !hidden.contains(id));
+                hidden
+            }
+            None => BTreeSet::new(),
+        };
+        let sessions = sessions;
+        let links = s.work_view_links()?;
+        // The ENDED half of the same fence, through the one predicate
+        // (multi-user M1, T9b). A link whose participant has been reaped has
+        // no live row above to take out of the graph, so it is named here;
+        // `link_visible` and `impact_of` test both sets before the snapshot
+        // arm. The memo makes a page cost one lookup per distinct
+        // conversation, and `is_internal` keeps the hub's own readers (and
+        // the scale fixture, which loads with `ViewScope::internal`) on the
+        // old cost.
+        let hidden_links: BTreeSet<i64> = match view {
+            Some(v) if !v.is_internal() => {
+                let mut seen: std::collections::BTreeMap<String, bool> = Default::default();
+                let mut hidden = BTreeSet::new();
+                for l in &links {
+                    if l.session_id.is_some() {
+                        continue;
+                    }
+                    if !crate::service::orgs::link_person_visible_memo(
+                        s, v, &l.link, None, &mut seen,
+                    )? {
+                        hidden.insert(l.link.id);
+                    }
+                }
+                hidden
+            }
+            _ => BTreeSet::new(),
+        };
         // Fence the live signal by scope: a pair whose session this scope
-        // cannot see (`OrgScope::sees_row`, the same check `link_visible`
+        // cannot see (`OrgScope::sees_row_org_only`, the same check `link_visible`
         // uses) does not lift its item, even though the raw query found it.
         let working_session_items: BTreeSet<i64> = s
             .work_items_with_working_session()?
@@ -620,7 +751,12 @@ impl Graph {
             .filter(|(_, session_id)| {
                 sessions
                     .get(session_id)
-                    .is_some_and(|row| scope.sees_row(row))
+                    // `hidden_sessions` above has already emptied every
+                    // person-invisible row out of `sessions` when a
+                    // `ViewScope` was supplied; this clause is what still
+                    // fences the org-only `Graph::load` path, whose readers
+                    // answer tasks and never a session row.
+                    .is_some_and(|row| scope.sees_row_org_only(row))
             })
             .map(|(item_id, _)| item_id)
             .collect();
@@ -637,10 +773,34 @@ impl Graph {
                 *open_proposals.entry(parent).or_default() += 1;
             }
         }
+        // A job mirror's state is the state of a DISPATCH, and both ends of a
+        // dispatch are sessions (multi-user M1, the review of main's new
+        // `Graph` fields). `work { task }` served it — and `JobView.result`,
+        // the worker's own output — to anyone who could see the work item,
+        // with no fence of any kind: `job_states_by_item` answered a state
+        // string, so the one predicate that judges a task
+        // (`tasks::task_visible_in_scope_pure`) could not even be asked. The
+        // store now hands over the `tasks` row and the predicate runs here,
+        // against the ALREADY person-filtered `sessions` map — so an end this
+        // reader cannot see resolves to `None` and the predicate fails closed
+        // on it, which is its documented behaviour for an unreadable end.
+        //
+        // `view: None` is the ORG-only load, whose readers answer tasks and
+        // never a session row (`Graph::load`'s doc, and the
+        // `WORK_ACTION_NO_GATE` rows it names); it keeps every state, as it
+        // keeps every session row.
+        // The labels of the rows that SURVIVED the fence, so
+        // `proposer_visible` can recognise one (multi-user M1). `None` is the
+        // ORG-only load, which applies no person fence anywhere.
+        let visible_proposers: Option<BTreeSet<String>> =
+            view.map(|_| sessions.values().map(proposer_label).collect());
+        let job_states = job_states_from(s, &sessions, view)?;
         Ok(Graph {
             now: crate::service::catalog::now_secs(),
             items,
-            links: s.work_view_links()?,
+            // M1 reads `links` above, to build `hidden_links`, so the local
+            // is used here rather than a second `work_view_links` query.
+            links,
             sessions,
             trackers: s.list_trackers()?.into_iter().map(|t| (t.id, t)).collect(),
             orgs: s.list_orgs()?,
@@ -653,9 +813,107 @@ impl Graph {
             rules: s.work_rules()?,
             context_red_pct: crate::service::health::context_red_pct(s),
             working_session_items,
-            job_states: s.job_states_by_item()?,
+            hidden_sessions,
+            hidden_links,
+            job_states,
+            // NOT fenced, and that is the judgement rather than an omission:
+            // this is a count of ITEMS (the `proposed` children of one
+            // parent), not of sessions. A proposal's own session metadata is
+            // its `proposed_by`, which `hidden_proposers` withholds; what is
+            // left — its title and `why` — is text a person wrote into the
+            // shared graph for the people who decide it, and the count
+            // carries none of it anyway.
+            //
+            // **The reason stops at proposals, and used to be written as
+            // though it covered every item** (multi-user M1, T5's review).
+            // It does not cover a JOB MIRROR: `create_agent_task_item` fills
+            // an `agent` child's title from the first line of the dispatch
+            // PROMPT and its notes from the prompt itself, so a mirror's text
+            // is one session's instruction to another — §4.3 content of both
+            // ends, not shared work structure. Mirrors are fenced on
+            // `g.job_states` wherever their text is served (`JobView`, and
+            // `SubtaskView.title` in `native_work`); they are not counted
+            // here, since a mirror is never `proposal_state = 'proposed'`.
             open_proposals,
+            visible_proposers,
         })
+    }
+
+    /// Is this item a JOB MIRROR whose dispatch the reader may not read — so
+    /// its title and notes must be withheld (multi-user M1, T5's review)?
+    ///
+    /// A mirror's `title` is the first line of the dispatch PROMPT and its
+    /// `notes` are the prompt itself (`Store::create_agent_task_item`), so a
+    /// mirror's text is one session's instruction to another: §4.3 content of
+    /// both ends of the dispatch, not shared work structure. The reasoning
+    /// that let it through — "its title and `why` are item data in the shared
+    /// graph, as every other item's are" — is true of a PROPOSAL and false of
+    /// a mirror; the `open_proposals` note in [`Graph::build`] records that.
+    ///
+    /// The fence is [`Graph::job_states`], the map already filtered by
+    /// `tasks::task_visible_in_scope_pure` (which fails closed on a dispatch
+    /// end this reader cannot resolve). Asking it here rather than
+    /// re-deriving the predicate is what keeps every surface of one mirror —
+    /// its own page, its row in the tree, its row among a parent's subtasks,
+    /// and `JobView` — from disagreeing about the same job.
+    ///
+    /// `job_states` is unfiltered for the ORG-only load (`Graph::load`, whose
+    /// readers answer tasks and never a session row), so this is `false`
+    /// there, exactly as every other person fence is.
+    /// Takes the ROW, not a [`ViewItem`], so the one predicate serves both
+    /// readers: the graph's own items and the children `native_children`
+    /// reads straight from the store (which are not all in
+    /// [`Graph::items`]).
+    pub(crate) fn mirror_text_hidden(&self, item: &crate::store::WorkItemRow) -> bool {
+        item.origin.as_deref() == Some("agent") && !self.job_states.contains_key(&item.id)
+    }
+
+    /// Is this link one the reader may not see — its LIVE row fenced, or (for
+    /// a link whose participant is gone) its recorded conversations fenced?
+    ///
+    /// **The one clause every projection built off a link must ask first**
+    /// (multi-user M1, T9b). It must run before the snapshot arms, which
+    /// would otherwise name the session by `snap_name` and its machine by
+    /// `snap_host` — exactly what the fence withholds.
+    pub(crate) fn link_hidden(&self, l: &ViewLink) -> bool {
+        l.session_id
+            .is_some_and(|id| self.hidden_sessions.contains(&id))
+            || self.hidden_links.contains(&l.link.id)
+    }
+
+    /// May this reader be told that `proposed_by` proposed a subtask?
+    ///
+    /// `work_items.proposed_by` is the [`proposer_label`] of the session an
+    /// agent proposed in the name of — its name and its machine, stored as
+    /// TEXT when the proposal was written, with no session id beside it. It
+    /// is session metadata by §4.3's definition, exactly as a link's
+    /// `snap_name` / `snap_host` are, and it was served to every reader of
+    /// the parent item.
+    ///
+    /// The rule is **allow-list, not deny-list**, and that is the whole of
+    /// why this is written the way it is:
+    ///
+    /// * a label that matches a row which survived the fence is served — the
+    ///   reader can see that session anyway;
+    /// * a session-shaped label that matches nothing is WITHHELD. A deny-list
+    ///   against the hidden rows would have passed exactly the case that
+    ///   needs it most: a reaped session leaves no row to hide, so its name
+    ///   would have become readable by everybody the moment it died — which
+    ///   is the same hole `Graph::hidden_links` exists to close for an ended
+    ///   link (T9b). The cost is that an attribution fades when its session
+    ///   is reaped, for its owner too;
+    /// * a label that is not session-shaped passes: `master`,
+    ///   `client:phone`, and every caller label `work_link { propose }`
+    ///   records when it names no session, carry no [`SEPARATOR`] and are
+    ///   not sessions at all.
+    ///
+    /// `None` is the ORG-only load ([`Graph::load`]), which applies no person
+    /// fence anywhere and must not start here.
+    pub(crate) fn proposer_visible(&self, proposed_by: &str) -> bool {
+        match &self.visible_proposers {
+            None => true,
+            Some(ok) => !proposed_by.contains(SEPARATOR) || ok.contains(proposed_by),
+        }
     }
 
     /// An item's own org: its tracker's, or a local item's (M14), or — for a
@@ -665,6 +923,17 @@ impl Graph {
     /// One level only, matching the SQL: `parent_for_new_child` refuses a
     /// native parent that is itself a subtask, so there is no deeper chain to
     /// walk and no cycle to guard against.
+    ///
+    /// **It asks no person fence, and that was checked rather than assumed**
+    /// (multi-user M1, the review of main's new `Graph` fields). Everything
+    /// it reads is item data — `work_items.tracker_id`, a tracker's `org_id`,
+    /// a local item's own org, and the PARENT item's same two fields: no
+    /// link, no session, nothing [`Self::link_hidden`] could be asked about.
+    /// The parent fallback cannot widen the answer either, because a native
+    /// subtask's real org IS its parent's (`insert_native` leaves the column
+    /// NULL and the SQL `Store::item_org` reads it the same way) — so this
+    /// reports the org such an item already belongs to rather than lending it
+    /// one.
     pub(crate) fn item_org(&self, item: &ViewItem) -> Option<i64> {
         self.own_item_org(item).or_else(|| {
             item.item
@@ -745,25 +1014,42 @@ impl Graph {
 
     /// May `scope` see this link (its org and its session)?
     fn link_visible(&self, scope: &OrgScope, l: &ViewLink) -> bool {
+        // The person fence first, and before the `is_all()` shortcut: a link
+        // whose session this reader may not see is refused whatever its org
+        // says, and must NOT fall through to the snapshot arm below, which
+        // would judge it by `snap_host` and show it by its snapshot name
+        // (multi-user M1, T7; the ENDED half is T9b's `hidden_links`).
+        if self.link_hidden(l) {
+            return false;
+        }
+        // This is the org boundary, not a privacy fence: and it is deliberately placed AFTER
+        // `link_hidden`, so the person fence runs first and this shortcut can never skip it.
         if scope.is_all() {
             return true;
         }
         if !scope.sees_org(self.link_org(l)) {
             return false;
         }
+        // Each arm below is the ORG half only; `link_hidden` at the top of
+        // this function is the person half, and it runs before the
+        // `is_all()` shortcut precisely so it cannot be skipped.
         match self.row_of(l) {
             Some(row) => match scope {
                 // M2's fence: a host's past work is its own host's.
                 OrgScope::Host { alias, .. } if l.link.ended_at.is_some() => {
-                    row.host_alias == *alias && scope.sees_row(row)
+                    // Org half; `link_hidden` is the person half.
+                    row.host_alias == *alias && scope.sees_row_org_only(row)
                 }
-                _ => scope.sees_row(row),
+                // Org half; `link_hidden` is the person half.
+                _ => scope.sees_row_org_only(row),
             },
             None => {
                 let host = l.link.snap_host.as_deref().unwrap_or_default();
                 match scope {
                     OrgScope::Host { alias, .. } => host == alias,
-                    _ => scope.sees_session(host, l.link.org_id),
+                    // The snapshot arm's org half; `link_hidden`'s
+                    // `hidden_links` half covers exactly this shape.
+                    _ => scope.sees_session_org_only(host, l.link.org_id),
                 }
             }
         }
@@ -891,6 +1177,10 @@ fn build_tasks<'g>(g: &'g Graph, scope: &OrgScope) -> Vec<Built<'g>> {
 }
 
 fn task_visible(g: &Graph, scope: &OrgScope, b: &Built<'_>) -> bool {
+    // This is the org boundary, not a privacy fence: it decides whether the TASK appears, and a
+    // task's key and title are work data — the same answer `local.rs::person_visible_links`
+    // writes down for a local item. Every link and session UNDER the task is person-fenced
+    // (`b.visible`, built from `link_visible`).
     if scope.is_all() {
         return true;
     }
@@ -900,6 +1190,11 @@ fn task_visible(g: &Graph, scope: &OrgScope, b: &Built<'_>) -> bool {
     }
     let shown = b.visible.iter().any(|(_, st)| *st != "rejected");
     match scope {
+        // This is the org boundary, not a privacy fence: the same answer as
+        // this function's first guard, in its other spelling — whether the
+        // TASK appears. A task's key and title are work data and survive the
+        // person fence exactly as a local item's do, while every link and
+        // session under it is person-fenced by `Graph::build`.
         OrgScope::All => true,
         // M3's fence: a host reads only work its own host did.
         OrgScope::Host { .. } => b.on_own_host,
@@ -1292,12 +1587,73 @@ fn with_sessions(
     task
 }
 
+/// The job mirrors this reader may read, as item id → job state — the ONE
+/// place the dispatch fence is written (multi-user M1, T5's review).
+///
+/// `sessions` must already be the PERSON-filtered map
+/// ([`Graph::hidden_sessions`] has been taken out of it), because that is
+/// what makes `task_visible_in_scope_pure` fail closed: an end this reader
+/// cannot see resolves to `None`, which is its documented refusal.
+///
+/// `view: None` is the ORG-only load ([`Graph::load`], whose readers answer
+/// tasks and never a session row): every job is kept, as every session row
+/// is.
+fn job_states_from(
+    s: &Store,
+    sessions: &HashMap<i64, SessionRow>,
+    view: Option<&crate::service::view_scope::ViewScope>,
+) -> Result<HashMap<i64, String>, IpcError> {
+    Ok(s.job_tasks_by_item()?
+        .into_iter()
+        .filter(|(_, t)| match view {
+            Some(v) => crate::service::tasks::task_visible_in_scope_pure(
+                t,
+                t.requester_session_id.and_then(|id| sessions.get(&id)),
+                t.worker_session_id.and_then(|id| sessions.get(&id)),
+                v,
+            ),
+            None => true,
+        })
+        .map(|(item_id, t)| (item_id, t.state))
+        .collect())
+}
+
+/// [`job_states_from`] for a reader that has no [`Graph`] to hand — it reads
+/// and filters the session map itself (`work::local::local_items`).
+///
+/// Separate from the `Graph` path rather than the other way round so a pass
+/// that already holds the sessions map does not read `sessions` twice.
+pub(crate) fn visible_job_states(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<HashMap<i64, String>, IpcError> {
+    let sessions: HashMap<i64, SessionRow> = s
+        .list_all_sessions()?
+        .into_iter()
+        .filter(|r| view.sees_session_row(r).is_visible())
+        .map(|r| (r.id, r))
+        .collect();
+    job_states_from(s, &sessions, Some(view))
+}
+
 fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'g> {
     let item = b.item;
     let key = item
         .and_then(|i| i.item.key.clone())
         .or_else(|| b.ref_key.clone());
-    let title = item.map(|i| i.item.title.clone()).unwrap_or_default();
+    // A job mirror's title is the dispatch prompt's first line, withheld from
+    // a reader of neither end (`Graph::mirror_text_hidden`). Fenced HERE, the
+    // first time the title is read, so neither the group label nor the
+    // derived-title fallback below can carry it.
+    let title = item
+        .map(|i| {
+            if g.mirror_text_hidden(&i.item) {
+                JOB_TITLE_WITHHELD.to_string()
+            } else {
+                i.item.title.clone()
+            }
+        })
+        .unwrap_or_default();
     let tracker = item
         .and_then(|i| i.item.tracker_id)
         .and_then(|t| g.trackers.get(&t));
@@ -1756,6 +2112,9 @@ fn visible_trackers(g: &Graph, scope: &OrgScope, tasks: &[WorkTask]) -> Vec<Trac
         .trackers
         .values()
         .filter(|t| match scope {
+            // This is the org boundary, not a privacy fence: which COMPANIES'
+            // trackers a brief names. A `TrackerBrief` is a tracker's id,
+            // name and kind — org configuration, no session.
             OrgScope::All => true,
             OrgScope::Org { .. } => scope.sees_org(t.org_id),
             // A host names only the trackers of the work it reads.
@@ -1984,10 +2343,18 @@ fn section_pages(
 }
 
 /// `work { action: tree, filters?, cursor?, limit?, per_task? }`.
-pub fn tree(store: &Mutex<Store>, scope: &OrgScope, args: &TreeArgs) -> Result<TreePage, IpcError> {
+///
+/// Takes the caller's whole [`ViewScope`] (multi-user M1, T7): the tree names
+/// every session of every task, which spec §4.3 calls content.
+pub fn tree(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    args: &TreeArgs,
+) -> Result<TreePage, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
     tree_of(&g, scope, args)
 }
@@ -2053,10 +2420,18 @@ pub(crate) fn find_task(
 }
 
 /// `work { action: task, task_id }`.
-pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<TaskDetail, IpcError> {
+///
+/// The whole [`ViewScope`] (multi-user M1, T7): one task's detail lists every
+/// session of that task.
+pub fn task(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    task_id: &str,
+) -> Result<TaskDetail, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
     let (task, aliases) = find_task(&g, scope, task_id, true)?;
     let item = task.item_id.and_then(|i| g.items.get(&i));
@@ -2171,6 +2546,17 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
     // not a scoped caller's to learn (an unassigned task is placed by
     // bound clients of several orgs, M14.1c).
     let placement = g.placements.get(&task.task_id).cloned().map(|mut p| {
+        // This is the org boundary, not a privacy fence: `Placement.updated_by` is a device
+        // label on shared work structure, and an unassigned task is placed by bound clients of
+        // several orgs — which is the reason it is withheld.
+        //
+        // **Open, and recorded as an owner decision** (T9c found it, T9d put
+        // it in the table: `scope_guard_tests::OPEN_QUESTIONS`, so the
+        // classification itself carries the question instead of only the
+        // prose beside it). The narrower question is whether a PERSON's own
+        // device should learn another person's DEVICE NAME: for such a
+        // caller `is_all()` is true and the label is withheld from nobody.
+        // The eight rules do not cover device identity.
         if !scope.is_all() {
             p.updated_by = None;
         }
@@ -2184,7 +2570,10 @@ pub fn task(store: &Mutex<Store>, scope: &OrgScope, task_id: &str) -> Result<Tas
         }
         _ => x,
     };
+    // A job mirror's notes ARE the dispatch prompt, so they go the same way
+    // as its title and its result (`Graph::mirror_text_hidden`).
     let notes = item
+        .filter(|i| !g.mirror_text_hidden(&i.item))
         .and_then(|i| i.item.notes.clone())
         .filter(|n| !n.trim().is_empty())
         .map(|n| fence(n, "a task's notes"));
@@ -2249,6 +2638,12 @@ struct NativeWork {
 /// conversation of the task and its subtasks. A child whose own org the
 /// caller cannot see is left out; a scoped caller reads only the steps of
 /// conversations it sees a link through, and a worker it sees.
+///
+/// Every session this reads comes out of `g.sessions`, which `Graph::load_for`
+/// has already emptied of every person-invisible row into `hidden_sessions`
+/// (multi-user M1, T7) — so the two `scope.sees_row_org_only` calls below are
+/// the ORG half alone, and `hidden_sessions` is the person half that finishes
+/// them (their rows in `ORG_HALF_SITES` say the same).
 fn native_work(
     s: &Store,
     g: &Graph,
@@ -2264,7 +2659,22 @@ fn native_work(
             .map(Option::flatten)
     };
     if let Some(i) = item {
-        out.own_result = job_of(i.item.task_id)?.and_then(|t| t.result);
+        // The SAME fence as `JobView.result` sixty lines below, and for the
+        // same reason (multi-user M1, T5's review found this half still
+        // open): `own_result` is the result of the dispatch THIS item mirrors
+        // — the worker session's own output, the most private thing a
+        // dispatch produces — and the reader of the task page is not
+        // necessarily a reader of either end of that dispatch.
+        //
+        // `g.job_states` is the fenced map (`Graph::build`): a job whose
+        // `tasks` row this reader may not see is not in it, and
+        // `task_visible_in_scope_pure` has already failed closed on an end it
+        // cannot resolve. Asking the already-applied fence, rather than
+        // re-deriving one here, is what keeps this answer and the `JobView`
+        // block from disagreeing about the same job.
+        if !g.mirror_text_hidden(&i.item) {
+            out.own_result = job_of(i.item.task_id)?.and_then(|t| t.result);
+        }
     }
     let children: Vec<crate::store::WorkItemRow> = match item {
         Some(i) => s
@@ -2277,7 +2687,15 @@ fn native_work(
             .collect(),
         None => Vec::new(),
     };
-    let sees_session = |sid: i64| g.sessions.get(&sid).is_some_and(|r| scope.sees_row(r));
+    // `native_work` is only reached from `task`, which builds the graph with
+    // `Graph::load_for`: `hidden_sessions` has already emptied every
+    // person-invisible row out of `g.sessions`, so this is the ORG half
+    // alone (multi-user M1, T10 — the two rows in `ORG_HALF_SITES`).
+    let sees_session = |sid: i64| {
+        g.sessions
+            .get(&sid)
+            .is_some_and(|r| scope.sees_row_org_only(r))
+    };
     let mut item_ids: BTreeSet<i64> = item.map(|i| i.item.id).into_iter().collect();
     let mut keys: Vec<String> = key.map(str::to_string).into_iter().collect();
     for c in children {
@@ -2287,7 +2705,11 @@ fn native_work(
             title: c.title.clone(),
             why: c.proposal_why.clone(),
             notes: c.notes.clone(),
-            proposed_by: c.proposed_by.clone(),
+            // The attribution is session metadata — a name and a machine —
+            // so it goes only to a reader who may see that session
+            // (multi-user M1; `Graph::proposer_hidden`). The proposal itself
+            // stays: its title and `why` are item data.
+            proposed_by: c.proposed_by.clone().filter(|by| g.proposer_visible(by)),
             at: c.created_at,
         };
         match c.proposal_state.as_deref() {
@@ -2311,7 +2733,23 @@ fn native_work(
             .get(&c.id)
             .and_then(|v| item_status(g, v))
             .or_else(|| Some(c.status_category.clone()));
-        if c.origin.as_deref() == Some("agent") {
+        // `g.job_states` is the FENCED map (`Graph::build`): a job whose
+        // `tasks` row this reader may not see is not in it, and this is the
+        // gate on the whole `JobView` — its `result` is the worker session's
+        // own output, the single most private thing a dispatch produces.
+        // Asking the already-applied fence rather than re-deriving it is what
+        // keeps the two answers (`SubtaskView.job_state` below and this
+        // block) from disagreeing about the same job.
+        // Is this child a job mirror whose dispatch the reader may not read?
+        // Its TITLE is the first line of the dispatch prompt and its notes
+        // are the prompt (`Store::create_agent_task_item`), so a mirror's
+        // text is one session's instruction to another — not shared work
+        // structure, whatever the shape of the row carrying it (multi-user
+        // M1, T5's review; the `open_proposals` note in `Graph::build` says
+        // where that reasoning went wrong). Same fence as `JobView` below,
+        // asked once here so the title and the view cannot disagree.
+        let mirror_fenced = g.mirror_text_hidden(&c);
+        if c.origin.as_deref() == Some("agent") && g.job_states.contains_key(&c.id) {
             if let Some(job) = job_of(c.task_id)? {
                 out.jobs.push(JobView {
                     item_id: c.id,
@@ -2321,7 +2759,7 @@ fn native_work(
                     worker: job
                         .worker_session_id
                         .and_then(|w| g.sessions.get(&w))
-                        .filter(|r| scope.sees_row(r))
+                        .filter(|r| scope.sees_row_org_only(r))
                         .map(|r| {
                             r.friendly_name
                                 .clone()
@@ -2347,7 +2785,16 @@ fn native_work(
             project_id: c.project_id,
             live_sessions,
             job_state: g.job_states.get(&c.id).cloned(),
-            title: c.title,
+            // The row stays — it is structure, and the tree that shows the
+            // same children would otherwise disagree about how many there
+            // are — but its text does not. `JOB_TITLE_WITHHELD` is the label
+            // `job_title` itself falls back to for a prompt with no first
+            // line, so the answer stays well-formed and says nothing.
+            title: if mirror_fenced {
+                JOB_TITLE_WITHHELD.to_string()
+            } else {
+                c.title
+            },
         });
     }
     // Every conversation of the task and its subtasks, deduplicated.
@@ -2369,6 +2816,9 @@ fn native_work(
     let mut groups: Vec<(i64, StepGroup)> = Vec::new();
     for st in s.current_steps(&convs)? {
         let label = labels.get(&st.claude_session_id);
+        // This is the org boundary, not a privacy fence: whether a scoped
+        // caller is told the PROJECT a subtask sits in. This function's
+        // session half is person-fenced by `hidden_sessions`, above.
         if !scope.is_all() && !label.is_some_and(|(_, visible)| *visible) {
             continue;
         }
@@ -2491,17 +2941,25 @@ fn item_status(g: &Graph, i: &ViewItem) -> Option<String> {
 /// with its task.
 pub fn session_tasks(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     session_id: i64,
 ) -> Result<SessionTasks, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
+    // `Graph::load_for` empties the person-invisible rows out of
+    // `g.sessions`. The org half still has to be asked here, and T10 proved
+    // it by deleting the call: `ViewScope::sees_session_facts` returns at its
+    // first clause for the hub's own reader, before the org boundary, so an
+    // internal-and-narrowed scope is fenced by this and nothing else.
     let row = g
         .sessions
         .get(&session_id)
-        .filter(|r| scope.sees_row(r))
+        // Org half; the person half is `Graph::load_for`'s `hidden_sessions`,
+        // which has already emptied this map of rows this caller may not see.
+        .filter(|r| scope.sees_row_org_only(r))
         .ok_or_else(|| crate::service::orgs::not_found("session", session_id))?;
     let built = build_tasks(&g, scope);
     let others = active_tasks_by_session(&built);
@@ -2775,13 +3233,14 @@ pub(crate) fn review_of(
 /// the caller may decide.
 pub fn review(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     cursor: Option<&str>,
     limit: Option<usize>,
 ) -> Result<ReviewPage, IpcError> {
+    let scope = &view.org;
     let g = {
         let s = lock(store)?;
-        Graph::load(&s, scope)?
+        Graph::load_for(&s, view)?
     };
     review_of(&g, scope, cursor, limit)
 }

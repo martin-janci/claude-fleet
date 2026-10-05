@@ -5,11 +5,15 @@
 -- `ensure_participant_for_session`). A session that never sent or received
 -- a message therefore had no identity, and everything anchored on the
 -- participant rather than on the reusable `sessions.id` — a move's re-point
--- today, work links next — silently skipped it. `sessions` rows are inserted
--- from three places (reconcile's upsert, `upsert_session`, the bg path), so
--- this is a trigger, not a call at each site: the same reasoning as 044's
--- `trg_read_cursors_on_session_delete`, and a fourth insert site cannot miss
--- it either.
+-- today, work links next — silently skipped it. A `sessions` row is inserted
+-- by `store/reconcile.rs::upsert_session_in_tx` (the reconcile pass) and by
+-- `store/sessions.rs::upsert_bg_session` (the pane-less `claude --bg` /
+-- external path), plus the test-only `upsert_session` beside it — named
+-- rather than counted, because the COUNT this header used to give went stale
+-- the first time one of them moved, and a future writer must be covered too.
+-- So this is a trigger, not a call at each site: the same reasoning as 044's
+-- `trg_read_cursors_on_session_delete`, and migration 099's
+-- `trg_conversation_owner_on_session_insert` is the next instance of it.
 --
 -- `WHEN NOT EXISTS`: a live participant already bound to this id (only a
 -- pre-existing orphan could be — `sweep_retired_participants` retires those)

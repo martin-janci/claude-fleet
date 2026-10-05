@@ -292,13 +292,28 @@ pub async fn handle_source(
         if !settings::get_bool(&s, settings::VOICE_ENABLED) {
             return (StatusCode::FORBIDDEN, "voice relay is off\n").into_response();
         }
-        let scope = match caller.org_scope(&s) {
+        // Multi-user M1: the PERSON scope, not the org one. A microphone
+        // feeds the session's prompt, so this is a drive-level reach: a row
+        // the caller cannot see answers as one that does not exist, a row it
+        // only watches is refused.
+        let scope = match caller.view_scope(&s) {
             Ok(sc) => sc,
             Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         };
-        let row = s.get_session_by_id(q.session_id).ok().flatten();
-        if !row.as_ref().is_some_and(|r| scope.sees_row(r)) {
+        let Some(row) = s
+            .get_session_by_id(q.session_id)
+            .ok()
+            .flatten()
+            .filter(|r| scope.sees_session_row(r).is_visible())
+        else {
             return (StatusCode::NOT_FOUND, "no such session\n").into_response();
+        };
+        if !scope.may_drive(&row) {
+            return (
+                StatusCode::FORBIDDEN,
+                "a watch grant cannot supply a microphone\n",
+            )
+                .into_response();
         }
     }
     let owner = caller.label();
