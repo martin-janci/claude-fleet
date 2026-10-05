@@ -1270,8 +1270,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "catalog_admin",
         },
     ),
-    // The Inbox's cards, read only until M6: `changesets { list }`, the
-    // master's or an unbound full client's.
+    // The Inbox's cards: `changesets { list }`, the master's or an unbound
+    // full client's. The card verbs follow below.
     (
         "catalog_list_changesets",
         Verdict::Routed { tool: "changesets" },

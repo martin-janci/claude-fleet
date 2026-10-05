@@ -131,7 +131,7 @@
 
 <style>
   .muted { color: var(--fg-muted); font-size: 12px; margin: 0 0 6px; }
-  .error { color: #dc2626; }
+  .error { color: var(--usage-crit); }
   .add-name { display: flex; gap: 6px; margin-bottom: 8px; }
   .add-name input { flex: 1; }
   .rows { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow: auto; }

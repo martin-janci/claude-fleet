@@ -1,14 +1,12 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
   import Badge from './Badge.svelte';
   import type { ChangesetView, ItemView } from './assets_workspace';
   import { heldWords } from './assets_cards';
 
   /** A card in the Inspector (R12): every item by group, with per-item ✕
    *  (reject — a person's verdict: it sticks until the content changes) and
-   *  "Skip this group"; an applied card's commits and Undo; a Drift card's
-   *  diff (the `diff` snippet, Task 10). `onapply` and `onsynchost` are for
-   *  Task 10's drift buttons and Hosts lines. */
+   *  "Skip this group"; an applied card's commits and Undo. A Drift card's
+   *  diff is the Inspector's Diff tab (`DriftPanel`), not rendered here. */
   let {
     view,
     readOnly,
@@ -16,7 +14,6 @@
     onreject,
     onundo,
     onreview,
-    diff,
   }: {
     view: ChangesetView;
     readOnly: boolean;
@@ -27,7 +24,6 @@
     onsynchost?: (host: string) => void;
     /** A Rollout card's Review plan: each pending host planned host-scoped, read-only. */
     onreview?: () => void;
-    diff?: Snippet;
   } = $props();
 
   const open = $derived(view.state === 'proposed' || view.state === 'failed');
@@ -40,7 +36,6 @@
 </script>
 
 <div class="detail">
-  {#if view.kind === 'drift' && diff}{@render diff()}{/if}
   {#each [...byGroup] as [g, items] (g)}
     {@const pending = items.filter((i) => i.state === 'pending').map((i) => i.position)}
     <section class="grp">

@@ -438,7 +438,7 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   `personal` too, the one deliberate change for a personal-only fleet;
   `fleet-hub catalog list` reads only (`probe_catalogs`: never clones or
   records a load) and `catalog remove` reports the open cards it withdrew.
-  No Tauri command or verdict row yet (M6).
+  Its Tauri commands and verdict rows arrived with M6.
 - **Assets M5 — the workspace shell** (plan
   `docs/superpowers/plans/2026-10-04-assets-m5-workspace.md`): a manifest
   entry records the sha256 of every file it wrote (`file_hashes`), so
@@ -468,7 +468,7 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   `catalog_admin { asset_history }` lists an asset's commits. Four read-only desktop
   commands route to the hub (`catalog_list_catalogs`,
   `catalog_list_changesets`, `catalog_repo_status_in`,
-  `catalog_asset_history`); card verbs stay M6. Frontend: `AssetsPanel`
+  `catalog_asset_history`); the card verbs came with M6. Frontend: `AssetsPanel`
   keeps loading, probing and every dialog and renders `AssetsWorkspace`
   (rail Inbox/Library/Secrets, a sentence header, `QueryInput`, the Inbox's
   sections with open cards read-only, `AssetList` as the Library, the
@@ -481,7 +481,48 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   focuses the query (Esc there closes, clears, then returns to the list),
   `a` adopts an identity, `s` syncs and `e` edits a personal asset, `⌘↵`
   runs Sync fleet; never inside a field or a dialog; read-only windows move
-  and select only; `i` waits for M6's card verbs.
+  and select only; `i` (M6) rejects a card's pending items.
+- **Assets M6 — cards on the desktop** (plan
+  `docs/superpowers/plans/2026-10-05-assets-m6-cards.md`): the card verbs are
+  desktop commands (`catalog_get_changeset`, `catalog_apply_changeset`,
+  `catalog_undo_changeset`, `catalog_dismiss_changeset`,
+  `catalog_reject_changeset_items`, `catalog_propose_changesets`,
+  `catalog_propose_layer_change`) that route by their own name to the hub's
+  `changesets` tool (standalone: the fleet-core functions); the hub checks the
+  grant per catalog the card touches and runs its confirm gate for a rollout
+  or restore apply, and a hub older than M6 refuses the new actions with
+  `E_INVALID`, which the desktop words as "the hub is older than this
+  desktop" (`olderHubWords`; no contract bump). Layer cards: `changesets {
+  propose_layer }` takes a `LayerChange` (create, rename, move a member)
+  and writes a `layer` card the person applies and may undo; reconcile never
+  refreshes or withdraws one. `catalog_admin { drift_diff }` (read) answers
+  a drifted asset's two texts for the Drift card's Take / Restore: the
+  rendered files only (`plan.files`, never a config merge), placeholders
+  kept (the catalog side is never secret-substituted), 256 KiB a side
+  (`truncated`, `binary`, `merges_only`). A held line (a copy a Rollout
+  would not touch) is the item's `changeset_items.outcome` (migration 098,
+  JSON): every Overwrite of the card's own asset is held under Additive,
+  as is a copy fleet cannot vouch for; an untouched withdrawn card is pruned
+  a week after `withdrawn_at` (migration 099). Frontend: the Inbox's cards
+  are `ChangesetCard`s (apply, undo, dismiss, ✕ per item, one primary for the
+  selected card; `⌘↵` runs it, else Sync fleet), the Inspector's Diff tab is
+  `DriftPanel` over `DiffView`, and `SyncPlanView` replaces the modal
+  `SyncPlanDialog` (a plan or a Rollout card's read-only review takes the
+  main column; "Plan anyway" stays host-scoped; Esc closes only it). The rail
+  gains **Layers** (by catalog, with footprints; create / rename / move make
+  cards) and **Hosts** (org, role per catalog, admission toggles — a hub
+  client may toggle only a catalog it holds a grant on — and the Inspector's
+  "on oci via layer core from personal" provenance, `resolve_preview`'s
+  `ResolutionView`). **Settings → Catalogs** is a `catalog` page resource
+  (add name/path/remote/org, remove, admit hosts); grants are shown as the
+  hub command `fleet-hub client grant CLIENT assets --catalog NAME`, never
+  edited here. The quick switcher lists assets and the commands Rescan
+  assets / Sync fleet / Propose cards after everything else; App fills the
+  `catalog` store once at launch (`primeCatalog`) so ⌘K works before Assets
+  is opened. A sync run's `ActionResult.catalog` keys a secret-blocked asset
+  as `catalog:kind/name` (a result without one is personal's). `a` / `s` /
+  `e` / `i` act from the list or the Inspector only, and the layout narrows
+  (rail to icons under 1100 px, the Inspector under the list under 860 px).
 - **File downloads** (spec
   `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
   095, contract revision 7): `send_file { session_id, path }` (a host's

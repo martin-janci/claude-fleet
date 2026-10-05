@@ -1,4 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi } from 'vitest';
 import AssetsRail from './AssetsRail.svelte';
 
@@ -49,5 +50,26 @@ describe('AssetsRail', () => {
     render(AssetsRail, props({ readOnly: true }));
     expect(screen.queryByTestId('assets-secrets')).toBeNull();
     expect(screen.getByTestId('assets-rail-library')).toBeTruthy();
+  });
+
+  // The labels hide below 1100 px (the rail is an icon strip), so each button
+  // names itself by aria-label and title, with its count in words.
+  it('every button keeps its name when the label text hides: aria-label and title', () => {
+    render(AssetsRail, props());
+    expect(screen.getByTestId('assets-rail-inbox').getAttribute('aria-label')).toBe('Inbox, 3');
+    expect(screen.getByTestId('assets-rail-inbox').getAttribute('title')).toBe('Inbox');
+    expect(screen.getByTestId('assets-secrets').getAttribute('aria-label')).toBe('Secrets');
+    expect(screen.getByRole('button', { name: 'Hosts, 5' })).toBeTruthy();
+  });
+
+  it('a zero count is not in the name', () => {
+    render(AssetsRail, props({ counts: { inbox: 0, layers: 0, hosts: 0, library: 2 } }));
+    expect(screen.getByTestId('assets-rail-inbox').getAttribute('aria-label')).toBe('Inbox');
+  });
+
+  it('hides the labels (not the buttons) below 1100px', () => {
+    const css = readFileSync('src/lib/AssetsRail.svelte', 'utf8').match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';
+    const block = /@media \(max-width: 1100px\)\s*\{([\s\S]*?)\n  \}/.exec(css)?.[1] ?? '';
+    expect(block).toMatch(/\.lbl\s*\{\s*display:\s*none/);
   });
 });

@@ -339,7 +339,9 @@ pub async fn catalog_list_catalogs(
 }
 
 /// Assets M5 (R13, R14): the changeset cards, read only — the Inbox's
-/// proposed cards. Apply / undo / dismiss are M6.
+/// proposed cards. Opening, applying, undoing and dismissing one, rejecting
+/// its items and proposing new ones are the card-verb commands below
+/// (`catalog_get_changeset` … `catalog_propose_changesets`).
 #[tauri::command]
 pub async fn catalog_list_changesets(
     backend: State<'_, Arc<FleetBackend>>,

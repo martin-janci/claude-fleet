@@ -111,6 +111,12 @@ pub struct ActionResult {
     /// `done` | `conflict` | `failed` | `blocked` | `skipped`.
     pub outcome: String,
     pub detail: Option<String>,
+    /// The catalog the planned action came from (Assets M6), so a blocked
+    /// asset is told apart from a same-named one in another catalog.
+    /// `#[serde(default)]` because the summary is stored as JSON and travels
+    /// the wire: rows and hubs older than M6 never carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
 }
 
 /// What the applier did about one host. `Deserialize` for the same reason
@@ -751,6 +757,7 @@ fn result_of(action: &Action, outcome: &str, detail: Option<String>) -> ActionRe
         op: action.op,
         outcome: outcome.to_string(),
         detail,
+        catalog: action.catalog.clone(),
     }
 }
 
@@ -1797,6 +1804,10 @@ mod tests {
         let res = apply_host(&ctx, &Claude, &create).await;
         assert_eq!(res.status, "applied", "{res:?}");
         assert_eq!(res.actions[0].outcome, DONE);
+        // The result names the catalog the planned action came from (M6),
+        // so the Inbox can key a blocked asset by it.
+        assert!(create.actions[0].catalog.is_some(), "{create:?}");
+        assert_eq!(res.actions[0].catalog, create.actions[0].catalog);
         assert!(!res.restart_required, "a skill needs no restart");
         let written = std::fs::read_to_string(&skill_file).expect("skill written");
         assert!(written.contains("first body"));

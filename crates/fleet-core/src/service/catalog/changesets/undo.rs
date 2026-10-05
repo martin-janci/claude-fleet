@@ -229,8 +229,8 @@ fn refuse_unless_undoable(card: &ChangesetRow, items: &[ChangesetItemRow]) -> Re
     }
     if !changes_catalog(card, items) {
         return refuse(format!(
-            "card {} is a {} card; only an applied bootstrap, new or take_host card can be \
-             undone",
+            "card {} is a {} card; only an applied bootstrap, new, layer or take_host card \
+             can be undone",
             card.id, card.kind
         ));
     }

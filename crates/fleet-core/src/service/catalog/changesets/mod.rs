@@ -464,9 +464,9 @@ pub fn writes_hosts(card: &ChangesetRow, selected: &[&ChangesetItemRow]) -> bool
 }
 
 /// A card that changed a catalog, so can be undone (R20): bootstrap, new,
-/// layer (Assets M6, R5), and a drift applied as take_host — and only when an applied item names a
-/// catalog. A hide-only card committed nothing, so there is nothing to undo
-/// (PF12).
+/// layer (Assets M6, R5), and a drift applied as take_host — and only when
+/// an applied item names a catalog. A hide-only card committed nothing, so
+/// there is nothing to undo (PF12).
 pub(crate) fn changes_catalog(card: &ChangesetRow, items: &[ChangesetItemRow]) -> bool {
     if applied_catalogs(items).is_empty() {
         return false;

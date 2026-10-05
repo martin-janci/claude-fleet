@@ -74,7 +74,7 @@
 <style>
   label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--fg-muted); margin-bottom: 8px; }
   input, select { font: inherit; padding: 4px 6px; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: 4px; }
-  .err { color: #dc2626; font-size: 12px; margin: -4px 0 8px; }
+  .err { color: var(--usage-crit); font-size: 12px; margin: -4px 0 8px; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; }
   .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }

@@ -37,7 +37,7 @@
   import { loadTasks, applyTaskEvents } from './lib/tasks';
   import { loadAccountUsage, applyAccountUsageEvents, accountUsage } from './lib/account_usage_store';
   import EmbedSlot from './lib/pages/EmbedSlot.svelte';
-  import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
+  import { mergeInventoryRow, clearInventoryFor, loadAssets, primeCatalog, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
   import TransferSheet from './lib/TransferSheet.svelte';
   import { applyMoveProgress, recheckWaitingRuns } from './lib/moves';
@@ -328,6 +328,9 @@
     // Trackers (work graph M3): their state badges, chip staleness and the
     // quick switcher's tickets. A hub older than M3 has no answer.
     void loadTrackers();
+    // The asset catalog, for the quick switcher's asset rows: only the Assets
+    // panel filled it, so ⌘K listed none on a fresh launch. Silent.
+    void primeCatalog(get(hubStatus).remote);
     // A hub reconnect the hub could not replay: the backend re-lists rows
     // itself; projects/worktrees and trackers/work have list shapes their
     // events cannot carry, so this window re-fetches them here. The chips

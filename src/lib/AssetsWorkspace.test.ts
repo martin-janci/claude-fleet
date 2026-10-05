@@ -1254,4 +1254,137 @@ describe('AssetsWorkspace hosts (R18)', () => {
     await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
     expect(screen.getByTestId('host-accept-oci-papayapos')).toBeDisabled();
   });
+
+  it('a hub client granted only personal cannot toggle papayapos: disabled, with the reason, and no call', async () => {
+    hubAnswers();
+    hubStatus.set({ ...STANDALONE, remote: true, client_name: 'desk', client_mode: 'full' });
+    catalogStatuses.set([st('personal', { granted: ['desk'] }), { ...PAPAYA, granted: ['someone-else'] }]);
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    const t = screen.getByTestId('host-accept-oci-papayapos');
+    expect(t).toBeDisabled();
+    expect(t.getAttribute('title')).toBe('Needs a grant on papayapos: ask the operator');
+    await fireEvent.click(t);
+    await fireEvent.click(screen.getByTestId('host-accept-local-papayapos'));
+    expect(cardCalls('catalog_admit_catalog')).toHaveLength(0);
+    expect(cardCalls('catalog_unadmit_catalog')).toHaveLength(0);
+  });
+
+  it('a hub client granted papayapos can toggle it', async () => {
+    hubAnswers([st('personal', { granted: ['desk'] }), { ...PAPAYA, granted: ['desk'], admitted: ['local', 'oci'] }]);
+    hubStatus.set({ ...STANDALONE, remote: true, client_name: 'desk', client_mode: 'full' });
+    catalogStatuses.set([st('personal', { granted: ['desk'] }), { ...PAPAYA, granted: ['desk'] }]);
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    await fireEvent.click(screen.getByTestId('host-accept-oci-papayapos'));
+    await waitFor(() => expect(cardCalls('catalog_admit_catalog')).toHaveLength(1));
+  });
+
+  it('a failed catalog reload after a toggle is reported, beside the success', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_admit_catalog') return ['oci'];
+      if (cmd === 'catalog_list_catalogs') throw { code: 'E_HUB_UNREACHABLE', message: 'hub did not answer' };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    await fireEvent.click(screen.getByTestId('host-accept-oci-papayapos'));
+    await waitFor(() => expect(get(toasts).some((t) => t.kind === 'error' && t.message.startsWith('Reload catalogs: hub did not answer'))).toBe(true));
+    expect(get(toasts).some((t) => t.message === 'oci now receives papayapos')).toBe(true);
+  });
+});
+
+describe('AssetsWorkspace carries (Task 15)', () => {
+  const css = readFileSync('src/lib/AssetsWorkspace.svelte', 'utf8').match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';
+  const media = (q: string) => new RegExp(`@media \\(max-width: ${q}\\)\\s*\\{([\\s\\S]*?)\\n  \\}`).exec(css)?.[1] ?? '';
+
+  it('the layout narrows: the rail to 56px under 1100px, the Inspector under the list under 860px', () => {
+    expect(media('1100px')).toMatch(/grid-template-columns:\s*56px minmax\(0, 1fr\) minmax\(280px, 340px\)/);
+    const narrow = media('860px');
+    expect(narrow).toMatch(/grid-template-columns:\s*56px minmax\(0, 1fr\);/);
+    expect(narrow).toContain("grid-template-areas: 'rail main' 'rail insp' 'foot foot'");
+    expect(narrow).toMatch(/\.insp\s*\{[^}]*border-top/);
+  });
+
+  describe('a, s, e and i act only from the list or the Inspector', () => {
+    const chip = () => screen.getByTestId('catalog-chip-personal');
+    const SEL = 'asset:personal:skill/edited';
+
+    it('s from the footer chip does nothing; from the list row it syncs', async () => {
+      const h = handlers();
+      render(AssetsWorkspace, { ...h, selectedKey: SEL });
+      chip().focus();
+      expect(document.activeElement).toBe(chip());
+      await fireEvent.keyDown(chip(), { key: 's' });
+      expect(h.onsync).not.toHaveBeenCalled();
+      const row = screen.getByTestId(`inbox-row-${SEL}`);
+      row.focus();
+      await fireEvent.keyDown(row, { key: 's' });
+      expect(h.onsync).toHaveBeenCalledWith({ kind: 'skill', name: 'edited' });
+    });
+
+    it('s from the Inspector syncs the selected asset', async () => {
+      const h = handlers();
+      render(AssetsWorkspace, { ...h, selectedKey: SEL });
+      const insp = document.querySelector('.insp') as HTMLElement;
+      await fireEvent.keyDown(insp, { key: 's' });
+      expect(h.onsync).toHaveBeenCalledWith({ kind: 'skill', name: 'edited' });
+    });
+
+    it('e from the footer chip does not open the editor', async () => {
+      render(AssetsWorkspace, { ...handlers(), selectedKey: SEL });
+      await fireEvent.keyDown(chip(), { key: 'e' });
+      expect(screen.queryByTestId('editor-save')).toBeNull();
+      expect(screen.getByTestId('inspector-tab-source').getAttribute('aria-selected')).not.toBe('true');
+    });
+
+    it('a from the footer chip does not adopt', async () => {
+      const h = handlers();
+      render(AssetsWorkspace, { ...h, selectedKey: 'identity:skill/fresh' });
+      await fireEvent.keyDown(chip(), { key: 'a' });
+      expect(h.onimport).not.toHaveBeenCalled();
+      await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'a' });
+      expect(h.onimport).toHaveBeenCalledWith(expect.objectContaining({ kind: 'skill', name: 'fresh' }));
+    });
+
+    it('i from the footer chip does not reject; from the list it does', async () => {
+      withCards([NEW_CARD, NEW_VIEW]);
+      answerCards([[NEW_CARD, NEW_VIEW]]);
+      render(AssetsWorkspace, { ...handlers(), selectedKey: 'card:7' });
+      await fireEvent.keyDown(chip(), { key: 'i' });
+      expect(cardCalls('catalog_reject_changeset_items')).toHaveLength(0);
+      await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'i' });
+      await waitFor(() => expect(cardCalls('catalog_reject_changeset_items')).toHaveLength(1));
+    });
+
+    it('j and / are not scoped: the list still moves from the footer', async () => {
+      render(AssetsWorkspace, handlers());
+      await fireEvent.keyDown(chip(), { key: 'j' });
+      expect((document.activeElement as HTMLElement | null)?.getAttribute('data-row-key')).toBe('asset:personal:skill/edited');
+    });
+  });
+
+  describe('the selected card is the primary only while the Inbox is on screen', () => {
+    it('with the listing not loaded, ⌘↵ syncs and the header Sync keeps the primary', async () => {
+      withCards([NEW_CARD, NEW_VIEW]);
+      answerCards([[NEW_CARD, NEW_VIEW]]);
+      catalog.set(null);
+      const h = handlers();
+      render(AssetsWorkspace, { ...h, selectedKey: 'card:7' });
+      expect(screen.queryByTestId('card-7')).toBeNull();
+      expect(primaries('.main')).toEqual(['assets-sync']);
+      await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'Enter', metaKey: true });
+      expect(h.onsync).toHaveBeenCalledWith({});
+      expect(cardCalls('catalog_apply_changeset')).toHaveLength(0);
+    });
+
+    it('with the Inbox shown, ⌘↵ applies the card (the contrast)', async () => {
+      withCards([NEW_CARD, NEW_VIEW]);
+      answerCards([[NEW_CARD, NEW_VIEW]]);
+      render(AssetsWorkspace, { ...handlers(), selectedKey: 'card:7' });
+      expect(primaries('.main')).toEqual(['card-primary-7']);
+      await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'Enter', metaKey: true });
+      await waitFor(() => expect(cardCalls('catalog_apply_changeset')).toHaveLength(1));
+    });
+  });
 });

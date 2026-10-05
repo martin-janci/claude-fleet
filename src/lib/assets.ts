@@ -168,6 +168,22 @@ export async function loadAssets(): Promise<Result<AssetListing>> {
   return r;
 }
 
+/** Fill the `catalog` store once at launch, so the quick switcher (⌘K) lists
+ *  assets before the Assets tab was ever opened — the panel is the only other
+ *  thing that loads it. Silent: a failure (no catalog configured, an ungranted
+ *  hub client's refusal) leaves the store as it was. A hub loaded its own
+ *  catalog at boot, so a hub client only reads the listing; a standalone
+ *  window first loads its configured catalog, as the panel's mount does
+ *  (nothing else has by then). */
+export async function primeCatalog(remote: boolean): Promise<void> {
+  if (!remote) {
+    const c = await loadCatalogConfig();
+    if (!c.ok || !c.value) return;
+    if (!(await loadCatalog(false)).ok) return;
+  }
+  await loadAssets();
+}
+
 export function getAsset(kind: string, name: string): Promise<Result<AssetDetail>> {
   return invokeCmd<AssetDetail>('catalog_get_asset', { args: { kind, name } });
 }
@@ -301,6 +317,8 @@ export interface ActionResult {
   op: ActionOp;
   outcome: string;
   detail: string | null;
+  /** The catalog the planned action came from; absent from a hub before M6. */
+  catalog?: string | null;
 }
 
 export interface HostSyncResult {

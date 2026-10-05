@@ -6,7 +6,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   keyOf, parseKey, scopeBadge, canWrite, summarizeRun, ago, assetHistory,
   loadChangesets, changesetSummaries, loadCatalogStatuses, catalogStatuses,
-  loadLayers, layerListing, repoStatusOf, isOpenCard, blockedOnSecrets, type ChangesetSummary, type ItemView,
+  loadLayers, layerListing, repoStatusOf, isOpenCard, blockedOnSecrets, blockedSecretKeys, type ChangesetSummary, type ItemView,
   applyChangeset, rejectItems, undoChangeset, dismissChangeset, getChangeset, proposeChangesets, proposeLayerChange,
   loadOpenCardViews, loadAllLayers, cardViews, layersByCatalog, driftDiff, admitCatalog, hostProvenance,
 } from './assets_workspace';
@@ -131,6 +131,24 @@ describe('blockedOnSecrets', () => {
     expect(b({ kind: 'mcp', name: 'fleet' })).toBe(true);
     expect(b({ kind: 'skill', name: 'x' })).toBe(false);
     expect(b({ kind: 'skill', name: 'y' })).toBe(false);
+  });
+  it('keys blocked assets by catalog too', () => {
+    const r = {
+      plan_id: 'p', started_at: 1, finished_at: 2,
+      hosts: [{ host_alias: 'oci', harness: 'claude', status: 'partial', detail: null, restart_required: false,
+        actions: [{ kind: 'skill', name: 'w', op: 'blocked', outcome: 'blocked', detail: 'missing secrets: TOKEN', catalog: 'acme' }] }],
+    } as never;
+    expect(blockedSecretKeys(r)).toEqual(['acme:skill/w']);
+    const blocked = blockedOnSecrets(r);
+    expect(blocked({ kind: 'skill', name: 'w', catalog: 'acme' })).toBe(true);
+    expect(blocked({ kind: 'skill', name: 'w', catalog: 'personal' })).toBe(false);
+    expect(blocked({ kind: 'skill', name: 'w' })).toBe(false);
+  });
+  it('a result without a catalog (a hub before M6) keys as personal', () => {
+    const b = blockedOnSecrets(run([act('skill', 'w', 'blocked', 'missing secrets: TOKEN')]));
+    expect(b({ kind: 'skill', name: 'w', catalog: 'personal' })).toBe(true);
+    expect(b({ kind: 'skill', name: 'w' })).toBe(true);
+    expect(b({ kind: 'skill', name: 'w', catalog: 'acme' })).toBe(false);
   });
   it('is false for everything with no run', () => {
     expect(blockedOnSecrets(null)({ kind: 'mcp', name: 'fleet' })).toBe(false);

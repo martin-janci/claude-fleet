@@ -122,6 +122,7 @@
   let editNonce = $state(0);
   let editKey = $state('');
   let listEl: HTMLElement | undefined = $state();
+  let inspEl: HTMLElement | undefined = $state();
   let queryEl: ReturnType<typeof QueryInput> | undefined = $state();
   let now = $state(Math.floor(Date.now() / 1000));
   $effect(() => {
@@ -294,6 +295,8 @@
       !!selectedCard &&
       !readOnly &&
       view === 'inbox' &&
+      !!inbox &&
+      !failed &&
       cardWritable(selectedCard) &&
       primaryVerb(selectedCard, $cardViews[selectedCard.id] ?? null) !== null &&
       keepCard(query, selectedCard),
@@ -361,14 +364,16 @@
   /** Admit or unadmit a catalog for a host; then re-read the catalogs (their
    *  `admitted` lists) and the layers. Unadmitting leaves what is installed. */
   async function toggleAdmission(host: string, catalogName: string, on: boolean) {
-    if (anyBusy) return;
+    // The view disables the toggle; this holds for anything else that calls it.
+    if (anyBusy || readOnly || !canWrite(catalogName, ctx)) return;
     cardBusy = 'admit';
     let r;
+    let reload;
     try {
       r = await (on ? admitCatalog(host, catalogName) : unadmitCatalog(host, catalogName));
       if (r.ok) {
-        await loadCatalogStatuses();
-        void loadAllLayers(get(catalogStatuses));
+        reload = await loadCatalogStatuses();
+        if (reload.ok) void loadAllLayers(get(catalogStatuses));
       }
     } finally {
       cardBusy = '';
@@ -381,6 +386,9 @@
       kind: 'info',
       message: on ? `${host} now receives ${catalogName}` : `${host} no longer receives ${catalogName}; what is installed stays until you remove it`,
     });
+    // The change is made; a failed re-read leaves the toggles stale (the
+    // catalogs read as none), which the person must be told.
+    if (reload && !reload.ok) pushError(reload.error, 'Reload catalogs');
   }
 
   // ── The keyboard (Rulings R22) ────────────────────────────────────────
@@ -449,6 +457,11 @@
       return;
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // `a`, `s`, `e` and `i` act on the selection from the list, the Inspector
+    // or the workspace itself: not from the footer's chips or the rail, where
+    // a letter typed is not a request to sync or edit something.
+    const inScope = !!target && (!!listEl?.contains(target) || !!inspEl?.contains(target) || target === rootEl);
+    if (!inScope && (e.key === 'a' || e.key === 's' || e.key === 'e' || e.key === 'i')) return;
     const key = focusedKey() ?? selectedKey;
     const sel = key ? parseKey(key) : null;
     // The arrows move rows in the list only; elsewhere (the Inspector's
@@ -679,6 +692,7 @@
           {selectedKey}
           {readOnly}
           busy={anyBusy}
+          canAdmit={(c) => canWrite(c, ctx)}
           onselect={select}
           ontoggle={toggleAdmission}
         />
@@ -703,7 +717,7 @@
     </div>
   </div>
 
-  <div class="insp">
+  <div class="insp" bind:this={inspEl}>
     {#if layerSelected}
       {#key selectedKey}
         <LayerInspector
@@ -762,6 +776,19 @@
   .main { grid-area: main; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
   .insp { grid-area: insp; min-height: 0; border-left: 1px solid var(--border); }
   .foot { grid-area: foot; }
+  /* Narrow: the rail shrinks to icons (its buttons keep their names), then the
+     Inspector stacks under the list. */
+  @media (max-width: 1100px) {
+    .ws { grid-template-columns: 56px minmax(0, 1fr) minmax(280px, 340px); }
+  }
+  @media (max-width: 860px) {
+    .ws {
+      grid-template-columns: 56px minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) minmax(0, 45%) auto;
+      grid-template-areas: 'rail main' 'rail insp' 'foot foot';
+    }
+    .insp { border-left: 0; border-top: 1px solid var(--border); }
+  }
   .head { display: grid; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
   .line { display: flex; align-items: center; gap: 10px; min-width: 0; }
   .sentence { font-size: 14px; font-weight: 600; letter-spacing: -0.005em; }

@@ -324,23 +324,24 @@ export function summarizeRun(run: SyncRunSummary): string {
   return `${new Date(run.finished_at * 1000).toLocaleString()} — ${parts.join(', ') || 'no hosts'}`;
 }
 
-/** The assets the last sync run could not apply for want of a secret (the
- *  planner words that as `missing secrets: …`; any other blocked action —
- *  an unsupported kind, say — is not a secret problem). It is the producer
- *  for the Inbox's `InboxInput.blocked`: the frontend holds only the last
- *  run's results, not the last plan, so a secret set since is not reflected
- *  until the next sync. */
+/** The assets the last sync run could not apply for want of a secret, as
+ *  `catalog:kind/name` (a result without a catalog, from a hub before M6, is
+ *  personal's). The planner words that as `missing secrets: …`; any other
+ *  blocked action — an unsupported kind, say — is not a secret problem. It
+ *  is the producer for the Inbox's `InboxInput.blocked`: the frontend holds
+ *  only the last run's results, not the last plan, so a secret set since is
+ *  not reflected until the next sync. */
 export function blockedSecretKeys(run: SyncRunSummary | null): string[] {
   const keys = new Set<string>();
   for (const h of run?.hosts ?? [])
     for (const x of h.actions)
-      if (x.op === 'blocked' && x.detail?.startsWith('missing secrets')) keys.add(`${x.kind}/${x.name}`);
+      if (x.op === 'blocked' && x.detail?.startsWith('missing secrets')) keys.add(`${x.catalog ?? PERSONAL}:${x.kind}/${x.name}`);
   return [...keys];
 }
 
-export function blockedOnSecrets(run: SyncRunSummary | null): (a: { kind: string; name: string }) => boolean {
+export function blockedOnSecrets(run: SyncRunSummary | null): (a: { kind: string; name: string; catalog?: string | null }) => boolean {
   const keys = new Set(blockedSecretKeys(run));
-  return (a) => keys.has(`${a.kind}/${a.name}`);
+  return (a) => keys.has(`${a.catalog ?? PERSONAL}:${a.kind}/${a.name}`);
 }
 
 /** "3 min ago" from Unix seconds. */

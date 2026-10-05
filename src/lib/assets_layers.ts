@@ -1,6 +1,6 @@
 // Assets M6 (R17, R18): layer footprints, "why is it on <host>?", a host's
 // role per catalog and which catalogs a host accepts — mirrors of
-// effective.rs `acceptance` and the resolver's role → extends chain.
+// effective.rs `acceptance` and the resolver's role → context → extends chain.
 import type { CatalogStatus, LayerListing } from './assets_workspace';
 
 function parentOf(l: LayerListing, name: string): string | null {

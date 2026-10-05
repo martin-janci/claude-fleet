@@ -7,8 +7,9 @@
   /** Hosts (spec, Workspace shell; R18): per host its org, its role per
    *  catalog, and the catalogs it accepts. An accepted catalog is a toggle:
    *  admit or unadmit (the hub refuses `personal` and a host that has an
-   *  org, so those are locked, and the lock says why). */
-  let { hosts, statuses, layers, orgName, selectedKey, readOnly, busy, onselect, ontoggle }: {
+   *  org, so those are locked, and the lock says why). A hub client may toggle
+   *  only a catalog it holds a grant on (`canAdmit`); the others say so. */
+  let { hosts, statuses, layers, orgName, selectedKey, readOnly, busy, canAdmit = () => true, onselect, ontoggle }: {
     hosts: HostRow[];
     statuses: CatalogStatus[] | null;
     layers: Record<string, LayerListing> | null;
@@ -16,6 +17,8 @@
     selectedKey: string | null;
     readOnly: boolean;
     busy: boolean;
+    /** Whether this window may admit to / unadmit from the catalog (R20). */
+    canAdmit?: (catalog: string) => boolean;
     onselect: (key: string) => void;
     ontoggle: (host: string, catalog: string, on: boolean) => void;
   } = $props();
@@ -73,8 +76,8 @@
               type="button"
               class="btn btn--chip"
               aria-pressed={acc.state !== 'none'}
-              disabled={acc.locked || readOnly || busy}
-              title={acc.why}
+              disabled={acc.locked || readOnly || busy || !canAdmit(c.name)}
+              title={!acc.locked && !readOnly && !canAdmit(c.name) ? `Needs a grant on ${c.name}: ask the operator` : acc.why}
               data-testid={`host-accept-${h.alias}-${c.name}`}
               onclick={(e) => {
                 e.stopPropagation();
