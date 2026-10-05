@@ -3,11 +3,17 @@
   import Inspector from './Inspector.svelte';
   import AssetDetail from './AssetDetail.svelte';
   import Badge from './Badge.svelte';
+  import ChangesetDetail from './ChangesetDetail.svelte';
   import HostStrip from './HostStrip.svelte';
   import { identitiesOf, catalogOf, type AssetIdentity, type AssetListing, type AssetSummary } from './assets';
   import { assetDots, driftSideWords } from './assets_inbox';
   import type { HostRow } from './hosts';
-  import { ago, assetHistory, parseKey, scopeBadge, type ChangesetSummary, type CommitEntry } from './assets_workspace';
+  import { heldWords } from './assets_cards';
+  import {
+    ago, assetHistory, cardViews, getChangeset, isOpenCard, parseKey, scopeBadge,
+    type ChangesetSummary, type ChangesetView, type CommitEntry,
+  } from './assets_workspace';
+  import type { CardVerbs } from './card_actions';
   import type { IpcError } from './result';
 
   /** What the Inspector shows for the selected row (Rulings R19): a pane of
@@ -28,6 +34,9 @@
     onsync,
     ondeleted,
     onimport,
+    oncard,
+    onreject,
+    cardBusy = false,
   }: {
     selectedKey: string | null;
     listing: AssetListing | null;
@@ -44,10 +53,16 @@
     onsync: (f: { hostAlias?: string; kind?: string; name?: string }) => void;
     ondeleted: () => void;
     onimport: (id: AssetIdentity) => void;
+    /** What a card's verbs do (Undo, here). */
+    oncard: CardVerbs;
+    /** Reject a card's pending items (✕, Skip this group). */
+    onreject: (id: number, positions: number[]) => void;
+    /** A card verb is running. */
+    cardBusy?: boolean;
   } = $props();
 
-  type Tab = 'overview' | 'source' | 'hosts' | 'history';
-  const LABEL: Record<Tab, string> = { overview: 'Overview', source: 'Source', hosts: 'Hosts', history: 'History' };
+  type Tab = 'overview' | 'source' | 'hosts' | 'history' | 'items';
+  const LABEL: Record<Tab, string> = { overview: 'Overview', source: 'Source', hosts: 'Hosts', history: 'History', items: 'Items' };
 
   const sel = $derived(selectedKey ? parseKey(selectedKey) : null);
   const asset = $derived.by((): AssetSummary | null => {
@@ -70,7 +85,25 @@
   // Defence in depth: only a personal asset is ever read through
   // `catalog_get_asset`, whatever `canOpen` says.
   const full = $derived(!!asset && !readOnly && catalogOf(asset) === 'personal' && canOpen(asset));
+  // A card in full: an open one from the store (the workspace loads those);
+  // an applied one — an Undo banner — is read once when it is selected.
+  let fetched = $state<ChangesetView | null>(null);
+  $effect(() => {
+    const c = card;
+    if (!c || isOpenCard(c) || $cardViews[c.id]) {
+      untrack(() => (fetched = null));
+      return;
+    }
+    if (untrack(() => fetched?.id) === c.id) return;
+    let live = true;
+    void getChangeset(c.id).then((r) => {
+      if (live && r.ok) fetched = r.value;
+    });
+    return () => (live = false);
+  });
+  const cardView = $derived(card ? ($cardViews[card.id] ?? (fetched?.id === card.id ? fetched : null)) : null);
   const tabs = $derived.by((): Tab[] => {
+    if (cardView) return cardView.kind === 'rollout' ? ['items', 'hosts'] : ['items'];
     if (asset) return full ? ['overview', 'source', 'hosts', 'history'] : readOnly ? ['overview', 'hosts'] : ['overview', 'hosts', 'history'];
     if (identity) return ['overview', 'hosts'];
     return ['overview'];
@@ -109,7 +142,7 @@
   });
   // The tab the person picked, unless this row has no such tab (a selection
   // change or a read-only flip took it away).
-  const tab = $derived<Tab>(tabs.includes(pick) ? pick : 'overview');
+  const tab = $derived<Tab>(tabs.includes(pick) ? pick : tabs[0]);
 
   // ── History ──────────────────────────────────────────────────────────
   type HistoryState = { key: string; rows: CommitEntry[] | null; error: string | null };
@@ -229,6 +262,32 @@
             ? 'Read-only: this window has no grant on this catalog.'
             : 'Managed in catalog ' + catalogOf(asset) + ': this window shows where it is installed and its History; editing it comes later.'}
         </p>
+      </div>
+    {:else if card && cardView && tab === 'hosts'}
+      <ul class="pad hosts" data-testid="inspector-hosts">
+        {#each cardView.items as h (h.position)}
+          <li>
+            <b>{h.name}</b> {h.state}
+            {#each h.outcome?.held ?? [] as l (`${l.kind}/${l.name}`)}
+              <span class="muted">{l.kind}/{l.name} — {heldWords(l.why)} · sync it yourself</span>
+            {/each}
+            {#if h.outcome?.note}<span class="muted">{h.outcome.note}</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    {:else if card && cardView}
+      <div class="pad" data-testid="inspector-card">
+        <p class="sentence">{cardView.summary}</p>
+        {#if cardView.error}<p class="error" role="alert">Failed: {cardView.error}</p>{/if}
+        <ChangesetDetail
+          view={cardView}
+          {readOnly}
+          busy={cardBusy}
+          onreject={(positions) => onreject(cardView.id, positions)}
+          onapply={(positions) => oncard.apply(cardView.id, positions)}
+          onundo={() => oncard.undo(cardView.id)}
+          onsynchost={oncard.synchost}
+        />
       </div>
     {:else if identity && tab === 'hosts'}
       <ul class="pad hosts" data-testid="inspector-hosts">

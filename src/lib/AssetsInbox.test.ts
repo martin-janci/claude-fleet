@@ -4,6 +4,7 @@ import AssetsInbox from './AssetsInbox.svelte';
 import { buildInbox } from './assets_inbox';
 import { parseQuery } from './assets_query';
 import type { AssetListing } from './assets';
+import type { ChangesetView } from './assets_workspace';
 
 const listing: AssetListing = {
   head: 'abc', loaded_at: 1, problems: [], unmanaged: [],
@@ -19,24 +20,54 @@ const listing: AssetListing = {
 };
 const card = { id: 7, kind: 'bootstrap' as const, summary: 'Adopt 1 as 1 layers', state: 'failed' as const, created_at: 1, error: 'core: import failed', groups: { core: 1 } };
 const inbox = buildInbox({ listing, cards: [card], order: ['local', 'oci'], stale: new Set() });
-const props = (over = {}) => ({ inbox, order: ['local', 'oci'], selectedKey: null, query: parseQuery(''), onselect: vi.fn(), ...over });
+const oncard = () => ({ apply: vi.fn(), dismiss: vi.fn(), undo: vi.fn(), synchost: vi.fn() });
+const props = (over = {}) => ({ inbox, order: ['local', 'oci'], selectedKey: null, query: parseQuery(''), onselect: vi.fn(), views: {}, busy: false, oncard: oncard(), ...over });
 
 describe('AssetsInbox', () => {
   it('shows proposed cards first, then the sections, with in sync folded to one line', async () => {
     render(AssetsInbox, props());
     const headers = Array.from(document.querySelectorAll('[data-testid^="inbox-section-"]')).map((h) => h.getAttribute('data-testid'));
     expect(headers).toEqual(['inbox-section-cards', 'inbox-section-drifted', 'inbox-section-fresh']);
-    const card = screen.getByTestId('inbox-row-card:7');
+    const card = screen.getByTestId('card-7');
     expect(card.textContent).toContain('Adopt 1 as 1 layers');
     expect(card.textContent).toContain('failed');
     expect(card.textContent).toContain('core: import failed');
-    expect(card.querySelectorAll('button')).toHaveLength(0);
     expect(screen.queryByTestId('inbox-row-asset:papayapos:skill/quiet')).toBeNull();
     const fold = screen.getByTestId('inbox-insync-toggle');
     expect(fold.getAttribute('aria-expanded')).toBe('false');
     expect(fold.textContent).toContain('In sync');
     await fireEvent.click(fold);
     expect(screen.getByTestId('inbox-row-asset:papayapos:skill/quiet').textContent).toContain('papayapos');
+  });
+
+  it('an open card renders as a ChangesetCard with its verbs', async () => {
+    const oc = oncard();
+    render(AssetsInbox, props({ oncard: oc }));
+    expect(screen.getByTestId('card-7')).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('card-primary-7'));
+    expect(oc.apply).toHaveBeenCalledWith(7, null);
+    await fireEvent.click(screen.getByTestId('card-dismiss-7'));
+    expect(oc.dismiss).toHaveBeenCalledWith(7);
+  });
+
+  it('only the selected card carries the primary verb', () => {
+    const { unmount } = render(AssetsInbox, props());
+    expect(screen.getByTestId('card-primary-7')).not.toHaveClass('btn--primary');
+    unmount();
+    render(AssetsInbox, props({ selectedKey: 'card:7' }));
+    expect(screen.getByTestId('card-primary-7')).toHaveClass('btn--primary');
+  });
+
+  it('an applied undoable card is listed under Recently applied', async () => {
+    const applied = { id: 4, kind: 'new' as const, summary: 'New on oci: skill/w', state: 'applied' as const, created_at: 1, applied_at: 2, undoable: true, catalogs: ['personal'] };
+    const withApplied = buildInbox({ listing, cards: [card, applied], order: ['local', 'oci'], stale: new Set() });
+    const oc = oncard();
+    const view: ChangesetView = { id: 4, kind: 'new', summary: applied.summary, state: 'applied', created_at: 1, commits: { personal: 'a1b2c3d4' }, undoable: true, items: [] };
+    render(AssetsInbox, props({ inbox: withApplied, oncard: oc, views: { 4: view } }));
+    expect(screen.getByTestId('inbox-section-applied')).toHaveTextContent('Recently applied');
+    expect(screen.getByTestId('card-4')).toHaveTextContent('personal a1b2c3d');
+    await fireEvent.click(screen.getByTestId('card-undo-4'));
+    expect(oc.undo).toHaveBeenCalledWith(4);
   });
 
   it('says why, with the scope badge and one dot per host', () => {
@@ -59,7 +90,7 @@ describe('AssetsInbox', () => {
     render(AssetsInbox, props({ query: parseQuery('kind:skill fresh') }));
     expect(screen.getByTestId('inbox-row-identity:skill/fresh')).toBeTruthy();
     expect(screen.queryByTestId('inbox-row-asset:personal:skill/edited')).toBeNull();
-    expect(screen.queryByTestId('inbox-row-card:7')).toBeNull();
+    expect(screen.queryByTestId('card-7')).toBeNull();
   });
 
   it('says "No matches." when the query filters everything out, not that nothing needs you', () => {
@@ -74,38 +105,55 @@ describe('AssetsInbox', () => {
   });
 });
 
-describe('AssetsInbox — cards are filtered by free words and catalog only (T7 ruling)', () => {
+describe('AssetsInbox — cards are filtered by free words and catalog only (T7 ruling, R2)', () => {
   it('host:, kind:, state:, layer: and scope: tokens never hide a card', () => {
     render(AssetsInbox, props({ query: parseQuery('host:nowhere kind:hook state:orphan layer:x scope:org') }));
-    expect(screen.getByTestId('inbox-row-card:7')).toBeTruthy();
+    expect(screen.getByTestId('card-7')).toBeTruthy();
   });
 
   it('free words match the card sentence, case-insensitively', () => {
     const { unmount } = render(AssetsInbox, props({ query: parseQuery('ADOPT') }));
-    expect(screen.getByTestId('inbox-row-card:7')).toBeTruthy();
+    expect(screen.getByTestId('card-7')).toBeTruthy();
     unmount();
     render(AssetsInbox, props({ query: parseQuery('rollout') }));
-    expect(screen.queryByTestId('inbox-row-card:7')).toBeNull();
+    expect(screen.queryByTestId('card-7')).toBeNull();
   });
 
-  it('a catalog: token never hides a card either (the summary does not name its catalogs yet)', () => {
-    const { unmount } = render(AssetsInbox, props({ query: parseQuery('catalog:personal') }));
-    expect(screen.getByTestId('inbox-row-card:7')).toBeTruthy();
+  it('a catalog: token hides a card of another catalog (R2)', () => {
+    const named = buildInbox({ listing, cards: [{ ...card, catalogs: ['personal'] }], order: ['local', 'oci'], stale: new Set() });
+    const { unmount } = render(AssetsInbox, props({ inbox: named, query: parseQuery('catalog:personal') }));
+    expect(screen.getByTestId('card-7')).toBeTruthy();
     unmount();
-    render(AssetsInbox, props({ query: parseQuery('catalog:acme') }));
-    expect(screen.getByTestId('inbox-row-card:7')).toBeTruthy();
+    render(AssetsInbox, props({ inbox: named, query: parseQuery('catalog:acme') }));
+    expect(screen.queryByTestId('card-7')).toBeNull();
   });
 
-  it('a card is a read-only row: selectable and marked, no apply, undo or dismiss', async () => {
+  it('a card that names no catalog is never hidden by a catalog: token', () => {
+    render(AssetsInbox, props({ query: parseQuery('catalog:acme') }));
+    expect(screen.getByTestId('card-7')).toBeTruthy();
+  });
+
+  it('a card is a selectable row in the keyboard walk: marked, keyed, and a click selects it', async () => {
     const onselect = vi.fn();
     render(AssetsInbox, props({ onselect, selectedKey: 'card:7' }));
-    const row = screen.getByTestId('inbox-row-card:7');
-    expect(row.tagName).toBe('BUTTON');
-    expect(row.getAttribute('aria-current')).toBe('true');
+    const row = screen.getByTestId('card-7');
+    expect(row).toHaveClass('selected');
     expect(row.getAttribute('data-row-key')).toBe('card:7');
+    expect(row.getAttribute('tabindex')).toBe('0');
     await fireEvent.click(row);
     expect(onselect).toHaveBeenCalledWith('card:7');
-    expect(screen.queryByText(/apply|undo|dismiss|skip/i)).toBeNull();
+  });
+
+  it('a busy card cannot be applied or dismissed twice', () => {
+    render(AssetsInbox, props({ busy: true }));
+    expect(screen.getByTestId('card-primary-7')).toBeDisabled();
+    expect(screen.getByTestId('card-dismiss-7')).toBeDisabled();
+  });
+
+  it('a read-only client sees the card without its verbs', () => {
+    render(AssetsInbox, props({ readonly: true }));
+    expect(screen.getByTestId('card-7')).toBeTruthy();
+    expect(screen.queryByTestId('card-primary-7')).toBeNull();
   });
 });
 

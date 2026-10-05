@@ -13,9 +13,12 @@
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
   import {
-    blockedOnSecrets, canWrite, catalogStatuses, changesetSummaries, keyOf, layerListing, layersByCatalog, parseKey, PERSONAL,
+    blockedOnSecrets, canWrite, cardViews, catalogStatuses, changesetSummaries, keyOf, layerListing, layersByCatalog, loadAllLayers,
+    loadChangesets, parseKey, PERSONAL,
     type WorkspaceView,
   } from './assets_workspace';
+  import { coveringNewCard, primaryVerb } from './assets_cards';
+  import { runCardVerb, type CardVerbs } from './card_actions';
   import { buildInbox, hostOrderOf, lastScanOf, sentence } from './assets_inbox';
   import { keep, parseQuery, type QueryRow } from './assets_query';
   import { isEditable } from './terminal_keys';
@@ -164,6 +167,25 @@
     selectedKey = key;
   }
 
+  // ── Card verbs (R12, R13): run, reload, toast (`card_actions`) ─────────
+  let cardBusy = $state('');
+  const anyBusy = $derived(busy !== '' || cardBusy !== '');
+  async function changed() {
+    await loadChangesets();
+    void loadAllLayers($catalogStatuses);
+    onrefresh();
+  }
+  const setCardBusy = (b: string) => (cardBusy = b);
+  const cardVerbs: CardVerbs & { reject: (id: number, positions: number[]) => void } = {
+    apply: (id, positions) => void runCardVerb('apply', id, { positions, setBusy: setCardBusy, onchanged: changed }),
+    dismiss: (id) => void runCardVerb('dismiss', id, { setBusy: setCardBusy, onchanged: changed }),
+    undo: (id) => void runCardVerb('undo', id, { setBusy: setCardBusy, onchanged: changed }),
+    reject: (id, positions) => void runCardVerb('reject', id, { positions, setBusy: setCardBusy, onchanged: changed }),
+    synchost: (host) => onsync({ hostAlias: host }),
+  };
+  const selectedCard = $derived(selection?.type === 'card' ? (($changesetSummaries ?? []).find((c) => c.id === selection.id) ?? null) : null);
+  const pendingOf = (id: number): number[] => ($cardViews[id]?.items ?? []).filter((i) => i.state === 'pending').map((i) => i.position);
+
   // ── The keyboard (Rulings R22) ────────────────────────────────────────
   // Focus moves between rows: the DOM order is the display order, a folded
   // section renders no rows. Space/Enter select natively (a static row
@@ -206,8 +228,19 @@
     // keep their keys.
     if (!visible || e.defaultPrevented || target?.closest?.('dialog,[role="dialog"]') || isEditable(target)) return;
     if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'Enter') {
-      // The one primary (R18): Sync fleet.
-      if (!readOnly && busy === '') {
+      // The region's one primary (R18, R-C): the selected card's verb when
+      // it applies (a review verb only selects, so there is nothing to run),
+      // else Sync fleet.
+      if (readOnly) return;
+      if (selectedCard) {
+        const v = primaryVerb(selectedCard, $cardViews[selectedCard.id] ?? null);
+        if (v?.apply && !anyBusy) {
+          e.preventDefault();
+          cardVerbs.apply(selectedCard.id, null);
+        }
+        return;
+      }
+      if (busy === '') {
         e.preventDefault();
         onsync({});
       }
@@ -238,6 +271,16 @@
         break;
       case 'a': {
         if (readOnly || sel?.type !== 'identity' || !listing) break;
+        // A New card that covers the identity is the one adopt: apply it
+        // rather than opening Import for the same copy.
+        const covering = coveringNewCard($changesetSummaries, $cardViews, sel.kind, sel.name);
+        if (covering) {
+          if (!anyBusy) {
+            e.preventDefault();
+            cardVerbs.apply(covering.id, null);
+          }
+          break;
+        }
         const id = identitiesOf(listing).find((i) => i.kind === sel.kind && i.name === sel.name);
         // As the row's own Import: never a fleet or harness internal.
         if (id && id.class !== 'fleet_internal' && id.class !== 'harness_internal') {
@@ -258,7 +301,21 @@
         e.preventDefault();
         void editAsset(key);
         break;
-      // `i` (ignore) is a card verb — reject_item — bound with the cards in M6.
+      case 'i': {
+        // Ignore: reject a card's pending items — the selected card's, or the
+        // New card that covers the selected identity. A person's verdict:
+        // it sticks until the content changes.
+        if (readOnly || anyBusy) break;
+        const id =
+          sel?.type === 'card' ? sel.id
+          : sel?.type === 'identity' ? (coveringNewCard($changesetSummaries, $cardViews, sel.kind, sel.name)?.id ?? null)
+          : null;
+        const positions = id === null ? [] : pendingOf(id);
+        if (id === null || !positions.length) break;
+        e.preventDefault();
+        cardVerbs.reject(id, positions);
+        break;
+      }
     }
   }
 
@@ -323,8 +380,8 @@
           >{busy === 'scan' ? 'Scanning…' : 'Rescan'}</button
         >
         {#if !readOnly}
-          <button type="button" class="btn btn--primary" onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
-            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'} <kbd>⌘↵</kbd></button
+          <button type="button" class="btn" class:btn--primary={!selectedCard} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
+            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !selectedCard} <kbd>⌘↵</kbd>{/if}</button
           >
         {/if}
       </div>
@@ -357,7 +414,18 @@
       {#if failed}
         {@render failed()}
       {:else if listing && view === 'inbox' && inbox}
-        <AssetsInbox {inbox} {order} {selectedKey} {query} readonly={readOnly} onselect={select} onimport={(i) => onimport(i)} />
+        <AssetsInbox
+          {inbox}
+          {order}
+          {selectedKey}
+          {query}
+          readonly={readOnly}
+          views={$cardViews}
+          busy={anyBusy}
+          oncard={cardVerbs}
+          onselect={select}
+          onimport={(i) => onimport(i)}
+        />
       {:else if listing}
         <AssetList
           {listing}
@@ -391,6 +459,9 @@
       autoEditKey={editKey || autoEditKey}
       {editNonce}
       {onsync}
+      oncard={cardVerbs}
+      onreject={cardVerbs.reject}
+      cardBusy={anyBusy}
       ondeleted={() => {
         selectedKey = null;
         ondeleted();

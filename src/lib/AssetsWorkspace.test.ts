@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AssetsWorkspace from './AssetsWorkspace.svelte';
 import { catalog, inventory, lastSyncRun, repoStatusStore, type AssetListing, type SyncRunSummary } from './assets';
-import { catalogStatuses, changesetSummaries, layerListing, type CatalogStatus } from './assets_workspace';
+import { cardViews, catalogStatuses, changesetSummaries, layerListing, type CatalogStatus, type ChangesetSummary, type ChangesetView } from './assets_workspace';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
 
@@ -20,6 +20,31 @@ const listing: AssetListing = {
   ],
   identities: [{ kind: 'skill', name: 'fresh', hosts: [{ host_alias: 'oci', harness: 'claude', host_hash: 'h' }], signature: 'oci', variants: 1, class: 'normal', reason: null }],
 };
+const NEW_CARD: ChangesetSummary = { id: 7, kind: 'new', summary: 'New on oci: skill/fresh → core', state: 'proposed', created_at: 1, groups: { core: 1 }, catalogs: ['personal'] };
+const NEW_VIEW: ChangesetView = { id: 7, kind: 'new', summary: NEW_CARD.summary, state: 'proposed', created_at: 1, commits: {}, undoable: false, catalogs: ['personal'], items: [
+  { position: 0, grp: 'core', catalog: 'personal', kind: 'skill', name: 'fresh', action: 'import', params: {}, decider: 'rule', state: 'pending' },
+  { position: 1, grp: 'core', catalog: 'personal', kind: 'skill', name: 'second', action: 'import', params: {}, decider: 'rule', state: 'pending' },
+  { position: 2, grp: 'core', catalog: 'personal', kind: 'skill', name: 'done', action: 'import', params: {}, decider: 'rule', state: 'rejected' },
+] };
+const DRIFT_CARD: ChangesetSummary = { id: 8, kind: 'drift', summary: 'oci edited skill/edited', state: 'proposed', created_at: 1 };
+const DRIFT_VIEW: ChangesetView = { id: 8, kind: 'drift', summary: DRIFT_CARD.summary, state: 'proposed', created_at: 1, commits: {}, undoable: false, items: [
+  { position: 0, grp: 'oci', kind: 'skill', name: 'edited', action: 'take_host', params: { host: 'oci' }, decider: 'person', state: 'pending' },
+] };
+const withCards = (...cards: [ChangesetSummary, ChangesetView][]) => {
+  changesetSummaries.set(cards.map(([c]) => c));
+  cardViews.set(Object.fromEntries(cards.map(([c, v]) => [c.id, v])));
+};
+const cardCalls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd);
+/** The hub answers every card verb with the applied card, and the reload with the cards as they were. */
+function answerCards(cards: [ChangesetSummary, ChangesetView][]) {
+  invoke.mockImplementation(async (cmd: string, a?: { args?: { id?: number } }) => {
+    if (cmd === 'catalog_list_changesets') return cards.map(([c]) => c);
+    if (cmd === 'catalog_get_changeset') return cards.find(([c]) => c.id === a?.args?.id)?.[1];
+    if (cmd.startsWith('catalog_') && cmd.endsWith('_changeset')) return { ...NEW_VIEW, state: 'applied', undoable: true, commits: { personal: 'abc1234' } };
+    if (cmd === 'catalog_reject_changeset_items') return { ...NEW_VIEW };
+    throw { code: 'E_TEST', message: cmd };
+  });
+}
 const handlers = () => ({ onscan: vi.fn(), onsync: vi.fn(), onimport: vi.fn(), onsecrets: vi.fn(), onnew: vi.fn(), onlintall: vi.fn() });
 
 beforeEach(() => {
@@ -27,7 +52,7 @@ beforeEach(() => {
   invoke.mockRejectedValue({ code: 'E_TEST', message: 'not in this test' });
   hubStatus.set(STANDALONE);
   catalog.set(listing); inventory.set([]); lastSyncRun.set(null); repoStatusStore.set(null);
-  catalogStatuses.set(null); changesetSummaries.set(null); layerListing.set(null);
+  catalogStatuses.set(null); changesetSummaries.set(null); layerListing.set(null); cardViews.set({});
   hosts.set([
     { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
     { alias: 'oci', ssh_alias: 'oci', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
@@ -58,6 +83,26 @@ describe('AssetsWorkspace', () => {
     expect(h.onscan).toHaveBeenCalled();
     await fireEvent.click(screen.getByTestId('assets-secrets'));
     expect(h.onsecrets).toHaveBeenCalled();
+  });
+
+  it('one primary per region: the header Sync with nothing selected, the selected card’s verb otherwise (R-C)', async () => {
+    withCards([NEW_CARD, NEW_VIEW], [DRIFT_CARD, DRIFT_VIEW]);
+    render(AssetsWorkspace, handlers());
+    const primaries = (region: string) => Array.from(document.querySelectorAll(`${region} .btn--primary`));
+    // Inbox, nothing selected: the header's Sync, and no card's verb.
+    expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['assets-sync']);
+    expect(primaries('.insp')).toHaveLength(0);
+    expect(document.querySelectorAll('.btn--primary')).toHaveLength(1);
+    // A card selected: its verb is the main column's one primary; Sync goes plain.
+    await fireEvent.click(screen.getByTestId('card-7'));
+    expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['card-primary-7']);
+    expect(screen.getByTestId('assets-sync')).toHaveClass('btn');
+    expect(screen.getByTestId('card-primary-8')).not.toHaveClass('btn--primary');
+    expect(primaries('.insp').length).toBeLessThanOrEqual(1);
+    expect(document.querySelectorAll('.btn--primary')).toHaveLength(1);
+    // Selecting an asset gives Sync its primary back.
+    await fireEvent.click(screen.getByTestId('inbox-row-identity:skill/fresh'));
+    expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['assets-sync']);
   });
 
   it('the Library holds the authoring controls and every asset once', async () => {
@@ -412,19 +457,107 @@ describe('AssetsWorkspace keyboard', () => {
     expect(h.onsync).not.toHaveBeenCalled();
   });
 
-  it('a on an asset row and s on an identity row do nothing; i is not bound in M5', async () => {
+  it('a on an asset row and s on an identity row do nothing', async () => {
     const h = handlers();
     render(AssetsWorkspace, h);
     const list = screen.getByTestId('assets-list');
     list.focus();
     await fireEvent.keyDown(list, { key: 'j' });
     await fireEvent.keyDown(document.activeElement!, { key: 'a' });
-    await fireEvent.keyDown(document.activeElement!, { key: 'i' });
     await fireEvent.keyDown(document.activeElement!, { key: 'j' });
     await fireEvent.keyDown(document.activeElement!, { key: 's' });
-    await fireEvent.keyDown(document.activeElement!, { key: 'i' });
     expect(h.onimport).not.toHaveBeenCalled();
     expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('i on a card rejects its pending items', async () => {
+    withCards([NEW_CARD, NEW_VIEW]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('card-7'));
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'i' });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_reject_changeset_items', { args: { id: 7, positions: [0, 1] } }));
+  });
+
+  it('i on an identity a New card covers rejects that card', async () => {
+    withCards([NEW_CARD, NEW_VIEW]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('inbox-row-identity:skill/fresh'));
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'i' });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_reject_changeset_items', { args: { id: 7, positions: [0, 1] } }));
+  });
+
+  it('i on anything else does nothing', async () => {
+    withCards([NEW_CARD, NEW_VIEW]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    render(AssetsWorkspace, handlers());
+    const list = screen.getByTestId('assets-list');
+    await fireEvent.click(screen.getByTestId('inbox-row-asset:personal:skill/edited'));
+    await fireEvent.keyDown(list, { key: 'i' });
+    // An identity no card covers.
+    catalog.set({ ...listing, identities: [{ ...listing.identities![0], name: 'other' }] });
+    await fireEvent.click(await screen.findByTestId('inbox-row-identity:skill/other'));
+    await fireEvent.keyDown(list, { key: 'i' });
+    expect(cardCalls('catalog_reject_changeset_items')).toHaveLength(0);
+  });
+
+  it('i does nothing for a read-only client or a card with nothing pending', async () => {
+    withCards([NEW_CARD, { ...NEW_VIEW, items: NEW_VIEW.items.map((i) => ({ ...i, state: 'rejected' as const })) }]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    const { unmount } = render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('card-7'));
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'i' });
+    unmount();
+    withCards([NEW_CARD, NEW_VIEW]);
+    render(AssetsWorkspace, { ...handlers(), readOnly: true });
+    await fireEvent.click(screen.getByTestId('card-7'));
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'i' });
+    expect(cardCalls('catalog_reject_changeset_items')).toHaveLength(0);
+  });
+
+  it('a on an identity a New card covers applies that card instead of opening Import', async () => {
+    withCards([NEW_CARD, NEW_VIEW]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    await fireEvent.click(screen.getByTestId('inbox-row-identity:skill/fresh'));
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'a' });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_apply_changeset', { args: { id: 7 } }));
+    expect(h.onimport).not.toHaveBeenCalled();
+  });
+
+  it('⌘↵ with a card selected runs its primary, not Sync', async () => {
+    withCards([NEW_CARD, NEW_VIEW]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    await fireEvent.click(screen.getByTestId('card-7'));
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'Enter', metaKey: true });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_apply_changeset', { args: { id: 7 } }));
+    expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('⌘↵ with a drift card selected does nothing (its primary only selects)', async () => {
+    withCards([DRIFT_CARD, DRIFT_VIEW]);
+    answerCards([[DRIFT_CARD, DRIFT_VIEW]]);
+    const h = handlers();
+    render(AssetsWorkspace, h);
+    await fireEvent.click(screen.getByTestId('card-8'));
+    await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'Enter', metaKey: true });
+    expect(cardCalls('catalog_apply_changeset')).toHaveLength(0);
+    expect(h.onsync).not.toHaveBeenCalled();
+  });
+
+  it('a card’s verbs reload the cards and the panel after they run', async () => {
+    withCards([NEW_CARD, NEW_VIEW]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    const onrefresh = vi.fn();
+    render(AssetsWorkspace, { ...handlers(), onrefresh });
+    await fireEvent.click(screen.getByTestId('card-dismiss-7'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_dismiss_changeset', { args: { id: 7 } }));
+    await waitFor(() => expect(onrefresh).toHaveBeenCalled());
+    expect(cardCalls('catalog_list_changesets').length).toBeGreaterThan(0);
   });
 
   it('the arrows scroll the Inspector natively; j there still walks the list', async () => {

@@ -3,11 +3,13 @@
 import { hostOrderOf, identitiesOf, oddHosts, type AssetIdentity, type AssetInventoryRow, type AssetListing, type AssetSummary, type HostState } from './assets';
 import type { DotState } from './assets_visual';
 import { ago, isOpenCard, keyOf, PERSONAL, type ChangesetSummary } from './assets_workspace';
-import { rowOfAsset, rowOfIdentity, rowOfOrphan, type QueryRow } from './assets_query';
+import { isUndoBanner } from './assets_cards';
+import { rowOfAsset, rowOfIdentity, rowOfOrphan, type ParsedQuery, type QueryRow } from './assets_query';
 
-export type InboxSection = 'cards' | 'needs' | 'drifted' | 'behind' | 'fresh' | 'insync';
+export type InboxSection = 'cards' | 'applied' | 'needs' | 'drifted' | 'behind' | 'fresh' | 'insync';
 export const SECTION_LABEL: Record<InboxSection, string> = {
   cards: 'Proposed',
+  applied: 'Recently applied',
   needs: 'Needs you',
   drifted: 'Drifted',
   behind: 'Behind the catalog',
@@ -32,7 +34,8 @@ export interface Inbox {
   sections: Record<InboxSection, InboxRow[]>;
   /** Fleet internals (`fleet_internal`, `harness_internal`): counted, not listed. */
   hidden: number;
-  /** Cards + needs you + drifted: what the rail's Inbox count says. */
+  /** Open cards + needs you + drifted: what the rail's Inbox count says
+   *  (an applied card with an Undo banner needs nothing). */
   needCount: number;
 }
 
@@ -90,10 +93,11 @@ function identityDots(id: AssetIdentity, order: string[], stale: ReadonlySet<str
 
 export function buildInbox(input: InboxInput): Inbox {
   const { listing, order, stale } = input;
-  const sections: Record<InboxSection, InboxRow[]> = { cards: [], needs: [], drifted: [], behind: [], fresh: [], insync: [] };
+  const sections: Record<InboxSection, InboxRow[]> = { cards: [], applied: [], needs: [], drifted: [], behind: [], fresh: [], insync: [] };
 
-  for (const c of (input.cards ?? []).filter(isOpenCard)) {
-    sections.cards.push({
+  for (const c of input.cards ?? []) {
+    const section = isOpenCard(c) ? sections.cards : isUndoBanner(c) ? sections.applied : null;
+    section?.push({
       key: keyOf({ type: 'card', id: c.id }), kind: c.kind, name: c.summary, why: c.error ?? '',
       dots: {}, query: { kind: c.kind, name: c.summary, hosts: [] }, card: c,
     });
@@ -159,6 +163,18 @@ export function buildInbox(input: InboxInput): Inbox {
   }
 
   return { sections, hidden, needCount: sections.cards.length + sections.needs.length + sections.drifted.length };
+}
+
+/** Whether the query keeps a card (T7 ruling, M6 R2). A card has no host,
+ *  scope, layer or state of its own, so only free words (against its
+ *  sentence) and `catalog:` (against the catalogs its apply commits to) can
+ *  hide it. A card that names no catalog cannot be excluded by one. */
+export function keepCard(query: ParsedQuery, c: ChangesetSummary): boolean {
+  const cats = (c.catalogs ?? []).map((x) => x.toLowerCase());
+  if (cats.length) {
+    for (const t of query.tokens) if (t.key === 'catalog' && !t.values.some((v) => cats.includes(v))) return false;
+  }
+  return !query.text || query.text.split(' ').every((w) => c.summary.toLowerCase().includes(w));
 }
 
 /** The newest scan the window knows of (Unix seconds), or null. */

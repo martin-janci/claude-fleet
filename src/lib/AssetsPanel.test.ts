@@ -492,7 +492,7 @@ describe('AssetsPanel authoring', () => {
       assets_scan_hosts: [{ host: 'local', status: 'scanned', detail: null, rows: 3 }],
     });
     render(AssetsPanel, { visible: true });
-    expect(await screen.findByTestId('inbox-row-card:7')).toBeTruthy();
+    expect(await screen.findByTestId('card-7')).toBeTruthy();
     const reads = () => invoke.mock.calls.filter((c) => c[0] === 'catalog_list_changesets').length;
     const before = reads();
     await fireEvent.click(screen.getByTestId('assets-scan'));
