@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# claude-fleet voice relay: an `arecord` stand-in for Claude Code's /voice on a
+# host with no sound card. Installed by fleet provisioning; do not edit here.
+# Streams the microphone of the app attached to this session from the fleet
+# server (GET /voice/capture), with this host's hook token.
+#
+# Claude Code calls exactly:
+#   arecord --version                                  presence check
+#   arecord -f S16_LE -r 16000 -c 1 -t raw /dev/null   probe (memoised per claude process)
+#   arecord -f S16_LE -r 16000 -c 1 -t raw -q -        record to stdout
+set -u
+ENV_FILE="$HOME/.claude-fleet/voice/voice.env"
+HEADERS="$HOME/.claude/fleet-hook.headers"
+FALLBACK_PORT="${FLEET_VOICE_FALLBACK_PORT:-4713}"
+FALLBACK_TOKEN="$HOME/.config/fleet-voice/token"
+
+case "${1:-}" in
+  --version) echo "arecord: claude-fleet voice relay"; exit 0 ;;
+esac
+last="${!#}"
+if [ "$last" = "/dev/null" ]; then
+  # Succeed regardless: the probe is memoised for the life of `claude`, and a
+  # microphone turned on later must still work.
+  sleep 1; exit 0
+fi
+if [ "$last" != "-" ]; then
+  echo "arecord (claude-fleet): only raw capture to stdout is supported" >&2; exit 2
+fi
+
+reason="no fleet voice config"
+if [ -r "$ENV_FILE" ] && [ -r "$HEADERS" ]; then
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  name="$(tmux display-message -p '#S' 2>/dev/null || true)"
+  if [ -n "${FLEET_VOICE_URL:-}" ] && [ -n "$name" ]; then
+    err="$(mktemp)"
+    # --fail: on an HTTP error curl writes nothing to stdout (PCM only there)
+    # and names the status on stderr.
+    if curl -sSN --fail -H @"$HEADERS" -G \
+         --data-urlencode "tmux=$name" "$FLEET_VOICE_URL/voice/capture" 2>"$err"; then
+      rm -f "$err"; exit 0
+    fi
+    reason="$(tr -d '\r' <"$err" | tail -n 1)"; rm -f "$err"
+    case "$reason" in
+      *409*) reason="$reason — turn on 🎤 for this session in claude-fleet" ;;
+      *403*) reason="$reason — voice relay is off in claude-fleet settings" ;;
+    esac
+  fi
+fi
+
+# The manual relay (a reverse-tunnelled microphone server), if set up.
+if [ -r "$FALLBACK_TOKEN" ] && { exec 3<>"/dev/tcp/127.0.0.1/$FALLBACK_PORT"; } 2>/dev/null; then
+  printf '%s\n' "$(cat "$FALLBACK_TOKEN")" >&3
+  exec cat <&3
+fi
+echo "arecord (claude-fleet): $reason" >&2
+exit 1
