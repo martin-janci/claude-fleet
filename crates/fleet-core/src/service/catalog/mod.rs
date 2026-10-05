@@ -357,6 +357,11 @@ pub struct HostState {
     pub host_alias: String,
     pub harness: String,
     pub state: String,
+    /// Assets M5 (R4): `host` | `catalog` on a drifted managed copy, so a
+    /// client that cannot read the inventory (an ungranted hub client) still
+    /// sees which side moved. Absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_side: Option<String>,
 }
 
 /// `Deserialize` because a hub-client desktop reads this back from the hub's
@@ -378,6 +383,32 @@ pub struct AssetSummary {
     /// older hub that predates this field still parses on the desktop side.
     #[serde(default)]
     pub scope: model::Scope,
+    /// Assets M5 (R11): the catalog this asset is in — `personal`, or an org
+    /// catalog's name. A hub before M5 listed the personal catalog only, so
+    /// an absent key reads as `personal`; and `personal` is never written
+    /// (fix round 1), so the default, personal-only listing is byte for byte
+    /// what it was before M5.
+    #[serde(default = "personal_label", skip_serializing_if = "is_personal")]
+    pub catalog: String,
+}
+
+fn personal_label() -> String {
+    catalogs::PERSONAL.to_string()
+}
+
+fn is_personal(catalog: &str) -> bool {
+    catalog == catalogs::PERSONAL
+}
+
+/// Assets M5 (R11): which catalogs a listing spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListingScope {
+    /// Every loaded catalog: the desktop, the master, an unbound full
+    /// person device (the audience of `list_catalogs`, M3 PF15).
+    Every,
+    /// The personal catalog only, as before M5: per-host tokens, org-bound
+    /// and readonly clients.
+    Personal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,11 +431,20 @@ pub struct AssetListing {
     pub identities: Option<Vec<identity::AssetIdentity>>,
 }
 
-/// Which hosts hold this catalog asset, and in what state. `unmanaged` and
-/// `orphan` rows are excluded by name: neither describes a catalog asset
+/// Which hosts hold `cat`'s asset `kind/name`, and in what state. `unmanaged`
+/// and `orphan` rows are excluded by name: neither describes a catalog asset
 /// (they are what `AssetListing::unmanaged` lists instead), and an orphan
-/// shares a `(kind, name)` with nothing in the catalog anyway.
-fn host_states(rows: &[AssetInventoryRow], kind: Kind, name: &str) -> Vec<HostState> {
+/// shares a `(kind, name)` with nothing in the catalog anyway. Carry 3
+/// (Assets M5, R12): a row is `cat`'s when the scan stamped `cat`'s id on
+/// it, or — a managed row scanned before Assets M2 stamped any — when it has
+/// none and `cat` is the personal catalog. So `personal/x` and `acme/x`
+/// never show each other's hosts.
+fn host_states(
+    rows: &[AssetInventoryRow],
+    cat: &repo::Catalog,
+    kind: Kind,
+    name: &str,
+) -> Vec<HostState> {
     rows.iter()
         .filter(|r| {
             r.kind == kind.as_str()
@@ -412,10 +452,15 @@ fn host_states(rows: &[AssetInventoryRow], kind: Kind, name: &str) -> Vec<HostSt
                 && r.state != "unmanaged"
                 && r.state != "orphan"
         })
+        .filter(|r| match r.catalog_id {
+            Some(id) => id == cat.id,
+            None => cat.org_id.is_none(),
+        })
         .map(|r| HostState {
             host_alias: r.host_alias.clone(),
             harness: r.harness.clone(),
             state: r.state.clone(),
+            drift_side: r.drift_side.clone(),
         })
         .collect()
 }
@@ -424,28 +469,56 @@ pub fn inventory(store: &Mutex<Store>) -> Result<Vec<AssetInventoryRow>, IpcErro
     Ok(lock(store)?.list_inventory()?)
 }
 
+/// The personal catalog's assets with their per-host state from the last
+/// scan, plus the unmanaged and orphan rows and its problems — the listing
+/// as it was before Assets M5. Every catalog's is opt-in (fix round 1):
+/// [`list_assets_in`] with [`ListingScope::Every`], which the M5 desktop
+/// asks for and the MCP tool grants by caller
+/// (`mcp::tools::assets::listing_scope`).
 pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
+    list_assets_in(store, ListingScope::Personal)
+}
+
+/// [`list_assets`] over `scope`'s catalogs, personal first
+/// ([`registry::in_order`]). Store first (the inventory), then the
+/// registry, never the other way round; nothing inside the registry closure
+/// takes the store or the registry again. `head`, `loaded_at` and
+/// `problems` are the personal catalog's; an org catalog that failed to
+/// load (a problem entry) lists nothing.
+pub fn list_assets_in(store: &Mutex<Store>, scope: ListingScope) -> Result<AssetListing, IpcError> {
     require_config(store)?;
     let rows = inventory(store)?;
     let identities = identity::group_identities(&rows);
-    with_catalog(|cat| {
+    registry::with_catalogs(|m| {
+        let personal = m.values().find(|c| c.org_id.is_none()).ok_or_else(|| {
+            IpcError::new(
+                E_CATALOG_NOT_CONFIGURED,
+                "catalog not loaded; call catalog_load",
+            )
+        })?;
+        let mut assets = Vec::new();
+        for cat in registry::in_order(m) {
+            if cat.load_error.is_some() || (scope == ListingScope::Personal && cat.org_id.is_some())
+            {
+                continue;
+            }
+            let label = effective::label_of(cat.org_id, &cat.name);
+            assets.extend(cat.assets.iter().map(|a| AssetSummary {
+                kind: a.kind().as_str().to_string(),
+                name: a.header.name.clone(),
+                version: a.header.version.clone(),
+                description: a.header.description.clone(),
+                tags: a.header.tags.clone(),
+                hosts: host_states(&rows, cat, a.kind(), &a.header.name),
+                install_as: a.header.install_as.clone(),
+                scope: a.header.scope,
+                catalog: label.clone(),
+            }));
+        }
         Ok(AssetListing {
-            head: cat.head.clone(),
-            loaded_at: cat.loaded_at,
-            assets: cat
-                .assets
-                .iter()
-                .map(|a| AssetSummary {
-                    kind: a.kind().as_str().to_string(),
-                    name: a.header.name.clone(),
-                    version: a.header.version.clone(),
-                    description: a.header.description.clone(),
-                    tags: a.header.tags.clone(),
-                    hosts: host_states(&rows, a.kind(), &a.header.name),
-                    install_as: a.header.install_as.clone(),
-                    scope: a.header.scope,
-                })
-                .collect(),
+            head: personal.head.clone(),
+            loaded_at: personal.loaded_at,
+            assets,
             // `unmanaged` is the wire name for "installed on a host but not
             // a catalog asset". An `orphan` — a past sync's manifest entry
             // whose asset the catalog has dropped — belongs in the same
@@ -457,7 +530,7 @@ pub fn list_assets(store: &Mutex<Store>) -> Result<AssetListing, IpcError> {
                 .filter(|r| r.state == "unmanaged" || r.state == "orphan")
                 .cloned()
                 .collect(),
-            problems: cat.problems.clone(),
+            problems: personal.problems.clone(),
             identities: Some(identities),
         })
     })
@@ -599,7 +672,7 @@ pub fn get_asset_in(
         Ok(AssetDetail {
             asset: asset.clone(),
             previews,
-            hosts: host_states(&rows, kind, name),
+            hosts: host_states(&rows, cat, kind, name),
         })
     })
 }
@@ -1525,7 +1598,8 @@ mod tests {
             vec![HostState {
                 host_alias: "local".into(),
                 harness: "claude".into(),
-                state: "drifted".into()
+                state: "drifted".into(),
+                drift_side: None,
             }]
         );
         assert_eq!(listing.unmanaged.len(), 1);
@@ -1574,6 +1648,7 @@ mod tests {
             hosts: Vec::new(),
             install_as: None,
             scope: model::Scope::Private,
+            catalog: catalogs::PERSONAL.into(),
         };
         let json = serde_json::to_value(&base).unwrap();
         assert!(
@@ -1651,6 +1726,164 @@ mod tests {
         assert_eq!(scope_of("shared-s"), model::Scope::Shared);
     }
 
+    /// Assets M5 (R11, R12): the listing spans every loaded catalog, each
+    /// asset naming its catalog and showing only its own catalog's host
+    /// states; the personal-only listing is as before; `get_asset` reads
+    /// its own catalog's hosts.
+    #[test]
+    fn list_assets_spans_catalogs_and_keeps_each_catalogs_host_states() {
+        let _g = lock_registry_for_test();
+        let root = repo_with_one_skill("m5-list");
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        configure(
+            ConfigureArgs {
+                repo_path: root.to_string_lossy().into(),
+                remote_url: None,
+            },
+            &store,
+        )
+        .unwrap();
+        load(false, &store).unwrap();
+        let org = store.lock().unwrap().add_org("acme", None, false).unwrap();
+        let acme = store
+            .lock()
+            .unwrap()
+            .upsert_catalog(
+                "acme",
+                &repo_with_one_skill("m5-list-acme").to_string_lossy(),
+                None,
+                Some(org.id),
+            )
+            .unwrap();
+        load_catalog(acme.id, false, &store).unwrap();
+        let personal = store
+            .lock()
+            .unwrap()
+            .personal_catalog()
+            .unwrap()
+            .unwrap()
+            .id;
+        let row = |host: &str, state: &str, catalog_id: Option<i64>| AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "s".into(),
+            state: state.into(),
+            scanned_at: 1,
+            managed: true,
+            catalog_id,
+            drift_side: (state == "drifted").then(|| "host".to_string()),
+            ..Default::default()
+        };
+        {
+            let s = store.lock().unwrap();
+            for h in ["local", "mefistos", "oci"] {
+                s.upsert_host(h).unwrap();
+            }
+            s.replace_host_inventory("local", "claude", &[row("local", "in_sync", Some(acme.id))])
+                .unwrap();
+            s.replace_host_inventory(
+                "mefistos",
+                "claude",
+                &[row("mefistos", "drifted", Some(personal))],
+            )
+            .unwrap();
+            s.replace_host_inventory("oci", "claude", &[row("oci", "missing", None)])
+                .unwrap();
+        }
+
+        // Fix round 1: the default listing is personal's, exactly as before
+        // M5 — not even a `catalog` key — so an older desktop keyed by name
+        // never sees a second `s`. The wide listing is opt-in.
+        let default = list_assets(&store).unwrap();
+        assert_eq!(default.assets.len(), 1);
+        assert_eq!(default.assets[0].catalog, "personal");
+        let wire = serde_json::to_value(&default).unwrap();
+        assert!(
+            !wire["assets"][0]
+                .as_object()
+                .unwrap()
+                .contains_key("catalog"),
+            "{wire}"
+        );
+        let every = list_assets_in(&store, ListingScope::Every).unwrap();
+        let hosts_of = |catalog: &str| -> Vec<(String, String, Option<String>)> {
+            every
+                .assets
+                .iter()
+                .find(|a| a.catalog == catalog)
+                .unwrap_or_else(|| panic!("no asset in {catalog}"))
+                .hosts
+                .iter()
+                .map(|h| (h.host_alias.clone(), h.state.clone(), h.drift_side.clone()))
+                .collect()
+        };
+        assert_eq!(every.assets.len(), 2, "one `s` per catalog");
+        assert_eq!(
+            every
+                .assets
+                .iter()
+                .map(|a| a.catalog.as_str())
+                .collect::<Vec<_>>(),
+            ["personal", "acme"],
+            "personal first (registry::in_order)"
+        );
+        assert_eq!(
+            hosts_of("personal"),
+            [
+                (
+                    "mefistos".to_string(),
+                    "drifted".to_string(),
+                    Some("host".to_string())
+                ),
+                ("oci".to_string(), "missing".to_string(), None),
+            ],
+            "an unstamped row (scanned before M2) is personal's"
+        );
+        assert_eq!(
+            hosts_of("acme"),
+            [("local".to_string(), "in_sync".to_string(), None)]
+        );
+
+        let personal_only = list_assets_in(&store, ListingScope::Personal).unwrap();
+        assert_eq!(
+            personal_only
+                .assets
+                .iter()
+                .map(|a| a.catalog.as_str())
+                .collect::<Vec<_>>(),
+            ["personal"]
+        );
+        let detail = get_asset(Kind::Skill, "s", &store).unwrap();
+        assert_eq!(
+            detail
+                .hosts
+                .iter()
+                .map(|h| h.host_alias.as_str())
+                .collect::<Vec<_>>(),
+            ["mefistos", "oci"]
+        );
+        let acme_row = store.lock().unwrap().get_catalog(acme.id).unwrap().unwrap();
+        let acme_detail =
+            get_asset_in(CatalogTarget::Row(&acme_row), Kind::Skill, "s", &store).unwrap();
+        assert_eq!(
+            acme_detail
+                .hosts
+                .iter()
+                .map(|h| h.host_alias.as_str())
+                .collect::<Vec<_>>(),
+            ["local"],
+            "carry 3: acme/s shows acme's hosts only"
+        );
+        // An older hub's summary has no `catalog`: it reads as personal.
+        let old: AssetSummary = serde_json::from_str(
+            r#"{"kind":"skill","name":"s","version":"1","description":"d","tags":[],"hosts":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.catalog, "personal");
+        registry::clear().unwrap();
+    }
+
     /// `orphan` rows — the host still holds something a past sync wrote but
     /// the catalog has dropped — belong in the same "not in the catalog"
     /// list the UI shows, alongside `unmanaged`.
@@ -1703,10 +1936,63 @@ mod tests {
             vec![HostState {
                 host_alias: "local".into(),
                 harness: "claude".into(),
-                state: "in_sync".into()
+                state: "in_sync".into(),
+                drift_side: None,
             }],
             "an orphan is not a host state of a catalog asset"
         );
+    }
+
+    /// Assets M5 (R4): a catalog asset's host states carry which side moved,
+    /// so a client that reads only `list_assets` sees it too.
+    #[test]
+    fn host_states_carry_which_side_moved() {
+        let row = |host: &str, side: Option<&str>| AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "s".into(),
+            state: "drifted".into(),
+            managed: true,
+            drift_side: side.map(String::from),
+            ..Default::default()
+        };
+        let got: Vec<(String, Option<String>)> = host_states(
+            &[
+                row("oci", Some("catalog")),
+                row("trn", Some("host")),
+                row("htz", None),
+            ],
+            &repo::Catalog::default(),
+            Kind::Skill,
+            "s",
+        )
+        .into_iter()
+        .map(|h| (h.host_alias, h.drift_side))
+        .collect();
+        assert_eq!(
+            got,
+            [
+                ("oci".to_string(), Some("catalog".to_string())),
+                ("trn".to_string(), Some("host".to_string())),
+                ("htz".to_string(), None),
+            ]
+        );
+        let wire = serde_json::to_value(HostState {
+            host_alias: "oci".into(),
+            harness: "claude".into(),
+            state: "in_sync".into(),
+            drift_side: None,
+        })
+        .unwrap();
+        assert!(
+            wire.get("drift_side").is_none(),
+            "absent when unknown: {wire}"
+        );
+        let old: HostState =
+            serde_json::from_str(r#"{"host_alias":"oci","harness":"claude","state":"drifted"}"#)
+                .unwrap();
+        assert_eq!(old.drift_side, None, "an older hub's reply still parses");
     }
 
     /// A typo'd `host_alias` must fail clearly, not as a raw SQLite

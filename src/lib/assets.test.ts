@@ -11,7 +11,7 @@ import {
   createAsset, updateAsset, deleteAsset, addResource, removeResource, lintAsset, lintAll,
   commitPending, pushCatalog, repoStatus, assetTemplate, spawnAuthorSession, resourceSize,
   repoStatusStore, KIND_FIELDS, TOOLS, TIERS, EVENTS,
-  identitiesOf, hostOrder,
+  identitiesOf, hostOrder, hostOrderOf, oddHosts,
   type AssetInventoryRow, type AssetListing, type SyncPlan, type HostPlan, type SyncAction,
   type EditableAsset,
 } from './assets';
@@ -117,6 +117,17 @@ describe('assets store', () => {
     expect(identitiesOf(server)[0].name).toBe('x');
   });
 
+  it('hostOrderOf is the one ordering, over bare aliases; hostOrder delegates to it', () => {
+    expect(hostOrderOf(['trn', 'local', 'oci', 'trn'])).toEqual(['local', 'oci', 'trn']);
+    expect(hostOrderOf(['trn', 'oci'])).toEqual(['oci', 'trn']);
+    expect(hostOrderOf([])).toEqual([]);
+  });
+  it('oddHosts reads the hosts a "copies differ" identity names, and none otherwise', () => {
+    const id = (reason: string | null) => ({ kind: 'skill', name: 'x', hosts: [], signature: '', variants: 2, class: 'needs_person' as const, reason });
+    expect(oddHosts(id('copies differ on oci, trn'))).toEqual(['oci', 'trn']);
+    expect(oddHosts(id('carries a secret'))).toEqual([]);
+    expect(oddHosts(id(null))).toEqual([]);
+  });
   it('hostOrder puts local first, then alphabetical', () => {
     const ids = [{ kind: 'skill', name: 'a', signature: 'oci,local', variants: 1, class: 'normal' as const, reason: null,
       hosts: [{ host_alias: 'trn', harness: 'claude', host_hash: null }, { host_alias: 'local', harness: 'claude', host_hash: null }, { host_alias: 'htz', harness: 'claude', host_hash: null }] }];

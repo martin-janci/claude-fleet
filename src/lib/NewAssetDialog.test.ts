@@ -31,6 +31,21 @@ describe('NewAssetDialog', () => {
     expect(optionsAfter).toEqual(['', 'reviewer']);
   });
 
+  it('offers only the personal catalog\'s assets to copy from, even when a name is in two catalogs (Assets M5, PF9)', () => {
+    catalog.set({
+      head: 'h', loaded_at: 1, problems: [], unmanaged: [],
+      assets: [
+        { kind: 'skill', name: 'worktree', version: '1', description: 'd', tags: [], hosts: [], catalog: 'personal' },
+        { kind: 'skill', name: 'worktree', version: '1', description: 'd', tags: [], hosts: [], catalog: 'acme' },
+        { kind: 'skill', name: 'acme-only', version: '1', description: 'd', tags: [], hosts: [], catalog: 'acme' },
+        { kind: 'skill', name: 'old-hub', version: '1', description: 'd', tags: [], hosts: [] },
+      ],
+    });
+    render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
+    const options = Array.from((screen.getByTestId('new-asset-duplicate-from') as HTMLSelectElement).options).map((o) => o.value);
+    expect(options).toEqual(['', 'worktree', 'old-hub']);
+  });
+
   it('Create is disabled until a valid kebab-case name is entered', async () => {
     render(NewAssetDialog, { onclose: () => {}, onsaved: () => {} });
     expect(screen.getByTestId('new-asset-create')).toBeDisabled();

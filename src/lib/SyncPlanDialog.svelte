@@ -1,5 +1,7 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
+  import Badge from './Badge.svelte';
+  import { opTone, outcomeTone } from './assets_visual';
   import { applySync, isDestructive, planSync, syncProgress, type SyncPlan, type SyncRunSummary } from './assets';
 
   /** A host plan skipped because the host has no layers assigned — the
@@ -7,6 +9,11 @@
    *  `sync/mod.rs`); matched by prefix since the rest of the sentence is
    *  free text. */
   const UNLAYERED_PREFIX = 'no layers assigned';
+
+  /** Ops whose reason is a caution (a host edit could be lost or could not be
+   *  ruled out); every other non-blocked reason is information (a private
+   *  asset withheld, a removal, a held catalog) and reads muted. */
+  const CAUTION_OPS = new Set(['update', 'overwrite', 'plugin_update']);
 
   let {
     plan,
@@ -96,7 +103,7 @@
 
 <Modal title="Sync plan" onclose={applying ? undefined : onclose} width="640px" testid="sync-plan-dialog">
   <div class="counts" data-testid="plan-counts">
-    {#each countsEntries as [op, n] (op)}<span class="count-chip">{op}: {n}</span>{/each}
+    {#each countsEntries as [op, n] (op)}<Badge tone={opTone(op)} label={`${op}: ${n}`} />{/each}
     {#if countsEntries.length === 0}<span class="muted">Nothing to do.</span>{/if}
   </div>
 
@@ -125,10 +132,13 @@
         {#each h.actions as a (a.kind + '::' + a.name)}
           {@const outcome = outcomeFor(h.host_alias, h.harness, a.kind, a.name)}
           <div class="action-row" data-testid={`plan-action-${h.host_alias}-${h.harness}-${a.kind}-${a.name}`}>
-            <span class={`op-badge op-${a.op}`}>{a.op}</span>
+            <Badge tone={opTone(a.op)} label={a.op} />
             <span class="asset">{a.kind}/{a.name}</span>
             {#if a.backup}<span class="backup" title="A backup will be made before writing">backup</span>{/if}
             {#if a.secrets.length}<span class="secrets">secrets: {a.secrets.join(', ')}</span>{/if}
+            {#if a.op !== 'blocked' && a.reason}
+              <span class="note" class:caution={CAUTION_OPS.has(a.op)} data-testid={`plan-note-${h.host_alias}-${h.harness}-${a.kind}-${a.name}`}>{a.reason}</span>
+            {/if}
             {#if a.op === 'blocked'}
               {#if a.reason}<span class="reason">{a.reason}</span>{/if}
               {#if a.missing_secrets.length > 0}
@@ -140,10 +150,11 @@
               {/if}
             {/if}
             {#if outcome}
-              <span
-                class={`outcome outcome-${outcome}`}
-                data-testid={`plan-outcome-${h.host_alias}-${h.harness}-${a.kind}-${a.name}`}
-              >{outcome}</span>
+              <Badge
+                tone={outcomeTone(outcome)}
+                label={outcome}
+                testid={`plan-outcome-${h.host_alias}-${h.harness}-${a.kind}-${a.name}`}
+              />
             {/if}
           </div>
         {/each}
@@ -188,32 +199,28 @@
 
 <style>
   .counts { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }
-  .count-chip { border: 1px solid var(--border); border-radius: 8px; padding: 1px 8px; }
   .hosts { display: flex; flex-direction: column; gap: 10px; max-height: 50vh; overflow: auto; }
   .host-section { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
   .host-header { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 4px; }
   .harness, .status, .detail { color: var(--fg-muted); }
-  .detail.warning { color: #d97706; }
+  .detail.warning { color: var(--usage-warn); }
   .link.quiet { font-size: 11px; opacity: 0.75; }
   .action-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; flex-wrap: wrap; }
-  .op-badge { border-radius: 8px; padding: 1px 8px; border: 1px solid var(--border); text-transform: uppercase; font-size: 10px; }
-  .op-overwrite, .op-remove { color: #e64a4a; border-color: #e64a4a; }
-  .op-create, .op-adopt, .op-plugin_install { color: #16a34a; }
-  .op-update, .op-plugin_update { color: #d97706; }
-  .op-blocked { color: var(--fg-muted); }
   .asset { font-family: ui-monospace, monospace; }
-  .backup { color: #d97706; } .secrets { color: var(--fg-muted); } .reason { color: #dc2626; }
+  .backup { color: var(--usage-warn); } .secrets { color: var(--fg-muted); } .reason { color: var(--usage-crit); }
+  /* A reason on a planned action: information (muted), or a caution (warn) for
+     update/overwrite/plugin_update — a note, never an error. */
+  .note { color: var(--fg-muted); }
+  .note.caution { color: var(--usage-warn); }
   .link { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; font-size: 12px; }
-  .outcome { border-radius: 8px; padding: 1px 8px; border: 1px solid var(--border); font-size: 10px; text-transform: uppercase; }
-  .outcome-done { color: #16a34a; } .outcome-conflict, .outcome-failed, .outcome-blocked { color: #dc2626; } .outcome-skipped { color: var(--fg-muted); }
-  .restart { color: #d97706; font-size: 12px; margin: 0; }
+  .restart { color: var(--usage-warn); font-size: 12px; margin: 0; }
   .force-partial { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .progress { font-size: 12px; color: var(--fg-muted); margin: 0; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
   .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
   .actions button.primary { border-color: var(--accent); }
-  .actions button.danger { color: #e64a4a; border-color: #e64a4a; }
+  .actions button.danger { color: var(--usage-crit); border-color: var(--usage-crit); }
   .muted { color: var(--fg-muted); font-size: 12px; }
-  .error { color: #dc2626; }
+  .error { color: var(--usage-crit); }
 </style>

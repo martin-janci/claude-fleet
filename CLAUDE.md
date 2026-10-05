@@ -439,6 +439,47 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   `fleet-hub catalog list` reads only (`probe_catalogs`: never clones or
   records a load) and `catalog remove` reports the open cards it withdrew.
   No Tauri command or verdict row yet (M6).
+- **Assets M5 — the workspace shell** (plan
+  `docs/superpowers/plans/2026-10-04-assets-m5-workspace.md`): a manifest
+  entry records the sha256 of every file it wrote (`file_hashes`), so
+  `ManifestEntry::host_copy_for` tells a copy fleet left untouched
+  (`Unchanged`) from one a person edited (`Edited`) or one an entry from
+  before M5 cannot vouch for (`Unverified`); rule 4 of the planner turns an
+  edited copy into an `overwrite` (never an `update`), and Rollout/SB6
+  (`OpFilter::Additive`, `action_allowed`) apply an `update`, or delete a
+  moved asset's old location, only over a verified `Unchanged` copy.
+  Migration 096 stores
+  `asset_inventory.drift_side` (`host` | `catalog`; also on `HostState`): a
+  copy only behind its catalog opens no Drift card, shows under *Behind the
+  catalog* in the Inbox whatever `catalog.auto` says, and SB6 brings it up
+  (`sb6_due`). Migration 097 stamps `changeset_items.decided_at`;
+  `rejected_rollouts` orders by it. Slug collisions in a Bootstrap card
+  (per destination catalog, kind and slug) need a look; `changesets::list`
+  computes undoability once (`undoable_ids`); the pass prunes an untouched
+  withdrawn card once it is older than a week, counted from its creation,
+  not its withdrawal (`WITHDRAWN_RETENTION_SECS`); `last_sync`
+  prefers a person's run. `list_assets` takes an opt-in `all_catalogs`
+  (default personal-only, as before, for every caller; with it, every
+  loaded catalog — `AssetSummary.catalog`, host states per catalog — for
+  the master and unbound full person devices, personal for everyone
+  else); this desktop asks for it locally and through the hub.
+  `catalog_admin { asset_history }` lists an asset's commits. Four read-only desktop
+  commands route to the hub (`catalog_list_catalogs`,
+  `catalog_list_changesets`, `catalog_repo_status_in`,
+  `catalog_asset_history`); card verbs stay M6. Frontend: `AssetsPanel`
+  keeps loading, probing and every dialog and renders `AssetsWorkspace`
+  (rail Inbox/Library/Secrets, a sentence header, `QueryInput`, the Inbox's
+  sections with open cards read-only, `AssetList` as the Library, the
+  tabbed `AssetInspector` over `AssetDetail`'s `section`s and History, a
+  footer of `CatalogChip`s, `auto` and `JobChip`; Sync fleet the one
+  primary; a hub client without a grant gets one read-only scope chip); one
+  `Badge`, `HostStrip` states, no hex colour in Assets components
+  (`assets_tokens.test.ts`). Keyboard (R22, on the workspace while shown):
+  `j`/`k` (arrows in the list) move between rows, Space/Enter select, `/`
+  focuses the query (Esc there closes, clears, then returns to the list),
+  `a` adopts an identity, `s` syncs and `e` edits a personal asset, `⌘↵`
+  runs Sync fleet; never inside a field or a dialog; read-only windows move
+  and select only; `i` waits for M6's card verbs.
 - **File downloads** (spec
   `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
   095, contract revision 7): `send_file { session_id, path }` (a host's

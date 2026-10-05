@@ -1230,7 +1230,9 @@ fn routed_read_cases() -> Vec<Case> {
         (
             "catalog_list_assets",
             "list_assets",
-            json!({}),
+            // Assets M5 fix round 1: this desktop asks for every catalog; an
+            // older one sends `{}` and gets personal's listing.
+            json!({ "all_catalogs": true }),
             r#"{"head":"abc","loaded_at":1,"assets":[{"kind":"skill","name":"worktree","version":"1","description":"d","tags":[],"hosts":[{"host_alias":"nas","harness":"claude","state":"in_sync"}]}],"unmanaged":[{"host_alias":"nas","harness":"claude","kind":"skill","name":"extra","state":"unmanaged","scanned_at":1,"managed":false}],"problems":[]}"#,
             Box::new(|b, s, _| {
                 block_on(commands::assets::routed::catalog_list_assets(b, s)).map(|_| ())
@@ -4463,8 +4465,8 @@ fn payload_of<T: serde::Serialize>(value: &T) -> &'static str {
 fn catalog_admin_cases() -> Vec<Case> {
     use commands::assets::routed as r;
     use fleet_core::service::catalog::admin::{
-        DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs, ResolvePreviewArgs,
-        SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        CatalogNameArgs, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs,
+        ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
     };
     use fleet_core::service::catalog::author::{
         self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
@@ -4911,6 +4913,77 @@ fn catalog_admin_cases() -> Vec<Case> {
             json!({ "action": "template", "args": { "kind": "skill", "name": "s" } }),
             asset,
             Box::new(move |b, _, _| block_on(r::catalog_template(b, skill("s"))).map(|_| ())),
+        ),
+        // Assets M5 (R13): the workspace's reads. A named catalog travels as
+        // the tool's own top-level `catalog`, never inside `args`.
+        (
+            "catalog_list_catalogs",
+            "catalog_admin",
+            json!({ "action": "list_catalogs" }),
+            "[]",
+            Box::new(|b, s, _| block_on(r::catalog_list_catalogs(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_list_changesets",
+            "changesets",
+            json!({ "action": "list" }),
+            r#"[{"id":3,"kind":"new","summary":"New on oci: skill/w → core","state":"proposed","created_at":1,"groups":{"core":1},"pending":1,"undoable":false}]"#,
+            Box::new(|b, s, _| block_on(r::catalog_list_changesets(b, s)).map(|_| ())),
+        ),
+        (
+            "catalog_repo_status_in",
+            "catalog_admin",
+            json!({ "action": "repo_status", "catalog": "acme" }),
+            STATUS,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_repo_status_in(
+                    b,
+                    CatalogNameArgs {
+                        name: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_asset_history",
+            "catalog_admin",
+            json!({ "action": "asset_history",
+                    "args": { "kind": "skill", "name": "s" },
+                    "catalog": "acme" }),
+            r#"[{"sha":"abc","at":1,"author":"a","subject":"edit s"}]"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_asset_history(
+                    b,
+                    commands::assets::AssetHistoryArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                        catalog: Some("acme".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Personal (named or not) sends no `catalog`, exactly the pre-M5 shape.
+        (
+            "catalog_asset_history",
+            "catalog_admin",
+            json!({ "action": "asset_history", "args": { "kind": "skill", "name": "s" } }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_asset_history(
+                    b,
+                    commands::assets::AssetHistoryArgs {
+                        kind: Kind::Skill,
+                        name: "s".into(),
+                        catalog: Some("personal".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
         ),
     ]
 }

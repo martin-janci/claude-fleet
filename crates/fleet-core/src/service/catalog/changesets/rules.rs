@@ -55,6 +55,9 @@ pub struct DriftFacts {
     pub name: String,
     pub host: String,
     pub host_hash: Option<String>,
+    /// Assets M5 (R5): the host copy is no longer what fleet wrote
+    /// (`drift_side = host`); `false` when the side is unknown.
+    pub edited: bool,
 }
 
 /// Members a never-rolled-out layer should have put on a host, and has not
@@ -366,19 +369,23 @@ fn hide_item(id: &AssetIdentity) -> ProposedItem {
 /// review M3), so apply refuses it until that catalog loads (R11) rather
 /// than adopting it into personal.
 fn look_item(id: &AssetIdentity, input: &RulesInput<'_>) -> ProposedItem {
-    let dest = destination(id, input);
-    let catalog_id = org_catalog(id, input)
-        .map(|c| c.id)
-        .or_else(|| personal_id(input));
     let reason = if id.class == IdentityClass::NeedsPerson {
         id.reason.clone().unwrap_or_else(|| "needs a person".into())
     } else {
-        match &dest {
+        match &destination(id, input) {
             Err(e) => e.clone(),
             Ok(_) if source_host(id).is_none() => NO_CLAUDE_COPY.to_string(),
             Ok(_) => NO_LAYER.to_string(),
         }
     };
+    look_item_because(id, input, reason)
+}
+
+/// [`look_item`] with the reason given.
+fn look_item_because(id: &AssetIdentity, input: &RulesInput<'_>, reason: String) -> ProposedItem {
+    let catalog_id = org_catalog(id, input)
+        .map(|c| c.id)
+        .or_else(|| personal_id(input));
     import_item(
         id,
         NEEDS_A_LOOK,
@@ -387,6 +394,51 @@ fn look_item(id: &AssetIdentity, input: &RulesInput<'_>) -> ProposedItem {
         None,
         Some(reason),
     )
+}
+
+/// An eligible identity a Bootstrap card would group for import: its
+/// destination catalog and the host its import reads from.
+fn importable(id: &AssetIdentity, input: &RulesInput<'_>) -> Option<(i64, String)> {
+    if id.class != IdentityClass::Normal {
+        return None;
+    }
+    Some((destination(id, input).ok()?, source_host(id)?))
+}
+
+/// Assets M5 (R7, PF18): the identities a Bootstrap card would import whose
+/// slug another of a different name shares in the SAME destination catalog
+/// (`My_Skill` and `my-skill` both import as `my-skill`) → why, keyed by
+/// `(kind, name)`. One import would create the slug and the other's group
+/// would fail the whole card at apply, so both need a look. Names bound for
+/// different catalogs never collide.
+fn slug_collisions(
+    eligible: &[&AssetIdentity],
+    input: &RulesInput<'_>,
+) -> BTreeMap<(String, String), String> {
+    let mut by_slug: BTreeMap<(i64, String, String), BTreeSet<String>> = BTreeMap::new();
+    for id in eligible {
+        if let Some((dest, _)) = importable(id, input) {
+            by_slug
+                .entry((dest, id.kind.clone(), slugify(&id.name)))
+                .or_default()
+                .insert(id.name.clone());
+        }
+    }
+    let mut out = BTreeMap::new();
+    for ((_, kind, slug), names) in by_slug.into_iter().filter(|(_, n)| n.len() > 1) {
+        for name in &names {
+            let others: Vec<&str> = names
+                .iter()
+                .filter(|n| *n != name)
+                .map(String::as_str)
+                .collect();
+            out.insert(
+                (kind.clone(), name.clone()),
+                format!("imports as {slug}, as {} does", others.join(", ")),
+            );
+        }
+    }
+    out
 }
 
 /// A member of a proposed layer and the host its import reads from.
@@ -406,6 +458,7 @@ fn bootstrap_card(eligible: &[&AssetIdentity], input: &RulesInput<'_>) -> Option
     let mut looks = Vec::new();
     let mut hides = Vec::new();
     let mut by_sig: BySignature<'_> = BTreeMap::new();
+    let collisions = slug_collisions(eligible, input);
     for &id in eligible {
         if is_internal(id) {
             if !input.auto {
@@ -413,16 +466,16 @@ fn bootstrap_card(eligible: &[&AssetIdentity], input: &RulesInput<'_>) -> Option
             }
             continue;
         }
-        match (
-            id.class == IdentityClass::Normal,
-            destination(id, input),
-            source_host(id),
-        ) {
-            (true, Ok(dest), Some(src)) => by_sig
+        if let Some(why) = collisions.get(&(id.kind.clone(), id.name.clone())) {
+            looks.push(look_item_because(id, input, why.clone()));
+            continue;
+        }
+        match importable(id, input) {
+            Some((dest, src)) => by_sig
                 .entry((dest, hosts_of(id)))
                 .or_default()
                 .push((id, src)),
-            _ => looks.push(look_item(id, input)),
+            None => looks.push(look_item(id, input)),
         }
     }
     let groups = name_groups(by_sig, input);
@@ -664,10 +717,17 @@ fn drift_cards(
             };
             ProposedCard {
                 kind: CardKind::Drift,
-                summary: format!(
-                    "{}/{} differs on {} from catalog {cat}",
-                    d.kind, d.name, d.host
-                ),
+                summary: if d.edited {
+                    format!(
+                        "{}/{} was edited on {} (catalog {cat})",
+                        d.kind, d.name, d.host
+                    )
+                } else {
+                    format!(
+                        "{}/{} differs on {} from catalog {cat}",
+                        d.kind, d.name, d.host
+                    )
+                },
                 items: vec![item(ItemAction::TakeHost), item(ItemAction::Restore)],
             }
         })
@@ -1014,6 +1074,28 @@ mod tests {
         assert_eq!(propose(&f.input()).len(), 1, "a new copy is a new subject");
     }
 
+    /// Assets M5 (R5): a copy a person edited says so in its card.
+    #[test]
+    fn a_drift_card_says_the_copy_was_edited_on_its_host() {
+        let mut f = fleet(false, vec![]);
+        f.bootstrapped = true;
+        f.drifted = vec![DriftFacts {
+            catalog_id: PERSONAL,
+            kind: "skill".into(),
+            name: "w".into(),
+            host: "trn".into(),
+            host_hash: Some("e".into()),
+            edited: true,
+        }];
+        let cards = propose(&f.input());
+        let drift = cards.iter().find(|c| c.kind == CardKind::Drift).unwrap();
+        assert_eq!(
+            drift.summary,
+            "skill/w was edited on trn (catalog personal)"
+        );
+        assert_eq!(drift.subject(), format!("drift:{PERSONAL}:skill/w@trn"));
+    }
+
     /// Drift offers take or restore; a never-rolled-out layer's gaps become
     /// one Rollout card; an open rollout and a verdict hold each.
     #[test]
@@ -1026,6 +1108,7 @@ mod tests {
             name: "w".into(),
             host: "trn".into(),
             host_hash: Some("e".into()),
+            edited: false,
         }];
         f.gaps = ["oci", "htz"]
             .iter()
@@ -1088,6 +1171,70 @@ mod tests {
                 .contains("failed to load"),
             "{:?}",
             look.params.reason
+        );
+    }
+
+    /// Assets M5 (R7): two names that import as one slug both need a look —
+    /// the card still applies, instead of failing on the second import.
+    #[test]
+    fn names_that_import_as_one_slug_need_a_look_instead_of_failing_the_card() {
+        let f = fleet(
+            false,
+            vec![
+                row("local", "skill", "My_Skill", "h1"),
+                row("local", "skill", "my-skill", "h2"),
+                row("local", "skill", "other", "h3"),
+            ],
+        );
+        let card = &propose(&f.input())[0];
+        assert_eq!(card.kind, CardKind::Bootstrap);
+        let looks: Vec<(&str, &str)> = card
+            .items
+            .iter()
+            .filter(|i| i.grp == NEEDS_A_LOOK)
+            .map(|i| (i.name.as_str(), i.params.reason.as_deref().unwrap_or("")))
+            .collect();
+        assert_eq!(
+            looks,
+            [
+                ("My_Skill", "imports as my-skill, as my-skill does"),
+                ("my-skill", "imports as my-skill, as My_Skill does"),
+            ]
+        );
+        assert_eq!(
+            imports(card).values().sum::<usize>(),
+            1,
+            "`other` still imports"
+        );
+    }
+
+    /// Assets M5 (PF18): a slug is one per destination catalog — two names
+    /// bound for different catalogs never collide, and both import.
+    #[test]
+    fn names_bound_for_different_catalogs_do_not_collide() {
+        let f = fleet(
+            true,
+            vec![
+                row("trn", "skill", "My_Skill", "h1"),
+                row("local", "skill", "my-skill", "h2"),
+            ],
+        );
+        let card = &propose(&f.input())[0];
+        assert_eq!(card.kind, CardKind::Bootstrap);
+        assert!(
+            card.items.iter().all(|i| i.grp != NEEDS_A_LOOK),
+            "{:?}",
+            card.items
+        );
+        let by_catalog: BTreeSet<(Option<i64>, &str)> = card
+            .items
+            .iter()
+            .filter(|i| i.action == ItemAction::Import)
+            .map(|i| (i.catalog_id, i.name.as_str()))
+            .collect();
+        assert_eq!(
+            by_catalog,
+            BTreeSet::from([(Some(PAPAYA), "My_Skill"), (Some(PERSONAL), "my-skill")])
         );
     }
 }

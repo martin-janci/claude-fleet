@@ -157,6 +157,8 @@ The cached Claude accounts seen across hosts.
 
 The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each asset's per-host drift state from the last scan, plus unmanaged assets on hosts and catalog parse problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the app, or `fleet-hub catalog set` on a hub).
 
+Parameters: `all_catalogs`
+
 ### `list_clients`
 
 Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at }.
@@ -848,6 +850,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_commit_pending`
 - `commands::assets::catalog_push`
 - `commands::assets::catalog_repo_status`
+- `commands::assets::catalog_repo_status_in`
+- `commands::assets::catalog_list_catalogs`
+- `commands::assets::catalog_list_changesets`
+- `commands::assets::catalog_asset_history`
 - `commands::assets::catalog_template`
 - `commands::assets::catalog_spawn_author_session`
 - `pty::pty_open`

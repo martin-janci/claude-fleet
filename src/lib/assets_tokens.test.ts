@@ -1,0 +1,39 @@
+import { readFileSync } from 'node:fs';
+import { describe, it, expect } from 'vitest';
+
+// Spec, Visuals: "the existing tokens and controls.css; the hard-coded hex
+// colours in AssetDetail and SyncPlanDialog move to tokens". Held for every
+// component of the Assets workspace, so a new one cannot bring one back.
+// Each task that adds an Assets component adds its file here.
+const GUARDED = [
+  'AssetsPanel.svelte',
+  'AssetList.svelte',
+  'AssetDetail.svelte',
+  'AssetEditor.svelte',
+  'SyncPlanDialog.svelte',
+  'HostStrip.svelte',
+  'Badge.svelte',
+  'IdentityRow.svelte',
+  'RowName.svelte',
+  'AssetsInbox.svelte',
+  'QueryInput.svelte',
+  'Inspector.svelte',
+  'AssetInspector.svelte',
+  'JobChip.svelte',
+  'CatalogChip.svelte',
+  'AssetsFooter.svelte',
+  'AssetsRail.svelte',
+  'AssetsWorkspace.svelte',
+];
+
+const styleOf = (src: string) => src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';
+
+describe('Assets components colour only through tokens', () => {
+  for (const file of GUARDED) {
+    it(file, () => {
+      const css = styleOf(readFileSync(`src/lib/${file}`, 'utf8'));
+      expect(css.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).toEqual([]);
+      expect(css.match(/:\s*(white|black)\b/g) ?? []).toEqual([]);
+    });
+  }
+});

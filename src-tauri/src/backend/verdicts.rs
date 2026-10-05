@@ -1069,8 +1069,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     // The overview's read, open to every paired client: the hub's
-    // `list_assets` answers `catalog::list_assets` over its own catalog and
-    // inventory — the same `AssetListing`.
+    // `list_assets` over its own catalogs and inventory — the same
+    // `AssetListing`. Assets M5: this desktop sends `all_catalogs: true`;
+    // the hub lists every catalog for the master or an unbound full client
+    // and personal only for anyone else (or when the flag is absent).
     (
         "catalog_list_assets",
         Verdict::Routed {
@@ -1255,6 +1257,38 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "catalog_template",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // Assets M5 (R13): the workspace's reads. The footer's catalog chips:
+    // `catalog_admin { list_catalogs }`, the master's or an unbound full
+    // client's — no grant (M3 PF15).
+    (
+        "catalog_list_catalogs",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // The Inbox's cards, read only until M6: `changesets { list }`, the
+    // master's or an unbound full client's.
+    (
+        "catalog_list_changesets",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    // One catalog's repo status by name: `catalog_admin { repo_status }`
+    // with the tool's `catalog` parameter; needs a grant on that catalog.
+    (
+        "catalog_repo_status_in",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    // The Inspector's History: `catalog_admin { asset_history }`, per
+    // catalog, with a grant on it. A hub before M5 refuses the action with
+    // E_INVALID (unknown variant) — no contract bump (R13).
+    (
+        "catalog_asset_history",
         Verdict::Routed {
             tool: "catalog_admin",
         },

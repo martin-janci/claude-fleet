@@ -153,24 +153,29 @@ describe('the asset catalog on a hub client', () => {
     hubStatus.set(remote);
     refusing();
     render(AssetsPanel, { props: { visible: true } });
-    await screen.findByTestId('assets-remote-note');
+    await screen.findByTestId('assets-readonly');
     expect(inv().mock.calls.filter((c) => c[0] === 'catalog_config')).toHaveLength(1);
     expect(inv().mock.calls.some((c) => c[0] === 'catalog_last_sync')).toBe(false);
     expect(inv().mock.calls.some((c) => c[0] === 'catalog_load')).toBe(false);
   });
 
-  it('refused: the read-only overview, with how to get the grant, and none of the controls', async () => {
+  it('refused: the read-only overview, one scope chip with how to get the grant, none of the controls', async () => {
     hubStatus.set(remote);
     refusing();
     render(AssetsPanel, { props: { visible: true } });
-    const note = await screen.findByTestId('assets-remote-note');
-    expect(note.textContent).toContain('Read-only');
-    expect(screen.getByTestId('assets-grant-cmd').textContent).toContain('fleet-hub client grant');
+    const chip = await screen.findByTestId('assets-readonly');
+    expect(chip.textContent).toContain('read-only');
+    expect(screen.queryByTestId('assets-grant-cmd')).toBeNull();
+    await fireEvent.click(chip);
+    // The exact command, with this client's own name (R23).
+    expect(screen.getByTestId('assets-grant-cmd').textContent).toBe('fleet-hub client grant laptop assets');
     // E_FORBIDDEN is the ordinary answer, not an error to show.
     expect(screen.queryByTestId('assets-grant-error')).toBeNull();
     expect(screen.queryByTestId('assets-sync')).toBeNull();
     expect(screen.queryByTestId('assets-secrets')).toBeNull();
     expect(screen.queryByTestId('assets-setup')).toBeNull();
+    await fireEvent.click(screen.getByTestId('assets-rail-library'));
+    for (const id of ['assets-new', 'assets-import', 'assets-lint-all']) expect(screen.queryByTestId(id), id).toBeNull();
   });
 
   it('an unexpected refusal (an old hub, the link down) is shown as is', async () => {
@@ -202,6 +207,7 @@ describe('the asset catalog on a hub client', () => {
     hubStatus.set(remote);
     refusing((cmd) => (cmd === 'catalog_list_assets' ? hubListing : null));
     render(AssetsPanel, { props: { visible: true } });
+    await fireEvent.click(await screen.findByTestId('assets-rail-library'));
     const row = await screen.findByTestId('asset-row-skill-worktree');
     expect(row.tagName).toBe('DIV');
     expect(row.textContent).toContain('1 in sync');
@@ -209,7 +215,7 @@ describe('the asset catalog on a hub client', () => {
     expect(row.getAttribute('title')).toContain('mac: drifted');
     expect(screen.getByTestId('assets-head').textContent).toContain('abcdef1');
     // Unmanaged rows are listed, with nothing to import them into.
-    expect(screen.getByTestId('identity-row-skill-extra').textContent).not.toContain('Import');
+    expect(screen.getByTestId('identity-row-skill-extra').parentElement!.textContent).not.toContain('Import');
   });
 
   it('scans the hosts through the hub and re-reads the overview', async () => {
@@ -223,6 +229,7 @@ describe('the asset catalog on a hub client', () => {
           : null,
     );
     render(AssetsPanel, { props: { visible: true } });
+    await fireEvent.click(await screen.findByTestId('assets-rail-library'));
     await screen.findByTestId('asset-row-skill-worktree');
     await fireEvent.click(screen.getByTestId('assets-scan'));
     expect((await screen.findByTestId('assets-scan-result')).textContent).toContain('nas: scanned');
@@ -261,8 +268,9 @@ describe('the asset catalog on a hub client', () => {
     render(AssetsPanel, { props: { visible: true } });
     await screen.findByTestId('assets-sync');
     expect(screen.getByTestId('assets-secrets')).toBeTruthy();
+    expect(screen.queryByTestId('assets-readonly')).toBeNull();
+    await fireEvent.click(screen.getByTestId('assets-rail-library'));
     expect(screen.getByTestId('assets-new')).toBeTruthy();
-    expect(screen.queryByTestId('assets-remote-note')).toBeNull();
     // Import routes to the hub's catalog_admin now, exactly like Sync and
     // Secrets: it is not disabled here, only while the live connection to
     // the hub is down (the offline-gating sweep in hub.test.ts covers that
@@ -271,6 +279,33 @@ describe('the asset catalog on a hub client', () => {
     expect(imp.disabled).toBe(false);
     await fireEvent.click(imp);
     expect(await screen.findByTestId('import-dialog')).toBeTruthy();
+  });
+
+  it('granted, the hub link down: Import is blocked with the reason, also when reached past the disabled button', async () => {
+    catalog.set(null);
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 3, retry_in_secs: 8, reason: 'connection refused' });
+    inv().mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'catalog_config': return hubConfig;
+        case 'catalog_load': return { head: 'abcdef1234567890', loaded_at: 1, asset_count: 1, problem_count: 0 };
+        case 'catalog_list_assets': return hubListing;
+        case 'assets_inventory': return [];
+        default: return null;
+      }
+    });
+    render(AssetsPanel, { props: { visible: true } });
+    await fireEvent.click(await screen.findByTestId('assets-rail-library'));
+    const imp = screen.getByTestId('assets-import') as HTMLButtonElement;
+    expect(imp.disabled).toBe(true);
+    const reason = imp.title;
+    expect(reason).not.toBe('');
+    // The `a` key (Task 12) calls the same handler without the button: the
+    // handler itself refuses.
+    imp.disabled = false;
+    await fireEvent.click(imp);
+    expect(screen.queryByTestId('import-dialog')).toBeNull();
+    expect(screen.getByText(reason)).toBeTruthy();
   });
 
   it('granted with no catalog yet: the setup form, for a path on the hub’s machine', async () => {

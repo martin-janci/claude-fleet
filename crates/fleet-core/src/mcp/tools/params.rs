@@ -861,6 +861,13 @@ pub struct RepairSessionParams {
 // --- asset catalog ---------------------------------------------------------
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ListAssetsParams {
+    /// Every catalog, not only personal (master/unbound full only).
+    #[serde(default)]
+    pub all_catalogs: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ScanAssetsParams {
     /// Only this host; omit for every reachable one.
     #[serde(default)]
@@ -1056,7 +1063,7 @@ pub struct CatalogAdminParams {
     /// apply_sync|last_sync|list_secrets|set_secret|delete_secret|
     /// list_layers|resolve_preview|propose_layers|set_host_layers|set_host_harnesses|
     /// layer_template|write_layer|delete_layer|list_catalogs|add_catalog|
-    /// remove_catalog|admit_catalog|unadmit_catalog
+    /// remove_catalog|admit_catalog|unadmit_catalog|asset_history
     pub action: String,
     /// The desktop command's own argument object.
     #[serde(default)]

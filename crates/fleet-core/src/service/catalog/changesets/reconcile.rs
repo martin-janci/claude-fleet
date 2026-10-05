@@ -42,6 +42,10 @@ pub struct ReconcileReport {
 /// The error a withdrawn card carries (R2).
 pub const WITHDRAWN: &str = "withdrawn: no longer applies";
 
+/// Assets M5 (R9): how long a card the system withdrew, untouched, is kept
+/// before the pass prunes it.
+pub const WITHDRAWN_RETENTION_SECS: i64 = 7 * 24 * 3600;
+
 type OpenCard = (ChangesetRow, Vec<ChangesetItemRow>);
 
 /// Everything one pass reads, owned. [`proposals`] puts it in one stable
@@ -59,11 +63,21 @@ struct PassFacts {
 }
 
 /// One pass. `auto` (`catalog.auto`): write `ignored` verdicts for
-/// internals here instead of proposing `hide` items (R18).
+/// internals here instead of proposing `hide` items (R18). Then prune the
+/// system's old, untouched withdrawn cards (Assets M5, R9) — best effort:
+/// a failed prune is logged and tried again next pass, never failing the
+/// pass whose writes already landed.
 pub fn reconcile(store: &Mutex<Store>, auto: bool) -> Result<ReconcileReport, IpcError> {
     let facts = gather(store)?;
     let (identities, proposed) = proposals(&facts, auto);
-    write(store, &facts, &identities, &proposed, auto)
+    let report = write(store, &facts, &identities, &proposed, auto)?;
+    let pruned = lock(store)?.prune_withdrawn_changesets(now_unix() - WITHDRAWN_RETENTION_SECS);
+    match pruned {
+        Ok(0) => {}
+        Ok(n) => tracing::debug!(pruned = n, "changesets: pruned withdrawn cards"),
+        Err(e) => tracing::warn!(error = %e, "changesets: pruning withdrawn cards failed"),
+    }
+    Ok(report)
 }
 
 /// Store rows under one guard, then the registry (cloned out, no lock held
@@ -134,6 +148,34 @@ fn gather(store: &Mutex<Store>) -> Result<PassFacts, IpcError> {
     })
 }
 
+/// Assets M5 (R5): the drifted managed Claude rows a Drift card is for. A
+/// copy that is only behind its catalog (`drift_side = catalog`) is not one:
+/// there is no pick to make, so a catalog-only change no longer opens a
+/// card per host (an open one is withdrawn by the pass, its subject no
+/// longer produced). What brings it up to date: SB6 on a layer already
+/// rolled out, with `catalog.auto` on; a Rollout card, only for a layer
+/// never rolled out to that host; otherwise — with `catalog.auto` off —
+/// only a person's own Sync. The Inbox lists it under *Behind the catalog*
+/// meanwhile. An edited
+/// copy (`host`) says so in its card; one whose side is unknown (`None`: a
+/// manifest entry from before M5) keeps M4's card.
+fn drift_facts(rows: &[AssetInventoryRow]) -> Vec<DriftFacts> {
+    rows.iter()
+        .filter(|r| r.state == "drifted" && r.managed && r.harness == "claude")
+        .filter(|r| r.drift_side.as_deref() != Some("catalog"))
+        .filter_map(|r| {
+            Some(DriftFacts {
+                catalog_id: r.catalog_id?,
+                kind: r.kind.clone(),
+                name: r.name.clone(),
+                host: r.host_alias.clone(),
+                host_hash: r.host_hash.clone(),
+                edited: r.drift_side.as_deref() == Some("host"),
+            })
+        })
+        .collect()
+}
+
 /// The identities and the cards the facts call for. Pure. Every input the
 /// rules read in sequence is sorted first — rows by (host, harness, kind,
 /// name), drift by (catalog, kind, name, host), gaps by (catalog, layer,
@@ -155,19 +197,7 @@ fn proposals(f: &PassFacts, auto: bool) -> (Vec<AssetIdentity>, Vec<ProposedCard
     hosts.sort_by(|a, b| a.alias.cmp(&b.alias));
     let mut catalogs = f.catalogs.clone();
     catalogs.sort_by_key(|c| c.id);
-    let mut drifted: Vec<DriftFacts> = rows
-        .iter()
-        .filter(|r| r.state == "drifted" && r.managed && r.harness == "claude")
-        .filter_map(|r| {
-            Some(DriftFacts {
-                catalog_id: r.catalog_id?,
-                kind: r.kind.clone(),
-                name: r.name.clone(),
-                host: r.host_alias.clone(),
-                host_hash: r.host_hash.clone(),
-            })
-        })
-        .collect();
+    let mut drifted = drift_facts(&rows);
     drifted.sort_by(|a, b| {
         (a.catalog_id, &a.kind, &a.name, &a.host).cmp(&(b.catalog_id, &b.kind, &b.name, &b.host))
     });
@@ -904,6 +934,76 @@ mod tests {
         r
     }
 
+    /// Assets M5 (R5): a copy that is only behind its catalog is not drift a
+    /// person must decide — no card; an edited or unknown one is.
+    #[test]
+    fn only_edited_or_unverified_copies_become_drift_facts() {
+        let row = |host: &str, side: Option<&str>| AssetInventoryRow {
+            host_alias: host.into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: "w".into(),
+            state: "drifted".into(),
+            managed: true,
+            catalog_id: Some(1),
+            drift_side: side.map(String::from),
+            ..Default::default()
+        };
+        let facts = drift_facts(&[
+            row("oci", Some("catalog")),
+            row("trn", Some("host")),
+            row("htz", None),
+        ]);
+        let got: Vec<(&str, bool)> = facts.iter().map(|d| (d.host.as_str(), d.edited)).collect();
+        assert_eq!(got, [("trn", true), ("htz", false)]);
+    }
+
+    /// Assets M5 (R5, PF4): through the real pass — `proposals` reads the
+    /// side — an edited copy's card says where it was edited, one with an
+    /// unknown side keeps M4's wording, and a copy only behind its catalog
+    /// opens none; an open card whose row turns `catalog` is withdrawn.
+    #[test]
+    fn the_pass_opens_drift_cards_only_for_copies_someone_edited() {
+        let _g = lock_registry_for_test();
+        let (store, p) = fleet_store(vec![skill("w")]);
+        let row = |host: &str, side: Option<&str>| {
+            let mut r = drifted(host, "w", p);
+            r.drift_side = side.map(String::from);
+            r
+        };
+        let open_drift = |store: &Mutex<Store>| -> Vec<String> {
+            let mut v: Vec<String> = store
+                .lock()
+                .unwrap()
+                .list_changesets()
+                .unwrap()
+                .into_iter()
+                .filter(|c| c.kind == "drift" && is_open(&c.state))
+                .map(|c| c.summary)
+                .collect();
+            v.sort();
+            v
+        };
+        put(&store, "oci", vec![row("oci", None)]);
+        put(&store, "trn", vec![row("trn", Some("host"))]);
+        reconcile(&store, true).unwrap();
+        assert_eq!(
+            open_drift(&store),
+            [
+                "skill/w differs on oci from catalog personal",
+                "skill/w was edited on trn (catalog personal)",
+            ]
+        );
+
+        put(&store, "oci", vec![row("oci", Some("catalog"))]);
+        let r = reconcile(&store, true).unwrap();
+        assert_eq!(r.withdrawn, 1, "{r:?}");
+        assert_eq!(
+            open_drift(&store),
+            ["skill/w was edited on trn (catalog personal)"]
+        );
+    }
+
     /// Task 4 review (M5): the pass feeds the rules its facts in one stable
     /// order, so the same inputs read in another order make the same cards
     /// — positions and summaries do not churn between refreshes.
@@ -1057,5 +1157,46 @@ mod tests {
     async fn a_panic_in_the_detached_sync_only_logs() {
         let h = spawn_logged("test sync", async { panic!("SB6 blew up") }).expect("a runtime");
         assert!(h.await.is_ok(), "the panic did not escape the task");
+    }
+
+    /// Assets M5 (R9, PF4): the pass itself prunes its old, untouched
+    /// withdrawn cards — a fresh one stays until it is past retention.
+    #[test]
+    fn a_pass_prunes_an_old_untouched_withdrawn_card() {
+        let _g = lock_registry_for_test();
+        let (store, _) = fleet_store(vec![skill("kept")]);
+        put(&store, "oci", vec![unmanaged("oci", "w")]);
+        reconcile(&store, true).unwrap();
+        let card = store.lock().unwrap().list_changesets().unwrap()[0].clone();
+        put(&store, "oci", vec![]);
+        assert_eq!(reconcile(&store, true).unwrap().withdrawn, 1);
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_changeset(card.id)
+                .unwrap()
+                .is_some(),
+            "a card withdrawn now is kept"
+        );
+        store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .execute(
+                "UPDATE changesets SET created_at = ?2 WHERE id = ?1",
+                rusqlite::params![card.id, now_unix() - WITHDRAWN_RETENTION_SECS - 1],
+            )
+            .unwrap();
+        reconcile(&store, true).unwrap();
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .get_changeset(card.id)
+                .unwrap()
+                .is_none(),
+            "pruned by the pass"
+        );
     }
 }

@@ -1021,13 +1021,17 @@ impl HubBackend {
         self.route("ensure_operator", &json!({})).await
     }
 
-    /// `commands::assets::catalog_list_assets`: the hub's catalog with each
+    /// `commands::assets::catalog_list_assets`: the hub's catalogs with each
     /// asset's per-host state, the same `AssetListing` the local command
-    /// builds.
+    /// builds. Assets M5: `all_catalogs` asks for every catalog, which the
+    /// hub grants the master and an unbound full client and answers
+    /// personal-only for anyone else; without it (an older desktop) the hub
+    /// answers personal-only for everyone.
     pub async fn catalog_list_assets(
         &self,
     ) -> Result<fleet_core::service::catalog::AssetListing, IpcError> {
-        self.route("catalog_list_assets", &json!({})).await
+        self.route("catalog_list_assets", &json!({ "all_catalogs": true }))
+            .await
     }
 
     /// `commands::assets::assets_scan_hosts`: `None` scans every reachable
