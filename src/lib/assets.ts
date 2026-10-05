@@ -15,14 +15,25 @@ export interface CatalogConfigRow {
   last_loaded_at: number | null;
 }
 export interface CatalogSummary { head: string; loaded_at: number; asset_count: number; problem_count: number }
+/** Assets M5 (R4): on a drifted managed copy, which side moved. Absent when
+ *  the copy's manifest entry cannot say (written before M5). */
+export type DriftSide = 'host' | 'catalog';
 export interface AssetInventoryRow {
   host_alias: string; harness: string; kind: string; name: string; state: string;
   catalog_hash: string | null; host_hash: string | null; scanned_at: number;
   managed: boolean;
   /** Present from hubs with migration 087; absent on older ones. */
   secret_like?: boolean; fleet_owned?: boolean;
+  /** Migration 091: the asset's catalog. */
+  catalog_id?: number | null;
+  /** Assets M5 (R4). Absent from an older hub. */
+  drift_side?: DriftSide | null;
 }
-export interface HostState { host_alias: string; harness: string; state: string }
+export interface HostState {
+  host_alias: string; harness: string; state: string;
+  /** Assets M5 (R4). Absent from an older hub. */
+  drift_side?: DriftSide | null;
+}
 export interface Problem { path: string; message: string }
 /** Assets S1b: who may receive an asset. */
 export type AssetScope = 'private' | 'shared';
@@ -227,9 +238,23 @@ export function identitiesOf(listing: AssetListing): AssetIdentity[] {
 /** Every host alias seen across `ids`, `local` first then alphabetical —
  *  the fixed dot order `HostStrip` renders in. */
 export function hostOrder(ids: AssetIdentity[]): string[] {
-  const all = new Set(ids.flatMap((i) => i.hosts.map((h) => h.host_alias)));
+  return hostOrderOf(ids.flatMap((i) => i.hosts.map((h) => h.host_alias)));
+}
+
+/** The same fixed order over bare aliases (the one implementation:
+ *  `hostOrder` and the Inbox both use it). */
+export function hostOrderOf(aliases: Iterable<string>): string[] {
+  const all = new Set(aliases);
   const rest = [...all].filter((a) => a !== 'local').sort();
   return all.has('local') ? ['local', ...rest] : rest;
+}
+
+const COPIES_DIFFER = 'copies differ on ';
+/** The hosts whose copy of a `needs_person` identity is the odd one out
+ *  (the server words it `copies differ on a, b`); `[]` for any other reason.
+ *  The one parser: `AssetList` and the Inbox's dots both read it. */
+export function oddHosts(i: Pick<AssetIdentity, 'reason'>): string[] {
+  return i.reason?.startsWith(COPIES_DIFFER) ? i.reason.slice(COPIES_DIFFER.length).split(', ') : [];
 }
 
 // ── Sync engine (sub-project 2): plan/apply, secrets, progress. Mirrors
@@ -288,6 +313,8 @@ export interface SyncRunSummary {
   started_at: number;
   finished_at: number;
   hosts: HostSyncResult[];
+  /** M4 I3 / M5 R10: SB6's automatic run, not a person's. */
+  auto?: boolean;
 }
 
 export interface SecretRow {

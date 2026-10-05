@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { groupByKind, stateCounts, identitiesOf, hostOrder, catalogOf, type AssetListing, type AssetIdentity, type AssetSummary } from './assets';
+  import { groupByKind, stateCounts, identitiesOf, hostOrder, oddHosts, catalogOf, type AssetListing, type AssetIdentity, type AssetSummary } from './assets';
   import HostStrip from './HostStrip.svelte';
   import Badge from './Badge.svelte';
 
@@ -37,7 +37,6 @@
   const visible = $derived(ids.filter((i) => showInternals || !internal(i)));
   const hiddenCount = $derived(ids.filter(internal).length);
   const orphans = $derived(listing.unmanaged.filter((r) => r.state === 'orphan' && (filter === '' || r.name.toLowerCase().includes(filter.toLowerCase()))));
-  const oddHosts = (i: AssetIdentity) => (i.reason?.startsWith('copies differ on ') ? i.reason.slice(17).split(', ') : []);
   const isSel = (kind: string, name: string) => selected?.kind === kind && selected?.name === name;
   /** Assets M5 (PF9): the listing spans every catalog, so a row is keyed by
    *  (catalog, name). The detail and the editor are the personal catalog's
