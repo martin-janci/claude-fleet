@@ -539,9 +539,14 @@ impl Store {
     }
 
     /// Assets M6 (R1): each `(position, outcome JSON)` onto card `id`'s
-    /// item, in one transaction. A position the card does not have is a
-    /// no-op.
-    pub fn set_changeset_item_outcomes(&self, id: i64, outcomes: &[(i64, String)]) -> Result<()> {
+    /// item, in one transaction; `None` clears it (a retried item that now
+    /// applies cleanly must not keep the last attempt's outcome). A position
+    /// the card does not have is a no-op.
+    pub fn set_changeset_item_outcomes(
+        &self,
+        id: i64,
+        outcomes: &[(i64, Option<String>)],
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         for (position, json) in outcomes {
             tx.execute(
@@ -647,14 +652,21 @@ mod tests {
                 &[sync_item("core", "oci"), sync_item("core", "htz")],
             )
             .unwrap();
-        s.set_changeset_item_outcomes(card.id, &[(1, r#"{"note":"htz: unreachable"}"#.into())])
-            .unwrap();
+        s.set_changeset_item_outcomes(
+            card.id,
+            &[(1, Some(r#"{"note":"htz: unreachable"}"#.into()))],
+        )
+        .unwrap();
         let items = s.changeset_items(card.id).unwrap();
         assert_eq!(items[0].outcome, None);
         assert_eq!(
             items[1].outcome.as_deref(),
             Some(r#"{"note":"htz: unreachable"}"#)
         );
+        // A retry that now applies cleanly clears it.
+        s.set_changeset_item_outcomes(card.id, &[(1, None), (7, None)])
+            .unwrap();
+        assert_eq!(s.changeset_items(card.id).unwrap()[1].outcome, None);
     }
 
     #[test]

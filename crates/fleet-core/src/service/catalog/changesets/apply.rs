@@ -1879,30 +1879,34 @@ fn finish_host_card(
     let failures: Vec<String> = outcome.values().flat_map(|o| o.failed.clone()).collect();
     let skipped: Vec<String> = outcome.values().flat_map(|o| o.skipped.clone()).collect();
     let note = (!skipped.is_empty()).then(|| format!("skipped: {}", skipped.join("; ")));
-    // R1: per item, what its host left undone — held lines, and a failed or
-    // skipped host's line; none for a host that applied cleanly.
-    let outcomes: Vec<(i64, String)> = selected
+    // R1: per selected item, what its host left undone — held lines, and a
+    // failed or skipped host's line. `None` for a host that applied cleanly,
+    // which CLEARS the item's outcome: a failed card stays open and its
+    // items are retried, and the last attempt's outcome must not outlive it.
+    let outcomes: Vec<(i64, Option<String>)> = selected
         .iter()
-        .filter_map(|i| {
-            let o = outcome.get(&host_of(i))?;
-            let note = (!o.failed.is_empty())
-                .then(|| o.failed.join("; "))
-                .or_else(|| {
-                    let plain: Vec<&str> = o
-                        .skipped
-                        .iter()
-                        .filter(|l| !l.ends_with("— sync it yourself"))
-                        .map(String::as_str)
-                        .collect();
-                    (!plain.is_empty()).then(|| plain.join("; "))
-                });
-            let out = ItemOutcome {
-                held: o.held_lines.clone(),
-                note,
-            };
-            (out != ItemOutcome::default())
-                .then(|| serde_json::to_string(&out).ok().map(|j| (i.position, j)))
-                .flatten()
+        .map(|i| {
+            let json = outcome.get(&host_of(i)).and_then(|o| {
+                let note = (!o.failed.is_empty())
+                    .then(|| o.failed.join("; "))
+                    .or_else(|| {
+                        let plain: Vec<&str> = o
+                            .skipped
+                            .iter()
+                            .filter(|l| !l.ends_with("— sync it yourself"))
+                            .map(String::as_str)
+                            .collect();
+                        (!plain.is_empty()).then(|| plain.join("; "))
+                    });
+                let out = ItemOutcome {
+                    held: o.held_lines.clone(),
+                    note,
+                };
+                (out != ItemOutcome::default())
+                    .then(|| serde_json::to_string(&out).ok())
+                    .flatten()
+            });
+            (i.position, json)
         })
         .collect();
     let s = lock(store)?;
@@ -4555,6 +4559,35 @@ mod tests {
         assert!(err.starts_with("nothing to restore on oci"), "{err}");
         assert!(!home.path().join(".claude/skills/w").exists());
         assert_eq!(last_run(&f), None, "nothing applied");
+    }
+
+    /// A failed card stays open and its items are retried: the retried
+    /// item's outcome is the last attempt's, so a restore that failed first
+    /// (nothing there to restore) and then applies carries no stale note.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_retried_item_that_now_applies_loses_its_old_outcome() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = drift_card(&f, p, "oci");
+        let v = restore(&f, id, &ssh).await;
+        assert_eq!(v.state, "failed");
+        let first = v.items[1].outcome.clone().expect("the failure is recorded");
+        assert!(first
+            .note
+            .unwrap_or_default()
+            .starts_with("nothing to restore on oci"));
+
+        // The host now holds a differing copy: the restore overwrites it.
+        host_skill(home.path(), "w", "Edited on the host, long enough.");
+        let v = restore(&f, id, &ssh).await;
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert_eq!(item_states(&v), ["skipped", "applied"]);
+        assert_eq!(v.items[1].outcome, None, "the first attempt's note is gone");
     }
 
     /// I2: a restore writes the harness its drift was seen on (claude) and
