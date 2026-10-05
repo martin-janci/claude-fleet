@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 pub const PCM_QUEUE: usize = 64;
 pub type PcmTx = tokio::sync::mpsc::Sender<Vec<u8>>;
@@ -36,11 +37,31 @@ struct Claim {
     owner: String,
     source: Arc<dyn VoiceSource>,
     last_used: Instant,
-    busy: bool,
+}
+
+/// A live capture of a session, whichever claim started it.
+struct LiveCapture {
+    id: u64,
+    revoked: CancellationToken,
+}
+
+#[derive(Default)]
+struct State {
+    claims: HashMap<i64, Claim>,
+    captures: HashMap<i64, LiveCapture>,
+}
+
+impl State {
+    /// End the session's live capture, if any: its holder sees `revoked`.
+    fn revoke_capture(&mut self, session_id: i64) {
+        if let Some(live) = self.captures.remove(&session_id) {
+            live.revoked.cancel();
+        }
+    }
 }
 
 pub struct VoiceRegistry {
-    claims: Mutex<HashMap<i64, Claim>>,
+    state: Mutex<State>,
     next: AtomicU64,
 }
 
@@ -53,24 +74,39 @@ impl Default for VoiceRegistry {
 /// An open capture. Dropping it stops the source and frees the session.
 pub struct Capture {
     pub rx: PcmRx,
+    revoked: CancellationToken,
     _source: Box<dyn Send>,
     _busy: BusyGuard,
+}
+
+impl Capture {
+    /// Cancelled when the claim that supplies this capture is replaced or
+    /// released. The route that streams `rx` must end the stream (and drop
+    /// the capture) when it fires, so no microphone stays open without a claim.
+    pub fn revoked(&self) -> CancellationToken {
+        self.revoked.clone()
+    }
 }
 
 struct BusyGuard {
     reg: Arc<VoiceRegistry>,
     session_id: i64,
-    claim_id: u64,
+    capture_id: u64,
 }
 
 impl Drop for BusyGuard {
     fn drop(&mut self) {
-        let mut claims = self.reg.claims.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(c) = claims.get_mut(&self.session_id) {
-            if c.id == self.claim_id {
-                c.busy = false;
-                c.last_used = Instant::now();
-            }
+        let mut st = self.reg.lock();
+        // Only this capture's own entry: a replacement may have a newer one.
+        if st
+            .captures
+            .get(&self.session_id)
+            .is_some_and(|l| l.id == self.capture_id)
+        {
+            st.captures.remove(&self.session_id);
+        }
+        if let Some(c) = st.claims.get_mut(&self.session_id) {
+            c.last_used = Instant::now();
         }
     }
 }
@@ -78,37 +114,43 @@ impl Drop for BusyGuard {
 impl VoiceRegistry {
     pub fn new() -> Self {
         Self {
-            claims: Mutex::new(HashMap::new()),
+            state: Mutex::new(State::default()),
             next: AtomicU64::new(1),
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<i64, Claim>> {
-        self.claims.lock().unwrap_or_else(|p| p.into_inner())
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Make `source` the session's microphone, replacing any earlier claim.
+    /// Make `source` the session's microphone, replacing any earlier claim
+    /// and revoking a capture the earlier claim has open.
     pub fn claim(&self, session_id: i64, owner: &str, source: Arc<dyn VoiceSource>) -> u64 {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        self.lock().insert(
-            session_id,
-            Claim {
-                id,
-                owner: owner.to_string(),
-                source,
-                last_used: Instant::now(),
-                busy: false,
-            },
-        );
+        {
+            let mut st = self.lock();
+            st.revoke_capture(session_id);
+            st.claims.insert(
+                session_id,
+                Claim {
+                    id,
+                    owner: owner.to_string(),
+                    source,
+                    last_used: Instant::now(),
+                },
+            );
+        }
         tracing::info!(session_id, owner, "[voice] microphone claimed");
         id
     }
 
-    /// Release `claim_id`; a claim that was already replaced is left alone.
+    /// Release `claim_id` (revoking a live capture); a claim that was already
+    /// replaced is left alone.
     pub fn release(&self, session_id: i64, claim_id: u64) -> bool {
-        let mut claims = self.lock();
-        if claims.get(&session_id).is_some_and(|c| c.id == claim_id) {
-            claims.remove(&session_id);
+        let mut st = self.lock();
+        if st.claims.get(&session_id).is_some_and(|c| c.id == claim_id) {
+            st.claims.remove(&session_id);
+            st.revoke_capture(session_id);
             tracing::info!(session_id, "[voice] microphone released");
             true
         } else {
@@ -117,35 +159,45 @@ impl VoiceRegistry {
     }
 
     pub fn owner(&self, session_id: i64) -> Option<String> {
-        self.lock().get(&session_id).map(|c| c.owner.clone())
+        self.lock().claims.get(&session_id).map(|c| c.owner.clone())
     }
 
-    /// Start the session's source. `ttl` of zero never expires a claim.
+    /// Start the session's source. `ttl` of zero never expires a claim; a
+    /// claim with a live capture never expires.
     pub fn begin_capture(
         self: &Arc<Self>,
         session_id: i64,
         ttl: Duration,
     ) -> Result<Capture, CaptureRefusal> {
-        let (source, claim_id) = {
-            let mut claims = self.lock();
-            let Some(c) = claims.get_mut(&session_id) else {
+        let (source, capture_id, revoked) = {
+            let mut st = self.lock();
+            let State { claims, captures } = &mut *st;
+            let Some(c) = claims.get(&session_id) else {
                 return Err(CaptureRefusal::NoClaim);
             };
-            if !ttl.is_zero() && !c.busy && c.last_used.elapsed() > ttl {
+            if captures.contains_key(&session_id) {
+                return Err(CaptureRefusal::Busy);
+            }
+            if !ttl.is_zero() && c.last_used.elapsed() > ttl {
                 claims.remove(&session_id);
                 return Err(CaptureRefusal::NoClaim);
             }
-            if c.busy {
-                return Err(CaptureRefusal::Busy);
-            }
-            c.busy = true;
-            (Arc::clone(&c.source), c.id)
+            let capture_id = self.next.fetch_add(1, Ordering::Relaxed);
+            let revoked = CancellationToken::new();
+            captures.insert(
+                session_id,
+                LiveCapture {
+                    id: capture_id,
+                    revoked: revoked.clone(),
+                },
+            );
+            (Arc::clone(&c.source), capture_id, revoked)
         };
         // The guard exists before `start` so a failure frees the session.
         let busy = BusyGuard {
             reg: Arc::clone(self),
             session_id,
-            claim_id,
+            capture_id,
         };
         let (tx, rx) = tokio::sync::mpsc::channel(PCM_QUEUE);
         match source.start(tx) {
@@ -153,6 +205,7 @@ impl VoiceRegistry {
                 tracing::info!(session_id, "[voice] capture started");
                 Ok(Capture {
                     rx,
+                    revoked,
                     _source: guard,
                     _busy: busy,
                 })

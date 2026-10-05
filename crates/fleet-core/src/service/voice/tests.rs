@@ -107,3 +107,51 @@ async fn an_unused_claim_expires_after_the_ttl_and_zero_means_never() {
     tokio::time::advance(Duration::from_secs(10_000)).await;
     assert!(reg.begin_capture(8, Duration::ZERO).is_ok());
 }
+
+#[tokio::test]
+async fn replacing_the_claim_revokes_a_live_capture_and_allows_a_new_one() {
+    let reg = Arc::new(VoiceRegistry::new());
+    let a = Arc::new(Fake::default());
+    reg.claim(7, "client:phone", a.clone());
+    let c1 = reg.begin_capture(7, TTL).unwrap();
+    let revoked = c1.revoked();
+    assert!(!revoked.is_cancelled());
+    let b = Arc::new(Fake::default());
+    reg.claim(7, "master", b.clone());
+    assert!(revoked.is_cancelled());
+    // The revoked capture no longer holds the session: a new one may start.
+    let c2 = reg.begin_capture(7, TTL).unwrap();
+    assert_eq!(b.starts.load(Ordering::SeqCst), 1);
+    // Dropping the old capture must not clear the new one's hold.
+    drop(c1);
+    assert_eq!(reg.begin_capture(7, TTL).err(), Some(CaptureRefusal::Busy));
+    drop(c2);
+    assert!(reg.begin_capture(7, TTL).is_ok());
+}
+
+#[tokio::test]
+async fn releasing_revokes_a_live_capture() {
+    let reg = Arc::new(VoiceRegistry::new());
+    let id = reg.claim(7, "master", Arc::new(Fake::default()));
+    let cap = reg.begin_capture(7, TTL).unwrap();
+    let revoked = cap.revoked();
+    assert!(reg.release(7, id));
+    assert!(revoked.is_cancelled());
+    assert_eq!(
+        reg.begin_capture(7, TTL).err(),
+        Some(CaptureRefusal::NoClaim)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_busy_claim_older_than_the_ttl_stays_busy() {
+    let reg = Arc::new(VoiceRegistry::new());
+    reg.claim(7, "master", Arc::new(Fake::default()));
+    let cap = reg.begin_capture(7, TTL).unwrap();
+    tokio::time::advance(Duration::from_secs(120)).await;
+    assert_eq!(reg.begin_capture(7, TTL).err(), Some(CaptureRefusal::Busy));
+    assert_eq!(reg.owner(7).as_deref(), Some("master"));
+    drop(cap);
+    // Dropping refreshed last_used, so the claim is fresh again.
+    assert!(reg.begin_capture(7, TTL).is_ok());
+}
