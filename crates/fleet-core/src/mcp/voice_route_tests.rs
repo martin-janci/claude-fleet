@@ -498,3 +498,81 @@ async fn source_for_a_session_outside_the_org_scope_is_404() {
     assert_eq!(dial(&h, STRANGER).await.err(), Some(404));
     assert_eq!(registry().owner(h.session_id), None);
 }
+
+#[tokio::test]
+async fn a_new_claim_over_a_live_capture_ends_it() {
+    let h = hub(true).await;
+    let first = Arc::new(Pusher::new(9));
+    registry().claim(h.session_id, "test", first.clone());
+    let mut r = get(h.addr, capture_path(), HOST_A).await;
+    assert_eq!(r.status, 200);
+    r.read_at_least(CHUNK).await;
+    registry().claim(h.session_id, "other", Arc::new(Pusher::new(7)));
+    assert!(
+        r.ends_within(Duration::from_secs(1)).await,
+        "the capture outlived its replaced claim"
+    );
+    eventually(
+        Duration::from_secs(1),
+        "the old microphone stays open",
+        || first.live.load(Ordering::SeqCst) == 0,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_superseded_source_socket_is_closed_with_4001() {
+    let h = hub(true).await;
+    let mut ws = dial(&h, PHONE).await.expect("the upgrade");
+    let sid = h.session_id;
+    eventually(PATIENCE, "the socket never claimed the session", || {
+        registry().owner(sid).as_deref() == Some("client:phone")
+    })
+    .await;
+    registry().claim(sid, "other", Arc::new(Pusher::new(7)));
+    let frame = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match ws.next().await {
+                Some(Ok(WsMessage::Close(frame))) => return frame,
+                Some(Ok(_)) => continue,
+                other => panic!("the socket ended without a close frame: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("no close frame in time")
+    .expect("a close frame with a code");
+    assert_eq!(u16::from(frame.code), 4001);
+    assert_eq!(frame.reason.as_str(), "microphone claimed elsewhere");
+}
+
+#[tokio::test]
+async fn every_stop_reaches_the_device_however_many_are_queued() {
+    // The device's socket is busy (backpressured): nothing drains the
+    // command queue while captures start and stop. No stop may be lost, or
+    // the device would keep its microphone open with no capture.
+    let (source, mut cmds) = super::WsSource::new();
+    for _ in 0..16 {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let guard = source.start(tx).expect("start");
+        drop(guard);
+    }
+    let mut stops = 0;
+    while let Ok(cmd) = cmds.try_recv() {
+        if matches!(cmd, super::SourceCmd::Stop { .. }) {
+            stops += 1;
+        }
+    }
+    assert_eq!(stops, 16);
+}
+
+#[test]
+fn pcm_for_a_capture_that_is_gone_stops_the_device() {
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let mut live = Some((3, tx));
+    assert_eq!(super::relay_pcm(&mut live, vec![1; 4]), None);
+    drop(rx);
+    assert_eq!(super::relay_pcm(&mut live, vec![1; 4]), Some(3));
+    assert!(live.is_none());
+    assert_eq!(super::relay_pcm(&mut live, vec![1; 4]), None, "told once");
+}

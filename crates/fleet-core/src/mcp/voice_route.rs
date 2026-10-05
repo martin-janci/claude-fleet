@@ -11,7 +11,7 @@ use super::report_route::ReportState;
 use crate::service::settings;
 use crate::service::voice::{registry, Capture, CaptureRefusal, PcmTx, VoiceSource};
 use axum::body::Body;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -168,31 +168,64 @@ enum SourceCmd {
     Stop { capture: u64 },
 }
 
+/// The close code a source socket gets when its claim was replaced or
+/// released elsewhere.
+const CLOSE_CLAIMED_ELSEWHERE: u16 = 4001;
+
 /// A claim held by a websocket: `start` asks the device to open its
-/// microphone; the returned guard asks it to close it.
+/// microphone; the returned guard asks it to close it. The command queue is
+/// unbounded so a stop is never lost while the socket is backpressured — a
+/// lost stop would leave the device's microphone open with no capture. It
+/// stays small: a session has at most one capture at a time.
 struct WsSource {
-    cmds: tokio::sync::mpsc::Sender<SourceCmd>,
+    cmds: tokio::sync::mpsc::UnboundedSender<SourceCmd>,
     next: AtomicU64,
 }
 
 struct StopOnDrop {
-    cmds: tokio::sync::mpsc::Sender<SourceCmd>,
+    cmds: tokio::sync::mpsc::UnboundedSender<SourceCmd>,
     capture: u64,
 }
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        let _ = self.cmds.try_send(SourceCmd::Stop {
+        let _ = self.cmds.send(SourceCmd::Stop {
             capture: self.capture,
         });
     }
+}
+
+impl WsSource {
+    fn new() -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<SourceCmd>) {
+        let (cmds, rx) = tokio::sync::mpsc::unbounded_channel();
+        let source = Arc::new(WsSource {
+            cmds,
+            next: AtomicU64::new(1),
+        });
+        (source, rx)
+    }
+}
+
+/// Hand a device's PCM chunk to the live capture. Returns the capture whose
+/// stop the device must still be told of: one whose receiver is gone
+/// although no stop came through the queue (defence in depth).
+fn relay_pcm(live: &mut Option<(u64, PcmTx)>, pcm: Vec<u8>) -> Option<u64> {
+    let (capture, tx) = live.as_ref()?;
+    if tx.is_closed() {
+        let capture = *capture;
+        *live = None;
+        return Some(capture);
+    }
+    // Full queue: drop the chunk rather than buffer audio.
+    let _ = tx.try_send(pcm);
+    None
 }
 
 impl VoiceSource for WsSource {
     fn start(&self, tx: PcmTx) -> Result<Box<dyn Send>, String> {
         let capture = self.next.fetch_add(1, Ordering::Relaxed);
         self.cmds
-            .try_send(SourceCmd::Start { capture, tx })
+            .send(SourceCmd::Start { capture, tx })
             .map_err(|_| "the device's connection is gone".to_string())?;
         Ok(Box::new(StopOnDrop {
             cmds: self.cmds.clone(),
@@ -251,11 +284,7 @@ pub async fn handle_source(
 /// and stop to the device as text, and its binary PCM into the live capture.
 async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
     let (mut sink, mut stream) = socket.split();
-    let (cmds, mut cmd_rx) = tokio::sync::mpsc::channel(4);
-    let source = Arc::new(WsSource {
-        cmds,
-        next: AtomicU64::new(1),
-    });
+    let (source, mut cmd_rx) = WsSource::new();
     let claim_id = registry().claim(session_id, &owner, source);
     let mut live: Option<(u64, PcmTx)> = None;
     loop {
@@ -269,21 +298,34 @@ async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
                     }
                 }
                 Some(SourceCmd::Stop { capture }) => {
-                    if live.as_ref().is_some_and(|(c, _)| *c == capture) {
-                        live = None;
+                    // Not live: the device was already told (`relay_pcm`).
+                    if !live.as_ref().is_some_and(|(c, _)| *c == capture) {
+                        continue;
                     }
+                    live = None;
                     let stop = format!("{{\"stop\":{capture}}}");
                     if sink.send(Message::Text(stop.into())).await.is_err() {
                         break;
                     }
                 }
-                None => break,
+                None => {
+                    // The claim was replaced or released elsewhere.
+                    let _ = sink
+                        .send(Message::Close(Some(CloseFrame {
+                            code: CLOSE_CLAIMED_ELSEWHERE,
+                            reason: "microphone claimed elsewhere".into(),
+                        })))
+                        .await;
+                    break;
+                }
             },
             msg = stream.next() => match msg {
                 Some(Ok(Message::Binary(pcm))) => {
-                    if let Some((_, tx)) = &live {
-                        // Full queue: drop the chunk rather than buffer audio.
-                        let _ = tx.try_send(pcm.to_vec());
+                    if let Some(capture) = relay_pcm(&mut live, pcm.to_vec()) {
+                        let stop = format!("{{\"stop\":{capture}}}");
+                        if sink.send(Message::Text(stop.into())).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
