@@ -1062,6 +1062,34 @@ fn list_assets_spans_every_catalog_only_for_the_master_and_unbound_full_devices(
     assert_eq!(listing_scope(&host("oci")), ListingScope::Personal);
 }
 
+/// Final review minor 3: the `list_assets` audience and the
+/// `list_catalogs` audience (`Touches::Nothing`) are one predicate, so they
+/// cannot drift apart.
+#[test]
+fn list_assets_and_list_catalogs_share_one_audience() {
+    use super::assets::{listing_scope, may_list_every_catalog};
+    use crate::service::catalog::ListingScope;
+    let callers = [
+        Caller::master(),
+        client(1, TokenMode::Full, None),
+        client(1, TokenMode::Readonly, None),
+        client(1, TokenMode::Updater, None),
+        client(1, TokenMode::Peer, None),
+        client(1, TokenMode::Full, Some(7)),
+        host("oci"),
+    ];
+    let every: Vec<bool> = callers.iter().map(may_list_every_catalog).collect();
+    assert_eq!(every, [true, true, false, false, false, false, false]);
+    for c in &callers {
+        assert_eq!(
+            listing_scope(c) == ListingScope::Every,
+            may_list_every_catalog(c),
+            "{}",
+            c.label()
+        );
+    }
+}
+
 /// A [`git_catalog`] that also holds skill `s` (uncommitted: a load reads
 /// the working tree).
 fn git_catalog_with_skill(tag: &str) -> std::path::PathBuf {

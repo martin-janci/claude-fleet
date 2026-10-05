@@ -241,11 +241,8 @@ impl FleetTools {
             _ => None,
         };
         let allowed = match &touches {
-            // Every catalog's paths, remotes and grantees, across orgs: the
-            // master's, or a person's own unbound full device.
-            Touches::Nothing => {
-                caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
-            }
+            // Every catalog's paths, remotes and grantees, across orgs.
+            Touches::Nothing => may_list_every_catalog(&caller),
             Touches::MasterOnly(_) => caller.is_master(),
             Touches::Catalog(name) => {
                 may_admin_catalog_row(&caller, &self.store, name, target.as_ref())?
@@ -832,11 +829,20 @@ fn changesets_forbidden(action: &str, catalog: Option<&str>, caller: &Caller) ->
 /// token and an org-bound, readonly or single-purpose client, so none of
 /// them learns an org catalog's name or assets from the listing.
 pub(crate) fn listing_scope(caller: &Caller) -> catalog::ListingScope {
-    if caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full) {
+    if may_list_every_catalog(caller) {
         catalog::ListingScope::Every
     } else {
         catalog::ListingScope::Personal
     }
+}
+
+/// Who may see every catalog — its name, paths, remotes, grantees and
+/// assets, across orgs: the master, or a person's own unbound full device.
+/// The one rule behind both `list_catalogs` (`Touches::Nothing` in
+/// `catalog_admin`) and [`listing_scope`], so the two audiences cannot
+/// drift apart (final review, minor 3).
+pub(crate) fn may_list_every_catalog(caller: &Caller) -> bool {
+    caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
 }
 
 /// True when `caller` may touch the catalog `name` whose row the caller has
