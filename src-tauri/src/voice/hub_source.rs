@@ -73,6 +73,8 @@ pub async fn run(
     let mut guard: Option<Box<dyn Send>> = None;
     loop {
         tokio::select! {
+            // A release wins over queued audio: nothing is sent after it.
+            biased;
             _ = stop.cancelled() => {
                 drop(guard.take());
                 let _ = sink.send(Message::Close(None)).await;
@@ -89,11 +91,23 @@ pub async fn run(
                         drop(guard.take());
                         let src = std::sync::Arc::clone(&source);
                         let tx = pcm_tx.clone();
-                        // Opening the device can block for seconds.
-                        let started = tokio::task::spawn_blocking(move || src.start(tx))
-                            .await
-                            .map_err(|e| e.to_string())
-                            .and_then(|r| r);
+                        // Opening the device can block for seconds, and a
+                        // release must not wait for it.
+                        let mut opening = tokio::task::spawn_blocking(move || src.start(tx));
+                        let started = tokio::select! {
+                            biased;
+                            _ = stop.cancelled() => {
+                                // The device may still open once `start`
+                                // returns: drop its guard then, closing it. (A
+                                // dropped JoinHandle would also drop the
+                                // output when the task completes; this says so
+                                // in code rather than relying on it.)
+                                tokio::spawn(async move { drop(opening.await) });
+                                let _ = sink.send(Message::Close(None)).await;
+                                return Ok(Ended::Released);
+                            }
+                            r = &mut opening => r.map_err(|e| e.to_string()).and_then(|r| r),
+                        };
                         match started {
                             Ok(g) => guard = Some(g),
                             Err(e) => {

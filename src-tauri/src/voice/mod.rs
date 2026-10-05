@@ -139,6 +139,7 @@ impl VoiceState {
             }
             *slot = None;
             let (state, error) = match ended {
+                // Unreachable: `run` answers Released only once `stop` is cancelled.
                 Ok(hub_source::Ended::Released) => return,
                 Ok(hub_source::Ended::ClaimedElsewhere) => {
                     ("released", Some("microphone claimed elsewhere".to_string()))
