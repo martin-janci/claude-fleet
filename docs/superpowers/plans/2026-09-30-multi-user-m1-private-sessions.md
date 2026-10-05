@@ -3,7 +3,23 @@
 Companion to `docs/superpowers/specs/2026-09-30-multi-user-gap-analysis.md`.
 Read §4 and §5 there first; this file is only the task list.
 
-**Status:** not started, revision 6 (after the implementer pass, 2026-09-30).
+**Status:** revision 6 (after the implementer pass, 2026-09-30); **built on
+branch `mellow-virgo`, 2026-10-01 … 2026-10-05, and not yet merged.**
+
+T0–T14 and F1–F3 and D1 are landed, including the sub-tasks the review rounds
+added that this list does not head in its own right (T2a, T8c, T9a–T9d,
+T10a–T10d, F2a–F2e). **T15 — hub-e2e, two people on one hub end to end — is
+the one task of this list still open**, together with the `fleet-hub person`
+CLI, which is not a task of this plan at all: it closes two limitations D1 had
+to write down as limitations.
+
+Two things to carry forward rather than re-derive, each recorded where it
+belongs rather than only here. The `long_poll_permit` bucketing on
+`caller.label()` is open by decision and is a self-denial-of-service, not a
+leak (acceptance item 6, and the table in T8 below). And the six items T8's
+section recorded as "still open" were closed by the rounds that followed it —
+that table is in T8, with where each one landed, so the original review
+(`m1-t6t8-findings.md`) does not send a reader hunting for them.
 
 Revision 2: ownership is always present, the migration no longer makes old
 sessions org-visible, and T4a is new. Revision 3: grants move downward only,
@@ -1862,15 +1878,28 @@ session content — `ResumeCandidate` carries name, host, branch, worktree,
 `host_alias` and `tmux_name`; `ReviewItem` carries `session_id`, `session_name`
 and `host`.
 
-**Also still open from the review that preceded the gate** (see
-`m1-t6t8-findings.md`, kept in this session's scratchpad): `dispatch_task`'s
-requester at `Reach::Read` when it should be `Drive`, `broadcast_prompt`'s
-fail-open `Option<ViewScope>`, T8's `looks_like_session_row` recognising a row
-only by the key `id` (and therefore blind to the `session_id` shape above),
-`work_link { start }` creating a session owned by the hub's person rather than
-the starter, `task_visible_in_scope_pure`'s proven-endpoint widening, and
-`related_sessions`' exemption claiming a fence that does not exist for a
-person's device.
+**Six items this section recorded as still open are CLOSED** — verified
+against the tree at 2026-10-05, after T8c, T9, T10 and T12 had each moved
+through this area. The list is kept rather than deleted, because a reader who
+meets the original review (`m1-t6t8-findings.md`, this session's scratchpad)
+would otherwise go hunting for holes that are no longer there:
+
+| Recorded as open | Where it is now |
+|---|---|
+| `dispatch_task`'s requester at `Reach::Read` | `Reach::Drive` (`mcp/tools/orchestration.rs`), with the watcher-escalation scenario written out in the comment: a watcher could otherwise start a session owned by the grantor, running the watcher's prompt on the grantor's AI account. |
+| `broadcast_prompt`'s fail-open `Option<ViewScope>` | Gone. The type is mentioned only in the past tense (`service/sessions/prompt.rs`, `mcp/tools/tests.rs`), each naming what `None` used to mean. |
+| `looks_like_session_row` keyed on `id` alone | Recognises the row by `host_alias` and its siblings, with a negative case pinned in `service/view_scope_tests.rs`. |
+| `work_link { start }` owning the session as the hub's person | `service/work/resume.rs` takes the owner from the chosen session; two tests assert the two modes apart (`Some(ada)` vs `Some(hub)`). |
+| `task_visible_in_scope_pure`'s proven-endpoint widening | Replaced by the pure function of that name (`service/tasks.rs`), which both former checks now go through. |
+| `related_sessions`' claimed-but-absent fence | The tool passes the caller's whole `ViewScope` to `related_sessions_scoped` (`mcp/tools/session_ops.rs`); there is no exemption left to claim. |
+
+**One item is genuinely still open, and is a self-denial-of-service rather
+than a leak**: `mcp/tools/support.rs::long_poll_permit` buckets on
+`caller.label()`, a device name rather than a person, so a revoked device
+holds its slots for the remaining `LONG_POLL_CAP`. Every wait behind those
+slots now refuses, so nothing is served by them. It is recorded in full at
+item 6 of the acceptance list above, and it stands as the reason never to key
+a future per-person quota on `label()`.
 
 **One judgement call to check rather than inherit.** The gate put
 `work { reopened }` in the no-gate table because `ReopenedWork` carries
@@ -1878,10 +1907,12 @@ item-level counts plus the host of the newest past session — the per-host coun
 shape rule 6 allows. If `last_host` reads as session metadata, that row moves
 and there is a thirteenth surface.
 
-**Behavioural pins still unwritten**, all listed in the findings file: the
+**The five behavioural pins this section listed as unwritten are written**, as
+rows of T14's matrix (`mcp/tools/tests_sessions_isolation.rs`): the
 `delete_worktree { force: true }` destruction, the `dispatch_task` watcher
-escalation, the `usage_report` leak, the `work_link { name }` write onto another
-person's row, and a `broadcast_prompt` call through the tool.
+escalation, the `usage_report` leak, the `work_link { name }` write onto
+another person's row, and a `broadcast_prompt` call through the tool. Each is
+now exercised per caller rather than argued about in prose.
 
 ---
 
