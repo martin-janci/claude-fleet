@@ -35,7 +35,8 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "hardenedRuntime": false
+      "hardenedRuntime": false,
+      "entitlements": "Entitlements.plist"
     },
     "windows": {
       "webviewInstallMode": {

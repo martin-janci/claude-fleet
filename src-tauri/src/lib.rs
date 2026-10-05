@@ -7,6 +7,7 @@ pub mod backend;
 mod bootstrap;
 mod commands;
 mod pty;
+mod voice;
 
 pub use app_events::AppHandleEventBus;
 
