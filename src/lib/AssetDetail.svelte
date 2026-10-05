@@ -289,7 +289,8 @@
 {/if}
 
 <style>
-  .detail { padding: 10px 14px; overflow: auto; height: 100%; font-size: 13px; }
+  /* No scroller of its own: it lives in the Inspector's tab panel, which scrolls. */
+  .detail { padding: 10px 14px; font-size: 13px; }
   .title-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
   .title-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .commit { font-size: 11px; color: var(--usage-ok); }

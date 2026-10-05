@@ -184,6 +184,8 @@ describe('AssetList — the Library (Assets M5)', () => {
     expect(row.closest('[data-testid="library-managed"]')).toBeTruthy();
     expect(document.querySelector('[data-row-key="asset:personal:skill/w"]')?.tagName).toBe('BUTTON');
     expect(screen.getByTestId('library-managed-header').textContent).toMatch(/Managed, read-only\s*1/);
+    expect(row.getAttribute('aria-disabled')).toBeNull();
+    expect(row.classList.contains('inert')).toBe(false);
     await fireEvent.click(row);
     expect(onselect).toHaveBeenCalledWith('skill', 'w', 'papayapos');
     await fireEvent.keyDown(row, { key: 'Enter' });
@@ -197,6 +199,9 @@ describe('AssetList — the Library (Assets M5)', () => {
       canWrite: (a: { catalog?: string }) => a.catalog !== 'papayapos',
     });
     const row = document.querySelector('[data-row-key="asset:papayapos:skill/w"]') as HTMLElement;
+    // Said in words, and no hover that promises a click.
+    expect(row.getAttribute('aria-disabled')).toBe('true');
+    expect(row.classList.contains('inert')).toBe(true);
     await fireEvent.click(row);
     await fireEvent.keyDown(row, { key: ' ' });
     expect(onselect).not.toHaveBeenCalled();

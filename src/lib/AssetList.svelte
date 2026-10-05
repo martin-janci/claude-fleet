@@ -150,9 +150,11 @@
     <div
       class="row static"
       class:selected={isSel(a)}
+      class:inert={!openStatic}
       role="button"
       tabindex="-1"
       aria-current={isSel(a) ? 'true' : undefined}
+      aria-disabled={openStatic ? undefined : 'true'}
       title={hostsTitle(a.hosts)}
       data-row-key={assetKey(a)}
       data-testid={rowTestid(a)}
@@ -254,7 +256,10 @@
   .row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
   .row:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .row.plain { cursor: default; }
-  .row.static { cursor: default; }
+  .row.static { cursor: pointer; }
+  /* A static row nothing can open yet: no hover that promises a click. */
+  .row.static.inert { cursor: default; }
+  .row.static.inert:hover { background: none; }
   .meta { color: var(--fg-muted); font-size: 11px; }
   .chips { display: flex; gap: 4px; margin-left: auto; }
   .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
