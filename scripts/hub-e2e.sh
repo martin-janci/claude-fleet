@@ -1249,7 +1249,14 @@ else
   bt=$(wcall "$HTOKB" work '{"action":"tickets"}')
   check "Beta's host token reads no tickets" '[ "$(jt "$bt" "[.. | objects | .key? // empty] | length")" = 0 ] && ! echo "$bt" | grep -q "E2E-"' "${bt:0:400}"
   bl=$(wcall "$HTOKB" list_sessions '{"host_alias":"local","summary":false}')
-  check "it sees local's sessions (isolation is off) but none of their work" '[ "$(jt "$bl" "[.. | objects | select(has(\"tmux_name\"))] | length")" -ge 1 ] && [ "$(jt "$bl" "[.. | objects | select(has(\"tmux_name\") and (.work != null or .work_suggested != null or (.work_rejected // [] | length) > 0))] | length")" = 0 ]' "${bl:0:600}"
+  # Multi-user M1 NARROWED this. Before it, `isolate_sessions` off meant a
+  # host token of the same org read another host's session ROWS (work
+  # redacted); now a session is private to the person who owns it and a
+  # per-host token is a machine that owns nothing, so it reads none of them.
+  # The claim is still two-sided: the call must SUCCEED and answer an empty
+  # page, not refuse — an error here would pass an "it sees nothing" test
+  # while telling us nothing about the fence.
+  check "it sees NONE of local's sessions: M1 makes them private to their owner, and a per-host token owns nothing" '! echo "$bl" | grep -q "\"isError\":true" && [ "$(jt "$bl" "[.. | objects | select(has(\"tmux_name\"))] | length")" = 0 ] && [ "$(jt "$bl" "[.. | objects | select(.work != null or .work_suggested != null)] | length")" = 0 ]' "${bl:0:600}"
   bc=$(wcall "$HTOKB" work "{\"action\":\"context\",\"key\":\"${HKEY:-E2E-2}\"}")
   check "the handover context is not its to read" '! echo "$bc" | grep -q E2E-HANDOVER-NOTE && ! echo "$bc" | grep -qE "Fix the login redirect|Add CSV export"' "${bc:0:400}"
   bs=$(wcall "$HTOKB" work_link '{"action":"start","key":"E2E-2","host_alias":"local"}')
@@ -1265,13 +1272,18 @@ else
   wcall "$TOKW" work_link "{\"action\":\"link\",\"session_id\":${SWEB:-0},\"key\":\"E2E-2\"}" >/dev/null
   # And a work:* frame of its own: re-setting the credential re-emits the tracker.
   wcall "$TOKW" work_admin "{\"action\":\"set_credential\",\"tracker_id\":${TID:-0},\"auth_kind\":\"basic\",\"username\":\"erin@example.invalid\",\"secret\":\"e2e-secret-token\"}" >/dev/null
-  until_ok 50 'grep -q "^event: work:tracker" "$SSEM" && grep -q "^event: session:updated" "$SSEB"'
+  # Only the master's frame is waited for. Beta's stream no longer receives a
+  # `session:updated` for local's private rows (M1), so waiting on one here
+  # spent all 50 attempts before failing the check below for the wrong reason.
+  until_ok 50 'grep -q "^event: work:tracker" "$SSEM"'
   sleep 1
   check "the master's stream carries the link (with its key) and the work:tracker frame" 'grep "^data:" "$SSEM" | grep -q "E2E-2" && grep -q "^event: work:tracker" "$SSEM"' "$(grep "^event:" "$SSEM" | sort | uniq -c)"
-  # The boundary docs/hub.md draws: no work field and no work:* frame. With
-  # isolate_sessions off a session's own fields stay readable (its name
-  # carries the key, and so does the timeline's audit line of the link).
-  check "Beta's stream gets the session frames, with no work in them and no work frame" 'grep -q "^event: session:updated" "$SSEB" && ! grep -q "^event: work" "$SSEB" && ! grep "^data:" "$SSEB" | grep -qE "\"work(_suggested)?\":\{|\"key\":\"E2E-|e2e-secret"' "$(grep "^event:" "$SSEB" | sort | uniq -c)"
+  # The boundary docs/hub.md draws, as M1 leaves it: no work field and no
+  # work:* frame — and no session frame either, because the rows those frames
+  # would describe are private to their owner and this caller is a per-host
+  # token. `event: ready` is the positive control: the stream is open and
+  # subscribed, so "no session frame" is a fence rather than a dead socket.
+  check "Beta's stream is open and carries neither local's private sessions nor any work frame" 'grep -q "^event: ready" "$SSEB" && ! grep -q "^event: work" "$SSEB" && ! grep -q "^event: session:" "$SSEB" && ! grep "^data:" "$SSEB" | grep -qE "\"work(_suggested)?\":\{|\"key\":\"E2E-|e2e-secret"' "$(grep "^event:" "$SSEB" | sort | uniq -c)"
   kill $EVM $EVB 2>/dev/null; wait $EVM $EVB 2>/dev/null; WEV_PIDS=""
 
   # --- 8. name work with no ticket (M11.1) ---------------------------------

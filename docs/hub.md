@@ -1835,10 +1835,19 @@ What else to know:
   unassigned ones. A host always sees its own sessions. It can break a
   controller that dispatches across companies, which is why it is yours to
   turn on.
-- **With isolation off, a session's own fields are not work data.** A
-  session's name, branch, worktree and last prompt stay readable by other
-  orgs' hosts (so a branch named after a ticket shows its key); turn
-  `isolate_sessions` on for an org whose session names must not be seen.
+- **With isolation off, a session's own fields are not work data — but
+  multi-user M1 narrowed who reaches the row at all.** This bullet used to
+  say a session's name, branch, worktree and last prompt stay readable by
+  other orgs' hosts, so a branch named after a ticket showed its key. That
+  was the rule while a session belonged to the fleet. Now it belongs to a
+  PERSON: a `private` row is readable by its owner and whoever they shared it
+  with, and a per-host token is a machine that owns nothing, so it no longer
+  reads another host's sessions whatever `isolate_sessions` says — it reaches
+  its own host's rows, plus the `unclaimed` ones there. `isolate_sessions`
+  therefore no longer has to be turned on to keep a session NAME from
+  another company's hosts; it still governs the org dimension, which is a
+  different question from ownership and is composed with it. See *Who owns a
+  session* above.
 - **A host in no org sees only unassigned work.** Assign every host of a
   company before connecting a second company's tracker: a bare key linked
   on an unassigned host's session belongs to no org, so ANY org's tracker
