@@ -134,6 +134,7 @@ fn only_the_owner_reaches_a_private_sessions_download() {
     use crate::service::view_scope::ViewScope;
     use crate::store::{GrantRecipient, GRANT_DRIVE, GRANT_WATCH};
     test_dir();
+    let _files = files_guard();
     let s = Store::open_in_memory().unwrap();
     let ada = s.create_person("ada", None).unwrap().id;
     let bob = s.create_person("bob", None).unwrap().id;
@@ -167,7 +168,9 @@ fn only_the_owner_reaches_a_private_sessions_download() {
     // file for row 1 of their own in-memory store collide — which is exactly
     // what broke `a_copy_is_written_in_chunks_hashed_and_moved_into_place`
     // when this test was first written. Move this row out of the way instead
-    // of relying on the order tests happen to run in.
+    // of relying on the order tests happen to run in. A distinct id is not
+    // enough on its own — the other test's sweep deletes any file its store
+    // has no row for — hence `files_guard` above.
     let id = 90_001;
     s.conn_ref()
         .execute("UPDATE downloads SET id = ?2 WHERE id = ?1", [row.id, id])
@@ -253,6 +256,10 @@ fn names_are_served_safely() {
 }
 
 /// The process's downloads dir, made once for every test that copies.
+/// `downloads::DIR` is a process-wide `OnceLock` — right for a real
+/// process, which has one downloads directory — so `init` keeps and returns
+/// whichever directory came first, here or in
+/// `mcp::tools::tests_sessions_isolation::downloads_dir`.
 fn test_dir() -> &'static Path {
     static D: OnceLock<PathBuf> = OnceLock::new();
     D.get_or_init(|| {
@@ -262,10 +269,28 @@ fn test_dir() -> &'static Path {
     })
 }
 
+/// The lock every test that puts BYTES in the shared dir holds for as long
+/// as its files must live.
+///
+/// One directory per process plus `file_of(id)` naming a copy by row id
+/// means every such test writes into one namespace, and two separate
+/// in-memory stores both hand out id 1. Worse, `sweep_with`'s orphan pass
+/// walks the whole directory and deletes every file ITS OWN store has no
+/// row for — which is every other test's file, whatever id it chose. So
+/// the files of two tests may not overlap in time: this serialises them,
+/// which makes the suite order- and interleaving-independent without
+/// touching the production `OnceLock`.
+fn files_guard() -> std::sync::MutexGuard<'static, ()> {
+    static L: Mutex<()> = Mutex::new(());
+    L.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn a_copy_is_written_in_chunks_hashed_and_moved_into_place() {
     use crate::ssh_fake::{FakeSsh, Match, Reply};
     test_dir();
+    let _files = files_guard();
     let s = Store::open_in_memory().unwrap();
     let row = insert(&s, "web-1", None, 10);
     let ssh = FakeSsh::new();
