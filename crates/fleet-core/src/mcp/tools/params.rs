@@ -1067,12 +1067,28 @@ pub struct CatalogAdminParams {
     /// apply_sync: nonce of an approved E_CONFIRM_REQUIRED.
     #[serde(default)]
     pub confirm_nonce: Option<String>,
-    /// config|load|list_layers|set_host_layers: catalog name (default
-    /// personal). remove/admit/unadmit_catalog: only the name in args.
-    /// add/remove_catalog: master only.
-    /// Others refuse it (authoring until M4; the rest are not per catalog).
+    /// Catalog name (default personal) for config|load|list_layers|
+    /// set_host_layers and the authoring actions; configure is personal
+    /// only. remove/admit/unadmit_catalog: only the name in args.
+    /// add/remove_catalog: master only. Fleet-wide actions refuse it.
     #[serde(default)]
     pub catalog: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ChangesetsParams {
+    /// list|propose|apply|undo|dismiss|reject_item
+    pub action: String,
+    /// The card: list shows it in full; apply|undo|dismiss|reject_item need it.
+    #[serde(default)]
+    pub id: Option<i64>,
+    /// apply: items (default all pending but "needs a look"; drift: one).
+    /// reject_item: required.
+    #[serde(default)]
+    pub positions: Option<Vec<i64>>,
+    /// apply of a rollout or restore: nonce of an approved E_CONFIRM_REQUIRED.
+    #[serde(default)]
+    pub confirm_nonce: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema, Default)]
@@ -1101,6 +1117,12 @@ pub struct UpdateAdminParams {
     /// pin: why, for the dashboard.
     #[serde(default)]
     pub reason: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RemoveDownloadParams {
+    /// The download's id (`list_downloads`).
+    pub id: i64,
 }
 
 // --- sharing a session (multi-user M1, T12) --------------------------------

@@ -58,7 +58,7 @@ const EVERYONE: &[Who] = &[
 const ORG_A: i64 = 1;
 const ORG_B: i64 = 2;
 
-/// The hub's personal owner, minted by migration 094 into an empty store —
+/// The hub's personal owner, minted by migration 096 into an empty store —
 /// so it is row 1, exactly as the orgs above are 1 and 2. The fixture
 /// asserts it rather than trusting it.
 const PERSON: i64 = 1;
@@ -291,7 +291,7 @@ fn fixture(isolate_b: bool) -> Fx {
     assert_eq!(
         s.personal_owner_id().unwrap(),
         Some(PERSON),
-        "migration 094 mints the owner as row 1"
+        "migration 098 mints the owner as row 1"
     );
     for (id, pane) in [(s_a, PANE_A), (s_b, PANE_B), (s_n, PANE_N)] {
         s.claim_if_unclaimed(id, Some(PERSON)).unwrap();

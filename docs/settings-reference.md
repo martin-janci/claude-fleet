@@ -65,6 +65,14 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `repair.auto_on_tick` | `false` | on / off | Re-add deleted worktree directories without anyone opening them. A stale entry is dropped only when its parent folder is the one seen while it was healthy, so an unmounted volume is never touched. |
 | `repair.tick_interval_secs` | `600` | ≥ 60 seconds | Seconds between automatic workspace checks, each repairing at most five worktrees. |
 
+## downloads
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `downloads.max_file_mb` | `100` | 1–4096 MiB | Largest file a session can send to your devices; a bigger one is refused. |
+| `downloads.max_total_mb` | `2048` | 1–1048576 MiB | How much the kept downloads may take together. A new file pushes out the oldest ones. |
+| `downloads.keep_secs` | `604800` | seconds, shown in days, `0` = until removed | How long a sent file is kept for your devices before it is removed. |
+
 ## Move to host
 
 | Setting | Default | Range | What it does |
@@ -135,6 +143,8 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 |---|---|---|---|
 | `catalog.scan_check_secs` | `3600` | seconds, shown in minutes, `0` = off | How often fleet looks for hosts whose asset scan is stale, and rescans them. Under five minutes is raised to five. Applies after a restart. |
 | `catalog.scan_max_age_secs` | `86400` | seconds, shown in hours | A host's assets are rescanned once its last scan is older than this, and every host after the catalog or a sync changes. |
+| `catalog.auto` | `true` | on / off | After each asset scan, hide fleet's own and Claude's internal assets, propose changeset cards, and, for layers already rolled out once, install what a host is missing and adopt identical copies. Never changes, overwrites or removes a copy a host already has. |
+| `catalog.auto_push` | `false` | on / off | Push the catalog repo right after a changeset card commits to it or is undone. Off: push it yourself. |
 
 ## update
 

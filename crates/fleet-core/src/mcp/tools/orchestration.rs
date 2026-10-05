@@ -1741,7 +1741,7 @@ impl FleetTools {
     /// with neither passes.
     ///
     /// That order matters for an `unclaimed` row, and it is the half this gate
-    /// first shipped without. Migration 095's triggers record an owner only
+    /// first shipped without. Migration 099's triggers record an owner only
     /// `WHEN NEW.owner_person_id IS NOT NULL`, so every reconcile-discovered
     /// session has a real transcript and NO record — and
     /// `conversation_owner_allows` answers `None => true`. On a hub with two

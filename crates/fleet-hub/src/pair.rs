@@ -606,7 +606,7 @@ pub fn client_grant(
 /// NOT through `work_admin { assign_client }` the way [`client_bind`] does
 /// its org: `work_admin` is the org graph's tool, each of its actions is
 /// enumerated by the isolation matrix, and whose DEVICE this is is not an
-/// org-graph question. The auth-epoch trigger of migration 094 fires on the
+/// org-graph question. The auth-epoch trigger of migration 096 fires on the
 /// write, so a running hub resolves the device to its new person on its very
 /// next request and its open `/events` stream ends at the next beat
 /// (`mcp::events_route::client_is_live`) instead of reading on under the old

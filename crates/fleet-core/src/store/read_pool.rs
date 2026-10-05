@@ -162,9 +162,9 @@ mod tests {
         s.set_client_trust("phone", false).unwrap();
         moved(&s, "untrusting a client");
         // Multi-user M1: whose device this is decides which sessions the
-        // caller may read, so migration 094's own trigger has to move the
+        // caller may read, so migration 098's own trigger has to move the
         // epoch for it too.
-        let owner = s.personal_owner_id().unwrap().expect("094 mints one");
+        let owner = s.personal_owner_id().unwrap().expect("096 mints one");
         s.set_client_person("phone", Some(owner)).unwrap();
         moved(&s, "binding a client to a person");
         s.set_client_person("phone", None).unwrap();

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 
 pub(crate) const HOSTS: usize = 20;
 pub(crate) const ORGS: i64 = 3;
-/// People on this hub, migration 094's personal owner (id 1) included.
+/// People on this hub, migration 098's personal owner (id 1) included.
 /// More than one, because the reads multi-user M1 adds are per PERSON
 /// and a single-person fixture measures them against a constant.
 pub(crate) const PEOPLE: usize = 4;
@@ -75,7 +75,7 @@ pub(crate) fn host_org(i: usize) -> Option<i64> {
     (!i.is_multiple_of(4)).then_some((i % 4) as i64)
 }
 
-/// A session's owner and visibility (multi-user M1, migration 095): every
+/// A session's owner and visibility (multi-user M1, migration 097): every
 /// fifth session is `unclaimed` — the shape reconcile leaves for a
 /// hand-started tmux session nobody can speak for — and the rest are spread
 /// over the fixture's [`PEOPLE`], so `idx_sessions_owner` is measured against
@@ -133,13 +133,13 @@ pub(crate) fn build(seed: u64, now: i64) -> ScaleFixture {
         )
         .unwrap();
     }
-    // People. Migration 094 minted the personal owner as id 1, so this adds
+    // People. Migration 096 minted the personal owner as id 1, so this adds
     // the colleagues: `session_owner` spreads the sessions over all of them.
     assert_eq!(
         tx.query_row("SELECT COUNT(*) FROM people", [], |r| r.get::<_, i64>(0))
             .unwrap(),
         1,
-        "094 mints exactly one person"
+        "096 mints exactly one person"
     );
     for n in 2..=PEOPLE {
         tx.execute(

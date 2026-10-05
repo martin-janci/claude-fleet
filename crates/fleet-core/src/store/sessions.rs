@@ -892,7 +892,7 @@ impl Store {
     }
 
     /// Who a Claude CONVERSATION belonged to the first time a session bound
-    /// it to an owner (`conversation_owners`, migration 095); `None` for a
+    /// it to an owner (`conversation_owners`, migration 097); `None` for a
     /// conversation no owned session ever held.
     ///
     /// The point of the table is that this answer outlives the session.
@@ -1402,7 +1402,7 @@ impl Store {
     /// retention window, and a move re-points the participant BEFORE this
     /// runs, so there is nothing here left to retire.
     ///
-    /// `session_grants` (migration 096) is NOT deleted here and must not be:
+    /// `session_grants` (migration 098) is NOT deleted here and must not be:
     /// it is `REFERENCES sessions(id) ON DELETE CASCADE`, so it goes with the
     /// row by itself — which matters for the same id-reuse reason as the
     /// events above, and is pinned by
@@ -4567,7 +4567,7 @@ mod tests {
         );
     }
 
-    /// Migration 095's conversation-owner record, the INSERT half: a session
+    /// Migration 099's conversation-owner record, the INSERT half: a session
     /// row that arrives with both a `claude_session_id` and an owner is
     /// recorded by `trg_conversation_owner_on_session_insert`, and the record
     /// is written by a TRIGGER rather than by a call at each write site for

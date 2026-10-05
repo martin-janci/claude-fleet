@@ -667,7 +667,7 @@ pub fn task_visible_in_scope_pure(
     // holds it NOW — which is how a reaped session's task came to be judged
     // against the stranger who inherited its rowid, handing them `prompt`
     // and `result` on the live stream and through `list_tasks`. Migration
-    // 097's trigger NULLs the id and stamps `detached_at`; this refuses the
+    // 099's trigger NULLs the id and stamps `detached_at`; this refuses the
     // row rather than reading the NULL as "no end to check", which the
     // `(None, _) => true` arm below would, and which would WIDEN. Both
     // sessions are over: there is nothing left for a person to drive.
@@ -850,7 +850,7 @@ pub fn liveness_verdict(
             "task exceeded tasks.max_age_secs ({max_age_secs}s) without reporting {DONE_PREFIX}<nonce>"
         ));
     }
-    // De-identified by migration 097's trigger: a session this task named
+    // De-identified by migration 099's trigger: a session this task named
     // was DELETED, so its id was NULLed out rather than left to resolve
     // against whoever SQLite hands it to next (multi-user M1, T9d). With
     // `dispatch_task` always recording a worker, "detached and no worker id"
@@ -1727,7 +1727,7 @@ mod tests {
         let t_rec = create_task(&s, None, Some(rec), "x").unwrap();
         let t_fine = create_task(&s, None, Some(fine), "x").unwrap();
         s.delete_session(gone).unwrap();
-        // Migration 097's trigger de-identified the task's worker end rather
+        // Migration 099's trigger de-identified the task's worker end rather
         // than leaving a recyclable id behind (T9d) — and the sweep must
         // still fail it, which is what `liveness_verdict`'s `detached_at`
         // arm is for. Without that arm `worker_session_id?` answers `None`

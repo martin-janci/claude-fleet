@@ -833,7 +833,7 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("new_bg_session", &args).await,
             // Multi-user M1 (T5): on a standalone desktop the person behind
-            // the window is this fleet's own personal owner (migration 094
+            // the window is this fleet's own personal owner (migration 096
             // gives a standalone hub one), so the agent's row is theirs. Routed
             // to a hub instead, the hub resolves the owner from the connection
             // and this arm is not reached.

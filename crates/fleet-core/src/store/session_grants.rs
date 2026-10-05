@@ -1,4 +1,4 @@
-//! Session grants (multi-user M1, migration 096): the one way a second person
+//! Session grants (multi-user M1, migration 098): the one way a second person
 //! ever reaches a session row.
 //!
 //! A session started through fleet is `private` to its owner, so sharing has
@@ -858,7 +858,7 @@ mod tests {
 
         // The hub's own personal owner is not a special case: being the
         // fleet's owner is not owning somebody else's session.
-        let hub_owner = s.personal_owner_id().unwrap().expect("094 mints one");
+        let hub_owner = s.personal_owner_id().unwrap().expect("096 mints one");
         let e = s
             .grant_session(session, GrantRecipient::Person(c), GRANT_WATCH, hub_owner)
             .expect_err("the hub's owner does not own ann's session either");

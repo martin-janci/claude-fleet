@@ -49,16 +49,67 @@ concurrency:
 # a morning:
 #
 #   job                  measured   ceiling
+#   changes             (new: the docs-only filter)  5
 #   version-consistency      0:10        15
 #   ag                       0:16        15
 #   frontend             2:06-4:39        30
 #   rust                16:45-17:33       60
 #   rust-windows            18:49         60
+#   windows-bundle     (new: the bundle, split out of rust-windows)   60
+#   clippy             (new: macOS/Windows lint, split out of the test jobs)   30
 #   hub-headless            16:39         60
 #
 # Raise one when the work in it legitimately grows; do not remove it.
 
 jobs:
+  # SKIP THE BUILD WHEN A PR TOUCHES ONLY PROSE THAT NOTHING READS. A PR that
+  # changed one plan or the build audit still ran every leg below: ten jobs,
+  # 10-14 minutes, the Windows and macOS runners among them (#432 changed one
+  # .md file). This job lists the PR's files; if every one is under a path
+  # below, the build and test jobs are skipped (a skipped job counts as passed
+  # for a required check) and only version-consistency runs.
+  #
+  # The list is deliberately an ALLOWLIST of prose no build or test reads, and
+  # deliberately short. docs/*.md at the top of docs/ is NOT on it: tests read
+  # control-api.md, hub.md, updates.md, work-graph.md, decisions.md,
+  # settings-reference.md and the page schema/catalog there, so an edit to one
+  # can fail CI. Before adding a path, grep crates/, src-tauri/, src/ and
+  # scripts/ for it; a file a test reads must stay off this list.
+  #
+  # Pushes to main and manual runs always run everything, so each merge keeps
+  # its own full verdict. If this job fails, its output is empty and every
+  # gated job runs anyway (`!= 'false'` below): it fails open, never green.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+      - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          code=false
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            case "$f" in
+              docs/superpowers/*|docs/plans/*|docs/specs/*|docs/adr/*|docs/ux/*|docs/images/*) ;;
+              README.md|CLAUDE.md|RUST-BUILD-PERFORMANCE-AUDIT.md) ;;
+              *) echo "runs the build: $f"; code=true; break ;;
+            esac
+          done < <(git diff --name-only "$BASE...$HEAD")
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   # The six version carriers scripts/release.sh rewrites, plus the four
   # Cargo.lock member entries it syncs, must all hold the same string — and
   # crates/fleet-core must stay at its allowlisted 0.1.0 with `publish = false`.
@@ -112,11 +163,17 @@ jobs:
         run: |
           command -v sqlite3 >/dev/null || { sudo apt-get update -q && sudo apt-get install -yq sqlite3; }
           bash scripts/hub-deploy-scripts-test.sh
+      # scripts/verify.sh's plan: which checks a set of changed files
+      # selects (CLAUDE.md → "Validation ladder"). Dry runs, about a second.
+      - name: verify.sh plan
+        run: bash scripts/verify-test.sh
 
   # tools/ag (the agent launcher) against fake claude/codex binaries. macOS
   # runs it under the stock /bin/bash 3.2 — the whole point of ag's
   # bash-3.2 rules — because the test pins PATH to $FAKE:/usr/bin:/bin.
   ag:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -132,6 +189,8 @@ jobs:
         run: shellcheck -s bash tools/ag/ag tools/ag/lib/*.sh tools/ag/drivers/*.sh tools/ag/install.sh scripts/ag-test.sh
 
   rust:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -159,7 +218,9 @@ jobs:
         with:
           workspaces: .
       - run: cargo fmt --all --check
+      # macOS lints in the `clippy` job below, in parallel with these tests.
       - run: cargo clippy --workspace --all-targets -- -D warnings
+        if: runner.os == 'Linux'
       - run: cargo test --workspace
       # cargo-deny checks Cargo.lock, which is platform-independent, so it
       # runs on the Linux leg only. Runs from the repo root, where cargo-deny
@@ -178,6 +239,8 @@ jobs:
   # Linux daemon), so they are left out; fmt and cargo-deny read nothing
   # platform-specific and stay on the Linux leg of `rust` above.
   rust-windows:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -186,20 +249,74 @@ jobs:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: windows
+      # Clippy runs in the `clippy` job below, in parallel with these tests.
+      # --no-fail-fast: every crate's failures in one run, not only the first
+      # failing test binary's.
+      - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --no-fail-fast
+
+  # CLIPPY ON macOS AND WINDOWS, BESIDE THEIR TESTS RATHER THAN BEFORE THEM.
+  # In one job, clippy's check build ran first and added ~1:45 to the two
+  # slowest legs of every run: `rust (macos)` 9:42 and `rust-windows` 7:54 on
+  # #437, where the Linux legs took ~6-7 min. Here it lints in parallel, so
+  # each OS still gets its own lint pass (cfg(target_os) code) and neither
+  # test job waits for it. Linux keeps clippy inside `rust`, which is not
+  # the slowest leg. The lint arguments are the ones the test jobs used.
+  # Its cache is saved from main only, as windows-bundle's is.
+  clippy:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            args: --workspace --all-targets
+          # fleet-agent and fleet-hub are Unix-only (see rust-windows).
+          - os: windows-latest
+            args: --workspace --exclude fleet-agent --exclude fleet-hub --all-targets
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
-          key: windows
-      - run: cargo clippy --workspace --exclude fleet-agent --exclude fleet-hub --all-targets -- -D warnings
-      # --no-fail-fast: every crate's failures in one run, not only the first
-      # failing test binary's.
-      - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --no-fail-fast
-      # The app itself, not only its crates: the frontend bundle, tauri-build's
-      # Windows resources (icon.ico, the manifest), the WebView2 link and the
-      # NSIS installer the release ships come together only here, so a break
-      # in any of them shows on the PR instead of at release time.
+          key: clippy
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy ${{ matrix.args }} -- -D warnings
+
+  # The app itself, not only its crates: the frontend bundle, tauri-build's
+  # Windows resources (icon.ico, the manifest), the WebView2 link and the
+  # NSIS installer the release ships come together only here, so a break in
+  # any of them shows on the PR instead of at release time.
+  #
+  # Its own job, beside rust-windows rather than after its tests: in one job
+  # the bundle added ~3 min (Node setup + `tauri build`) to what was already
+  # the slowest leg of every run (14:15 on #432, the other legs ~7 min). Here
+  # it compiles the app from its own cache in parallel. That cache is saved
+  # from main only, so PR runs restore it without adding an entry per PR.
+  windows-bundle:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: windows-bundle
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -236,6 +353,8 @@ jobs:
   # fleet-update (the update engine) is held to the same rule: fleet-updater
   # and, later, fleet-agent depend on it.
   hub-headless:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -321,6 +440,8 @@ jobs:
           retention-days: 7
 
   frontend:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false

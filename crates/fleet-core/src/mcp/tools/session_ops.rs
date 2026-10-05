@@ -382,7 +382,7 @@ impl FleetTools {
         //
         // The service's own `reject_foreign_conversation` asks T3's durable
         // `conversation_owners` record and nothing else, and that record is
-        // written only `WHEN NEW.owner_person_id IS NOT NULL` (migration 095's
+        // written only `WHEN NEW.owner_person_id IS NOT NULL` (migration 099's
         // triggers) — so for every reconcile-discovered conversation it
         // answers `None => true` while `ViewScope::sees_past_conversation`,
         // which asks the SURVIVING row first, refuses. Two mechanisms on one

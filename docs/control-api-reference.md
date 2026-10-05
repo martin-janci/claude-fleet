@@ -53,6 +53,12 @@ The Assets tab's catalog operations as one tool, plus the set of catalogs and ho
 
 Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 
+### `changesets`
+
+Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
+
+Parameters: `action`, `confirm_nonce`, `id`, `positions`
+
 ### `decide_setting_proposals`
 
 Apply or reject settings proposals by id, each on its own; a trusted device only.
@@ -156,6 +162,12 @@ The asset catalog (skills, agents, hooks, MCP servers, plugin refs) with each as
 Paired client devices and what each token may do. The token digest is never returned: a token exists in plaintext only in the /pair response that minted it. Read-only but master token only (it names every paired device). Rows: { id, name, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, person_id }.
 
 Parameters: `include_revoked`
+
+### `list_downloads`
+
+Files sent to the user's devices, newest first: {downloads, total_bytes, max_total_bytes, max_file_bytes}. Bytes: GET /downloads/<id>.
+
+Parameters: `limit`, `session_id`
 
 ### `list_github_repos`
 
@@ -315,6 +327,12 @@ Sessions sharing this session's project and worktree.
 
 Parameters: `session_id`
 
+### `remove_download`
+
+Remove a sent file and its copy: {removed}.
+
+Parameters: `id`
+
 ### `remove_host`
 
 Remove a host; its sessions are orphaned. Returns the removed row.
@@ -434,6 +452,12 @@ Parameters: `confirm_nonce`, `host_alias`, `session_id`, `tmux_name`
 Scan hosts for installed skills/agents/hooks/MCP servers/plugins and recompute each catalog asset's state (in_sync | drifted | missing | unmanaged | unsupported | orphan). Read-only on hosts.
 
 Parameters: `host_alias`
+
+### `send_file`
+
+Send a file from a session's host to the user's phone and desktop (copied in the background, ≤ downloads.max_file_mb; zip a folder first). Your session_id: whoami. path: absolute or relative to the session's worktree root. E_NOTFOUND, E_LIMIT.
+
+Parameters: `note`, `path`, `session_id`
 
 ### `send_message`
 
@@ -757,6 +781,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::purge_project`
 - `commands::quick_replies::quick_replies`
 - `commands::quick_replies::set_quick_replies`
+- `commands::downloads::list_downloads`
+- `commands::downloads::send_file`
+- `commands::downloads::remove_download`
+- `commands::downloads::save_download`
 - `commands::pages::get_fleet_settings`
 - `commands::pages::describe_fleet_settings`
 - `commands::pages::list_pages`

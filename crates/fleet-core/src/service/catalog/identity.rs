@@ -105,12 +105,13 @@ pub fn group_identities(rows: &[AssetInventoryRow]) -> Vec<AssetIdentity> {
         .collect()
 }
 
+/// Test fixtures shared with the changeset rules' tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod fixtures {
     use crate::store::AssetInventoryRow;
 
-    fn r(host: &str, kind: &str, name: &str, hash: Option<&str>) -> AssetInventoryRow {
+    /// One `unmanaged` Claude inventory row.
+    pub(crate) fn r(host: &str, kind: &str, name: &str, hash: Option<&str>) -> AssetInventoryRow {
         AssetInventoryRow {
             host_alias: host.into(),
             harness: "claude".into(),
@@ -122,6 +123,39 @@ mod tests {
             ..Default::default()
         }
     }
+
+    /// The live fleet's shape (2026-09-29): 164 skill identities in 8
+    /// host-set signatures, every copy hashed `same`.
+    /// Synthetic names (`s1`…`s164`), real distribution.
+    pub(crate) fn live_shape() -> Vec<AssetInventoryRow> {
+        let sets: &[(&[&str], usize)] = &[
+            (&["local", "mefistos", "oci", "trn"], 82),
+            (&["local"], 30),
+            (&["local", "mefistos", "oci", "trn", "htz"], 17),
+            (&["local", "oci", "trn"], 11),
+            (&["trn"], 9),
+            (&["local", "mefistos"], 9),
+            (&["oci", "htz"], 5),
+            (&["htz"], 1),
+        ];
+        let mut rows = Vec::new();
+        let mut n = 0;
+        for (hosts, count) in sets {
+            for _ in 0..*count {
+                n += 1;
+                for h in *hosts {
+                    rows.push(r(h, "skill", &format!("s{n}"), Some("same")));
+                }
+            }
+        }
+        rows
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{live_shape, r};
+    use super::*;
 
     #[test]
     fn groups_copies_into_one_identity_with_a_signature() {
@@ -174,27 +208,7 @@ mod tests {
     /// host-set signatures. Synthetic names, real distribution.
     #[test]
     fn live_shape_collapses_520_rows_to_164_identities() {
-        let sets: &[(&[&str], usize)] = &[
-            (&["local", "mefistos", "oci", "trn"], 82),
-            (&["local"], 30),
-            (&["local", "mefistos", "oci", "trn", "htz"], 17),
-            (&["local", "oci", "trn"], 11),
-            (&["trn"], 9),
-            (&["local", "mefistos"], 9),
-            (&["oci", "htz"], 5),
-            (&["htz"], 1),
-        ];
-        let mut rows = Vec::new();
-        let mut n = 0;
-        for (hosts, count) in sets {
-            for _ in 0..*count {
-                n += 1;
-                for h in *hosts {
-                    rows.push(r(h, "skill", &format!("s{n}"), Some("same")));
-                }
-            }
-        }
-        let ids = group_identities(&rows);
+        let ids = group_identities(&live_shape());
         assert_eq!(ids.len(), 164);
         let mut sigs: Vec<&str> = ids.iter().map(|i| i.signature.as_str()).collect();
         sigs.sort();

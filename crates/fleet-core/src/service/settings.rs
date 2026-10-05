@@ -345,6 +345,12 @@ pub const MOVE_MAX_TRANSCRIPT_MB: &str = crate::service::move_session::SETTING_M
 /// Upper bound for [`MOVE_MAX_TRANSCRIPT_MB`]: the copy is held in memory.
 pub const MOVE_MAX_TRANSCRIPT_MB_MAX: u64 = 4096;
 
+/// File downloads: one file's ceiling, everything kept together, and how
+/// long a copy is kept (`service::downloads`).
+pub const DOWNLOADS_MAX_FILE_MB: &str = "downloads.max_file_mb";
+pub const DOWNLOADS_MAX_TOTAL_MB: &str = "downloads.max_total_mb";
+pub const DOWNLOADS_KEEP_SECS: &str = "downloads.keep_secs";
+
 /// Upper bound for [`MOVE_MAX_BUNDLE_MB`]: the bundle is relayed through the
 /// orchestrator in 8 MiB chunks via a private temp file, so this bounds relay
 /// time and temp-disk use on the orchestrator and both hosts, not memory.
@@ -473,6 +479,15 @@ pub const AUTO_TIDY_REASONS: &[&str] = &["done_idle", "pr_merged_idle", "not_pla
 pub const CATALOG_SCAN_CHECK_SECS: &str = "catalog.scan_check_secs";
 /// A host whose newest inventory row is older than this is rescanned.
 pub const CATALOG_SCAN_MAX_AGE_SECS: &str = "catalog.scan_max_age_secs";
+
+// ── asset changesets (Assets M4; `service::catalog::changesets`) ──
+/// SB6 / spec *Automatic (no card)*: after every scan-tick pass, hide
+/// internals, build changeset cards, and apply additive sync ops on layers
+/// already rolled out once. On by default.
+pub const CATALOG_AUTO: &str = "catalog.auto";
+/// SB4: push each catalog a changeset card commits to, right after it
+/// applies (or is undone). Off by default.
+pub const CATALOG_AUTO_PUSH: &str = "catalog.auto_push";
 
 // ── decisions (Jev evaluation, D35-D37; `service::decide`) ──
 /// The kill switch: with it off no decision-model call is ever made. Off by
@@ -704,6 +719,34 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Seconds)
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        DOWNLOADS_MAX_FILE_MB,
+        "100",
+        Kind::Int { min: 1, max: 4096 },
+        "Download: file cap",
+        "Largest file a session can send to your devices; a bigger one is refused.",
+    )
+    .unit(Unit::Mib),
+    Spec::new(
+        DOWNLOADS_MAX_TOTAL_MB,
+        "2048",
+        Kind::Int {
+            min: 1,
+            max: 1_048_576,
+        },
+        "Downloads: space",
+        "How much the kept downloads may take together. A new file pushes out the oldest ones.",
+    )
+    .unit(Unit::Mib),
+    Spec::new(
+        DOWNLOADS_KEEP_SECS,
+        "604800",
+        Kind::Secs,
+        "Keep downloads",
+        "How long a sent file is kept for your devices before it is removed.",
+    )
+    .unit(Unit::Days)
+    .zero("until removed"),
     Spec::new(
         MOVE_MAX_TRANSCRIPT_MB,
         "200",
@@ -946,6 +989,20 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Hours)
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        CATALOG_AUTO,
+        "true",
+        Kind::Bool,
+        "Asset cards and safe sync",
+        "After each asset scan, hide fleet's own and Claude's internal assets, propose changeset cards, and, for layers already rolled out once, install what a host is missing and adopt identical copies. Never changes, overwrites or removes a copy a host already has.",
+    ),
+    Spec::new(
+        CATALOG_AUTO_PUSH,
+        "false",
+        Kind::Bool,
+        "Push applied cards",
+        "Push the catalog repo right after a changeset card commits to it or is undone. Off: push it yourself.",
+    ),
     Spec::new(
         WORK_DESCRIBE_CACHE_SECS,
         "300",

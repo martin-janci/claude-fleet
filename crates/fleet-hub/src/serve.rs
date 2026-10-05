@@ -152,7 +152,7 @@ pub fn init(
                 .map_err(|e| e.to_string())?;
         }
         // Multi-user M1: a hub knows whose it is before it serves anything.
-        // Migration 094 inserts the personal owner, so this is normally one
+        // Migration 096 inserts the personal owner, so this is normally one
         // index seek; it is called at every entry point that mints the
         // master token because a store opened outside `init` must have one
         // too, and no single entry point is guaranteed to run first.
@@ -835,6 +835,14 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         tracing::warn!("{warning}");
     }
     persist(&store, &r)?;
+    // File downloads live under the data dir; a copy the last run left
+    // half-done fails now, before a client can ask for it.
+    if let Ok(s) = store.lock() {
+        match fleet_core::service::downloads::init(&r.data_dir, &s) {
+            Ok(dir) => tracing::info!(dir = %dir.display(), "downloads ready"),
+            Err(e) => tracing::warn!(error = %e, "downloads unavailable"),
+        }
+    }
     // `/events` stamps `needs_attention` without a store, so it is handed
     // the `context_full` threshold `list_sessions` reads; later writes
     // (`set_setting`, `fleet-hub decide` and the desktop all go through the

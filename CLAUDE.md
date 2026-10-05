@@ -31,27 +31,41 @@ the first time, then every edit paid once per copy
 `.cargo/config.toml`. Times are for a fleet-core edit on 4 cores.
 
 ```bash
-# 1. while you work, after every edit (≈ 13 s; libraries and binaries only)
+# 1. while you work, after every edit (≈ 15 s; libraries and binaries only)
 cargo fleet-fast-check                  # check --workspace --profile fast-check
 pnpm check                              # frontend edits: svelte-check
-# 2. at a checkpoint: before committing, and after any change to an API that
-#    tests use (≈ 19 s; = rust-analyzer's own check)
-cargo fleet-check                       # check --workspace --all-targets
-# 3. the tests of what you touched (module path filter; ≈ 30 s build + the run)
-cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
-pnpm exec vitest run src/lib/foo.test.ts
-# 4. before committing (also what .githooks/pre-commit runs)
+# 2. before committing (≈ 65 s: fmt 3 s, lint 27 s, tests 33 s)
+scripts/verify.sh                       # fmt, lint and the tests of the modules
+                                        # the change touches, each once; --dry-run
+                                        # prints the plan
+# 3. before pushing / marking a PR ready (≈ 3 min warm)
+scripts/verify.sh full                  # = scripts/ci-local.sh, narrowed to the jobs
+                                        # the change touches; the suite runs once
+```
+
+What `verify.sh` runs, for running a piece of it by hand:
+
+```bash
 cargo fmt --all --check
 cargo fleet-lint                        # clippy --workspace --all-targets -- -D warnings
-# 5. before pushing / marking a PR ready (≈ 2.5 min warm)
-cargo test --workspace                  # full suite, what CI runs
+cargo fleet-test -- service::health     # test --workspace --lib --bins -- <filter>
+pnpm exec vitest related --run src/lib/foo.ts
+cargo fleet-check                       # check --workspace --all-targets (= rust-analyzer's check)
+cargo test --workspace                  # the full suite, what CI runs
 scripts/ci-local.sh                     # everything in CI order; --rust-only / --frontend-only / --hub-e2e
 ```
 
 `fleet-fast-check` does not type-check test code: a signature change that
-breaks a test passes it and fails `fleet-check`. rust-analyzer stays on the
-full check. `target/fast-check/` costs ~2 GB once and is never cleaned
-automatically.
+breaks a test passes it and fails `fleet-lint` / `fleet-check`. rust-analyzer
+stays on the full check. `target/fast-check/` costs ~2 GB once and is never
+cleaned automatically.
+
+`fleet-lint` reports everything `fleet-check` does (clippy is the compiler
+plus lints, test code included), but the two compile separately: running
+both after an edit costs ~22 s more than lint alone. `verify.sh` lints and
+does not check, and the pre-commit hook's clippy is then a no-op. Likewise
+`scripts/ci-local.sh` runs `cargo test --workspace` itself, so running both
+pays the ~2 min suite twice.
 
 Rules:
 
@@ -130,7 +144,13 @@ failure is the receipt, not a problem.
 Known Rust flakes — timing-sensitive, so they fail on a loaded box; re-run
 alone before blaming your change: `rewind::tests::the_removal_script_leaves_a_tree_a_live_pane_is_in`,
 `work::scale_tests::*`, the `CHAIN_BUDGET` migration tests in
-`store/schema/tests_upgrade.rs`, and `service::add_project`. Not a flake:
+`store/schema/tests_upgrade.rs`, and `service::add_project`. Two of those
+moved and neither is now fixed: `work::scale_tests::*` each take their own
+fixture copy since the suite cut, so they no longer queue behind one another
+— their 3,000 ms budgets are still wall-clock and still fail under load; and
+`FILE_OPEN_BUDGET` lifted the file-based upgrade test to 30 s **on Windows
+only**, so on Linux `opening_a_pre_work_graph_file_upgrades_it_within_budget`
+and the two in-memory chains still hold `CHAIN_BUDGET` at 5 s. Not a flake:
 `cargo test -p fleet-core --lib -- --test-threads=1` takes 23–25 minutes
 (4.5k tests; measured on mercury, 2026-10-02), so a `timeout 600` wrapper
 kills it mid-run and the last `test … ...` line names whichever test was in
@@ -377,7 +397,7 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   layer rows, admissions and grants) and admits hosts; `add_catalog` refuses
   moving an existing catalog to another org (`Store::check_catalog_owner`).
   `catalog_admin` takes an optional `catalog` (config, load, list_layers,
-  set_host_layers; the authoring actions stay personal-only until M4) and
+  set_host_layers, and the authoring actions since M4) and
   five actions (`list_catalogs`, `add_catalog`, `remove_catalog`,
   `admit_catalog`, `unadmit_catalog`); every action checks a grant on the
   catalog it touches (`AdminCall::touches` → `may_admin_catalog`) — the
@@ -392,6 +412,72 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   replaces, not only the catalogs its actions come from. Operator side:
   `fleet-hub catalog add|list|remove|admit|unadmit`, `catalog reload
   --catalog`, `client grant|ungrant <name> assets --catalog`.
+- **Assets M4 — changesets** (plan
+  `docs/superpowers/plans/2026-10-02-assets-m4-changesets.md`): migration 094
+  adds `changesets`, `changeset_items` and `asset_triage_verdicts` (the
+  spec's DDL verbatim; `applied_at` is Unix milliseconds, `created_at` and
+  `decided_at` seconds). `service/catalog/changesets/` proposes cards by
+  rule (`rules.rs`, pure): Bootstrap when nothing is bootstrapped yet or
+  ≥ 20 unmanaged normal identities exist — grouped by host-set signature and
+  name prefix into context layers (`everywhere`, `<host>-only`, `core`,
+  `<prefix>`), `set_scope shared` for personal assets an org host has,
+  `hide` for internals; New on host per identity; Drift (take the host copy
+  or restore); Rollout for a never-rolled-out layer with `missing` members.
+  The reconcile pass (`reconcile.rs`) refreshes them after every scan-tick
+  pass while `catalog.auto` is on (`after_scan_pass`, `try_lock` — it never
+  blocks the tick or touches its owed set) and on `changesets { propose }`;
+  a card's subject is derived from its items; a verdict on `(kind, name,
+  content_hash)` holds a subject until its content changes, and a `person`
+  verdict is never replaced by another decider. Apply (`apply.rs`) needs
+  clean checkouts (every untracked file counts), snapshots the touched
+  catalogs' `host_layers`, imports per (catalog, source host), writes layer
+  files and scopes, appends contexts, and commits only the exact files it
+  wrote, once per catalog (`fleet: <summary>`); on any failure it puts back
+  only its own files and the snapshot and commits nothing — and where
+  anything foreign is in its way it resets nothing and the card says
+  "manual cleanup needed"; success proposes a follow-up Rollout. Rollout
+  runs `plan_sync` + `apply_sync` narrowed to create/adopt/update; a Drift
+  restore (one asset, one host, its harness, a person's pick) may also
+  overwrite, with a backup; nothing ever removes from a host. Undo
+  (`undo.rs`) reverts the card's commits and restores the snapshot —
+  replacing every `host_layers` row of each touched catalog — only for the
+  latest applied card per catalog, on clean checkouts, and refuses when a
+  path its revert touches sits on disk untracked; it does not un-hide, and
+  a rolled-out layer stays rolled out (P27). Dismiss and reject_item write
+  `rejected` verdicts. `catalog.auto` (on) hides internals, prepares cards
+  and runs SB6's additive sync on layers a Rollout card has applied
+  (missing assets and identical copies only — never a `drifted` one —
+  skipping a host whose rollout a person rejected); `catalog.auto_push`
+  (off) pushes after apply and undo. One tokio `APPLY_LOCK` serialises all
+  of it and every authoring write. MCP `changesets { list | propose | apply
+  | undo | dismiss | reject_item }` is never served to per-host tokens and
+  is the master's or an unbound full person device's (org-bound, readonly
+  and peer callers are refused before any card is read): `list` needs no
+  more, `propose` the personal grant, `apply` a grant on every catalog its
+  selected items name, undo/dismiss/reject_item one on every catalog the
+  card names — plus personal when an item names no catalog (hide) or the
+  apply writes hosts (rollout, restore), which also passes the `apply_sync`
+  confirm gate. Also in M4: the authoring `catalog_admin` actions take
+  `catalog` (`CatalogTarget`; `configure` stays personal) and a named
+  catalog is resolved once per call; an asset whose own catalog file has a
+  load problem is held (`ProblemHolds` → a `Noop`, never a `Remove`) — in
+  `personal` too, the one deliberate change for a personal-only fleet;
+  `fleet-hub catalog list` reads only (`probe_catalogs`: never clones or
+  records a load) and `catalog remove` reports the open cards it withdrew.
+  No Tauri command or verdict row yet (M6).
+- **File downloads** (spec
+  `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
+  095, contract revision 7): `send_file { session_id, path }` (a host's
+  Claude from its own host, or a person) stats the file, keeps the
+  `downloads.*` budget and inserts a `fetching` row; `service::downloads`
+  copies it in carry chunks into `<data dir>/downloads/<id>` (set by
+  `downloads::init` in `fleet-hub serve` and the desktop's setup). Clients
+  read `list_downloads` (not served to host tokens), re-read on
+  `download:changed` (ids only, hidden from scoped streams) and fetch the
+  bytes from `GET /downloads/<id>` (`mcp/downloads_route.rs`), never through
+  a tool result. The GC sweep drops rows past `downloads.keep_secs`. Desktop:
+  the footer's ⤓ Downloads sheet and the file viewer's *Send to downloads*;
+  `save_download` picks the destination in its own save dialog.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
@@ -725,8 +811,9 @@ The desktop builds for Windows as a **client** (plan
 there), the home/cache dirs through `fleet_core::home` only, and the hub
 token in Credential Manager. Unix-only code and tests stay `#[cfg(unix)]`
 (for a test module: a `#[cfg(unix)]` line above a bare `#[cfg(test)]`, the
-form `no_eprintln_tests` recognises); `rust-windows` in CI keeps clippy and
-the tests green there. `fleet-agent` and `fleet-hub` stay Unix-only.
+form `no_eprintln_tests` recognises); in CI, `rust-windows` keeps the tests
+and the Windows leg of `clippy` keeps the lints green there. `fleet-agent`
+and `fleet-hub` stay Unix-only.
 On Windows a WSL distribution is a host (`fleet_core::wsl`, alias
 `wsl-<name>`): `SshClient::remote_command` and the PTY attach run it through
 `wsl.exe … sh -c` instead of `ssh`, and it gets no reverse tunnel. The `ssh`

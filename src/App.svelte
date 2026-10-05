@@ -50,6 +50,8 @@
   import NewSessionDialog from './lib/NewSessionDialog.svelte';
   import { newSessionRequest, clearNewSessionRequest } from './lib/new_session_request';
   import { push, pushError } from './lib/toasts';
+  import DownloadsSheet from './lib/DownloadsSheet.svelte';
+  import { downloads, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession, restoreLastSession, selectSessionExplicitly, onSessionOpened } from './lib/selection';
@@ -179,6 +181,9 @@
   let bootstrapError = $state<string | null>(null);
   let unlistenEvents: UnlistenFn | null = null;
   let showWelcome = $state(false);
+  // File downloads: the footer button and its sheet.
+  let showDownloads = $state(false);
+  const unseenDownloads = $derived(unseen($downloads));
 
   function reportBootstrap(what: string, r: Result<unknown>): string | null {
     if (r.ok) return null;
@@ -289,6 +294,8 @@
       onWorkEvents: onWorkEvents,
       // `work:changed` (M14): the Work view re-reads.
       onWorkChanged: noteWorkChanged,
+      // File downloads: ids only, so the list is re-read.
+      onDownloadsChanged: noteDownloadsChanged,
       // `grant:changed` (M1): a share or a revoke moves no column on any row,
       // so this is the only thing that tells a client its own grant set
       // changed. It patches `access.ts`, and everything derived from it — the
@@ -345,7 +352,11 @@
     // events cannot carry, so this window re-fetches them here. The chips
     // have no event at all, so they are re-read too (unless an edit is
     // pending: a reload must not replace a half-typed chip).
+    // File downloads: the footer's count (a hub older than revision 7 is
+    // refused before this, so a failure is just an empty list).
+    void loadDownloads();
     setGapHandler(() => {
+      void loadDownloads();
       void loadProjects();
       void loadTrackers();
       void refreshComposerPresetsIfIdle();
@@ -1064,6 +1075,10 @@
   </div>
 </main>
 
+{#if showDownloads}
+  <DownloadsSheet onclose={() => (showDownloads = false)} />
+{/if}
+
 <footer class="status">
   {#if healthError}
     <span class="err" data-testid="health-error">ipc error: {healthError}</span>
@@ -1076,6 +1091,14 @@
          beside it names WHICH hub, which was never the same as saying whose
          version the reader is looking at. -->
     <span data-testid="footer-version" title={versions.title}>{versions.text}</span>
+    <button
+      type="button"
+      class="hub-badge"
+      data-testid="footer-downloads"
+      title="Files sessions sent to your devices"
+      onclick={() => (showDownloads = true)}
+      >⤓ Downloads{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
+    >
     {#if trackersLine}
       <!-- Work graph M12.4: the tracker roll-up, re-read by TrackerAttention. -->
       <button

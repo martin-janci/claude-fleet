@@ -393,6 +393,31 @@ Index by area (names only; see the reference for details):
   files; master token only — a host's layer assignment decides what the
   next `apply_sync` writes to its filesystem, the same reasoning as
   `apply_sync` and `set_secret`).
+- **Asset changesets (Assets M4)** — `changesets` (`action`: `list` |
+  `propose` | `apply` | `undo` | `dismiss` | `reject_item`): cards
+  proposed from the last scan (Bootstrap, New on host, Drift, Rollout). It
+  answers only the master and a full paired client bound to no org, which
+  may `list` (one card in full with `id`); an org-bound client is refused
+  every action before any card is read, and a per-host token is never
+  served the tool (its "can list" is `list_assets` and the inventory).
+  `propose` needs the personal grant; `apply` (`positions` picks items; a
+  drift card applies one), `undo` (the latest applied card per catalog:
+  `git revert` plus the stored layer assignments, never touching hosts),
+  `dismiss` and `reject_item` need a grant on every catalog the card names
+  (`fleet-hub client grant <name> assets [--catalog NAME]`); for `apply`
+  the grants and the gate are read from exactly the items it runs (with no
+  `positions`, every pending item but "needs a look"): applying a rollout
+  or a restore also needs the personal grant and passes the `apply_sync`
+  confirm gate, whose request names the card, its kind and each item with
+  a short hash of its content, so an approval covers only that content (a
+  card refreshed to new content, even for the same hosts and assets, asks
+  again). A client naming a card that does
+  not exist gets the same `E_FORBIDDEN` as an ungranted one, and a client
+  holding no grant at all gets one refusal for every card; the master gets
+  `E_NOTFOUND`. A failed apply commits nothing; a card never removes
+  anything from a host. Dismissing or rejecting records a verdict, so the
+  same content is not proposed again. One card action runs at a time; a
+  card's host sync is not a task, so `cancel_task` cannot stop it.
 - **Multi-harness set (F3a)** — `set_host_harnesses` (choose which
   harnesses the catalog syncs on one host: `null` = auto — Claude, plus
   Codex where a scan finds it or fleet already manages it there —
@@ -701,6 +726,17 @@ Index by area (names only; see the reference for details):
   `update_status`. It never reaches a per-host token or an org-bound
   client. The update wire itself, `POST /update/check` and
   `/update/report`, is not a tool: see `docs/updates.md`.
+- **File downloads** — `send_file` (`{ session_id, path, note? }`) copies a
+  file from a session's host to the machine that owns the fleet (the hub),
+  for the person's phone and desktop: absolute or relative to the session's
+  worktree root, ≤ `downloads.max_file_mb`, folders refused (zip them). It
+  answers the row in state `fetching` at once; the copy runs in the
+  background. A per-host token sends from its OWN host only — that is how a
+  session's Claude hands over what it made. `list_downloads` (a read) and
+  `remove_download` are a person's, never served to a per-host token; the
+  bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
+  `download:changed { id }`, ids only, never on a host- or org-bound
+  stream. See `docs/hub.md` → *File downloads*.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their

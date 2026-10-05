@@ -109,11 +109,17 @@
 //!   local-only, for the master or a paired client granted the catalog. A
 //!   revision-5 hub does not serve it, so even a granted desktop would open
 //!   the full Assets panel and fail every action with an unknown tool.
-//! - **7** — *five brand-new tools the desktop routes to.* Multi-user M1's
+//! - **7** — *brand-new tools the desktop routes to.* File downloads:
+//!   `list_downloads`, `send_file` and `remove_download` (and the
+//!   `GET /downloads/<id>` route `save_download` streams from). A
+//!   revision-6 hub serves none of them, so the Downloads sheet and the file
+//!   viewer's "Send to downloads" would fail every action with an unknown
+//!   tool.
+//! - **8** — *five brand-new tools the desktop routes to.* Multi-user M1's
 //!   sharing surface: `session_share`, `session_unshare`, `session_narrow`,
 //!   `session_access` and `my_grants` become hub tools, and the desktop
 //!   routes a command to each of them instead of having no command at all.
-//!   A revision-6 hub serves none of the five, so a desktop paired with one
+//!   A revision-7 hub serves none of the five, so a desktop paired with one
 //!   would draw the Share sheet and fail every button with an unknown tool —
 //!   and, worse than a failed button, `my_grants` is the ONE place a client
 //!   learns its own person id and its own grant set, so a hub that cannot
@@ -134,4 +140,4 @@
 //!   the rule above says explicitly not to bump for, and an older client
 //!   absorbs them through `#[serde(default)]`. One bump covers the milestone.
 //!   There is deliberately no mixed window: hub and desktop upgrade together.
-pub const CONTRACT_REVISION: u32 = 7;
+pub const CONTRACT_REVISION: u32 = 8;

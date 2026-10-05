@@ -363,8 +363,9 @@ fn accepted_list(kinds: Option<&Vec<String>>) -> Vec<String> {
 /// reads (`get_settings`); nothing on a host or an org-bound phone needs them.
 /// `grant` frames name a person and a session (multi-user M1, T9): a per-host
 /// token has no person and holds no grants, and an org-bound client derives
-/// nothing from somebody else's share.
-pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work", "settings", "update", "grant"];
+/// nothing from somebody else's share. `download` frames name files of every
+/// host; a scoped caller re-reads its own through `list_downloads`.
+pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work", "settings", "update", "grant", "download"];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
 /// what they asked for.
@@ -1913,7 +1914,7 @@ mod tests {
     /// One private session and the four people a share has: its OWNER, a
     /// `watch` grantee, a `drive` grantee and a stranger.
     ///
-    /// The hub's own personal owner (migration 094) is a FIFTH person, so
+    /// The hub's own personal owner (migration 096) is a FIFTH person, so
     /// `Store::sole_enabled_person` answers `None` and nobody gets the
     /// single-person carve-out. That is deliberate: with it in play every
     /// assertion below would be about the carve-out rather than about the
@@ -2579,7 +2580,7 @@ mod tests {
     /// `result` included. `list_tasks` leaked the same row through the same
     /// predicate.
     ///
-    /// Migration 097's trigger NULLs the ids and stamps `detached_at`, and
+    /// Migration 099's trigger NULLs the ids and stamps `detached_at`, and
     /// the predicate refuses a detached task to everyone but the hub's own
     /// reader.
     #[test]

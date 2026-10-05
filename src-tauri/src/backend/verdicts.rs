@@ -636,6 +636,31 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "quick_replies",
         },
     ),
+    // File downloads live on the machine that owns the fleet — the hub
+    // when paired — so the list, a send and a removal are the hub's tools.
+    (
+        "list_downloads",
+        Verdict::Routed {
+            tool: "list_downloads",
+        },
+    ),
+    ("send_file", Verdict::Routed { tool: "send_file" }),
+    (
+        "remove_download",
+        Verdict::Routed {
+            tool: "remove_download",
+        },
+    ),
+    // Saving reads the row through `list_downloads` (refusing a file that
+    // is not ready or not this client's), then streams the bytes from the
+    // hub's `GET /downloads/<id>` into the file this machine's save dialog
+    // picked.
+    (
+        "save_download",
+        Verdict::Routed {
+            tool: "list_downloads",
+        },
+    ),
     (
         "get_fleet_settings",
         Verdict::Routed {

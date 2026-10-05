@@ -371,7 +371,7 @@ fn client_tokens_has_assets_admin(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 094 (multi-user M1): `client_tokens`
+/// `already_applied` guard of migration 096 (multi-user M1): `client_tokens`
 /// already has `person_id`. That `ALTER TABLE ... ADD COLUMN` is the one
 /// statement in 094 that is not idempotent — the table, both indexes and the
 /// trigger are `IF NOT EXISTS`, and both writes are conditional — so the
@@ -385,7 +385,7 @@ fn client_tokens_has_person(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 097 (multi-user M1, T9d): the one
+/// `already_applied` guard of migration 099 (multi-user M1, T9d): the one
 /// `ADD COLUMN` in the script. The trigger is `IF NOT EXISTS` and the
 /// backfill `UPDATE`s are idempotent, so only the column needs the guard.
 fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -397,8 +397,8 @@ fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 095 (multi-user M1): `sessions`
-/// already has `visibility`, the LAST of 095's two `ADD COLUMN`s — the
+/// `already_applied` guard of migration 097 (multi-user M1): `sessions`
+/// already has `visibility`, the LAST of 097's two `ADD COLUMN`s — the
 /// `work_items_has_status_set_at` convention. Everything else in the script
 /// is `IF NOT EXISTS` or a `DROP`/`CREATE` of the row-version trigger, and
 /// the two `ADD COLUMN`s are the statements that cannot be written
@@ -1018,16 +1018,17 @@ const MIGRATIONS: &[Migration] = &[
         85,
         include_str!("../../migrations/085_work_unlinks_item_index.sql"),
     ),
-    // Multi-user M1's four scripts were written as 086-089 and RENUMBERED to
-    // 094-097 when `main` was merged: `main` had meanwhile shipped 086-093
-    // (shared work context, inventory flags, guides, host harnesses, the
-    // catalogs). The scripts themselves are unchanged — the two sets touch
-    // disjoint tables (M1: `people`, `sessions`, `session_grants`, `tasks`) —
-    // so the renumber is the whole of it. A database an earlier M1 build
-    // already opened recorded 86-89 for THESE scripts and will skip `main`'s
-    // 086-093; that is the collision `repair_skipped_main_migrations` below
-    // has handled twice before, and M1 has no repair arm yet (see
-    // MERGE-REPORT.md).
+    // Multi-user M1's four scripts were written as 086-089, renumbered to
+    // 094-097 at the first `main` merge, and RENUMBERED AGAIN to 096-099 at
+    // the second: `main` had meanwhile shipped 086-093 (shared work context,
+    // inventory flags, guides, host harnesses, the catalogs) and then 094
+    // (changesets) and 095 (downloads). The scripts themselves are unchanged
+    // — every set touches disjoint tables (M1: `people`, `sessions`,
+    // `session_grants`, `tasks`) — so the renumber is the whole of it, and
+    // M1 deliberately has NO arm in `repair_skipped_main_migrations` below:
+    // no `fleet-hub` binary was ever built from an M1 worktree and the branch
+    // was first pushed on 2026-10-04, so no database in the wild has ever
+    // recorded 86-89 or 94-97 for these scripts. There is nothing to repair.
     // Shared work context (design 2026-09-29): origin, project, notes, job
     // and proposal columns on `work_items`. The ADD COLUMNs are not
     // idempotent, so the same guard 084 uses; the backfill and indexes are.
@@ -1074,13 +1075,19 @@ const MIGRATIONS: &[Migration] = &[
     // (personal backfilled from `assets_admin_at`). IF NOT EXISTS + INSERT
     // OR IGNORE: safe to re-run.
     Migration::plain(93, include_str!("../../migrations/093_catalog_access.sql")),
+    // Assets S1b+S2 M4: changeset cards, their items, triage verdicts (the
+    // spec's DDL verbatim). CREATE IF NOT EXISTS: safe to re-run.
+    Migration::plain(94, include_str!("../../migrations/094_changesets.sql")),
+    // File downloads: `downloads` (a file a session sent from its host,
+    // copied to the data dir). CREATE IF NOT EXISTS: safe to re-run.
+    Migration::plain(95, include_str!("../../migrations/095_downloads.sql")),
     // Multi-user M1 (T1): `people`, `client_tokens.person_id` with its own
     // narrow auth-epoch trigger, this hub's personal owner, and the backfill
     // that leaves no live device person-less. Guarded: the ADD COLUMN is the
     // one statement here that is not idempotent.
     Migration {
-        version: 94,
-        sql: include_str!("../../migrations/094_people.sql"),
+        version: 96,
+        sql: include_str!("../../migrations/096_people.sql"),
         already_applied: Some(client_tokens_has_person),
     },
     // Multi-user M1 (T3): `sessions.owner_person_id` / `visibility`,
@@ -1091,8 +1098,8 @@ const MIGRATIONS: &[Migration] = &[
     // script — it is `backfill_session_owner`, after the collision repair,
     // for migration 080's reason.
     Migration {
-        version: 95,
-        sql: include_str!("../../migrations/095_session_owner.sql"),
+        version: 97,
+        sql: include_str!("../../migrations/097_session_owner.sql"),
         already_applied: Some(sessions_has_visibility),
     },
     // Multi-user M1 (T4): `session_grants` — the owner's explicit, revocable,
@@ -1101,14 +1108,14 @@ const MIGRATIONS: &[Migration] = &[
     // statement is `IF NOT EXISTS` and there is no ADD COLUMN, so re-running
     // the script changes nothing. The rules it cannot express as constraints
     // are in `store/session_grants.rs`.
-    Migration::plain(96, include_str!("../../migrations/096_session_grants.sql")),
+    Migration::plain(98, include_str!("../../migrations/098_session_grants.sql")),
     // Multi-user M1 (T9d): `tasks.detached_at` plus the `AFTER DELETE ON
     // sessions` trigger that NULLs a reaped session's id out of both ends and
     // stamps the task, so a recycled `sessions.id` can never make another
     // person's task read as theirs. Guarded: the ADD COLUMN.
     Migration {
-        version: 97,
-        sql: include_str!("../../migrations/097_tasks_detach.sql"),
+        version: 99,
+        sql: include_str!("../../migrations/099_tasks_detach.sql"),
         already_applied: Some(tasks_has_detached_at),
     },
 ];
@@ -1265,7 +1272,7 @@ impl Store {
         )
     }
 
-    /// Migration 095's backfill: on a hub with exactly ONE person, every
+    /// Migration 099's backfill: on a hub with exactly ONE person, every
     /// session fleet itself started becomes that person's, and private.
     ///
     /// **Why it is Rust and not an `UPDATE` in the script.** Migration 080
@@ -1294,7 +1301,7 @@ impl Store {
     /// `unclaimed`, which is a count and nothing else.
     ///
     /// `(SELECT id FROM people WHERE is_personal_owner = 1) IS NOT NULL`
-    /// looks redundant beside the count — migration 094 mints the flagged
+    /// looks redundant beside the count — migration 098 mints the flagged
     /// row — and is there so that a database where the one person is
     /// somehow not the flagged owner attributes NOTHING rather than
     /// stamping `private` with a NULL owner, which no caller could ever
@@ -1506,6 +1513,12 @@ mod tests {
         "participants",
         "read_cursors",
         "peer_links",
+        "host_layers",
+        "host_catalogs",
+        "client_catalog_grants",
+        "changesets",
+        "changeset_items",
+        "asset_triage_verdicts",
     ];
 
     #[test]
@@ -2727,6 +2740,119 @@ mod tests {
         assert_eq!(n, 0);
     }
 
+    /// Carry 3c (Rulings R30): 093 backfills a grant for every
+    /// `assets_admin_at` holder, eligible or not — revoked, readonly and
+    /// org-bound ones too — and those rows grant nothing: the live predicate
+    /// refuses them and `catalog_grantees` never lists them.
+    #[test]
+    fn migration_93_backfills_ineligible_holders_but_they_grant_nothing() {
+        let old = store_at_version(92);
+        old.conn
+            .execute_batch(
+                "INSERT INTO catalogs (id, name, repo_path, org_id, created_at) VALUES (1, 'personal', '/p', NULL, 0);\
+                 INSERT INTO orgs (id, name, created_at) VALUES (10, 'acme', 0);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, revoked_at) \
+                   VALUES ('gone', 'h1', 'full', 1, 5, 9);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at) \
+                   VALUES ('kiosk', 'h2', 'readonly', 1, 5);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at, org_id) \
+                   VALUES ('contractor', 'h3', 'full', 1, 5, 10);\
+                 INSERT INTO client_tokens (name, token_sha256, mode, created_at, assets_admin_at) \
+                   VALUES ('desk', 'h4', 'full', 1, 5);",
+            )
+            .unwrap();
+        old.migrate().expect("093 and 094");
+        let n: i64 = old
+            .conn
+            .query_row("SELECT COUNT(*) FROM client_catalog_grants", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 4, "the backfill copies every holder");
+        let id = |name: &str| -> i64 {
+            old.conn
+                .query_row(
+                    "SELECT id FROM client_tokens WHERE name = ?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        for name in ["gone", "kiosk", "contractor"] {
+            assert!(
+                !old.client_may_admin_catalog(id(name), 1).unwrap(),
+                "{name} is not eligible"
+            );
+        }
+        assert!(old.client_may_admin_catalog(id("desk"), 1).unwrap());
+        assert_eq!(old.catalog_grantees(1).unwrap(), vec!["desk".to_string()]);
+    }
+
+    /// 094 on a database stopped at 093 creates the spec's three tables,
+    /// column for column; re-running it is a no-op.
+    #[test]
+    fn migration_94_creates_changesets_items_and_verdicts() {
+        let old = store_at_version(93);
+        old.migrate().expect("094");
+        let cols = |t: &str| -> Vec<String> {
+            old.conn
+                .prepare(&format!(
+                    "SELECT name FROM pragma_table_info('{t}') ORDER BY cid"
+                ))
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            cols("changesets"),
+            [
+                "id",
+                "kind",
+                "summary",
+                "state",
+                "created_at",
+                "applied_at",
+                "commits",
+                "layers_snapshot",
+                "error"
+            ]
+        );
+        assert_eq!(
+            cols("changeset_items"),
+            [
+                "changeset_id",
+                "position",
+                "grp",
+                "catalog_id",
+                "kind",
+                "name",
+                "action",
+                "params",
+                "decider",
+                "state"
+            ]
+        );
+        assert_eq!(
+            cols("asset_triage_verdicts"),
+            [
+                "catalog_id",
+                "kind",
+                "name",
+                "content_hash",
+                "verdict",
+                "decider",
+                "decided_at"
+            ]
+        );
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 94;")
+            .unwrap();
+        old.migrate().expect("re-running 094 is safe");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
     /// M2 carry 6 / Rulings R1: 091 must not assume `host_layers` exists — a
     /// database from the 033 collision family can reach 091 without it, and
     /// `repair_skipped_main_migrations` (which recreates it) runs only after
@@ -3874,7 +4000,7 @@ mod tests {
                 // Migration 074: its own trigger,
                 // `auth_epoch_client_tokens_assets_admin`.
                 "assets_admin_at",
-                // Multi-user M1 (migration 094): its own trigger,
+                // Multi-user M1 (migration 096): its own trigger,
                 // `auth_epoch_client_tokens_person`. Whose device this is
                 // decides which sessions the caller may read at all, so a
                 // re-binding MUST invalidate every cached caller.
@@ -3918,7 +4044,7 @@ mod tests {
         assert_eq!(s.active_client_tokens().unwrap()[0].org_id, Some(b.id));
     }
 
-    /// Multi-user M1 (migration 094): re-binding a paired device to another
+    /// Multi-user M1 (migration 096): re-binding a paired device to another
     /// person — or unbinding it — changes WHOSE token it is, and therefore
     /// which sessions the caller may read at all. It must invalidate every
     /// cached caller, or a device handed to a colleague would go on reading
@@ -3926,11 +4052,11 @@ mod tests {
     #[test]
     fn binding_a_client_to_a_person_bumps_the_auth_epoch() {
         let s = Store::open_in_memory().unwrap();
-        let owner = s.personal_owner_id().unwrap().expect("094 mints one");
+        let owner = s.personal_owner_id().unwrap().expect("096 mints one");
         let ada = s.create_person("ada", None).unwrap();
         s.insert_client_token("phone", &"0".repeat(64), "full")
             .unwrap();
-        // A device paired AFTER the upgrade starts person-less: 094's
+        // A device paired AFTER the upgrade starts person-less: 096's
         // backfill only reaches the rows that were there when it ran, and
         // binding the new one is T2's pairing change.
         assert_eq!(s.active_client_tokens().unwrap()[0].person_id, None);
@@ -3973,7 +4099,7 @@ mod tests {
         assert_eq!(binding(&s), Some(ada.id));
     }
 
-    /// Migration 094 on a populated v93 database: every LIVE DEVICE comes
+    /// Migration 098 on a populated v95 database: every LIVE DEVICE comes
     /// out of the upgrade bound to this hub's personal owner (no row is left
     /// at the `person: None` privilege level), a revoked row is left exactly
     /// as it was, a `peer` and an `updater` row are left person-less because
@@ -3982,8 +4108,8 @@ mod tests {
     /// back and migrating again — which the guard turns into a record-only
     /// pass — changes nothing.
     #[test]
-    fn migration_094_on_a_populated_v93_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 93;
+    fn migration_096_on_a_populated_v95_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 95;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch(
@@ -4001,7 +4127,7 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 
-        let owner = s.personal_owner_id().unwrap().expect("094 mints one");
+        let owner = s.personal_owner_id().unwrap().expect("096 mints one");
         assert_eq!(s.list_people().unwrap().len(), 1);
         let unowned: i64 = s
             .conn
@@ -4048,7 +4174,7 @@ mod tests {
         }
 
         // Re-migrate over a schema that already has the column: the guard
-        // records the version and runs not one of 094's statements — no
+        // records the version and runs not one of 096's statements — no
         // second owner, no rename undone, no binding rewritten.
         s.rename_person(owner, Some("Martin"), None).unwrap();
         s.set_client_person("phone", None).unwrap();
@@ -4076,7 +4202,7 @@ mod tests {
         assert_eq!(rows, 4, "the re-run touched no rows");
     }
 
-    /// Migration 095 on a populated v94 database: the two columns arrive
+    /// Migration 099 on a populated v96 database: the two columns arrive
     /// with the safe default, the backfill attributes exactly the rows fleet
     /// started (`started_at IS NOT NULL`) to the hub's one person and leaves
     /// a reconcile-discovered row `unclaimed`, each attributed row's
@@ -4086,8 +4212,8 @@ mod tests {
     /// deletion, and rolling the recorded version back and migrating again —
     /// which the guard turns into a record-only pass — changes nothing.
     #[test]
-    fn migration_095_on_a_populated_v94_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 94;
+    fn migration_097_on_a_populated_v96_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 96;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch(
@@ -4110,7 +4236,7 @@ mod tests {
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 
-        let owner = s.personal_owner_id().unwrap().expect("094 mints one");
+        let owner = s.personal_owner_id().unwrap().expect("096 mints one");
         let row = |s: &Store, name: &str| -> (Option<i64>, String, i64) {
             s.conn
                 .query_row(
@@ -4135,7 +4261,7 @@ mod tests {
             "a row reconcile found is nobody's: unclaimed, and untouched"
         );
 
-        // The conversation-owner record: written by 095's UPDATE trigger
+        // The conversation-owner record: written by 097's UPDATE trigger
         // when the backfill gave the row an owner, and only for a row that
         // has both halves.
         let owners: Vec<(String, i64)> = {
@@ -4197,7 +4323,7 @@ mod tests {
         );
 
         // Re-migrate over a schema that already has the columns: the guard
-        // records the version and runs not one of 095's statements, and the
+        // records the version and runs not one of 097's statements, and the
         // backfill — which is outside the script and therefore DOES run
         // again — matches no row.
         s.conn
@@ -4228,7 +4354,7 @@ mod tests {
             .unwrap()
     }
 
-    /// 095's backfill attributes NOTHING once the hub has more than one
+    /// 097's backfill attributes NOTHING once the hub has more than one
     /// person: there is no fact saying which of them started a pre-M1 row,
     /// and the upgrade widens nothing (rule 7). Those rows stay `unclaimed`,
     /// which is a per-host count and not one byte more.
@@ -4262,7 +4388,7 @@ mod tests {
         );
     }
 
-    /// Migration 096 on a populated database: the table and its three indexes
+    /// Migration 098 on a populated database: the table and its three indexes
     /// arrive, the grants a hub already holds survive a second open, and the
     /// NULL-safe live index still fires afterwards.
     ///
@@ -4271,8 +4397,8 @@ mod tests {
     /// `Migration::plain` with no `already_applied` guard — this is the test
     /// that says so rather than the comment claiming it.
     #[test]
-    fn migration_096_on_a_populated_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 95;
+    fn migration_098_on_a_populated_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 97;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
@@ -4370,7 +4496,7 @@ mod tests {
         };
         // The baseline is whatever the rest of the chain left, not 0: a
         // later migration that legitimately re-binds a token moves the
-        // counter too (094's backfill binds this live row to the hub's
+        // counter too (096's backfill binds this live row to the hub's
         // personal owner). What this test pins is the DELTA — one token
         // write bumps it once, and re-running 060 does not reset it.
         let base = read_epoch(&s);

@@ -2274,7 +2274,9 @@ fn capture_default_cap_matches_docs() {
 /// `catalog_admin`, and host identity & health's `merge_host` and
 /// `forget_project`: 95; `update_status` / `update_admin`: 97; `session_tool_detail`: 98 (102 with
 /// the tools main added alongside it; declarative pages' `guide`: 103;
-/// multi-harness F3a's `set_host_harnesses`: 104.)
+/// multi-harness F3a's `set_host_harnesses`: 104; Assets M4's
+/// `changesets`: 105; file downloads' `send_file` / `list_downloads` /
+/// `remove_download`: 108.)
 #[test]
 fn router_sum_serves_every_tool() {
     let attrs: usize = [
@@ -2287,6 +2289,7 @@ fn router_sum_serves_every_tool() {
         include_str!("assets.rs"),
         include_str!("peer.rs"),
         include_str!("updates.rs"),
+        include_str!("downloads.rs"),
         include_str!("sharing.rs"),
     ]
     .iter()
@@ -2297,8 +2300,9 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    // 104 + multi-user M1's six sharing / claim tools (T12).
-    assert_eq!(served, 110);
+    // 108 (main, incl. file downloads) + multi-user M1's six sharing /
+    // claim tools (T12).
+    assert_eq!(served, 114);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -2766,7 +2770,7 @@ async fn pair_client_defaults_the_person_to_this_hubs_owner_and_takes_a_name() {
     let (tools, guards, store) = client_tools();
     let owner_name = {
         let s = store.lock().unwrap();
-        let id = s.personal_owner_id().unwrap().expect("094 mints one");
+        let id = s.personal_owner_id().unwrap().expect("096 mints one");
         s.get_person(id).unwrap().unwrap().name
     };
     let v = result_json(
@@ -3749,19 +3753,23 @@ fn the_served_definition_budget_stays_bounded() {
     /// +352 bytes). Measured at 70,523 on 2026-10-02 after merging `main`
     /// into Assets M3 (70,483, +92 bytes) and the final review's M-c
     /// (`remove_catalog` is master-only, said in `catalog_admin`'s
-    /// description and its `catalog` parameter, +40 bytes).
-    /// Measured at 70,914 on 2026-10-03 after merging `main` into multi-user
-    /// M1 (+291 bytes over `main`'s 70,623): `pair_client { person }` and the
-    /// sentences about it in `pair_client` / `list_clients`, and M1 T6's
-    /// sentence on `list_hosts` about `unclaimed_sessions`.
-    /// Measured at 73,065 on 2026-10-04 after multi-user M1 T12 (+2,051
-    /// bytes): the five sharing definitions `session_share`,
+    /// description and its `catalog` parameter, +40 bytes). Measured at
+    /// 70,542 on 2026-10-03 after Assets M4 Task 3 (`catalog_admin`'s
+    /// `catalog` parameter names the authoring actions, +19 bytes).
+    /// Measured at 71,417 on 2026-10-03 after Assets M4 Task 9 (the
+    /// `changesets` tool and its four parameters, +875 bytes; master only —
+    /// a per-host token is never served it).
+    /// Measured at 72,687 on 2026-10-04 after merging Assets M4 into file
+    /// downloads (`send_file`, `list_downloads`, `remove_download`, +1,170
+    /// bytes).
+    /// Measured on 2026-10-04 after multi-user M1 T12 on top of that
+    /// (+2,051 bytes): the five sharing definitions `session_share`,
     /// `session_unshare`, `session_narrow`, `session_access` and `my_grants`,
     /// each with its parameters and its refusal codes. The sixth tool,
     /// `session_claim`, is `Access::HostToken` and is NOT on the master
     /// surface this constant measures; `NOT_FOR_HOST_TOKENS` keeps the other
-    /// five off a per-host token's (79 tools / 57,468 bytes, unchanged).
-    const BUDGET_BYTES: usize = 73_165;
+    /// five off a per-host token's.
+    const BUDGET_BYTES: usize = 74_838;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -9492,7 +9500,7 @@ async fn host_counts(t: &FleetTools, caller: Caller) -> Vec<(String, Option<i64>
 async fn list_sessions_drops_another_persons_private_row_and_the_unclaimed_ones() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let mk = |name: &str| {
         s.upsert_session(name, "h", None, None, 1, 1, "running", None)
@@ -9565,7 +9573,7 @@ async fn list_sessions_drops_another_persons_private_row_and_the_unclaimed_ones(
 async fn fresh_for_naming_another_persons_session_writes_no_cursor_and_does_not_blind_them() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let a_row = s
         .upsert_session("a-dev", "h", None, None, 1, 1, "running", None)
@@ -9629,7 +9637,7 @@ async fn fresh_for_naming_another_persons_session_writes_no_cursor_and_does_not_
 async fn a_one_person_fleet_still_sees_its_unclaimed_rows() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let mine = s
         .upsert_session("mine", "h", None, None, 1, 1, "running", None)
         .unwrap();
@@ -9667,7 +9675,7 @@ async fn list_hosts_serves_the_unclaimed_count_only_on_a_one_person_fleet() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("empty").unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     for n in ["one", "two"] {
         s.upsert_session(n, "h", None, None, 1, 1, "running", None)
             .unwrap();
@@ -11245,7 +11253,7 @@ struct Gate {
 fn gate_fixture() -> Gate {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let mk = |name: &str| {
         s.upsert_session(name, "h", None, None, 1, 1, "running", None)
@@ -11424,7 +11432,7 @@ fn a_host_token_reaches_its_own_pane_and_the_unclaimed_rows_only() {
 fn one_person_keeps_every_verb_on_the_rows_reconcile_found() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let found = s
         .upsert_session("hand-started", "h", None, None, 1, 1, "running", None)
         .unwrap();
@@ -12482,7 +12490,7 @@ fn a_broadcast_delivery_resolves_its_target_again_by_id() {
 fn a_conversation_is_not_resumed_into_another_persons_session() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let a_row = s
         .upsert_session("a-dev", "h", None, None, 1, 1, "running", None)
@@ -12518,7 +12526,7 @@ async fn work_links_conversation_actions_refuse_another_persons_past_work() {
     const CID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let past = s
         .upsert_session("dev-o-r--abc-1", "h", None, None, 1, 1, "running", None)
@@ -13024,7 +13032,7 @@ fn the_result_gate_is_reached_for_every_caller() {
 async fn related_sessions_fences_its_anchor_and_its_list() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let mk = |name: &str| {
@@ -13123,7 +13131,7 @@ async fn whoami_never_names_another_persons_same_named_session() {
     for h in ["h-a", "h-b", "h-c"] {
         s.upsert_host(h).unwrap();
     }
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     // Distinct `last_activity_at`, because the candidates come in that
     // order (most recent first) and this test asserts on it.
@@ -13410,7 +13418,7 @@ async fn dispatching_a_task_in_another_persons_name_needs_drive() {
 async fn deleting_a_worktree_under_another_persons_session_needs_own() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host(crate::service::projects::LOCAL_HOST).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let wt = s
@@ -13724,7 +13732,7 @@ const PAST_CID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
 fn past_work_fixture() -> PastWork {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     // The session whose link ENDS: reaped, so only the snapshot is left.
     let past = s
@@ -13818,7 +13826,7 @@ async fn work_links_pages_are_not_a_fleet_wide_catalogue_of_private_sessions() {
 async fn org_impact_names_no_session_another_person_cannot_see() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let org_b = s.add_org("b", None, false).unwrap().id;
     let a_row = s
@@ -13883,7 +13891,7 @@ async fn org_impact_names_no_session_another_person_cannot_see() {
 async fn reopened_and_local_items_count_only_the_callers_own_sessions() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let a_row = s
         .upsert_session("dev-secret-branch", "h", None, None, 1, 1, "running", None)
@@ -14044,7 +14052,7 @@ fn discover_lost_sessions_is_fenced_by_person() {
 async fn deleting_a_worktree_under_another_persons_lost_session_is_still_refused() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host(crate::service::projects::LOCAL_HOST).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let wt = s
@@ -14129,7 +14137,7 @@ async fn a_new_session_does_not_land_in_another_persons_worktree() {
     // not a geometry check further in.
     let host = crate::service::projects::LOCAL_HOST;
     s.upsert_host(host).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let wt = s
@@ -14238,7 +14246,7 @@ async fn a_new_session_does_not_land_in_another_persons_worktree() {
 async fn list_worktrees_names_no_occupant_another_person_cannot_see() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host(crate::service::projects::LOCAL_HOST).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let wt = s
@@ -14603,7 +14611,7 @@ const ADA_SECRETS: &[&str] = &[
 fn view_pages_fixture() -> ViewPages {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     // A second person, so nobody gets the single-person carve-out: with it in
     // play every assertion below would be about the carve-out.
     let bob = s.create_person("bob", None).unwrap().id;
@@ -15054,7 +15062,7 @@ async fn every_view_scope_page_hides_another_persons_ended_link() {
 async fn a_start_refusal_names_no_session_another_person_cannot_see() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     let a_row = s
@@ -15129,7 +15137,7 @@ async fn a_start_does_not_land_in_another_persons_worktree() {
     let s = Store::open_in_memory().unwrap();
     let host = crate::service::projects::LOCAL_HOST;
     s.upsert_host(host).unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let pid = s.upsert_project("o", "r", "/p").unwrap();
     // The branch `work_link { start, key: PAY-123 }` will slug to.
@@ -15371,7 +15379,7 @@ const CARD_KEY: &str = "CRD-1";
 fn ticket_cache_fixture() -> TicketCache {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     assert!(
         s.sole_enabled_person().unwrap().is_none(),
@@ -15623,7 +15631,7 @@ async fn the_ticket_cache_arms_have_no_ended_shape() {
 async fn an_ended_local_items_name_is_not_another_persons_to_change() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
     let pid = s.upsert_project("o", "r", "/p").unwrap();
@@ -15702,7 +15710,7 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
     for ended in [false, true] {
         let s = Store::open_in_memory().unwrap();
         s.upsert_host("h").unwrap();
-        let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+        let ada = s.personal_owner_id().unwrap().expect("096 mints one");
         let bob = s.create_person("bob", None).unwrap().id;
         assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
         let pid = s.upsert_project("o", "r", "/p").unwrap();
@@ -15797,7 +15805,7 @@ async fn a_local_items_status_is_not_another_persons_to_set() {
 async fn an_unlinked_local_item_is_nobodys_to_rename_or_set() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
     let pid = s.upsert_project("o", "r", "/p").unwrap();
@@ -16221,7 +16229,7 @@ fn shared_fixture() -> Shared {
     let bus = Arc::new(crate::events::RecordingEventBus::new());
     let s = Store::open_with_bus_in_memory(bus.clone()).expect("store");
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     let carol = s.create_person("carol", None).unwrap().id;
     let mk = |name: &str, pane: &str| {

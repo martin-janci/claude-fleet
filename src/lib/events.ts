@@ -83,6 +83,9 @@ export type RowEventHandlers = {
   /** One call per flush with every `update:changed` (update design §11: ids
    *  only), in order: re-read `update_status`. */
   onUpdateChanged?: (changes: UpdateChanged[]) => void;
+  /** One call per flush with the id of every `download:changed` (file
+   *  downloads: ids only), in order: re-read `list_downloads`. */
+  onDownloadsChanged?: (ids: number[]) => void;
   /**
    * One call per flush with every well-formed `grant:changed` (multi-user M1:
    * ids only), in order. A grant mutates no `sessions` column, so sharing and
@@ -132,6 +135,7 @@ type Queued =
   | { name: 'work:changed'; payload: unknown }
   | { name: 'settings:changed'; payload: { key: string } }
   | { name: 'update:changed'; payload: UpdateChanged }
+  | { name: 'download:changed'; payload: { id: number } }
   | { name: 'grant:changed'; payload: unknown };
 
 /**
@@ -173,6 +177,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const workChanges: WorkChanged[] = [];
     const settingsKeys: string[] = [];
     const updateChanges: UpdateChanged[] = [];
+    const downloadIds: number[] = [];
     const grantChanges: GrantChanged[] = [];
     for (const ev of batch) {
       switch (ev.name) {
@@ -277,6 +282,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           }
           break;
         }
+        case 'download:changed':
+          if (typeof ev.payload?.id === 'number') downloadIds.push(ev.payload.id);
+          break;
         case 'grant:changed': {
           const g = parseGrantChanged(ev.payload);
           if (g) grantChanges.push(g);
@@ -296,6 +304,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (workChanges.length > 0) handlers.onWorkChanged?.(workChanges);
     if (settingsKeys.length > 0) handlers.onSettingsChanged?.(settingsKeys);
     if (updateChanges.length > 0) handlers.onUpdateChanged?.(updateChanges);
+    if (downloadIds.length > 0) handlers.onDownloadsChanged?.(downloadIds);
     if (grantChanges.length > 0) handlers.onGrantChanged?.(grantChanges);
   };
 
@@ -337,6 +346,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     workChanged: !!handlers.onWorkChanged,
     settingsChanged: !!handlers.onSettingsChanged,
     updateChanged: !!handlers.onUpdateChanged,
+    downloadsChanged: !!handlers.onDownloadsChanged,
     grantChanged: !!handlers.onGrantChanged,
   };
 
@@ -378,6 +388,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:changed', wanted.workChanged),
     sub('settings:changed', wanted.settingsChanged),
     sub('update:changed', wanted.updateChanged),
+    sub('download:changed', wanted.downloadsChanged),
     sub('grant:changed', wanted.grantChanged),
   ]);
   return () => {

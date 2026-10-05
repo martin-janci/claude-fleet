@@ -16,6 +16,20 @@ use std::time::{Duration, Instant};
 /// for a debug build on a CI runner; the measured number is printed.
 const CHAIN_BUDGET: Duration = Duration::from_secs(5);
 
+/// The same chain through `open_with_bus` on a real file. On Linux that adds
+/// ~35 ms to the in-memory chain (174 ms against 140 ms, 4 vCPU, debug), so
+/// it keeps `CHAIN_BUDGET`. On the Windows runner the identical open took
+/// 5.39 s and failed the 5 s budget (the v0.4.6 release run, 2026-10-04): ~30x
+/// Linux, with the migrations themselves unchanged. That is the runner's file
+/// I/O on a fresh temp file (NTFS, real-time scanning), not migration code.
+/// The two in-memory tests still hold the migrations to `CHAIN_BUDGET` on
+/// every platform, so the file test only needs to catch a stall there.
+const FILE_OPEN_BUDGET: Duration = if cfg!(windows) {
+    Duration::from_secs(30)
+} else {
+    CHAIN_BUDGET
+};
+
 const SEED: u64 = 0x5EED_0012_0001;
 
 fn store_over(conn: Connection) -> Store {
@@ -128,7 +142,7 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
     // No migration after 044 updates a session row (row_version would bump).
     //
     // Multi-user M1 changed what this line means, so the number is quoted
-    // deliberately rather than merely re-asserted. 095's attribution of
+    // deliberately rather than merely re-asserted. 097's attribution of
     // pre-M1 rows is `Store::backfill_session_owner`, which runs *after* the
     // chain and after 095 re-issued the row-version trigger to watch
     // `owner_person_id` / `visibility` — so an attributed row's
@@ -263,7 +277,7 @@ fn the_chain_from_pre_work_graph_to_latest_is_fast_complete_and_sound() {
     // `CHECK` makes that value unrepresentable, which is stronger than any
     // `SELECT COUNT(*)` (spec §4.3, Q10).
     let people = store.list_people().unwrap();
-    assert_eq!(people.len(), 1, "094 mints exactly one person");
+    assert_eq!(people.len(), 1, "096 mints exactly one person");
     let owner = store.personal_owner_id().unwrap().expect("the owner");
     assert_eq!(people[0].id, owner);
     assert_eq!(
@@ -349,8 +363,8 @@ fn opening_a_pre_work_graph_file_upgrades_it_within_budget() {
     let elapsed = started.elapsed();
     println!("M12.1: open_with_bus upgraded the generated state.db in {elapsed:?}");
     assert!(
-        elapsed < CHAIN_BUDGET,
-        "opening took {elapsed:?}, over {CHAIN_BUDGET:?}"
+        elapsed < FILE_OPEN_BUDGET,
+        "opening took {elapsed:?}, over {FILE_OPEN_BUDGET:?}"
     );
     assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     assert_eq!(
@@ -511,7 +525,7 @@ fn deleting_an_upgraded_session_journals_its_conversations() {
     integrity_ok(&store);
 }
 
-/// Multi-user M1, 095's backfill, on the realistic upgrade path and with a
+/// Multi-user M1, 097's backfill, on the realistic upgrade path and with a
 /// population to attribute.
 ///
 /// `store::testgen` deliberately rebuilds v0.2.37's schema and writes no
@@ -563,7 +577,7 @@ fn the_m1_backfill_attributes_the_rows_fleet_started_and_only_those() {
     assert!(with_conversation > 0);
 
     store.migrate().expect("upgrade");
-    let owner = store.personal_owner_id().unwrap().expect("094 mints one");
+    let owner = store.personal_owner_id().unwrap().expect("096 mints one");
 
     let attributed = count(
         &store,

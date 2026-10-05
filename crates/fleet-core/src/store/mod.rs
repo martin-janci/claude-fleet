@@ -11,9 +11,11 @@ use std::sync::Arc;
 pub mod backup;
 mod bench_work_link;
 mod catalog;
+mod changesets;
 mod clients;
 mod conversations;
 mod decisions;
+mod downloads;
 mod guides;
 mod hosts_accounts;
 mod layers;
@@ -58,6 +60,9 @@ mod work_usage;
 mod work_view;
 
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
+pub use changesets::{
+    AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,
+};
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
     LINE_SEPARATORS,
@@ -69,6 +74,7 @@ pub use decisions::{
     DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
     DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
+pub use downloads::{DownloadRow, NewDownload};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use layers::HostLayerRow;
 pub use nl_census::{
@@ -510,6 +516,32 @@ impl Store {
             instance: next_instance(),
             peer_generations: Default::default(),
         };
+        store.migrate()?;
+        Ok(store)
+    }
+
+    /// Test-only: a store of its own holding a copy of this one's database,
+    /// as [`Store::open_with_bus_in_memory`] copies the migrated template.
+    /// For a fixture that is built once and read by tests that must not
+    /// queue on one connection (`service::work::scale_tests`).
+    #[cfg(test)]
+    pub(crate) fn copy_for_test(&self) -> Result<Self> {
+        let mut conn = Connection::open_in_memory()?;
+        rusqlite::backup::Backup::new(&self.conn, &mut conn)?.run_to_completion(
+            i32::MAX,
+            std::time::Duration::ZERO,
+            None,
+        )?;
+        let store = Self {
+            conn,
+            bus: StoreBus::new(Arc::new(NoopEventBus)),
+            kills: Default::default(),
+            message_notify: Arc::new(tokio::sync::Notify::new()),
+            instance: next_instance(),
+            peer_generations: Default::default(),
+        };
+        // Nothing left to migrate; this sets the connection's own pragmas
+        // (`foreign_keys`), which a backup does not carry.
         store.migrate()?;
         Ok(store)
     }

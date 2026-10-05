@@ -28,7 +28,7 @@
 --               nothing that could break the untrusted-content marker.
 -- display_name  the profile layer (M2). NULL means "show `name`".
 -- disabled_at   the person has left. The row STAYS — grants and (from
---               migration 095) sessions point at it, and re-attributing a
+--               migration 097) sessions point at it, and re-attributing a
 --               departed colleague's work is not an operation M1 has. It is
 --               deliberately not part of the owner index below.
 CREATE TABLE IF NOT EXISTS people (

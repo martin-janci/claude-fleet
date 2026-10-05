@@ -263,7 +263,7 @@ fn is_sha(s: &str) -> bool {
     (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-pub(super) fn parse_err(what: &str, got: &str) -> IpcError {
+pub(crate) fn parse_err(what: &str, got: &str) -> IpcError {
     IpcError::new(codes::E_PARSE, format!("unexpected {what} output: {got:?}"))
 }
 

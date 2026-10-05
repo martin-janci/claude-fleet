@@ -10,6 +10,7 @@
 pub(crate) mod auth;
 #[cfg(test)]
 mod doc_gen;
+pub mod downloads_route;
 pub mod events_route;
 pub mod guard;
 pub mod hooks;
@@ -481,6 +482,16 @@ fn build_app(
                 .layer(axum::extract::DefaultBodyLimit::max(
                     fleet_proto::report::BODY_MAX,
                 ))
+                .with_state(report_state.clone()),
+        )
+        // `/downloads/<id>`: a ready file download's bytes, streamed. Behind
+        // `authorize`; the handler applies the caller's scope.
+        .merge(
+            axum::Router::new()
+                .route(
+                    "/downloads/{id}",
+                    axum::routing::get(downloads_route::handle_download),
+                )
                 .with_state(report_state.clone()),
         )
         // `/update/check` and `/update/report`: the frozen update wire
@@ -1181,7 +1192,7 @@ mod tests {
             assert!(kiosk.trusted_at.is_none(), "the plain pairing is not");
             // Multi-user M1: both pairings named the hub's own owner, and
             // both rows came out bound to it.
-            let owner = s.personal_owner_id().unwrap().expect("094 mints one");
+            let owner = s.personal_owner_id().unwrap().expect("096 mints one");
             assert_eq!(desk.person_id, Some(owner));
             assert_eq!(kiosk.person_id, Some(owner));
         }

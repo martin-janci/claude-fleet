@@ -1821,6 +1821,26 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
         person_half: "`Graph::load_for`'s `hidden_sessions`, which has already \
                       emptied `g.sessions` of the rows this caller may not see",
     },
+    OrgHalf {
+        file: "crates/fleet-core/src/service/downloads.rs",
+        func: "visible",
+        nth: 0,
+        code: "None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),",
+        person_half: "`may_own` in the OTHER arm of the same match, on the \
+                      session row the file came out of — the `own` TIER, not \
+                      `sees_session_row`: a download is an unconstrained \
+                      absolute-path read of the owner's host, which §4.3 \
+                      invariant 5 says no grant confers. This arm is the \
+                      session-is-GONE case (a reaped row, or a download with \
+                      no `session_id`): there is no person left to ask, and \
+                      `DownloadRow.org_id` — recorded for exactly this — is \
+                      the whole of the fence. The residue is BOUNDED, not \
+                      merely acknowledged: `downloads::send` is the `own` \
+                      tier too, so every row that could reach this arm was \
+                      created by the session's owner or by its own Claude \
+                      and never by a grantee, which is why a person column \
+                      on `downloads` would change no answer here",
+    },
 ];
 
 /// Every production call of the two org-only session predicates, keyed like a

@@ -544,7 +544,7 @@ fn cross_org_links_need_force_and_unassigned_never_conflicts() {
 fn an_ended_link_with_no_conversation_recorded_is_withheld() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     let bob = s.create_person("bob", None).unwrap().id;
     assert!(s.sole_enabled_person().unwrap().is_none(), "two people");
     let pid = s.upsert_project("o", "r", "/p").unwrap();
@@ -613,7 +613,7 @@ fn an_ended_link_with_no_conversation_recorded_is_withheld() {
 fn a_single_person_hub_still_sees_an_ended_link_with_nothing_recorded() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("h").unwrap();
-    let ada = s.personal_owner_id().unwrap().expect("094 mints one");
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
     assert_eq!(
         s.sole_enabled_person().unwrap(),
         Some(ada),
