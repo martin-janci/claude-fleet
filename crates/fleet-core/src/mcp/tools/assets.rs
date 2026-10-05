@@ -979,6 +979,7 @@ mod confirm_summary_tests {
             commits: None,
             layers_snapshot: None,
             error: None,
+            withdrawn_at: None,
         }
     }
 

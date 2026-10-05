@@ -43,6 +43,9 @@ pub type ApplyGuard = tokio::sync::MutexGuard<'static, ()>;
 /// Closed cards `list` shows next to every open one.
 pub const RECENT_CLOSED: usize = 20;
 
+/// The start of every `error` the system writes when it withdraws a card.
+pub const WITHDRAWN_PREFIX: &str = "withdrawn:";
+
 /// What a card is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -354,6 +357,9 @@ pub struct ChangesetView {
     /// name.
     #[serde(default)]
     pub catalogs: Vec<String>,
+    /// Assets M6 (R3): the system withdrew it (dismissed, error `withdrawn:…`).
+    #[serde(default)]
+    pub withdrawn: bool,
     pub items: Vec<ItemView>,
 }
 
@@ -382,6 +388,9 @@ pub struct ChangesetSummary {
     /// name.
     #[serde(default)]
     pub catalogs: Vec<String>,
+    /// Assets M6 (R3): the system withdrew it (dismissed, error `withdrawn:…`).
+    #[serde(default)]
+    pub withdrawn: bool,
 }
 
 /// R3: a card that can still be applied (and that the pass refreshes).
@@ -526,6 +535,16 @@ fn is_undoable(
         && later_card(card, items, s)?.is_none())
 }
 
+/// Assets M6 (R3): the system withdrew the card — dismissed with an error
+/// starting [`WITHDRAWN_PREFIX`].
+fn is_withdrawn(card: &ChangesetRow) -> bool {
+    card.state == "dismissed"
+        && card
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with(WITHDRAWN_PREFIX))
+}
+
 /// R2: the sorted, unique names of the catalogs a card's items name.
 fn catalog_names(items: &[ChangesetItemRow], names: &BTreeMap<i64, String>) -> Vec<String> {
     items
@@ -558,6 +577,7 @@ fn view(
             (name.unwrap_or(id), sha)
         })
         .collect();
+    let withdrawn = is_withdrawn(&card);
     Ok(ChangesetView {
         id: card.id,
         kind: card.kind,
@@ -569,6 +589,7 @@ fn view(
         commits,
         undoable,
         catalogs: catalog_names(&items, &names),
+        withdrawn,
         items: items
             .into_iter()
             .map(|i| ItemView {
@@ -626,6 +647,7 @@ pub fn list(store: &Mutex<Store>) -> Result<Vec<ChangesetSummary>, IpcError> {
         }
         let pending = items.iter().filter(|i| i.state == "pending").count();
         out.push(ChangesetSummary {
+            withdrawn: is_withdrawn(&card),
             undoable: undoable.contains(&card.id),
             id: card.id,
             kind: card.kind,
@@ -808,6 +830,7 @@ mod tests {
             commits: None,
             layers_snapshot: None,
             error: None,
+            withdrawn_at: None,
         };
         let import = |card: i64, catalog: i64| ChangesetItemRow {
             changeset_id: card,
@@ -883,6 +906,47 @@ mod tests {
             vec!["acme".to_string(), "personal".to_string()]
         );
         assert_eq!(get(card.id, &store).unwrap().catalogs, summary.catalogs);
+    }
+
+    /// Assets M6 (R3): a card the system withdrew says so, in a list and in
+    /// full; a person's dismissal does not.
+    #[test]
+    fn a_withdrawn_card_says_so() {
+        assert!(reconcile::WITHDRAWN.starts_with(WITHDRAWN_PREFIX));
+        let s = Store::open_in_memory().unwrap();
+        let item = || NewChangesetItem {
+            grp: "core".into(),
+            catalog_id: None,
+            kind: "host".into(),
+            name: "oci".into(),
+            action: "sync".into(),
+            params: None,
+            decider: "rule".into(),
+        };
+        let withdrawn = s.insert_changeset("new", "New on oci", &[item()]).unwrap();
+        let by_person = s.insert_changeset("new", "New on oci", &[item()]).unwrap();
+        let open = s.insert_changeset("new", "New on oci", &[item()]).unwrap();
+        assert!(s
+            .withdraw_changeset(withdrawn.id, reconcile::WITHDRAWN)
+            .unwrap());
+        assert!(s.withdraw_changeset(by_person.id, "no thanks").unwrap());
+        let store = Mutex::new(s);
+        let flag = |id: i64| {
+            list(&store)
+                .unwrap()
+                .into_iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .withdrawn
+        };
+        assert!(flag(withdrawn.id));
+        assert!(
+            !flag(by_person.id),
+            "a person's dismissal is not a withdrawal"
+        );
+        assert!(!flag(open.id));
+        assert!(get(withdrawn.id, &store).unwrap().withdrawn);
+        assert!(!get(open.id, &store).unwrap().withdrawn);
     }
 
     /// Assets M5 (R9): `list`'s one-pass undoability agrees with

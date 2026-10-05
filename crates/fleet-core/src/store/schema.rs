@@ -438,6 +438,17 @@ fn changeset_items_has_outcome(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 099 (`withdrawn_at` on `changesets`,
+/// Assets M6).
+fn changesets_has_withdrawn_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('changesets') WHERE name = 'withdrawn_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
 /// on `asset_inventory`).
 fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1079,6 +1090,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 98,
         sql: include_str!("../../migrations/098_changeset_item_outcome.sql"),
         already_applied: Some(changeset_items_has_outcome),
+    },
+    // Assets M6: when the system withdrew a card, so it is pruned a week
+    // after withdrawal. ADD COLUMN is not idempotent: guarded.
+    Migration {
+        version: 99,
+        sql: include_str!("../../migrations/099_changeset_withdrawn_at.sql"),
+        already_applied: Some(changesets_has_withdrawn_at),
     },
 ];
 
@@ -2715,7 +2733,9 @@ mod tests {
                 "applied_at",
                 "commits",
                 "layers_snapshot",
-                "error"
+                "error",
+                // 099 (Assets M6): `migrate` runs on to the latest.
+                "withdrawn_at"
             ]
         );
         assert_eq!(
@@ -4597,6 +4617,32 @@ mod tests {
         assert_eq!(o, None, "an item recorded before 098 has no outcome");
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 98;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Assets M6 (R3): `changesets.withdrawn_at`, NULL on existing cards,
+    /// guarded on re-run.
+    #[test]
+    fn migration_099_adds_withdrawn_at_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(98);
+        s.conn
+            .execute_batch(
+                "INSERT INTO changesets (id, kind, summary, state, created_at, error) \
+                   VALUES (1, 'new', 'New on oci', 'dismissed', 1, 'withdrawn: no longer applies');",
+            )
+            .unwrap();
+        assert!(!changesets_has_withdrawn_at(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert!(changesets_has_withdrawn_at(&s.conn).unwrap());
+        let at: Option<i64> = s
+            .conn
+            .query_row("SELECT withdrawn_at FROM changesets", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(at, None);
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 99;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

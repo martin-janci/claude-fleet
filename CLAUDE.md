@@ -456,8 +456,10 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   `rejected_rollouts` orders by it. Slug collisions in a Bootstrap card
   (per destination catalog, kind and slug) need a look; `changesets::list`
   computes undoability once (`undoable_ids`); the pass prunes an untouched
-  withdrawn card once it is older than a week, counted from its creation,
-  not its withdrawal (`WITHDRAWN_RETENTION_SECS`); `last_sync`
+  withdrawn card a week after its withdrawal (`WITHDRAWN_RETENTION_SECS`;
+  migration 099 stamps `changesets.withdrawn_at`, cards withdrawn earlier
+  fall back to `created_at`); a New card whose slug another candidate or
+  the catalog holds needs a look; `last_sync`
   prefers a person's run. `list_assets` takes an opt-in `all_catalogs`
   (default personal-only, as before, for every caller; with it, every
   loaded catalog — `AssetSummary.catalog`, host states per catalog — for

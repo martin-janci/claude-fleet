@@ -2455,6 +2455,7 @@ mod filter_tests {
             commits: None,
             layers_snapshot: None,
             error: None,
+            withdrawn_at: None,
         };
         let sync = |card: i64, state: &str, decided_at: Option<i64>| ChangesetItemRow {
             changeset_id: card,

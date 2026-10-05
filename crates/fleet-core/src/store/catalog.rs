@@ -226,12 +226,17 @@ impl Store {
         // (the spec's DDL), so the cards that name this catalog let go of it
         // first: open ones are withdrawn, applied ones keep their history.
         tx.execute(
-            "UPDATE changesets SET state = 'dismissed', error = ?2 \
+            "UPDATE changesets SET state = 'dismissed', error = ?2, withdrawn_at = ?3 \
              WHERE state IN ('proposed', 'failed') \
                AND id IN (SELECT changeset_id FROM changeset_items WHERE catalog_id = ?1)",
             rusqlite::params![
                 row.id,
-                format!("withdrawn: catalog {} was removed", row.name)
+                format!(
+                    "{} catalog {} was removed",
+                    crate::service::catalog::changesets::WITHDRAWN_PREFIX,
+                    row.name
+                ),
+                now_unix()
             ],
         )?;
         tx.execute(

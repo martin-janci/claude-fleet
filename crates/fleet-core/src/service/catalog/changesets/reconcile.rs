@@ -14,6 +14,7 @@ use super::{
 };
 use crate::ipc_error::{lock, IpcError};
 use crate::service::catalog::identity::{self, AssetIdentity, IdentityClass};
+use crate::service::catalog::import::slugify;
 use crate::service::catalog::repo::Catalog;
 use crate::service::catalog::{effective, registry};
 use crate::service::settings;
@@ -42,8 +43,8 @@ pub struct ReconcileReport {
 /// The error a withdrawn card carries (R2).
 pub const WITHDRAWN: &str = "withdrawn: no longer applies";
 
-/// Assets M5 (R9): how long a card the system withdrew, untouched, is kept
-/// before the pass prunes it.
+/// Assets M5 (R9), M6 (R3): how long a card the system withdrew, untouched,
+/// is kept before the pass prunes it — a week after it was withdrawn.
 pub const WITHDRAWN_RETENTION_SECS: i64 = 7 * 24 * 3600;
 
 type OpenCard = (ChangesetRow, Vec<ChangesetItemRow>);
@@ -377,6 +378,14 @@ fn catalog_facts(
         org_id: row.org_id,
         loaded: entry.is_some_and(|c| c.load_error.is_none()),
         asset_count: entry.map_or(0, |c| c.assets.len()),
+        slugs: entry
+            .map(|c| {
+                c.assets
+                    .iter()
+                    .map(|a| (a.kind().as_str().to_string(), slugify(&a.header.name)))
+                    .collect()
+            })
+            .unwrap_or_default(),
         layers: entry
             .map(|c| {
                 c.layers
@@ -1016,6 +1025,7 @@ mod tests {
             loaded: true,
             asset_count: 3,
             layers: vec![],
+            slugs: BTreeSet::new(),
         }];
         let mut rows = vec![
             unmanaged("oci", "a"),
@@ -1184,7 +1194,7 @@ mod tests {
             .unwrap()
             .conn_ref()
             .execute(
-                "UPDATE changesets SET created_at = ?2 WHERE id = ?1",
+                "UPDATE changesets SET withdrawn_at = ?2 WHERE id = ?1",
                 rusqlite::params![card.id, now_unix() - WITHDRAWN_RETENTION_SECS - 1],
             )
             .unwrap();

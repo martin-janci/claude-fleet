@@ -52,7 +52,7 @@
 use super::apply::{propose_follow_up, rollout_summary, stamp_gap_hashes};
 use super::{
     applied_catalogs, changes_catalog, is_open, later_card, ApplyGuard, CardKind, ChangesetView,
-    Decider, ItemAction, ItemParams, APPLY_LOCK,
+    Decider, ItemAction, ItemParams, APPLY_LOCK, WITHDRAWN_PREFIX,
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::import::slugify;
@@ -597,7 +597,7 @@ fn trim_follow_up(
     if gone.is_empty() {
         return Ok(());
     }
-    let withdrawn = format!("withdrawn: card #{card_id} was undone");
+    let withdrawn = format!("{WITHDRAWN_PREFIX} card #{card_id} was undone");
     for rollout in s.list_changesets()? {
         if rollout.kind != CardKind::Rollout.as_str() || !is_open(&rollout.state) {
             continue;

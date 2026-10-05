@@ -45,6 +45,8 @@ pub struct CatalogFacts {
     pub loaded: bool,
     pub asset_count: usize,
     pub layers: Vec<LayerFacts>,
+    /// Assets M6 (R4): `(kind, slug)` of every asset the catalog holds.
+    pub slugs: BTreeSet<(String, String)>,
 }
 
 /// A managed asset whose copy on a host differs from its catalog's.
@@ -171,11 +173,14 @@ pub fn propose(input: &RulesInput<'_>) -> Vec<ProposedCard> {
     if input.bootstrap_open || normal >= BOOTSTRAP_MIN || (!input.bootstrapped && normal > 0) {
         cards.extend(bootstrap_card(&eligible, input));
     } else {
+        // Assets M6 (R4, T3 M8): two new names that import as one slug both
+        // need a look, as in a Bootstrap card.
+        let collides = slug_collisions(&eligible, input);
         for id in &eligible {
             if is_internal(id) && input.auto {
                 continue;
             }
-            cards.push(new_card(id, input));
+            cards.push(new_card(id, input, &collides));
         }
     }
     cards.extend(drift_cards(input, &held));
@@ -405,7 +410,7 @@ fn importable(id: &AssetIdentity, input: &RulesInput<'_>) -> Option<(i64, String
     Some((destination(id, input).ok()?, source_host(id)?))
 }
 
-/// Assets M5 (R7, PF18): the identities a Bootstrap card would import whose
+/// Assets M5 (R7, PF18), M6 (R4): the identities a Bootstrap or New card would import whose
 /// slug another of a different name shares in the SAME destination catalog
 /// (`My_Skill` and `my-skill` both import as `my-skill`) → why, keyed by
 /// `(kind, name)`. One import would create the slug and the other's group
@@ -651,7 +656,11 @@ fn layer_for(id: &AssetIdentity, dest: i64, input: &RulesInput<'_>) -> Option<St
         .map(|l| l.name.clone())
 }
 
-fn new_card(id: &AssetIdentity, input: &RulesInput<'_>) -> ProposedCard {
+fn new_card(
+    id: &AssetIdentity,
+    input: &RulesInput<'_>,
+    collides: &BTreeMap<(String, String), String>,
+) -> ProposedCard {
     let on = id.signature.replace(',', ", ");
     if is_internal(id) {
         return ProposedCard {
@@ -661,6 +670,27 @@ fn new_card(id: &AssetIdentity, input: &RulesInput<'_>) -> ProposedCard {
         };
     }
     if id.class == IdentityClass::Normal {
+        // Assets M6 (R4): a slug another candidate or the destination
+        // catalog already holds would fail at apply.
+        if let Ok(dest) = destination(id, input) {
+            let slug = slugify(&id.name);
+            let why = collides
+                .get(&(id.kind.clone(), id.name.clone()))
+                .cloned()
+                .or_else(|| {
+                    catalog(input, dest)
+                        .filter(|c| c.slugs.contains(&(id.kind.clone(), slug.clone())))
+                        .filter(|_| slug != id.name)
+                        .map(|_| format!("imports as {slug}, which the catalog already holds"))
+                });
+            if let Some(why) = why {
+                return ProposedCard {
+                    kind: CardKind::New,
+                    summary: format!("New on {on}: {}/{} needs a look", id.kind, id.name),
+                    items: vec![look_item_because(id, input, why)],
+                };
+            }
+        }
         if let (Ok(dest), Some(src)) = (destination(id, input), source_host(id)) {
             if let Some(layer) = layer_for(id, dest, input) {
                 let mut items = vec![import_item(
@@ -847,6 +877,7 @@ mod tests {
             loaded: true,
             asset_count: 0,
             layers: vec![],
+            slugs: BTreeSet::new(),
         }];
         if with_org_catalog {
             catalogs.push(CatalogFacts {
@@ -856,6 +887,7 @@ mod tests {
                 loaded: true,
                 asset_count: 0,
                 layers: vec![],
+                slugs: BTreeSet::new(),
             });
         }
         Facts {
@@ -1060,6 +1092,62 @@ mod tests {
         let lonely = cards.iter().find(|c| c.summary.contains("lonely")).unwrap();
         assert_eq!(lonely.items[0].grp, NEEDS_A_LOOK);
         assert!(lonely.summary.ends_with("needs a look"));
+    }
+
+    /// Assets M6 (R4, carry T3 M8): two new identities that import as the
+    /// same slug into the same catalog both need a look — never two New
+    /// cards, the second of which would fail at apply.
+    #[test]
+    fn two_new_identities_sharing_a_slug_both_need_a_look() {
+        let mut f = fleet(
+            false,
+            vec![
+                row("oci", "skill", "My_Skill", "h1"),
+                row("oci", "skill", "my-skill", "h2"),
+            ],
+        );
+        f.bootstrapped = true;
+        f.catalogs[0].asset_count = 10;
+        f.catalogs[0].layers = vec![LayerFacts {
+            name: "core".into(),
+            hosts: BTreeSet::from(["oci".to_string()]),
+        }];
+        let cards = propose(&f.input());
+        let news: Vec<_> = cards.iter().filter(|c| c.kind == CardKind::New).collect();
+        assert_eq!(news.len(), 2);
+        for c in news {
+            assert!(c.summary.ends_with("needs a look"), "{}", c.summary);
+            assert_eq!(c.items[0].grp, NEEDS_A_LOOK);
+            assert!(c.items[0]
+                .params
+                .reason
+                .as_deref()
+                .unwrap()
+                .starts_with("imports as my-skill, as "));
+        }
+    }
+
+    /// R4: a new identity whose slug the destination catalog already holds
+    /// under another name needs a look.
+    #[test]
+    fn a_new_identity_whose_slug_the_catalog_holds_needs_a_look() {
+        let mut f = fleet(false, vec![row("oci", "skill", "My_Skill", "h1")]);
+        f.bootstrapped = true;
+        f.catalogs[0].asset_count = 10;
+        f.catalogs[0].layers = vec![LayerFacts {
+            name: "core".into(),
+            hosts: BTreeSet::from(["oci".to_string()]),
+        }];
+        f.catalogs[0]
+            .slugs
+            .insert(("skill".into(), "my-skill".into()));
+        let cards = propose(&f.input());
+        let c = cards.iter().find(|c| c.kind == CardKind::New).unwrap();
+        assert!(c.summary.ends_with("needs a look"), "{}", c.summary);
+        assert_eq!(
+            c.items[0].params.reason.as_deref(),
+            Some("imports as my-skill, which the catalog already holds")
+        );
     }
 
     /// Spec: "Rules never re-propose a subject with a matching verdict until
