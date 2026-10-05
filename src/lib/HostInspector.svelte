@@ -6,8 +6,9 @@
   /** A host in the Inspector (spec, Workspace shell; R18): what it receives,
    *  and for every asset the layer that brought it and the catalog it came
    *  from ("skill/w — via layer core from personal"), then what the hub
-   *  refused and which catalogs it held back. It loads its own provenance. */
-  let { alias }: { alias: string } = $props();
+   *  refused and which catalogs it held back. It loads its own provenance,
+   *  again whenever `revision` changes (an admission toggled: final review I3). */
+  let { alias, revision = 0 }: { alias: string; revision?: number } = $props();
 
   const TABS = [{ id: 'effective', label: 'Effective' }] as const;
   let tab = $state<string>('effective');
@@ -17,6 +18,7 @@
 
   $effect(() => {
     const host = alias;
+    void revision;
     let stale = false;
     view = null;
     problem = null;

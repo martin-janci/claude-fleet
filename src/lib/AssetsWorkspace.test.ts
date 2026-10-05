@@ -1225,6 +1225,19 @@ describe('AssetsWorkspace hosts (R18)', () => {
     await waitFor(() => expect(screen.getByTestId('host-accept-oci-papayapos')).toHaveAttribute('aria-pressed', 'true'));
   });
 
+  it('toggling an admission for the selected host re-reads its provenance', async () => {
+    hubAnswers([st('personal'), { ...PAPAYA, admitted: ['local', 'oci'] }]);
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    await fireEvent.click(screen.getByTestId('host-row-oci'));
+    await screen.findByTestId('host-prov-line-skill/w');
+    expect(cardCalls('catalog_host_provenance')).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('host-accept-oci-papayapos'));
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'oci now receives papayapos')).toBe(true));
+    await waitFor(() => expect(cardCalls('catalog_host_provenance')).toHaveLength(2));
+    expect(cardCalls('catalog_host_provenance')[1][1]).toEqual({ args: { host_alias: 'oci' } });
+  });
+
   it('unadmitting says the host keeps what it has', async () => {
     hubAnswers([st('personal'), { ...PAPAYA, admitted: [] }]);
     render(AssetsWorkspace, handlers());

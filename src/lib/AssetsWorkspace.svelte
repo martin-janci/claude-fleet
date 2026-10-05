@@ -362,6 +362,8 @@
   // ── Hosts (R18): the admission toggles ─────────────────────────────────
   const orgName = (id: number | null) => (id === null ? null : ($orgs.find((o) => o.id === id)?.name ?? `org ${id}`));
   const selectedHost = $derived(selection?.type === 'host' ? selection.alias : null);
+  /** Bumped after an admission changes: the Host Inspector re-reads what the host receives. */
+  let hostRevision = $state(0);
   /** Admit or unadmit a catalog for a host; then re-read the catalogs (their
    *  `admitted` lists) and the layers. Unadmitting leaves what is installed. */
   async function toggleAdmission(host: string, catalogName: string, on: boolean) {
@@ -383,6 +385,7 @@
       pushError(r.error, 'Admission');
       return;
     }
+    hostRevision += 1;
     push({
       kind: 'info',
       message: on ? `${host} now receives ${catalogName}` : `${host} no longer receives ${catalogName}; what is installed stays until you remove it`,
@@ -732,7 +735,7 @@
         />
       {/key}
     {:else if selectedHost && view === 'hosts'}
-      {#key selectedHost}<HostInspector alias={selectedHost} />{/key}
+      {#key selectedHost}<HostInspector alias={selectedHost} revision={hostRevision} />{/key}
     {:else}
     <AssetInspector
       {selectedKey}
