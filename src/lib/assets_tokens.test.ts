@@ -13,6 +13,7 @@ const GUARDED = [
   'SyncPlanDialog.svelte',
   'HostStrip.svelte',
   'Badge.svelte',
+  'IdentityRow.svelte',
 ];
 
 const styleOf = (src: string) => src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { groupByKind, stateCounts, identitiesOf, hostOrder, oddHosts, catalogOf, type AssetListing, type AssetIdentity, type AssetSummary } from './assets';
-  import HostStrip from './HostStrip.svelte';
+  import { groupByKind, stateCounts, identitiesOf, hostOrder, catalogOf, type AssetListing, type AssetIdentity, type AssetSummary } from './assets';
   import Badge from './Badge.svelte';
+  import IdentityRow from './IdentityRow.svelte';
 
   let {
     listing,
@@ -79,15 +79,7 @@
   {#if visible.length > 0 || hiddenCount > 0}
     <div class="group-header">On hosts, not in catalog <span class="count">{visible.length}</span></div>
     {#each visible as i (`${i.kind}:${i.name}`)}
-      <div class="row unmanaged" data-testid={`identity-row-${i.kind}-${i.name}`}>
-        <span class="name">{i.name}</span>
-        <span class="meta">{i.kind}</span>
-        {#if i.class === 'needs_person'}<Badge tone="warn" label={i.reason ?? 'needs a person'} title={i.reason ?? ''} />{/if}
-        <HostStrip {order} present={[...new Set(i.hosts.map((h) => h.host_alias))]} odd={oddHosts(i)} />
-        {#if !readonly && !internal(i)}
-          <button class="link" onclick={() => onimport(i)} title="Import this asset">Import</button>
-        {/if}
-      </div>
+      <IdentityRow identity={i} {order} {readonly} {onimport} testid={`identity-row-${i.kind}-${i.name}`} />
     {/each}
     {#if hiddenCount > 0}
       <button class="link toggle" onclick={() => (showInternals = !showInternals)}>
