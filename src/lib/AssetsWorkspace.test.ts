@@ -577,6 +577,17 @@ describe('AssetsWorkspace plan view (R15, R16)', () => {
       }
     });
 
+    it('an asset selected from outside (the quick switcher) leaves the review and shows the Library', async () => {
+      withCards([ROLLOUT_CARD, ROLLOUT_VIEW]);
+      answerPlans();
+      const { rerender } = render(AssetsWorkspace, { ...handlers(), selectedKey: 'card:11' });
+      await fireEvent.click(screen.getByTestId('card-review-11'));
+      await screen.findByTestId('sync-plan-view');
+      await rerender({ ...handlers(), selectedKey: 'asset:personal:skill/edited', view: 'library' });
+      await waitFor(() => expect(screen.queryByTestId('sync-plan-view')).toBeNull());
+      expect(screen.getByTestId('asset-row-skill-edited')).toBeTruthy();
+    });
+
     it('a host whose plan failed is reported and the rest are still shown', async () => {
       withCards([ROLLOUT_CARD, ROLLOUT_VIEW]);
       answerPlans('htz');

@@ -5,6 +5,7 @@
 // through these stores instead of prop-drilling. Same pattern as
 // `new_session_request.ts`.
 import { writable } from 'svelte/store';
+import type { AssetsCommand } from './quick_switcher';
 
 export interface HostsViewRequest {
   /** Host alias to preselect; `null` lets App pick (selected session's host,
@@ -20,6 +21,24 @@ export const hostsViewOpen = writable(false);
 
 export function requestHostsView(host: string | null = null): void {
   hostsViewRequest.set({ host });
+}
+
+/** A pending "open the Assets view" request (the quick switcher's asset and
+ *  command rows, Assets M6 R19): App opens the overlay, `AssetsPanel` takes
+ *  it, selects `select` (a workspace row key) or runs `command`, and clears
+ *  it. It outlives the panel's mount: the panel mounts only while the
+ *  overlay is open, so a request set first is read on mount. `at` makes two
+ *  identical requests distinct. */
+export interface AssetsViewRequest {
+  select?: string;
+  command?: AssetsCommand;
+  at: number;
+}
+
+export const assetsViewRequest = writable<AssetsViewRequest | null>(null);
+
+export function requestAssetsView(r: Omit<AssetsViewRequest, 'at'>): void {
+  assetsViewRequest.set({ ...r, at: Date.now() });
 }
 
 // "Close the Hosts view" — the flip side of `onSessionOpened` in

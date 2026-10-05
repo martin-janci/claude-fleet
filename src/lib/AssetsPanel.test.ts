@@ -1,5 +1,6 @@
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { get } from 'svelte/store';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -7,6 +8,9 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AssetsPanel from './AssetsPanel.svelte';
 import { catalog, catalogConfig, inventory, lastSyncRun, repoStatusStore } from './assets';
 import { hosts } from './hosts';
+import { hubStatus, STANDALONE } from './hub';
+import { assetsViewRequest, requestAssetsView } from './app_views';
+import { toasts } from './toasts';
 import { authorSessionOpened, clearAuthorSessionOpened } from './AuthorSessionDialog.svelte';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -737,5 +741,173 @@ describe('AssetsPanel authoring', () => {
     await rerender({ visible: true });
 
     expect(invoke).not.toHaveBeenCalledWith('catalog_load', expect.anything());
+  });
+});
+
+// ── Requests from the QuickSwitcher (Assets M6, R19) ──────────────────────
+describe('AssetsPanel switcher requests', () => {
+  const config = { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 };
+  const base = {
+    catalog_config: config,
+    catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+    catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: null,
+    catalog_repo_status: { head: 'h', dirty: 0, ahead: null, behind: null, has_upstream: false },
+    catalog_list_changesets: [],
+    catalog_get_asset: {
+      asset: { kind: 'skill', name: 'worktree', version: '1', description: 'Make one.', tags: [], body: '# b' },
+      previews: [], hosts: [],
+    },
+  };
+  const calls = (cmd: string) => invoke.mock.calls.filter((c) => c[0] === cmd);
+  const WORKTREE = 'asset:personal:skill/worktree';
+
+  beforeEach(() => {
+    hubStatus.set(STANDALONE);
+    assetsViewRequest.set(null);
+  });
+  afterEach(() => {
+    hubStatus.set(STANDALONE);
+    assetsViewRequest.set(null);
+  });
+
+  it('a select request made before the panel mounts selects the row, in the Library', async () => {
+    byCmd(base);
+    requestAssetsView({ select: WORKTREE });
+    render(AssetsPanel, { visible: true });
+    expect((await screen.findByTestId('asset-detail-title')).textContent).toContain('worktree');
+    // The row is in the Library, not the Inbox it started on.
+    expect(screen.getByTestId('asset-row-skill-worktree')).toBeTruthy();
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+  });
+
+  it('a select request while the panel is open moves from another view to the row', async () => {
+    byCmd(base);
+    render(AssetsPanel, { visible: true });
+    await openLayers();
+    expect(screen.queryByTestId('asset-row-skill-worktree')).toBeNull();
+    requestAssetsView({ select: WORKTREE });
+    expect((await screen.findByTestId('asset-detail-title')).textContent).toContain('worktree');
+    expect(screen.getByTestId('asset-row-skill-worktree')).toBeTruthy();
+    expect(get(assetsViewRequest)).toBeNull();
+  });
+
+  it('the workspace keeps its keys after a select request: j moves the focus on from the selected row', async () => {
+    byCmd(base);
+    requestAssetsView({ select: WORKTREE });
+    render(AssetsPanel, { visible: true });
+    await screen.findByTestId('asset-detail-title');
+    const row = screen.getByTestId('asset-row-skill-worktree');
+    expect(row.getAttribute('aria-current')).toBe('true');
+    // The list has the keyboard once the Library is shown, as for any open.
+    await waitFor(() => expect(document.activeElement && screen.getByTestId('assets-workspace').contains(document.activeElement)).toBe(true));
+    await fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'j' });
+    expect((document.activeElement as HTMLElement).getAttribute('data-row-key')).toBe('asset:personal:mcp_server/fleet');
+    // Focus moved; the selection stays until Enter.
+    expect(screen.getByTestId('asset-row-skill-worktree').getAttribute('aria-current')).toBe('true');
+  });
+
+  it('a rescan request runs the scan once and is cleared', async () => {
+    byCmd({ ...base, assets_scan_hosts: [{ host: 'local', status: 'scanned', detail: null, rows: 3 }] });
+    requestAssetsView({ command: 'rescan' });
+    render(AssetsPanel, { visible: true });
+    expect(await screen.findByTestId('assets-scan-result')).toBeTruthy();
+    expect(calls('assets_scan_hosts')).toHaveLength(1);
+    expect(get(assetsViewRequest)).toBeNull();
+    await tick();
+    expect(calls('assets_scan_hosts')).toHaveLength(1);
+  });
+
+  it('a sync request plans the whole fleet and opens the plan view', async () => {
+    byCmd({ ...base, catalog_plan_sync: { id: 'plan-1', computed_at: 1, hosts: [], counts: {} } });
+    requestAssetsView({ command: 'sync' });
+    render(AssetsPanel, { visible: true });
+    expect(await screen.findByTestId('plan-back')).toBeTruthy();
+    expect(calls('catalog_plan_sync')).toHaveLength(1);
+    expect(calls('catalog_plan_sync')[0][1]).toEqual({ args: { host_alias: null, kind: null, name: null, allow_unlayered: false } });
+    expect(get(assetsViewRequest)).toBeNull();
+  });
+
+  it('a propose request proposes, reloads the cards and shows the Inbox', async () => {
+    byCmd({ ...base, catalog_propose_changesets: [] });
+    render(AssetsPanel, { visible: true });
+    await openLibrary();
+    expect(screen.queryByTestId('assets-inbox')).toBeNull();
+    invoke.mockClear();
+    requestAssetsView({ command: 'propose' });
+    expect(await screen.findByTestId('assets-inbox')).toBeTruthy();
+    expect(calls('catalog_propose_changesets')).toHaveLength(1);
+    expect(calls('catalog_list_changesets').length).toBeGreaterThan(0);
+    expect(get(assetsViewRequest)).toBeNull();
+  });
+
+  it('a refused propose names the reason and keeps the view', async () => {
+    byCmd({ ...base, catalog_propose_changesets: { code: 'E_FORBIDDEN', message: 'no grant' } });
+    render(AssetsPanel, { visible: true });
+    await openLibrary();
+    requestAssetsView({ command: 'propose' });
+    await waitFor(() => expect(calls('catalog_propose_changesets')).toHaveLength(1));
+    await waitFor(() => expect(get(toasts).some((t) => t.message.includes('no grant'))).toBe(true));
+    expect(screen.queryByTestId('assets-inbox')).toBeNull();
+  });
+
+  it('a command does nothing while the panel is busy', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_plan_sync') return new Promise(() => {});
+      if (cmd in base) return (base as Record<string, unknown>)[cmd];
+      throw { code: 'E_TEST', message: `unexpected ${cmd}` };
+    });
+    render(AssetsPanel, { visible: true });
+    await screen.findByTestId('assets-sync');
+    requestAssetsView({ command: 'sync' });
+    await waitFor(() => expect(calls('catalog_plan_sync')).toHaveLength(1));
+    // The plan is still computing: a rescan must not start on top of it.
+    requestAssetsView({ command: 'rescan' });
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+    expect(calls('assets_scan_hosts')).toHaveLength(0);
+  });
+
+  it('a hub client without the grant: rescan, sync and propose do nothing and are cleared', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, client_name: 'desk', client_mode: 'full' });
+    byCmd({
+      catalog_config: { code: 'E_FORBIDDEN', message: 'not granted' },
+      catalog_list_assets: listing, assets_inventory: [], catalog_list_changesets: [], catalog_list_catalogs: [],
+    });
+    render(AssetsPanel, { visible: true });
+    for (const command of ['rescan', 'sync', 'propose'] as const) {
+      requestAssetsView({ command });
+      await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+    }
+    // The request waited for the grant probe, then was dropped.
+    expect(calls('catalog_config')).toHaveLength(1);
+    expect(await screen.findByTestId('assets-workspace')).toBeTruthy();
+    expect(calls('assets_scan_hosts')).toHaveLength(0);
+    expect(calls('catalog_plan_sync')).toHaveLength(0);
+    expect(calls('catalog_propose_changesets')).toHaveLength(0);
+  });
+
+  it('a hub client without the grant can still select a row', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, client_name: 'desk', client_mode: 'full' });
+    byCmd({
+      catalog_config: { code: 'E_FORBIDDEN', message: 'not granted' },
+      catalog_list_assets: listing, assets_inventory: [], catalog_list_changesets: [], catalog_list_catalogs: [],
+    });
+    requestAssetsView({ select: WORKTREE });
+    render(AssetsPanel, { visible: true });
+    expect(await screen.findByTestId('asset-row-skill-worktree')).toBeTruthy();
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
+  });
+
+  it('a request still waiting when the panel goes away is dropped, not run at the next open', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_config') return new Promise(() => {});
+      throw { code: 'E_TEST', message: cmd };
+    });
+    requestAssetsView({ command: 'rescan' });
+    const { unmount } = render(AssetsPanel, { visible: true });
+    await tick(); await tick();
+    expect(get(assetsViewRequest)).not.toBeNull();
+    unmount();
+    expect(get(assetsViewRequest)).toBeNull();
+    expect(calls('assets_scan_hosts')).toHaveLength(0);
   });
 });

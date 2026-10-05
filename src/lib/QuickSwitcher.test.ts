@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 import QuickSwitcher from './QuickSwitcher.svelte';
@@ -8,6 +8,8 @@ import { projects } from './projects';
 import { selectedSession, clearSelection } from './selection';
 import { newSessionRequest, clearNewSessionRequest } from './new_session_request';
 import { recentSessions } from './quick_switcher';
+import { assetsViewRequest } from './app_views';
+import { catalog } from './assets';
 
 function sess(over: Partial<SessionRow> & { id: number }): SessionRow {
   return {
@@ -218,12 +220,12 @@ describe('QuickSwitcher', () => {
     await fireEvent.keyDown(input, { key: 'ArrowUp' });
     await fireEvent.keyDown(input, { key: 'ArrowUp' });
     await tick();
-    // Wrapped past the top to the last row (the project row).
-    expect(document.querySelector('.row.active')?.getAttribute('data-key')).toBe('project:1');
+    // Wrapped past the top to the last row (the last command row; commands rank after projects).
+    expect(document.querySelector('.row.active')?.getAttribute('data-key')).toBe('command:propose');
     await tick();
     await Promise.resolve();
     expect(scrolled).toContain('session:38');
-    expect(scrolled[scrolled.length - 1]).toBe('project:1');
+    expect(scrolled[scrolled.length - 1]).toBe('command:propose');
     // @ts-expect-error restore jsdom default (undefined)
     delete Element.prototype.scrollIntoView;
   });
@@ -391,5 +393,58 @@ describe('QuickSwitcher tickets', () => {
     await fireEvent.input(input, { target: { value: 'https://acme.atlassian.net/browse/ABC-77' } });
     await tick();
     expect(screen.getByTestId('switcher-lookup')).toBeTruthy();
+  });
+});
+
+describe('QuickSwitcher assets and commands', () => {
+  const listing = {
+    head: null, loaded_at: null, unmanaged: [], problems: [],
+    assets: [
+      { kind: 'skill', name: 'zebra-wrangler', version: '1', description: 'Tame the stripes', tags: [], hosts: [], catalog: 'acme' },
+    ],
+  } as never;
+  beforeEach(() => {
+    assetsViewRequest.set(null);
+    catalog.set(listing);
+  });
+  afterEach(() => catalog.set(null));
+
+  it('typing an asset name lists it under Assets, and picking it requests the Assets view with it selected', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'zebra' } });
+    await tick();
+    const row = screen.getByTestId('switcher-asset');
+    expect(row.getAttribute('data-key')).toBe('asset:acme:skill/zebra-wrangler');
+    expect(screen.getByText('Assets', { selector: '.group, .group *' })).toBeTruthy();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(assetsViewRequest)).toMatchObject({ select: 'asset:acme:skill/zebra-wrangler' });
+    expect(get(assetsViewRequest)?.command).toBeUndefined();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('picking Sync fleet requests the command', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await fireEvent.input(input, { target: { value: 'sync' } });
+    await tick();
+    expect(screen.getByText('Commands', { selector: '.group, .group *' })).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('switcher-command'));
+    await tick();
+    expect(get(assetsViewRequest)).toMatchObject({ command: 'sync' });
+    expect(get(assetsViewRequest)?.select).toBeUndefined();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('the three commands are listed with an empty query, below sessions and projects', async () => {
+    render(QuickSwitcher);
+    await openSwitcher();
+    expect(screen.getAllByTestId('switcher-command').map((e) => e.getAttribute('data-key'))).toEqual([
+      'command:rescan', 'command:sync', 'command:propose',
+    ]);
+    const kinds = Array.from(document.querySelectorAll('[data-testid^="switcher-"][data-key]')).map((e) => e.getAttribute('data-key')!.split(':')[0]);
+    expect(kinds.lastIndexOf('session')).toBeLessThan(kinds.indexOf('asset'));
+    expect(kinds.lastIndexOf('asset')).toBeLessThan(kinds.indexOf('command'));
   });
 });

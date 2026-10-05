@@ -54,6 +54,7 @@
   import { selectedSession, restoreLastSession, selectSessionExplicitly, onSessionOpened } from './lib/selection';
   import {
     appChord,
+    assetsViewRequest,
     hostsChordLabel,
     hostsViewOpen,
     hostsViewRequest,
@@ -561,6 +562,13 @@
     if (!req) return;
     hostsViewRequest.set(null);
     untrack(() => openHosts(req.host));
+  });
+
+  // The quick switcher's asset and command rows (Assets M6, R19): open the
+  // Assets overlay. The request is left set: AssetsPanel takes it, also when
+  // it mounts only because of this.
+  $effect(() => {
+    if ($assetsViewRequest) untrack(showAssets);
   });
 
   // A path clicked in the Conversation tab: show Files for that session

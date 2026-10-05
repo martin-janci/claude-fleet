@@ -49,6 +49,7 @@
     importBlocked = null,
     failed,
     selectedKey = $bindable(null),
+    view = $bindable('inbox'),
     autoEditKey = '',
     plan = null,
     planFilter = {},
@@ -81,6 +82,8 @@
     /** Shown in the list area instead of the list (a failed load). */
     failed?: Snippet;
     selectedKey?: string | null;
+    /** The rail's view; bound so `AssetsPanel` can show a requested row. */
+    view?: WorkspaceView;
     /** A just-created asset's key: the Inspector opens it in Source, editing. */
     autoEditKey?: string;
     /** An open sync plan: it takes the main column until it is closed (Back, Esc). */
@@ -105,7 +108,6 @@
   } = $props();
 
 
-  let view = $state<WorkspaceView>('inbox');
   let queryText = $state('');
   let showProblems = $state(false);
   let showGrant = $state(false);
@@ -191,6 +193,11 @@
     review = null;
     selectedKey = key;
   }
+  // An asset selected from outside (the quick switcher) leaves a Rollout
+  // review, which would otherwise keep covering the list it is in.
+  $effect(() => {
+    if (selection?.type === 'asset') untrack(() => (review = null));
+  });
 
   // ── The sync plan and the Rollout review take the main column ──────────
   /** A Rollout card's plan, read-only: each pending host planned host-scoped

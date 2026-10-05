@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
+import { get } from 'svelte/store';
 import {
+  assetsViewRequest,
+  requestAssetsView,
   appChord,
   hostsChordLabel,
   sessionViewChordLabel,
@@ -109,5 +112,21 @@ describe('the Work-view chord (work graph M14)', () => {
       expect(appChord(ev(k, { metaKey: true, shiftKey: true }), true)).not.toBe('work-view');
       expect(appChord(ev(k.toUpperCase(), { ctrlKey: true, shiftKey: true }), false)).not.toBe('work-view');
     }
+  });
+});
+
+describe('requestAssetsView', () => {
+  beforeEach(() => assetsViewRequest.set(null));
+
+  it('sets the request with a timestamp', () => {
+    expect(get(assetsViewRequest)).toBeNull();
+    requestAssetsView({ select: 'asset:personal:skill/w' });
+    expect(get(assetsViewRequest)).toMatchObject({ select: 'asset:personal:skill/w' });
+    expect(typeof get(assetsViewRequest)!.at).toBe('number');
+  });
+
+  it('carries a command', () => {
+    requestAssetsView({ command: 'sync' });
+    expect(get(assetsViewRequest)).toMatchObject({ command: 'sync' });
   });
 });

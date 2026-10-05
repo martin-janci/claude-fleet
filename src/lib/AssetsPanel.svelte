@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import {
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
@@ -8,7 +8,13 @@
     type HostScanResult, type SyncPlan, type SyncRunSummary, type AssetKind, type AssetIdentity,
   } from './assets';
   import AssetsWorkspace from './AssetsWorkspace.svelte';
-  import { catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL } from './assets_workspace';
+  import {
+    catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, isOpenCard, loadLayers, PERSONAL, proposeChangesets,
+    type WorkspaceView,
+  } from './assets_workspace';
+  import { olderHubWords } from './assets_cards';
+  import { assetsViewRequest, type AssetsViewRequest } from './app_views';
+  import { push, pushError } from './toasts';
   import { loadFleetSettings } from './fleet_settings';
   import type { IpcError } from './result';
   import ImportDialog from './ImportDialog.svelte';
@@ -43,6 +49,9 @@
   // The workspace's selection: one row key (`keyOf`), shared by every view
   // and the Inspector.
   let selectedKey = $state<string | null>(null);
+  // The workspace's view, bound so a switcher request can show the row it
+  // selects (`library`) or the cards it proposes (`inbox`).
+  let view = $state<WorkspaceView>('inbox');
   let syncPlan = $state<SyncPlan | null>(null);
   // The filter `syncPlan` was computed from, so the plan view's "Plan
   // anyway" (on a skipped-unlayered host) can re-plan with the same scope
@@ -189,17 +198,76 @@
     await loadOverview();
   }
 
+  // Whether this machine's own catalog config has been read (the fleet owner's
+  // path); a hub client settles through the grant probe instead.
+  let configRead = $state(false);
   onMount(async () => {
     // The footer's `auto: on|off`.
     void loadFleetSettings();
-    if (!ownsTheFleet($hubStatus)) return;
+    if (!ownsTheFleet($hubStatus)) { configRead = true; return; }
     const c = await loadCatalogConfig();
+    configRead = true;
     if (c.ok && c.value) {
       await reload(false);
       void repoStatus();
     }
     void lastSync();
   });
+
+  // ── A request from the quick switcher (Assets M6, R19) ──────────────────
+  // The panel mounts only while the overlay is open, so a request made first
+  // is read here on mount; it waits until the panel knows what this client
+  // may do (the grant probe, the config read), then is taken once. A request
+  // left over when the panel goes away is dropped, not run at the next open.
+  const settled = $derived(hubUnavailable !== null || (hubOverview ? hubAdmin === 'granted' || hubAdmin === 'denied' : configRead));
+  // The workspace is on screen: the full one, or the hub's read-only overview.
+  const workspaceShown = $derived(catalogBlocked ? hubOverview : !!$catalogConfig);
+  $effect(() => {
+    const r = $assetsViewRequest;
+    if (!r || !settled) return;
+    untrack(() => {
+      assetsViewRequest.set(null);
+      void runAssetsRequest(r);
+    });
+  });
+  onDestroy(() => assetsViewRequest.set(null));
+
+  async function runAssetsRequest(r: AssetsViewRequest) {
+    // An open sync plan covers the list; it yields to what was asked for,
+    // except mid-apply.
+    const clearPlan = () => { if (busy !== 'apply') syncPlan = null; };
+    if (r.select && workspaceShown) {
+      clearPlan();
+      view = 'library';
+      selectedKey = r.select;
+    }
+    // Rescan, Sync and Propose change things: a client without the grant (the
+    // read-only overview) or without a catalog, or a busy panel, does nothing.
+    if (!r.command || catalogBlocked || !$catalogConfig || busy !== '') return;
+    if (r.command === 'rescan') {
+      void scan();
+    } else if (r.command === 'sync') {
+      void requestSync({});
+    } else {
+      clearPlan();
+      await proposeCards();
+    }
+  }
+
+  /** "Propose cards": the hub derives its cards from the hosts as they are. */
+  async function proposeCards() {
+    const r = await proposeChangesets();
+    if (!r.ok) {
+      const older = olderHubWords(r.error, 'propose changes');
+      if (older) push({ kind: 'error', message: older });
+      else pushError(r.error, 'Propose');
+      return;
+    }
+    const loaded = await loadChangesets();
+    view = 'inbox';
+    const n = (loaded.ok ? loaded.value : r.value).filter(isOpenCard).length;
+    push({ kind: 'info', message: `Proposed: ${n} open cards` });
+  }
 
   // Tab-focus reload: a session delegated via "Open in session" edits the
   // catalog repo directly, outside any authoring command, so nothing else
@@ -372,6 +440,7 @@
         scanDisabled={overviewNotConfigured}
         failed={overviewLoad === 'failed' ? hubFailed : undefined}
         bind:selectedKey
+        bind:view
         onscan={scanOnHub}
         onsync={() => {}}
         onimport={() => {}}
@@ -411,6 +480,7 @@
       {importBlocked}
       failed={!$catalog && catalogLoad === 'failed' ? loadFailed : undefined}
       bind:selectedKey
+      bind:view
       autoEditKey={pendingAutoEdit}
       plan={syncPlan}
       planFilter={syncFilter}
