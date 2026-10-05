@@ -2,7 +2,7 @@
   import Badge from './Badge.svelte';
   import { opTone, outcomeTone } from './assets_visual';
   import { cardMayApply, cardOwns } from './assets_cards';
-  import { onMount } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { applySync, isDestructive, planSync, syncProgress, type SyncPlan, type SyncRunSummary } from './assets';
 
   /** A host plan skipped because the host has no layers assigned — the
@@ -54,8 +54,27 @@
 
   const review = $derived(mode === 'review');
   let backEl: HTMLButtonElement | undefined = $state();
-  // The view replaces the list, so the keyboard (Esc) must start inside it.
+  let rootEl: HTMLElement | undefined = $state();
+  // The view replaces the list, so the keyboard must start inside it.
   onMount(() => backEl?.focus());
+  /** Focus that fell out of the view (the clicked button was removed by a
+   *  re-plan, or disabled by an apply) returns to Back once it is enabled,
+   *  else to the view itself, so the keyboard is never stranded on `body`.
+   *  (The workspace also takes Esc from `body` while a plan is open.) */
+  async function refocus() {
+    await tick();
+    const a = document.activeElement as HTMLButtonElement | null;
+    // The view itself held focus only while Back was disabled.
+    if (a && a !== document.body && a.isConnected && !a.disabled && !(a === rootEl && backEl && !backEl.disabled)) return;
+    (backEl && !backEl.disabled ? backEl : rootEl)?.focus();
+  }
+
+  // A new plan (a re-plan swaps the host's header, and the clicked button
+  // with it) is a moment focus can fall out of the view.
+  $effect(() => {
+    void plan;
+    untrack(() => void refocus());
+  });
 
   let applying = $state(false);
   let forcePartial = $state(false);
@@ -73,8 +92,9 @@
     replanError = null;
     const r = await planSync({ ...filter, hostAlias, allowUnlayered: true });
     replanning = false;
-    if (!r.ok) { replanError = r.error.message; return; }
+    if (!r.ok) { replanError = r.error.message; void refocus(); return; }
     onreplanned?.(r.value);
+    void refocus();
   }
 
   /** What the view lists: in a review, only what the card owns. */
@@ -87,7 +107,14 @@
   const applicableCount = $derived(
     plan.hosts.reduce((n, h) => n + h.actions.filter((a) => a.op !== 'noop' && a.op !== 'blocked').length, 0),
   );
-  const countsEntries = $derived(Object.entries(plan.counts).filter(([, n]) => n > 0));
+  // A review counts what it shows (by op, noop left out, as the backend
+  // counts), not the whole host plans' counts.
+  const countsEntries = $derived.by((): [string, number][] => {
+    if (!(review && owned)) return Object.entries(plan.counts).filter(([, n]) => n > 0);
+    const m = new Map<string, number>();
+    for (const h of shownHosts) for (const a of h.actions) if (a.op !== 'noop') m.set(a.op, (m.get(a.op) ?? 0) + 1);
+    return [...m];
+  });
   const progress = $derived(applying && $syncProgress && $syncProgress.plan_id === plan.id ? $syncProgress : null);
 
   function outcomeFor(hostAlias: string, harness: string, kind: string, name: string): string | null {
@@ -100,6 +127,7 @@
     onapplying?.(true);
     error = null;
     controller = new AbortController();
+    void refocus();
     const r = await applySync(plan.id, forcePartial, controller.signal);
     applying = false;
     onapplying?.(false);
@@ -107,10 +135,12 @@
     if (!r.ok) {
       error = r.error.message;
       if (r.error.code === 'E_SECRET_MISSING') sawSecretMissing = true;
+      void refocus();
       return;
     }
     summary = r.value;
     onapplied?.(summary);
+    void refocus();
   }
 
   function cancelApply() {
@@ -118,7 +148,7 @@
   }
 </script>
 
-<section class="plan-view" aria-label="Sync plan" data-testid="sync-plan-view">
+<section class="plan-view" aria-label="Sync plan" data-testid="sync-plan-view" tabindex="-1" bind:this={rootEl}>
   <header class="line">
     <button type="button" class="btn btn--quiet" data-testid="plan-back" bind:this={backEl} disabled={applying} onclick={onclose}>← Back</button>
     <h2>{review ? 'Roll-out review' : 'Sync plan'}</h2>
@@ -133,8 +163,8 @@
     {#if countsEntries.length === 0}<span class="muted">Nothing to do.</span>{/if}
   </div>
 
-  {#if error}<p class="error" data-testid="plan-error">{error}</p>{/if}
-  {#if replanError}<p class="error" data-testid="plan-replan-error">{replanError}</p>{/if}
+  {#if error}<p class="error" role="alert" data-testid="plan-error">{error}</p>{/if}
+  {#if replanError}<p class="error" role="alert" data-testid="plan-replan-error">{replanError}</p>{/if}
 
   <div class="hosts">
     {#each shownHosts as h (h.host_alias + '::' + h.harness)}
@@ -228,7 +258,7 @@
 </section>
 
 <style>
-  .plan-view { display: flex; flex-direction: column; gap: 10px; padding: 10px 14px; min-height: 100%; box-sizing: border-box; }
+  .plan-view { outline: 0; display: flex; flex-direction: column; gap: 10px; padding: 10px 14px; min-height: 100%; box-sizing: border-box; }
   .line { display: flex; align-items: center; gap: 10px; }
   h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.005em; }
   .counts { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }

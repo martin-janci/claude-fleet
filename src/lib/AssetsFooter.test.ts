@@ -151,7 +151,7 @@ describe('AssetsFooter', () => {
       expect(live().getAttribute('aria-live')).toBe('polite');
       expect(live().textContent).toBe('');
     });
-    it('names the job and its progress, says Done. when it ends, and clears on the next job', async () => {
+    it('names the job and its progress, says Finished. when it ends, and clears on the next job', async () => {
       const { rerender } = render(AssetsFooter, { ...props, busy: 'scan' });
       expect(live().textContent).toBe('Scanning hosts…');
       await rerender({ ...props, busy: 'apply' });
@@ -159,7 +159,7 @@ describe('AssetsFooter', () => {
       syncProgress.set({ plan_id: 'p', host_alias: 'oci', harness: 'claude', done: 2, total: 5 });
       await waitFor(() => expect(live().textContent).toBe('Syncing 2 of 5 hosts…'));
       await rerender({ ...props, busy: '' });
-      await waitFor(() => expect(live().textContent).toBe('Done.'));
+      await waitFor(() => expect(live().textContent).toBe('Finished.'));
       await rerender({ ...props, busy: 'pull' });
       await waitFor(() => expect(live().textContent).toBe('Pulling…'));
     });

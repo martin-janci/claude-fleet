@@ -238,6 +238,7 @@ describe('SyncPlanView', () => {
 
     await waitFor(() => expect(screen.getByTestId('plan-error')).toBeTruthy());
     expect(screen.getByTestId('plan-error').textContent).toContain('missing secrets');
+    expect(screen.getByTestId('plan-error').getAttribute('role')).toBe('alert');
     expect(screen.getByTestId('plan-force-partial')).toBeTruthy();
     // The plan stays valid — Apply (now with force_partial) is one click away.
     expect(screen.getByTestId('plan-apply')).not.toBeDisabled();
@@ -276,6 +277,61 @@ describe('SyncPlanView as a view', () => {
   });
 });
 
+describe('focus stays in the view', () => {
+  const inView = () => screen.getByTestId('sync-plan-view').contains(document.activeElement);
+
+  it('after "Plan anyway" re-renders the host header (the clicked button is gone), focus is back on Back', async () => {
+    const skipped = hostPlan({ host_alias: 'oci', status: 'skipped', detail: 'no layers assigned: x' });
+    invoke.mockResolvedValue(plan([hostPlan({ host_alias: 'oci', actions: [action()] })], { create: 1 }));
+    const { rerender } = render(SyncPlanView, { plan: plan([skipped]), onclose: vi.fn(), onreplanned: () => {} });
+    const onreplanned = (p: SyncPlan) => void rerender({ plan: p, onclose: vi.fn(), onreplanned: () => {} });
+    await rerender({ plan: plan([skipped]), onclose: vi.fn(), onreplanned });
+    const btn = screen.getByTestId('plan-anyway-oci-claude');
+    btn.focus();
+    await fireEvent.click(btn);
+    await waitFor(() => expect(screen.queryByTestId('plan-anyway-oci-claude')).toBeNull());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('plan-back')));
+  });
+
+  it('while an apply runs focus is on the view itself (Apply and Back are disabled), and Back again once it settles', async () => {
+    let finish: (v: unknown) => void = () => {};
+    invoke.mockImplementation(() => new Promise((res) => { finish = res; }));
+    const p = plan([hostPlan({ actions: [action({ op: 'create' })] })], { create: 1 });
+    render(SyncPlanView, { plan: p, onclose: vi.fn(), onapplied: vi.fn() });
+    const apply = screen.getByTestId('plan-apply');
+    apply.focus();
+    await fireEvent.click(apply);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('sync-plan-view')));
+    finish({ plan_id: 'plan-1', started_at: 1, finished_at: 2, hosts: [] });
+    await waitFor(() => expect(screen.getByTestId('plan-apply')).toBeDisabled());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('plan-back')));
+    expect(inView()).toBe(true);
+  });
+
+  it('a failed apply returns focus to Back too', async () => {
+    invoke.mockRejectedValueOnce({ code: 'E_X', message: 'boom' });
+    const p = plan([hostPlan({ actions: [action({ op: 'create' })] })], { create: 1 });
+    render(SyncPlanView, { plan: p, onclose: vi.fn(), onapplied: vi.fn() });
+    screen.getByTestId('plan-apply').focus();
+    await fireEvent.click(screen.getByTestId('plan-apply'));
+    await waitFor(() => expect(screen.getByTestId('plan-error')).toBeTruthy());
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId('plan-back')));
+  });
+
+  it('does not take focus a person moved to another field', async () => {
+    invoke.mockResolvedValue(plan([hostPlan({ host_alias: 'oci', actions: [] })]));
+    const skipped = hostPlan({ host_alias: 'oci', status: 'skipped', detail: 'no layers assigned: x' });
+    render(SyncPlanView, { plan: plan([skipped]), onclose: vi.fn(), onreplanned: () => {} });
+    const other = document.createElement('input');
+    document.body.appendChild(other);
+    await fireEvent.click(screen.getByTestId('plan-anyway-oci-claude'));
+    other.focus();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).toBe(other);
+    other.remove();
+  });
+});
+
 describe('review mode (R15)', () => {
   const owned = { assets: new Set(['skill/w', 'skill/v']), catalogs: new Set(['personal']) };
   const reviewPlan = () => plan([hostPlan({ host_alias: 'oci', actions: [
@@ -295,6 +351,23 @@ describe('review mode (R15)', () => {
     expect(screen.queryByTestId('plan-action-oci-claude-skill-other')).toBeNull();
     expect(screen.getByTestId('plan-review-note')).toHaveTextContent('Roll out applies only');
     expect(screen.getByRole('heading', { name: 'Roll-out review' })).toBeTruthy();
+  });
+
+  it('counts what it shows, by op and without noop — not the whole host plans', () => {
+    const p = plan([hostPlan({ host_alias: 'oci', actions: [
+      action({ name: 'w', op: 'update', host_copy: 'unverified', catalog: 'personal' }),
+      action({ name: 'v', op: 'create', catalog: 'personal' }),
+      action({ name: 'n', op: 'noop', catalog: 'personal' }),
+      action({ name: 'other', op: 'create', catalog: 'personal' }),
+      action({ name: 'gone', op: 'remove', catalog: 'personal' }),
+    ] })], { update: 1, create: 2, remove: 1 });
+    render(SyncPlanView, { plan: p, mode: 'review', owned: { assets: new Set(['skill/w', 'skill/v', 'skill/n']), catalogs: new Set(['personal']) }, onclose: vi.fn() });
+    expect(Array.from(screen.getByTestId('plan-counts').querySelectorAll('.badge')).map((b) => b.textContent)).toEqual(['update: 1', 'create: 1']);
+  });
+
+  it('says so when the review shows nothing to do', () => {
+    render(SyncPlanView, { plan: reviewPlan(), mode: 'review', owned: { assets: new Set(['skill/zzz']), catalogs: new Set(['personal']) }, onclose: vi.fn() });
+    expect(screen.getByTestId('plan-counts')).toHaveTextContent('Nothing to do.');
   });
 
   it('holds an update over a copy the planner did not verify unchanged, an overwrite, and a remove', () => {

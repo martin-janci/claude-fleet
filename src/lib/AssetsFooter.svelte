@@ -71,7 +71,7 @@
   };
   // The persistent live region (R16): it is always in the DOM, so a screen
   // reader hears its text change. It names the job and its progress, says
-  // "Done." when the work ends, and clears when the next job starts.
+  // "Finished." when the work ends (neutral: a failure is announced by its own alert), and clears when the next job starts.
   const working = $derived(busy !== '' && !!JOB[busy]);
   const progressText = $derived(
     busy === 'apply' && $syncProgress && $syncProgress.total > 0 ? `Syncing ${$syncProgress.done} of ${$syncProgress.total} hosts…` : null,
@@ -86,7 +86,7 @@
       wasWorking = on;
     });
   });
-  const liveText = $derived(working ? (progressText ?? `${JOB[busy]}…`) : finished ? 'Done.' : '');
+  const liveText = $derived(working ? (progressText ?? `${JOB[busy]}…`) : finished ? 'Finished.' : '');
   const auto = $derived(settingBool($fleetSettings, SETTING_KEYS.catalogAuto));
   const blockedCount = $derived(blockedSecretKeys($lastSyncRun).length);
 </script>

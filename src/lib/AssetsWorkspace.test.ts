@@ -367,6 +367,55 @@ describe('AssetsWorkspace plan view (R15, R16)', () => {
     }
   });
 
+  it('Esc from body (focus fell out of the view) still closes only the plan', async () => {
+    const onplanclose = vi.fn();
+    const appEsc = vi.fn();
+    window.addEventListener('keydown', appEsc);
+    try {
+      render(AssetsWorkspace, { ...handlers(), plan: PLAN, onplanclose });
+      (document.activeElement as HTMLElement | null)?.blur();
+      expect(document.activeElement).toBe(document.body);
+      const ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      document.body.dispatchEvent(ev);
+      expect(onplanclose).toHaveBeenCalledTimes(1);
+      expect(ev.defaultPrevented).toBe(true);
+      expect(appEsc).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('keydown', appEsc);
+    }
+  });
+
+  it('Esc from body after a "Plan anyway" and after an apply keeps the overlay and closes the plan', async () => {
+    const unlayered: SyncPlan = { ...PLAN, hosts: [{ host_alias: 'oci', harness: 'claude', status: 'skipped', detail: 'no layers assigned: x', actions: [] }] };
+    const planned: SyncPlan = { ...PLAN, id: 'plan-2' };
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_plan_sync') return planned;
+      if (cmd === 'catalog_apply_sync') return { plan_id: 'plan-2', started_at: 1, finished_at: 2, hosts: [] };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    const appEsc = vi.fn();
+    window.addEventListener('keydown', appEsc);
+    try {
+      const onplanclose = vi.fn();
+      const { rerender } = render(AssetsWorkspace, { ...handlers(), plan: unlayered, onplanclose });
+      const props = (p: SyncPlan) => ({ ...handlers(), plan: p, onplanclose, onreplanned: (n: SyncPlan) => void rerender(props(n)) });
+      await rerender(props(unlayered));
+      screen.getByTestId('plan-anyway-oci-claude').focus();
+      await fireEvent.click(screen.getByTestId('plan-anyway-oci-claude'));
+      await waitFor(() => expect(screen.queryByTestId('plan-anyway-oci-claude')).toBeNull());
+      // Focus is back inside the view, and Esc from body is taken too.
+      await waitFor(() => expect(screen.getByTestId('sync-plan-view').contains(document.activeElement)).toBe(true));
+      await fireEvent.click(screen.getByTestId('plan-apply'));
+      await waitFor(() => expect(screen.getByTestId('plan-apply')).toBeDisabled());
+      await waitFor(() => expect(screen.getByTestId('sync-plan-view').contains(document.activeElement)).toBe(true));
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(onplanclose).toHaveBeenCalledTimes(1);
+      expect(appEsc).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('keydown', appEsc);
+    }
+  });
+
   it('with no plan open Esc is left to the App', async () => {
     const appEsc = vi.fn();
     window.addEventListener('keydown', appEsc);

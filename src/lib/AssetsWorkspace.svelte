@@ -221,6 +221,25 @@
     const aliases = new Set(p.hosts.map((h) => h.host_alias));
     review = { ...review, plan: mergePlans([{ ...review.plan, hosts: review.plan.hosts.filter((h) => !aliases.has(h.host_alias)) }, p]) };
   }
+  /** Esc closes only the plan, never the whole Assets overlay (the App
+   *  listens on `window`, in the bubble phase). It is taken here in the
+   *  capture phase, and also from `body`, so it holds even when focus fell
+   *  out of the view (a removed or disabled button). A field, a dialog and
+   *  anything outside the workspace (the agent panel) keep their own Esc. */
+  function onPlanEsc(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || e.defaultPrevented) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest?.('dialog,[role="dialog"]') || isEditable(t)) return;
+    if (t && t !== document.body && t !== document.documentElement && !rootEl?.contains(t)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void closePlan();
+  }
+  $effect(() => {
+    if (!visible || !planOpen) return;
+    window.addEventListener('keydown', onPlanEsc, true);
+    return () => window.removeEventListener('keydown', onPlanEsc, true);
+  });
   /** Back and Esc: close the plan or the review — not while an apply runs. */
   async function closePlan() {
     if (!planOpen || busy === 'apply') return;
@@ -304,17 +323,9 @@
     // PF10: a dialog (a modal or the catalog chip's popover) and a field
     // keep their keys.
     if (!visible || e.defaultPrevented || target?.closest?.('dialog,[role="dialog"]') || isEditable(target)) return;
-    // A plan or a review covers the list: its rows take no keys. Esc closes
-    // only the plan — the event stops here so the App does not also close the
-    // whole Assets overlay (it listens on `window`, after this).
-    if (planOpen) {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        e.stopPropagation();
-        void closePlan();
-      }
-      return;
-    }
+    // A plan or a review covers the list: its rows take no keys (Esc is
+    // taken by `onPlanEsc`, below).
+    if (planOpen) return;
     if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'Enter') {
       // The region's one primary (R18, R-C): the selected card's verb when
       // it applies (a review verb only selects, so there is nothing to run),
@@ -414,7 +425,8 @@
   $effect(() => {
     if (!visible || !listEl) return;
     untrack(() => {
-      if (!rootEl?.contains(document.activeElement)) listEl?.focus({ preventScroll: true });
+      // An open plan holds the keyboard, not the list behind it.
+      if (!rootEl?.contains(document.activeElement)) (rootEl?.querySelector<HTMLElement>('.plan-view') ?? listEl)?.focus({ preventScroll: true });
     });
   });
 </script>
