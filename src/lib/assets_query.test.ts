@@ -66,6 +66,7 @@ describe('completions', () => {
     expect(completions('host:local,', vocab)).toEqual(['host:local,oci']);
     expect(completions('', vocab)).toEqual([]);
     expect(completions('nope:x', vocab)).toEqual([]);
+    expect(completions('state:un', vocab)).toEqual(['state:unmanaged', 'state:unsupported']);
   });
   it('replaces only the fragment being typed', () => {
     expect(applyCompletion('kind:skill ho', 'host:')).toBe('kind:skill host:');

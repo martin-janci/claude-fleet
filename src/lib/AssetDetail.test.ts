@@ -88,4 +88,24 @@ describe('AssetDetail sections (Assets M5)', () => {
     expect(screen.queryByTestId('asset-detail-title')).toBeNull();
     expect(screen.queryByTestId('preview-file-path')).toBeNull();
   });
+
+  it('a drifted cell says which side moved (final review minor 2)', async () => {
+    byCmd({
+      catalog_get_asset: {
+        ...detail,
+        hosts: [
+          { host_alias: 'local', harness: 'claude', state: 'drifted', drift_side: 'host' },
+          { host_alias: 'oci', harness: 'claude', state: 'drifted', drift_side: 'catalog' },
+          { host_alias: 'gpu', harness: 'claude', state: 'drifted' },
+        ],
+      },
+    });
+    const up = (alias: string) => ({ alias, reachable: true }) as never;
+    render(AssetDetail, { kind: 'skill', name: 'w', hosts: [up('local'), up('oci'), up('gpu')], section: 'hosts' });
+    const local = await screen.findByTestId('matrix-cell-local-claude');
+    expect(local.textContent).toContain('drifted — edited on host');
+    expect(local.className).toContain('state-drifted');
+    expect(screen.getByTestId('matrix-cell-oci-claude').textContent).toContain('drifted — behind the catalog');
+    expect(screen.getByTestId('matrix-cell-gpu-claude').textContent).not.toContain('—');
+  });
 });

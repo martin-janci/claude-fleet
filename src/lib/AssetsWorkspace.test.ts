@@ -369,6 +369,27 @@ describe('AssetsWorkspace keyboard', () => {
     expect(await screen.findByTestId('editor-save')).toBeTruthy();
   });
 
+  it('e on the asset already being edited keeps the unsaved draft and only shows Source (final review I2)', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_get_asset') return { asset: { kind: 'skill', name: 'edited', version: '1', description: 'd', tags: [], body: '# b' }, previews: [], hosts: [] };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    const row = screen.getByTestId('inbox-row-asset:personal:skill/edited');
+    await fireEvent.click(row);
+    row.focus();
+    await fireEvent.keyDown(row, { key: 'e' });
+    const description = (await screen.findByTestId('editor-description')) as HTMLTextAreaElement;
+    await fireEvent.input(description, { target: { value: 'unsaved words' } });
+    await fireEvent.click(screen.getByTestId('inspector-tab-overview'));
+    row.focus();
+    await fireEvent.keyDown(row, { key: 'e' });
+    expect(screen.getByTestId('inspector-tab-source').getAttribute('aria-selected')).toBe('true');
+    const after = (await screen.findByTestId('editor-description')) as HTMLTextAreaElement;
+    expect(after).toBe(description);
+    expect(after.value).toBe('unsaved words');
+  });
+
   it('e and s leave an org catalog asset and an identity alone', async () => {
     catalog.set({
       ...listing,
@@ -486,7 +507,7 @@ describe('AssetsWorkspace keyboard', () => {
     document.addEventListener('keydown', outside);
     try {
       await fireEvent.keyDown(q, { key: 'Escape' }); // closes the completions
-      expect(screen.queryByTestId('assets-query-completions')).toBeNull();
+      expect(screen.getByTestId('assets-query-completions').hidden).toBe(true);
       expect(q.value).toBe('kind:');
       await fireEvent.keyDown(q, { key: 'Escape' }); // clears
       expect(q.value).toBe('');

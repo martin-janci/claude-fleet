@@ -6,6 +6,7 @@
   import AssetEditor from './AssetEditor.svelte';
   import AuthorSessionDialog from './AuthorSessionDialog.svelte';
   import { hubStatus, hubBlock } from './hub';
+  import { driftSideWords } from './assets_inbox';
 
   let {
     kind,
@@ -21,6 +22,9 @@
     section = 'all',
     /** Edit lives in Source: ask the Inspector to show it. */
     onsection,
+    /** Whether the editor is open, on mount and on every change (final
+     *  review I2: the Inspector's `e` must not re-create an open editor). */
+    onediting,
   }: {
     kind: string;
     name: string;
@@ -38,6 +42,7 @@
     startInEdit?: boolean;
     section?: 'all' | 'overview' | 'hosts' | 'source';
     onsection?: (s: 'source') => void;
+    onediting?: (editing: boolean) => void;
   } = $props();
 
   const show = (s: 'overview' | 'hosts' | 'source') => section === 'all' || section === s;
@@ -67,6 +72,10 @@
 
   // ── Edit ─────────────────────────────────────────────────────────────
   let editing = $state(untrack(() => startInEdit));
+  $effect.pre(() => {
+    const on = editing;
+    untrack(() => onediting?.(on));
+  });
   let lastCommit = $state<string | null>(null);
 
   function onSaved(result: WriteResult) {
@@ -151,6 +160,12 @@
     return s ? s.replace('_', ' ') : 'not scanned';
   }
 
+  /** Which side moved, for a drifted cell (final review, minor 2). */
+  function side(hostAlias: string, harness: string): string | null {
+    if (rawState(hostAlias, harness) !== 'drifted') return null;
+    return driftSideWords(detail?.hosts.find((h) => h.host_alias === hostAlias && h.harness === harness)?.drift_side);
+  }
+
   // `orphan` deliberately excluded: it only ever appears on an unmanaged
   // inventory row (AssetsPanel's "On hosts, not in catalog" list), never in
   // a catalog asset's own `hosts` — the array this component reads — so it
@@ -217,8 +232,9 @@
             {#each harnesses as h}
               {@const s = cell(host.alias, h)}
               {@const raw = rawState(host.alias, h)}
-              <td class={`state-${s.replace(' ', '-')}`} data-testid={`matrix-cell-${host.alias}-${h}`} title={s === 'skipped' ? 'host unreachable' : ''}>
-                {s}
+              {@const moved = side(host.alias, h)}
+              <td class={`state-${s.replace(' ', '-')}`} data-testid={`matrix-cell-${host.alias}-${h}`} title={s === 'skipped' ? 'host unreachable' : (moved ?? '')}>
+                {s}{#if moved}<span class="side">{` — ${moved}`}</span>{/if}
                 {#if raw && SYNCABLE_STATES.has(raw)}
                   <button class="cell-sync" onclick={() => requestSync(host.alias)} data-testid={`cell-sync-${host.alias}-${h}`}>Sync</button>
                 {/if}

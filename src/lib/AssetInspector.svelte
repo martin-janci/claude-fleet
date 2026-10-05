@@ -5,7 +5,7 @@
   import Badge from './Badge.svelte';
   import HostStrip from './HostStrip.svelte';
   import { identitiesOf, catalogOf, type AssetIdentity, type AssetListing, type AssetSummary } from './assets';
-  import { assetDots } from './assets_inbox';
+  import { assetDots, driftSideWords } from './assets_inbox';
   import type { HostRow } from './hosts';
   import { ago, assetHistory, parseKey, scopeBadge, type ChangesetSummary, type CommitEntry } from './assets_workspace';
   import type { IpcError } from './result';
@@ -79,18 +79,32 @@
   let pick = $state<Tab>('overview');
   // Open in Source, editing: a just-created asset, or `e` (a new nonce).
   // Decided BEFORE `AssetDetail` mounts (`$effect.pre`; PF1): the detail
-  // reads `startInEdit` once, when it is created.
+  // reads `startInEdit` once, when it is created, so `e` re-creates it
+  // (`mount`) — unless the detail already open for this very asset is
+  // editing: then `e` only shows Source, and the unsaved draft stays
+  // (final review I2).
   let editing = $state(false);
+  let mount = $state(0);
+  let detailEditing = false;
   let seenNonce = untrack(() => editNonce);
+  let seenKey = untrack(() => selectedKey);
   $effect.pre(() => {
     const key = selectedKey;
     const nonce = editNonce;
     const canEdit = full;
     untrack(() => {
-      const edit = (key !== null && key === autoEditKey) || nonce !== seenNonce;
+      const pressed = nonce !== seenNonce;
+      const sameAsset = key === seenKey;
       seenNonce = nonce;
+      seenKey = key;
+      if (pressed && sameAsset && detailEditing && canEdit) {
+        pick = 'source';
+        return;
+      }
+      const edit = (key !== null && key === autoEditKey) || pressed;
       editing = edit && canEdit;
       pick = editing ? 'source' : 'overview';
+      if (pressed) mount += 1;
     });
   });
   // The tab the person picked, unless this row has no such tab (a selection
@@ -130,7 +144,10 @@
   });
 
   const now = Math.floor(Date.now() / 1000);
-  const sideWords = (side?: string | null) => (side === 'host' ? ' — edited on the host' : side === 'catalog' ? ' — differs from the catalog' : '');
+  const sideWords = (side?: string | null) => {
+    const w = driftSideWords(side);
+    return w ? ` — ${w}` : '';
+  };
   const kindWord = (k: string) => k.replace('_', ' ');
   const title = $derived(asset?.name ?? identity?.name ?? orphanRows[0]?.name ?? card?.summary ?? '');
   const eyebrow = $derived(
@@ -158,8 +175,8 @@
            under History too, so going back never refetches. An open editor
            is kept mounted by AssetDetail itself (hidden outside Source), so
            an unsaved draft survives every tab. Re-created only for another
-           asset or an `e` press. -->
-      {#key `${selectedKey}::${editNonce}`}
+           asset or an `e` press that is not already editing it. -->
+      {#key `${selectedKey}::${mount}`}
         <div class="detail" hidden={tab === 'history'}>
           <AssetDetail
             kind={asset.kind}
@@ -170,6 +187,7 @@
             {onsync}
             {ondeleted}
             startInEdit={editing}
+            onediting={(on) => (detailEditing = on)}
           />
         </div>
       {/key}
@@ -231,7 +249,7 @@
       </div>
     {:else if orphanRows.length}
       <div class="pad" data-testid="inspector-summary">
-        <p>Fleet put it on {[...new Set(orphanRows.map((r) => r.host_alias))].join(', ')}; the catalog no longer has it. The next sync of those hosts removes it, with a backup.</p>
+        <p>Fleet put it on {[...new Set(orphanRows.map((r) => r.host_alias))].join(', ')}; the catalog no longer has it. Only your Sync of those hosts removes it, with a backup; nothing automatic does.</p>
       </div>
     {:else if card}
       <div class="pad" data-testid="inspector-summary">

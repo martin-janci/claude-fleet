@@ -24,7 +24,7 @@ export interface QueryRow {
 
 export interface QueryVocab { hosts: string[]; layers: string[]; catalogs: string[] }
 
-export const STATES = ['in_sync', 'drifted', 'edited', 'behind', 'missing', 'unmanaged', 'orphan'];
+export const STATES = ['in_sync', 'drifted', 'edited', 'behind', 'missing', 'unmanaged', 'orphan', 'unsupported'];
 export const SCOPES = ['private', 'shared', 'org', 'managed'];
 const KIND_ALIASES: Record<string, string> = { mcp: 'mcp_server', plugin: 'plugin_ref', skills: 'skill', agents: 'agent', hooks: 'hook' };
 const PRESENT = new Set(['in_sync', 'drifted', 'unmanaged', 'orphan']);

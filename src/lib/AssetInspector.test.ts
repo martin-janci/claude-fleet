@@ -133,7 +133,7 @@ describe('AssetInspector', () => {
     render(AssetInspector, { ...base, readOnly: true, selectedKey: 'asset:personal:skill/w' });
     expect(tabLabels()).toEqual(['Overview', 'Hosts']);
     await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
-    expect(screen.getByTestId('inspector-hosts').textContent).toContain('oci: drifted — edited on the host');
+    expect(screen.getByTestId('inspector-hosts').textContent).toContain('oci: drifted — edited on host');
     expect(invoke.mock.calls.some((c) => c[0] === 'catalog_get_asset')).toBe(false);
   });
 
@@ -157,6 +157,8 @@ describe('AssetInspector', () => {
     render(AssetInspector, { ...base, selectedKey: 'orphan:skill/gone' });
     expect(tabLabels()).toEqual(['Overview']);
     expect(screen.getByTestId('inspector-summary').textContent).toContain('oci');
+    // Final review minor 7: nothing automatic removes it, only a person's Sync.
+    expect(screen.getByTestId('inspector-summary').textContent).toContain('Only your Sync of those hosts removes it');
   });
 
   it('a card: its sentence and groups, read only', () => {

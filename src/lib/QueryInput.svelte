@@ -98,22 +98,22 @@
       {#each tokens as t, i (i)}<span class="tok"><i>{t.key}:</i>{t.values.join(',')}</span>{/each}
     </span>
   {/if}
-  {#if options.length}
-    <ul class="list" id={listId} role="listbox" aria-label="Completions" data-testid={`${testid}-completions`}>
-      {#each options as o, i (o)}
-        <li
-          id={optionId(i)}
-          role="option"
-          aria-selected={i === active}
-          class:active={i === active}
-          onmousedown={(e) => {
-            e.preventDefault();
-            take(i);
-          }}
-        >{o}</li>
-      {/each}
-    </ul>
-  {/if}
+  <!-- Always in the DOM (hidden while closed), so `aria-controls` names an
+       element that exists. -->
+  <ul class="list" id={listId} role="listbox" aria-label="Completions" hidden={!options.length} data-testid={`${testid}-completions`}>
+    {#each options as o, i (o)}
+      <li
+        id={optionId(i)}
+        role="option"
+        aria-selected={i === active}
+        class:active={i === active}
+        onmousedown={(e) => {
+          e.preventDefault();
+          take(i);
+        }}
+      >{o}</li>
+    {/each}
+  </ul>
 </div>
 
 <style>
@@ -127,6 +127,7 @@
   .tokens { display: flex; gap: 4px; }
   .tok { font-family: var(--mono); font-size: var(--control-font-sm); padding: 1px 6px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--fg); white-space: nowrap; }
   .tok i { font-style: normal; color: var(--accent); }
+  .list[hidden] { display: none; }
   .list {
     position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; min-width: 220px; margin: 0; padding: 4px 0;
     list-style: none; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--bg);

@@ -39,7 +39,7 @@ describe('QueryInput', () => {
     const input = screen.getByTestId('assets-query') as HTMLInputElement;
     await fireEvent.input(input, { target: { value: 'ho' } });
     await fireEvent.keyDown(input, { key: 'Escape' });
-    expect(screen.queryByTestId('assets-query-completions')).toBeNull();
+    expect(screen.getByTestId('assets-query-completions').hidden).toBe(true);
     expect(input.value).toBe('ho');
     await fireEvent.keyDown(input, { key: 'Escape' });
     expect(input.value).toBe('');
@@ -57,6 +57,18 @@ describe('QueryInput', () => {
     expect(input.getAttribute('aria-controls')).toBe(list.id);
     expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual(['kind:skill']);
     expect(screen.getAllByRole('option')[0].getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('aria-controls always names the listbox, which is hidden while closed (final review minor 9)', async () => {
+    render(QueryInput, { vocab });
+    const input = screen.getByRole('combobox', { name: 'Filter assets' });
+    const list = document.getElementById(input.getAttribute('aria-controls') ?? '');
+    expect(list?.getAttribute('role')).toBe('listbox');
+    expect(list?.hidden).toBe(true);
+    expect(screen.queryByRole('listbox')).toBeNull();
+    await typed(input, 'kind:s');
+    expect(list?.hidden).toBe(false);
+    expect(screen.getByRole('listbox')).toBe(list);
   });
 
   it('completes case-insensitively and keeps the earlier words', async () => {

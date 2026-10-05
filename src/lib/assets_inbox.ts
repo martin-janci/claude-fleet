@@ -57,6 +57,13 @@ export { hostOrderOf };
 const words = (hosts: string[]) => hosts.join(', ');
 const hostsWhere = (a: AssetSummary, pred: (s: HostState) => boolean) => [...new Set(a.hosts.filter(pred).map((s) => s.host_alias))];
 
+/** Which side moved on a drifted managed copy (Assets M5, R4), in the
+ *  Inbox's words — for every view that lists a copy per host. `null` when
+ *  the side is unknown (an entry from before M5, an older hub). */
+export function driftSideWords(side?: string | null): string | null {
+  return side === 'host' ? 'edited on host' : side === 'catalog' ? 'behind the catalog' : null;
+}
+
 /** One catalog asset's dots: differs over missing over in sync; a host with
  *  no row is `na`; a row on an unreachable host is `stale`. */
 export function assetDots(a: AssetSummary, order: string[], stale: ReadonlySet<string>): Record<string, DotState> {
