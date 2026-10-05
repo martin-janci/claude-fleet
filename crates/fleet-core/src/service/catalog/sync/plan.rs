@@ -138,8 +138,10 @@ pub struct Action {
     /// Assets M5 (Rulings R2/R3): whether the host copy is still what fleet
     /// wrote, when the manifest names this asset. The applier's card
     /// filters read it: an Additive (Rollout, SB6) `Update` needs
-    /// `Unchanged`.
-    #[serde(skip)]
+    /// `Unchanged`. Assets M6 (R1, R15): on the wire when known — the
+    /// desktop's Rollout review mirrors `action_allowed` with it. Absent
+    /// when unknown, as before M6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_copy: Option<HostCopy>,
 }
 
@@ -3293,6 +3295,21 @@ mod tests {
             plugin: None,
             host_copy: None,
         }
+    }
+
+    /// Assets M6 (R1, R15): the host-copy verdict is on the wire when known.
+    #[test]
+    fn an_actions_host_copy_is_on_the_wire_when_known() {
+        let mut a = file_action("w", ActionOp::Update, "p");
+        a.host_copy = Some(HostCopy::Unverified);
+        let v = serde_json::to_value(&a).unwrap();
+        assert_eq!(v["host_copy"], "unverified");
+        a.host_copy = None;
+        let v = serde_json::to_value(&a).unwrap();
+        assert!(
+            v.get("host_copy").is_none(),
+            "absent when unknown, as before"
+        );
     }
 
     /// F3c (future-proofing for harnesses sharing `~/.agents/skills`): two

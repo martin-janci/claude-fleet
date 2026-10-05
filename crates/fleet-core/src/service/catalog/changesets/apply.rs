@@ -28,7 +28,8 @@
 
 use super::rules::{gap_hash, LayerGap, NEEDS_A_LOOK, UPDATE};
 use super::{
-    is_open, ApplyGuard, CardKind, ChangesetView, Decider, ItemAction, ItemParams, APPLY_LOCK,
+    is_open, ApplyGuard, CardKind, ChangesetView, Decider, HeldLine, HeldWhy, ItemAction,
+    ItemOutcome, ItemParams, APPLY_LOCK,
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::import::slugify;
@@ -1466,34 +1467,35 @@ pub(crate) fn narrow(
         .retain(|a| action_allowed(f, a) && card_owns(a, assets, catalogs));
 }
 
-/// Assets M5 fix round 1: the card's own actions `narrow` drops under `f`
-/// only because the planner could not verify the host copy untouched — an
-/// `Update` over a copy whose manifest entry predates the file hashes, a
-/// moved asset's `Create` that would delete such an old copy (final review
-/// I1), or an `Overwrite` of a copy the hashes show edited (a moved one's
-/// old copy included) — each as the line the card reports: such a host is
-/// left to a person, never counted done.
+/// Assets M5 fix round 1, M6 R1: the card's own actions `narrow` drops under
+/// `f` only because fleet cannot treat the host copy as untouched — an
+/// `Update` over a copy whose entry predates the file hashes, a moved
+/// asset's `Create` that would delete such an old copy (final review I1),
+/// and EVERY `Overwrite` of the card's asset (an edited copy, or a pre-M5
+/// one that differs while the catalog did not change — carry T1). Such a
+/// host is left to a person, never counted done.
 fn held_by_host_copy(
-    host: &str,
     hp: &HostPlan,
     f: OpFilter,
     assets: &BTreeSet<String>,
     catalogs: &BTreeSet<String>,
-) -> Vec<String> {
+) -> Vec<HeldLine> {
     hp.actions
         .iter()
         .filter(|a| card_owns(a, assets, catalogs) && !action_allowed(f, a))
-        .filter(|a| {
-            op_allowed(f, a.op)
-                || (a.op == ActionOp::Overwrite && a.host_copy == Some(HostCopy::Edited))
-        })
-        .map(|a| {
-            let why = if a.host_copy == Some(HostCopy::Edited) {
-                "host copy edited"
-            } else {
-                "host copy predates fleet's file hashes"
-            };
-            format!("{}/{} on {host}: {why} — sync it yourself", a.kind, a.name)
+        .filter(|a| op_allowed(f, a.op) || a.op == ActionOp::Overwrite)
+        .map(|a| HeldLine {
+            kind: a.kind.clone(),
+            name: a.name.clone(),
+            why: match (a.host_copy, a.op) {
+                (Some(HostCopy::Edited), _) => HeldWhy::Edited,
+                (Some(HostCopy::Unverified), _) => HeldWhy::Unverified,
+                // No verdict on an overwrite: it differs, nothing more is
+                // known. An update or a moved create held without a
+                // verdict keeps M5's words: the entry cannot vouch.
+                (_, ActionOp::Overwrite) => HeldWhy::Differs,
+                _ => HeldWhy::Unverified,
+            },
         })
         .collect()
 }
@@ -1536,6 +1538,9 @@ struct HostOutcome {
     /// the host copy untouched ([`held_by_host_copy`], named in `skipped`).
     /// The host's items are then not done, like a skipped host's.
     held: bool,
+    /// Assets M6 (R1): the same holds as data; their lines are also in
+    /// `skipped`, as since M5.
+    held_lines: Vec<HeldLine>,
     failed: Vec<String>,
     skipped: Vec<String>,
 }
@@ -1623,14 +1628,22 @@ async fn sync_hosts(
             }
             missing.extend(missing_secrets(&hp, assets, catalogs));
             let held = if hp.status == "planned" {
-                held_by_host_copy(host, &hp, filter, assets, catalogs)
+                held_by_host_copy(&hp, filter, assets, catalogs)
             } else {
                 Vec::new()
             };
             narrow(&mut hp, filter, assets, catalogs);
             if !held.is_empty() {
                 o.held = true;
-                o.skipped.extend(held);
+                o.skipped.extend(held.iter().map(|h| {
+                    format!(
+                        "{}/{} on {host}: {} — sync it yourself",
+                        h.kind,
+                        h.name,
+                        h.why.words()
+                    )
+                }));
+                o.held_lines.extend(held);
             }
             if hp.status != "planned" {
                 let why = hp.detail.clone().unwrap_or_else(|| hp.status.clone());
@@ -1866,7 +1879,34 @@ fn finish_host_card(
     let failures: Vec<String> = outcome.values().flat_map(|o| o.failed.clone()).collect();
     let skipped: Vec<String> = outcome.values().flat_map(|o| o.skipped.clone()).collect();
     let note = (!skipped.is_empty()).then(|| format!("skipped: {}", skipped.join("; ")));
+    // R1: per item, what its host left undone — held lines, and a failed or
+    // skipped host's line; none for a host that applied cleanly.
+    let outcomes: Vec<(i64, String)> = selected
+        .iter()
+        .filter_map(|i| {
+            let o = outcome.get(&host_of(i))?;
+            let note = (!o.failed.is_empty())
+                .then(|| o.failed.join("; "))
+                .or_else(|| {
+                    let plain: Vec<&str> = o
+                        .skipped
+                        .iter()
+                        .filter(|l| !l.ends_with("— sync it yourself"))
+                        .map(String::as_str)
+                        .collect();
+                    (!plain.is_empty()).then(|| plain.join("; "))
+                });
+            let out = ItemOutcome {
+                held: o.held_lines.clone(),
+                note,
+            };
+            (out != ItemOutcome::default())
+                .then(|| serde_json::to_string(&out).ok().map(|j| (i.position, j)))
+                .flatten()
+        })
+        .collect();
     let s = lock(store)?;
+    s.set_changeset_item_outcomes(card.id, &outcomes)?;
     if failures.is_empty() {
         let rest: Vec<i64> = items
             .iter()
@@ -2334,14 +2374,18 @@ mod filter_tests {
                 "deletes nothing: {copy:?}"
             );
             let hp = planned(vec![moved.clone()]);
-            let held = held_by_host_copy("oci", &hp, OpFilter::Additive, &assets, &catalogs);
+            let held = held_by_host_copy(&hp, OpFilter::Additive, &assets, &catalogs);
             assert_eq!(held.is_empty(), want, "{copy:?}: {held:?}");
         }
         moved.host_copy = Some(HostCopy::Unverified);
         let hp = planned(vec![moved]);
         assert_eq!(
-            held_by_host_copy("oci", &hp, OpFilter::Additive, &assets, &catalogs),
-            ["skill/w on oci: host copy predates fleet's file hashes — sync it yourself"]
+            held_by_host_copy(&hp, OpFilter::Additive, &assets, &catalogs),
+            [HeldLine {
+                kind: "skill".into(),
+                name: "w".into(),
+                why: HeldWhy::Unverified,
+            }]
         );
     }
 
@@ -2420,6 +2464,7 @@ mod filter_tests {
             decider: "person".into(),
             state: state.into(),
             decided_at,
+            outcome: None,
         };
         let key = (1, "core".to_string(), "oci".to_string());
         // Card 9 rejected oci at t=100; card 5 (an OLDER id) applied it at t=200.
@@ -4339,6 +4384,103 @@ mod tests {
         );
     }
 
+    /// Strip the file hashes from every manifest entry under `home`: the
+    /// entries now read as written before M5.
+    fn make_entries_pre_m5(home: &Path) {
+        let path = home.join(".claude/.fleet-assets.json");
+        let mut m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for e in m["assets"].as_object_mut().unwrap().values_mut() {
+            e.as_object_mut().unwrap().remove("file_hashes");
+        }
+        std::fs::write(&path, m.to_string()).unwrap();
+    }
+
+    /// Assets M6 (R1, carry T1): a pre-M5 copy edited on the host while the
+    /// catalog did not change plans as an Overwrite. The Rollout never
+    /// applies it, and now says so — the host's item is skipped with a
+    /// held line, not counted done.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rollout_holds_a_pre_m5_copy_that_differs_with_a_line() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        person_syncs_oci(&f, &ssh).await;
+        make_entries_pre_m5(home.path());
+        let skill = home.path().join(".claude/skills/w/SKILL.md");
+        std::fs::write(&skill, "edited on the host\n").unwrap();
+
+        let card = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, card, &ssh).await.unwrap();
+        assert_eq!(item_states(&v), ["skipped"], "{:?}", v.error);
+        let o = v.items[0].outcome.clone().expect("an outcome");
+        assert_eq!(
+            o.held,
+            vec![HeldLine {
+                kind: "skill".into(),
+                name: "w".into(),
+                why: HeldWhy::Unverified,
+            }]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&skill).unwrap(),
+            "edited on the host\n"
+        );
+    }
+
+    /// R1: the existing pre-M5 hold (catalog changed) is the same line as
+    /// data, and the card's `error` text is unchanged for MCP readers.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_held_update_is_an_outcome_and_still_a_note() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        person_syncs_oci(&f, &ssh).await;
+        make_entries_pre_m5(home.path());
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[("skills/w/body.md", "Steps, revised.\n")],
+        );
+        let card = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, card, &ssh).await.unwrap();
+        let o = v.items[0].outcome.clone().expect("an outcome");
+        assert_eq!(o.held[0].why, HeldWhy::Unverified);
+        assert!(v
+            .error
+            .unwrap_or_default()
+            .contains("skill/w on oci: host copy predates fleet's file hashes — sync it yourself"));
+    }
+
+    /// R1: an edited copy (hashes present) is held as `edited`.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn an_edited_copy_is_held_as_edited() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        person_syncs_oci(&f, &ssh).await;
+        std::fs::write(home.path().join(".claude/skills/w/SKILL.md"), "mine\n").unwrap();
+        let card = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, card, &ssh).await.unwrap();
+        assert_eq!(item_states(&v), ["skipped"]);
+        assert_eq!(
+            v.items[0].outcome.as_ref().unwrap().held[0].why,
+            HeldWhy::Edited
+        );
+    }
+
     /// Assets M5 fix round 1 (2): a manifest entry from before M5 cannot
     /// vouch for the host copy, so the Rollout leaves its update to a
     /// person — and says so: the host's item is skipped with a note, never
@@ -4357,13 +4499,14 @@ mod tests {
         let before = std::fs::read_to_string(&skill).unwrap();
 
         // Make the entry one written before M5: no file hashes.
-        let path = home.path().join(".claude/.fleet-assets.json");
-        let mut m: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        for e in m["assets"].as_object_mut().unwrap().values_mut() {
-            assert!(e.as_object_mut().unwrap().remove("file_hashes").is_some());
-        }
-        std::fs::write(&path, m.to_string()).unwrap();
+        let manifest = home.path().join(".claude/.fleet-assets.json");
+        assert!(
+            std::fs::read_to_string(&manifest)
+                .unwrap()
+                .contains("file_hashes"),
+            "the sync recorded file hashes"
+        );
+        make_entries_pre_m5(home.path());
 
         f.commit_files(
             &f.personal_root,

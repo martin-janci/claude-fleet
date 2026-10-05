@@ -174,6 +174,56 @@ impl ItemParams {
     }
 }
 
+/// Why a host-writing card left one of its assets on a host to a person
+/// (Assets M6, R1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldWhy {
+    /// The host copy is not what fleet wrote.
+    Edited,
+    /// Its manifest entry predates fleet's file hashes, so an edit cannot
+    /// be ruled out.
+    Unverified,
+    /// The planner had no host-copy verdict, and the action is one a card
+    /// never applies (an overwrite).
+    Differs,
+}
+
+impl HeldWhy {
+    /// The words the card's `error` note has used since M5.
+    pub fn words(self) -> &'static str {
+        match self {
+            HeldWhy::Edited => "host copy edited",
+            HeldWhy::Unverified => "host copy predates fleet's file hashes",
+            HeldWhy::Differs => "host copy differs",
+        }
+    }
+}
+
+/// One asset a card held back on a host (R1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldLine {
+    pub kind: String,
+    pub name: String,
+    pub why: HeldWhy,
+}
+
+/// What a host-writing card left undone on one item's host (migration 098).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemOutcome {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held: Vec<HeldLine>,
+    /// A skipped or failed host's line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl ItemOutcome {
+    pub fn parse(json: Option<&str>) -> Option<ItemOutcome> {
+        json.and_then(|j| serde_json::from_str(j).ok())
+    }
+}
+
 /// One item a rule proposes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProposedItem {
@@ -275,6 +325,9 @@ pub struct ItemView {
     pub params: ItemParams,
     pub decider: String,
     pub state: String,
+    /// Assets M6 (R1): what the card left undone on this item's host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<ItemOutcome>,
 }
 
 /// One card in full (`changesets { list, id }`, and every mutating action's
@@ -297,6 +350,10 @@ pub struct ChangesetView {
     pub commits: BTreeMap<String, String>,
     #[serde(default)]
     pub undoable: bool,
+    /// Assets M6 (R2): the sorted, unique names of the catalogs the items
+    /// name.
+    #[serde(default)]
+    pub catalogs: Vec<String>,
     pub items: Vec<ItemView>,
 }
 
@@ -321,6 +378,10 @@ pub struct ChangesetSummary {
     pub pending: usize,
     #[serde(default)]
     pub undoable: bool,
+    /// Assets M6 (R2): the sorted, unique names of the catalogs the items
+    /// name.
+    #[serde(default)]
+    pub catalogs: Vec<String>,
 }
 
 /// R3: a card that can still be applied (and that the pass refreshes).
@@ -465,6 +526,16 @@ fn is_undoable(
         && later_card(card, items, s)?.is_none())
 }
 
+/// R2: the sorted, unique names of the catalogs a card's items name.
+fn catalog_names(items: &[ChangesetItemRow], names: &BTreeMap<i64, String>) -> Vec<String> {
+    items
+        .iter()
+        .filter_map(|i| i.catalog_id.and_then(|c| names.get(&c).cloned()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 fn view(
     card: ChangesetRow,
     items: Vec<ChangesetItemRow>,
@@ -497,6 +568,7 @@ fn view(
         error: card.error,
         commits,
         undoable,
+        catalogs: catalog_names(&items, &names),
         items: items
             .into_iter()
             .map(|i| ItemView {
@@ -509,6 +581,7 @@ fn view(
                 params: ItemParams::parse(i.params.as_deref()),
                 decider: i.decider,
                 state: i.state,
+                outcome: ItemOutcome::parse(i.outcome.as_deref()),
             })
             .collect(),
     })
@@ -525,6 +598,11 @@ pub fn get(id: i64, store: &Mutex<Store>) -> Result<ChangesetView, IpcError> {
 /// Every open card and the [`RECENT_CLOSED`] most recent others, newest first.
 pub fn list(store: &Mutex<Store>) -> Result<Vec<ChangesetSummary>, IpcError> {
     let s = lock(store)?;
+    let names: BTreeMap<i64, String> = s
+        .list_catalogs()?
+        .into_iter()
+        .map(|r| (r.id, r.name))
+        .collect();
     let mut cards = Vec::new();
     for card in s.list_changesets()? {
         let items = s.changeset_items(card.id)?;
@@ -558,6 +636,7 @@ pub fn list(store: &Mutex<Store>) -> Result<Vec<ChangesetSummary>, IpcError> {
             error: card.error,
             groups,
             pending,
+            catalogs: catalog_names(&items, &names),
         });
     }
     Ok(out)
@@ -610,6 +689,7 @@ mod tests {
             decider: n.decider,
             state: "rejected".into(),
             decided_at: None,
+            outcome: None,
         }
     }
 
@@ -741,6 +821,7 @@ mod tests {
             decider: "rule".into(),
             state: "applied".into(),
             decided_at: None,
+            outcome: None,
         };
         let cards = vec![
             (card(1, "bootstrap", Some(10)), vec![import(1, 1)]),
@@ -752,6 +833,56 @@ mod tests {
         ];
         assert_eq!(undoable_ids(&cards), BTreeSet::from([4]));
         assert_eq!(undoable_ids(&cards[..3]), BTreeSet::from([2, 3]));
+    }
+
+    /// Assets M6 (R2, carry T7): a card lists the catalogs its items name,
+    /// sorted and unique, in the list and in the full view.
+    #[test]
+    fn a_card_lists_the_catalogs_its_items_name() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        let p = s.personal_catalog().unwrap().unwrap().id;
+        let org = s.add_org("acme", None, false).unwrap();
+        let a = s
+            .upsert_catalog("acme", "/a", None, Some(org.id))
+            .unwrap()
+            .id;
+        let imp = |catalog: i64, name: &str| {
+            testkit::item(
+                "core",
+                Some(catalog),
+                "skill",
+                name,
+                ItemAction::Import,
+                ItemParams::default(),
+            )
+        };
+        let hide = testkit::item(
+            "core",
+            None,
+            "skill",
+            "z",
+            ItemAction::Hide,
+            ItemParams::default(),
+        );
+        let card = s
+            .insert_changeset(
+                "bootstrap",
+                "Adopt 3 as 1 layers",
+                &[imp(a, "x"), imp(p, "y"), hide],
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let summary = list(&store)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.id == card.id)
+            .unwrap();
+        assert_eq!(
+            summary.catalogs,
+            vec!["acme".to_string(), "personal".to_string()]
+        );
+        assert_eq!(get(card.id, &store).unwrap().catalogs, summary.catalogs);
     }
 
     /// Assets M5 (R9): `list`'s one-pass undoability agrees with

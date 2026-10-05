@@ -49,6 +49,12 @@ pub struct ChangesetItemRow {
     /// wire then, as before).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decided_at: Option<i64>,
+    /// Assets M6 (migration 098, R1): JSON `ItemOutcome` — what a
+    /// host-writing card left undone on this item's host; `None` when it
+    /// applied cleanly, and on items recorded before 098 (absent on the
+    /// wire then, as before).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 /// An item to insert; its position is its index. `state` is always
@@ -123,7 +129,7 @@ impl ItemIdentity {
 const CARD_COLS: &str =
     "id, kind, summary, state, created_at, applied_at, commits, layers_snapshot, error";
 const ITEM_COLS: &str =
-    "changeset_id, position, grp, catalog_id, kind, name, action, params, decider, state, decided_at";
+    "changeset_id, position, grp, catalog_id, kind, name, action, params, decider, state, decided_at, outcome";
 
 fn card_row(r: &rusqlite::Row<'_>) -> Result<ChangesetRow> {
     Ok(ChangesetRow {
@@ -152,6 +158,7 @@ fn item_row(r: &rusqlite::Row<'_>) -> Result<ChangesetItemRow> {
         decider: r.get(8)?,
         state: r.get(9)?,
         decided_at: r.get(10)?,
+        outcome: r.get(11)?,
     })
 }
 
@@ -531,6 +538,20 @@ impl Store {
         tx.commit()
     }
 
+    /// Assets M6 (R1): each `(position, outcome JSON)` onto card `id`'s
+    /// item, in one transaction. A position the card does not have is a
+    /// no-op.
+    pub fn set_changeset_item_outcomes(&self, id: i64, outcomes: &[(i64, String)]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (position, json) in outcomes {
+            tx.execute(
+                "UPDATE changeset_items SET outcome = ?3 WHERE changeset_id = ?1 AND position = ?2",
+                rusqlite::params![id, position, json],
+            )?;
+        }
+        tx.commit()
+    }
+
     /// Record a verdict on `(kind, name, content_hash)`. A `person` verdict
     /// is never replaced by another decider's (spec: "an agent never
     /// overturns a person's verdict", Rulings R10); a person may replace
@@ -602,6 +623,38 @@ mod tests {
         s.set_catalog_config("/p", None).unwrap();
         let personal = s.personal_catalog().unwrap().unwrap().id;
         (s, personal)
+    }
+
+    fn sync_item(layer: &str, host: &str) -> NewChangesetItem {
+        NewChangesetItem {
+            grp: layer.into(),
+            catalog_id: None,
+            kind: "host".into(),
+            name: host.into(),
+            action: "sync".into(),
+            params: None,
+            decider: "rule".into(),
+        }
+    }
+
+    #[test]
+    fn item_outcomes_are_written_by_position_and_read_back() {
+        let s = Store::open_in_memory().unwrap();
+        let card = s
+            .insert_changeset(
+                "rollout",
+                "Roll out core to oci, htz",
+                &[sync_item("core", "oci"), sync_item("core", "htz")],
+            )
+            .unwrap();
+        s.set_changeset_item_outcomes(card.id, &[(1, r#"{"note":"htz: unreachable"}"#.into())])
+            .unwrap();
+        let items = s.changeset_items(card.id).unwrap();
+        assert_eq!(items[0].outcome, None);
+        assert_eq!(
+            items[1].outcome.as_deref(),
+            Some(r#"{"note":"htz: unreachable"}"#)
+        );
     }
 
     #[test]

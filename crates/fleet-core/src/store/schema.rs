@@ -427,6 +427,17 @@ fn changeset_items_has_decided_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 098 (`outcome` on
+/// `changeset_items`, Assets M6).
+fn changeset_items_has_outcome(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('changeset_items') WHERE name = 'outcome'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
 /// on `asset_inventory`).
 fn asset_inventory_has_fleet_owned(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1061,6 +1072,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 97,
         sql: include_str!("../../migrations/097_changeset_item_decided_at.sql"),
         already_applied: Some(changeset_items_has_decided_at),
+    },
+    // Assets M6: what a host-writing card left undone on an item's host.
+    // ADD COLUMN is not idempotent: guarded.
+    Migration {
+        version: 98,
+        sql: include_str!("../../migrations/098_changeset_item_outcome.sql"),
+        already_applied: Some(changeset_items_has_outcome),
     },
 ];
 
@@ -2713,8 +2731,9 @@ mod tests {
                 "params",
                 "decider",
                 "state",
-                // 097 (Assets M5): `migrate` runs on to the latest.
-                "decided_at"
+                // 097 (Assets M5), 098 (Assets M6): `migrate` runs on to the latest.
+                "decided_at",
+                "outcome"
             ]
         );
         assert_eq!(
@@ -4549,6 +4568,35 @@ mod tests {
         assert_eq!(at, None, "an item decided before 097 has no time");
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 97;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Assets M6 (R1): `changeset_items.outcome`, NULL on existing items,
+    /// guarded on re-run.
+    #[test]
+    fn migration_098_adds_item_outcome_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(97);
+        s.conn
+            .execute_batch(
+                "INSERT INTO changesets (id, kind, summary, state, created_at) \
+                   VALUES (1, 'rollout', 'Roll out core to oci', 'applied', 1); \
+                 INSERT INTO changeset_items \
+                   (changeset_id, position, grp, kind, name, action, decider, state) \
+                   VALUES (1, 0, 'core', 'host', 'oci', 'sync', 'rule', 'skipped');",
+            )
+            .unwrap();
+        assert!(!changeset_items_has_outcome(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert!(changeset_items_has_outcome(&s.conn).unwrap());
+        let o: Option<String> = s
+            .conn
+            .query_row("SELECT outcome FROM changeset_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(o, None, "an item recorded before 098 has no outcome");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 98;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
