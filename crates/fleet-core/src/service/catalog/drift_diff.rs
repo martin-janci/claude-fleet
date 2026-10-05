@@ -6,15 +6,15 @@
 //!   host — never a config file a merge writes into (`.claude.json`,
 //!   `settings.json`), which holds other assets' entries and secrets.
 //! - The catalog side is rendered WITHOUT secret substitution, so it keeps
-//!   its `${NAME}` placeholders. A file that holds a placeholder is not read
-//!   on the host at all (its host copy has the secret's value in it); the
-//!   answer says `secret` and carries neither text.
+//!   its `${NAME}` placeholders. A file whose rendered bytes hold any `${`
+//!   is not read on the host at all (its host copy may have a secret's value
+//!   in it); the answer says `secret` and carries neither text.
 //! - Each side is cut at [`MAX_SIDE_BYTES`].
 //! - A path must be one apply would write: `~/`-relative, no `..`.
 
 use super::catalogs::PERSONAL;
 use super::harness::{self, Harness};
-use super::model::{find_placeholders, Kind};
+use super::model::Kind;
 use super::sync::apply::is_safe_path;
 use super::validate::check_name;
 use super::{effective, inventory, require_dialable_host, CatalogTarget};
@@ -56,8 +56,8 @@ pub struct DriftFile {
     /// Either side was cut at [`MAX_SIDE_BYTES`].
     #[serde(default)]
     pub truncated: bool,
-    /// The file holds a `${NAME}` secret: the host copy has its value, so
-    /// neither side is read or shown (both texts are `None`).
+    /// The file's rendered bytes hold a `${`, so the host copy may have a
+    /// secret's value: neither side is read or shown (both texts are `None`).
     #[serde(default)]
     pub secret: bool,
 }
@@ -238,11 +238,14 @@ pub async fn drift_diff(
             ));
         }
     }
-    // A file that holds a secret placeholder is not read on the host.
+    // A file that may hold a secret is not read on the host. Any `${` counts,
+    // not only what `find_placeholders` sees in the raw text: a `.toml` file
+    // is substituted after TOML decoding, so an escaped name
+    // (`${W\u005fTOKEN}`) still becomes the secret's value on the host.
     let secret: Vec<bool> = plan
         .files
         .iter()
-        .map(|f| !find_placeholders(&String::from_utf8_lossy(&f.bytes)).is_empty())
+        .map(|f| String::from_utf8_lossy(&f.bytes).contains("${"))
         .collect();
     let rel = |path: &str| path.trim_start_matches("~/").to_string();
     let rels: Vec<String> = plan
@@ -588,6 +591,45 @@ mod tests_host {
             .unwrap();
         assert!(skill.secret);
         assert_eq!((&skill.catalog, &skill.host), (&None, &None));
+        assert!(!serde_json::to_string(&d)
+            .unwrap()
+            .contains("hunter2-the-secret"));
+    }
+
+    /// A `.toml` file is substituted after TOML decoding, so an escaped
+    /// placeholder (`${W\u005fTOKEN}`) that `find_placeholders` does not see
+    /// in the raw text still becomes the secret's value on the host. Any
+    /// `${` in the rendered bytes keeps the file unread.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_toml_file_with_an_escaped_placeholder_is_not_read() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        f.commit_files(
+            &f.personal_root,
+            f.personal.id,
+            &[("skills/w/resources/x.toml", "k = \"${W\\u005fTOKEN}\"\n")],
+        );
+        f.store
+            .lock()
+            .unwrap()
+            .set_secret("W_TOKEN", None, "hunter2-the-secret")
+            .unwrap();
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ssh = ssh_with_home(bin.path(), home.path());
+        person_syncs_oci(&f, &ssh).await;
+        let on_host = std::fs::read_to_string(home.path().join(".claude/skills/w/x.toml")).unwrap();
+        assert!(on_host.contains("hunter2-the-secret"), "the host has it");
+        let d = drift_diff(CatalogTarget::Personal, args("w"), &f.store, &ssh)
+            .await
+            .unwrap();
+        let toml = d
+            .files
+            .iter()
+            .find(|x| x.path.ends_with("skills/w/x.toml"))
+            .unwrap();
+        assert!(toml.secret, "{toml:?}");
+        assert_eq!((&toml.catalog, &toml.host), (&None, &None));
         assert!(!serde_json::to_string(&d)
             .unwrap()
             .contains("hunter2-the-secret"));
