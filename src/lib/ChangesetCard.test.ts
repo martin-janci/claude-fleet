@@ -95,6 +95,19 @@ describe('ChangesetCard', () => {
     fireEvent.click(oci.querySelector('button')!);
     expect(onsynchost).toHaveBeenCalledWith('oci');
   });
+  it('an applied rollout that held a host back shows the held lines and Sync, and no Dismiss or primary', () => {
+    const r: ChangesetSummary = { id: 9, kind: 'rollout', summary: 'Roll out core to oci', state: 'applied', created_at: 1, applied_at: 2, held_hosts: ['oci'] };
+    const rv: ChangesetView = { id: 9, kind: 'rollout', summary: r.summary, state: 'applied', created_at: 1, commits: {}, undoable: false, items: [
+      item({ position: 0, kind: 'host', name: 'oci', action: 'sync', state: 'applied', outcome: { held: [{ kind: 'skill', name: 'w', why: 'edited' }] } }),
+    ] };
+    const onsynchost = vi.fn();
+    render(ChangesetCard, props({ card: r, view: rv, onsynchost }));
+    expect(screen.getByTestId('card-host-9-oci')).toHaveTextContent('skill/w — edited on the host · sync it yourself');
+    fireEvent.click(screen.getByRole('button', { name: 'Sync oci' }));
+    expect(onsynchost).toHaveBeenCalledWith('oci');
+    expect(screen.queryByTestId('card-dismiss-9')).toBeNull();
+    expect(screen.queryByTestId('card-primary-9')).toBeNull();
+  });
   it('an applied, undoable card is a banner with Undo', async () => {
     const p = props({ card: { ...boot, state: 'applied', undoable: true, applied_at: 1 }, view: { ...bootView, state: 'applied', undoable: true, commits: { personal: 'a1b2c3d4', papayapos: '9f0e1d2' } } });
     render(ChangesetCard, p);

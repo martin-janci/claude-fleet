@@ -27,6 +27,25 @@ describe('runCardVerb', () => {
     await runCardVerb('apply', 3, { setBusy: () => {}, onchanged: () => {} });
     expect(get(toasts).at(-1)!.message).toBe('Not applied: oci: unreachable');
   });
+  it('a Rollout applied with held hosts warns, names them, and offers to show the card', async () => {
+    const held = (host: string) => ({
+      position: host === 'oci' ? 0 : 1, grp: 'core', kind: 'host', name: host, action: 'sync', params: {}, decider: 'rule', state: 'applied',
+      outcome: { held: [{ kind: 'skill', name: 'w', why: 'edited' }] },
+    });
+    invoke.mockResolvedValue({
+      ...VIEW, id: 9, kind: 'rollout', summary: 'Roll out core to oci, htz, trn', undoable: false,
+      error: 'skipped: oci: skill/w edited — sync it yourself',
+      items: [held('oci'), held('htz'), { ...held('trn'), position: 2, outcome: null }],
+    });
+    const select = vi.fn();
+    await runCardVerb('apply', 9, { setBusy: () => {}, onchanged: () => {}, select });
+    const t = get(toasts).at(-1)!;
+    expect(t.kind).toBe('warning');
+    expect(t.message).toBe('Rolled out; held on oci, htz — sync those yourself');
+    expect(t.action?.label).toBe('Show');
+    t.action!.run();
+    expect(select).toHaveBeenCalledWith(9);
+  });
   it('words an older hub', async () => {
     invoke.mockRejectedValue({ code: 'E_INVALID', message: 'unknown changesets action propose_layer: list|…' });
     await runCardVerb('apply', 3, { setBusy: () => {}, onchanged: () => {} });

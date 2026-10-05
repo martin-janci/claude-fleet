@@ -195,8 +195,9 @@ describe('card verbs', () => {
     await loadOpenCardViews([
       { id: 1, kind: 'new', summary: '', state: 'proposed', created_at: 1 },
       { id: 2, kind: 'new', summary: '', state: 'applied', created_at: 1 },
+      { id: 3, kind: 'rollout', summary: '', state: 'applied', created_at: 1, held_hosts: ['oci'] },
     ]);
-    expect(Object.keys(get(cardViews))).toEqual(['1']);
+    expect(Object.keys(get(cardViews))).toEqual(['1', '3']);
   });
   it('an older overlapping load that finishes last does not overwrite the newer one', async () => {
     cardViews.set({});

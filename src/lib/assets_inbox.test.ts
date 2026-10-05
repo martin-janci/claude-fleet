@@ -129,6 +129,15 @@ describe('rows beyond the brief', () => {
     expect(inbox.sections.cards.map((r) => r.key)).toEqual(['card:7']);
     expect(inbox.needCount).toBe(1);
   });
+  it('keeps an applied card that held hosts back under applied, so its held lines and Sync buttons show', () => {
+    const c: ChangesetSummary[] = [
+      { id: 8, kind: 'rollout', summary: 'Roll out core to oci', state: 'applied', undoable: false, created_at: 1, applied_at: 2, held_hosts: ['oci'] },
+      { id: 9, kind: 'rollout', summary: 'Roll out core to trn', state: 'applied', undoable: false, created_at: 1, applied_at: 2, held_hosts: [] },
+    ];
+    const inbox = buildInbox({ listing: { ...listing, assets: [], unmanaged: [], identities: [] }, cards: c, order, stale: new Set() });
+    expect(inbox.sections.applied.map((r) => r.key)).toEqual(['card:8']);
+    expect(inbox.needCount).toBe(0);
+  });
   it('gives each row the query row the shared search reads, with the layers of its asset', () => {
     const inbox = buildInbox({ listing, cards: [], order, stale: new Set(), layersOf: (a) => (a.name === 'fine' ? ['core'] : []) });
     expect(inbox.sections.insync[0].query).toMatchObject({ kind: 'skill', name: 'fine', catalog: 'personal', layers: ['core'] });

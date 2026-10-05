@@ -214,6 +214,27 @@ describe('AssetInspector', () => {
     expect(onreview).toHaveBeenCalledTimes(2);
   });
 
+  it('only a failed card says Failed as an alert; an applied card\'s error is a note, a withdrawn card says so', () => {
+    const at = (state: ChangesetView['state'], error: string, withdrawn = false) => {
+      cardViews.set({ 7: { ...view7, state, error, withdrawn } });
+      const r = render(AssetInspector, { ...base, cards: [{ ...base.cards[0], state }], selectedKey: 'card:7' });
+      const card = screen.getByTestId('inspector-card');
+      const out = { text: card.textContent ?? '', alert: card.querySelector('[role="alert"]')?.textContent ?? null };
+      r.unmount();
+      return out;
+    };
+    const failed = at('failed', 'oci: unreachable');
+    expect(failed.alert).toBe('Failed: oci: unreachable');
+    const applied = at('applied', 'skipped: oci — sync it yourself');
+    expect(applied.alert).toBeNull();
+    expect(applied.text).toContain('Note: skipped: oci — sync it yourself');
+    expect(applied.text).not.toContain('Failed');
+    const withdrawn = at('dismissed', 'withdrawn: layer core was renamed to base', true);
+    expect(withdrawn.alert).toBeNull();
+    expect(withdrawn.text).toContain('Withdrawn: layer core was renamed to base');
+    expect(withdrawn.text).not.toContain('Failed');
+  });
+
   it('a card applied through the Inspector Undo runs the verb', async () => {
     cardViews.set({ 7: { ...view7, state: 'applied', undoable: true, commits: { personal: 'abcdef12' } } });
     const oncard = { apply: vi.fn(), dismiss: vi.fn(), undo: vi.fn(), synchost: vi.fn() };

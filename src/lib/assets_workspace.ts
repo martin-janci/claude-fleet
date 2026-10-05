@@ -44,6 +44,8 @@ export interface ChangesetSummary {
   catalogs?: string[];
   /** A drift card whose copy has since changed or gone (M6). */
   withdrawn?: boolean;
+  /** The hosts whose copies its apply held back (final review I1); absent from an older hub. */
+  held_hosts?: string[];
 }
 
 /** Why a host's copy was held back by a card's apply (R1). */
@@ -190,12 +192,14 @@ export function driftDiff(a: { host_alias: string; kind: string; name: string; h
 
 let cardViewsGen = 0;
 
-/** R12: every open card in full (cards are few; the views need items).
- *  Overlapping loads can finish out of order, so only the newest run's result
- *  stands; a card whose fetch failed keeps its previous view. */
+/** R12: every open card in full (cards are few; the views need items), and
+ *  every applied card that held hosts back (final review I1: the Inbox shows
+ *  its held lines and Sync buttons). Overlapping loads can finish out of
+ *  order, so only the newest run's result stands; a card whose fetch failed
+ *  keeps its previous view. */
 export async function loadOpenCardViews(cards: ChangesetSummary[] | null): Promise<void> {
   const gen = ++cardViewsGen;
-  const open = (cards ?? []).filter(isOpenCard);
+  const open = (cards ?? []).filter((c) => isOpenCard(c) || heldBack(c));
   const got = await Promise.all(open.map((c) => getChangeset(c.id)));
   if (gen !== cardViewsGen) return;
   const prev = get(cardViews);
@@ -230,6 +234,11 @@ export function assetHistory(kind: string, name: string, catalog?: string | null
 /** R14: a card the Inbox shows — still to apply, or failed and retryable. */
 export function isOpenCard(c: ChangesetSummary): boolean {
   return c.state === 'proposed' || c.state === 'failed';
+}
+
+/** An applied card whose apply held some hosts' copies back (final review I1). */
+export function heldBack(c: ChangesetSummary): boolean {
+  return c.state === 'applied' && (c.held_hosts?.length ?? 0) > 0;
 }
 
 /** What a list row is — one string per row (`data-row-key`), shared by the

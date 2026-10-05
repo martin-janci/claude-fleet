@@ -278,7 +278,8 @@
   }
   const setCardBusy = (b: string) => (cardBusy = b);
   const cardVerbs: CardVerbs & { reject: (id: number, positions: number[]) => void } = {
-    apply: (id, positions) => void runCardVerb('apply', id, { positions, setBusy: setCardBusy, onchanged: changed }),
+    apply: (id, positions) =>
+      void runCardVerb('apply', id, { positions, setBusy: setCardBusy, onchanged: changed, select: (c) => select(keyOf({ type: 'card', id: c })) }),
     dismiss: (id) => void runCardVerb('dismiss', id, { setBusy: setCardBusy, onchanged: changed }),
     undo: (id) => void runCardVerb('undo', id, { setBusy: setCardBusy, onchanged: changed }),
     reject: (id, positions) => void runCardVerb('reject', id, { positions, setBusy: setCardBusy, onchanged: changed }),

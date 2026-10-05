@@ -1,7 +1,7 @@
 <script lang="ts">
   import Badge from './Badge.svelte';
   import RowName from './RowName.svelte';
-  import type { ChangesetSummary, ChangesetView, ItemView } from './assets_workspace';
+  import { isOpenCard, type ChangesetSummary, type ChangesetView, type ItemView } from './assets_workspace';
   import { cardNote, heldWords, isUndoBanner, NEEDS_A_LOOK, primaryVerb } from './assets_cards';
 
   /** One card (spec, Changesets; Rulings R12, R13; mockups screen 1): its
@@ -134,7 +134,7 @@
         {#each looks as l (l.position)}<Badge title={l.params.reason ?? ''} label={`${l.name} · ${l.params.reason ?? 'needs a person'}`} />{/each}
       </div>
     {/if}
-    {#if !readOnly}
+    {#if !readOnly && isOpenCard(card)}
       <footer class="line">
         {#if verb}
           <button

@@ -417,6 +417,31 @@ pub struct ChangesetSummary {
     /// Assets M6 (R3): the system withdrew it (dismissed, error `withdrawn:…`).
     #[serde(default)]
     pub withdrawn: bool,
+    /// Final review I1: the hosts whose copies its apply held back (an item
+    /// outcome with held lines), sorted and unique — the Inbox keeps such a
+    /// card under *Recently applied* so its held lines and Sync buttons show.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub held_hosts: Vec<String>,
+}
+
+/// The hosts whose copies the items' outcomes held back, sorted and unique.
+/// A host item (a Rollout's `sync`) names its host; any other item names it
+/// in `params.host`.
+fn held_hosts(items: &[ChangesetItemRow]) -> Vec<String> {
+    let hosts: BTreeSet<String> = items
+        .iter()
+        .filter(|i| ItemOutcome::parse(i.outcome.as_deref()).is_some_and(|o| !o.held.is_empty()))
+        .map(|i| {
+            if i.kind == "host" {
+                i.name.clone()
+            } else {
+                ItemParams::parse(i.params.as_deref())
+                    .host
+                    .unwrap_or_else(|| i.name.clone())
+            }
+        })
+        .collect();
+    hosts.into_iter().collect()
 }
 
 /// R3: a card that can still be applied (and that the pass refreshes).
@@ -685,6 +710,7 @@ pub fn list(store: &Mutex<Store>) -> Result<Vec<ChangesetSummary>, IpcError> {
             groups,
             pending,
             catalogs: catalog_names(&items, &names),
+            held_hosts: held_hosts(&items),
         });
     }
     Ok(out)
@@ -932,6 +958,56 @@ mod tests {
             vec!["acme".to_string(), "personal".to_string()]
         );
         assert_eq!(get(card.id, &store).unwrap().catalogs, summary.catalogs);
+    }
+
+    /// Final review I1: a listed card names the hosts its apply held back.
+    #[test]
+    fn a_card_lists_the_hosts_its_apply_held_back() {
+        let s = Store::open_in_memory().unwrap();
+        let sync = |host: &str| NewChangesetItem {
+            grp: "core".into(),
+            catalog_id: None,
+            kind: "host".into(),
+            name: host.into(),
+            action: "sync".into(),
+            params: None,
+            decider: "rule".into(),
+        };
+        let card = s
+            .insert_changeset(
+                "rollout",
+                "Roll out core",
+                &[sync("trn"), sync("oci"), sync("htz")],
+            )
+            .unwrap();
+        let held = r#"{"held":[{"kind":"skill","name":"w","why":"edited"}]}"#;
+        s.set_changeset_item_outcomes(
+            card.id,
+            &[
+                (0, Some(held.into())),
+                (1, Some(held.into())),
+                (2, Some(r#"{"note":"unreachable"}"#.into())),
+            ],
+        )
+        .unwrap();
+        let plain = s
+            .insert_changeset("rollout", "Roll out", &[sync("oci")])
+            .unwrap();
+        let store = Mutex::new(s);
+        let listed = list(&store).unwrap();
+        let of = |id: i64| {
+            listed
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .held_hosts
+                .clone()
+        };
+        assert_eq!(of(card.id), vec!["oci".to_string(), "trn".to_string()]);
+        assert!(of(plain.id).is_empty());
+        let json =
+            serde_json::to_string(listed.iter().find(|c| c.id == plain.id).unwrap()).unwrap();
+        assert!(!json.contains("held_hosts"), "absent when empty: {json}");
     }
 
     /// Assets M6 (R3): a card the system withdrew says so, in a list and in

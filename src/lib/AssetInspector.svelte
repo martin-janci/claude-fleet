@@ -326,7 +326,15 @@
     {:else if card && cardView}
       <div class="pad" data-testid="inspector-card">
         <p class="sentence">{cardView.summary}</p>
-        {#if cardView.error}<p class="error" role="alert">Failed: {cardView.error}</p>{/if}
+        {#if cardView.error}
+          {#if cardView.state === 'failed'}
+            <p class="error" role="alert">Failed: {cardView.error}</p>
+          {:else if cardView.withdrawn || cardView.error.startsWith('withdrawn:')}
+            <p class="muted">Withdrawn: {cardView.error.replace(/^withdrawn:\s*/, '')}</p>
+          {:else}
+            <p class="muted">Note: {cardView.error}</p>
+          {/if}
+        {/if}
         {#if tab === 'diff'}
           <DriftPanel view={cardView} readOnly={cardRo} busy={cardBusy} onapply={(p) => oncard.apply(cardView.id, p)} />
         {:else}
@@ -369,7 +377,10 @@
         <dl class="kv">
           <dt>State</dt><dd>{card.state}</dd>
           <dt>Proposed</dt><dd>{ago(card.created_at, now)}</dd>
-          {#if card.error}<dt>Error</dt><dd class="error">{card.error}</dd>{/if}
+          {#if card.error}
+            {#if card.state === 'failed'}<dt>Error</dt><dd class="error">{card.error}</dd>
+            {:else}<dt>{card.withdrawn ? 'Withdrawn' : 'Note'}</dt><dd>{card.error}</dd>{/if}
+          {/if}
         </dl>
         <ul class="groups">
           {#each Object.entries(card.groups ?? {}) as [g, n] (g)}<li><Badge label={`${g} ${n}`} /></li>{/each}
