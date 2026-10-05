@@ -31,16 +31,43 @@ reason="no fleet voice config"
 if [ -r "$ENV_FILE" ] && [ -r "$HEADERS" ]; then
   # shellcheck disable=SC1090
   . "$ENV_FILE"
-  name="$(tmux display-message -p '#S' 2>/dev/null || true)"
+  # The session of this recorder's own pane, not of the client's current one.
+  if [ -n "${TMUX_PANE:-}" ]; then
+    name="$(tmux display-message -p -t "$TMUX_PANE" '#S' 2>/dev/null || true)"
+  else
+    name="$(tmux display-message -p '#S' 2>/dev/null || true)"
+  fi
   if [ -n "${FLEET_VOICE_URL:-}" ] && [ -n "$name" ]; then
     err="$(mktemp)"
+    # Claude Code ends a recording with SIGTERM to this process and waits for
+    # its stdout to close. curl runs in the background so that the signal
+    # ends it too: a curl left streaming would hold stdout (and the
+    # microphone) open. `jobs -p` also covers a signal before `pid` is set.
+    # shellcheck disable=SC2317,SC2046  # called by the trap; job ids are numbers
+    stop() {
+      kill $(jobs -p) 2>/dev/null
+      wait
+      rm -f "$err"
+      exit 143
+    }
+    trap stop TERM INT HUP PIPE
     # --fail: on an HTTP error curl writes nothing to stdout (PCM only there)
     # and names the status on stderr.
-    if curl -sSN --fail -H @"$HEADERS" -G \
-         --data-urlencode "tmux=$name" "$FLEET_VOICE_URL/voice/capture" 2>"$err"; then
-      rm -f "$err"; exit 0
-    fi
+    curl -sSN --fail -H @"$HEADERS" -G \
+      --data-urlencode "tmux=$name" "$FLEET_VOICE_URL/voice/capture" 2>"$err" &
+    pid=$!
+    wait "$pid"
+    rc=$?
+    trap - TERM INT HUP PIPE
+    if [ "$rc" -eq 0 ]; then rm -f "$err"; exit 0; fi
     reason="$(tr -d '\r' <"$err" | tail -n 1)"; rm -f "$err"
+    case "$rc" in
+      # Nothing was streamed (no resolve, no connect, an HTTP error): the
+      # manual relay may still answer.
+      6|7|22) ;;
+      # The recording was cut part-way: it fails, never continues elsewhere.
+      *) echo "arecord (claude-fleet): $reason" >&2; exit 1 ;;
+    esac
     case "$reason" in
       *409*) reason="$reason — turn on 🎤 for this session in claude-fleet" ;;
       *403*) reason="$reason — voice relay is off in claude-fleet settings" ;;
@@ -48,7 +75,8 @@ if [ -r "$ENV_FILE" ] && [ -r "$HEADERS" ]; then
   fi
 fi
 
-# The manual relay (a reverse-tunnelled microphone server), if set up.
+# The manual relay (a reverse-tunnelled microphone server), if set up. `exec`
+# makes cat this process, so Claude Code's SIGTERM ends it directly.
 if [ -r "$FALLBACK_TOKEN" ] && { exec 3<>"/dev/tcp/127.0.0.1/$FALLBACK_PORT"; } 2>/dev/null; then
   printf '%s\n' "$(cat "$FALLBACK_TOKEN")" >&3
   exec cat <&3
