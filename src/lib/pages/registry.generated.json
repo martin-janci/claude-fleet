@@ -534,7 +534,8 @@
       "restart": "none",
       "tags": [],
       "unit": "seconds",
-      "value": "300"
+      "value": "300",
+      "zero": "no limit"
     },
     {
       "ai": "suggest",

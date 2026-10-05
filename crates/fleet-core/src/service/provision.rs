@@ -2405,7 +2405,7 @@ mod tests {
         let bin_write = Step::Script(remote_write_script(
             "~/.claude-fleet/voice/bin",
             "~/.claude-fleet/voice/bin/arecord",
-            include_str!("../../../../tools/voice/arecord"),
+            VOICE_ARECORD,
         ));
         let chmod = Step::Script("chmod 755 \"$HOME\"/'.claude-fleet/voice/bin/arecord'".into());
         let env_write = Step::Script(remote_write_script(
@@ -2421,10 +2421,6 @@ mod tests {
         };
         assert!(pos(&bin_write) < pos(&chmod), "chmod after the write");
         pos(&env_write);
-        assert_eq!(
-            VOICE_ARECORD,
-            include_str!("../../../../tools/voice/arecord")
-        );
     }
 
     #[tokio::test]

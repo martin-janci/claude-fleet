@@ -78,7 +78,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `voice.enabled` | `false` | on / off | Let Claude Code's /voice on a host record from the microphone of the app attached to it. The microphone opens only while you record, for a session you turned 🎤 on for. |
-| `voice.max_capture_secs` | `300` | seconds | A recording longer than this is cut off. |
+| `voice.max_capture_secs` | `300` | seconds, `0` = no limit | A recording longer than this is cut off. |
 | `voice.claim_ttl_secs` | `1800` | seconds, `0` = never | A session's 🎤 turns itself off after this long without a recording. |
 
 ## Move to host

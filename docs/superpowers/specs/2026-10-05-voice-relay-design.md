@@ -58,12 +58,18 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
     150 ms; memoised for the life of the `claude` process) → sleep, exit 0,
     regardless of whether a claim exists, so a claim made later still works.
   - `arecord -f S16_LE -r 16000 -c 1 -t raw -q -` → finds its tmux session
-    name (`tmux display-message -p '#S'`, `TMUX` is inherited), then
+    name (`tmux display-message -p -t "$TMUX_PANE" '#S'`, without `-t` when
+    `TMUX_PANE` is unset; `TMUX` is inherited), then
     `curl -sN --fail -H @~/.claude/fleet-hook.headers
     "<base>/voice/capture?tmux=<name>"` with stdout passed through.
-- Fallback: when the fleet request fails (no claim, fleet down), it tries the
-  manual `127.0.0.1:4713` path with `~/.config/fleet-voice/token` if that
-  file exists, else exits 1 with a one-line reason on stderr.
+  - Claude Code ends a recording with SIGTERM to `arecord` and waits for its
+    stdout to close, so curl runs in the background under a TERM/INT/HUP/PIPE
+    trap that kills it (and removes the stand-in's temp file).
+- Fallback: when the fleet request fails before any audio (cannot connect,
+  an HTTP error such as 409), it tries the manual `127.0.0.1:4713` path with
+  `~/.config/fleet-voice/token` if that file exists, else exits 1 with a
+  one-line reason on stderr. A stream cut part-way exits 1 and is never
+  continued from the fallback.
 
 ### Server: `GET /voice/capture`
 
@@ -81,13 +87,21 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
 
 - Per session, at most one claim: `{ owner (Caller identity), source,
   claimed_at, last_used_at }`. Last claim wins; a replaced owner's source is
-  told so.
+  told so (`VoiceSource::revoked(Replaced)`), and so is an expired one
+  (`Expired`, found lazily by the next capture). `/voice/source` closes a
+  replaced socket with 4001 "microphone claimed elsewhere" and an expired one
+  with 4002 "microphone idle — turn 🎤 on again"; it pings the device every
+  20 s so a proxy's idle timeout does not drop a claim. The owner's own
+  release is not a revocation.
 - A claim ends on the desktop's `voice_release`, on its source going away
   (websocket closed, desktop detached), or after `voice.claim_ttl_secs`
   unused.
 - `VoiceSource` is a trait: `start(sink) -> CaptureHandle`, dropped to stop.
   fleet-core knows nothing about audio devices.
-- The desktop emits a local `voice:state` Tauri event.
+- The desktop emits a local `voice:state` Tauri event: `claimed`,
+  `capturing`, `stopped` (a capture ended; the UI goes back to claimed only
+  from capturing, since it can follow a release), `released` (with the
+  reason when the claim was taken or lapsed), `error`.
 
 ### Desktop
 

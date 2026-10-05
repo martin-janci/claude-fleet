@@ -767,7 +767,8 @@ pub const SPECS: &[Spec] = &[
         "Voice: longest recording",
         "A recording longer than this is cut off.",
     )
-    .unit(Unit::Seconds),
+    .unit(Unit::Seconds)
+    .zero("no limit"),
     Spec::new(
         VOICE_CLAIM_TTL_SECS,
         "1800",
