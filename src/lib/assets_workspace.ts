@@ -3,7 +3,7 @@
 // `layer:`, a catalog's repo status, an asset's History — and the small pure
 // helpers the views share. Mirrors service/catalog/{catalogs, changesets/mod,
 // repo}.rs and the commands of commands/assets.rs (Rulings R13).
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { AssetSummary, RepoStatus, SyncRunSummary } from './assets';
 import type { BadgeTone } from './assets_visual';
@@ -188,12 +188,23 @@ export function driftDiff(a: { host_alias: string; kind: string; name: string; h
   });
 }
 
-/** R12: every open card in full (cards are few; the views need items). */
+let cardViewsGen = 0;
+
+/** R12: every open card in full (cards are few; the views need items).
+ *  Overlapping loads can finish out of order, so only the newest run's result
+ *  stands; a card whose fetch failed keeps its previous view. */
 export async function loadOpenCardViews(cards: ChangesetSummary[] | null): Promise<void> {
+  const gen = ++cardViewsGen;
   const open = (cards ?? []).filter(isOpenCard);
   const got = await Promise.all(open.map((c) => getChangeset(c.id)));
+  if (gen !== cardViewsGen) return;
+  const prev = get(cardViews);
   const next: Record<number, ChangesetView> = {};
-  got.forEach((r, i) => { if (r.ok) next[open[i].id] = r.value; });
+  got.forEach((r, i) => {
+    const id = open[i].id;
+    if (r.ok) next[id] = r.value;
+    else if (prev[id]) next[id] = prev[id];
+  });
   cardViews.set(next);
 }
 

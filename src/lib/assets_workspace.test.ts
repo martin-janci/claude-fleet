@@ -180,6 +180,28 @@ describe('card verbs', () => {
     ]);
     expect(Object.keys(get(cardViews))).toEqual(['1']);
   });
+  it('an older overlapping load that finishes last does not overwrite the newer one', async () => {
+    cardViews.set({});
+    const resolvers: ((v: unknown) => void)[] = [];
+    invoke.mockImplementation(() => new Promise((res) => { resolvers.push(res); }));
+    const card = { id: 1, kind: 'new' as const, summary: '', state: 'proposed' as const, created_at: 1 };
+    const first = loadOpenCardViews([card]);
+    const second = loadOpenCardViews([card]);
+    resolvers[1]({ id: 1, summary: 'newer', items: [] });
+    await second;
+    resolvers[0]({ id: 1, summary: 'stale', items: [] });
+    await first;
+    expect(get(cardViews)[1].summary).toBe('newer');
+  });
+  it('a failed fetch keeps the card\'s previous view', async () => {
+    cardViews.set({});
+    const card = { id: 1, kind: 'new' as const, summary: '', state: 'proposed' as const, created_at: 1 };
+    invoke.mockResolvedValueOnce({ id: 1, summary: 'kept', items: [] });
+    await loadOpenCardViews([card]);
+    invoke.mockRejectedValueOnce({ code: 'E_HUB_TIMEOUT', message: 'slow' });
+    await loadOpenCardViews([card]);
+    expect(get(cardViews)[1].summary).toBe('kept');
+  });
   it('loads layers for every loaded catalog by name', async () => {
     invoke.mockResolvedValue({ layers: [], hosts: [] });
     await loadAllLayers([
