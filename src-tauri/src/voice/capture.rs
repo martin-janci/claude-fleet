@@ -17,6 +17,8 @@ impl VoiceSource for CpalSource {
     fn start(&self, tx: PcmTx) -> Result<Box<dyn Send>, String> {
         use super::resample::Converter;
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        use std::sync::mpsc::TryRecvError;
+        use std::sync::{Arc, Mutex};
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let on_state = self.on_state.clone();
@@ -25,7 +27,8 @@ impl VoiceSource for CpalSource {
         std::thread::Builder::new()
             .name("voice-capture".into())
             .spawn(move || {
-                let run = || -> Result<cpal::Stream, String> {
+                // `Ok(None)`: `start` gave up waiting, so the device is never played.
+                let run = || -> Result<Option<cpal::Stream>, String> {
                     let dev = cpal::default_host()
                         .default_input_device()
                         .ok_or("no microphone found")?;
@@ -39,6 +42,10 @@ impl VoiceSource for CpalSource {
                     }
                     let mut conv = Converter::new(cfg.sample_rate().0, cfg.channels());
                     let mut buf = Vec::with_capacity(3_200);
+                    // The only sender: a stream error takes it, which ends the
+                    // capture at once instead of leaving the recorder in silence.
+                    let sink = Arc::new(Mutex::new(Some(tx)));
+                    let err_sink = Arc::clone(&sink);
                     let err_state = on_state.clone();
                     let stream = dev
                         .build_input_stream(
@@ -46,24 +53,42 @@ impl VoiceSource for CpalSource {
                             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                                 buf.extend(conv.push(data));
                                 if buf.len() >= 3_200 {
-                                    let _ = tx.try_send(std::mem::take(&mut buf));
+                                    // Contended only while an error takes the sender.
+                                    if let Ok(sink) = sink.try_lock() {
+                                        if let Some(tx) = sink.as_ref() {
+                                            let _ = tx.try_send(std::mem::take(&mut buf));
+                                        }
+                                    }
                                 }
                             },
-                            move |e| err_state("error", Some(e.to_string())),
+                            move |e| {
+                                if let Ok(mut sink) = err_sink.lock() {
+                                    sink.take();
+                                }
+                                err_state("error", Some(e.to_string()));
+                            },
                             None,
                         )
                         .map_err(|e| e.to_string())?;
+                    if let Err(TryRecvError::Disconnected) = stop_rx.try_recv() {
+                        return Ok(None);
+                    }
                     stream.play().map_err(|e| e.to_string())?;
-                    Ok(stream)
+                    Ok(Some(stream))
                 };
                 match run() {
-                    Ok(stream) => {
-                        let _ = ready_tx.send(Ok(()));
+                    Ok(Some(stream)) => {
+                        if ready_tx.send(Ok(())).is_err() {
+                            // `start` already returned its timeout error.
+                            drop(stream);
+                            return;
+                        }
                         on_state("capturing", None);
                         let _ = stop_rx.recv();
                         drop(stream);
                         on_state("claimed", None);
                     }
+                    Ok(None) => {}
                     Err(e) => {
                         on_state("error", Some(e.clone()));
                         let _ = ready_tx.send(Err(e));

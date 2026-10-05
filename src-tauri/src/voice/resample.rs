@@ -88,6 +88,32 @@ mod tests {
         assert!((15_999..=16_001).contains(&n), "{n}");
     }
     #[test]
+    fn chunking_does_not_change_the_output() {
+        // A 440 Hz stereo sine at 44.1 kHz: a ratio that is not a whole number.
+        let input: Vec<f32> = (0..44_100)
+            .flat_map(|i| {
+                let v = (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.8;
+                [v, v]
+            })
+            .collect();
+        let whole = samples(&Converter::new(44_100, 2).push(&input));
+        let mut c = Converter::new(44_100, 2);
+        let mut chunked = Vec::new();
+        // Odd frame counts (×2 samples, so no frame is split).
+        for part in input.chunks(2 * 97).flat_map(|p| p.chunks(2 * 13)) {
+            chunked.extend(samples(&c.push(part)));
+        }
+        assert!(
+            (whole.len() as i64 - chunked.len() as i64).abs() <= 1,
+            "{} vs {}",
+            whole.len(),
+            chunked.len()
+        );
+        for (i, (a, b)) in whole.iter().zip(&chunked).enumerate() {
+            assert!((*a as i32 - *b as i32).abs() <= 1, "sample {i}: {a} vs {b}");
+        }
+    }
+    #[test]
     fn out_of_range_input_is_clamped() {
         let mut c = Converter::new(16_000, 1);
         assert_eq!(samples(&c.push(&[2.0, -2.0])), vec![32767, -32767]);

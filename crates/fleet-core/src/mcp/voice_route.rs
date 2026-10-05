@@ -70,7 +70,14 @@ pub async fn handle_capture(
             Duration::from_secs(settings::get_secs(&s, settings::VOICE_CLAIM_TTL_SECS)),
         )
     };
-    let capture = match registry().begin_capture(session_id, ttl) {
+    // A desktop source's `start` blocks until its microphone opens (up to
+    // 5 s), so it runs off the async workers.
+    let begun =
+        tokio::task::spawn_blocking(move || registry().begin_capture(session_id, ttl)).await;
+    let Ok(begun) = begun else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let capture = match begun {
         Ok(c) => c,
         Err(CaptureRefusal::NoClaim) => {
             return (

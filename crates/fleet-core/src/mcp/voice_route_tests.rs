@@ -362,6 +362,54 @@ async fn capture_streams_the_claimed_source() {
     .await;
 }
 
+/// A source whose `start` blocks its thread until the test opens the gate
+/// (as a desktop microphone does while it opens), then fails.
+struct Gated {
+    entered: std::sync::atomic::AtomicBool,
+    open_tx: Mutex<std::sync::mpsc::Sender<()>>,
+    open_rx: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl VoiceSource for Gated {
+    fn start(&self, _tx: PcmTx) -> Result<Box<dyn Send>, String> {
+        self.entered.store(true, Ordering::SeqCst);
+        let opened = self.open_rx.lock().unwrap().recv_timeout(PATIENCE).is_ok();
+        Err(if opened {
+            "no microphone (gate opened)"
+        } else {
+            "no microphone (gate timed out)"
+        }
+        .into())
+    }
+}
+
+#[tokio::test]
+async fn a_blocking_source_start_does_not_stall_the_hub_and_its_failure_is_502() {
+    let h = hub(true).await;
+    let (open_tx, open_rx) = std::sync::mpsc::channel();
+    let src = Arc::new(Gated {
+        entered: false.into(),
+        open_tx: Mutex::new(open_tx),
+        open_rx: Mutex::new(open_rx),
+    });
+    registry().claim(h.session_id, "test", src.clone());
+    let (first, ()) = tokio::join!(get(h.addr, capture_path(), HOST_A), async {
+        eventually(PATIENCE, "the source was never started", || {
+            src.entered.load(Ordering::SeqCst)
+        })
+        .await;
+        // The hub still answers while `start` blocks (one-thread runtime).
+        assert_eq!(get(h.addr, capture_path(), HOST_B).await.status, 404);
+        src.open_tx.lock().unwrap().send(()).unwrap();
+    });
+    assert_eq!(first.status, 502);
+    let body = first.text().await;
+    assert!(
+        body.contains("the microphone did not start: no microphone (gate opened)"),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn a_second_capture_of_the_session_is_409() {
     let h = hub(true).await;
