@@ -2281,19 +2281,96 @@ mod tests {
         assert_eq!(on_disk, listed, "list every tools/ag file in AG_FILES");
     }
 
-    /// C1: provision.rs `include_str!`s tools/ag, so the hub image's build
-    /// context must carry it or the tagged image build breaks.
+    /// C1: every file a workspace crate embeds from outside `crates/`
+    /// (`include_str!` / `include_bytes!` reaching `../../../../…`) must be in
+    /// the hub image's build context, or the tagged image build breaks while
+    /// every other build — which compiles from the full checkout — stays
+    /// green. It checked only tools/ag until v0.4.10's hub image failed on
+    /// `tools/voice/arecord`, which no `COPY` carried.
     #[test]
-    fn the_hub_image_build_context_ships_tools_ag() {
-        let path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fleet-hub/Dockerfile");
-        let dockerfile = std::fs::read_to_string(&path).expect("read the hub Dockerfile");
+    fn the_hub_image_build_context_ships_every_embedded_file() {
+        use std::path::{Component, Path, PathBuf};
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dockerfile_path = repo.join("crates/fleet-hub/Dockerfile");
+        let dockerfile =
+            std::fs::read_to_string(&dockerfile_path).expect("read the hub Dockerfile");
+        // The source of every build-stage `COPY <src> <dst>` (not `--from=`).
+        let copied: Vec<String> = dockerfile
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("COPY "))
+            .filter(|rest| !rest.trim_start().starts_with("--"))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .map(|s| s.trim_end_matches('/').to_string())
+            .collect();
+
+        fn normalize(p: &Path) -> PathBuf {
+            let mut out = PathBuf::new();
+            for c in p.components() {
+                match c {
+                    Component::ParentDir => {
+                        out.pop();
+                    }
+                    Component::CurDir => {}
+                    other => out.push(other),
+                }
+            }
+            out
+        }
+        fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    // Integration tests are never compiled into the image.
+                    if p.file_name().is_some_and(|n| n != "tests" && n != "target") {
+                        rs_files(&p, out);
+                    }
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        rs_files(&repo.join("crates"), &mut files);
+        let mut missing = Vec::new();
+        let mut seen = 0;
+        for file in files {
+            let name = file.file_name().unwrap().to_string_lossy().to_string();
+            // Unit-test files are compiled only under cfg(test), never in the image.
+            if name == "tests.rs" || name.starts_with("tests_") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&file).unwrap();
+            for mac in ["include_str!(\"", "include_bytes!(\""] {
+                for (i, _) in src.match_indices(mac) {
+                    let rest = &src[i + mac.len()..];
+                    let Some(end) = rest.find('"') else { continue };
+                    let target = normalize(&file.parent().unwrap().join(&rest[..end]));
+                    let Ok(rel) = target.strip_prefix(normalize(&repo)) else {
+                        continue;
+                    };
+                    let rel = rel.to_string_lossy().replace('\\', "/");
+                    if rel.starts_with("crates/") {
+                        continue;
+                    }
+                    seen += 1;
+                    let covered = copied
+                        .iter()
+                        .any(|c| rel == *c || rel.starts_with(&format!("{c}/")));
+                    if !covered {
+                        missing.push(format!("{rel} (embedded by {})", file.display()));
+                    }
+                }
+            }
+        }
         assert!(
-            dockerfile
-                .lines()
-                .any(|l| l.trim_start().starts_with("COPY tools/ag ")),
-            "{} must `COPY tools/ag ./tools/ag` (provision.rs embeds it)",
-            path.display()
+            seen > 0,
+            "found no out-of-crate embeds — the scan is broken"
+        );
+        assert!(
+            missing.is_empty(),
+            "{} has no `COPY` for these embedded files:\n  {}",
+            dockerfile_path.display(),
+            missing.join("\n  ")
         );
     }
 
