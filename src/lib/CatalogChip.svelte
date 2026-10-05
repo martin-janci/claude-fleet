@@ -12,6 +12,8 @@
     head,
     state: load = 'loaded',
     problem = null,
+    path = null,
+    remote = null,
     repo = null,
     writable = false,
     busy = false,
@@ -23,6 +25,9 @@
     head: string | null;
     state?: 'loaded' | 'problem' | 'not_loaded';
     problem?: string | null;
+    /** Where the catalog lives: its checkout and, when set, its remote. */
+    path?: string | null;
+    remote?: string | null;
     repo?: RepoStatus | null;
     writable?: boolean;
     busy?: boolean;
@@ -36,6 +41,7 @@
   let chip: HTMLButtonElement | undefined = $state();
   let dialog: HTMLElement | undefined = $state();
   const personal = $derived(name === 'personal');
+  const title = $derived([path, remote, problem].filter(Boolean).join('\n'));
   const short = $derived((repo?.head ?? head ?? '').slice(0, 7) || '—');
   const ahead = $derived(repo?.ahead ?? 0);
   const dirty = $derived(repo?.dirty ?? 0);
@@ -81,7 +87,7 @@
     class="btn btn--quiet is-bounded chip"
     aria-haspopup="dialog"
     aria-expanded={open}
-    title={problem ?? ''}
+    {title}
     bind:this={chip}
     onclick={toggle}
     data-testid={`catalog-chip-${name}`}
@@ -100,6 +106,12 @@
         }
       }}
     >
+      {#if path || remote}
+        <p class="where" data-testid={`catalog-where-${name}`}>
+          {#if path}<span class="path">{path}</span>{/if}
+          {#if remote}<span class="remote">{remote}</span>{/if}
+        </p>
+      {/if}
       {#if repo}
         <p class="status" data-testid={personal ? 'assets-repo-status' : `catalog-status-${name}`}>
           {repo.head.slice(0, 7)} · {repo.dirty} dirty
@@ -143,6 +155,7 @@
     padding: 10px 12px; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--bg); font-size: 12px;
   }
   .status { margin: 0; font-family: var(--mono); font-size: 11.5px; }
+  .where { display: grid; gap: 2px; margin: 0; font-family: var(--mono); font-size: 11px; color: var(--fg-muted); overflow-wrap: anywhere; user-select: text; }
   .acts { display: flex; gap: 6px; flex-wrap: wrap; }
   .muted { margin: 0; color: var(--fg-muted); }
 </style>

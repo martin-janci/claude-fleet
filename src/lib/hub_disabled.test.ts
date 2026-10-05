@@ -281,6 +281,33 @@ describe('the asset catalog on a hub client', () => {
     expect(await screen.findByTestId('import-dialog')).toBeTruthy();
   });
 
+  it('granted, the hub link down: Import is blocked with the reason, also when reached past the disabled button', async () => {
+    catalog.set(null);
+    hubStatus.set(remote);
+    hubConnection.set({ state: 'offline', attempt: 3, retry_in_secs: 8, reason: 'connection refused' });
+    inv().mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'catalog_config': return hubConfig;
+        case 'catalog_load': return { head: 'abcdef1234567890', loaded_at: 1, asset_count: 1, problem_count: 0 };
+        case 'catalog_list_assets': return hubListing;
+        case 'assets_inventory': return [];
+        default: return null;
+      }
+    });
+    render(AssetsPanel, { props: { visible: true } });
+    await fireEvent.click(await screen.findByTestId('assets-rail-library'));
+    const imp = screen.getByTestId('assets-import') as HTMLButtonElement;
+    expect(imp.disabled).toBe(true);
+    const reason = imp.title;
+    expect(reason).not.toBe('');
+    // The `a` key (Task 12) calls the same handler without the button: the
+    // handler itself refuses.
+    imp.disabled = false;
+    await fireEvent.click(imp);
+    expect(screen.queryByTestId('import-dialog')).toBeNull();
+    expect(screen.getByText(reason)).toBeTruthy();
+  });
+
   it('granted with no catalog yet: the setup form, for a path on the hub’s machine', async () => {
     catalog.set(null);
     catalogConfig.set(null);

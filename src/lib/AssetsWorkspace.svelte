@@ -80,6 +80,8 @@
   let queryText = $state('');
   let showProblems = $state(false);
   let showGrant = $state(false);
+  const uid = $props.id();
+  const grantNoteId = `${uid}-grant`;
   // Bumped by the `e` key (Task 12): open the selected asset in Source.
   let editNonce = $state(0);
   let listEl: HTMLElement | undefined = $state();
@@ -154,7 +156,7 @@
 </script>
 
 <div class="ws" data-testid="assets-workspace">
-  <AssetsRail {view} {counts} {readOnly} onview={(v) => (view = v)} {onsecrets} />
+  <AssetsRail {view} {counts} {readOnly} busy={busy !== ''} onview={(v) => (view = v)} {onsecrets} />
 
   <div class="main">
     <header class="head">
@@ -167,14 +169,16 @@
               type="button"
               class="btn btn--chip"
               aria-expanded={showGrant}
+              aria-controls={grantNoteId}
               onclick={() => (showGrant = !showGrant)}
               data-testid="assets-readonly">read-only · ask the operator to grant assets on personal</button
             >
             {#if showGrant}
-              <span class="grant" role="note"
+              <span class="grant" role="note" id={grantNoteId}
                 >On the hub's machine: <code data-testid="assets-grant-cmd"
-                  >fleet-hub client grant {readOnlyClient ?? '<this client>'} assets</code
-                ></span
+                  >fleet-hub client grant {readOnlyClient ?? "<this client's name>"} assets</code
+                >{#if !readOnlyClient}
+                  (<code>fleet-hub client list</code> shows the name){/if}</span
               >
             {/if}
           </span>

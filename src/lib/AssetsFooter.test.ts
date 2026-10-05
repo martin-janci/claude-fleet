@@ -60,7 +60,8 @@ describe('AssetsFooter', () => {
     render(AssetsFooter, props);
     const chip = screen.getByTestId('catalog-chip-papayapos');
     expect(chip.textContent).toContain('⚠');
-    expect(chip.getAttribute('title')).toBe('schema_version 99');
+    // Where it lives, then why it failed.
+    expect(chip.getAttribute('title')).toBe('/r\nschema_version 99');
   });
   it('reads an org catalog\'s ahead and dirty from its own repo status', async () => {
     catalogStatuses.set([status('personal', null, 'a1b2c3d9'), status('papayapos', 7, '9f0e1d2a')]);
@@ -90,6 +91,22 @@ describe('AssetsFooter', () => {
     await waitFor(() => expect(screen.getByTestId('catalog-chip-papayapos').textContent).not.toContain('↑'));
     expect(screen.getByTestId('assets-pull')).toBeTruthy();
     expect(invoke.mock.calls.filter((c) => c[0] === 'catalog_repo_status_in')).toHaveLength(2);
+  });
+  it('each chip says where its catalog lives: an org one from its listing row, the personal fallback from the config', async () => {
+    catalogStatuses.set([status('personal', null, 'a1b2c3d9', { repo_path: '/home/me/agent-assets', remote_url: 'git@x:me/a.git' }), status('papayapos', 7, '9f0e1d2a', { repo_path: '/srv/papayapos' })]);
+    render(AssetsFooter, props);
+    await fireEvent.click(screen.getByTestId('catalog-chip-papayapos'));
+    expect(screen.getByTestId('catalog-where-papayapos').textContent).toContain('/srv/papayapos');
+    await fireEvent.click(screen.getByTestId('catalog-chip-personal'));
+    expect(screen.getByTestId('catalog-where-personal').textContent).toContain('/home/me/agent-assets');
+    expect(screen.getByTestId('catalog-where-personal').textContent).toContain('git@x:me/a.git');
+  });
+  it('the personal fallback chip (no catalog listing) takes path and remote from the config', async () => {
+    catalogConfig.set({ repo_path: '/cfg/assets', remote_url: 'git@y:me/b.git', head_commit: 'c0ffee12', last_loaded_at: 1 });
+    render(AssetsFooter, props);
+    await fireEvent.click(screen.getByTestId('catalog-chip-personal'));
+    expect(screen.getByTestId('catalog-where-personal').textContent).toContain('/cfg/assets');
+    expect(screen.getByTestId('catalog-where-personal').textContent).toContain('git@y:me/b.git');
   });
   it('shows the work in progress instead of the last sync', () => {
     syncProgress.set({ plan_id: 'p', host_alias: 'oci', harness: 'claude', done: 2, total: 5 });

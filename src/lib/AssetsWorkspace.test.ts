@@ -75,6 +75,11 @@ describe('AssetsWorkspace', () => {
     expect(h.onlintall).toHaveBeenCalled();
   });
 
+  it('Secrets on the rail is disabled while the panel is busy', () => {
+    render(AssetsWorkspace, { ...handlers(), busy: 'scan' });
+    expect(screen.getByTestId('assets-secrets')).toBeDisabled();
+  });
+
   it('selecting a row shows it in the Inspector', async () => {
     render(AssetsWorkspace, handlers());
     await fireEvent.click(screen.getByTestId('inbox-row-identity:skill/fresh'));
@@ -92,6 +97,23 @@ describe('AssetsWorkspace', () => {
     expect(screen.getByTestId('assets-hub-refresh')).toBeTruthy();
     await fireEvent.click(chip);
     expect(screen.getByTestId('assets-grant-cmd').textContent).toBe('fleet-hub client grant desk assets');
+  });
+
+  it('read-only chip: controls the note it reveals; without a client name it says how to find it', async () => {
+    render(AssetsWorkspace, { ...handlers(), readOnly: true, readOnlyClient: null });
+    const chip = screen.getByTestId('assets-readonly');
+    await fireEvent.click(chip);
+    const note = document.getElementById(chip.getAttribute('aria-controls') ?? '');
+    expect(note?.getAttribute('role')).toBe('note');
+    expect(note?.contains(screen.getByTestId('assets-grant-cmd'))).toBe(true);
+    expect(screen.getByTestId('assets-grant-cmd').textContent).toBe("fleet-hub client grant <this client's name> assets");
+    expect(note?.textContent).toContain('fleet-hub client list');
+  });
+
+  it('read-only chip with a client name has no name-lookup hint', async () => {
+    render(AssetsWorkspace, { ...handlers(), readOnly: true, readOnlyClient: 'desk' });
+    await fireEvent.click(screen.getByTestId('assets-readonly'));
+    expect(document.querySelector('[role="note"]')?.textContent).not.toContain('fleet-hub client list');
   });
 
   it('read-only: the Inbox and the Library rows offer no Import', async () => {

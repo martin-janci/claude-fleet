@@ -8,12 +8,15 @@
     view,
     counts,
     readOnly,
+    busy = false,
     onview,
     onsecrets,
   }: {
     view: WorkspaceView;
     counts: Record<WorkspaceView, number>;
     readOnly: boolean;
+    /** Something is running: Secrets waits, as the old toolbar button did. */
+    busy?: boolean;
     onview: (v: WorkspaceView) => void;
     onsecrets: () => void;
   } = $props();
@@ -35,7 +38,7 @@
   {/each}
   {#if !readOnly}
     <div class="sep" role="separator"></div>
-    <button type="button" onclick={onsecrets} data-testid="assets-secrets">
+    <button type="button" onclick={onsecrets} disabled={busy} data-testid="assets-secrets">
       <Icon name="key" size={15} /><span class="lbl">Secrets</span>
     </button>
   {/if}
@@ -47,7 +50,8 @@
     display: flex; align-items: center; gap: 9px; height: 28px; padding: 0 8px; border: 0; border-radius: var(--radius-md);
     background: none; color: var(--control-fg-quiet); font: inherit; font-size: 12.5px; cursor: pointer; text-align: left;
   }
-  .rail button:hover { background: var(--control-bg-hover); }
+  .rail button:hover:not(:disabled) { background: var(--control-bg-hover); }
+  .rail button:disabled { opacity: 0.5; cursor: default; }
   .rail button.on { background: var(--accent-soft); color: var(--fg); font-weight: 600; }
   .rail button:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
   .ct { margin-left: auto; font-size: 11px; font-variant-numeric: tabular-nums; color: var(--fg-muted); font-weight: 400; }

@@ -27,14 +27,22 @@
     onpush: () => void;
   } = $props();
 
-  type Chip = { name: string; head: string | null; state: 'loaded' | 'problem' | 'not_loaded'; problem: string | null };
+  type Chip = {
+    name: string; head: string | null; state: 'loaded' | 'problem' | 'not_loaded'; problem: string | null;
+    path: string | null; remote: string | null;
+  };
   const chips = $derived.by((): Chip[] => {
     const rows = $catalogStatuses;
     if (rows && rows.length) {
-      return rows.map((c) => ({ name: c.name, head: c.head_commit, state: c.state, problem: c.problem ?? null }));
+      return rows.map((c) => ({
+        name: c.name, head: c.head_commit, state: c.state, problem: c.problem ?? null, path: c.repo_path, remote: c.remote_url,
+      }));
     }
     const head = $repoStatusStore?.head ?? $catalogConfig?.head_commit ?? listing?.head ?? null;
-    return [{ name: PERSONAL, head, state: 'loaded', problem: null }];
+    return [{
+      name: PERSONAL, head, state: 'loaded', problem: null,
+      path: $catalogConfig?.repo_path ?? null, remote: $catalogConfig?.remote_url ?? null,
+    }];
   });
 
   // R24: an org catalog's dirty/ahead, read again with each listing the
@@ -72,6 +80,8 @@
       head={c.head}
       state={c.state}
       problem={c.problem}
+      path={c.path}
+      remote={c.remote}
       repo={c.name === PERSONAL ? (readOnly ? null : $repoStatusStore) : (orgRepo[c.name] ?? null)}
       writable={!readOnly && c.name === PERSONAL}
       busy={busy !== ''}

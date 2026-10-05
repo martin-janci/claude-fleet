@@ -254,6 +254,7 @@
   // own defaults) or an identity row, its Inspector, or the `a` key.
   function importFrom(identity: AssetIdentity | null) {
     if (identity) return onImportUnmanaged(identity);
+    if (importBlocked) { error = importBlocked; return; }
     importPreset = null;
     showImport = true;
   }

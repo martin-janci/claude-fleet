@@ -42,6 +42,11 @@ describe('AssetsRail', () => {
     expect(p.onsecrets).toHaveBeenCalled();
   });
 
+  it('Secrets is disabled while something runs, as the old toolbar button was', () => {
+    render(AssetsRail, props({ busy: true }));
+    expect(screen.getByTestId('assets-secrets')).toBeDisabled();
+    expect(screen.getByTestId('assets-rail-library')).not.toBeDisabled();
+  });
   it('read-only: no Secrets', () => {
     render(AssetsRail, props({ readOnly: true }));
     expect(screen.queryByTestId('assets-secrets')).toBeNull();

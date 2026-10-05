@@ -73,6 +73,22 @@ describe('CatalogChip', () => {
     expect(screen.getByTestId('assets-repo-status').textContent).toContain('2 dirty');
     for (const id of ['assets-pull', 'assets-commit-pending', 'assets-push']) expect(screen.queryByTestId(id)).toBeNull();
   });
+  it('says where the catalog lives — path and remote — in the popover and the chip title', async () => {
+    render(CatalogChip, { name: 'personal', head: null, repo, path: '/r/agent-assets', remote: 'git@github.com:me/agent-assets.git', problem: null });
+    const chip = screen.getByTestId('catalog-chip-personal');
+    expect(chip.getAttribute('title')).toBe('/r/agent-assets\ngit@github.com:me/agent-assets.git');
+    await fireEvent.click(chip);
+    const where = screen.getByTestId('catalog-where-personal');
+    expect(where.textContent).toContain('/r/agent-assets');
+    expect(where.textContent).toContain('git@github.com:me/agent-assets.git');
+  });
+  it('a chip without a remote names only its path, and keeps its problem in the title', async () => {
+    render(CatalogChip, { name: 'acme', head: 'h', path: '/srv/acme', remote: null, state: 'problem', problem: 'schema_version 99' });
+    const chip = screen.getByTestId('catalog-chip-acme');
+    expect(chip.getAttribute('title')).toBe('/srv/acme\nschema_version 99');
+    await fireEvent.click(chip);
+    expect(screen.getByTestId('catalog-where-acme').textContent?.trim()).toBe('/srv/acme');
+  });
   it('Esc closes the popover and the focus goes back to the chip', async () => {
     render(CatalogChip, { name: 'personal', head: 'abc', repo, writable: true });
     const chip = screen.getByTestId('catalog-chip-personal');
