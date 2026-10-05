@@ -474,6 +474,8 @@ fn row(
         work_rev: 0,
         pr_evidence: None,
         pr_checked_at: None,
+        owner_person_id: None,
+        visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
@@ -501,7 +503,7 @@ fn select_targets_filters_by_host() {
     let s = sample_sessions();
     let f = BroadcastFilter {
         host: Some("mac".into()),
-        ..Default::default()
+        ..BroadcastFilter::internal()
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![1, 2]);
 }
@@ -511,7 +513,7 @@ fn select_targets_filters_by_status() {
     let s = sample_sessions();
     let f = BroadcastFilter {
         status: Some("idle".into()),
-        ..Default::default()
+        ..BroadcastFilter::internal()
     };
     // session 4 is idle but kind=review, so excluded.
     assert_eq!(select_targets(&s, &f, None, None), vec![1, 3]);
@@ -522,7 +524,7 @@ fn select_targets_filters_by_project() {
     let s = sample_sessions();
     let f = BroadcastFilter {
         project_id: Some(20),
-        ..Default::default()
+        ..BroadcastFilter::internal()
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![3]);
 }
@@ -532,7 +534,7 @@ fn select_targets_skips_blocked_and_stuck_sessions_unless_asked_for_them() {
     let mut s = sample_sessions();
     s[0].claude_status = Some("blocked".into());
     s[1].stuck_kind = Some("auth_menu".into());
-    let f = BroadcastFilter::default();
+    let f = BroadcastFilter::internal();
     let picked = select_targets(&s, &f, None, None);
     assert!(
         !picked.contains(&1),
@@ -544,7 +546,7 @@ fn select_targets_skips_blocked_and_stuck_sessions_unless_asked_for_them() {
     );
     let f = BroadcastFilter {
         status: Some("blocked".into()),
-        ..Default::default()
+        ..BroadcastFilter::internal()
     };
     assert_eq!(
         select_targets(&s, &f, None, None),
@@ -560,7 +562,7 @@ fn select_targets_filters_combined() {
         host: Some("mac".into()),
         project_id: Some(10),
         status: Some("running".into()),
-        scope: None,
+        view: crate::service::view_scope::ViewScope::internal(),
     };
     assert_eq!(select_targets(&s, &f, None, None), vec![2]);
 }
@@ -569,14 +571,14 @@ fn select_targets_filters_combined() {
 fn select_targets_excludes_non_work() {
     let s = sample_sessions();
     // No filters: every work session, never the review one (id 4).
-    let f = BroadcastFilter::default();
+    let f = BroadcastFilter::internal();
     assert_eq!(select_targets(&s, &f, None, None), vec![1, 2, 3]);
 }
 
 #[test]
 fn select_targets_excludes_controller() {
     let s = sample_sessions();
-    let f = BroadcastFilter::default();
+    let f = BroadcastFilter::internal();
     let controller = ("mac".to_string(), "work-a".to_string());
     // session 1 is the controller and must be dropped.
     assert_eq!(select_targets(&s, &f, Some(&controller), None), vec![2, 3]);
@@ -585,7 +587,7 @@ fn select_targets_excludes_controller() {
 #[test]
 fn select_targets_controller_only_matches_on_both_host_and_tmux() {
     let s = sample_sessions();
-    let f = BroadcastFilter::default();
+    let f = BroadcastFilter::internal();
     // Same tmux name on a different host must NOT be excluded.
     let controller = ("mefistos".to_string(), "work-a".to_string());
     assert_eq!(
@@ -609,7 +611,7 @@ fn select_targets_excludes_the_operator_as_well_as_the_controller() {
     let operator = ("local".to_string(), "fleet-operator".to_string());
     let ids = select_targets(
         &sessions,
-        &BroadcastFilter::default(),
+        &BroadcastFilter::internal(),
         Some(&controller),
         Some(&operator),
     );
@@ -619,7 +621,7 @@ fn select_targets_excludes_the_operator_as_well_as_the_controller() {
     let elsewhere = ("hetzner".to_string(), "fleet-operator".to_string());
     let ids = select_targets(
         &sessions,
-        &BroadcastFilter::default(),
+        &BroadcastFilter::internal(),
         None,
         Some(&elsewhere),
     );

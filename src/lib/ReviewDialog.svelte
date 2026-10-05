@@ -3,6 +3,7 @@
   import { selectSessionExplicitly } from './selection';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { sessionBlocked } from './share';
   import Modal from './Modal.svelte';
   import SpiralLoader from './SpiralLoader.svelte';
 
@@ -13,11 +14,20 @@
   let error = $state<string | null>(null);
   let controller: AbortController | null = null;
 
-  // spawn_review routes, so it only needs the live connection to be up.
-  const spawnBlocked = $derived(hubActionBlocked('spawn_review', $hubStatus, $hubConnection));
+  // Both halves (multi-user M1, F2a). `spawn_review` routes, so it needs the
+  // live connection up — and it is `own` in `share.ts::SESSION_TIER`: it starts
+  // a session in the owner's worktree with a terminal of its own. The opener in
+  // `SessionDetails` already composes both, but this dialog does not re-ask on
+  // confirm, so a reason that arrived while it was open (a revoke, a narrow)
+  // would not have reached the Start button.
+  const spawnBlocked = $derived(
+    hubActionBlocked('spawn_review', $hubStatus, $hubConnection) ??
+      $sessionBlocked(source, 'spawn_review'),
+  );
   const canStart = $derived(prompt.trim().length > 0 && !spawning && spawnBlocked === null);
 
   async function start() {
+    if (!canStart) return;
     spawning = true;
     error = null;
     controller = new AbortController();
@@ -50,6 +60,9 @@
       <textarea bind:value={prompt} rows="10" data-testid="review-textarea"></textarea>
     </section>
 
+    {#if spawnBlocked}
+      <p class="err" data-testid="review-blocked" role="status">{spawnBlocked}</p>
+    {/if}
     {#if error}
       <p class="err" data-testid="review-error">{error}</p>
     {/if}

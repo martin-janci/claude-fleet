@@ -78,6 +78,13 @@ fn rename(item: i64, title: &str) -> WorkLinkArgs {
     }
 }
 
+/// The whole scope for `local_items` (multi-user M1, T8d): every case here is
+/// about the ORG half, so the person half is the hub's own unrestricted reader
+/// with the org under test put back on it.
+fn lv(scope: &OrgScope) -> crate::service::view_scope::ViewScope {
+    crate::service::view_scope::ViewScope::internal().with_org(scope.clone())
+}
+
 #[test]
 fn naming_returns_the_row_with_its_new_primary_work() {
     let fx = fixture();
@@ -284,14 +291,14 @@ fn local_items_list_what_the_scope_sees_with_live_counts() {
             .unwrap();
         s.create_local_work_item(None, "Orphan").unwrap();
     }
-    let all = local_items(&fx.store, &OrgScope::All).unwrap();
+    let all = local_items(&fx.store, &lv(&OrgScope::All)).unwrap();
     assert_eq!(all.len(), 3);
     let count =
         |rows: &[LocalWorkItem], id: i64| rows.iter().find(|r| r.id == id).map(|r| r.live_sessions);
     assert_eq!(count(&all, on_b), Some(2));
     assert_eq!(count(&all, on_a), Some(1));
 
-    let a = local_items(&fx.store, &host(&fx, "h-a")).unwrap();
+    let a = local_items(&fx.store, &lv(&host(&fx, "h-a"))).unwrap();
     assert_eq!(
         a.iter().map(|r| r.id).collect::<BTreeSet<_>>(),
         [on_a, on_b].into()
@@ -301,11 +308,11 @@ fn local_items_list_what_the_scope_sees_with_live_counts() {
         Some(1),
         "host A counts only its own sessions"
     );
-    let b = local_items(&fx.store, &host(&fx, "h-b")).unwrap();
+    let b = local_items(&fx.store, &lv(&host(&fx, "h-b"))).unwrap();
     assert_eq!(b.iter().map(|r| r.id).collect::<Vec<_>>(), vec![on_b]);
     // Ended work still lists for the host its session ran on.
     fx.store.lock().unwrap().delete_session(fx.s_b).unwrap();
-    let b = local_items(&fx.store, &host(&fx, "h-b")).unwrap();
+    let b = local_items(&fx.store, &lv(&host(&fx, "h-b"))).unwrap();
     assert_eq!(
         b.iter()
             .map(|r| (r.id, r.live_sessions))

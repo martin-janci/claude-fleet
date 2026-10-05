@@ -121,10 +121,65 @@ in `App.test.ts` and `clipboard_native.test.ts` — that is a dependency gap, no
 code error. (`localStorage` is polyfilled in `vitest.setup.ts`; there are no
 known pre-existing frontend test failures.)
 
+**`src-tauri`'s test target parks on a loaded box, and `TMPDIR` fixes it.**
+`claude_fleet_lib`'s ~700 tests each build a temp SQLite store through
+`tempfile::tempdir()`, so on the root ext4 filesystem they serialise behind one
+journal: threads sit in `jbd2_log_wait_commit` with `/proc/pressure/io` at
+35–83% and `cargo test --workspace` never finishes. Point `TMPDIR` at tmpfs and
+the same binary runs the whole target in ~80–120 s:
+
+```bash
+mkdir -p /dev/shm/fleet-tests
+TMPDIR=/dev/shm/fleet-tests cargo fleet-test -- backend::
+```
+
+Two traps when running a test binary directly rather than through cargo:
+`ls -t target/debug/deps/<crate>-*` can hand you a STALE binary (several hashes
+live there and the newest-written is not always first) — use
+`find target/debug/deps -name '<crate>-*' ! -name '*.d' -printf '%T@ %p\n' | sort -rn | head -1`;
+and a stale `claude_fleet_lib` fails `verdict_gen` for the right reason, because
+it renders the table it was compiled with against the file on disk.
+
+**A `REGEN_*` run is MEANT to fail.** `REGEN_HUB_VERDICTS=1` /
+`REGEN_DOCS=1` / `REGEN_HUB_CONTRACT=1` write the file and then panic on
+purpose, telling you to read the diff and run again without the variable. The
+failure is the receipt, not a problem.
+
 Known Rust flakes — timing-sensitive, so they fail on a loaded box; re-run
 alone before blaming your change: `rewind::tests::the_removal_script_leaves_a_tree_a_live_pane_is_in`,
 `work::scale_tests::*`, the `CHAIN_BUDGET` migration tests in
-`store/schema/tests_upgrade.rs`, and `service::add_project`. Not a flake:
+`store/schema/tests_upgrade.rs`, `service::add_project`, and
+`fleet-agent`'s `conn::tests::report_frames_stay_under_the_frame_cap_and_carry_the_rest_over`
+(it fails `Elapsed(())` in a parallel run and passes alone in 0.15 s). Two of the others
+moved and neither is now fixed: `work::scale_tests::*` each take their own
+fixture copy since the suite cut, so they no longer queue behind one another
+— their 3,000 ms budgets are still wall-clock and still fail under load; and
+`FILE_OPEN_BUDGET` lifted the file-based upgrade test to 30 s **on Windows
+only**, so on Linux `opening_a_pre_work_graph_file_upgrades_it_within_budget`
+and the two in-memory chains still hold `CHAIN_BUDGET` at 5 s.
+
+Two more, added 2026-10-05, both with THIN margins rather than large ones —
+worth knowing before you spend an hour on either:
+`service::transcript::tests::fetch_maps_a_missing_local_transcript_to_e_no_transcript`
+and its `fetch_conversation_` twin answer **`E_TIMEOUT` instead of
+`E_NO_TRANSCRIPT`** on a loaded box, so the failure names the wrong cause.
+The reason, measured: they do **not** override `HOME`, so they read the
+developer's real `~/.claude/projects` (1.4 GB, 432 project directories, ~3,000
+transcripts on mercury) under `transcript.rs`'s `READ_WALL_CLOCK = 20 s`. At
+`loadavg` ~7 that takes **0.05 s**; at ~20 it blows the wall clock. Fixing
+them means pinning `HOME` in those two tests. And
+`mcp::tools::tests::a_one_person_fleet_still_sees_its_unclaimed_rows` is the
+opposite shape: it **passes in the full suite and fails run alone**, where
+`list_sessions` answers 12 rows for a store holding 2. Not a leak (the master
+is unrestricted by design and these are unclaimed rows it may see) and not
+caused by T14, whose only edit to that file is three `pub(super)` keywords —
+but a test that only pins under load pins nothing, so it is a real defect in
+the test and not yet diagnosed. Ruled out already: cross-test pollution (it
+fails with `--exact` alone), the machine's tmux server (`TMUX_TMPDIR` at an
+empty dir changes nothing), and a seeded template (no migration inserts
+`sessions`).
+
+Not a flake:
 `cargo test -p fleet-core --lib -- --test-threads=1` takes 23–25 minutes
 (4.5k tests; measured on mercury, 2026-10-02), so a `timeout 600` wrapper
 kills it mid-run and the last `test … ...` line names whichever test was in

@@ -197,6 +197,13 @@ fn plan_cwd(s: &Store, row: &SessionRow) -> Option<String> {
 pub(crate) const CONTROLLER_SKIP_REASON: &str =
     "fleet controller: recreate it explicitly with force";
 
+/// The skip reason for a named id this host's plan cannot reach: one that
+/// names no session at all, one whose session lives on another host — and,
+/// since multi-user M1 (T7), one the caller may not restore, which the MCP
+/// layer answers with this same sentence so the three are indistinguishable
+/// (no existence oracle on another person's session).
+pub const NOT_ON_THIS_HOST: &str = "not found on this host";
+
 /// Whether `row` is the registered fleet controller — the same test
 /// `guard_not_controller` applies (host + tmux name).
 fn is_controller(controller: Option<&(String, String)>, row: &SessionRow) -> bool {
@@ -243,7 +250,7 @@ fn plan_one_explicit(s: &Store, host_alias: &str, id: i64) -> Result<RestorePlan
             claude_session_id: None,
             friendly_name: None,
             action: "skip".into(),
-            reason: Some("not found on this host".to_string()),
+            reason: Some(NOT_ON_THIS_HOST.to_string()),
         });
     };
     let base = RestorePlanEntry {
@@ -258,7 +265,7 @@ fn plan_one_explicit(s: &Store, host_alias: &str, id: i64) -> Result<RestorePlan
     if row.host_alias != host_alias {
         return Ok(RestorePlanEntry {
             action: "skip".into(),
-            reason: Some("not found on this host".to_string()),
+            reason: Some(NOT_ON_THIS_HOST.to_string()),
             ..base
         });
     }

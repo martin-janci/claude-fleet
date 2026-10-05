@@ -58,13 +58,34 @@ const EVERYONE: &[Who] = &[
 const ORG_A: i64 = 1;
 const ORG_B: i64 = 2;
 
+/// The hub's personal owner, minted by migration 098 into an empty store —
+/// so it is row 1, exactly as the orgs above are 1 and 2. The fixture
+/// asserts it rather than trusting it.
+const PERSON: i64 = 1;
+
+/// The pane each host's token is standing in (multi-user M1, §4.4). The
+/// fixture writes these into `sessions.tmux_pane_id`, so the scope builder
+/// resolves each host caller to exactly the one row its agent is in — the
+/// same thing a provisioned host's `X-Fleet-Pane` header does in
+/// production.
+const PANE_A: &str = "%11";
+const PANE_B: &str = "%12";
+const PANE_N: &str = "%13";
+
 impl Who {
     fn caller(self) -> Caller {
-        let host = |h: &str| Caller {
+        let host = |h: &str, pane: &str| Caller {
             host_alias: Some(h.into()),
             client: None,
             mode: TokenMode::Full,
+            pane: Some(pane.into()),
+            is_personal_owner: false,
         };
+        // Every paired client here is the hub's one person's device.
+        // A device bound to NOBODY is a refusing scope (M1, T2's default
+        // makes it unmintable), so a fixture that left `person_id` at
+        // `None` would be testing the fail-closed path in every row rather
+        // than the org boundary this matrix is about.
         let client = |mode, org_id| Caller {
             host_alias: None,
             client: Some(crate::mcp::auth::ClientRef {
@@ -72,8 +93,11 @@ impl Who {
                 name: "phone".into(),
                 trusted: false,
                 org_id,
+                person_id: Some(PERSON),
             }),
             mode,
+            pane: None,
+            is_personal_owner: org_id.is_none(),
         };
         match self {
             Who::Master => Caller::master(),
@@ -81,9 +105,9 @@ impl Who {
             Who::ClientReadonly => client(TokenMode::Readonly, None),
             Who::BoundA => client(TokenMode::Full, Some(ORG_A)),
             Who::BoundB => client(TokenMode::Full, Some(ORG_B)),
-            Who::HostA => host("h-a"),
-            Who::HostB => host("h-b"),
-            Who::HostNone => host("h-n"),
+            Who::HostA => host("h-a", PANE_A),
+            Who::HostB => host("h-b", PANE_B),
+            Who::HostNone => host("h-n", PANE_N),
         }
     }
 
@@ -131,6 +155,14 @@ struct Fx {
     link_x: i64,
 }
 
+/// The whole scope for the two `structure` reads that take one (multi-user M1,
+/// T8d): every case in this file is about the ORG half, so the person half is
+/// the hub's own unrestricted reader with the org under test put back on it —
+/// the same `vs` helper `service::work::view_tests` uses, for the same reason.
+fn iso_view(scope: &OrgScope) -> crate::service::view_scope::ViewScope {
+    crate::service::view_scope::ViewScope::internal().with_org(scope.clone())
+}
+
 fn item(s: &Store, tracker: i64, ext: &str, key: &str, title: &str, desc: &str) -> i64 {
     s.upsert_tracker_item(
         tracker,
@@ -150,6 +182,18 @@ fn item(s: &Store, tracker: i64, ext: &str, key: &str, title: &str, desc: &str) 
 
 fn fixture(isolate_b: bool) -> Fx {
     let s = Store::open_in_memory().unwrap();
+    // No `local` host. The `list_sessions` row below reaches
+    // `service::sessions::list_sessions`, which runs a real reconcile pass
+    // when the last one is stale — and whether it does is decided by a
+    // PROCESS-GLOBAL gate (`reconcile_gate()`), so it depends on what else the
+    // suite is doing at that moment. With a `local` host that pass runs
+    // `tmux list-sessions` on the machine the test is running on and adopts
+    // whatever it finds, so the matrix's expected page became "the four
+    // fixture rows, plus however many tmux sessions this developer happens to
+    // have open". Off, as on a `fleet-hub serve`, the pass has only the three
+    // unreachable fixture hosts to probe and finds nothing.
+    s.set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+        .unwrap();
     for h in ["h-a", "h-b", "h-n"] {
         s.upsert_host(h).unwrap();
     }
@@ -236,6 +280,28 @@ fn fixture(isolate_b: bool) -> Fx {
     let s_b = sess("s-b", "h-b", Some(pid_beta), "conv-b");
     let s_n = sess("s-n", "h-n", None, "conv-n");
     let s_x = sess("s-x", "h-a", Some(pid_acme), "conv-x");
+    // Multi-user M1. Three of the four rows are OWNED by the hub's one
+    // person and therefore `private`; s_x is deliberately left
+    // `unclaimed`, which is what a reconcile-discovered row looks like and
+    // is the other half of §4.4's host rule. Each owned row carries the
+    // pane its host's token speaks from, so a host caller resolves to
+    // exactly the session its agent is in — the production shape, where
+    // reconcile writes `tmux_pane_id` and the MCP connection carries
+    // `X-Fleet-Pane`.
+    assert_eq!(
+        s.personal_owner_id().unwrap(),
+        Some(PERSON),
+        "migration 098 mints the owner as row 1"
+    );
+    for (id, pane) in [(s_a, PANE_A), (s_b, PANE_B), (s_n, PANE_N)] {
+        s.claim_if_unclaimed(id, Some(PERSON)).unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET tmux_pane_id = ?2 WHERE id = ?1",
+                rusqlite::params![id, pane],
+            )
+            .unwrap();
+    }
     s.link_session_work(s_a, WorkTarget::Item(item_a), "manual")
         .unwrap();
     s.link_session_work(s_b, WorkTarget::Item(item_b), "manual")
@@ -1691,32 +1757,47 @@ async fn run_matrix(isolate: bool) {
     // carry that work: earlier rows unlinked and re-made them.
     relink(&fx, fx.s_x, fx.item_b);
     relink(&fx, fx.s_b, fx.item_b);
-    let isolated = isolate;
     m.row(
         "list_sessions",
         "-",
         |_, _| json!({ "summary": false }),
-        move |fx, who, a| {
+        |fx, who, a| {
             let rows: Vec<Value> = serde_json::from_str(text(a)).unwrap();
-            let sees_b = rows.iter().any(|r| r["id"] == fx.s_b);
-            let sees_a = rows.iter().any(|r| r["id"] == fx.s_a);
-            match who {
-                Who::HostA | Who::HostNone => assert_eq!(sees_b, !isolated, "{who:?}"),
-                // A bound client's session fence is strict (M14).
-                Who::BoundA => assert!(sees_a && !sees_b, "{who:?}"),
-                Who::BoundB => assert!(sees_b && !sees_a, "{who:?}"),
-                Who::HostB => {
-                    assert!(sees_b);
-                    assert_eq!(
-                        sees_a, !isolated,
-                        "an isolating org's host sees only its own"
-                    );
-                }
-                _ => assert!(sees_b && sees_a, "{who:?}"),
-            }
+            let ids: BTreeSet<i64> = rows.iter().filter_map(|r| r["id"].as_i64()).collect();
+            // Choke point 1 (multi-user M1, T6). An invisible row is
+            // DROPPED, so the page itself is the assertion — a caller
+            // cannot learn that a row it may not see exists.
+            //
+            // D7's `isolate_sessions` no longer appears on either side of
+            // this: the host fence hides every other host's rows whatever
+            // any org says, so both runs of this matrix expect the same
+            // page here.
+            let want: Vec<i64> = match who {
+                // §4.4's two clauses: the one row this token's pane proves,
+                // plus the `unclaimed` rows on its own host. Not another
+                // person's private row (s_b, s_n), not an unassigned row on
+                // another host, not an org-mate's row on another host.
+                Who::HostA => vec![fx.s_a, fx.s_x],
+                Who::HostB => vec![fx.s_b],
+                Who::HostNone => vec![fx.s_n],
+                // A client bound to an org is the same person, fenced by
+                // the org half: its org's sessions plus the unassigned one
+                // (D31 on).
+                Who::BoundA => vec![fx.s_a, fx.s_x, fx.s_n],
+                Who::BoundB => vec![fx.s_b, fx.s_n],
+                // The one person on this hub: the three rows they own, and
+                // the `unclaimed` one they could already see before M1.
+                _ => vec![fx.s_a, fx.s_b, fx.s_n, fx.s_x],
+            };
+            assert_eq!(
+                ids,
+                want.into_iter().collect::<BTreeSet<_>>(),
+                "{who:?} listed the wrong rows"
+            );
             // The work on a row: the master and the clients read all of it,
             // a host only its own org's — B's ticket on A's own s_x is
-            // stripped for host A, and every row is bare to the no-org host.
+            // stripped for host A, and the no-org host reads only its own
+            // unassigned work.
             let work_key = |id: i64| {
                 let r = rows
                     .iter()
@@ -1725,32 +1806,20 @@ async fn run_matrix(isolate: bool) {
                 r["work"]["key"].as_str().map(str::to_string)
             };
             match who {
-                Who::HostA => {
+                Who::HostA | Who::BoundA => {
                     assert_eq!(work_key(fx.s_a).as_deref(), Some("AA-1"));
                     assert_eq!(work_key(fx.s_x), None, "B's ticket on A's session");
-                    if !isolated {
-                        assert_eq!(work_key(fx.s_b), None);
-                    }
                 }
-                Who::HostB => {
+                Who::HostB | Who::BoundB => {
                     assert_eq!(work_key(fx.s_b).as_deref(), Some("BB-1"));
-                    if !isolated {
-                        assert_eq!(work_key(fx.s_a), None);
-                        assert_eq!(work_key(fx.s_x), None);
-                    }
                 }
                 Who::HostNone => {
-                    assert_eq!(work_key(fx.s_a), None);
-                    assert_eq!(work_key(fx.s_x), None);
-                    if !isolated {
-                        assert_eq!(work_key(fx.s_b), None);
-                    }
+                    assert_eq!(
+                        work_key(fx.s_n).as_deref(),
+                        Some("LOC-1"),
+                        "its own unassigned work is not another org's"
+                    );
                 }
-                Who::BoundA => {
-                    assert_eq!(work_key(fx.s_a).as_deref(), Some("AA-1"));
-                    assert_eq!(work_key(fx.s_x), None, "B's ticket on A's session");
-                }
-                Who::BoundB => assert_eq!(work_key(fx.s_b).as_deref(), Some("BB-1")),
                 _ => {
                     assert_eq!(work_key(fx.s_a).as_deref(), Some("AA-1"));
                     assert_eq!(work_key(fx.s_x).as_deref(), Some("BB-1"));
@@ -1764,10 +1833,11 @@ async fn run_matrix(isolate: bool) {
         "peer_status",
         "-",
         |fx, _| json!({ "session_id": fx.s_b }),
-        move |_, who, a| match who {
-            Who::HostA | Who::HostNone if isolated => {
-                is_code(who, a, "E_NOTFOUND", "isolated peer")
-            }
+        |_, who, a| match who {
+            // Multi-user M1 (T6): a per-host token reads its own host's
+            // sessions and nothing else, so s_b (on h-b) is out of reach
+            // for both of these whether or not org B isolates.
+            Who::HostA | Who::HostNone => is_code(who, a, "E_NOTFOUND", "another host's session"),
             Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's session"),
             _ => is_ok(who, a, "peer status"),
         },
@@ -1794,11 +1864,15 @@ async fn run_matrix(isolate: bool) {
         "related_sessions",
         "-",
         |fx, _| json!({ "session_id": fx.s_b }),
-        move |_, who, a| match who {
-            // An isolated anchor answers exactly as a missing one.
-            Who::HostA | Who::HostNone if isolated => {
-                is_code(who, a, "E_SQLITE", "isolated anchor")
-            }
+        |_, who, a| match who {
+            // An anchor the caller may not see answers exactly as a missing
+            // one — and since M1 that is every other host's row.
+            // `E_NOTFOUND`, in `orgs::not_found`'s one sentence: the anchor
+            // check answers invisible and missing alike now, where it used to
+            // leak `rusqlite`'s own "Query returned no rows" for the missing
+            // half and nothing at all for the invisible one (multi-user M1,
+            // T7 — the check was behind `if !scope.is_all()`).
+            Who::HostA | Who::HostNone => is_code(who, a, "E_NOTFOUND", "another host's anchor"),
             Who::BoundA => assert!(a.is_err(), "another org's anchor: {a:?}"),
             _ => is_ok(who, a, "related"),
         },
@@ -1819,7 +1893,11 @@ async fn run_matrix(isolate: bool) {
             json!({ "session_id": 999_999 }),
         )
         .await;
-        assert_eq!(hidden, missing);
+        // The one sentence with the id swapped, as everywhere else: both are
+        // `orgs::not_found("session", …)` now, so the ONLY difference between
+        // "a row you may not see" and "no such row" is the number the caller
+        // itself passed in.
+        same_as_unknown(&hidden, &missing, &fx.s_b.to_string(), "999999");
     }
     m.row(
         "send_message",
@@ -1828,13 +1906,13 @@ async fn run_matrix(isolate: bool) {
             json!({ "from_session_id": own(fx, who), "to_session_id": fx.s_b,
                     "body": "hello", "deliver": false })
         },
-        move |_, who, a| {
+        |_, who, a| {
             if readonly_refused(who, a) {
                 return;
             }
             match who {
-                Who::HostA | Who::HostNone if isolated => {
-                    is_code(who, a, "E_NOTFOUND", "message to an isolated session")
+                Who::HostA | Who::HostNone => {
+                    is_code(who, a, "E_NOTFOUND", "message to another host's session")
                 }
                 Who::BoundA => is_code(who, a, "E_NOTFOUND", "message to another org's session"),
                 Who::HostB | Who::BoundB => is_code(who, a, "E_SELF_TARGET", "own session"),
@@ -1864,7 +1942,9 @@ async fn run_matrix(isolate: bool) {
             for mk in who.forbidden_markers() {
                 assert!(!text(&a).contains(mk), "LEAK {who:?} {tool}: {a:?}");
             }
-            if isolate && matches!(who, Who::HostA | Who::HostNone) {
+            // M1: another host's session is simply not there, for every
+            // per-host token that is not standing on it.
+            if matches!(who, Who::HostA | Who::HostNone) {
                 is_code(who, &a, "E_NOTFOUND", tool);
             }
             // A client bound to A never reaches B's session (M14).
@@ -1901,9 +1981,11 @@ async fn run_matrix(isolate: bool) {
     }
     for &who in EVERYONE {
         let c = who.caller();
+        // Multi-user M1 (T9): the stream fence takes the whole `ViewScope`,
+        // not the org half — so this is the same value a live stream holds.
         let scope = {
             let s = fx.t.store.lock().unwrap();
-            c.org_scope(&s).unwrap()
+            c.view_scope(&s).unwrap()
         };
         let kinds = crate::mcp::events_route::fence_host_bound(&c, None);
         if who.is_host() || who.is_bound() {
@@ -1918,36 +2000,49 @@ async fn run_matrix(isolate: bool) {
                 payload: serde_json::to_value(row).unwrap(),
                 seq: i as u64 + 1,
             };
-            let lookup = |sid: i64| {
-                let s = fx.t.store.lock().unwrap();
-                s.get_session_by_id(sid)
-                    .unwrap()
-                    .map(|r| (r.host_alias, r.org_id))
-            };
             // The same session's timeline frame (no row, only its id).
             let ev = crate::events::EventMessage {
                 name: "session:event",
                 payload: json!({ "id": 1, "session_id": row.id, "kind": "prompt_sent" }),
                 seq: 100 + i as u64,
             };
-            let ev_out = crate::mcp::events_route::fence_frame(&scope, &ev, &lookup);
-            let out = crate::mcp::events_route::fence_frame(&scope, &msg, &lookup);
+            // …and its kill frame, which carries the row's facts because by
+            // the time one is read the row is gone (T9).
+            let killed = crate::events::EventMessage {
+                name: "session:killed",
+                payload: crate::events::RowChange::SessionKilled(
+                    crate::events::SessionKilledPayload::of_row(row),
+                )
+                .payload(),
+                seq: 200 + i as u64,
+            };
+            let ev_out = crate::mcp::events_route::fence_frame(&scope, &ev, &fx.t.store);
+            let out = crate::mcp::events_route::fence_frame(&scope, &msg, &fx.t.store);
+            let killed_out = crate::mcp::events_route::fence_frame(&scope, &killed, &fx.t.store);
             assert_eq!(
                 ev_out.is_none(),
                 out.is_none(),
                 "{who:?}: a row and its events agree"
             );
+            assert_eq!(
+                killed_out.is_none(),
+                out.is_none(),
+                "{who:?}: a row and its kill frame agree"
+            );
             let is_b = row.id == fx.s_b;
             let is_a = row.id == fx.s_a || row.id == fx.s_x;
-            // B isolates: nobody outside B reads B's session frames, and
-            // B's hosts read only B's and unassigned ones.
-            // A bound client never reads another org's session frame (M14),
-            // isolated or not.
-            let dropped = (isolate
-                && ((matches!(who, Who::HostA | Who::HostNone) && is_b)
-                    || (who == Who::HostB && is_a)))
-                || (who == Who::BoundA && is_b)
-                || (who == Who::BoundB && is_a);
+            // Multi-user M1 (T6): a per-host token's stream carries its own
+            // host's frames and no others — D7 no longer decides it, and
+            // neither run of this matrix differs here. A bound client never
+            // reads another org's session frame (M14), isolated or not.
+            let dropped = match who {
+                Who::HostA => row.host_alias != "h-a",
+                Who::HostB => row.host_alias != "h-b",
+                Who::HostNone => row.host_alias != "h-n",
+                Who::BoundA => is_b,
+                Who::BoundB => is_a,
+                _ => false,
+            };
             if dropped {
                 assert!(out.is_none(), "{who:?} got an isolated frame of {}", row.id);
                 continue;
@@ -2004,6 +2099,8 @@ async fn run_matrix(isolate: bool) {
                 host_alias: Some(host.into()),
                 client: None,
                 mode: TokenMode::Full,
+                pane: None,
+                is_personal_owner: false,
             };
             let ctx = crate::service::hooks::HookContext {
                 caller: &c,
@@ -2638,9 +2735,11 @@ async fn run_matrix(isolate: bool) {
                 ),
                 Who::HostB => {
                     assert!(has("BB-1") && has("BB-3") && !has("AA-1"), "{keys:?}");
-                    // s_x (A's) is named to host B only while no org
-                    // isolates sessions (D7).
-                    assert_eq!(text(a).contains("s-x"), !isolate, "{a:?}");
+                    // B's ticket still reaches host B; the A-host SESSION
+                    // carrying it never does. Since multi-user M1 T6 a
+                    // per-host token sees its own host's rows and nothing
+                    // else, so this no longer turns on D7 — it subsumes it.
+                    assert!(!text(a).contains("s-x"), "{a:?}");
                 }
                 Who::HostNone => assert!(has("LOC-1") && !has("AA-1") && !has("BB-1"), "{keys:?}"),
                 Who::BoundA => {
@@ -2668,7 +2767,10 @@ async fn run_matrix(isolate: bool) {
             }
             Who::HostB => {
                 assert!(text(a).contains("s-b"), "{a:?}");
-                assert_eq!(text(a).contains("s-x"), !isolate, "D7: {a:?}");
+                // As in the `tree` row above: the task is B's, but s_x is a
+                // session on host A, and a per-host token reaches no other
+                // host's rows at all since M1 T6 — D7 or no D7.
+                assert!(!text(a).contains("s-x"), "{a:?}");
             }
             Who::BoundB => assert!(text(a).contains("s-b") && !text(a).contains("s-x"), "{a:?}"),
             _ => is_code(who, a, "E_NOTFOUND", "another org's task"),
@@ -2939,8 +3041,13 @@ async fn run_matrix(isolate: bool) {
     // (Earlier rows unlink and re-make it: `relink` is its live id.)
     let cross_org_listed = |fx: &Fx| {
         let link = relink(fx, fx.s_x, fx.item_b);
-        let r =
-            crate::service::work::view::review(&fx.t.store, &OrgScope::All, None, None).unwrap();
+        let r = crate::service::work::view::review(
+            &fx.t.store,
+            &crate::service::view_scope::ViewScope::internal(),
+            None,
+            None,
+        )
+        .unwrap();
         r.items
             .iter()
             .any(|i| i.kind == "cross_org" && i.link_id == link)
@@ -3187,13 +3294,17 @@ async fn run_matrix(isolate: bool) {
         "assign_org",
         move |fx, _| {
             let task = format!("item:{local_a}");
-            let cur = crate::service::work::view::task(&fx.t.store, &OrgScope::All, &task)
-                .unwrap()
-                .task;
+            let cur = crate::service::work::view::task(
+                &fx.t.store,
+                &crate::service::view_scope::ViewScope::internal(),
+                &task,
+            )
+            .unwrap()
+            .task;
             let to = if cur.org_source == "item" { 0 } else { ORG_A };
             let imp = crate::service::work::structure::org_impact(
                 &fx.t.store,
-                &OrgScope::All,
+                &iso_view(&OrgScope::All),
                 &task,
                 Some(to),
             )
@@ -4166,6 +4277,8 @@ async fn a_per_host_token_still_cannot_read_another_hosts_tickets_in_its_org() {
         host_alias: Some("h-a2".into()),
         client: None,
         mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
     };
     let r =
         fx.t.work(
@@ -4321,7 +4434,7 @@ fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
 
     st::place(
         &store,
-        &OrgScope::All,
+        &crate::service::view_scope::ViewScope::internal(),
         &tid,
         Some("Payments"),
         Some("SECRET-A note"),
@@ -4354,10 +4467,10 @@ fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
     )
     .unwrap();
     st::view_delete(&store, &OrgScope::All, view.id, Some(view.version)).unwrap();
-    let imp = st::org_impact(&store, &OrgScope::All, &tid, Some(ORG_B)).unwrap();
+    let imp = st::org_impact(&store, &iso_view(&OrgScope::All), &tid, Some(ORG_B)).unwrap();
     st::assign_org(
         &store,
-        &OrgScope::All,
+        &iso_view(&OrgScope::All),
         &tid,
         Some(ORG_B),
         Some(&imp.impact_token),
@@ -4397,21 +4510,30 @@ fn work_changed_carries_ids_only_and_reaches_only_unbound_callers() {
         assert!(!text.contains("SECRET"), "ids only: {text}");
     }
 
+    let store = std::sync::Arc::new(store);
     for &who in EVERYONE {
         let c = who.caller();
         let kinds = fence_host_bound(&c, None);
         let asked = fence_host_bound(&c, Some(vec!["work".into()]));
-        let scope = {
+        let view = {
             let s = store.lock().unwrap();
-            c.org_scope(&s).unwrap()
+            c.view_scope(&s).unwrap()
         };
         for f in &frames {
             for k in [&kinds, &asked] {
-                let delivered =
-                    matches(k.as_ref(), f) && fence_frame(&scope, f, &|_| None).is_some();
+                let delivered = matches(k.as_ref(), f) && fence_frame(&view, f, &store).is_some();
+                // `!is_scoped()`, not `is_unbound()`, and the difference is
+                // multi-user M1: a `work` frame names tracker tickets and
+                // carries no session, so the ORG half is the whole fence —
+                // `HOST_BOUND_HIDDEN_KINDS` keeps it off every host-bound
+                // and org-bound stream and the person half has nothing to
+                // say about a ticket. `is_unbound()` happens to answer the
+                // same for this fixture's eight callers; saying what is
+                // actually being asserted keeps it true when a ninth
+                // carries a person and no org.
                 assert_eq!(
                     delivered,
-                    who.is_unbound(),
+                    !c.is_scoped(),
                     "{who:?}: work:changed {} (asked {k:?})",
                     f.payload
                 );

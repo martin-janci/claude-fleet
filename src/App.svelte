@@ -25,6 +25,7 @@
   import { composerInsert } from './lib/conversation';
   import { tidyRequest } from './lib/tidy';
   import TerminalView from './lib/TerminalView.svelte';
+  import WatchView from './lib/WatchView.svelte';
   import FilesPanel from './lib/FilesPanel.svelte';
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
@@ -39,7 +40,9 @@
   import EmbedSlot from './lib/pages/EmbedSlot.svelte';
   import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
+  import { accessOf, applyGrantChanges, loadMyGrants } from './lib/access';
   import TransferSheet from './lib/TransferSheet.svelte';
+  import ShareSheet from './lib/ShareSheet.svelte';
   import { applyMoveProgress, recheckWaitingRuns } from './lib/moves';
   import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
   import Toasts from './lib/Toasts.svelte';
@@ -293,12 +296,29 @@
       onWorkChanged: noteWorkChanged,
       // File downloads: ids only, so the list is re-read.
       onDownloadsChanged: noteDownloadsChanged,
+      // `grant:changed` (M1): a share or a revoke moves no column on any row,
+      // so this is the only thing that tells a client its own grant set
+      // changed. It patches `access.ts`, and everything derived from it — the
+      // terminal gate included — re-evaluates without a re-list. A revoke
+      // closing an attached PTY depends on this frame arriving.
+      onGrantChanged: applyGrantChanges,
     });
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
       loadSessions(),
       loadHosts(),
       loadAccounts(),
+      // This client's own person id and grant set (multi-user M1). Awaited
+      // with the lists because `restoreLastSession()` below selects a row and
+      // the terminal gate reads the answer the moment it does — a paired
+      // desktop that learned its identity a beat later would flash "no
+      // terminal" over the owner's own session.
+      //
+      // Deliberately NOT in the `failures` list: a standalone desktop needs no
+      // answer at all (it owns the fleet, so every row it holds is its own),
+      // and a backend older than the command has none to give — turning either
+      // into a startup error would report a problem that changes nothing.
+      loadMyGrants(),
     ]);
     const failures = [
       healthFailure,
@@ -340,6 +360,11 @@
       void loadProjects();
       void loadTrackers();
       void refreshComposerPresetsIfIdle();
+      // A gap the hub could not replay can have swallowed a `grant:changed`,
+      // and a grant set that quietly lost an entry is a shared session that
+      // has vanished from reach (or, worse, a revoked one still reachable).
+      // Re-read it rather than trusting the patched copy.
+      void loadMyGrants();
     });
     // The composer's chip row. Fleet state since it moved off `localStorage`
     // (so the phone and this window share one list), and never on the
@@ -483,6 +508,18 @@
   const selId = $derived($selectedSession?.id ?? null);
   const selNoPane = $derived(!!$selectedSession && hasNoPane($selectedSession));
   const selHasClaudeId = $derived(!!$selectedSession?.claude_session_id);
+  // Multi-user M1: what this client may do with the selected row — `own`,
+  // `drive`, `watch`, or `null` when it cannot tell (an unreachable hub, or
+  // one that has not said who this device is). DERIVED, never a field on the
+  // row: see `lib/access.ts` for why the row could not carry it. Read through
+  // `$accessOf` so a `grant:changed` re-evaluates it with no re-list.
+  const selAccess = $derived($accessOf($selectedSession));
+  // Sharing never confers a terminal (spec §4.3 invariant 4): `pty_open` is
+  // this machine's own `ssh … tmux attach`, which the hub cannot revoke. So a
+  // row the client does not own gets the read-only snapshot instead, and
+  // TerminalView is never mounted for it at all.
+  const selOwned = $derived(selAccess === 'own');
+  const selWatchOnly = $derived(!!$selectedSession && !selNoPane && !selOwned);
   $effect(() => {
     if (selId === null || selNoPane) filesMode = false;
   });
@@ -508,7 +545,9 @@
   // underneath. Unlike Files/Hosts the Session tab keeps the center
   // (Details) pane — both its views are views *of* the session.
   const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode);
-  const effectiveView = $derived(resolveSessionView($sessionView, selNoPane, selHasClaudeId));
+  const effectiveView = $derived(
+    resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
+  );
   const conversationMode = $derived(sessionTabActive && effectiveView === 'conversation');
   // Bumped to remount the view when a request names a host while it is open.
   let hostsViewKey = $state(0);
@@ -598,10 +637,17 @@
    * a click is a no-op that must not silently overwrite the preference a
    * different row is relying on. showSession() still runs unconditionally —
    * the click should always leave whatever overlay was open.
+   *
+   * A row this client may only WATCH (multi-user M1) forces neither view even
+   * with no `claude_session_id`: the terminal slot holds the read-only pane
+   * snapshot, which needs no transcript, so `resolveSessionView` returns the
+   * preference for both. By this comment's own rule the pref must therefore be
+   * writable — otherwise the slot a watcher came for is only reachable when
+   * the preference already happened to be `terminal`, and the toggle is inert.
    */
   function setSessionView(v: SessionView) {
-    if (resolveSessionView(v, selNoPane, selHasClaudeId) !== v) return;
-    if (!selNoPane && selHasClaudeId) sessionView.set(v);
+    if (resolveSessionView(v, selNoPane, selHasClaudeId, selOwned) !== v) return;
+    if (!selNoPane && (selHasClaudeId || selWatchOnly)) sessionView.set(v);
     showSession();
   }
   /**
@@ -618,6 +664,9 @@
     setSessionView(otherSessionView(effectiveView));
   }
   const NO_PANE_TITLE = 'Runs outside tmux — no terminal';
+  /** The Terminal pill's tooltip on a session shared with this person: it is
+   *  still a view of the pane, just not a live one (multi-user M1). */
+  const WATCH_ONLY_TITLE = 'Shared with you — a read-only snapshot of the pane, not a terminal';
 
   // Footer usage segment: whether to look at usage, not the numbers. A coarse
   // clock is enough for "3m" ages and staleness.
@@ -754,6 +803,11 @@
 <HintLayer />
 <Toasts />
 <TransferSheet />
+<!-- One Share sheet for the whole app, opened by id from `shareSheetFor`
+     (multi-user M1) — the same shape as the Transfer sheet above, and for the
+     same reason: the row, the details panel and anything else that wants to
+     share a session should not each own a dialog. -->
+<ShareSheet />
 <McpConfirmDialog />
 <AgentFab />
 <AgentPanel contextInput={agentContextInput} />
@@ -915,7 +969,11 @@
               aria-checked={effectiveView === 'terminal'}
               aria-keyshortcuts={isMac ? 'Meta+J' : 'Control+Shift+J'}
               disabled={selNoPane}
-              title={selNoPane ? NO_PANE_TITLE : `The tmux pane (${sessionViewChord})`}
+              title={selNoPane
+                ? NO_PANE_TITLE
+                : selWatchOnly
+                  ? `${WATCH_ONLY_TITLE} (${sessionViewChord})`
+                  : `The tmux pane (${sessionViewChord})`}
               onclick={() => setSessionView('terminal')}
               data-testid="subtab-terminal">Terminal</button
             >
@@ -950,7 +1008,39 @@
              buffer survive a Files-mode round trip — flipping back is instant
              and never re-fits or reconnects the terminal. -->
         <div class="view-slot">
-          <TerminalView />
+          {#if selWatchOnly && $selectedSession}
+            <!-- The third view state (multi-user M1): a session reached
+                 through a GRANT. TerminalView is not mounted — not hidden,
+                 not disabled, not mounted — because mounting it is what
+                 attaches: `openTerm` fires off the selection and calls
+                 `pty_open` with no gesture, and that attach is this machine's
+                 own SSH, which the hub can neither refuse nor revoke. The
+                 read-only snapshot takes its place.
+
+                 Expressed as a nested branch rather than a third top-level
+                 one so the Files and Conversation overlays below stay shared:
+                 a duplicated copy of them would be a second place to keep in
+                 step. They are NOT ungated, though — the earlier claim that
+                 "both are routed reads the hub authorises per call" was wrong
+                 about one path. FilesPanel's writes are `local_only`, so a
+                 paired desktop is refused them by the hub. ConversationPanel
+                 reads are routed, but its composer is not only routed: the
+                 outbox uploads the attachment tray with `upload_attachments`
+                 (`same_in_both` — this machine's own scp onto the owner's
+                 host, no hub in the path) BEFORE the routed `send_prompt`. So
+                 the composer gates itself on this client's access to the row,
+                 inside ConversationPanel, which is where its controls are.
+                 The guarantee the plan asks for here — "the component is
+                 never mounted for a granted session" — is about TerminalView
+                 and is the same either way. -->
+            <WatchView
+              session={$selectedSession}
+              access={selAccess}
+              visible={!hostsMode && !assetsMode && !filesMode && !conversationMode}
+            />
+          {:else}
+            <TerminalView />
+          {/if}
         </div>
         {#if filesMode && $selectedSession}
           <div class="view-slot overlay">

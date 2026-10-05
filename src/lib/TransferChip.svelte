@@ -3,6 +3,7 @@
   import { hubConnection } from './hub_connection';
   import { canMoveSession, moveBlockedReason } from './moveEligibility';
   import { moves, runForSession, stepNumber, transferSheetFor } from './moves';
+  import { sessionBlocked } from './share';
   import type { SessionRow } from './sessions';
 
   // The terminal header's host name, which is also the Transfer button — and,
@@ -16,9 +17,18 @@
   const run = $derived(runForSession($moves, session));
   /** This session is the one the move PRODUCED, not the one that moved. */
   const arrived = $derived(run !== undefined && run.sessionId !== session.id);
-  const blocked = $derived(moveBlockedReason($hubStatus, $hubConnection));
+  // Both halves, in the order `share.ts` documents: what the hub refuses a
+  // client outright, then who this client is on THIS row (multi-user M1 — the
+  // move lifecycle is spec §4.3's `own` tier, so a grantee may not start one).
+  // `SessionDetails`' own "Move to host…" composes exactly these two; this
+  // chip is the same control in the terminal header and used to ask only the
+  // hub's half, so a watcher's header still offered the move.
+  const blocked = $derived(
+    moveBlockedReason($hubStatus, $hubConnection) ?? $sessionBlocked(session, 'move_session'),
+  );
 
   function open() {
+    if (!run && blocked !== null) return;
     transferSheetFor.set(run ? run.sessionId : session.id);
   }
 </script>

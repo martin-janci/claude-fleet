@@ -510,7 +510,11 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_tidy", &args).await,
-            None => work::tidy::work_tidy(store, &fleet_core::service::orgs::OrgScope::All, now()),
+            None => work::tidy::work_tidy(
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+                now(),
+            ),
         }
     }
 
@@ -647,7 +651,10 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("list_local_work_items", &args).await,
-            None => work::local::local_items(store, &fleet_core::service::orgs::OrgScope::All),
+            None => work::local::local_items(
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+            ),
         }
     }
 
@@ -747,7 +754,13 @@ pub(crate) mod routed {
     ) -> Result<Vec<WorkLinkRow>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("session_work_links", &args).await,
-            None => work::work(&args, store, &fleet_core::service::orgs::OrgScope::All),
+            // The standalone desktop is the hub's own reader: one person at
+            // the keyboard and no `Caller` to ask (multi-user M1, T8d).
+            None => work::work(
+                &args,
+                store,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+            ),
         }
     }
 
@@ -880,8 +893,13 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("work_resume_plan", &args).await,
             None => {
-                work::work_resume_plan(&args, store, ssh, &fleet_core::service::orgs::OrgScope::All)
-                    .await
+                work::work_resume_plan(
+                    &args,
+                    store,
+                    ssh,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
+                )
+                .await
             }
         }
     }
@@ -931,7 +949,7 @@ pub(crate) mod routed {
                     ssh.as_ref(),
                     &args.key,
                     args.link_id,
-                    &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                 )
                 .await
             }
@@ -964,6 +982,7 @@ pub(crate) mod routed {
                     ssh,
                     reg,
                     &fleet_core::service::orgs::OrgScope::All,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
                 )
                 .await
             }
@@ -982,9 +1001,11 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_today", &wire).await,
-            None => {
-                work::today::today(store, args.since, &fleet_core::service::orgs::OrgScope::All)
-            }
+            None => work::today::today(
+                store,
+                args.since,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+            ),
         }
     }
 
@@ -1000,7 +1021,11 @@ pub(crate) mod routed {
         };
         match backend.hub() {
             Some(hub) => hub.route("work_ticket_card", &wire).await,
-            None => work::card::card(store, &args.key, &fleet_core::service::orgs::OrgScope::All),
+            None => work::card::card(
+                store,
+                &args.key,
+                &fleet_core::service::view_scope::ViewScope::internal(),
+            ),
         }
     }
 

@@ -5,6 +5,7 @@
   import { accounts, accountEmailTier, type AccountRow } from './accounts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { bulkTargets, sessionBlocked } from './share';
   import Modal from './Modal.svelte';
 
   let {
@@ -15,8 +16,20 @@
     onClose: () => void;
   } = $props();
 
-  // send_prompt routes, so it only needs the live connection to be up.
+  // send_prompt routes, so it only needs the live connection to be up. This
+  // is the half that is true of EVERY target, so it stays whole-sheet; who
+  // this client is differs per target and is narrowed below.
   const sendBlocked = $derived(hubActionBlocked('send_prompt', $hubStatus, $hubConnection));
+  /**
+   * Per-target narrowing (multi-user M1, F2a). This sheet fans `send_prompt`
+   * out over OTHER sessions — up to every session in the fleet with "Show all
+   * fleet" — so one answer for the whole sheet gates nothing: the entry button
+   * in `SessionDetails` asks about the SOURCE row, and the targets are not it.
+   * A target shared with this client at `watch`, or not shared at all, is
+   * dropped from the send and says why on its own row, exactly as
+   * `BulkPromptDialog` marks a skipped one.
+   */
+  const targetBlocked = $derived((t: SessionRow): string | null => $sessionBlocked(t, 'send_prompt'));
 
   let prompt = $state('');
   let showAllFleet = $state(false);
@@ -46,6 +59,8 @@
   const displayTargets = $derived(
     showAllFleet ? allOtherTargets : relatedTargets,
   );
+  /** The shown targets this client may actually prompt. */
+  const promptable = $derived(bulkTargets(displayTargets, 'send_prompt', $sessionBlocked));
 
   // Track which targets are checked (default: all relateds checked).
   // Synchronously seed from related sessions in the store at mount time so
@@ -53,11 +68,15 @@
   function initialChecked(): Record<number, boolean> {
     const map: Record<number, boolean> = {};
     if (source.project_id === null) return map;
+    const mayPrompt = get(sessionBlocked);
     for (const s of get(sessions)) {
       if (
         s.id !== source.id &&
         s.project_id === source.project_id &&
-        s.worktree_id === source.worktree_id
+        s.worktree_id === source.worktree_id &&
+        // Never pre-check a session this client may not prompt: a tick the
+        // send then drops would read as a prompt that silently went nowhere.
+        mayPrompt(s, 'send_prompt') === null
       ) {
         map[s.id] = true;
       }
@@ -69,7 +88,7 @@
   // Initialise checked map when relatedTargets changes (newly observed sessions).
   $effect(() => {
     for (const r of relatedTargets) {
-      if (checked[r.id] === undefined) checked[r.id] = true;
+      if (checked[r.id] === undefined && targetBlocked(r) === null) checked[r.id] = true;
     }
   });
 
@@ -85,14 +104,16 @@
   // Read from displayTargets — not the raw `checked` map — so stale entries
   // from a prior "Show all fleet" toggle can't keep Send enabled when none of
   // the currently-displayed rows are checked.
-  const hasChecked = $derived(displayTargets.some((t) => checked[t.id]));
+  const hasChecked = $derived(promptable.some((t) => checked[t.id]));
   const canSend = $derived(prompt.trim().length > 0 && hasChecked && !sending && sendBlocked === null);
 
   async function send() {
     sending = true;
     errors = {};
     succeeded = {};
-    const targets = displayTargets.filter((t) => checked[t.id]);
+    // `promptable`, not `displayTargets`: the narrowing is the gate, and it is
+    // re-read here so a revoke that arrived while the sheet was open holds.
+    const targets = promptable.filter((t) => checked[t.id]);
     await Promise.allSettled(
       targets.map(async (t) => {
         const key = targetKey(t);
@@ -126,11 +147,15 @@
         <ul>
           {#each displayTargets as t (t.id)}
             {@const key = targetKey(t)}
-            <li class="target-row">
+            {@const why = targetBlocked(t)}
+            <li class="target-row" class:not-mine={why !== null}>
               <label>
                 <input
                   type="checkbox"
-                  bind:checked={checked[t.id]}
+                  checked={checked[t.id] === true && why === null}
+                  disabled={why !== null}
+                  title={why ?? ''}
+                  onchange={(e) => (checked[t.id] = (e.currentTarget as HTMLInputElement).checked)}
                   data-testid="target-checkbox-{t.id}"
                 />
                 <span class="host-badge">[{t.host_alias}]</span>
@@ -138,6 +163,9 @@
                 <span class="sess-name">{t.tmux_name}</span>
                 {#if t.status !== 'running'}
                   <span class="warn" title="session may not be in claude REPL">⚠</span>
+                {/if}
+                {#if why}
+                  <span class="muted" data-testid="target-not-mine-{t.id}" title={why}>not yours</span>
                 {/if}
                 {#if succeeded[key]}
                   <span class="ok">✓</span>
@@ -222,6 +250,7 @@
     cursor: pointer;
   }
   .target-row label:hover { border-color: var(--border); background: var(--bg-pane); }
+  .target-row.not-mine label { opacity: 0.55; cursor: not-allowed; }
   .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.7rem;

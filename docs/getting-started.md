@@ -61,6 +61,8 @@ Repositories on this machine are found by scanning the base. On a remote host, t
 
 Click **Create first session** in the checklist, or use the new-session button in the sidebar. Choose the host and a project, then start. Claude Code launches in a tmux session on that host and the terminal attaches to it.
 
+Nothing about this changed when fleet became multi-user: there is no registration and no login, the install creates its own personal owner on first run, every session you start is attributed to it, and the sessions fleet did not start stay visible to you exactly as before. Sharing a session with somebody else needs a hub — see [hub.md](hub.md#who-owns-a-session).
+
 ---
 
 ## Guided setup — the "Get started" checklist

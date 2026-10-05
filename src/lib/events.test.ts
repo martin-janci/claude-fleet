@@ -108,6 +108,38 @@ describe('subscribeToRowEvents', () => {
     expect(seen).toEqual([['gc.enabled', 'work.recent_days']]);
   });
 
+  // Multi-user M1: a share or a revoke mutates no `sessions` column, so this
+  // frame is the ONLY thing that tells a client its own grant set moved. Ids
+  // only — never a row — and `level: null` is a revoke.
+  it('delivers grant:changed to onGrantChanged as one batch, dropping malformed frames', async () => {
+    const seen: unknown[][] = [];
+    await subscribeToRowEvents({ onGrantChanged: (changes) => seen.push(changes) });
+    fire('grant:changed', { session_id: 3, person_id: 7, level: 'watch' });
+    fire('grant:changed', { session_id: 3, person_id: 7, level: null });
+    fire('grant:changed', { person_id: 7, level: 'watch' }); // no session_id
+    // A level this build does not know reads as a REVOKE, not as a dropped
+    // frame: a grant only ever moves downward, so the safe reading of a level
+    // we cannot act on is "no level".
+    fire('grant:changed', { session_id: 4, person_id: 7, level: 'superuser' });
+    await flush();
+    expect(seen).toEqual([
+      [
+        { session_id: 3, person_id: 7, level: 'watch' },
+        { session_id: 3, person_id: 7, level: null },
+        { session_id: 4, person_id: 7, level: null },
+      ],
+    ]);
+  });
+
+  it('listens for grant:changed only when asked', async () => {
+    vi.mocked(listen).mockClear();
+    await subscribeToRowEvents({ onSessionEvents: () => {} });
+    expect(vi.mocked(listen).mock.calls.map((c) => c[0])).not.toContain('grant:changed');
+    vi.mocked(listen).mockClear();
+    await subscribeToRowEvents({ onGrantChanged: () => {} });
+    expect(vi.mocked(listen).mock.calls.map((c) => c[0])).toContain('grant:changed');
+  });
+
   it('listens for work:changed only when asked', async () => {
     vi.mocked(listen).mockClear();
     await subscribeToRowEvents({ onWorkEvents: () => {} });

@@ -30,6 +30,7 @@
     hostAlias,
     tmuxName,
     supported = true,
+    accessBlocked = null,
     onFork,
   }: {
     turns: ConvTurn[];
@@ -41,6 +42,24 @@
     hostAlias: string;
     tmuxName: string;
     supported?: boolean;
+    /**
+     * Why THIS CLIENT may not rewind this session, from `share.ts`
+     * (multi-user M1) — the access half of the question, which this component
+     * cannot ask for itself: `$sessionBlocked` needs the session ROW (its
+     * `owner_person_id`), and all this component is given is an id, a host and
+     * a tmux name. So the owner of the row computes it and passes it in, and
+     * the hub half is still composed here, in the documented precedence
+     * (`share.ts`: the hub's refusal wins, because it is true of every
+     * session).
+     *
+     * `rewind_conversation` is `own` in `SESSION_TIER`, so this bars a `drive`
+     * grantee too, not only a watcher: Fork, Rewind and Retry each leave a
+     * permanent verbatim copy of the owner's transcript behind.
+     *
+     * Defaults to `null` — an owned session, which is every session on a
+     * standalone desktop.
+     */
+    accessBlocked?: string | null;
     /** Opens the worktree sheet (Task 7); it calls the backend itself. */
     onFork: (anchor: string | null) => void;
   } = $props();
@@ -56,9 +75,15 @@
 
   // Both route to the hub: with its link down they would fail with a raw
   // error, so they say why instead (as the composer does for send_prompt).
+  // `accessBlocked` is the second half — who this client is on the row — in
+  // the precedence `share.ts` documents: the hub's own refusal first, because
+  // "the hub never accepts this from a client" is true of every session.
   const rewindBlocked = $derived(
-    hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection),
+    hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ?? accessBlocked,
   );
+  // Retry IS a rewind followed by a send, so it inherits the rewind's gate
+  // whole — including the `own` tier — rather than keeping a second copy of it
+  // in step. `send_prompt`'s hub half is the only thing left to add.
   const retryBlocked = $derived(
     rewindBlocked ?? hubActionBlocked('send_prompt', $hubStatus, $hubConnection),
   );
@@ -78,6 +103,13 @@
   // way `SessionDetails.svelte:197` does it for `restartSession` (and
   // `ForkSheet.svelte:62` for the fork).
   async function doRewind(retry: boolean) {
+    // The dialog is only reachable from a button this gate already disabled;
+    // the guard is here so a reason that arrived WHILE the dialog was open
+    // (a revoke, a narrowed grant, the link going down) still stops the call.
+    if (retry ? retryBlocked : rewindBlocked) {
+      confirming = null;
+      return;
+    }
     const label = retry ? 'Retry failed' : 'Rewind failed';
     busy = true;
     const r = await rewindConversation(sessionId, 'rewind', view.rewindAnchor);
@@ -149,7 +181,13 @@
       aria-label="Retry this turn"
       title={retryBlocked ?? 'Retry — rewind and send the same prompt again'}
       disabled={busy || !!retryBlocked}
-      onclick={() => (confirming = 'retry')}><Icon name="retry" size={14} /></button
+      onclick={() => {
+        // The guard, not just the `disabled` attribute: a reason that arrived
+        // while the row was on screen (a revoke, the hub link dropping) must
+        // not be able to raise a confirmation dialog whose confirm button then
+        // refuses — and `doRewind` holds the same line for a dialog already up.
+        if (!retryBlocked) confirming = 'retry';
+      }}><Icon name="retry" size={14} /></button
     >
   {:else if view.retryUnavailable}
     <!-- Shown, not dropped: the prompt on screen is not what a re-send would
@@ -171,7 +209,9 @@
       aria-label="Fork a new session from this reply"
       title={rewindBlocked ?? 'Fork here — a new session from this reply'}
       disabled={!!rewindBlocked}
-      onclick={() => onFork(view.forkAnchor)}><Icon name="fork" size={14} /></button
+      onclick={() => {
+        if (!rewindBlocked) onFork(view.forkAnchor);
+      }}><Icon name="fork" size={14} /></button
     >
   {/if}
   {#if view.canRewind}
@@ -182,7 +222,9 @@
       aria-label="Rewind this session to before this turn"
       title={rewindBlocked ?? 'Rewind here — back to before this turn'}
       disabled={busy || !!rewindBlocked}
-      onclick={() => (confirming = 'rewind')}><Icon name="rewind" size={14} /></button
+      onclick={() => {
+        if (!rewindBlocked) confirming = 'rewind';
+      }}><Icon name="rewind" size={14} /></button
     >
   {/if}
 </div>

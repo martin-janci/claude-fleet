@@ -35,6 +35,7 @@
   } from './hosts_view';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
+  import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import EmbedSlot from './pages/EmbedSlot.svelte';
@@ -96,6 +97,31 @@
   const restorable = $derived(
     hostSessions.filter((s) => s.lost_at !== null && s.claude_session_id && s.kind !== 'bg' && s.kind !== 'external'),
   );
+  /**
+   * Multi-user M1 (F2b): "Restore n lost sessions…" was gated on NOTHING —
+   * neither the hub's half nor the access half — and `restore_host_sessions`
+   * is spec §4.3's `own` tier, the batch form of `recreate_session`. A host's
+   * lost rows are not all one person's, so this narrows PER TARGET rather than
+   * answering once for the button: `bulkTargets` is the same shape Sidebar's
+   * select mode and TidyReview use, and the dialog below says how many rows
+   * were left out so the count on the button is never a silent truncation.
+   */
+  const restorableMine = $derived(bulkTargets(restorable, 'restore_host_sessions', $sessionBlocked));
+  const restoreNotMine = $derived(restorable.length - restorableMine.length);
+  /** Why the button is dead: the hub's own half first (it ROUTES, so a down
+   *  link blocks it), then the access half — and, when every lost row on the
+   *  host belongs to someone else, that sentence, since the hub half would
+   *  answer `null` and leave the button live over nothing this client owns. */
+  const restoreBlocked = $derived(
+    hubActionBlocked('restore_host_sessions', $hubStatus, $hubConnection) ??
+      (restorableMine.length === 0
+        ? ($sessionBlocked(restorable[0], 'restore_host_sessions') ??
+          'None of the lost sessions on this host are yours to restore.')
+        : null),
+  );
+  /** The ids this client may actually restore, as a set, so the plan the
+   *  backend answers with can be filtered by it without a second narrowing. */
+  const restorableMineIds = $derived(new Set(restorableMine.map((s) => s.id)));
 
   let restorePlan = $state<RestorePlanEntry[] | null>(null);
   let restoreError = $state<string | null>(null);
@@ -143,6 +169,13 @@
 
   async function onResumeCandidate(c: LostCandidate) {
     if (!c.resumable || c.project_id === null || c.derived_tmux_name === null) return;
+    // Re-asked at the write: the discovered list stays on screen, and nothing
+    // in it moves when a grant is narrowed.
+    const refused = candidateBlocked(c);
+    if (refused !== null) {
+      resumeErrors = { ...resumeErrors, [c.claude_session_id]: refused };
+      return;
+    }
     const { [c.claude_session_id]: _dropped, ...rest } = resumeErrors;
     resumeErrors = rest;
     resumingId = c.claude_session_id;
@@ -192,13 +225,48 @@
 
   // Resume is a `new_session` carrying `resume_claude_session_id`, and
   // `new_session` ROUTES: a paired desktop resumes through the hub like any
-  // other routed mutation, so the only thing that can block it is the live
-  // link being down — the same gate `reprobeBlocked` uses.
-  const resumeBlocked = $derived(hubActionBlocked('new_session', $hubStatus, $hubConnection));
+  // other routed mutation, so the live link being down blocks it — the same
+  // gate `reprobeBlocked` uses.
+  const resumeHubBlocked = $derived(hubActionBlocked('new_session', $hubStatus, $hubConnection));
+
+  /**
+   * …and the access half, which the hub half cannot answer (multi-user M1,
+   * F2c). "Find lost conversations" lists the host's Claude TRANSCRIPTS, not
+   * fleet's rows: `discover_lost_sessions` reads `~/.claude/projects` on the
+   * machine, which holds every person's conversations who has ever worked
+   * there. Resuming one adopts it into a session of this person's — the
+   * transcript-acquisition path the milestone's durable conversation-owner
+   * record exists to refuse.
+   *
+   * `new_session` deliberately has NO `SESSION_TIER` row, so the tier table is
+   * not the mechanism here: a tier answers "what may I do to an EXISTING
+   * session", and `new_session` is how a session comes into being — giving it a
+   * row would demand a gate on every creation path in the app, each of which
+   * has no session to ask about. What the table does supply is a comparable
+   * question for the SOURCE: a candidate that fleet already has a row for
+   * (`existing_session_id`) is judged against that row at the `own` tier, with
+   * `recreate_session` as the question, because adopting a transcript into a
+   * new pane is exactly what `recreate_session` does.
+   *
+   * A candidate with no row at all resolves to `null`, which
+   * `$sessionIdBlocked` fails closed on everywhere but a standalone desktop —
+   * the right answer, since an orphaned transcript on a shared host is the
+   * case we cannot vouch for at all. A single-user install is unchanged.
+   */
+  function candidateBlocked(c: LostCandidate): string | null {
+    return resumeHubBlocked ?? $sessionIdBlocked(c.existing_session_id, 'recreate_session');
+  }
 
   // The restore plan may hold only skips (e.g. the fleet controller, which
   // needs an explicit forced recreate): then there is nothing to confirm.
-  const restoreCount = $derived((restorePlan ?? []).filter((e) => e.action === 'restore').length);
+  const restoreCount = $derived(
+    (restorePlan ?? []).filter((e) => e.action === 'restore' && restorableMineIds.has(e.session_id)).length,
+  );
+  /** Rows the plan would restore that are somebody else's — named in the
+   *  dialog rather than silently dropped from the count. */
+  const restorePlanNotMine = $derived(
+    (restorePlan ?? []).filter((e) => e.action === 'restore' && !restorableMineIds.has(e.session_id)).length,
+  );
 
   function sessionName(s: SessionRow): string {
     return s.friendly_name?.trim() || s.tmux_name;
@@ -247,6 +315,10 @@
   }
 
   async function onRestoreClick() {
+    // Re-asked at the call, not only on the button: a grant can be narrowed
+    // between the render that enabled it and the click (and the dry run is
+    // itself `restore_host_sessions`).
+    if (restoreBlocked !== null) return;
     restoreError = null;
     restoreSummary = null;
     busy = true;
@@ -266,8 +338,20 @@
   }
 
   async function confirmRestore() {
+    // Re-asked here too: the confirm dialog stays open, so a revoke can land
+    // between the plan and the click. And the plan comes from the BACKEND,
+    // which plans for the host and not for this caller — so the ids are
+    // narrowed again against what this client may restore.
+    if (restoreBlocked !== null) return;
     const alias = host.alias;
-    const ids = (restorePlan ?? []).filter((e) => e.action === 'restore').map((e) => e.session_id);
+    const ids = (restorePlan ?? [])
+      .filter((e) => e.action === 'restore' && restorableMineIds.has(e.session_id))
+      .map((e) => e.session_id);
+    if (ids.length === 0) {
+      confirm = null;
+      restorePlan = null;
+      return;
+    }
     busy = true;
     const r = await restoreHostSessions(alias, { sessionIds: ids });
     busy = false;
@@ -394,10 +478,17 @@
           <button
             type="button"
             class="small"
-            disabled={busy}
+            disabled={busy || restoreBlocked !== null}
+            title={restoreBlocked ??
+              (restoreNotMine > 0
+                ? `${restoreNotMine} of the ${restorable.length} lost sessions here belong to someone else and are left out`
+                : '')}
             data-testid="restore-lost"
             onclick={onRestoreClick}
-            >Restore {restorable.length} lost session{restorable.length === 1 ? '' : 's'}…</button
+            >Restore {restorableMine.length || restorable.length} lost session{(restorableMine.length ||
+              restorable.length) === 1
+              ? ''
+              : 's'}…{#if restoreNotMine > 0}<span class="muted"> ({restoreNotMine} not yours)</span>{/if}</button
           >
         {/if}
         {#if host.reachable}
@@ -429,8 +520,8 @@
         {#if discoverList.length === 0}
           <p class="muted">No Claude conversations found on {host.alias}.</p>
         {:else}
-          {#if resumeBlocked}
-            <p class="muted" data-testid="discover-hub-note">Resume is unavailable right now: {resumeBlocked}</p>
+          {#if resumeHubBlocked}
+            <p class="muted" data-testid="discover-hub-note">Resume is unavailable right now: {resumeHubBlocked}</p>
           {/if}
           <ul class="discover-items">
             {#each discoverList as c (c.claude_session_id)}
@@ -446,8 +537,8 @@
                   <span class="muted">already in fleet</span>
                 {:else if resumedIds.has(c.claude_session_id)}
                   <span class="muted">resumed</span>
-                {:else if c.resumable && c.project_id !== null && c.derived_tmux_name !== null && resumeBlocked}
-                  <span class="muted" title={resumeBlocked}>resume unavailable</span>
+                {:else if c.resumable && c.project_id !== null && c.derived_tmux_name !== null && candidateBlocked(c)}
+                  <span class="muted" title={candidateBlocked(c)} data-testid="discover-resume-blocked">resume unavailable</span>
                 {:else if c.resumable && c.project_id !== null && c.derived_tmux_name !== null}
                   <button
                     type="button"
@@ -616,10 +707,19 @@
         <li>
           <span class="name">{entry.friendly_name ?? entry.tmux_name}</span>
           {#if entry.cwd}<span class="muted">{entry.cwd}</span>{/if}
-          {#if entry.action === 'skip'}<span class="skip">skipped — {entry.reason}</span>{/if}
+          {#if entry.action === 'skip'}<span class="skip">skipped — {entry.reason}</span>
+          {:else if !restorableMineIds.has(entry.session_id)}<span class="skip"
+              >left alone — not yours</span
+            >{/if}
         </li>
       {/each}
     </ul>
+    {#if restorePlanNotMine > 0}
+      <p class="note" data-testid="restore-not-mine">
+        {restorePlanNotMine} of these belong to someone else and will be left alone — only the
+        session's owner can restore it.
+      </p>
+    {/if}
     {#if restoreCount === 0}
       <p class="note" data-testid="restore-nothing">Nothing here can be restored.</p>
     {:else}

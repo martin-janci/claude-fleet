@@ -291,7 +291,7 @@ pub struct SessionRow {
     /// the top guess; this moves on every link change, a secondary's too, so
     /// a client knows when to re-read the session's tasks. Opaque; `0` (and
     /// absent) when the session has no live link. Never sent to a scoped
-    /// caller (`OrgScope::redact_row`): another org's link would move it.
+    /// caller (`OrgScope::redact_row_org_only`): another org's link would move it.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub work_rev: i64,
     /// What the PR probe last read as evidence about the session's PR
@@ -307,6 +307,66 @@ pub struct SessionRow {
     /// `outcome::PR_EVIDENCE_STALE_SECS` describes the past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_checked_at: Option<i64>,
+    /// Whose session this is (migration 099, multi-user M1): the `people`
+    /// row that owns it. `None` for a row nobody can speak for — one
+    /// reconcile discovered on a host, or a pre-M1 row fleet did not create
+    /// (`visibility = 'unclaimed'`).
+    ///
+    /// A caller-INDEPENDENT fact: it says who the owner is, not what the
+    /// reader may do, so it is safe on the broadcast bus. There is
+    /// deliberately no per-caller access field on this row; the answer to
+    /// "may THIS caller see it" is computed at the gate from this field,
+    /// [`SessionRow::visibility`] and the caller's grants, and never
+    /// stored on the row a broadcast carries.
+    ///
+    /// It is **not** what the stream fence keys on. `BroadcastEventBus::emit`
+    /// runs `strip_nulls` before the frame enters the replay ring
+    /// (`events.rs`), so an unowned row's key is *absent* rather than null —
+    /// indistinguishable from a hub built before the column, and "absent"
+    /// reads as "no restriction" (spec §3.7). `visibility`, which is NOT
+    /// NULL, is the key that survives that and the one a fence may read.
+    /// Hence no `skip_serializing_if` on either field.
+    #[serde(default)]
+    pub owner_person_id: Option<i64>,
+    /// [`VISIBILITY_PRIVATE`] or [`VISIBILITY_UNCLAIMED`] (migration 099,
+    /// whose `CHECK` admits nothing else — in particular no `'org'`, which
+    /// the owner removed from M1 because the schema's only referent for
+    /// "the org can see it" is a column an admin binds their own device to;
+    /// spec §4.3). `private` is the default for anything a person starts;
+    /// `unclaimed` is the safe holding state.
+    ///
+    /// `#[serde(default = "visibility_unclaimed")]`, never a bare
+    /// `#[serde(default)]`: see that function for why the difference is the
+    /// privacy-critical one.
+    #[serde(default = "visibility_unclaimed")]
+    pub visibility: String,
+}
+
+/// `sessions.visibility` (migration 100): private to its owner, and to the
+/// people the owner has granted `watch` or `drive` to. The default for
+/// anything a person starts through fleet.
+pub const VISIBILITY_PRIVATE: &str = "private";
+
+/// `sessions.visibility` (migration 100): nobody can speak for this row —
+/// reconcile found it on a host, or it predates M1 and fleet did not create
+/// it. An out-of-scope caller learns a per-host COUNT of these and not one
+/// byte more (spec §4.3); claiming one needs proof of host access.
+pub const VISIBILITY_UNCLAIMED: &str = "unclaimed";
+
+/// [`SessionRow::visibility`] when a frame carries no `visibility` key at
+/// all: a hub built before migration 099, or a row read from one.
+///
+/// **It must be a named function.** A bare `#[serde(default)]` on a `String`
+/// yields `String::default()` — the empty string — which is neither
+/// `private` nor `unclaimed` and so matches no arm anybody writes: the
+/// privacy fence would fail *open* into a case that does not exist (spec
+/// §3.7). The repo's convention for exactly this shape is a named default
+/// function (`store/orgs.rs::bound_sees_unassigned_default`,
+/// `store/trackers.rs::default_true`, `store/work.rs::default_role`), and
+/// `rows::tests::a_session_row_with_no_visibility_key_reads_unclaimed`
+/// asserts the VALUE, not merely that parsing succeeded.
+fn visibility_unclaimed() -> String {
+    VISIBILITY_UNCLAIMED.to_string()
 }
 
 fn is_zero_i64(n: &i64) -> bool {
@@ -433,7 +493,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
        WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
-     pr_evidence, pr_checked_at"
+     pr_evidence, pr_checked_at, owner_person_id, visibility"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -540,6 +600,8 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         work_rev: row.get(61)?,
         pr_evidence: decode_pr_evidence(row.get(62)?),
         pr_checked_at: row.get(63)?,
+        owner_person_id: row.get(64)?,
+        visibility: row.get(65)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -868,6 +930,26 @@ pub struct HostRow {
     /// unknown). Computed from the stored fingerprint, never stored.
     #[serde(default)]
     pub provision_stale: bool,
+    /// How many `unclaimed` sessions this host carries (multi-user M1,
+    /// spec §4.3) — the ONE thing a caller ever learns about a row nobody
+    /// can speak for. Computed per request by
+    /// `service::hosts::list_hosts`, never stored.
+    ///
+    /// **`None` and `Some(0)` are different answers, and the difference is
+    /// the privacy rule.** `Some(0)` says "this host has no unclaimed
+    /// sessions"; `None` says "you are not being told", and it is what a
+    /// hub with more than one person serves everybody (R5-d). Serving `0`
+    /// there would be a claim about the host that the caller is not
+    /// entitled to. On such a hub the count reaches a human through
+    /// `fleet-hub session unclaimed` — shell access on the hub machine —
+    /// and through no API at all.
+    ///
+    /// Plain `#[serde(default)]` and no `skip_serializing_if`: the key is
+    /// always on the wire, as `null` when withheld, so an older hub (which
+    /// omits it entirely) and a hub that withheld it read the same —
+    /// `None`, which is the closed answer either way.
+    #[serde(default)]
+    pub unclaimed_sessions: Option<i64>,
     /// Which harnesses the asset catalog syncs on this host (multi-harness
     /// F3a, migration 089). `None` = auto: Claude, plus Codex where a scan
     /// finds it or fleet already manages Codex assets there. `Some` = exactly
@@ -970,6 +1052,10 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         provisioned_at: row.get(21)?,
         provision_stale: provisioned
             && fingerprint.as_deref() != Some(crate::service::provision::fingerprint()),
+        // Never stored, and never derivable from a `hosts` row:
+        // `service::hosts::list_hosts` fills it in per request, for the
+        // callers R5-d entitles to it.
+        unclaimed_sessions: None,
         // Migration 089. A value that is not a JSON string array reads as
         // auto rather than failing the whole row.
         harnesses: row
@@ -1103,6 +1189,14 @@ pub struct ClientTokenRow {
     /// (migration 074, `fleet-hub client grant <name> assets`): the hub's
     /// `catalog_admin` tool answers it as it answers the master.
     pub assets_admin_at: Option<i64>,
+    /// Whose device this is (multi-user M1, migration 100): the `people` row
+    /// this token belongs to. `None` is the `person: None` privilege level —
+    /// a caller nobody owns — which every gate must refuse and no scope can
+    /// resolve; migration 098 leaves no live row in that state, and
+    /// `Store::set_client_person` is the only thing that puts one back.
+    /// Deliberately no foreign key: deleting a person leaves the token bound
+    /// to an id nothing has (fail closed), never widened.
+    pub person_id: Option<i64>,
 }
 
 /// One inter-session message (migration 015). The store is the source of
@@ -1175,6 +1269,22 @@ pub struct TaskRow {
     /// Not serialised either, hence `None` on a row read back from a hub.
     #[serde(skip_serializing, default)]
     pub worker_claude_session_id: Option<String>,
+    /// When a session this task names was DELETED, so the task's ends no
+    /// longer identify anybody (migration 101, multi-user M1 T9d).
+    ///
+    /// `sessions.id` is reused, and a task outlives its sessions, so an id
+    /// kept past the row's death would make the task read as belonging to
+    /// whoever holds that id next. The trigger NULLs the id and stamps this;
+    /// [`crate::service::tasks::task_visible_in_scope_pure`] then answers
+    /// `false` for everyone but the hub's own reader, because the sessions
+    /// are over and there is nothing left for a person to drive.
+    ///
+    /// `#[serde(skip)]`, like `SessionRow::stale_demoted_at`: it is a fence
+    /// input, decided where the rows live, and never a field a client reads
+    /// or a hub client has to be told. So it is `None` on a row read back
+    /// from a hub — harmless, because the hub already applied the fence.
+    #[serde(skip)]
+    pub detached_at: Option<i64>,
 }
 
 /// Where the catalog repo lives and its last-loaded HEAD (migration 030).
@@ -1276,7 +1386,8 @@ pub const TASK_TERMINAL_STATES: [&str; 3] = ["done", "failed", "cancelled"];
 
 pub(super) const TASK_COLUMNS: &str =
     "id, requester_session_id, worker_session_id, prompt, state, result, \
-     error, created_at, started_at, finished_at, nonce, worker_claude_session_id";
+     error, created_at, started_at, finished_at, nonce, worker_claude_session_id, \
+     detached_at";
 
 /// [`TASK_COLUMNS`] qualified with the `t.` alias for joined queries.
 pub(super) fn task_columns_t() -> String {
@@ -1297,6 +1408,7 @@ pub(super) fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow>
         finished_at: row.get(9)?,
         nonce: row.get(10)?,
         worker_claude_session_id: row.get(11)?,
+        detached_at: row.get(12)?,
     })
 }
 
@@ -1595,6 +1707,94 @@ mod tests {
             back.eq_ignoring_row_version(&row),
             "a demoted-only difference is not a visible one"
         );
+    }
+
+    /// One private, owned session, for the two wire tests below.
+    fn owned_private_session(s: &Store) -> (i64, i64) {
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("w", "local", None, None, 1, 1, "running", None)
+            .unwrap();
+        let person = s.create_person("ada", None).unwrap().id;
+        s.conn_ref()
+            .execute(
+                "UPDATE sessions SET owner_person_id = ?1, visibility = 'private' \
+                 WHERE id = ?2",
+                rusqlite::params![person, id],
+            )
+            .unwrap();
+        (id, person)
+    }
+
+    /// The inverse of the test above, and the privacy-critical one
+    /// (migration 099, spec §3.7): a `SessionRow` parsed from a frame with
+    /// **no `visibility` key at all** — an older hub, or a replayed frame
+    /// from before the column — reads [`VISIBILITY_UNCLAIMED`].
+    ///
+    /// This is what the named `#[serde(default = "visibility_unclaimed")]`
+    /// buys. A bare `#[serde(default)]` on a `String` yields the empty
+    /// string, which is neither value 097's `CHECK` admits and so matches no
+    /// arm any fence writes — the one default that fails OPEN. The assertion
+    /// is therefore on the VALUE, not on parsing having succeeded: parsing
+    /// succeeds either way, which is exactly why this test has to exist.
+    #[test]
+    fn a_session_row_with_no_visibility_key_reads_unclaimed() {
+        // Built from a real row and then stripped, rather than hand-written:
+        // a hand-written payload drifts, and this must stay a test about the
+        // two missing keys and nothing else. The row is private and owned
+        // BEFORE the strip, so the assertion tells the serde default apart
+        // from the value passing through — a row that was already
+        // `unclaimed` would pass either way.
+        let s = Store::open_in_memory().unwrap();
+        let (id, _) = owned_private_session(&s);
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        let mut json = serde_json::to_value(&row).unwrap();
+        let obj = json.as_object_mut().expect("a row is an object");
+        let was = obj.remove("visibility");
+        assert_eq!(
+            was.as_ref().and_then(|v| v.as_str()),
+            Some(VISIBILITY_PRIVATE),
+            "the key must have been there to be removed"
+        );
+        obj.remove("owner_person_id");
+        let back: SessionRow = serde_json::from_value(json)
+            .expect("a pre-095 hub's session row must still deserialize");
+        assert_eq!(
+            back.visibility, VISIBILITY_UNCLAIMED,
+            "a missing visibility reads `unclaimed`, never the empty string"
+        );
+        assert_ne!(
+            back.visibility, "",
+            "String::default() is the default that fails open"
+        );
+        assert_eq!(back.owner_person_id, None);
+    }
+
+    /// And the round trip: a current hub's values survive the wire, so the
+    /// default has not quietly made the field write-only — the failure
+    /// `a_project_row_from_a_current_hub_keeps_its_system_flag` pins for
+    /// `ProjectRow`.
+    ///
+    /// Neither field carries `skip_serializing_if`, and `visibility` must
+    /// not: `BroadcastEventBus::emit` runs `strip_nulls` before a frame
+    /// enters the replay ring, so an unowned row's `owner_person_id` is
+    /// ABSENT on the stream and indistinguishable from a pre-095 hub's.
+    /// `visibility` is NOT NULL and is therefore the only key a fence can
+    /// safely read (spec §3.7).
+    #[test]
+    fn visibility_and_owner_survive_the_wire() {
+        let s = Store::open_in_memory().unwrap();
+        let (id, person) = owned_private_session(&s);
+        let row = s.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row.owner_person_id, Some(person));
+        assert_eq!(row.visibility, VISIBILITY_PRIVATE);
+        let json = serde_json::to_value(&row).unwrap();
+        let vis = json.get("visibility").and_then(|v| v.as_str());
+        let own = json.get("owner_person_id").and_then(|v| v.as_i64());
+        assert_eq!(vis, Some(VISIBILITY_PRIVATE), "the fence's key");
+        assert_eq!(own, Some(person), "and the owner beside it");
+        let back: SessionRow = serde_json::from_value(json).unwrap();
+        assert!(back.eq_ignoring_row_version(&row));
     }
 
     /// `WorkSummary.effective_status` (native item status task 4, fix round

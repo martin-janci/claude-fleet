@@ -18,6 +18,7 @@ import {
 } from './moveSession';
 import type { IpcError, Result } from './result';
 import { sessions, type SessionRow } from './sessions';
+import { sessionActionBlocked, sessionIdActionBlocked } from './share';
 import { selectedSession, selectSession } from './selection';
 import { onTimelineEvent } from './live_events';
 import { hubConnection, type HubConnection } from './hub_connection';
@@ -248,8 +249,46 @@ export function runForSession(
   return undefined;
 }
 
+/**
+ * Why this client may not run the move lifecycle on `sessionId`, or null
+ * (multi-user M1, F2b).
+ *
+ * The gate lives in this module, at the three entry points the UI calls, and
+ * not only on the controls: `move_session` is spec §4.3's `own` tier, and the
+ * Transfer sheet, the terminal-header chip, the details panel and a toast
+ * action all reach these three functions. One of them, the wait view's
+ * "Transfer again", was still live after F2 precisely because the gate was a
+ * property of the surface rather than of the write.
+ *
+ * It answers only on the ACCESS half: "the hub refuses this from a client" and
+ * "the link is down" are `moveEligibility.ts`'s job, in front of the control,
+ * where the sentence can be shown. Here there is no control to annotate — a
+ * refusal is silent — so this is the floor, not the explanation.
+ *
+ * ── Not knowing is not permission (F2d) ───────────────────────────────────
+ *
+ * It used to resolve the row itself and hand `sessionActionBlocked` whatever
+ * came back, including `undefined` — which answers `null`, i.e. allowed. The
+ * whole lifecycle therefore failed OPEN the moment the row left the store, and
+ * a run outlives its row by construction: a `partial` adopted after a restart,
+ * a `waiting` run on a host that has gone quiet, a `failed` run still on screen
+ * after a reconcile dropped the session. On a paired desktop "not in
+ * `$sessions`" also means *fenced off the stream*, which is exactly the case a
+ * kill must not be offered for.
+ *
+ * So the resolution is `share.ts::sessionIdActionBlocked`'s, once, instead of
+ * hand-rolled here: it fails closed with `UNKNOWN_SESSION_REASON` on a fleet
+ * this client does not own, and answers `null` on a standalone desktop, where
+ * the master owns every row (`access.ts::sessionAccess` rule 1) and a
+ * single-user install must be untouched.
+ */
+function moveAccessBlocked(sessionId: number | null | undefined): string | null {
+  return sessionIdActionBlocked(sessionId, 'move_session');
+}
+
 /** Start a move without waiting for it. A no-op while one is running. */
 export function startMove(session: SessionRow, toHost: string, opts: { keepSource: boolean }): void {
+  if (sessionActionBlocked(session, 'move_session') !== null) return;
   if (activeMoveFor(session.id)) return;
   // A run already under this key is a settled one this start replaces (a
   // failed attempt, a done move of a re-discovered row): its last events may
@@ -636,6 +675,7 @@ export function retryMove(
 ): void {
   const run = get(store).get(sessionId);
   if (!run || run.status !== 'failed' || run.origin !== 'local') return;
+  if (moveAccessBlocked(sessionId) !== null) return;
   const cleanTarget = opts.cleanTarget ?? false;
   const forceCrossOrg = opts.forceCrossOrg ?? run.forceCrossOrg;
   unwatchWait(sessionId);
@@ -751,6 +791,24 @@ export function resolveMoveRun(sessionId: number, action: ResolveAction): void {
   const targetId = targetIdOf(run);
   if (targetId === null) {
     push({ kind: 'error', message: `${run.sessionName}: no target session to resolve.` });
+    return;
+  }
+  // Both ids, and this is the fix rather than a belt-and-braces (F2d): the gate
+  // used to ask about `sessionId` alone, which is the run's KEY — the source
+  // session — while `resolve_move` is handed `targetId` and acts on THAT.
+  // Asking about the source and acting on the target is not a gate on the
+  // write: a partial move leaves two live sessions, and after one the
+  // operator's grant on them can differ (the target is the new row on the
+  // target host; the source is somebody's running pane). Undo kills the target,
+  // Finish kills the source, so each is asked for.
+  //
+  // A refusal goes onto the run as `resolveError` rather than being silent:
+  // the Transfer sheet's Finish/Undo buttons are gated on the SOURCE row, so a
+  // target this client cannot vouch for would otherwise be a button that does
+  // nothing at all.
+  const refused = moveAccessBlocked(sessionId) ?? sessionIdActionBlocked(targetId, 'resolve_move');
+  if (refused !== null) {
+    put({ ...run, resolveError: { code: 'E_FORBIDDEN', message: refused }, resolving: false });
     return;
   }
   // A stale refusal from a previous attempt must not linger through this one.
@@ -980,6 +1038,7 @@ export function applyMoveProgress(p: MoveProgress): void {
 export function cancelWait(sessionId: number): void {
   const run = get(store).get(sessionId);
   if (!run || run.status !== 'waiting') return;
+  if (moveAccessBlocked(sessionId) !== null) return;
   const sessionName = run.sessionName;
   void cancelMoveWait(sessionId, run.toHost).then(async (r: Result<MoveWaitCancelled>) => {
     if (!r.ok) {

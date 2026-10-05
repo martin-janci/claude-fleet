@@ -213,7 +213,12 @@ async fn tidy_apply_is_a_batch_that_reports_every_item() {
     assert!(journal.iter().any(|j| j.kind == "tidy"));
     drop(s);
     // The snooze took: nothing is suggested for it now.
-    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let r = work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
     assert!(!r.candidates.iter().any(|c| c.session_id == snoozed));
 }
 
@@ -278,7 +283,12 @@ async fn a_tree_a_live_review_uses_is_only_plain_killed() {
         dirty: vec!["a".into()],
         ..Default::default()
     };
-    let plan = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let plan = work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
     let c = plan
         .candidates
         .iter()
@@ -323,17 +333,25 @@ async fn host_scope_and_bad_requests_are_per_item_or_refused() {
     );
     assert!(exec.calls().is_empty());
     assert_eq!(
-        work_tidy(&store, &host("other"), NOW)
-            .unwrap()
-            .candidates
-            .len(),
+        work_tidy(
+            &store,
+            &crate::service::view_scope::ViewScope::internal().with_org(host("other")),
+            NOW
+        )
+        .unwrap()
+        .candidates
+        .len(),
         0
     );
     assert_eq!(
-        work_tidy(&store, &host("local"), NOW)
-            .unwrap()
-            .candidates
-            .len(),
+        work_tidy(
+            &store,
+            &crate::service::view_scope::ViewScope::internal().with_org(host("local")),
+            NOW
+        )
+        .unwrap()
+        .candidates
+        .len(),
         1
     );
 }
@@ -446,7 +464,12 @@ async fn auto_tidy_acts_only_on_the_allowed_reasons() {
             && e.detail.as_deref() == Some("auto:done_idle:safe_kill:safe_kill_requested")));
     drop(s);
     // pr_merged_idle is still only suggested; the in-progress one never is.
-    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let r = work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
     let merged_c = r
         .candidates
         .iter()
@@ -476,7 +499,12 @@ fn a_merged_prs_stamp_is_offered_as_pr_merged_idle_end_to_end() {
             [sid],
         )
         .unwrap();
-    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let r = work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
     let c = r
         .candidates
         .iter()
@@ -527,7 +555,12 @@ fn a_stamped_done_is_still_offered_once_its_signal_is_gone_end_to_end() {
             )
             .unwrap();
     }
-    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let r = work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
     let c = r
         .candidates
         .iter()
@@ -636,7 +669,12 @@ fn a_persons_done_ages_into_done_idle() {
             )
             .unwrap();
     }
-    let r = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let r = work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
     let c = r
         .candidates
         .iter()
@@ -747,13 +785,23 @@ async fn a_per_host_token_never_sees_or_touches_another_orgs_candidates() {
         OrgScope::for_host(&s, "local").unwrap()
     };
     // The master sees all three.
-    let all = work_tidy(&o.store, &OrgScope::All, NOW).unwrap();
+    let all = work_tidy(
+        &o.store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
     let ids: Vec<i64> = all.candidates.iter().map(|c| c.session_id).collect();
     assert_eq!(ids, vec![o.a_sess, o.b_sess, o.x_sess]);
     assert_eq!(all.candidates[2].key.as_deref(), Some("BB-1"));
     // Host A (in Company A): its org's sessions only, and B's ticket on
     // its own session is not named.
-    let mine = work_tidy(&o.store, &scope, NOW).unwrap();
+    let mine = work_tidy(
+        &o.store,
+        &crate::service::view_scope::ViewScope::internal().with_org(scope.clone()),
+        NOW,
+    )
+    .unwrap();
     let ids: Vec<i64> = mine.candidates.iter().map(|c| c.session_id).collect();
     assert_eq!(ids, vec![o.a_sess, o.x_sess]);
     let x = &mine.candidates[1];
@@ -876,7 +924,13 @@ async fn auto_tidy_follows_the_org_override() {
         settings::set(&s, settings::WORK_AUTO_TIDY, "true").unwrap();
         s.set_org_auto_tidy(o.org_a, Some(false)).unwrap();
     }
-    let c = work_tidy(&o.store, &OrgScope::All, NOW).unwrap().candidates;
+    let c = work_tidy(
+        &o.store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap()
+    .candidates;
     let auto: Vec<i64> = c.iter().filter(|c| c.auto).map(|c| c.session_id).collect();
     assert_eq!(auto, vec![o.b_sess]);
     // Inherit clears the override.
@@ -914,12 +968,16 @@ fn seed_unlinked(store: &Mutex<Store>, name: &str) -> i64 {
 }
 
 fn reason_of(store: &Mutex<Store>, id: i64) -> Option<TidyReason> {
-    work_tidy(store, &OrgScope::All, NOW)
-        .unwrap()
-        .candidates
-        .iter()
-        .find(|c| c.session_id == id)
-        .map(|c| c.reason)
+    work_tidy(
+        store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap()
+    .candidates
+    .iter()
+    .find(|c| c.session_id == id)
+    .map(|c| c.reason)
 }
 
 #[tokio::test]
@@ -929,7 +987,12 @@ async fn idle_unlinked_is_suggested_and_killed_only_when_clean() {
     let dirty = seed_unlinked(&store, "dirty");
     assert_eq!(reason_of(&store, clean), Some(TidyReason::IdleUnlinked));
     assert_eq!(reason_of(&store, dirty), Some(TidyReason::IdleUnlinked));
-    let report = work_tidy(&store, &OrgScope::All, NOW).unwrap();
+    let report = work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW,
+    )
+    .unwrap();
     assert_eq!(report.idle_unlinked_days, 7);
     let exec = FakeExec {
         dirty: vec!["dirty".into()],
@@ -1051,20 +1114,28 @@ async fn keep_holds_a_session_out_for_n_days_per_session() {
         .any(|e| e.kind == "tidy_kept"
             && e.detail.as_deref() == Some(&*(NOW + 3 * 86_400).to_string())));
     let later = NOW + 3 * 86_400 + 1;
-    assert!(work_tidy(&store, &OrgScope::All, later)
-        .unwrap()
-        .candidates
-        .iter()
-        .any(|c| c.session_id == id));
+    assert!(work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        later
+    )
+    .unwrap()
+    .candidates
+    .iter()
+    .any(|c| c.session_id == id));
     // The latest keep wins, shorter or not.
     tidy_apply(&store, &exec, &[keep(Some(1))], &OrgScope::All, NOW)
         .await
         .unwrap();
-    assert!(work_tidy(&store, &OrgScope::All, NOW + 86_400 + 1)
-        .unwrap()
-        .candidates
-        .iter()
-        .any(|c| c.session_id == id));
+    assert!(work_tidy(
+        &store,
+        &crate::service::view_scope::ViewScope::internal(),
+        NOW + 86_400 + 1
+    )
+    .unwrap()
+    .candidates
+    .iter()
+    .any(|c| c.session_id == id));
     assert!(exec.calls().is_empty(), "keep never kills");
 }
 

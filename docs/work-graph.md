@@ -337,6 +337,14 @@ project group's header also has **Name this work…**, for its sessions that
 have no work. An explicit link always wins over anything fleet recognised,
 and a rejection is sticky: fleet never suggests that pair again.
 
+Local work is reached THROUGH the sessions linked to it, which is also how
+fleet knows whose it is. So a local item whose last link you removed —
+**Clear**, or an unlink — can no longer be renamed or given a status, by
+you or by anybody else: with no link there is no record of whose work it
+was, and fleet answers as it would for an item id that does not exist. It
+still appears in the local-work list, and linking a session to it again
+makes it writable again.
+
 **Clear** removes the link without rejecting the key: fleet may propose it
 again later. But not from the same evidence. When the session's branch,
 its pull request's head branch or a closing reference of its pull request

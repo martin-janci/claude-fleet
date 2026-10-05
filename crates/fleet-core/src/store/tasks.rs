@@ -101,6 +101,13 @@ impl Store {
 
     /// The `queued` / `running` tasks a worker session is executing (oldest
     /// first — the marker scan resolves them in dispatch order).
+    ///
+    /// Reuse-safe since migration 101 (multi-user M1, T9d): `sessions.id` is
+    /// recycled, and this bound a dead session's open tasks to whoever next
+    /// held its rowid — so the Stop hook scanned a stranger's transcript for
+    /// another person's task markers (`service::tasks::handle_stop_for_
+    /// worker`). The trigger NULLs `worker_session_id` on delete, so a new
+    /// session under a recycled id matches nothing here.
     pub fn open_tasks_for_worker(
         &self,
         worker_session_id: i64,

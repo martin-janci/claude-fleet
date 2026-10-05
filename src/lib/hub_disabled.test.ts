@@ -39,6 +39,20 @@ import { hosts } from './hosts';
 import { catalog, catalogConfig } from './assets';
 import { projects, type ProjectTreeRow } from './projects';
 import { sessions as sessionsStore, type SessionRow } from './sessions';
+import { resetAccessForTests, setMyGrants } from './access';
+
+/**
+ * Who this paired desktop is on the fleet (multi-user M1).
+ *
+ * Every session fixture in this file is stamped with it, and `beforeEach`
+ * seeds the module with it. This file is about the HUB LINK — a control that
+ * cannot work being disabled with the reason before the click — and ownership
+ * is a different axis entirely (`SessionDetails.test.ts` and
+ * `SessionRowItem.test.ts` cover that one). Without the seed a paired-desktop
+ * test here would be exercising "the hub has not said who this device is",
+ * which fails closed and would hide the very thing these tests assert.
+ */
+const OWNER = 7;
 
 const remote: HubStatus = {
   remote: true,
@@ -66,6 +80,8 @@ beforeEach(() => {
   hosts.set([]);
   projects.set([]);
   sessionsStore.set([]);
+  resetAccessForTests();
+  setMyGrants(OWNER, []);
 });
 
 afterEach(() => {
@@ -392,6 +408,8 @@ describe('new_session and repair_session route now, so their buttons stay enable
     parent_session_id: null, tags: [],
     model: null, context_tokens: null, context_window: null, context_source: null,
     context_at: null, context_stale: false, tmux_pane_id: null, pending_input: null,
+    // This desktop's own session: see OWNER above.
+    owner_person_id: OWNER, visibility: 'private' as const,
   };
 
   it('+ New session is enabled on a hub client', async () => {
@@ -530,6 +548,7 @@ describe('the git-write panel on a hub client', () => {
 describe('safe remove and discard-kill on a hub client', () => {
   const session: SessionRow = sessionFixture('mefistos', 'dev-foo', {
     project_id: 3, claude_status: null, turn_seq: 0, last_stop_at: null,
+    owner_person_id: OWNER, visibility: 'private',
   });
 
   it('Safe remove is disabled, with the reason', async () => {
@@ -640,6 +659,7 @@ describe('add and purge project on a hub client', () => {
 describe('a routed mutation control while the hub connection is not up', () => {
   const session: SessionRow = sessionFixture('mefistos', 'dev-foo', {
     project_id: 3, claude_status: null, turn_seq: 0, last_stop_at: null,
+    owner_person_id: OWNER, visibility: 'private',
   });
 
   it('Kill session is disabled while reconnecting, naming the hub as unreachable', async () => {

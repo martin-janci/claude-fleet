@@ -22,6 +22,7 @@ import HostDetail from './HostDetail.svelte';
 import { sharedWith } from './hosts_view';
 import { timeAgo } from './session_status';
 import { hubStatus, STANDALONE } from './hub';
+import { UNKNOWN_SESSION_REASON } from './share';
 import { hubConnection } from './hub_connection';
 import { ADMIN, GMAIL, NOW, fleetHosts, fleetSessions, fleetUsage, host, session } from './hosts_fixture';
 import { viewHostSessions } from './host_actions';
@@ -458,12 +459,10 @@ describe('HostDetail find lost conversations', () => {
     hubConnection.set({ state: 'standalone' });
   });
 
-  // `new_session` routes, so a paired desktop resumes THROUGH the hub. The
-  // only thing that can stop it is the live link, which is what every other
-  // routed mutation gates on.
-  it('a connected paired desktop still offers Resume', async () => {
-    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
-    hubConnection.set({ state: 'connected' });
+  // The positive control for the gate below: a standalone desktop IS the
+  // fleet, every row and every transcript on its hosts is this person's, and
+  // nothing about multi-user M1 changes what a single-user install does.
+  it('a standalone desktop offers Resume', async () => {
     mockedDiscover.mockResolvedValueOnce({ ok: true, value: [candidate()] });
     mount('mefistos');
     await fireEvent.click(screen.getByTestId('discover-lost'));
@@ -471,6 +470,35 @@ describe('HostDetail find lost conversations', () => {
 
     expect(screen.queryByTestId('discover-hub-note')).toBeNull();
     expect(screen.getByTestId('discover-resume')).toBeTruthy();
+  });
+
+  /**
+   * Multi-user M1 (F2c). `new_session` routes, so the hub half is satisfied by
+   * a live link — and that is exactly why the access half had to be added
+   * here: nothing else was asking WHOSE conversation the transcript is.
+   *
+   * `discover_lost_sessions` reads the host's `~/.claude/projects`, which on a
+   * shared machine holds every person's conversations, and a candidate the
+   * Resume button is offered for is by construction one fleet has NO row for
+   * (`existing_session_id` is null; a candidate with a row shows "already in
+   * fleet" instead). So there is nothing to resolve an owner from, and the
+   * gate fails closed rather than offering to adopt the transcript.
+   */
+  it('a connected paired desktop offers no Resume: the transcript has no owner it can check', async () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    hubConnection.set({ state: 'connected' });
+    mockedDiscover.mockResolvedValueOnce({ ok: true, value: [candidate()] });
+    mount('mefistos');
+    await fireEvent.click(screen.getByTestId('discover-lost'));
+    await tick();
+
+    // The hub half says nothing: the link is up.
+    expect(screen.queryByTestId('discover-hub-note')).toBeNull();
+    expect(screen.queryByTestId('discover-resume')).toBeNull();
+    expect(screen.getByTestId('discover-resume-blocked').getAttribute('title')).toBe(
+      UNKNOWN_SESSION_REASON,
+    );
+    expect(mockedNewSession).not.toHaveBeenCalled();
   });
 
   it('an offline paired desktop offers no Resume and says why', async () => {

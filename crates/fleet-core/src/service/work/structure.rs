@@ -187,15 +187,26 @@ fn unbound_only(scope: &OrgScope, what: &str) -> Result<(), IpcError> {
 /// tracker-controlled value is never written back. `expected_version` is
 /// the placement version the person saw (`0`: none). Answers the task as
 /// it now reads.
+///
+/// **It takes the WHOLE scope** (multi-user M1, T9b), because what it ANSWERS
+/// is a `WorkTask`, whose `sessions: Vec<TaskLink>` is every link of the task
+/// — `{ session_id, name, host, branch, claude_status, needs_you, resumable }`
+/// per link. The table's old exemption read "a task's group (`task_id`): the
+/// work item, not a session", which is true of the write and false of the
+/// answer; `Graph::load` is `OrgScope::All` for every paired client bound to
+/// no org, and T8's result gate cannot net a `TaskLink` (it spells the host
+/// `host` and carries no `tmux_name`). Same defect as `org_impact`'s, in the
+/// sibling arm.
 pub fn place(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     task_id: &str,
     group: Option<&str>,
     note: Option<&str>,
     expected_version: Option<i64>,
     by: &str,
 ) -> Result<WorkTask, IpcError> {
+    let scope = &view.org;
     no_host(scope, "place")?;
     let expected = expected_version.ok_or_else(|| {
         invalid("place needs expected_version (0 when the task has no placement)")
@@ -203,7 +214,7 @@ pub fn place(
     let group = clean_text(group.unwrap_or_default(), "group", LABEL_MAX_CHARS, true)?;
     let note = clean_text(note.unwrap_or_default(), "note", NOTE_MAX_CHARS, true)?;
     let s = lock(store)?;
-    let mut g = Graph::load(&s, scope)?;
+    let mut g = Graph::load_for(&s, view)?;
     // Visibility first: a task out of scope answers as an unknown one, and
     // its placement's version is never compared (no oracle).
     let (task, _) = find_task(&g, scope, task_id, false)?;
@@ -259,6 +270,9 @@ fn clean_rule(r: &RuleInput) -> Result<(String, RuleConditions, String), IpcErro
 /// to learn.
 pub fn rules(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<WorkRule>, IpcError> {
     match scope {
+        // This is the org boundary, not a privacy fence: a placement RULE is
+        // a company's own configuration (its tracker, its project keys, its
+        // repositories) and names no session.
         OrgScope::All => lock(store)?.work_rules(),
         OrgScope::Host { .. } => Ok(Vec::new()),
         OrgScope::Org { .. } => {
@@ -420,6 +434,9 @@ pub fn rule_delete(
 /// views saved under that org. A host keeps none.
 fn view_owner(scope: &OrgScope) -> Option<Option<i64>> {
     match scope {
+        // This is the org boundary, not a privacy fence: a saved VIEW is
+        // stored under an org and is that org's configuration. It is a set
+        // of filters, not any session's data.
         OrgScope::All => None,
         OrgScope::Org { org, .. } => Some(Some(*org)),
         OrgScope::Host { .. } => Some(Some(i64::MIN)),
@@ -439,6 +456,8 @@ pub fn views(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<WorkView>, Ip
 /// the unknown id it is to it (work graph M14.1c).
 fn check_view_filters(s: &Store, scope: &OrgScope, f: &WorkTreeFilters) -> Result<(), IpcError> {
     check_filters(f)?;
+    // This is the org boundary, not a privacy fence: a filter may name only an org or tracker ID
+    // this caller sees.
     if scope.is_all() {
         return Ok(());
     }
@@ -589,6 +608,18 @@ fn impact_of(
         .iter()
         .filter(|l| item_id.is_some() && l.link.item_id == item_id)
     {
+        // The PERSON fence, before anything is read off the link (multi-user
+        // M1, T8d; its ENDED half T9b): a link whose session this reader may
+        // not see is not listed, its host is not added to `ran_on`, and its
+        // conversations are not counted. It must NOT fall through to the
+        // snapshot arms below, which would name the session by `snap_name`
+        // and its machine by `snap_host` — exactly what the fence withholds.
+        // `Graph::link_hidden` is the one clause, shared with
+        // `Graph::link_visible`, applied here because `impact_of` projects
+        // the links itself rather than going through it.
+        if g.link_hidden(l) {
+            continue;
+        }
         // The view's own state (a rejection moves no one), name and org.
         let Some(state) = g.state_of(l).filter(|s| *s != "rejected") else {
             continue;
@@ -615,6 +646,9 @@ fn impact_of(
         // What the caller may not see of the link is not listed (an
         // unrestricted caller — the only one that may move an org — sees
         // all of it).
+        // This is the org boundary, not a privacy fence: which orgs' links a move's preview
+        // lists. `Graph::load_for` has already emptied the person-invisible rows out of the
+        // graph, and `Graph::link_hidden` keeps their snapshots out.
         if !scope.is_all() && !scope.sees_org(session_org) {
             continue;
         }
@@ -696,15 +730,26 @@ fn impact_of(
 
 /// `work { action: org_impact, task_id, org_id }` (`0`: no org): exactly
 /// what moving a local task to another org changes, before it does.
+/// Multi-user M1 (T8d): it takes the WHOLE scope. `is_all()` below is the
+/// AUTHORITY check it was always meant to be — only a caller that may move an
+/// org may preview the move — and is not, and never was, a privacy fence:
+/// `OrgScope::All` is what the master and every paired client bound to no org
+/// alike resolve to, so on a two-person hub the old `Graph::load` handed an
+/// ordinary person's laptop an `ImpactLink { session_id, name, host }` for
+/// every session on the task, whoever owned it. `Graph::load_for` empties the
+/// invisible rows out of the graph first, and `impact_of`'s own
+/// `Graph::link_hidden` skip keeps their snapshots out too.
 pub fn org_impact(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     task_id: &str,
     org_id: Option<i64>,
 ) -> Result<OrgImpact, IpcError> {
+    let scope = &view.org;
     // Only a caller that may move an org reads what a move would change
-    // (D33): the impact names every host and bound client of both orgs, and
-    // the journal of sessions a scoped caller does not see.
+    // (D33): the impact names every host and bound client of both orgs.
+    // This is the org boundary, not a privacy fence: it is the AUTHORITY to move an org (D33),
+    // which the doc above has said since T8d.
     if !scope.is_all() {
         return Err(forbidden(
             "org_impact is not available to a per-host token or an org-bound client: it may \
@@ -713,7 +758,7 @@ pub fn org_impact(
     }
     let to = org_arg(org_id)?;
     let s = lock(store)?;
-    let g = Graph::load(&s, scope)?;
+    let g = Graph::load_for(&s, view)?;
     impact_of(&s, &g, scope, task_id, to)
 }
 
@@ -727,17 +772,22 @@ pub fn org_impact(
 /// task from its next read or frame.
 pub fn assign_org(
     store: &Mutex<Store>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
     task_id: &str,
     org_id: Option<i64>,
     impact_token: Option<&str>,
 ) -> Result<WorkTask, IpcError> {
+    let scope = &view.org;
     unbound_only(scope, "assign_org")?;
     let to = org_arg(org_id)?;
     let token = impact_token
         .ok_or_else(|| invalid("assign_org needs the impact_token of a fresh org_impact"))?;
     let s = lock(store)?;
-    let mut g = Graph::load(&s, scope)?;
+    // The same load as `org_impact`, and that is load-bearing rather than
+    // tidiness: `impact_token` is a hash OVER `impact.links`, so a move
+    // previewed through the person-fenced graph can only be confirmed
+    // against the same one (T8d).
+    let mut g = Graph::load_for(&s, view)?;
     let impact = impact_of(&s, &g, scope, task_id, to)?;
     if !impact.allowed {
         return Err(match impact.reason.as_deref() {

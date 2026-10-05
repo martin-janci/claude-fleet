@@ -20,7 +20,7 @@
 //! standup's words are the desktop's to build from what it shows.
 
 use crate::ipc_error::{lock, IpcError};
-use crate::service::orgs::{self, OrgScope};
+use crate::service::orgs::{self};
 use crate::store::{ItemMeta, SessionRow, Store, TrackerRow, WorkItemRow, WorkLinkRow};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -339,29 +339,63 @@ fn mine(meta: &ItemMeta, tracker: Option<&TrackerRow>) -> bool {
 }
 
 /// `work { action: today, since? }`.
+///
+/// Takes the caller's whole [`ViewScope`] (multi-user M1, T7), not only its
+/// org half, **for both halves of the digest**: the LIVE one, where
+/// `TodaySession` carries the friendly-or-tmux name, the host, the PR url and
+/// `claude_status` of every live row; and the ENDED one, where
+/// `TodayShipped` carries the ticket key, title and `snap_pr_url` of the work
+/// that finished (T9b — that half was `orgs::scope_links`, i.e. org-only, so
+/// Ada's digest listed the PRs Bob shipped). All of it is content spec §4.3
+/// names. Fenced by the org scope alone this answer handed every private
+/// session in the fleet to any paired client bound to no org, because
+/// `OrgScope::All` is what such a caller's scope is.
 pub fn today(
     store: &Mutex<Store>,
     since: Option<i64>,
-    scope: &OrgScope,
+    view: &crate::service::view_scope::ViewScope,
 ) -> Result<Today, IpcError> {
+    let scope = &view.org;
     let now = crate::service::catalog::now_secs();
     let since = since.unwrap_or(now - DEFAULT_WINDOW_SECS).min(now);
     let s = lock(store)?;
     let operator = crate::service::operator::operator_ref(&s);
 
     // Live rows: a per-host token reads its own host's, redacted to its org.
+    //
+    // The org half of this filter, and it runs BEFORE the person
+    // predicate below rather than instead of it (multi-user M1, T10).
+    // When T10 first deleted it as a duplicate the suite caught a real
+    // hole: `ViewScope::sees_session_facts` then returned at its FIRST
+    // clause for the hub's own reader, before the org boundary, so a
+    // scope that was internal AND narrowed
+    // (`ViewScope::internal().with_org(..)` — this function's own
+    // per-host reader, a hook reader, every org-level test) was fenced
+    // by THIS call and nothing else. That ordering is fixed (the T6
+    // review): the org clause is first in `sees_session_facts` now, so
+    // the two halves genuinely compose. The call stays because this is
+    // where the page is CUT — a row dropped here is never derived from
+    // — and its row in `scope_guard_tests::ORG_HALF_SITES` names the
+    // person half.
     let mut rows: Vec<SessionRow> = s
         .list_all_sessions()?
         .into_iter()
         .filter(|r| counts(r, operator.as_ref()))
+        // The org half; `view.sees_session_row` just below is the person
+        // half, and composes this for every caller-built scope.
         .filter(|r| match scope.host() {
-            Some(h) => r.host_alias == h && scope.sees_row(r),
-            // `All` sees every row; a bound client (M14) its org's.
-            None => scope.sees_row(r),
+            // Org half; `sees_session_row` below is the person half.
+            Some(h) => r.host_alias == h && scope.sees_row_org_only(r),
+            // `All` sees every row; a bound client (M14) its org's. Org
+            // half again; `sees_session_row` below is the person half.
+            None => scope.sees_row_org_only(r),
         })
+        // And the PERSON half, which no org scope carries: whose row it is,
+        // what was shared with this caller, and §4.4's host clauses.
+        .filter(|r| view.sees_session_row(r).is_visible())
         .collect();
     for r in &mut rows {
-        scope.redact_row(r);
+        scope.redact_row_org_only(r);
     }
 
     // Tickets that moved to done since `since`: linked to work, or mine.
@@ -387,8 +421,16 @@ pub fn today(
     }
 
     // Work that ended since `since`, as the caller may read it.
+    //
+    // `scope_links_for`, never `scope_links` (multi-user M1, T9b): the ENDED
+    // half of this answer is `TodayShipped { key, title, url, pr_url }`, and
+    // `pr_url` is the link's own `snap_pr_url` — the PR another person opened
+    // from their own session. `scope_links` is the fence "for the writes,
+    // which name one link the caller already reached by id"; the read fence
+    // is `scope_links_for`, which runs the person half over every link that
+    // survived the org one.
     let mut links = s.recent_ended_work_links(since, TODAY_MAX as i64)?;
-    orgs::scope_links(&s, scope, &mut links)?;
+    orgs::scope_links_for(&s, view, &mut links)?;
     let mut ended = Vec::new();
     for link in links {
         if link.role != "work" || link.snap_pr_url.is_none() {
@@ -637,7 +679,12 @@ mod tests {
     #[test]
     fn today_reads_the_store_and_a_host_scope_reads_only_its_host() {
         let (st, a) = store_with_day();
-        let all = today(&st, None, &OrgScope::All).unwrap();
+        let all = today(
+            &st,
+            None,
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         let ids: Vec<i64> = all
             .groups
             .iter()
@@ -651,8 +698,13 @@ mod tests {
             .expect("PAY-7 group");
         assert_eq!(pay.sessions[0].id, a);
 
-        let host = OrgScope::for_host(&st.lock().unwrap(), "h").unwrap();
-        let mine = today(&st, None, &host).unwrap();
+        let host = orgs::OrgScope::for_host(&st.lock().unwrap(), "h").unwrap();
+        let mine = today(
+            &st,
+            None,
+            &crate::service::view_scope::ViewScope::internal().with_org(host),
+        )
+        .unwrap();
         let hosts: Vec<&str> = mine
             .groups
             .iter()
@@ -665,7 +717,12 @@ mod tests {
     #[test]
     fn a_future_since_is_clamped_to_now() {
         let (st, _) = store_with_day();
-        let t = today(&st, Some(i64::MAX), &OrgScope::All).unwrap();
+        let t = today(
+            &st,
+            Some(i64::MAX),
+            &crate::service::view_scope::ViewScope::internal(),
+        )
+        .unwrap();
         assert_eq!(t.since, t.now);
     }
 }

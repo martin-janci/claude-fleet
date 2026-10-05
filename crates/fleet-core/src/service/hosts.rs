@@ -47,9 +47,48 @@ pub async fn discover_hosts_fresh() -> Result<Vec<SshHost>, IpcError> {
         .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("discover hosts: {e}")))?
 }
 
-pub fn list_hosts(store: &Mutex<Store>) -> Result<Vec<HostRow>, IpcError> {
+/// Every registered host, each carrying the one thing M1 ever says about a
+/// session nobody can speak for: [`HostRow::unclaimed_sessions`].
+///
+/// **Who gets the count is R5-d, and it is a two-way split, not a scale.**
+///
+/// * the hub's own reader ([`ViewScope::internal`] — the standalone
+///   desktop, which is one person's machine by construction) and the ONE
+///   live person on a single-person hub: the count;
+/// * everybody else, the master on a hub with two people included: `None`.
+///
+/// `None`, never `Some(0)`: `0` is a claim about the host, and a caller who
+/// may not know is not entitled to it. On a hub with more than one person
+/// the count reaches a human only through `fleet-hub session unclaimed` —
+/// shell access on the hub machine — and through no API surface at all.
+/// There is deliberately no host-administration concept here to widen it
+/// with; M2 defines who administers a host, and the count follows that
+/// definition when it does.
+///
+/// The master is resolved to the hub's personal owner for this read like
+/// any other (`Caller::view_scope`), and that is safe only because the test
+/// is `is_sole_person`: on a hub with two people the master's person is one
+/// of several, so the count is withheld from it too. "The operator" and
+/// "the master token" are different callers, and the count belongs to
+/// neither — it belongs to the one person whose fleet this still is.
+///
+/// [`ViewScope::internal`]: crate::service::view_scope::ViewScope::internal
+pub fn list_hosts(
+    store: &Mutex<Store>,
+    scope: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<HostRow>, IpcError> {
     let s = lock(store)?;
-    s.list_hosts().map_err(IpcError::from)
+    let mut rows = s.list_hosts().map_err(IpcError::from)?;
+    if scope.is_internal() || scope.is_sole_person() {
+        let counts = s.unclaimed_counts_by_host()?;
+        for h in &mut rows {
+            // Absent from the map is a real zero for a caller entitled to
+            // the answer — and stays `None` for everyone else, which is
+            // what the two values mean apart.
+            h.unclaimed_sessions = Some(counts.get(&h.alias).copied().unwrap_or(0));
+        }
+    }
+    Ok(rows)
 }
 
 /// The hosts a fleet-wide loop may touch: every non-hidden row, and `local`
@@ -835,6 +874,7 @@ mod tests {
             agent_version: None,
             provisioned_at: None,
             provision_stale: false,
+            unclaimed_sessions: None,
             provision_warning: None,
             harnesses: None,
         }

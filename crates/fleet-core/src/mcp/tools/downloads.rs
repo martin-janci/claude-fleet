@@ -24,7 +24,7 @@ impl FleetTools {
         );
         let scope = {
             let s = lock(&self.store).map_err(to_mcp_err)?;
-            caller.org_scope(&s).map_err(to_mcp_err)?
+            caller.view_scope(&s).map_err(to_mcp_err)?
         };
         let source = if caller.is_client() {
             downloads::SOURCE_PERSON
@@ -49,7 +49,7 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("list_downloads", &format!("session_id={:?}", p.session_id));
         let s = lock(&self.store).map_err(to_mcp_err)?;
-        let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+        let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
         let out = downloads::list(&s, &scope, &p).map_err(to_mcp_err)?;
         ok_json_compact(&out)
     }
@@ -62,7 +62,7 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("remove_download", &format!("id={}", p.id));
         let s = lock(&self.store).map_err(to_mcp_err)?;
-        let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+        let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
         let removed = downloads::remove(&s, &scope, p.id).map_err(to_mcp_err)?;
         ok_json_compact(&serde_json::json!({ "removed": removed }))
     }

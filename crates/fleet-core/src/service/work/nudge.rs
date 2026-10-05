@@ -153,7 +153,11 @@ pub fn classify_nudge(
         }
         out.push(NudgeCandidate { key, title });
     };
-    for t in tickets_in(s, None, Some("mine"), None, Some(want), &scope)? {
+    // The hub's own hook reader, narrowed to that host's orgs: the
+    // candidates are tracker items (key and title), and `live_session_ids`
+    // is not read here at all.
+    let reader = crate::service::view_scope::ViewScope::internal().with_org(scope);
+    for t in tickets_in(s, None, Some("mine"), None, Some(want), &reader)? {
         offer(t.item.key, t.item.title);
     }
     // Local items belong to no org, which every scope sees (M5).

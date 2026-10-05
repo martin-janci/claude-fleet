@@ -85,8 +85,11 @@ fn client(id: i64, mode: TokenMode, org: Option<i64>) -> Caller {
             name: format!("c{id}"),
             trusted: false,
             org_id: org,
+            person_id: None,
         }),
         mode,
+        pane: None,
+        is_personal_owner: false,
     }
 }
 
@@ -95,6 +98,8 @@ fn host(alias: &str) -> Caller {
         host_alias: Some(alias.into()),
         client: None,
         mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
     }
 }
 

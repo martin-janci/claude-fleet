@@ -848,6 +848,16 @@ async fn rewind_conversation_with(
                     resume_claude_session_id: Some(new_id.clone()),
                     model: launch.model.clone(),
                     effort: launch.effort.clone(),
+                    // Multi-user M1 (T5, spec §4.3 invariant 6): a fork
+                    // inherits the SOURCE's owner, never the forker's. The
+                    // fork is a permanent verbatim copy of the source's
+                    // transcript, so an owner whose session was forked by
+                    // somebody else would have no way to revoke it — and
+                    // `RewindArgs` carries no forker identity anyway, so
+                    // source-inheritance is both the safe answer and the only
+                    // expressible one. Forking a session you do not own is
+                    // refused at the gate: it is an `own` operation.
+                    owner_person_id: sess.owner_person_id,
                 })
                 .await;
             // A failed start leaves nothing a new-worktree fork made: the

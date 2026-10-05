@@ -73,6 +73,9 @@ pub async fn spawn_review(
 
     // The review name is live now; clear any kill of it so step 3 may
     // insert the row (the suffix makes a collision unlikely, not impossible).
+    // A review's owner is the SOURCE row's, and step 4 writes it against the
+    // row id (multi-user M1, T5) — see there for why the source and not the
+    // caller. No path states an owner by NAME any more.
     record_tmux_created(store, &source.host_alias, &review_name);
     // 3. Register via per-host reconcile.
     reconcile_one_host(store, ssh, &source.host_alias).await?;
@@ -88,6 +91,21 @@ pub async fn spawn_review(
                 IpcError::new(codes::E_INTERNAL, "review session vanished after spawn")
             })?;
         s.set_session_kind(row.id, "review", Some(source.id))?;
+        // Ownership (multi-user M1, T5 / spec §4.3 invariant 6): a review
+        // inherits the SOURCE row's owner and visibility, never the caller's.
+        // A review runs Claude in the owner's worktree, on the owner's host,
+        // over the owner's work — if it belonged to whoever asked for it, a
+        // watcher would end up owning a session inside the owner's checkout,
+        // with a terminal and outside anything the owner could revoke. (The
+        // source row is the authority, so no `Caller` is needed; spawning a
+        // review of a session you do not own is refused at the gate, one
+        // layer up, because `spawn_review` is an `own` operation.)
+        //
+        // Hard failure, for `finalize_new_session`'s reason: a review of a
+        // private session that lands `unclaimed` is a row the owner cannot
+        // read and somebody else could claim. An unowned source leaves the
+        // review unclaimed too, which is the right answer, not an error.
+        s.claim_if_unclaimed(row.id, source.owner_person_id)?;
         let _ = s.set_claude_session_id(row.id, &claude_id);
         let _ = s.set_started_at(row.id, now_unix());
         row.id

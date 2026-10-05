@@ -275,6 +275,7 @@ pub async fn org_suggestions(
 pub(crate) mod routed {
     use super::*;
     use fleet_core::service::orgs::{self, OrgScope};
+    use fleet_core::service::view_scope::ViewScope;
     use fleet_core::service::work::WorkArgs;
 
     fn read(action: &str) -> WorkArgs {
@@ -290,7 +291,7 @@ pub(crate) mod routed {
     ) -> Result<Vec<ScopeEntry>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("work_scopes", &read("scopes")).await,
-            None => orgs::scopes(store, &OrgScope::All),
+            None => orgs::scopes(store, &ViewScope::internal()),
         }
     }
 
@@ -310,7 +311,7 @@ pub(crate) mod routed {
     ) -> Result<Vec<OrgSuggestion>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("org_suggestions", &read("org_suggestions")).await,
-            None => orgs::org_suggestions(store, &OrgScope::All),
+            None => orgs::org_suggestions(store, &ViewScope::internal()),
         }
     }
 }

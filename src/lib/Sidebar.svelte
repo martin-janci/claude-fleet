@@ -28,7 +28,8 @@
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
-  import { hostFilter, effectiveHostFilter } from './hosts';
+  import { hostFilter, effectiveHostFilter, hosts } from './hosts';
+  import { bulkTargets, sessionBlocked } from './share';
   import {
     effectiveScope,
     scopeFilter,
@@ -421,9 +422,59 @@
     }
   });
 
+  /**
+   * The per-host unclaimed counts (multi-user M1, rule 6) — a COUNT, with no
+   * rows and no expand, which is the whole point: an unclaimed session is one
+   * fleet did not start, and spec §4.3 says the only thing anyone out of its
+   * scope may learn about it is a number. Rendering rows here would be exactly
+   * the metadata leak the number exists instead of.
+   *
+   * Deliberately NOT from `hosts_view.ts::sessionCounts`, which derives every
+   * other host badge from the rows this client holds — there are no rows to
+   * derive this from, by design. It comes from `HostRow.unclaimed_sessions`,
+   * straight off the host row.
+   *
+   * A host is skipped when its count is absent or `null` — which is the NORMAL
+   * case on a hub with more than one person (R5-d): the backend serves `null`
+   * rather than a number there, because a zero is itself a claim about the host
+   * that would let a second person infer one. Nothing is rendered for it: not
+   * "0", not a dash. A genuine `0` is skipped too — true, but it describes
+   * nothing, and `fleet-hub session unclaimed` is where a human reads the
+   * counts anyway. The sidebar's host filter applies, like every other list
+   * here.
+   */
+  const unclaimedByHost = $derived(
+    $hosts
+      .filter(
+        (h) =>
+          !h.hidden &&
+          typeof h.unclaimed_sessions === 'number' &&
+          h.unclaimed_sessions > 0 &&
+          (viewHost === 'all' || viewHost === h.alias),
+      )
+      .map((h) => ({ alias: h.alias, count: h.unclaimed_sessions as number })),
+  );
+  const unclaimedTotal = $derived(unclaimedByHost.reduce((n, h) => n + h.count, 0));
+
+  /**
+   * The bulk fan-outs, narrowed to the rows this client may actually act on
+   * (multi-user M1). Select mode already excludes outside-fleet rows as
+   * read-only; a session shared with this person at `watch` — or at `drive`,
+   * for Kill, which spec §4.3 puts in the owner-only tier — is the same kind
+   * of row, and both filter through the SAME predicate as every single-row
+   * button, so there is one rule and not a second copy of the level table.
+   *
+   * Narrowed here rather than in `toggleSelected`, because the two actions
+   * need different levels: a `drive` row is a legitimate bulk-prompt target
+   * and an illegitimate bulk-kill one, and a selection that refused it
+   * outright would take the first away to prevent the second.
+   */
+  const bulkKillTargets = $derived(bulkTargets(selectedRows, 'kill_session', $sessionBlocked));
+  const bulkPromptTargets = $derived(bulkTargets(selectedRows, 'send_prompt', $sessionBlocked));
+
   async function confirmBulkKill() {
     bulkKillOpen = false;
-    const targets = selectedRows;
+    const targets = bulkKillTargets;
     clearSelected();
     const results = await Promise.allSettled(
       targets.map(async (sess) => {
@@ -675,9 +726,26 @@
   // running; one click brings them back); reopened work carries a badge.
   const reopenedKeys = $derived(reopenedByKey($reopenedWork));
   let unarchiving: Set<number> = $state(new Set());
-  async function unarchive(id: number, e?: Event) {
+  /**
+   * Why this client may not un-archive `sess` (multi-user M1, F2b). The Done
+   * section's `archived · show` chip was the one work control in this file
+   * gated by neither half: `unarchive_session_work` is `drive` in
+   * `share.ts::SESSION_TIER` and ROUTES, so both halves apply. Asked per ROW
+   * — the chip is drawn once per archived session, and a group can hold rows
+   * of more than one owner.
+   */
+  function unarchiveBlocked(sess: SessionRow): string | null {
+    return (
+      hubActionBlocked('unarchive_session_work', $hubStatus, $hubConnection) ??
+      $sessionBlocked(sess, 'unarchive_session_work')
+    );
+  }
+  async function unarchive(sess: SessionRow, e?: Event) {
     e?.stopPropagation();
-    if (unarchiving.has(id)) return;
+    const id = sess.id;
+    // Re-asked at the call, not only on the chip: a revoke can arrive while
+    // the group is on screen.
+    if (unarchiving.has(id) || unarchiveBlocked(sess) !== null) return;
     unarchiving = new Set([...unarchiving, id]);
     const r = await unarchiveSession(id);
     unarchiving = new Set([...unarchiving].filter((x) => x !== id));
@@ -983,6 +1051,11 @@
   async function confirmKill() {
     if (!pendingKill) return;
     const sess = pendingKill;
+    // Re-asked at the call (multi-user M1, F2b): the confirm dialog stays open,
+    // so a grant can be narrowed between `askKill` and this click. The row's
+    // own Kill button is disabled by `SessionRowItem`'s `killBlocked`, but the
+    // dialog in front of it is not that button.
+    if ($sessionBlocked(sess, 'kill_session') !== null) return;
     pendingKill = null;
     const r = await killSession(sess.host_alias, sess.tmux_name);
     if (!r.ok) {
@@ -1027,6 +1100,7 @@
   async function confirmRestart() {
     if (!pendingRestart) return;
     const sess = pendingRestart;
+    if ($sessionBlocked(sess, 'restart_session') !== null) return;
     pendingRestart = null;
     const r = await restartSession(sess.host_alias, sess.tmux_name);
     if (!r.ok) pushError(r.error, 'Restart failed');
@@ -1039,6 +1113,7 @@
   async function confirmRecreate() {
     if (!pendingRecreate) return;
     const sess = pendingRecreate;
+    if ($sessionBlocked(sess, 'recreate_session') !== null) return;
     pendingRecreate = null;
     const r = await recreateSession(sess.id);
     if (!r.ok) {
@@ -1072,6 +1147,10 @@
   let nameWorkFor: { id: number; label: string }[] | null = $state(null);
   function openNameWork(list: readonly SessionRow[], e: Event) {
     e.stopPropagation();
+    // Empty means every session in the group was narrowed away by the access
+    // gate (multi-user M1): there is nothing to name, and a dialog with no
+    // target would submit a write that the hub then refuses.
+    if (list.length === 0) return;
     nameWorkFor = list.map((s) => ({ id: s.id, label: s.friendly_name || s.tmux_name }));
   }
 
@@ -1282,9 +1361,10 @@
                       <button
                         class="archived-chip"
                         data-testid="archived-chip"
-                        disabled={unarchiving.has(sess.id)}
-                        title="Archived: collapsed here, tmux still running. Click to bring it back (a prompt or an attach does too)"
-                        onclick={(e) => void unarchive(sess.id, e)}>archived · show</button
+                        disabled={unarchiving.has(sess.id) || unarchiveBlocked(sess) !== null}
+                        title={unarchiveBlocked(sess) ??
+                          'Archived: collapsed here, tmux still running. Click to bring it back (a prompt or an attach does too)'}
+                        onclick={(e) => void unarchive(sess, e)}>archived · show</button
                       >
                     </div>
                   {/each}
@@ -1350,14 +1430,29 @@
               </span>
               <span class="count">{projectSessions.length}</span>
               {#if $sidebarGroupBy === 'work' && projectSessions.length > 0}
+                <!-- Narrowed to the sessions this client may actually write a
+                     work link to (multi-user M1), the same way `bulkKillTargets`
+                     narrows select mode: `name_session_work` is `drive` in
+                     `share.ts::SESSION_TIER`, and `SessionRowItem`'s per-session
+                     "Rename…" has composed both halves since F2 while this group
+                     header asked only the hub's — the same control, two surfaces,
+                     two answers. When nothing in the group qualifies the button
+                     says why, in `share.ts`' own words rather than a new
+                     sentence. -->
+                {@const nameTargets = bulkTargets(projectSessions, 'name_session_work', $sessionBlocked)}
+                {@const groupNameBlocked =
+                  nameWorkBlocked ??
+                  (nameTargets.length === 0
+                    ? $sessionBlocked(projectSessions[0], 'name_session_work')
+                    : null)}
                 <button
                   class="icon-btn small"
                   data-testid="name-work-group"
-                  disabled={nameWorkBlocked !== null}
-                  title={nameWorkBlocked ??
-                    `Name this work… (${projectSessions.length} session${projectSessions.length === 1 ? '' : 's'} with no work)`}
+                  disabled={groupNameBlocked !== null}
+                  title={groupNameBlocked ??
+                    `Name this work… (${nameTargets.length} session${nameTargets.length === 1 ? '' : 's'} with no work)`}
                   aria-label="Name this work"
-                  onclick={(e) => openNameWork(projectSessions, e)}
+                  onclick={(e) => openNameWork(nameTargets, e)}
                 >#</button>
               {/if}
               <button
@@ -1449,6 +1544,30 @@
         {/if}
       </div>
     {/if}
+
+    {#if unclaimedTotal > 0}
+      <!-- A count, and nothing else. No caret, no toggle, no rows: there is
+           deliberately no way to expand this, because there is nothing behind
+           it — fleet serves a number for an unclaimed session and no metadata
+           at all (multi-user M1, rule 6). Claiming one is done from the
+           session's own pane, or with `fleet-hub session claim`; a button here
+           would need a session id this surface does not have, and spec §4.3
+           forbids it outright. -->
+      <div class="orphan-section" data-testid="unclaimed-section">
+        <div class="section-header unclaimed-header" data-testid="unclaimed-count">
+          Unclaimed ({unclaimedTotal})
+        </div>
+        <p class="unclaimed-note" data-testid="unclaimed-hosts">
+          {#each unclaimedByHost as h, i (h.alias)}{i > 0 ? ' · ' : ''}{h.alias}
+            {h.count}{/each}
+        </p>
+        <p class="unclaimed-note">
+          tmux sessions fleet did not start and nobody has claimed. Nothing else
+          about them is shown — claim one from its own pane, or with
+          <code>fleet-hub session claim</code>.
+        </p>
+      </div>
+    {/if}
   </div>
   {/if}
 
@@ -1533,21 +1652,39 @@
 
 {#if bulkKillOpen}
   <ConfirmDialog
-    title="Kill {selectedRows.length} session{selectedRows.length === 1 ? '' : 's'}?"
+    title="Kill {bulkKillTargets.length} session{bulkKillTargets.length === 1 ? '' : 's'}?"
     confirmLabel="Kill all"
     danger
     onconfirm={confirmBulkKill}
     oncancel={() => (bulkKillOpen = false)}
     confirmTestId="confirm-bulk-kill"
   >
-    This will kill
-    {#each selectedRows as r, i (r.id)}{i > 0 ? ', ' : ''}<code>{r.tmux_name}</code> on <code>{r.host_alias}</code>{/each}
-    and lose any running claude state inside them. Continue?
+    {#if bulkKillTargets.length === 0}
+      <span data-testid="bulk-kill-none"
+        >None of the selected sessions is yours to kill — a session shared with you
+        can be watched or driven, never killed.</span
+      >
+    {:else}
+      This will kill
+      {#each bulkKillTargets as r, i (r.id)}{i > 0 ? ', ' : ''}<code>{r.tmux_name}</code> on <code>{r.host_alias}</code>{/each}
+      and lose any running claude state inside them. Continue?
+      {#if bulkKillTargets.length < selectedRows.length}
+        <!-- Said out loud rather than silently dropped: the count in the title
+             no longer matches the selection, and the reason is a rule. -->
+        <span data-testid="bulk-kill-skipped"
+          >{selectedRows.length - bulkKillTargets.length} selected session{selectedRows.length -
+            bulkKillTargets.length ===
+          1
+            ? ' is'
+            : 's are'} not yours to kill and will be left alone.</span
+        >
+      {/if}
+    {/if}
   </ConfirmDialog>
 {/if}
 
 {#if bulkPromptOpen}
-  <BulkPromptDialog targets={selectedRows} onClose={() => (bulkPromptOpen = false)} />
+  <BulkPromptDialog targets={bulkPromptTargets} onClose={() => (bulkPromptOpen = false)} />
 {/if}
 
 {#if pendingRestart}
@@ -1840,6 +1977,18 @@
     border-top: 1px solid var(--border);
     padding-top: 0.35rem;
     margin-top: 0.35rem;
+  }
+  /* The unclaimed count (multi-user M1): a label, not a toggle — there is no
+     caret because there is nothing to open. */
+  .unclaimed-header {
+    cursor: default;
+  }
+  .unclaimed-note {
+    margin: 0 0 0.25rem;
+    padding: 0 0.4rem;
+    font-size: 0.68rem;
+    line-height: 1.4;
+    color: var(--fg-muted);
   }
   .section-header {
     font-size: 0.65rem;
