@@ -26,6 +26,8 @@ const GUARDED = [
   'AssetsWorkspace.svelte',
   'ChangesetCard.svelte',
   'ChangesetDetail.svelte',
+  'DiffView.svelte',
+  'DriftPanel.svelte',
 ];
 
 const styleOf = (src: string) => src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';

@@ -6,6 +6,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AssetInspector from './AssetInspector.svelte';
 import type { AssetListing } from './assets';
 import { cardViews, type ChangesetView } from './assets_workspace';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const listing: AssetListing = {
@@ -36,6 +37,7 @@ const view7: ChangesetView = { id: 7, kind: 'new', summary: 'New on oci: skill/f
 
 beforeEach(() => {
   cardViews.set({});
+  fleetSettings.set({ ...SETTING_DEFAULTS });
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string) => {
     if (cmd === 'catalog_get_asset') return { asset: { kind: 'skill', name: 'w', version: '1', description: 'Make one.', tags: [], body: '# b' }, previews: [], hosts: [] };
@@ -344,5 +346,80 @@ describe('AssetInspector', () => {
     await fireEvent.click(screen.getByTestId('inspector-tab-history'));
     await waitFor(() => expect(screen.getByTestId('inspector-history').textContent).toContain('unknown catalog nope'));
     expect(screen.getByTestId('inspector-history').textContent).not.toContain('update the hub');
+  });
+
+  const driftView: ChangesetView = {
+    id: 12, kind: 'drift', summary: 'skill/w was edited on oci (catalog personal)', state: 'proposed', created_at: 1, commits: {}, undoable: false, catalogs: ['personal'],
+    items: [
+      { position: 0, grp: 'drift', catalog: 'personal', kind: 'skill', name: 'w', action: 'take_host', params: { host: 'oci', harness: 'claude' }, decider: 'rule', state: 'pending' },
+      { position: 1, grp: 'drift', catalog: 'personal', kind: 'skill', name: 'w', action: 'restore', params: { host: 'oci', harness: 'claude' }, decider: 'rule', state: 'pending' },
+    ],
+  };
+  const driftCard = { id: 12, kind: 'drift' as const, summary: driftView.summary, state: 'proposed' as const, created_at: 1, groups: { drift: 2 } };
+
+  it("a drift card's Diff tab shows the DriftPanel and applies Take through oncard", async () => {
+    cardViews.set({ 12: driftView });
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_drift_diff') return { host_alias: 'oci', harness: 'claude', files: [{ path: '~/.claude/skills/w/SKILL.md', catalog: 'a\n', host: 'b\n' }] };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    const oncard = { ...base.oncard, apply: vi.fn() };
+    render(AssetInspector, { ...base, oncard, cards: [driftCard], selectedKey: 'card:12' });
+    expect(tabLabels()).toEqual(['Diff', 'Items']);
+    expect(await screen.findByTestId('drift-panel')).toBeTruthy();
+    await fireEvent.click(await screen.findByTestId('drift-take'));
+    expect(oncard.apply).toHaveBeenCalledWith(12, [0]);
+    await fireEvent.click(screen.getByTestId('inspector-tab-items'));
+    expect(screen.queryByTestId('drift-panel')).toBeNull();
+    expect(screen.getByTestId('card-item-12-0')).toBeTruthy();
+  });
+
+  it('a read-only window gets the diff without Take or Restore', async () => {
+    cardViews.set({ 12: driftView });
+    invoke.mockResolvedValue({ host_alias: 'oci', harness: 'claude', files: [] });
+    render(AssetInspector, { ...base, readOnly: true, cards: [driftCard], selectedKey: 'card:12' });
+    await screen.findByTestId('drift-panel');
+    expect(screen.queryByTestId('drift-take')).toBeNull();
+  });
+
+  it('a host copy edited on the host links to its drift card', async () => {
+    cardViews.set({ 12: driftView });
+    const onselect = vi.fn();
+    render(AssetInspector, { ...base, onselect, cards: [driftCard], selectedKey: 'asset:personal:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    await fireEvent.click(await screen.findByTestId('inspector-drift-link-oci'));
+    expect(onselect).toHaveBeenCalledWith('card:12');
+  });
+
+  it('the link shows on the summary path too, and only while a drift card is open', async () => {
+    const onselect = vi.fn();
+    const org = { ...listing, assets: [{ ...listing.assets[0], catalog: 'papayapos' }] };
+    cardViews.set({ 12: { ...driftView, items: driftView.items.map((i) => ({ ...i, catalog: 'papayapos' })) } });
+    const r = render(AssetInspector, { ...base, onselect, listing: org, cards: [driftCard], selectedKey: 'asset:papayapos:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    await fireEvent.click(screen.getByTestId('inspector-drift-link-oci'));
+    expect(onselect).toHaveBeenCalledWith('card:12');
+    cardViews.set({ 12: { ...driftView, state: 'applied' } });
+    await waitFor(() => expect(screen.queryByTestId('inspector-drift-link-oci')).toBeNull());
+    r.unmount();
+  });
+
+  it('a copy behind the catalog says what happens next, by the catalog.auto setting', async () => {
+    const behind = { ...listing, assets: [{ ...listing.assets[0], hosts: [{ host_alias: 'oci', harness: 'claude', state: 'drifted' as const, drift_side: 'catalog' as const }] }] };
+    const r = render(AssetInspector, { ...base, listing: behind, readOnly: true, selectedKey: 'asset:personal:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    expect(screen.getByTestId('inspector-behind-oci')).toHaveTextContent('Behind the catalog — fleet updates it automatically');
+    r.unmount();
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'catalog.auto': 'false' });
+    render(AssetInspector, { ...base, listing: behind, readOnly: true, selectedKey: 'asset:personal:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    expect(screen.getByTestId('inspector-behind-oci')).toHaveTextContent('Behind the catalog — your next Sync updates it');
+  });
+
+  it('the same sentence shows under the full Hosts section', async () => {
+    const behind = { ...listing, assets: [{ ...listing.assets[0], hosts: [{ host_alias: 'oci', harness: 'claude', state: 'drifted' as const, drift_side: 'catalog' as const }] }] };
+    render(AssetInspector, { ...base, listing: behind, selectedKey: 'asset:personal:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    expect(await screen.findByTestId('inspector-behind-oci')).toHaveTextContent('Behind the catalog');
   });
 });

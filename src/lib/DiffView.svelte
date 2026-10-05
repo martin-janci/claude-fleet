@@ -61,11 +61,11 @@
 </script>
 
 <script lang="ts">
-  let { diff }: { diff: string } = $props();
+  let { diff, testid = 'diff-view' }: { diff: string; testid?: string } = $props();
   const rows = $derived(parseUnifiedDiff(diff));
 </script>
 
-<div class="diff" data-testid="diff-view">
+<div class="diff" data-testid={testid}>
   {#each rows as row}
     <div class="row {row.kind}">
       <span class="gutter old">{row.oldNo ?? ''}</span>
@@ -111,16 +111,16 @@
     flex: 1 1 auto;
   }
   .row.add {
-    background: color-mix(in srgb, #3fb950 16%, transparent);
+    background: color-mix(in srgb, var(--usage-ok) 16%, transparent);
   }
   .row.add .marker {
-    color: #3fb950;
+    color: var(--usage-ok);
   }
   .row.del {
-    background: color-mix(in srgb, #f85149 16%, transparent);
+    background: color-mix(in srgb, var(--usage-crit) 16%, transparent);
   }
   .row.del .marker {
-    color: #f85149;
+    color: var(--usage-crit);
   }
   .row.hunk {
     background: color-mix(in srgb, var(--accent) 14%, transparent);

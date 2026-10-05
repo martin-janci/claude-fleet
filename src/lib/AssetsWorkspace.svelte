@@ -477,6 +477,7 @@
       {onsync}
       oncard={cardVerbs}
       onreject={cardVerbs.reject}
+      onselect={select}
       cardBusy={anyBusy}
       {cardWritable}
       ondeleted={() => {

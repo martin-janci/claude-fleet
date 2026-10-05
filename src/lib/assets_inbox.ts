@@ -67,6 +67,12 @@ export function driftSideWords(side?: string | null): string | null {
   return side === 'host' ? 'edited on host' : side === 'catalog' ? 'behind the catalog' : null;
 }
 
+/** What happens to a copy that is only behind the catalog (nobody edited it
+ *  on the host): the catalog's auto-sync brings it up, or the next Sync. */
+export function behindWords(auto: boolean): string {
+  return `Behind the catalog — ${auto ? 'fleet updates it automatically' : 'your next Sync updates it'}`;
+}
+
 /** One catalog asset's dots: differs over missing over in sync; a host with
  *  no row is `na`; a row on an unreachable host is `stale`. */
 export function assetDots(a: AssetSummary, order: string[], stale: ReadonlySet<string>): Record<string, DotState> {

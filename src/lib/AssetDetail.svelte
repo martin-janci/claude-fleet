@@ -6,7 +6,8 @@
   import AssetEditor from './AssetEditor.svelte';
   import AuthorSessionDialog from './AuthorSessionDialog.svelte';
   import { hubStatus, hubBlock } from './hub';
-  import { driftSideWords } from './assets_inbox';
+  import { behindWords, driftSideWords } from './assets_inbox';
+  import { fleetSettings, settingBool, SETTING_KEYS } from './fleet_settings';
 
   let {
     kind,
@@ -166,6 +167,16 @@
     return driftSideWords(detail?.hosts.find((h) => h.host_alias === hostAlias && h.harness === harness)?.drift_side);
   }
 
+  /** The cell's hover words: why it is skipped, or which side moved — and
+   *  for a copy only behind the catalog, what will happen to it. */
+  function cellTitle(hostAlias: string, harness: string, moved: string | null): string {
+    if (cell(hostAlias, harness) === 'skipped') return 'host unreachable';
+    if (rawState(hostAlias, harness) === 'drifted' && detail?.hosts.find((h) => h.host_alias === hostAlias && h.harness === harness)?.drift_side === 'catalog') {
+      return behindWords(settingBool($fleetSettings, SETTING_KEYS.catalogAuto));
+    }
+    return moved ?? '';
+  }
+
   // `orphan` deliberately excluded: it only ever appears on an unmanaged
   // inventory row (AssetsPanel's "On hosts, not in catalog" list), never in
   // a catalog asset's own `hosts` — the array this component reads — so it
@@ -233,7 +244,7 @@
               {@const s = cell(host.alias, h)}
               {@const raw = rawState(host.alias, h)}
               {@const moved = side(host.alias, h)}
-              <td class={`state-${s.replace(' ', '-')}`} data-testid={`matrix-cell-${host.alias}-${h}`} title={s === 'skipped' ? 'host unreachable' : (moved ?? '')}>
+              <td class={`state-${s.replace(' ', '-')}`} data-testid={`matrix-cell-${host.alias}-${h}`} title={cellTitle(host.alias, h, moved)}>
                 {s}{#if moved}<span class="side">{` — ${moved}`}</span>{/if}
                 {#if raw && SYNCABLE_STATES.has(raw)}
                   <button class="cell-sync" onclick={() => requestSync(host.alias)} data-testid={`cell-sync-${host.alias}-${h}`}>Sync</button>
