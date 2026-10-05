@@ -446,16 +446,18 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   (`Unchanged`) from one a person edited (`Edited`) or one an entry from
   before M5 cannot vouch for (`Unverified`); rule 4 of the planner turns an
   edited copy into an `overwrite` (never an `update`), and Rollout/SB6
-  (`OpFilter::Additive`, `action_allowed`) apply an `update` only over a
-  verified `Unchanged` copy. Migration 096 stores
+  (`OpFilter::Additive`, `action_allowed`) apply an `update`, or delete a
+  moved asset's old location, only over a verified `Unchanged` copy.
+  Migration 096 stores
   `asset_inventory.drift_side` (`host` | `catalog`; also on `HostState`): a
   copy only behind its catalog opens no Drift card, shows under *Behind the
   catalog* in the Inbox whatever `catalog.auto` says, and SB6 brings it up
   (`sb6_due`). Migration 097 stamps `changeset_items.decided_at`;
   `rejected_rollouts` orders by it. Slug collisions in a Bootstrap card
   (per destination catalog, kind and slug) need a look; `changesets::list`
-  computes undoability once (`undoable_ids`); the pass prunes untouched
-  withdrawn cards after a week (`WITHDRAWN_RETENTION_SECS`); `last_sync`
+  computes undoability once (`undoable_ids`); the pass prunes an untouched
+  withdrawn card once it is older than a week, counted from its creation,
+  not its withdrawal (`WITHDRAWN_RETENTION_SECS`); `last_sync`
   prefers a person's run. `list_assets` takes an opt-in `all_catalogs`
   (default personal-only, as before, for every caller; with it, every
   loaded catalog — `AssetSummary.catalog`, host states per catalog — for

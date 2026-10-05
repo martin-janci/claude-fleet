@@ -150,9 +150,13 @@ fn gather(store: &Mutex<Store>) -> Result<PassFacts, IpcError> {
 
 /// Assets M5 (R5): the drifted managed Claude rows a Drift card is for. A
 /// copy that is only behind its catalog (`drift_side = catalog`) is not one:
-/// a Rollout, SB6 or a person's sync brings it up to date with no pick to
-/// make, so a catalog-only change no longer opens a card per host (an open
-/// one is withdrawn by the pass, its subject no longer produced). An edited
+/// there is no pick to make, so a catalog-only change no longer opens a
+/// card per host (an open one is withdrawn by the pass, its subject no
+/// longer produced). What brings it up to date: SB6 on a layer already
+/// rolled out, with `catalog.auto` on; a Rollout card, only for a layer
+/// never rolled out to that host; otherwise — with `catalog.auto` off —
+/// only a person's own Sync. The Inbox lists it under *Behind the catalog*
+/// meanwhile. An edited
 /// copy (`host`) says so in its card; one whose side is unknown (`None`: a
 /// manifest entry from before M5) keeps M4's card.
 fn drift_facts(rows: &[AssetInventoryRow]) -> Vec<DriftFacts> {

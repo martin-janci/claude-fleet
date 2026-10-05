@@ -634,14 +634,14 @@ pub(crate) const MOVED_ONTO_FOREIGN_REASON: &str = "moved to a location that alr
 pub(crate) const EDITED_AND_MOVED_REASON: &str = "edited on host, and the catalog changed too";
 /// Rule 4: the host copy is not what fleet wrote; the catalog is unchanged.
 pub(crate) const EDITED_ON_HOST_REASON: &str = "edited on host; the catalog has not changed";
-/// Rule 4 (R2): the catalog moved on, and the manifest entry predates the
-/// file hashes that would tell whether the host copy was edited too.
 /// Rule 4 (R2, fix round 1): the catalog has not changed and the host copy
 /// differs, but the entry predates fleet's file hashes, so the edit is
 /// M4's inference, not proven — [`EDITED_ON_HOST_REASON`] is kept for a
 /// copy the hashes show edited.
 pub(crate) const UNVERIFIED_EDIT_REASON: &str =
     "likely edited on host; the catalog has not changed, and the host copy predates fleet's file hashes";
+/// Rule 4 (R2): the catalog moved on, and the manifest entry predates the
+/// file hashes that would tell whether the host copy was edited too.
 pub(crate) const UNVERIFIED_UPDATE_REASON: &str =
     "the catalog changed; the host copy predates fleet's file hashes, so a host edit cannot be ruled out";
 

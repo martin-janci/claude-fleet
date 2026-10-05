@@ -14,13 +14,17 @@
 //!
 //! A host card (rollout, drift restore) plans the card's hosts and applies
 //! only what R15 allows; SB6's automatic additive sync shares that path
-//! (`auto_additive`). A Rollout only creates, adopts or updates a copy the
-//! planner verified untouched (Assets M5), and SB6 only creates or adopts
-//! (it never picks a drifted copy); a restore — one
-//! asset, one host, picked by a person — may also overwrite, with a backup;
-//! nothing ever removes. A card's host sync runs under its
-//! own cancellation token, never registered, so `cancel_task` cannot stop
-//! it (R27).
+//! (`auto_additive`). A Rollout and SB6 create, adopt, or update a copy the
+//! planner verified untouched since fleet wrote it (Assets M5) — SB6's
+//! update only for a managed copy that is just behind its catalog
+//! (`sb6_due`). Neither ever overwrites a copy, and neither removes an
+//! asset. The one deletion either makes is a moved asset's old location
+//! (a re-pointed `install_as`, F3c's Codex move), backed up, and only when
+//! the planner verified that old copy untouched too (`action_allowed`).
+//! A restore — one asset, one host, picked by a person — may also
+//! overwrite, with a backup. A card's host sync runs under its own
+//! cancellation token, never registered, so `cancel_task` cannot stop it
+//! (R27).
 
 use super::rules::{gap_hash, LayerGap, NEEDS_A_LOOK, UPDATE};
 use super::{
@@ -4660,10 +4664,12 @@ mod tests {
         assert!(home.path().join(".claude/skills/w/SKILL.md").is_file());
     }
 
-    /// Final review I1 (interim): the catalog moved **and** a person edited
-    /// the host copy, so the planner would plan an Update — SB6 never treats
-    /// a `drifted` row as due, so the host copy stays as the person left it
-    /// and nothing is planned, applied or recorded.
+    /// The catalog moved **and** a person edited the host copy — the
+    /// planner plans an Overwrite, which no Additive run carries. The row's
+    /// side is unknown (`drift_side` unset, as for a manifest entry from
+    /// before M5), and `sb6_due` admits a `drifted` row only when it is
+    /// `catalog`: so SB6 does not even plan the host, and the copy stays as
+    /// the person left it, with nothing planned, applied or recorded.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn sb6_never_touches_a_managed_drifted_copy_on_a_rolled_out_layer() {
