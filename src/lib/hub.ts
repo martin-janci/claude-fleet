@@ -354,6 +354,12 @@ export const ROUTED_ACTIONS = [
   'catalog_reject_changeset_items',
   'catalog_propose_changesets',
   'catalog_propose_layer_change',
+  // Assets M6: the catalog set (the reads — layers_in, host_provenance,
+  // drift_diff — are not listed).
+  'catalog_add_catalog',
+  'catalog_remove_catalog',
+  'catalog_admit_catalog',
+  'catalog_unadmit_catalog',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

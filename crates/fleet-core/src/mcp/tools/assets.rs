@@ -525,33 +525,11 @@ impl FleetTools {
         audit("resolve_preview", &format!("host_alias={}", p.host_alias));
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let res = catalog::resolve_preview(&p.host_alias, &self.store).map_err(to_mcp_err)?;
-        // Project to a summary shape at the MCP boundary: `Resolution` is a
-        // full `Catalog`, and `Asset`'s serializer emits `body` in full plus
-        // every `Resource`'s base64 `bytes` — sending that uncapped over MCP
-        // blows past token caps on any fleet-sized catalog (see the same
-        // warning on `ok_json_compact` below). `list_assets` already returns
-        // a summary shape for the same reason; this mirrors it. The Tauri
-        // command for the desktop UI keeps the full `Resolution`.
-        let assets: Vec<serde_json::Value> = res
-            .catalog
-            .assets
-            .iter()
-            .map(|a| {
-                serde_json::json!({
-                    "kind": a.kind().as_str(),
-                    "name": a.header.name,
-                    "version": a.header.version,
-                })
-            })
-            .collect();
-        ok_json(&serde_json::json!({
-            "provenance": res.provenance,
-            "excluded": res.excluded,
-            "refused": res.refused,
-            "withheld": res.withheld,
-            "held_back": res.held_back,
-            "assets": assets,
-        }))
+        // `Resolution` is a full `Catalog` (every asset body and resource's
+        // base64 bytes), which blows past MCP token caps on a fleet-sized
+        // catalog; answer the summary view (`ResolutionView`), as
+        // `list_assets` does.
+        ok_json(&catalog::resolve::ResolutionView::of(&res))
     }
 
     #[tool(description = "Propose a layer split from the last scan, grouping \

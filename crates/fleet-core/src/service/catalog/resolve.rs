@@ -59,6 +59,59 @@ pub struct Resolution {
     pub held_back: BTreeMap<String, String>,
 }
 
+/// One effective asset as the summary view names it (no body, no resources).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedAsset {
+    pub kind: String,
+    pub name: String,
+    pub version: String,
+}
+
+/// [`Resolution`] without the asset bodies: what MCP's `resolve_preview`
+/// answers and the desktop's host provenance reads. `Resolution` itself
+/// carries a full `Catalog`, whose serializer emits every `body` and each
+/// `Resource`'s base64 `bytes` — over MCP that blows past token caps on any
+/// fleet-sized catalog (`list_assets` returns a summary for the same
+/// reason). Every field but `assets` is `Resolution`'s own, unchanged, and
+/// each is `#[serde(default)]` so a view from an older hub still decodes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolutionView {
+    #[serde(default)]
+    pub provenance: BTreeMap<String, Provenance>,
+    #[serde(default)]
+    pub excluded: BTreeMap<String, String>,
+    #[serde(default)]
+    pub refused: Vec<crate::service::catalog::effective::Refusal>,
+    #[serde(default)]
+    pub withheld: std::collections::BTreeSet<(String, String)>,
+    #[serde(default)]
+    pub held_back: BTreeMap<String, String>,
+    #[serde(default)]
+    pub assets: Vec<ResolvedAsset>,
+}
+
+impl ResolutionView {
+    pub fn of(res: &Resolution) -> Self {
+        Self {
+            provenance: res.provenance.clone(),
+            excluded: res.excluded.clone(),
+            refused: res.refused.clone(),
+            withheld: res.withheld.clone(),
+            held_back: res.held_back.clone(),
+            assets: res
+                .catalog
+                .assets
+                .iter()
+                .map(|a| ResolvedAsset {
+                    kind: a.kind().as_str().to_string(),
+                    name: a.header.name.clone(),
+                    version: a.header.version.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// Deep-merge `over` into `base`: mappings recurse, everything else replaces.
 fn merge_yaml(base: &mut serde_yaml::Value, over: &serde_yaml::Value) {
     match (base, over) {
@@ -275,6 +328,31 @@ mod tests {
 
     fn lay(yaml: &str) -> Layer {
         Layer::from_yaml(yaml).unwrap()
+    }
+
+    #[test]
+    fn the_view_drops_asset_bodies_and_keeps_provenance() {
+        let cat = catalog(&["w"]);
+        let role = lay("kind: layer\nname: r\naxis: role\nmembers:\n  - skill/w\n");
+        let mut r = resolve(&cat, &[&role], &[]);
+        r.catalog.assets[0].body = "a long body".into();
+        r.withheld.insert(("skill".into(), "secret".into()));
+        r.held_back.insert("acme".into(), "not loaded".into());
+        let v = ResolutionView::of(&r);
+        let json = serde_json::to_value(&v).unwrap();
+        assert!(json["provenance"]
+            .as_object()
+            .unwrap()
+            .contains_key("skill/w"));
+        assert_eq!(
+            json["assets"][0],
+            serde_json::json!({"kind":"skill","name":"w","version":"1"})
+        );
+        assert!(json["assets"][0].get("body").is_none());
+        assert_eq!(json["withheld"], serde_json::json!([["skill", "secret"]]));
+        assert_eq!(json["held_back"], serde_json::json!({"acme": "not loaded"}));
+        let back: ResolutionView = serde_json::from_value(json).unwrap();
+        assert_eq!(back.assets, v.assets);
     }
 
     #[test]

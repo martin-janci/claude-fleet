@@ -36,7 +36,7 @@ pub struct DriftDiffArgs {
     pub kind: Kind,
     pub name: String,
     /// default `claude`
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
 }
 
