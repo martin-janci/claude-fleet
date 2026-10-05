@@ -127,12 +127,14 @@
     hubActionBlocked('spawn_review', $hubStatus, $hubConnection) ??
       $sessionBlocked(session, 'spawn_review'),
   );
-  /** Share… — owner only, and the sheet says so again on the inside. The hub
-   *  half is deliberately absent here: `session_share` is not in `hub.ts`'s
-   *  `ROUTED_ACTIONS` yet (task F3 adds it, after the Rust side has landed and
-   *  regenerated `hub_verdicts.generated.json`), and adding it from here would
-   *  turn a pure-pnpm run red. */
-  const shareBlocked = $derived($sessionBlocked(session, 'session_share'));
+  /** Share… — owner only, and the sheet says so again on the inside. Both
+   *  halves since F3: `session_share` routes to the hub (T13), so a paired
+   *  desktop whose link is down gets "try again once it's back" rather than a
+   *  sheet whose every button then fails. */
+  const shareBlocked = $derived(
+    hubActionBlocked('session_share', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_share'),
+  );
 
   // Look up the parent project (if any) for context.
   const parentProject = $derived(

@@ -1,8 +1,25 @@
 # Multi-user fleet — gap analysis and design decisions
 
-**Status:** analysis, revision 6. Nothing here is built. No decision in §4 is
-final until the owner says yes; §3 is what the code says today and is not a
-decision.
+**Status:** analysis, revision 6. **§4's decisions are now built** — M1 is on
+branch `mellow-virgo` (2026-10-01 … 2026-10-05, unmerged), per the task list
+in `docs/superpowers/plans/2026-09-30-multi-user-m1-private-sessions.md`, whose
+own status line says what is landed and what is left. §4.3's `own`-tier list
+and §4.4's shared-host rule and pane proof are the authorities the code and
+its tests cite, so a change to either is a change to the implementation.
+
+Two things this header used to say and no longer can. "Nothing here is built"
+was true when written and is not; and "no decision in §4 is final until the
+owner says yes" has been overtaken — the owner took the §4 decisions across
+four review rounds, including the ones that *reversed* a recommendation here
+(no admin override of privacy, audited or otherwise; sharing confers no
+terminal; an admin may narrow or revoke a departed member's grants but never
+widen, add a recipient, or redirect one). Those are constraints on the code
+now, not proposals.
+
+**§3 remains what it is:** a reading of the tree as it was on 2026-09-30,
+before any of this landed, and not a decision. It is deliberately not updated
+— §3 is the *before* picture the gap is measured against, and rewriting it to
+match the current tree would erase the gap this document exists to describe.
 
 **Revision 2 (owner's review, 2026-09-30).** Five recommendations in revision 1
 drifted from the agreed brief and were corrected. They are recorded here so the

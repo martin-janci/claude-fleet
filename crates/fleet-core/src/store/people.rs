@@ -429,7 +429,7 @@ impl Store {
     /// Create this hub's personal owner if it has none, and return its id.
     ///
     /// One of the two writers of `is_personal_owner` (the other is migration
-    /// 094); `pub(crate)` rather than `pub` so it stays that way, and
+    /// 096); `pub(crate)` rather than `pub` so it stays that way, and
     /// reached through `mcp::settings::ensure_personal_owner`, which is
     /// where the entry points call it. Idempotent: with the flagged row
     /// present it writes nothing.

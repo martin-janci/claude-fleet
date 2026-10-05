@@ -39,6 +39,8 @@
     type SessionGrant,
   } from './sessions';
   import { shareSheetFor, sessionBlocked } from './share';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
 
   const id = $derived($shareSheetFor);
   const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
@@ -47,7 +49,29 @@
    *  offering the controls — so this is read through `$accessOf`, which
    *  re-derives on a `grant:changed` with no re-list. */
   const owned = $derived($accessOf(session) === 'own');
-  const shareBlocked = $derived($sessionBlocked(session, 'session_share'));
+  /** All three writes route to the hub (T13), so each asks both halves since
+   *  F3: the refusal half (`$sessionBlocked` — a grantee cannot grant on) and
+   *  the live link (`hubActionBlocked`), which is what stops a click from
+   *  dying while the hub is unreachable. Three gates and not one, because
+   *  `hubActionBlocked` answers per action name and the sheet's buttons are
+   *  three different routed commands. */
+  const shareBlocked = $derived(
+    hubActionBlocked('session_share', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_share'),
+  );
+  const narrowBlocked = $derived(
+    hubActionBlocked('session_narrow', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_narrow'),
+  );
+  const revokeBlocked = $derived(
+    hubActionBlocked('session_unshare', $hubStatus, $hubConnection) ??
+      $sessionBlocked(session, 'session_unshare'),
+  );
+  /** The notice that replaces the sheet's body asks the ACCESS half only, on
+   *  purpose: it explains why there are no controls, and "try again once the
+   *  hub is back" would be a promise to a grantee who will still not be the
+   *  owner when it is. The buttons above keep both halves. */
+  const notOwnerReason = $derived($sessionBlocked(session, 'session_share'));
   const label = $derived(session?.friendly_name || session?.tmux_name || 'this session');
 
   /** The live grant list, as `session_access` answers it. `null` while the
@@ -107,12 +131,21 @@
    *  is re-read rather than patched locally because the hub is the authority
    *  on what the grant set now is — a narrow that the store refused as
    *  already-narrow must not leave a locally-edited row claiming otherwise. */
-  async function run(forId: number, f: () => Promise<Result<unknown>>) {
+  async function run(
+    forId: number,
+    blocked: string | null,
+    f: () => Promise<Result<unknown>>,
+  ) {
     // Re-asked at the call, not only in the markup above (multi-user M1, F2b):
     // `owned` swaps the sheet's body for the refusal notice, but a revoke that
     // lands between a click and this line would otherwise still send. Sharing,
     // narrowing and revoking are all the `own` tier, which is exactly `owned`.
-    if (busy || !owned) return;
+    //
+    // `blocked` is the same re-ask for the OTHER half (F3): the hub link can
+    // drop between the click and this line too, and the gate is a parameter
+    // rather than one expression here because the three writes are three
+    // different routed commands — a caller has to name its own.
+    if (busy || !owned || blocked !== null) return;
     busy = true;
     error = null;
     const r = await f();
@@ -129,7 +162,7 @@
     const forId = id;
     const name = person.trim();
     if (forId === null || !name) return;
-    void run(forId, async () => {
+    void run(forId, shareBlocked, async () => {
       const r = await shareSession(forId, name, level);
       if (r.ok) person = '';
       return r;
@@ -139,13 +172,13 @@
   function doNarrow(name: string) {
     const forId = id;
     if (forId === null) return;
-    void run(forId, () => narrowShare(forId, name));
+    void run(forId, narrowBlocked, () => narrowShare(forId, name));
   }
 
   function doRevoke(name: string) {
     const forId = id;
     if (forId === null) return;
-    void run(forId, () => unshareSession(forId, name));
+    void run(forId, revokeBlocked, () => unshareSession(forId, name));
   }
 
   /** What to call a recipient, and what to send back as `person`. The hub's
@@ -171,7 +204,7 @@
            same answer, so this is what a revoke ARRIVING while it is open
            looks like, not a path a click can normally reach. -->
       <p class="err" data-testid="share-not-owner">
-        {shareBlocked ?? 'Only the session’s owner can share it.'}
+        {notOwnerReason ?? 'Only the session’s owner can share it.'}
       </p>
       <div class="actions">
         <button type="button" onclick={close}>Close</button>
@@ -201,7 +234,8 @@
             type="button"
             class="primary"
             data-testid="share-confirm"
-            disabled={busy || person.trim() === ''}
+            disabled={busy || person.trim() === '' || shareBlocked !== null}
+            title={shareBlocked ?? 'Share this session with one person'}
             onclick={doShare}>{busy ? 'Sharing…' : 'Share'}</button
           >
         </div>
@@ -234,7 +268,12 @@
                 {#if confirming === name && name !== null}
                   <span class="confirm" data-testid="share-revoke-confirm">
                     Revoke?
-                    <button type="button" class="danger" data-testid="share-revoke-yes" disabled={busy}
+                    <button
+                      type="button"
+                      class="danger"
+                      data-testid="share-revoke-yes"
+                      disabled={busy || revokeBlocked !== null}
+                      title={revokeBlocked ?? 'Revoke this grant'}
                       onclick={() => doRevoke(name)}>Revoke</button
                     >
                     <button type="button" data-testid="share-revoke-no" disabled={busy}
@@ -250,10 +289,10 @@
                     <button
                       type="button"
                       data-testid="share-narrow"
-                      disabled={busy || name === null}
+                      disabled={busy || name === null || narrowBlocked !== null}
                       title={name === null
                         ? 'This hub did not name the recipient, so this app cannot act on the grant — use fleet-hub'
-                        : 'Lower this grant to watch (read-only)'}
+                        : (narrowBlocked ?? 'Lower this grant to watch (read-only)')}
                       onclick={() => name !== null && doNarrow(name)}>Narrow to watch</button
                     >
                   {/if}
@@ -261,10 +300,10 @@
                     type="button"
                     class="danger"
                     data-testid="share-revoke"
-                    disabled={busy || name === null}
+                    disabled={busy || name === null || revokeBlocked !== null}
                     title={name === null
                       ? 'This hub did not name the recipient, so this app cannot act on the grant — use fleet-hub'
-                      : 'Revoke this grant'}
+                      : (revokeBlocked ?? 'Revoke this grant')}
                     onclick={() => (confirming = name)}>Revoke</button
                   >
                 {/if}
