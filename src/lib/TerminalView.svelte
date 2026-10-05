@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
+  import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -19,6 +20,8 @@
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
   import TransferChip from './TransferChip.svelte';
+  import MicToggle from './MicToggle.svelte';
+  import { voiceState, claimVoice, releaseVoice } from './voice';
   import { fitCells } from './terminal_size';
   import { ownsTheFleet } from './hub';
 
@@ -331,8 +334,15 @@
     const sess = $selectedSession;
     if (!sess) {
       void closeTerm();
+      // Nothing attached: the microphone has no session to serve.
+      if (get(voiceState).state !== 'off') void releaseVoice();
       return;
     }
+    // The microphone claim follows the attached session. (A session switch
+    // also runs closeTerm(), so the release lives on the no-selection and
+    // destroy paths only, or it would undo this.)
+    const v = get(voiceState);
+    if (v.state !== 'off' && v.sessionId !== sess.id) void claimVoice(sess.id);
     if (isAttachedTo(sess)) return;
     void openTerm();
   });
@@ -978,6 +988,7 @@
     destroyed = true;
     openGeneration += 1;
     void closeTerm();
+    if (get(voiceState).state !== 'off') void releaseVoice();
     mouse.dispose();
   });
 
@@ -1139,6 +1150,7 @@
         >{displayName($selectedSession, $showFriendlyNames)}</span
       >
       <TransferChip session={$selectedSession} />
+      <MicToggle session={$selectedSession} transport={selectedSessionHostTransport} />
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>
