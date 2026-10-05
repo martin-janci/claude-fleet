@@ -26,7 +26,7 @@ use fleet_core::service::catalog::{
     },
     author_session::{self, SpawnAuthorArgs},
     catalogs::CatalogStatus,
-    changesets::ChangesetSummary,
+    changesets::{self, ChangesetSummary, ChangesetView, LayerChange},
     import::ImportReport,
     inventory,
     model::{Asset, Kind},
@@ -344,6 +344,111 @@ pub async fn catalog_list_changesets(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<ChangesetSummary>, IpcError> {
     routed::catalog_list_changesets(&backend, &store).await
+}
+
+/// `catalog_get_changeset` / `_undo_` / `_dismiss_`'s arguments.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChangesetIdArgs {
+    pub id: i64,
+}
+
+/// `catalog_apply_changeset`'s arguments: the card and, optionally, the
+/// items to run (default: every pending item but "needs a look"; a drift
+/// card needs exactly one).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApplyChangesetArgs {
+    pub id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub positions: Option<Vec<i64>>,
+}
+
+/// `catalog_reject_changeset_items`' arguments.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RejectItemsArgs {
+    pub id: i64,
+    pub positions: Vec<i64>,
+}
+
+/// `catalog_propose_layer_change`'s arguments.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LayerChangeArgs {
+    pub change: LayerChange,
+}
+
+/// Assets M6 (R8): one card in full — the Inspector's Items / Hosts / Diff.
+#[tauri::command]
+pub async fn catalog_get_changeset(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ChangesetIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_get_changeset(&backend, args, &store).await
+}
+
+/// Assets M6 (R8): apply a card (or the named items) — on a hub, its
+/// `changesets { apply }`, which checks the caller's grant on every catalog
+/// the items touch and, for a rollout or restore, the hub's confirm gate.
+#[tauri::command]
+pub async fn catalog_apply_changeset(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ApplyChangesetArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_apply_changeset(&backend, args, &store, &ssh).await
+}
+
+/// Assets M6 (R8): undo an applied card — its commits are reverted and the
+/// host-layer snapshot restored; allowed only for the latest applied card in
+/// each catalog it touched.
+#[tauri::command]
+pub async fn catalog_undo_changeset(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ChangesetIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_undo_changeset(&backend, args, &store).await
+}
+
+/// Assets M6 (R8): dismiss a proposed card; nothing is written.
+#[tauri::command]
+pub async fn catalog_dismiss_changeset(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: ChangesetIdArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_dismiss_changeset(&backend, args, &store).await
+}
+
+/// Assets M6 (R8): a person's no to some of a card's items; the card is
+/// dismissed once nothing is pending.
+#[tauri::command]
+pub async fn catalog_reject_changeset_items(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: RejectItemsArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_reject_changeset_items(&backend, args, &store).await
+}
+
+/// Assets M6 (R5): run the proposers now — the new cards, newest first.
+#[tauri::command]
+pub async fn catalog_propose_changesets(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<ChangesetSummary>, IpcError> {
+    routed::catalog_propose_changesets(&backend, &store).await
+}
+
+/// Assets M6 (R5): a layer change (create, rename, move a member) as a
+/// proposed card — never a direct commit.
+#[tauri::command]
+pub async fn catalog_propose_layer_change(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: LayerChangeArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ChangesetView, IpcError> {
+    routed::catalog_propose_layer_change(&backend, args, &store).await
 }
 
 /// Assets M5 (R13, R24): one catalog's dirty / ahead / behind, by name.
@@ -976,6 +1081,135 @@ pub(crate) mod routed {
                 .await
             }
             None => catalog::changesets::list(store),
+        }
+    }
+
+    /// Hub tool arguments for the card verbs that take only a card id.
+    fn card_call(action: &str, id: i64) -> serde_json::Value {
+        serde_json::json!({ "action": action, "id": id })
+    }
+
+    pub async fn catalog_get_changeset(
+        backend: &FleetBackend,
+        args: ChangesetIdArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_get_changeset", &card_call("list", args.id))
+                    .await
+            }
+            None => changesets::get(args.id, store),
+        }
+    }
+
+    pub async fn catalog_apply_changeset(
+        backend: &FleetBackend,
+        args: ApplyChangesetArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let mut body = card_call("apply", args.id);
+                if let Some(p) = &args.positions {
+                    body["positions"] = serde_json::json!(p);
+                }
+                hub.route("catalog_apply_changeset", &body).await
+            }
+            None => {
+                changesets::apply::apply(
+                    changesets::apply::ApplyArgs {
+                        id: args.id,
+                        positions: args.positions,
+                    },
+                    store,
+                    ssh,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn catalog_undo_changeset(
+        backend: &FleetBackend,
+        args: ChangesetIdArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_undo_changeset", &card_call("undo", args.id))
+                    .await
+            }
+            None => changesets::undo::undo(args.id, store).await,
+        }
+    }
+
+    pub async fn catalog_dismiss_changeset(
+        backend: &FleetBackend,
+        args: ChangesetIdArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route("catalog_dismiss_changeset", &card_call("dismiss", args.id))
+                    .await
+            }
+            None => changesets::undo::dismiss(args.id, store).await,
+        }
+    }
+
+    pub async fn catalog_reject_changeset_items(
+        backend: &FleetBackend,
+        args: RejectItemsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let mut body = card_call("reject_item", args.id);
+                body["positions"] = serde_json::json!(args.positions);
+                hub.route("catalog_reject_changeset_items", &body).await
+            }
+            None => changesets::undo::reject_items(args.id, &args.positions, store).await,
+        }
+    }
+
+    pub async fn catalog_propose_changesets(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<ChangesetSummary>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                hub.route(
+                    "catalog_propose_changesets",
+                    &serde_json::json!({ "action": "propose" }),
+                )
+                .await
+            }
+            None => changesets::propose(store).await,
+        }
+    }
+
+    pub async fn catalog_propose_layer_change(
+        backend: &FleetBackend,
+        args: LayerChangeArgs,
+        store: &Mutex<Store>,
+    ) -> Result<ChangesetView, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                let change = serde_json::to_value(&args.change).map_err(|e| {
+                    IpcError::new(
+                        fleet_core::ipc_error::codes::E_INTERNAL,
+                        format!("the layer change could not be encoded for the hub: {e}"),
+                    )
+                })?;
+                hub.route(
+                    "catalog_propose_layer_change",
+                    &serde_json::json!({ "action": "propose_layer", "change": change }),
+                )
+                .await
+            }
+            None => changesets::propose_layer(args.change, store).await,
         }
     }
 

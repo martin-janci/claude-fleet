@@ -1276,6 +1276,40 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "catalog_list_changesets",
         Verdict::Routed { tool: "changesets" },
     ),
+    // Assets M6 (R8): the card verbs — `changesets { list(id) | apply |
+    // undo | dismiss | reject_item | propose | propose_layer }`. The hub
+    // checks the caller's grant per catalog the card touches and runs its
+    // confirm gate for a rollout or restore apply; the desktop never sends
+    // a nonce (as `catalog_apply_sync`). A hub before M6 refuses
+    // `propose_layer` with E_INVALID (R13 precedent) — no contract bump.
+    (
+        "catalog_get_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_apply_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_undo_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_dismiss_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_reject_changeset_items",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_propose_changesets",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_propose_layer_change",
+        Verdict::Routed { tool: "changesets" },
+    ),
     // One catalog's repo status by name: `catalog_admin { repo_status }`
     // with the tool's `catalog` parameter; needs a grant on that catalog.
     (

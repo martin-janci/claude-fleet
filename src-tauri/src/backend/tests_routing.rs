@@ -4480,6 +4480,9 @@ fn catalog_admin_cases() -> Vec<Case> {
     const CONFIG: &str =
         r#"{"repo_path":"/srv/assets","remote_url":null,"head_commit":"abc","last_loaded_at":1}"#;
     const WRITE: &str = r#"{"commit":"abc","lint":{"errors":[],"warnings":[]}}"#;
+    // A minimal card, answering every `changesets` verb that returns one.
+    const VIEW: &str =
+        r#"{"id":3,"kind":"new","summary":"s","state":"applied","created_at":1,"items":[]}"#;
     const STATUS: &str =
         r#"{"head":"abc","dirty":0,"ahead":null,"behind":null,"has_upstream":false}"#;
     const SYNC_RUN: &str = r#"{"plan_id":"p1","started_at":1,"finished_at":2,"hosts":[]}"#;
@@ -4929,6 +4932,111 @@ fn catalog_admin_cases() -> Vec<Case> {
             json!({ "action": "list" }),
             r#"[{"id":3,"kind":"new","summary":"New on oci: skill/w → core","state":"proposed","created_at":1,"groups":{"core":1},"pending":1,"undoable":false}]"#,
             Box::new(|b, s, _| block_on(r::catalog_list_changesets(b, s)).map(|_| ())),
+        ),
+        // Assets M6 (R8): the card verbs — all `changesets`.
+        (
+            "catalog_get_changeset",
+            "changesets",
+            json!({ "action": "list", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_get_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_apply_changeset",
+            "changesets",
+            json!({ "action": "apply", "id": 3, "positions": [0, 2] }),
+            VIEW,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_apply_changeset(
+                    b,
+                    commands::assets::ApplyChangesetArgs { id: 3, positions: Some(vec![0, 2]) },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_apply_changeset",
+            "changesets",
+            json!({ "action": "apply", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_apply_changeset(
+                    b,
+                    commands::assets::ApplyChangesetArgs { id: 3, positions: None },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_undo_changeset",
+            "changesets",
+            json!({ "action": "undo", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_undo_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_dismiss_changeset",
+            "changesets",
+            json!({ "action": "dismiss", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_dismiss_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_reject_changeset_items",
+            "changesets",
+            json!({ "action": "reject_item", "id": 3, "positions": [1] }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_reject_changeset_items(
+                    b,
+                    commands::assets::RejectItemsArgs { id: 3, positions: vec![1] },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_propose_changesets",
+            "changesets",
+            json!({ "action": "propose" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_propose_changesets(b, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_propose_layer_change",
+            "changesets",
+            json!({ "action": "propose_layer", "change": { "op": "rename", "layer": "core", "to": "base" } }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_propose_layer_change(
+                    b,
+                    commands::assets::LayerChangeArgs {
+                        change: fleet_core::service::catalog::changesets::LayerChange::Rename {
+                            catalog: None,
+                            layer: "core".into(),
+                            to: "base".into(),
+                        },
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
         ),
         (
             "catalog_repo_status_in",

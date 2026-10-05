@@ -347,6 +347,13 @@ export const ROUTED_ACTIONS = [
   'save_work_view',
   'delete_work_view',
   'add_project',
+  // Assets M6: the card verbs.
+  'catalog_apply_changeset',
+  'catalog_undo_changeset',
+  'catalog_dismiss_changeset',
+  'catalog_reject_changeset_items',
+  'catalog_propose_changesets',
+  'catalog_propose_layer_change',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];
