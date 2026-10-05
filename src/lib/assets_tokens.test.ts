@@ -28,6 +28,9 @@ const GUARDED = [
   'ChangesetDetail.svelte',
   'DiffView.svelte',
   'DriftPanel.svelte',
+  'AssetsLayers.svelte',
+  'LayerInspector.svelte',
+  'LayerChangeForm.svelte',
 ];
 
 const styleOf = (src: string) => src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';

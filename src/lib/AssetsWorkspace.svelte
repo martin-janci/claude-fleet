@@ -2,6 +2,9 @@
   import { tick, untrack, type Snippet } from 'svelte';
   import AssetsRail from './AssetsRail.svelte';
   import AssetsInbox from './AssetsInbox.svelte';
+  import AssetsLayers from './AssetsLayers.svelte';
+  import LayerInspector from './LayerInspector.svelte';
+  import LayerChangeForm from './LayerChangeForm.svelte';
   import AssetList from './AssetList.svelte';
   import AssetInspector from './AssetInspector.svelte';
   import AssetsFooter from './AssetsFooter.svelte';
@@ -15,16 +18,16 @@
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
   import {
-    blockedOnSecrets, canWrite, cardViews, catalogStatuses, changesetSummaries, keyOf, layerListing, layersByCatalog, loadAllLayers,
-    loadChangesets, parseKey, PERSONAL,
-    type ChangesetSummary, type WorkspaceView,
+    blockedOnSecrets, canWrite, cardViews, catalogStatuses, changesetSummaries, isOpenCard, keyOf, layerListing, layersByCatalog, loadAllLayers,
+    loadChangesets, parseKey, PERSONAL, proposeChangesets, proposeLayerChange,
+    type ChangesetSummary, type LayerChange, type WorkspaceView,
   } from './assets_workspace';
-  import { coveringNewCard, mergePlans, primaryVerb } from './assets_cards';
+  import { coveringNewCard, mergePlans, olderHubWords, primaryVerb } from './assets_cards';
   import { runCardVerb, type CardVerbs } from './card_actions';
   import { buildInbox, hostOrderOf, keepCard, lastScanOf, sentence } from './assets_inbox';
   import { keep, parseQuery, type QueryRow } from './assets_query';
   import { isEditable } from './terminal_keys';
-  import { pushError } from './toasts';
+  import { push, pushError } from './toasts';
 
   /** The Assets workspace (spec, Workspace shell): rail · list with a
    *  sentence header and the query · Inspector, over a footer. It owns the
@@ -282,6 +285,69 @@
   );
   const pendingOf = (id: number): number[] => ($cardViews[id]?.items ?? []).filter((i) => i.state === 'pending').map((i) => i.position);
 
+  // ── Layers (R17, R5, R6): create / rename / move propose a card ────────
+  /** Every loaded catalog's layers; until they load, the personal listing. */
+  const layersAll = $derived($layersByCatalog ?? ($layerListing ? { [PERSONAL]: $layerListing } : null));
+  /** The loaded catalogs this window may author layers in. */
+  const layerCatalogs = $derived(
+    ($catalogStatuses ? $catalogStatuses.filter((s) => s.state === 'loaded').map((s) => s.name) : [PERSONAL]).filter((c) => canWrite(c, ctx)),
+  );
+  let creating = $state(false);
+  /** The New layer form is on screen: its Propose is the main column's one
+   *  primary, so the header's Sync goes plain (R-C). */
+  const creatingShown = $derived(creating && view === 'layers' && !planOpen && !failed && !readOnly && layerCatalogs.length > 0);
+  const layerSelected = $derived.by(() => {
+    if (selection?.type !== 'layer') return null;
+    const l = layersAll?.[selection.catalog];
+    const def = l?.layers.find((x) => x.name === selection.name);
+    return l && def ? { catalog: selection.catalog, def, listing: l } : null;
+  });
+  /** A layer change becomes a card the person applies (R5): jump to it in
+   *  the Inbox, with Apply now in the toast. */
+  async function proposeChange(c: LayerChange) {
+    if (anyBusy) return;
+    cardBusy = 'card';
+    let r;
+    try {
+      r = await proposeLayerChange(c);
+    } finally {
+      cardBusy = '';
+    }
+    if (!r.ok) {
+      const older = olderHubWords(r.error, 'propose layer changes');
+      if (older) push({ kind: 'error', message: older });
+      else pushError(r.error, 'Propose');
+      return;
+    }
+    const v = r.value;
+    await loadChangesets();
+    creating = false;
+    view = 'inbox';
+    void closePlan();
+    select(`card:${v.id}`);
+    push({ kind: 'info', message: `Card ready: ${v.summary}`, action: { label: 'Apply now', run: () => cardVerbs.apply(v.id, null) } });
+  }
+  /** "Propose again": the hub re-derives its cards from the hosts as they are. */
+  async function proposeAgain() {
+    if (anyBusy) return;
+    cardBusy = 'card';
+    let r;
+    try {
+      r = await proposeChangesets();
+    } finally {
+      cardBusy = '';
+    }
+    if (!r.ok) {
+      const older = olderHubWords(r.error, 'propose changes');
+      if (older) push({ kind: 'error', message: older });
+      else pushError(r.error, 'Propose');
+      return;
+    }
+    const loaded = await loadChangesets();
+    const n = (loaded.ok ? loaded.value : r.value).filter(isOpenCard).length;
+    push({ kind: 'info', message: `Proposed again: ${n} open cards` });
+  }
+
   // ── The keyboard (Rulings R22) ────────────────────────────────────────
   // Focus moves between rows: the DOM order is the display order, a folded
   // section renders no rows. Space/Enter select natively (a static row
@@ -331,6 +397,8 @@
       // it applies (a review verb only selects, so there is nothing to run),
       // else Sync fleet.
       if (readOnly) return;
+      // The New layer form is the main column's primary: Sync is not.
+      if (creatingShown) return;
       if (selectedCard && cardPrimary) {
         const v = primaryVerb(selectedCard, $cardViews[selectedCard.id] ?? null);
         if (v?.apply && !anyBusy) {
@@ -435,6 +503,7 @@
 <div class="ws" data-testid="assets-workspace" role="group" aria-label="Assets workspace" bind:this={rootEl} onkeydown={onKeydown}>
   <AssetsRail {view} {counts} {readOnly} busy={busy !== ''} onview={(v) => {
       view = v;
+      creating = false;
       void closePlan();
     }} {onsecrets} />
 
@@ -484,8 +553,8 @@
           >{busy === 'scan' ? 'Scanning…' : 'Rescan'}</button
         >
         {#if !readOnly}
-          <button type="button" class="btn" class:btn--primary={!cardPrimary && !syncPlanOpen} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
-            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary && !planOpen} <kbd>⌘↵</kbd>{/if}</button
+          <button type="button" class="btn" class:btn--primary={!cardPrimary && !syncPlanOpen && !creatingShown} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
+            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary && !planOpen && !creatingShown} <kbd>⌘↵</kbd>{/if}</button
           >
         {/if}
       </div>
@@ -543,6 +612,29 @@
           onselect={select}
           onimport={(i) => onimport(i)}
         />
+      {:else if view === 'layers'}
+        {#if creatingShown}
+          <div class="newlayer">
+            <LayerChangeForm
+              mode="create"
+              catalogs={layerCatalogs}
+              catalog={layerCatalogs.includes(PERSONAL) ? PERSONAL : layerCatalogs[0]}
+              busy={anyBusy}
+              onsubmit={proposeChange}
+              oncancel={() => (creating = false)}
+            />
+          </div>
+        {/if}
+        <AssetsLayers
+          layers={layersAll}
+          {order}
+          {selectedKey}
+          readOnly={readOnly || layerCatalogs.length === 0}
+          busy={anyBusy}
+          onselect={select}
+          onnew={() => (creating = !creating)}
+          onpropose={proposeAgain}
+        />
       {:else if listing}
         <AssetList
           {listing}
@@ -565,6 +657,19 @@
   </div>
 
   <div class="insp">
+    {#if layerSelected}
+      {#key selectedKey}
+        <LayerInspector
+          catalog={layerSelected.catalog}
+          layer={layerSelected.def}
+          listing={layerSelected.listing}
+          {order}
+          writable={canWrite(layerSelected.catalog, ctx)}
+          busy={anyBusy}
+          onchange={proposeChange}
+        />
+      {/key}
+    {:else}
     <AssetInspector
       {selectedKey}
       {listing}
@@ -588,6 +693,7 @@
       }}
       onimport={(i) => onimport(i)}
     />
+    {/if}
   </div>
 
   <div class="foot">
@@ -616,6 +722,7 @@
   .grant { font-size: 12px; color: var(--fg-muted); }
   .grant code, .problems code { font-family: var(--mono); font-size: 11.5px; user-select: text; }
   kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 4px; border-radius: 3px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); opacity: 0.85; }
+  .newlayer { padding: 10px 14px 0; }
   .body { flex: 1; min-height: 0; overflow: auto; outline: 0; }
   .body:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .error { margin: 0; padding: 4px 14px; color: var(--usage-crit); }

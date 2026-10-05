@@ -27,6 +27,10 @@ function byCmd(map: Record<string, unknown>) {
 async function openLibrary() {
   await fireEvent.click(await screen.findByTestId('assets-rail-library'));
 }
+/** The Layers rail entry (Assets M6, R17). */
+async function openLayers() {
+  await fireEvent.click(await screen.findByTestId('assets-rail-layers'));
+}
 /** The personal catalog chip's popover: Pull, Commit pending, Push and the
  *  repo status line (R17, R24). */
 async function openPersonalChip() {
@@ -118,6 +122,24 @@ describe('AssetsPanel', () => {
     expect(screen.queryByText('Loading…')).toBeNull();
     expect(screen.getByTestId('assets-load-failed')).toBeTruthy();
     expect(screen.getByTestId('assets-retry')).toBeTruthy();
+  });
+
+  it('a refresh reads the layers of every loaded catalog (R17)', async () => {
+    const st = (name: string, state: string) => ({ id: 1, name, org_id: null, repo_path: '/r', remote_url: null, head_commit: null, last_loaded_at: 1, state, asset_count: 0 });
+    byCmd({
+      catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 },
+      catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 },
+      catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: null,
+      catalog_list_catalogs: [st('personal', 'loaded'), st('acme', 'loaded'), st('idle', 'not_loaded')],
+      catalog_list_layers_in: { layers: [{ name: 'core', axis: 'context' }], hosts: [] },
+    });
+    render(AssetsPanel, { visible: true });
+    await openLayers();
+    expect(await screen.findByTestId('layers-catalog-acme')).toBeTruthy();
+    expect(screen.getByTestId('layers-catalog-personal')).toBeTruthy();
+    expect(screen.queryByTestId('layers-catalog-idle')).toBeNull();
+    const asked = invoke.mock.calls.filter((c) => c[0] === 'catalog_list_layers_in').map((c) => c[1].args.name).sort();
+    expect(asked).toEqual(['acme', 'personal']);
   });
 
   it('lists assets grouped by kind with state chips, unmanaged group and problems badge', async () => {

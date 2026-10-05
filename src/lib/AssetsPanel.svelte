@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
+  import { get } from 'svelte/store';
   import {
     catalog, catalogConfig, loadCatalogConfig, configureCatalog, loadCatalog, loadAssets, loadInventory, scanHosts,
     planSync, lastSync, lastSyncRun,
@@ -7,7 +8,7 @@
     type HostScanResult, type SyncPlan, type SyncRunSummary, type AssetKind, type AssetIdentity,
   } from './assets';
   import AssetsWorkspace from './AssetsWorkspace.svelte';
-  import { keyOf, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL } from './assets_workspace';
+  import { catalogStatuses, keyOf, loadAllLayers, loadCatalogStatuses, loadChangesets, loadLayers, PERSONAL } from './assets_workspace';
   import { loadFleetSettings } from './fleet_settings';
   import type { IpcError } from './result';
   import ImportDialog from './ImportDialog.svelte';
@@ -70,7 +71,8 @@
   async function refresh() {
     // The workspace's own reads (R13, R14): best effort — a refusal shows
     // less, never an error. The cards refresh with every panel refresh.
-    void loadCatalogStatuses();
+    // Every loaded catalog's layers (R17) follow the statuses that name them.
+    void loadCatalogStatuses().then(() => loadAllLayers(get(catalogStatuses)));
     void loadChangesets();
     void loadLayers();
     const [a, i] = await Promise.all([loadAssets(), loadInventory()]);

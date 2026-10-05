@@ -1,4 +1,5 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
+import { get } from 'svelte/store';
 import { readFileSync } from 'node:fs';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -6,7 +7,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AssetsWorkspace from './AssetsWorkspace.svelte';
 import { catalog, inventory, lastSyncRun, repoStatusStore, type AssetListing, type SyncPlan, type SyncRunSummary } from './assets';
-import { cardViews, catalogStatuses, changesetSummaries, layerListing, type CatalogStatus, type ChangesetSummary, type ChangesetView } from './assets_workspace';
+import { cardViews, catalogStatuses, changesetSummaries, layerListing, layersByCatalog, type CatalogStatus, type ChangesetSummary, type ChangesetView, type LayerListing } from './assets_workspace';
+import { toasts } from './toasts';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
 
@@ -45,6 +47,10 @@ function answerCards(cards: [ChangesetSummary, ChangesetView][]) {
     throw { code: 'E_TEST', message: cmd };
   });
 }
+const LAYERS: LayerListing = {
+  layers: [{ name: 'core', axis: 'context', members: ['skill/fine'] }, { name: 'server', axis: 'role', extends: 'core' }],
+  hosts: [{ host_alias: 'oci', catalog_id: 1, layer_name: 'server', axis: 'role', position: 0, active: true }],
+};
 const handlers = () => ({ onscan: vi.fn(), onsync: vi.fn(), onimport: vi.fn(), onsecrets: vi.fn(), onnew: vi.fn(), onlintall: vi.fn() });
 
 beforeEach(() => {
@@ -52,7 +58,7 @@ beforeEach(() => {
   invoke.mockRejectedValue({ code: 'E_TEST', message: 'not in this test' });
   hubStatus.set(STANDALONE);
   catalog.set(listing); inventory.set([]); lastSyncRun.set(null); repoStatusStore.set(null);
-  catalogStatuses.set(null); changesetSummaries.set(null); layerListing.set(null); cardViews.set({});
+  catalogStatuses.set(null); changesetSummaries.set(null); layerListing.set(null); layersByCatalog.set(null); cardViews.set({}); toasts.set([]);
   hosts.set([
     { alias: 'local', ssh_alias: null, reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
     { alias: 'oci', ssh_alias: 'oci', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: null, account_uuid: null, provisioned: true, transport: 'ssh' },
@@ -103,6 +109,25 @@ describe('AssetsWorkspace', () => {
     // Selecting an asset gives Sync its primary back.
     await fireEvent.click(screen.getByTestId('inbox-row-identity:skill/fresh'));
     expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['assets-sync']);
+    // Layers: with its list showing, Sync is still the main column's primary...
+    layersByCatalog.set({ personal: LAYERS });
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['assets-sync']);
+    // ...and with the New layer form open its Propose is, and Sync goes plain.
+    await fireEvent.click(screen.getByTestId('layers-new'));
+    expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['layer-form-submit']);
+    expect(screen.getByTestId('assets-sync')).toHaveClass('btn');
+    expect(screen.getByTestId('assets-sync')).not.toHaveClass('btn--primary');
+    expect(document.querySelectorAll('.btn--primary')).toHaveLength(1);
+    // A layer's own rename form is the Inspector's one primary: one per region.
+    await fireEvent.click(screen.getByTestId('layer-row-personal-core'));
+    await fireEvent.click(screen.getByTestId('layer-rename'));
+    expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['layer-form-submit']);
+    expect(primaries('.insp').map((b) => b.getAttribute('data-testid'))).toEqual(['layer-form-submit']);
+    // Cancelling the main form gives Sync its primary back.
+    await fireEvent.click(within(screen.getByTestId('assets-list')).getByRole('button', { name: 'Cancel' }));
+    expect(primaries('.main').map((b) => b.getAttribute('data-testid'))).toEqual(['assets-sync']);
+    expect(primaries('.insp')).toHaveLength(1);
   });
 
   it('a selected card whose verb is not on screen leaves Sync the primary, and ⌘↵ runs Sync', async () => {
@@ -975,5 +1000,157 @@ describe('AssetsWorkspace keyboard', () => {
   it('the list shows a focus ring when it has the keyboard', () => {
     const css = readFileSync('src/lib/AssetsWorkspace.svelte', 'utf8').match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';
     expect(css).toMatch(/\.body:focus-visible\s*\{[^}]*outline:\s*var\(--ring-w\) solid var\(--ring\)/);
+  });
+});
+
+const LAYER_CARD: ChangesetSummary = { id: 21, kind: 'layer', summary: 'New layer servers in personal', state: 'proposed', created_at: 1, catalogs: ['personal'] };
+const LAYER_VIEW: ChangesetView = { id: 21, kind: 'layer', summary: LAYER_CARD.summary, state: 'proposed', created_at: 1, commits: {}, undoable: false, catalogs: ['personal'], items: [
+  { position: 0, grp: 'personal', catalog: 'personal', kind: 'layer', name: 'servers', action: 'create_layer', params: { layer: 'servers' }, decider: 'person', state: 'pending' },
+] };
+async function proposeServersLayer() {
+  await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+  await fireEvent.click(screen.getByTestId('layers-new'));
+  await fireEvent.input(screen.getByTestId('layer-form-name'), { target: { value: 'servers' } });
+  await fireEvent.click(screen.getByTestId('layer-form-submit'));
+}
+
+describe('AssetsWorkspace layers (R17, R5, R6)', () => {
+  beforeEach(() => layersByCatalog.set({ personal: LAYERS }));
+
+  it('the Layers rail entry shows the Layers view, grouped by catalog, in place of the Library', async () => {
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    expect(screen.getByTestId('layers-view')).toBeTruthy();
+    expect(screen.getByTestId('layers-catalog-personal')).toBeTruthy();
+    expect(screen.getByTestId('layer-row-personal-core')).toHaveTextContent('1');
+    expect(screen.queryByTestId('assets-new')).toBeNull();
+  });
+
+  it('a selected layer opens in the Inspector; its Hosts tab says why it is on a host', async () => {
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    await fireEvent.click(screen.getByTestId('layer-row-personal-core'));
+    expect(screen.getByTestId('layer-inspector')).toBeTruthy();
+    expect(screen.getByTestId('layer-member-skill/fine')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    expect(screen.getByTestId('layer-why-oci')).toHaveTextContent('role server → extends core');
+  });
+
+  it('the personal listing stands in until every catalog’s layers have loaded', async () => {
+    layersByCatalog.set(null);
+    layerListing.set(LAYERS);
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    expect(screen.getByTestId('layer-row-personal-core')).toBeTruthy();
+  });
+
+  it('read-only: the Layers view without New layer, Propose again, rename or move', async () => {
+    render(AssetsWorkspace, { ...handlers(), readOnly: true });
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    expect(screen.queryByTestId('layers-new')).toBeNull();
+    expect(screen.queryByTestId('layers-propose')).toBeNull();
+    await fireEvent.click(screen.getByTestId('layer-row-personal-core'));
+    expect(screen.getByTestId('layer-member-skill/fine')).toBeTruthy();
+    expect(screen.queryByTestId('layer-rename')).toBeNull();
+    expect(screen.queryByTestId('layer-move-skill/fine')).toBeNull();
+  });
+
+  it('proposing a layer change selects its card in the Inbox and offers Apply now', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_propose_layer_change') return LAYER_VIEW;
+      if (cmd === 'catalog_list_changesets') return [LAYER_CARD];
+      if (cmd === 'catalog_get_changeset') return LAYER_VIEW;
+      if (cmd === 'catalog_apply_changeset') return { ...LAYER_VIEW, state: 'applied', undoable: true, commits: { personal: 'abc1234' } };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    await proposeServersLayer();
+    expect(cardCalls('catalog_propose_layer_change')[0][1]).toEqual({ args: { change: { op: 'create', catalog: 'personal', layer: 'servers', axis: 'context' } } });
+    await waitFor(() => expect(screen.getByTestId('assets-inbox')).toBeTruthy());
+    await waitFor(() => expect(document.querySelector('[data-row-key="card:21"]')?.getAttribute('aria-current')).toBe('true'));
+    expect(screen.getByTestId('assets-rail-inbox').getAttribute('aria-current')).toBe('page');
+    expect(screen.queryByTestId('layer-form')).toBeNull();
+    const t = get(toasts).find((x) => x.message === 'Card ready: New layer servers in personal');
+    expect(t?.action?.label).toBe('Apply now');
+    t!.action!.run();
+    await waitFor(() => expect(cardCalls('catalog_apply_changeset')).toEqual([['catalog_apply_changeset', { args: { id: 21 } }]]));
+  });
+
+  it('renaming from the Inspector proposes the change for that layer', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_propose_layer_change') return { ...LAYER_VIEW, summary: 'Rename core → base' };
+      if (cmd === 'catalog_list_changesets') return [LAYER_CARD];
+      if (cmd === 'catalog_get_changeset') return LAYER_VIEW;
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    await fireEvent.click(screen.getByTestId('layer-row-personal-core'));
+    await fireEvent.click(screen.getByTestId('layer-rename'));
+    await fireEvent.input(screen.getByTestId('layer-form-name'), { target: { value: 'base' } });
+    await fireEvent.click(screen.getByTestId('layer-form-submit'));
+    await waitFor(() => expect(screen.getByTestId('assets-inbox')).toBeTruthy());
+    expect(cardCalls('catalog_propose_layer_change')[0][1]).toEqual({ args: { change: { op: 'rename', catalog: 'personal', layer: 'core', to: 'base' } } });
+  });
+
+  it('an older hub refusing propose_layer is worded, and the form stays for another try', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_propose_layer_change') throw { code: 'E_INVALID', message: 'unknown changesets action: propose_layer' };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    await proposeServersLayer();
+    await waitFor(() => expect(get(toasts).some((t) => /^The hub is older/.test(t.message))).toBe(true));
+    expect(screen.getByTestId('layers-view')).toBeTruthy();
+    expect(screen.getByTestId('layer-form')).toBeTruthy();
+  });
+
+  it('another refusal is shown as an error toast', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_propose_layer_change') throw { code: 'E_INVALID', message: 'layer exists' };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    await proposeServersLayer();
+    await waitFor(() => expect(get(toasts).some((t) => t.kind === 'error' && t.message.includes('layer exists'))).toBe(true));
+  });
+
+  it('Propose again re-proposes, reloads the cards and says how many are open', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_propose_changesets') return [NEW_CARD];
+      if (cmd === 'catalog_list_changesets') return [NEW_CARD, LAYER_CARD];
+      if (cmd === 'catalog_get_changeset') return NEW_VIEW;
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    await fireEvent.click(screen.getByTestId('layers-propose'));
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'Proposed again: 2 open cards')).toBe(true));
+    expect(cardCalls('catalog_list_changesets')).toHaveLength(1);
+  });
+
+  it('leaving the Layers view closes the New layer form', async () => {
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    await fireEvent.click(screen.getByTestId('layers-new'));
+    expect(screen.getByTestId('layer-form')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('assets-rail-inbox'));
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    expect(screen.queryByTestId('layer-form')).toBeNull();
+  });
+
+  it('the form offers only the catalogs this window may write', async () => {
+    const st = (name: string, o: Partial<CatalogStatus> = {}) => ({ name, org_id: null, state: 'loaded', ...o }) as CatalogStatus;
+    catalogStatuses.set([st('personal'), st('acme', { org_id: 5, granted: [] }), st('broken', { state: 'problem' })]);
+    hubStatus.set({ ...STANDALONE, remote: true, client_name: 'mac' });
+    layersByCatalog.set({ personal: LAYERS, acme: LAYERS });
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-layers'));
+    await fireEvent.click(screen.getByTestId('layers-new'));
+    const opts = Array.from(screen.getByTestId('layer-form-catalog').querySelectorAll('option')).map((o) => o.value);
+    expect(opts).toEqual(['personal']);
+    // A catalog it may not write opens its layers read-only.
+    await fireEvent.click(screen.getByTestId('layer-row-acme-core'));
+    expect(screen.queryByTestId('layer-rename')).toBeNull();
   });
 });
