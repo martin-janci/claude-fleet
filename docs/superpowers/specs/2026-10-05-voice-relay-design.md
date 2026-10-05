@@ -49,8 +49,9 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
   `/usr/bin/arecord` (seen on `mefistos`) and does not depend on the
   non-interactive shell's `PATH` (seen on `-htz`, `-oci`). A session started
   before provisioning picks it up on its next restart.
-- Reads `~/.claude-fleet/voice.env` (mode 600), written by provisioning next
-  to the hook config: `voice.env` (URL only); bearer read with `curl -H @~/.claude/fleet-hook.headers`.
+- Reads `~/.claude-fleet/voice/voice.env`, written by provisioning: the fleet
+  base URL as the host sees it (URL only); the bearer is read with `curl -H
+  @~/.claude/fleet-hook.headers`.
 - Claude Code calls exactly three forms; the stand-in accepts only these:
   - `arecord --version` → exit 0.
   - `arecord -f S16_LE -r 16000 -c 1 -t raw /dev/null` (probe, killed after
@@ -81,7 +82,7 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
 - Per session, at most one claim: `{ owner (Caller identity), source,
   claimed_at, last_used_at }`. Last claim wins; a replaced owner's source is
   told so.
-- A claim ends on `voice_claim { on: false }`, on its source going away
+- A claim ends on the desktop's `voice_release`, on its source going away
   (websocket closed, desktop detached), or after `voice.claim_ttl_secs`
   unused.
 - `VoiceSource` is a trait: `start(sink) -> CaptureHandle`, dropped to stop.
@@ -110,18 +111,18 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
   A dev build (`pnpm tauri dev`) is attributed to the launching terminal.
 - **UI:** a 🎤 toggle in the terminal header (`TerminalView.svelte`, beside
   the Transfer chip): grey off, highlighted when claimed, a red dot while
-  capturing (from `voice:changed`). Disabled with a tooltip when the host is
+  capturing (from `voice:state`). Disabled with a tooltip when the host is
   agent-transport, not provisioned for voice, or `voice.enabled` is off.
   The claim follows the attached session (only one PTY is attached at a
   time). First use shows: "Run `/voice` in the session, then hold space."
   Fleet never runs `/voice` itself.
-- **Commands:** `voice_claim { session_id, on }`, `voice_status` are `SameInBoth`
-  Tauri commands.
+- **Commands:** `voice_claim { session_id, on }` and `voice_release { session_id }`
+  are `SameInBoth` Tauri commands.
 
 ### Data flow
 
 ```
-🎤 on → voice_claim{session_id, on:true} → registry: claim(session, source)
+🎤 on → voice_claim{session_id, on:true} (desktop command) → registry: claim(session, source)
 /voice, hold space → claude spawns arecord (stand-in)
   → curl -N <base>/voice/capture?tmux=<name>   (host token, over the tunnel)
   → registry: claim? → source.start()          (microphone opens)
@@ -133,8 +134,9 @@ release space → claude kills arecord → connection drops
 ## Security
 
 - `/voice/capture`: a host token, for a session on that host only.
-- `voice_claim`, `/voice/source`: the master or a paired `full` device, for a
-  session inside its `OrgScope`; readonly, peer and host tokens are refused.
+- `voice_claim` is a desktop command (standalone and hub-paired). `/voice/source`
+  is the only hub-side claim surface (master or paired `full` device, for a
+  session inside its `OrgScope`; readonly, peer and host tokens are refused).
   Rows in `mcp/tools/tests_isolation.rs`.
 - No claim, no microphone. A claim exists only through a person's action.
 - Limits: `voice.max_capture_secs` (default 300), one capture per session,
@@ -149,7 +151,7 @@ release space → claude kills arecord → connection drops
 | Case | What happens |
 |---|---|
 | No claim / fleet down | stand-in tries the 4713 fallback, else exit 1 with a reason; Claude Code reports a failed recording |
-| macOS denies the microphone | `voice:changed` error; header shows "Microphone denied — System Settings → Privacy → Microphone"; capture response closed |
+| macOS denies the microphone | `voice:state` error; header shows "Microphone denied — System Settings → Privacy → Microphone"; capture response closed |
 | hub ↔ desktop websocket drops mid-capture | capture closed, claim released |
 | capture exceeds the limit | server closes the response |
 | second capture on the same session | 409 |
