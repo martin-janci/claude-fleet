@@ -14,6 +14,13 @@
     onsync,
     ondeleted,
     startInEdit = false,
+    /** Assets M5 (R19): which part the Inspector shows — `overview` (title,
+     *  actions, lint, description, tags), `hosts` (the host × harness
+     *  matrix), `source` (the editor or the rendered preview). `all` (the
+     *  default) is the whole detail, as before. Switching it never refetches. */
+    section = 'all',
+    /** Edit lives in Source: ask the Inspector to show it. */
+    onsection,
   }: {
     kind: string;
     name: string;
@@ -29,7 +36,11 @@
      *  this component by kind+name so a fresh instance — and a fresh read
      *  of this prop — is created per selection. */
     startInEdit?: boolean;
+    section?: 'all' | 'overview' | 'hosts' | 'source';
+    onsection?: (s: 'source') => void;
   } = $props();
+
+  const show = (s: 'overview' | 'hosts' | 'source') => section === 'all' || section === s;
 
   let detail = $state<AssetDetail | null>(null);
   let error = $state<string | null>(null);
@@ -40,8 +51,12 @@
   // change.
   let reloadKey = $state(0);
 
+  // Only a real change of asset (or a write) refetches — not a re-render of
+  // the same props (a `$derived` is equality-checked; the Inspector flips
+  // `section` per tab without ever reading the asset again).
+  const target = $derived(JSON.stringify([kind, name]));
   $effect(() => {
-    const k = kind, n = name;
+    const [k, n] = JSON.parse(target) as [string, string];
     void reloadKey;
     detail = null; error = null;
     getAsset(k, n).then((r) => {
@@ -154,6 +169,7 @@
   {:else if !detail}
     <p class="muted">Loading…</p>
   {:else}
+    {#if show('overview')}
     <div class="title-row">
       <h3 data-testid="asset-detail-title"><span class="kind">{detail.asset.kind}</span> {detail.asset.name} <span class="ver">v{detail.asset.version}</span></h3>
       <div class="title-actions">
@@ -166,7 +182,7 @@
         <button class="sync-btn" onclick={() => (showAuthorDialog = true)} disabled={authorBlocked !== null} title={authorBlocked ?? ''} data-testid="asset-open-session">Open in session</button>
         <button class="sync-btn" onclick={toggleLint} data-testid="asset-lint">{lintBusy ? 'Linting…' : 'Lint'}</button>
         {#if !editing}
-          <button class="sync-btn" onclick={() => (editing = true)} data-testid="asset-edit">Edit</button>
+          <button class="sync-btn" onclick={() => { editing = true; onsection?.('source'); }} data-testid="asset-edit">Edit</button>
         {/if}
         <button class="sync-btn danger" onclick={() => (showDeleteConfirm = true)} data-testid="asset-delete">Delete</button>
       </div>
@@ -188,6 +204,9 @@
     {#if detail.asset.install_as}<p class="install-as" data-testid="asset-install-as">installs as <code>{detail.asset.install_as}</code></p>{/if}
     {#if detail.asset.tags?.length}<p class="tags">{#each detail.asset.tags ?? [] as t}<span class="tag">{t}</span>{/each}</p>{/if}
 
+    {/if}
+
+    {#if show('hosts')}
     <h4>Hosts</h4>
     <table class="matrix">
       <thead><tr><th>host</th>{#each harnesses as h}<th>{h}</th>{/each}</tr></thead>
@@ -209,7 +228,9 @@
         {/each}
       </tbody>
     </table>
+    {/if}
 
+    {#if show('source')}
     {#if editing}
       <h4>Edit</h4>
       <AssetEditor asset={detail.asset} onsaved={onSaved} oncancel={onEditCancel} />
@@ -239,6 +260,7 @@
         {/each}
         {#if preview.plan.files.length === 0 && preview.plan.merges.length === 0}<p class="muted">Nothing to install.</p>{/if}
       {/if}
+    {/if}
     {/if}
   {/if}
 </div>
