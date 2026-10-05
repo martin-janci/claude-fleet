@@ -112,24 +112,46 @@ CREATE TABLE IF NOT EXISTS conversation_owners (
 -- Both triggers name only `claude_session_id` (there since 014) and
 -- `owner_person_id` (added above) plus the table above, so they compile
 -- under the same rules as the row-version trigger below.
-CREATE TRIGGER IF NOT EXISTS trg_conversation_owner_on_session_insert
+--
+-- **Why `ON CONFLICT … DO NOTHING` and not `INSERT OR IGNORE`.** They mean
+-- the same thing in a statement run on its own, and NOT inside a trigger
+-- whose firing statement carries its own conflict clause: SQLite lets the
+-- OUTER statement's conflict handling override an `OR` clause in a trigger
+-- body, and `store/reconcile.rs` writes `sessions` with
+-- `… ON CONFLICT(host_alias, tmux_name) DO UPDATE SET …`. So the `OR IGNORE`
+-- these triggers were first written with was silently downgraded to ABORT on
+-- exactly the reconcile path, and a second session reusing a
+-- `claude_session_id` — a resume, a recreate, `resume_claude_session_id` —
+-- failed the whole upsert with
+-- `E_SQLITE: UNIQUE constraint failed: conversation_owners.claude_session_id`.
+-- It was hub-e2e's work-graph block that caught it, 33 checks deep in a
+-- cascade from one root failure. An upsert's `DO NOTHING` is part of the
+-- statement rather than an `OR` clause, so nothing overrides it, and
+-- first-writer-wins holds on every path. DROP before CREATE rather than
+-- `IF NOT EXISTS`, so a database that already ran the first version of this
+-- unreleased migration is corrected rather than left with the old body.
+DROP TRIGGER IF EXISTS trg_conversation_owner_on_session_insert;
+CREATE TRIGGER trg_conversation_owner_on_session_insert
 AFTER INSERT ON sessions
 WHEN NEW.claude_session_id IS NOT NULL AND NEW.owner_person_id IS NOT NULL
 BEGIN
-  INSERT OR IGNORE INTO conversation_owners
+  INSERT INTO conversation_owners
     (claude_session_id, owner_person_id, first_seen_at)
   VALUES (NEW.claude_session_id, NEW.owner_person_id,
-          CAST(strftime('%s', 'now') AS INTEGER));
+          CAST(strftime('%s', 'now') AS INTEGER))
+  ON CONFLICT(claude_session_id) DO NOTHING;
 END;
 
-CREATE TRIGGER IF NOT EXISTS trg_conversation_owner_on_session_update
+DROP TRIGGER IF EXISTS trg_conversation_owner_on_session_update;
+CREATE TRIGGER trg_conversation_owner_on_session_update
 AFTER UPDATE OF claude_session_id, owner_person_id ON sessions
 WHEN NEW.claude_session_id IS NOT NULL AND NEW.owner_person_id IS NOT NULL
 BEGIN
-  INSERT OR IGNORE INTO conversation_owners
+  INSERT INTO conversation_owners
     (claude_session_id, owner_person_id, first_seen_at)
   VALUES (NEW.claude_session_id, NEW.owner_person_id,
-          CAST(strftime('%s', 'now') AS INTEGER));
+          CAST(strftime('%s', 'now') AS INTEGER))
+  ON CONFLICT(claude_session_id) DO NOTHING;
 END;
 
 -- `owner_person_id` and `visibility` are both `SessionRow` fields, so

@@ -1381,6 +1381,92 @@ mod tests {
         );
     }
 
+    /// Migration 097's conversation-owner triggers have to survive the
+    /// RECONCILE path, and the first version of them did not.
+    ///
+    /// `INSERT OR IGNORE` and `ON CONFLICT … DO NOTHING` mean the same thing
+    /// in a statement run on its own — and NOT inside a trigger body, when
+    /// the statement that FIRES the trigger carries its own conflict clause:
+    /// SQLite lets the outer one override an `OR` clause in the body, and
+    /// `upsert_session_in_tx` writes `… ON CONFLICT(host_alias, tmux_name)
+    /// DO UPDATE SET …`. So the IGNORE was silently an ABORT on exactly this
+    /// path, and a second row resuming a conversation another row had
+    /// already recorded failed the WHOLE pass with
+    /// `UNIQUE constraint failed: conversation_owners.claude_session_id`.
+    ///
+    /// Nothing in this crate caught it: every other test of those triggers
+    /// writes `sessions` with a plain statement, which honours `OR IGNORE`.
+    /// `scripts/hub-e2e.sh`'s work-graph block did, 33 failed checks deep in
+    /// a cascade from one root failure — which is the argument for keeping
+    /// that block gated-but-run in CI rather than trusting the unit suite.
+    #[test]
+    fn a_reconcile_pass_may_reuse_a_claude_session_id_and_the_first_owner_stands() {
+        let (mut store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let ada = store.create_person("ada", None).unwrap().id;
+        let bob = store.create_person("bob", None).unwrap().id;
+        assert_ne!(ada, bob, "two distinct owners, or this measures nothing");
+        let keep = vec!["a".to_string(), "b".to_string()];
+
+        // Two live rows on one host, one owned by each person.
+        store
+            .apply_host_reconcile(HostReconcile {
+                sessions: &[live_session("a", pid, 10), live_session("b", pid, 10)],
+                keep: &keep,
+                ..empty_probe("alpha", 1)
+            })
+            .unwrap();
+        let a = store.get_session("a", "alpha").unwrap().unwrap().id;
+        let b = store.get_session("b", "alpha").unwrap().unwrap().id;
+        store.claim_if_unclaimed(a, Some(ada)).unwrap();
+        store.claim_if_unclaimed(b, Some(bob)).unwrap();
+
+        // Ada's row picks up a conversation: the trigger records it as hers.
+        store
+            .apply_host_reconcile(HostReconcile {
+                sessions: &[
+                    ReconcileSession {
+                        claude_session_id: Some("conv-x".to_string()),
+                        ..live_session("a", pid, 11)
+                    },
+                    live_session("b", pid, 11),
+                ],
+                keep: &keep,
+                ..empty_probe("alpha", 2)
+            })
+            .unwrap();
+        assert_eq!(store.conversation_owner("conv-x").unwrap(), Some(ada));
+
+        // Bob's row now resumes the SAME conversation. This is the pass that
+        // used to abort — and the one the e2e hit, because a resume, a
+        // recreate and `resume_claude_session_id` all reach it.
+        store
+            .apply_host_reconcile(HostReconcile {
+                sessions: &[
+                    ReconcileSession {
+                        claude_session_id: Some("conv-x".to_string()),
+                        ..live_session("a", pid, 12)
+                    },
+                    ReconcileSession {
+                        claude_session_id: Some("conv-x".to_string()),
+                        ..live_session("b", pid, 12)
+                    },
+                ],
+                keep: &keep,
+                ..empty_probe("alpha", 3)
+            })
+            .expect("a reused claude_session_id must not fail the reconcile pass");
+
+        assert_eq!(
+            store.conversation_owner("conv-x").unwrap(),
+            Some(ada),
+            "first writer wins: Bob's row resuming the conversation must not \
+             re-home who it belonged to — that record is what the resume gate \
+             and the summary fence both ask about"
+        );
+    }
+
     #[test]
     fn upsert_session_in_tx_identical_row_pushes_no_change() {
         // Direct, transaction-level check of the BE-11 diff: the same upsert
