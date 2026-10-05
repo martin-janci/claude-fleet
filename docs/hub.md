@@ -1008,6 +1008,7 @@ fleet-hub client bind contractor-phone 2
 fleet-hub client unbind contractor-phone
 fleet-hub client bind-person ada-laptop ada
 fleet-hub client unbind-person ada-laptop
+fleet-hub person list                       # which person each `person <id>` is
 fleet-hub client grant mac-desktop assets
 fleet-hub client ungrant mac-desktop assets
 ```
@@ -1022,9 +1023,10 @@ contractor-phone  full      person 4  org 2  -                  -               
 kiosk             readonly  -         -      -                  -                  2026-09-17 09:12Z  -                  -
 ```
 
-PERSON is whose device it is, printed as an id (`person 3`); a dash means nobody
-— a device `client unbind-person` cut loose — and such a device sees no private
-session at all. See *Who owns a session*.
+PERSON is whose device it is, printed as an id (`person 3`) because that is what
+the device row carries; `fleet-hub person list` names the ids. A dash means
+nobody — a device `client unbind-person` cut loose — and such a device sees no
+private session at all. See *Who owns a session*.
 
 The token itself is never shown again: only its SHA-256 is stored, and the
 plaintext exists in the one `/pair` response that minted it. Lost it? Revoke
@@ -1113,14 +1115,16 @@ What a client may do:
   it back — the device stays paired (only `client revoke` ends that) but
   belongs to nobody and then sees no private session at all. The person is
   created the first time you name them, so a new colleague's laptop is one
-  command. Both `bind-person` and `unbind-person` write `state.db` directly,
-  so neither needs a running hub, and both take effect from that device's
-  next request (an open event stream ends at its next beat). Leaving
-  `--person` out pairs the device to **this hub's own owner**, which is what
-  makes pairing your own second phone need nothing new; a peer hub link and
-  an updater token are nobody's device and are refused either way. Only the
-  hub owner's own device reaches the fleet's settings — see *On a paired
-  device* under *Configuration*.
+  command; `fleet-hub person list` is what maps the `person <id>` in the table
+  above back to a name, and `person rename` / `person disable` are the other
+  two things you can do to one. Both `bind-person` and `unbind-person` write
+  `state.db` directly, so neither needs a running hub, and both take effect
+  from that device's next request (an open event stream ends at its next
+  beat). Leaving `--person` out pairs the device to **this hub's own owner**,
+  which is what makes pairing your own second phone need nothing new; a peer
+  hub link and an updater token are nobody's device and are refused either
+  way. Only the hub owner's own device reaches the fleet's settings — see *On
+  a paired device* under *Configuration*.
 - **Sharing a session, and the sessions nobody owns** (multi-user M1). A
   session a person starts is private to them; they share it with one
   colleague at a time, at `watch` (read it) or `drive` (also prompt it),
@@ -1237,9 +1241,29 @@ fleet-hub pair --name ada-laptop --person ada   # a colleague's first device
 fleet-hub pair --name my-phone                  # no --person: your own
 fleet-hub client bind-person ada-phone ada      # hand an existing device over
 fleet-hub client unbind-person ada-phone        # take it back; still paired
+fleet-hub person list [--json]                  # everyone, with their ids
+fleet-hub person rename ada --to ada.lovelace   # or --display-name "Ada L."
+fleet-hub person disable ada --force            # end their reach (see below)
 fleet-hub session unclaimed [--host <alias>]    # the sessions nobody owns
 fleet-hub session claim 42 --person ada         # give one to a person
 ```
+
+`person list` is the only thing that maps an id to a human: `client list`
+names a device's person as `person 3`, because a device row carries an id, and
+this is what says who 3 is. It prints people and nothing else — the id, the
+name, the display name, which row is this hub's own owner, when each was
+created, and when a disabled one was disabled. It never prints a person's
+sessions, nor a count of them: there is no admin view of somebody else's work
+on a hub, and this listing is not a way around that. Disabled people are in
+it on purpose — a grant and a session still point at them, and a row the
+listing hid would be one you could not act on.
+
+`person rename` changes the text and nothing else. Every grant is addressed to
+the person's **id**, so a rename cannot hand somebody's share to a different
+human, and the owner flag does not travel with the name either — rename this
+hub's placeholder `owner` to your own name whenever you like. A name only a
+*disabled* person holds is free to take, so a departed colleague never blocks a
+new one; a name a **live** person holds is refused.
 
 A person's reach is the devices bound to them. **Disabling a person ends both
 halves of it in one transaction:** every device of theirs is revoked, and every
@@ -1252,13 +1276,28 @@ by anyone else. That is the whole answer to "a colleague has left" — their
 access ends, their work is not re-attributed, and no admin inherits it. The
 hub's own owner cannot be disabled: every gate keys on that row.
 
-Two things to know about this release. There is no `fleet-hub` subcommand and no
-tool that disables a person, so what you have today is `fleet-hub client revoke
-<name>` for each of their devices — the first half only, which leaves the shares
-made *to* them standing until each session's owner revokes them. And
-`client list` prints a person as an id (`person 3`), with a dash for a device
-that belongs to nobody; nothing lists people by name yet, so keep a note of the
-names you pair.
+`fleet-hub person disable <name>` is how you do it, and it does both halves in
+that one transaction. It refuses until you add `--force`, and the refusal is
+the confirmation: it prints how many devices and how many grants would go, and
+writes nothing. With `--force` it says what it actually revoked, counted
+afterwards, so you can see both halves happened:
+
+```
+disabled ada (person 3): 2 device(s) revoked, 1 grant(s) to them revoked
+```
+
+What it does **not** do, plainly: it does not re-attribute their sessions —
+those rows stay theirs and stay private, readable by nobody, and no command
+here moves them; it does not touch the grants *they* made, which belong to each
+session's own owner; it cannot disable this hub's owner, because every access
+gate keys on that row (rename the owner instead, or revoke their devices one at
+a time with `client revoke`); and **there is no re-enable in this release** —
+`person disable` has no inverse, and a device cannot be bound to a disabled
+person, so plan on adding a fresh person if someone comes back. No tool over
+the control API disables anybody either: this is a command on the hub machine,
+run as the person at its console, like `client bind-person` and `session
+claim`. It needs no running hub, and a running one honours it from its next
+request.
 
 ### Two people on one host
 

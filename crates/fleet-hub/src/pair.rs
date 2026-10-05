@@ -372,10 +372,10 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             .and_then(|v| v.as_i64())
             .map_or_else(|| "-".to_string(), |p| format!("person {p}"))
     };
-    let cells: Vec<[String; 9]> = rows
+    let cells: Vec<Vec<String>> = rows
         .iter()
         .map(|r| {
-            [
+            vec![
                 field(r, "name"),
                 field(r, "mode"),
                 person(r),
@@ -388,19 +388,30 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
             ]
         })
         .collect();
-    let header = [
-        "NAME",
-        "MODE",
-        "PERSON",
-        "ORG",
-        "TRUSTED",
-        "ASSETS",
-        "CREATED",
-        "LAST SEEN",
-        "REVOKED",
-    ];
-    let mut width = header.map(str::len);
-    for row in &cells {
+    table(
+        &[
+            "NAME",
+            "MODE",
+            "PERSON",
+            "ORG",
+            "TRUSTED",
+            "ASSETS",
+            "CREATED",
+            "LAST SEEN",
+            "REVOKED",
+        ],
+        &cells,
+    )
+}
+
+/// A header plus one line per row, columns padded to the widest cell.
+///
+/// The one table layout this CLI has: `client list` and `person list`
+/// (multi-user M1) both render through it, so a second copy cannot drift
+/// from this one on the two things that are easy to get wrong below.
+pub(crate) fn table(header: &[&str], rows: &[Vec<String>]) -> String {
+    let mut width: Vec<usize> = header.iter().map(|h| h.len()).collect();
+    for row in rows {
         for (w, c) in width.iter_mut().zip(row) {
             *w = (*w).max(display_width(c));
         }
@@ -409,9 +420,9 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
     // Padding is counted in terminal columns, not `char`s: `{:<w$}` pads to a
     // char count, which would under-pad a CJK or emoji name (two columns per
     // char) and misalign every column after it.
-    let line = |row: &[String; 9]| {
+    let line = |row: &[String]| {
         let mut s = String::new();
-        for (i, (cell, w)) in row.iter().zip(width).enumerate() {
+        for (i, (cell, w)) in row.iter().zip(&width).enumerate() {
             s.push_str(cell);
             if i + 1 == row.len() {
                 break;
@@ -421,9 +432,9 @@ pub fn client_table(rows: &[serde_json::Value]) -> String {
         }
         s
     };
-    let head = line(&header.map(str::to_string));
-    std::iter::once(head)
-        .chain(cells.iter().map(line))
+    let head: Vec<String> = header.iter().map(|h| (*h).to_string()).collect();
+    std::iter::once(line(&head))
+        .chain(rows.iter().map(|r| line(r)))
         .collect::<Vec<_>>()
         .join("\n")
 }
