@@ -14,12 +14,15 @@ pub mod hub_source;
 #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 mod resample;
 
-use fleet_core::service::voice::{registry, VoiceSource};
+use fleet_core::service::voice::{registry, RevokeReason, VoiceSource};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
 
 /// The event the UI follows: `{ session_id, state, error? }`, `state` one of
-/// `claimed` / `capturing` / `released` / `error`.
+/// `claimed` / `capturing` / `stopped` / `released` / `error`. `stopped` is a
+/// capture's end and says nothing about the claim (it can follow a
+/// `released`); a `released` with an `error` is a claim taken elsewhere or
+/// lapsed idle.
 pub const STATE_EVENT: &str = "voice:state";
 
 /// The owner a standalone claim is registered under.
@@ -41,6 +44,26 @@ pub fn payload(session_id: i64, state: &str, error: Option<String>) -> serde_jso
 pub fn cpal_source(session_id: i64, emit: Emit) -> Arc<dyn VoiceSource> {
     Arc::new(capture::CpalSource {
         on_state: Arc::new(move |state, error| emit(payload(session_id, state, error))),
+    })
+}
+
+/// What the UI is told when a hub socket ends without this window
+/// releasing it; `None` for a release (whoever released already told it).
+fn hub_ended_report(
+    ended: Result<hub_source::Ended, String>,
+) -> Option<(&'static str, Option<String>)> {
+    let text = |s: &str| Some(s.to_string());
+    Some(match ended {
+        // Unreachable: `run` answers Released only once `stop` is cancelled.
+        Ok(hub_source::Ended::Released) => return None,
+        Ok(hub_source::Ended::ClaimedElsewhere) => {
+            ("released", text(RevokeReason::Replaced.text()))
+        }
+        Ok(hub_source::Ended::Idle) => ("released", text(RevokeReason::Expired.text())),
+        Ok(hub_source::Ended::HubClosed) => {
+            ("released", text("the hub closed the microphone connection"))
+        }
+        Err(e) => ("error", Some(e)),
     })
 }
 
@@ -138,19 +161,9 @@ impl VoiceState {
                 return;
             }
             *slot = None;
-            let (state, error) = match ended {
-                // Unreachable: `run` answers Released only once `stop` is cancelled.
-                Ok(hub_source::Ended::Released) => return,
-                Ok(hub_source::Ended::ClaimedElsewhere) => {
-                    ("released", Some("microphone claimed elsewhere".to_string()))
-                }
-                Ok(hub_source::Ended::HubClosed) => (
-                    "released",
-                    Some("the hub closed the microphone connection".to_string()),
-                ),
-                Err(e) => ("error", Some(e)),
-            };
-            emit(payload(session_id, state, error));
+            if let Some((state, error)) = hub_ended_report(ended) {
+                emit(payload(session_id, state, error));
+            }
         });
     }
 
@@ -213,5 +226,47 @@ mod tests {
                 (2, "released".into()),
             ]
         );
+    }
+
+    #[test]
+    fn a_standalone_claim_taken_by_another_device_turns_the_mic_off_saying_why() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&events);
+        let emit: Emit = Arc::new(move |v| seen.lock().unwrap().push(v));
+        let state = VoiceState::default();
+        state.claim_local(31, cpal_source(31, Arc::clone(&emit)), &emit);
+        registry().claim(31, "client:phone", Arc::new(Silent));
+        let last = events.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(
+            last,
+            payload(31, "released", Some("microphone claimed elsewhere".into()))
+        );
+        // This window's later release is a no-op on the registry: the
+        // phone's claim stays.
+        state.release(&emit);
+        assert_eq!(registry().owner(31).as_deref(), Some("client:phone"));
+    }
+
+    #[test]
+    fn a_hub_socket_that_ends_on_its_own_tells_the_ui_why() {
+        use hub_source::Ended;
+        let r = |e| hub_ended_report(e).map(|(s, err)| (s, err.unwrap_or_default()));
+        assert_eq!(r(Ok(Ended::Released)), None);
+        assert_eq!(
+            r(Ok(Ended::ClaimedElsewhere)),
+            Some(("released", "microphone claimed elsewhere".into()))
+        );
+        assert_eq!(
+            r(Ok(Ended::Idle)),
+            Some(("released", "microphone idle — turn 🎤 on again".into()))
+        );
+        assert_eq!(
+            r(Ok(Ended::HubClosed)),
+            Some((
+                "released",
+                "the hub closed the microphone connection".into()
+            ))
+        );
+        assert_eq!(r(Err("boom".into())), Some(("error", "boom".into())));
     }
 }

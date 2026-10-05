@@ -2,23 +2,32 @@
 //! (that is the claim), answer `{"start":n}` by opening the microphone and
 //! sending binary PCM, `{"stop":n}` by closing it.
 
-use fleet_core::service::voice::{VoiceSource, PCM_QUEUE};
+use fleet_core::service::voice::{RevokeReason, VoiceSource, PCM_QUEUE};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http, Message};
-
-/// The close code the hub sends when this claim was replaced or released
-/// elsewhere (`mcp/voice_route.rs`).
-const CLOSE_CLAIMED_ELSEWHERE: u16 = 4001;
 
 /// How a socket that did not fail came to an end.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Ended {
     /// This window released or replaced the claim (`stop`).
     Released,
-    /// Another device claimed the session's microphone on the hub.
+    /// Another device claimed the session's microphone on the hub (4001).
     ClaimedElsewhere,
+    /// The claim lapsed unused (`voice.claim_ttl_secs`) and a recording
+    /// found it so (4002).
+    Idle,
     /// The hub closed the socket for any other reason.
     HubClosed,
+}
+
+/// What the hub's close code (if any) says about how the claim ended
+/// (`RevokeReason::close_code`, shared with `mcp/voice_route.rs`).
+pub fn ended_by_close(code: Option<u16>) -> Ended {
+    match code.and_then(RevokeReason::from_close_code) {
+        Some(RevokeReason::Replaced) => Ended::ClaimedElsewhere,
+        Some(RevokeReason::Expired) => Ended::Idle,
+        None => Ended::HubClosed,
+    }
 }
 
 /// The websocket upgrade for `/voice/source` under the hub's `base_url`
@@ -122,12 +131,7 @@ pub async fn run(
                     }
                 }
                 Some(Ok(Message::Close(frame))) => {
-                    return Ok(match frame {
-                        Some(f) if u16::from(f.code) == CLOSE_CLAIMED_ELSEWHERE => {
-                            Ended::ClaimedElsewhere
-                        }
-                        _ => Ended::HubClosed,
-                    });
+                    return Ok(ended_by_close(frame.map(|f| u16::from(f.code))));
                 }
                 None => return Ok(Ended::HubClosed),
                 Some(Err(e)) => return Err(e.to_string()),
@@ -159,5 +163,13 @@ mod tests {
             "ws://127.0.0.1:7777/voice/source?session_id=1"
         );
         assert!(upgrade_request("ftp://hub", "tok", 1).is_err());
+    }
+
+    #[test]
+    fn the_hubs_close_code_says_how_the_claim_ended() {
+        assert_eq!(ended_by_close(Some(4001)), Ended::ClaimedElsewhere);
+        assert_eq!(ended_by_close(Some(4002)), Ended::Idle);
+        assert_eq!(ended_by_close(Some(1000)), Ended::HubClosed);
+        assert_eq!(ended_by_close(None), Ended::HubClosed);
     }
 }

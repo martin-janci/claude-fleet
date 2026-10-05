@@ -1,17 +1,24 @@
 //! The desktop's microphone as a `VoiceSource`: the default input through
 //! cpal, opened in `start` and closed when the returned guard drops.
 
-use fleet_core::service::voice::{PcmTx, VoiceSource};
+use fleet_core::service::voice::{PcmTx, RevokeReason, VoiceSource};
 
 pub fn supported() -> bool {
     cfg!(any(target_os = "macos", target_os = "windows"))
 }
 
 pub struct CpalSource {
-    /// Told about start / stop / error for the UI (`voice:state`). Unread
-    /// where there is no capture.
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    /// Told about start / stop / error / revocation for the UI
+    /// (`voice:state`).
     pub on_state: std::sync::Arc<dyn Fn(&'static str, Option<String>) + Send + Sync>,
+}
+
+impl CpalSource {
+    /// The registry dropped this window's standalone claim (another device
+    /// claimed the session, or it lapsed idle): the 🎤 turns off, saying why.
+    fn tell_revoked(&self, reason: RevokeReason) {
+        (self.on_state)("released", Some(reason.text().to_string()));
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -88,7 +95,11 @@ impl VoiceSource for CpalSource {
                         on_state("capturing", None);
                         let _ = stop_rx.recv();
                         drop(stream);
-                        on_state("claimed", None);
+                        // Not "claimed": a capture also stops because the
+                        // claim was released, and this arrives after that
+                        // "released". The UI returns to claimed only from
+                        // capturing.
+                        on_state("stopped", None);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -103,11 +114,19 @@ impl VoiceSource for CpalSource {
             .map_err(|_| "the microphone did not open".to_string())??;
         Ok(Box::new(stop_tx))
     }
+
+    fn revoked(&self, reason: RevokeReason) {
+        self.tell_revoked(reason);
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl VoiceSource for CpalSource {
     fn start(&self, _tx: PcmTx) -> Result<Box<dyn Send>, String> {
         Err("voice relay is not supported on this platform".into())
+    }
+
+    fn revoked(&self, reason: RevokeReason) {
+        self.tell_revoked(reason);
     }
 }

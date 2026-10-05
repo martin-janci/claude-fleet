@@ -15,7 +15,8 @@ export interface VoiceState {
 
 interface VoiceStatePayload {
   session_id: number;
-  state: 'claimed' | 'capturing' | 'released' | 'error';
+  /** `stopped`: a capture ended; the claim may or may not still be held. */
+  state: 'claimed' | 'capturing' | 'stopped' | 'released' | 'error';
   error?: string;
 }
 
@@ -70,7 +71,10 @@ export function followSession(sessionId: number, transport: 'ssh' | 'agent'): vo
   if (!voiceSupported(transport)) {
     void releaseVoice();
   } else if (s.state === 'error') {
+    // The backend may still hold the claim (a microphone that failed to open
+    // leaves it registered); a release is idempotent, so always send one.
     voiceState.update((v) => ({ ...v, sessionId: null, state: 'off', error: null }));
+    void releaseVoice();
   } else if (s.sessionId !== sessionId) {
     void claimVoice(sessionId);
   }
@@ -82,8 +86,11 @@ export function abandonFollow(sessionId: number): void {
   if (s.state !== 'off' && s.sessionId !== sessionId) void releaseVoice();
 }
 
-/** Follow the backend's `voice:state`. A hub 4001 arrives as `released` with
- *  an error text: the toggle turns off but keeps the reason in its tooltip. */
+/** Follow the backend's `voice:state`. A claim taken elsewhere or lapsed
+ *  idle (a hub's 4001 / 4002, or the standalone registry's revocation)
+ *  arrives as `released` with an error text: the toggle turns off but keeps
+ *  the reason in its tooltip. `stopped` (a capture ended) returns to
+ *  `claimed` only from `capturing`: it can arrive after a release. */
 export async function startVoiceEvents(): Promise<UnlistenFn> {
   return listen<VoiceStatePayload>('voice:state', (e) => {
     const p = e.payload;
@@ -97,6 +104,8 @@ export async function startVoiceEvents(): Promise<UnlistenFn> {
           return { ...s, sessionId: p.session_id, state: 'error', error: p.error ?? 'Microphone error' };
         case 'capturing':
           return { ...s, sessionId: p.session_id, state: 'capturing', error: null, tipShown: true };
+        case 'stopped':
+          return s.state === 'capturing' ? { ...s, state: 'claimed', error: null } : s;
         default:
           return { ...s, sessionId: p.session_id, state: 'claimed', error: null };
       }

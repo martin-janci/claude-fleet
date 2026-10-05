@@ -3,7 +3,16 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }));
 import { invoke } from '@tauri-apps/api/core';
-import { voiceState, resetVoiceForTest, claimVoice, releaseVoice, followSession, abandonFollow } from './voice';
+import { listen } from '@tauri-apps/api/event';
+import {
+  voiceState,
+  resetVoiceForTest,
+  claimVoice,
+  releaseVoice,
+  followSession,
+  abandonFollow,
+  startVoiceEvents,
+} from './voice';
 
 const calls = () => vi.mocked(invoke).mock.calls.map((c) => c[0]);
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -33,14 +42,16 @@ describe('followSession (the terminal follows the attached session)', () => {
     expect(invoke).toHaveBeenLastCalledWith('voice_release', undefined);
     expect(get(voiceState).state).toBe('off');
   });
-  it('does not retry after a failed claim; it goes off', async () => {
+  it('does not retry after a failed claim; it goes off and gives the backend claim back', async () => {
     vi.mocked(invoke).mockRejectedValueOnce({ code: 'E_FORBIDDEN', message: 'nope' });
     await claimVoice(5);
     expect(get(voiceState).state).toBe('error');
     followSession(6, 'ssh');
     await flush();
-    expect(calls()).toEqual(['voice_claim']);
-    expect(get(voiceState)).toMatchObject({ state: 'off', sessionId: null });
+    // An error (a microphone that failed to open) can leave the standalone
+    // claim registered; the release is idempotent, so it is always sent.
+    expect(calls()).toEqual(['voice_claim', 'voice_release']);
+    expect(get(voiceState)).toMatchObject({ state: 'off', sessionId: null, error: null });
   });
   it('a failed attach gives up a claim held for another session', async () => {
     await claimVoice(5);
@@ -62,5 +73,51 @@ describe('claim/release ordering', () => {
     await flush();
     expect(get(voiceState).state).toBe('off');
     expect(calls()).toEqual(['voice_claim', 'voice_release', 'voice_release']);
+  });
+});
+
+describe('voice:state events', () => {
+  type Payload = { session_id: number; state: string; error?: string };
+  async function events(): Promise<(p: Payload) => void> {
+    vi.mocked(listen).mockClear();
+    await startVoiceEvents();
+    const handler = vi.mocked(listen).mock.calls[0][1] as (e: { payload: Payload }) => void;
+    return (payload) => handler({ payload });
+  }
+
+  it('a capture that stops returns to claimed', async () => {
+    const send = await events();
+    await claimVoice(5);
+    send({ session_id: 5, state: 'capturing' });
+    expect(get(voiceState).state).toBe('capturing');
+    send({ session_id: 5, state: 'stopped' });
+    expect(get(voiceState).state).toBe('claimed');
+  });
+  it('a stop that arrives after turning the mic off does not turn it back on', async () => {
+    const send = await events();
+    await claimVoice(5);
+    send({ session_id: 5, state: 'capturing' });
+    await releaseVoice();
+    send({ session_id: 5, state: 'released' });
+    send({ session_id: 5, state: 'stopped' });
+    expect(get(voiceState).state).toBe('off');
+  });
+  it('a stop while merely claimed changes nothing', async () => {
+    const send = await events();
+    await claimVoice(5);
+    send({ session_id: 5, state: 'stopped' });
+    expect(get(voiceState)).toMatchObject({ state: 'claimed', sessionId: 5 });
+  });
+  it('an idle claim that lapsed goes off and says why', async () => {
+    const send = await events();
+    await claimVoice(5);
+    send({ session_id: 5, state: 'released', error: 'microphone idle — turn 🎤 on again' });
+    expect(get(voiceState)).toMatchObject({ state: 'off', error: 'microphone idle — turn 🎤 on again' });
+  });
+  it('a claim taken by another device goes off and says why', async () => {
+    const send = await events();
+    await claimVoice(5);
+    send({ session_id: 5, state: 'released', error: 'microphone claimed elsewhere' });
+    expect(get(voiceState)).toMatchObject({ state: 'off', error: 'microphone claimed elsewhere' });
   });
 });
