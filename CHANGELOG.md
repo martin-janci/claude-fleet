@@ -8,6 +8,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.10] - 2026-10-05
+
+### Added
+- **voice:** 🎤 toggle in the terminal header
+- **voice:** desktop voice_claim — in-process standalone, /voice/source when paired
+- **voice:** desktop microphone capture (cpal) and PCM conversion
+- **voice:** provision the recorder stand-in and prefix claude's PATH
+- **voice:** host arecord stand-in for /voice
+- **voice:** /voice/capture and /voice/source relay routes
+- **voice:** voice.* settings (relay off by default)
+- **voice:** VoiceRegistry — one microphone claim per session
+
+### Changed
+- **voice:** run the arecord stand-in's test and shellcheck
+
+### Fixed
+- **release:** release-mobile.sh refuses a phone that would refuse its own hub
+- **voice:** the 🎤 stays off after a release; say why a claim ended
+- **voice:** tell a source why its claim ended; ping /voice/source
+- **voice:** SIGTERM ends a live recording; ask tmux for the recorder's own pane
+- **voice:** follow the attached session through one rule; no retry after error; ordered claim/release
+- **voice:** a release wins over queued audio and does not wait for the device to open
+- **voice:** start the source off the async workers; never play a microphone start gave up on; end a capture on a stream error
+- **voice:** never lose a source stop; close a superseded source with 4001
+- **voice:** capture state per session; claim replace/release revokes a live capture
+
+### Documentation
+- **voice:** guide gaps; max_capture_secs 0 is "no limit"; drop a no-op test assert
+- **voice:** user guide and orientation
+- **voice:** fix spec inconsistencies for revisions
+- **voice:** spec revisions from planning
+- **voice:** F1 implementation plan
+- voice relay design (Claude Code /voice with the app's microphone)
 ## [0.4.9] - 2026-10-05
 
 ### Fixed
@@ -2661,6 +2694,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.10]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.10
 [0.4.9]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.9
 [0.4.8]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.8
 [0.4.7]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.7
