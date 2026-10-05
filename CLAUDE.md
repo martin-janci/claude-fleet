@@ -162,10 +162,12 @@ Two more, added 2026-10-05, both with THIN margins rather than large ones —
 worth knowing before you spend an hour on either:
 `service::transcript::tests::fetch_maps_a_missing_local_transcript_to_e_no_transcript`
 and its `fetch_conversation_` twin answer **`E_TIMEOUT` instead of
-`E_NO_TRANSCRIPT`** on a loaded box: they probe the local host under a 20 s
-deadline and report the timeout rather than the missing transcript, so the
-failure names the wrong cause. Quiet, they pass in **17.66 s** — under the
-limit by 2.3 s, which is why load flips them. And
+`E_NO_TRANSCRIPT`** on a loaded box, so the failure names the wrong cause.
+The reason, measured: they do **not** override `HOME`, so they read the
+developer's real `~/.claude/projects` (1.4 GB, 432 project directories, ~3,000
+transcripts on mercury) under `transcript.rs`'s `READ_WALL_CLOCK = 20 s`. At
+`loadavg` ~7 that takes **0.05 s**; at ~20 it blows the wall clock. Fixing
+them means pinning `HOME` in those two tests. And
 `mcp::tools::tests::a_one_person_fleet_still_sees_its_unclaimed_rows` is the
 opposite shape: it **passes in the full suite and fails run alone**, where
 `list_sessions` answers 12 rows for a store holding 2. Not a leak (the master
