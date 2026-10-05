@@ -2281,19 +2281,91 @@ mod tests {
         assert_eq!(on_disk, listed, "list every tools/ag file in AG_FILES");
     }
 
-    /// C1: provision.rs `include_str!`s tools/ag, so the hub image's build
-    /// context must carry it or the tagged image build breaks.
+    /// C1: the hub image builds from a context of only what its Dockerfile
+    /// COPYs, while CI builds from the whole checkout, so a file outside
+    /// `crates/` that the hub's crates `include_str!` / `include_bytes!`
+    /// and the Dockerfile leaves out breaks only the tagged image build
+    /// (tools/ag in 0.4.x, tools/voice/arecord in 0.4.10). Every such file
+    /// must sit under a `COPY <src>` of `crates/fleet-hub/Dockerfile`.
     #[test]
-    fn the_hub_image_build_context_ships_tools_ag() {
-        let path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fleet-hub/Dockerfile");
-        let dockerfile = std::fs::read_to_string(&path).expect("read the hub Dockerfile");
+    fn the_hub_image_build_context_ships_every_embedded_file() {
+        use std::path::{Component, Path, PathBuf};
+
+        fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read a source dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    rs_files(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        /// `base/rel` from the repository root, `..` folded lexically.
+        fn from_root(base: &Path, rel: &str) -> String {
+            let mut parts: Vec<String> = Vec::new();
+            for c in base.join(rel).components() {
+                match c {
+                    Component::ParentDir => {
+                        parts.pop();
+                    }
+                    Component::Normal(p) => parts.push(p.to_string_lossy().into_owned()),
+                    _ => {}
+                }
+            }
+            parts.join("/")
+        }
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // The workspace crates fleet-hub compiles (its Cargo.toml's path deps).
+        let mut sources = Vec::new();
+        for krate in ["fleet-core", "fleet-hub", "fleet-proto", "fleet-update"] {
+            rs_files(&root.join("crates").join(krate).join("src"), &mut sources);
+        }
+        let mut embedded = std::collections::BTreeSet::new();
+        for file in &sources {
+            let text = std::fs::read_to_string(file).expect("read a source file");
+            let dir = file
+                .parent()
+                .expect("a parent")
+                .strip_prefix(&root)
+                .expect("under root");
+            for macro_open in ["include_str!(\"", "include_bytes!(\""] {
+                for (at, _) in text.match_indices(macro_open) {
+                    let rest = &text[at + macro_open.len()..];
+                    let lit = &rest[..rest.find('"').expect("a closing quote")];
+                    let path = from_root(dir, lit);
+                    if !path.starts_with("crates/") {
+                        embedded.insert(path);
+                    }
+                }
+            }
+        }
         assert!(
-            dockerfile
-                .lines()
-                .any(|l| l.trim_start().starts_with("COPY tools/ag ")),
-            "{} must `COPY tools/ag ./tools/ag` (provision.rs embeds it)",
-            path.display()
+            embedded.contains("tools/voice/arecord"),
+            "the scan should see provision.rs's embeds: {embedded:?}"
+        );
+
+        let dockerfile = crate::repo_files::read("crates/fleet-hub/Dockerfile");
+        let copied: Vec<&str> = dockerfile
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("COPY "))
+            .filter(|args| !args.trim_start().starts_with("--"))
+            .filter_map(|args| args.split_whitespace().next())
+            .map(|src| src.trim_end_matches('/'))
+            .collect();
+        let missing: Vec<&String> = embedded
+            .iter()
+            .filter(|p| {
+                !copied
+                    .iter()
+                    .any(|src| *p == src || p.starts_with(&format!("{src}/")))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "crates/fleet-hub/Dockerfile must COPY these embedded files into the \
+             image build context, or the tagged hub image fails to compile: {missing:?}"
         );
     }
 
