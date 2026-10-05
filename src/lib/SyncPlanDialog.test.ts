@@ -62,6 +62,31 @@ describe('SyncPlanDialog', () => {
     expect(screen.getByTestId('plan-action-local-claude-skill-s').querySelector('.reason')).toBeNull();
   });
 
+  it('styles a caution reason (update/overwrite/plugin_update) as warn and an informational one (noop, remove) as muted', () => {
+    const p = plan(
+      [
+        hostPlan({
+          actions: [
+            action({ name: 'u', op: 'update', reason: 'host copy unverified' }),
+            action({ name: 'o', op: 'overwrite', reason: 'edited on host' }),
+            action({ name: 'pu', op: 'plugin_update', reason: 'plugin moved' }),
+            action({ name: 'n', op: 'noop', reason: 'private; withheld from org host, not removed' }),
+            action({ name: 'r', op: 'remove', reason: 'no longer in the catalog' }),
+          ],
+        }),
+      ],
+      { update: 1 },
+    );
+    render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });
+    const note = (n: string) => screen.getByTestId(`plan-note-local-claude-skill-${n}`);
+    for (const n of ['u', 'o', 'pu']) expect(note(n).className).toContain('caution');
+    for (const n of ['n', 'r']) {
+      expect(note(n).className).toContain('note');
+      expect(note(n).className).not.toContain('caution');
+    }
+    expect(note('n').textContent).toBe('private; withheld from org host, not removed');
+  });
+
   it('renders the Apply button red (danger) when the plan overwrites something', () => {
     const p = plan([hostPlan({ actions: [action({ op: 'overwrite' })] })], { overwrite: 1 });
     render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });

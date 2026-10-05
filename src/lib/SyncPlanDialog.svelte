@@ -10,6 +10,11 @@
    *  free text. */
   const UNLAYERED_PREFIX = 'no layers assigned';
 
+  /** Ops whose reason is a caution (a host edit could be lost or could not be
+   *  ruled out); every other non-blocked reason is information (a private
+   *  asset withheld, a removal, a held catalog) and reads muted. */
+  const CAUTION_OPS = new Set(['update', 'overwrite', 'plugin_update']);
+
   let {
     plan,
     filter = {},
@@ -132,7 +137,7 @@
             {#if a.backup}<span class="backup" title="A backup will be made before writing">backup</span>{/if}
             {#if a.secrets.length}<span class="secrets">secrets: {a.secrets.join(', ')}</span>{/if}
             {#if a.op !== 'blocked' && a.reason}
-              <span class="note" data-testid={`plan-note-${h.host_alias}-${h.harness}-${a.kind}-${a.name}`}>{a.reason}</span>
+              <span class="note" class:caution={CAUTION_OPS.has(a.op)} data-testid={`plan-note-${h.host_alias}-${h.harness}-${a.kind}-${a.name}`}>{a.reason}</span>
             {/if}
             {#if a.op === 'blocked'}
               {#if a.reason}<span class="reason">{a.reason}</span>{/if}
@@ -203,8 +208,10 @@
   .action-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 2px 0; flex-wrap: wrap; }
   .asset { font-family: ui-monospace, monospace; }
   .backup { color: var(--usage-warn); } .secrets { color: var(--fg-muted); } .reason { color: var(--usage-crit); }
-  /* A caution about a planned action (e.g. an update whose host copy cannot be verified) — a note, never an error. */
-  .note { color: var(--usage-warn); }
+  /* A reason on a planned action: information (muted), or a caution (warn) for
+     update/overwrite/plugin_update — a note, never an error. */
+  .note { color: var(--fg-muted); }
+  .note.caution { color: var(--usage-warn); }
   .link { background: none; border: 0; color: var(--accent); cursor: pointer; padding: 0; font-size: 12px; }
   .restart { color: var(--usage-warn); font-size: 12px; margin: 0; }
   .force-partial { display: flex; align-items: center; gap: 6px; font-size: 12px; }
