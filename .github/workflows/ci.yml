@@ -183,6 +183,15 @@ jobs:
       - name: shellcheck ag
         if: runner.os == 'Linux'
         run: shellcheck -s bash tools/ag/ag tools/ag/lib/*.sh tools/ag/drivers/*.sh tools/ag/install.sh scripts/ag-test.sh
+      # tools/voice/arecord (the host's recorder stand-in for /voice) against
+      # fake HTTP / relay servers. Linux only: the test uses coreutils'
+      # `timeout` and python3, and hosts that record are Linux boxes.
+      - name: voice arecord tests
+        if: runner.os == 'Linux'
+        run: bash scripts/voice-arecord-test.sh
+      - name: shellcheck voice arecord
+        if: runner.os == 'Linux'
+        run: shellcheck -s bash tools/voice/arecord scripts/voice-arecord-test.sh
 
   rust:
     needs: changes
