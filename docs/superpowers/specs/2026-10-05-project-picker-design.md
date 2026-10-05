@@ -65,11 +65,11 @@ row, Hide becomes **Keep** ("this is not noise").
 
 A pure function over what the app already holds; strongest signal first:
 
-1. **Preferred host** (*New session on host*): projects with a worktree on
-   that host. Reason: `on <host>`.
-2. **Selected session** (`selectedSession`): its project, then projects whose
-   recent sessions share its group. Reason: `current session` /
-   `same group as <project>`.
+1. **Preferred host** (*New session on host*): projects with a session on
+   that host (fleet's local worktree rows cover only the `local` host, so
+   sessions are the signal that works for every host). Reason: `on <host>`.
+2. **Selected session** (`selectedSession`): its project. Reason:
+   `current session`. (Expanding to "same group as" is left out of phase 1.)
 3. **Active sidebar filters** (`SessionFacetInput`: scope, host, search,
    work/tracker filters): projects of the sessions the filtered list shows.
    Reason: `from filter: <facet label>`.
@@ -85,14 +85,18 @@ A project's group, first match wins:
 
 1. the person's group (`project_picks.grp`);
 2. *(phase 2)* a confirmed Jev proposal (also stored in `project_picks.grp`);
-3. **prefix cluster**: repos of the same owner sharing a leading or trailing
-   dash-separated token with at least one other repo form a cluster
-   (`openmarket-*`, `*-mcp`, `sales-twins-*`); a repo matching exactly one
-   cluster joins it; a repo matching two is ambiguous (left to the next rule,
-   and to Jev in phase 2). Cluster names are derived (`openmarket` →
-   "openmarket", `*-mcp` → "mcp");
-4. the project's org (work graph M5), when it has one;
-5. the owner.
+3. **prefix cluster**: among one owner's non-noise repos, a leading or
+   trailing dash/underscore token shared by at least two multi-token repos
+   forms a cluster (`openmarket-*`, `*-mcp`, `sales-twins-*`); a repo
+   matching exactly one cluster joins it (a single-token repo joins the
+   leading cluster of its own name: `openmarket` → "openmarket"); a repo
+   matching two is ambiguous (left to the owner, and to Jev in phase 2). The
+   cluster's name is its token;
+4. the owner.
+
+The project's org is not a phase-1 rule: the frontend's project rows carry
+no org (only sessions do), and resolving `org_rules` for projects is work
+graph territory.
 
 Groups are **display only**. They are not orgs, carry no permission, and are
 never written into `org_rules`.
@@ -102,10 +106,18 @@ never written into `org_rules`.
 A project is noise when `pick` is not `keep` or `pin`, and any of:
 
 - `pick = hide`;
-- `system` (already excluded today: `fleet/operator`);
-- 0 worktrees;
-- `last_session_at` is null and the project was registered over 30 days ago;
-- the repo name matches `^(test|tmp|example)-`, `-analysis$`, `-epic-\d+$`.
+- `last_session_at` is null (no session ever);
+- `starts_30d = 0` and the repo name matches `^(test|tmp|example)-`,
+  `-analysis$` or `-epic-\d+$`.
+
+`system` projects (`fleet/operator`) are excluded outright, as today.
+
+Two rules from the first draft are dropped: "0 worktrees" (the joined
+worktree rows are the `local` host's only, so on a hub without a local host
+every project would read as noise), and "registered over 30 days ago"
+(projects have no registration time). In their place: a project added
+through *Add project* is marked `keep` at once — adding it is the person
+saying it matters.
 
 Forks of other owners are **not** noise by rule (some are used); they are left
 to Jev.
@@ -124,9 +136,11 @@ rankProjects(input: {
 }): PickerView   // sections, or one ranked list when query is non-empty
 ```
 
-`Sidebar.svelte`'s popover renders a `PickerView`; `quick_switcher.ts`'s
-project rows (`New session in <project>`) use the same ranking for their
-order and drop noise from the empty-query list, so both surfaces agree.
+`Sidebar.svelte`'s popover renders a `PickerView` (through a new
+`ProjectPicker.svelte`); `quick_switcher.ts`'s project rows (`New session in
+<project>`) drop noise from the empty-query list with the same `isNoise`, so
+both surfaces agree on what is noise. Typing still finds a noise project
+there too.
 
 ### Data
 
@@ -140,34 +154,49 @@ Migration `102_project_picker.sql`:
 CREATE TABLE project_picks (
   owner TEXT NOT NULL,
   repo  TEXT NOT NULL,
-  pick  TEXT CHECK (pick IN ('pin','hide','keep')),
+  pick  TEXT CHECK (pick IS NULL OR pick IN ('pin','hide','keep')),
   grp   TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (owner, repo)
 );
 CREATE TABLE project_starts (
-  owner TEXT NOT NULL,
-  repo  TEXT NOT NULL,
-  at    INTEGER NOT NULL
+  owner      TEXT NOT NULL,
+  repo       TEXT NOT NULL,
+  host_alias TEXT NOT NULL,
+  tmux_name  TEXT NOT NULL,
+  at         INTEGER NOT NULL,
+  UNIQUE (host_alias, tmux_name, at)
 );
-CREATE INDEX idx_project_starts ON project_starts(owner, repo, at);
+CREATE INDEX idx_project_starts_project ON project_starts(owner, repo, at);
 ```
 
 (The number is the next free one at the time of writing; take the next free
 one when implementing.)
 
-- **`project_starts`** gets a row in reconcile whenever a session row is
-  first inserted for a project — the same place `last_session_at` moves
-  (`touch_project_last_session_at_in_tx`) — so sessions started outside
-  fleet count too. The retention sweep deletes rows older than 90 days.
-- **`ProjectRow`** gains `starts_30d: u32`, `pick: Option<String>`,
-  `grp: Option<String>`, each `#[serde(default)]` (a desktop on a newer
-  contract must not break against an older hub; contract golden regenerated
-  with `REGEN_HUB_CONTRACT=1`).
-- **`set_project_pick { owner, repo, pick?, grp? }`**: a new command and MCP
-  tool action; `verdicts.rs` row **Route** (an ordinary write on a hub);
-  `REGEN_HUB_VERDICTS=1`, `REGEN_DOCS=1`. It emits `project:updated` so every
-  window patches in place.
+- **`project_starts`**: reconcile runs `INSERT OR IGNORE` for every live
+  session with a project on every pass, next to where `last_session_at`
+  moves; `at` is the tmux session's `created_at`. The UNIQUE key makes the
+  repeat a no-op, so no "first insert" detection is needed, and sessions
+  started outside fleet count too. The GC sweep deletes rows older than 90
+  days.
+- **The picker state is NOT on `ProjectRow`.** `list_projects_joined` reads
+  the worktree columns at fixed offsets after the project columns, and
+  reconcile emits `project:updated` with a bare `ProjectRow` that the
+  frontend swaps in whole — a pick carried there would be wiped by every
+  pass. Instead, two commands of their own:
+  - **`project_picks`** → `[{ owner, repo, pick, grp, starts_30d }]`, one
+    per non-system project;
+  - **`set_project_pick { owner, repo, pick, grp }`** (full replace; both
+    null deletes the row) → the updated row.
+
+  Both are hub tools with `Access::PersonDevice` (a person's preference:
+  their paired devices only, never a host's token, not served to the master
+  — which keeps the master's description budget untouched), and both
+  commands are `Routed` in `verdicts.rs` (`REGEN_HUB_VERDICTS=1`,
+  `REGEN_DOCS=1`). No event: the picker reloads `project_picks` each time it
+  opens and patches its store from `set_project_pick`'s answer. A hub older
+  than this feature answers with an error, and the picker works from the
+  rules alone. `CONTRACT_REVISION` does not move.
 
 ### Phase 1 tests
 
@@ -175,9 +204,11 @@ one when implementing.)
   caps, each context signal and its reason, prefix clusters (incl. the
   ambiguous case), every noise rule and the `keep`/`pin` overrides, query
   ranking with noise penalised but present.
-- Store: `project_starts` written once per new session, survives a project
-  row being re-created, `starts_30d` window, retention.
-- `set_project_pick`: round trip, `project:updated` emitted, hub routing row.
+- Store: `project_starts` written once per session however many passes see
+  it, survives a project row being re-created, `starts_30d` window,
+  retention.
+- `project_picks` / `set_project_pick`: round trip, validation, access rows,
+  hub routing cases.
 - Component: search + keyboard flow, Pin/Hide/Keep, `Other` folded.
 
 ## Phase 2: Jev `project_group`
