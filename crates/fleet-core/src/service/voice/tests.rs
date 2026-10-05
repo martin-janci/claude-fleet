@@ -1,0 +1,109 @@
+use super::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// A source that counts starts and live guards, and pushes one chunk.
+#[derive(Default)]
+struct Fake {
+    starts: AtomicUsize,
+    live: Arc<AtomicUsize>,
+    fail: bool,
+}
+struct Live(Arc<AtomicUsize>);
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl VoiceSource for Fake {
+    fn start(&self, tx: PcmTx) -> Result<Box<dyn Send>, String> {
+        if self.fail {
+            return Err("denied".into());
+        }
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        self.live.fetch_add(1, Ordering::SeqCst);
+        tx.try_send(vec![1, 2, 3, 4]).unwrap();
+        Ok(Box::new(Live(Arc::clone(&self.live))))
+    }
+}
+const TTL: Duration = Duration::from_secs(60);
+
+#[tokio::test]
+async fn no_claim_means_no_capture_and_no_microphone() {
+    let reg = Arc::new(VoiceRegistry::new());
+    assert_eq!(
+        reg.begin_capture(7, TTL).err(),
+        Some(CaptureRefusal::NoClaim)
+    );
+}
+
+#[tokio::test]
+async fn a_capture_reads_the_source_and_dropping_it_closes_the_microphone() {
+    let reg = Arc::new(VoiceRegistry::new());
+    let src = Arc::new(Fake::default());
+    reg.claim(7, "master", src.clone());
+    let mut cap = reg.begin_capture(7, TTL).unwrap();
+    assert_eq!(cap.rx.recv().await, Some(vec![1, 2, 3, 4]));
+    assert_eq!(src.live.load(Ordering::SeqCst), 1);
+    drop(cap);
+    assert_eq!(src.live.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn one_capture_per_session_at_a_time() {
+    let reg = Arc::new(VoiceRegistry::new());
+    reg.claim(7, "master", Arc::new(Fake::default()));
+    let first = reg.begin_capture(7, TTL).unwrap();
+    assert_eq!(reg.begin_capture(7, TTL).err(), Some(CaptureRefusal::Busy));
+    drop(first);
+    assert!(reg.begin_capture(7, TTL).is_ok());
+}
+
+#[tokio::test]
+async fn the_last_claim_wins_and_a_stale_release_is_ignored() {
+    let reg = Arc::new(VoiceRegistry::new());
+    let a = reg.claim(7, "client:phone", Arc::new(Fake::default()));
+    let b = reg.claim(7, "master", Arc::new(Fake::default()));
+    assert!(!reg.release(7, a));
+    assert_eq!(reg.owner(7).as_deref(), Some("master"));
+    assert!(reg.release(7, b));
+    assert_eq!(reg.owner(7), None);
+}
+
+#[tokio::test]
+async fn a_failed_source_frees_the_session() {
+    let reg = Arc::new(VoiceRegistry::new());
+    reg.claim(
+        7,
+        "master",
+        Arc::new(Fake {
+            fail: true,
+            ..Default::default()
+        }),
+    );
+    assert_eq!(
+        reg.begin_capture(7, TTL).err(),
+        Some(CaptureRefusal::SourceFailed("denied".into()))
+    );
+    // not left busy
+    assert_eq!(
+        reg.begin_capture(7, TTL).err(),
+        Some(CaptureRefusal::SourceFailed("denied".into()))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unused_claim_expires_after_the_ttl_and_zero_means_never() {
+    let reg = Arc::new(VoiceRegistry::new());
+    reg.claim(7, "master", Arc::new(Fake::default()));
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert_eq!(
+        reg.begin_capture(7, TTL).err(),
+        Some(CaptureRefusal::NoClaim)
+    );
+    assert_eq!(reg.owner(7), None);
+    reg.claim(8, "master", Arc::new(Fake::default()));
+    tokio::time::advance(Duration::from_secs(10_000)).await;
+    assert!(reg.begin_capture(8, Duration::ZERO).is_ok());
+}
