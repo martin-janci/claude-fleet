@@ -3761,17 +3761,21 @@ fn the_served_definition_budget_stays_bounded() {
     /// a per-host token is never served it).
     /// Measured at 72,687 on 2026-10-04 after merging Assets M4 into file
     /// downloads (`send_file`, `list_downloads`, `remove_download`, +1,170
-    /// bytes).
-    /// **Measured at 75,229 on 2026-10-05**, merging multi-user M1 T12 on
+    /// bytes). Measured at 72,701 on 2026-10-04 after Assets M5 Task 4
+    /// (`asset_history` in `CatalogAdminParams::action`, +14 bytes).
+    /// Measured at 72,827 on 2026-10-05 after its fix round 1
+    /// (`list_assets` takes `all_catalogs`, +126 bytes).
+    /// **Measured at 75,369 on 2026-10-05**, merging multi-user M1 T12 on
     /// top of that: the five sharing definitions `session_share`,
     /// `session_unshare`, `session_narrow`, `session_access` and `my_grants`,
     /// each with its parameters and its refusal codes (+2,542 bytes over
-    /// `main`'s 72,687). The sixth tool, `session_claim`, is
-    /// `Access::HostToken` and is NOT on the master surface this constant
-    /// measures; `NOT_FOR_HOST_TOKENS` keeps the other five off a per-host
-    /// token's. The constant is that measurement plus the customary 100
-    /// bytes of headroom.
-    const BUDGET_BYTES: usize = 75_329;
+    /// `main`'s 72,827 — the figure M1 measured against `main` before the
+    /// Assets M5 merge, arrived at again here from the other side). The
+    /// sixth tool, `session_claim`, is `Access::HostToken` and is NOT on the
+    /// master surface this constant measures; `NOT_FOR_HOST_TOKENS` keeps
+    /// the other five off a per-host token's. The constant is that
+    /// measurement plus the customary 100 bytes of headroom.
+    const BUDGET_BYTES: usize = 75_469;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10843,6 +10847,12 @@ const CATALOG_ADMIN_SESSION_LESS_ACTIONS: &[&str] = &[
     "remove_catalog",
     "admit_catalog",
     "unadmit_catalog",
+    // Assets M5, reviewed on the multi-user M1 merge: `AssetHistory(AssetRef)`
+    // is answered by `author::asset_history_in(target, a, store)` — a catalog
+    // target and an asset reference. It names no session, reads no session
+    // row, and returns an asset's own history, so `catalog_admin` keeps its
+    // place in REVIEWED_WITHOUT_A_SESSION.
+    "asset_history",
 ];
 
 /// `catalog_admin`'s row in [`REVIEWED_WITHOUT_A_SESSION`] made real

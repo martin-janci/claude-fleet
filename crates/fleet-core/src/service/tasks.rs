@@ -850,7 +850,7 @@ pub fn liveness_verdict(
             "task exceeded tasks.max_age_secs ({max_age_secs}s) without reporting {DONE_PREFIX}<nonce>"
         ));
     }
-    // De-identified by migration 099's trigger: a session this task named
+    // De-identified by migration 101's trigger: a session this task named
     // was DELETED, so its id was NULLed out rather than left to resolve
     // against whoever SQLite hands it to next (multi-user M1, T9d). With
     // `dispatch_task` always recording a worker, "detached and no worker id"
@@ -1727,7 +1727,7 @@ mod tests {
         let t_rec = create_task(&s, None, Some(rec), "x").unwrap();
         let t_fine = create_task(&s, None, Some(fine), "x").unwrap();
         s.delete_session(gone).unwrap();
-        // Migration 099's trigger de-identified the task's worker end rather
+        // Migration 101's trigger de-identified the task's worker end rather
         // than leaving a recyclable id behind (T9d) — and the sweep must
         // still fail it, which is what `liveness_verdict`'s `detached_at`
         // arm is for. Without that arm `worker_session_id?` answers `None`

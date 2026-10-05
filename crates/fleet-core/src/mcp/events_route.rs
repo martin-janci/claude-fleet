@@ -1920,7 +1920,7 @@ mod tests {
     /// One private session and the four people a share has: its OWNER, a
     /// `watch` grantee, a `drive` grantee and a stranger.
     ///
-    /// The hub's own personal owner (migration 096) is a FIFTH person, so
+    /// The hub's own personal owner (migration 100) is a FIFTH person, so
     /// `Store::sole_enabled_person` answers `None` and nobody gets the
     /// single-person carve-out. That is deliberate: with it in play every
     /// assertion below would be about the carve-out rather than about the
@@ -2586,7 +2586,7 @@ mod tests {
     /// `result` included. `list_tasks` leaked the same row through the same
     /// predicate.
     ///
-    /// Migration 099's trigger NULLs the ids and stamps `detached_at`, and
+    /// Migration 101's trigger NULLs the ids and stamps `detached_at`, and
     /// the predicate refuses a detached task to everyone but the hub's own
     /// reader.
     #[test]

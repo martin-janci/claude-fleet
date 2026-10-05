@@ -75,7 +75,7 @@ pub(crate) fn host_org(i: usize) -> Option<i64> {
     (!i.is_multiple_of(4)).then_some((i % 4) as i64)
 }
 
-/// A session's owner and visibility (multi-user M1, migration 097): every
+/// A session's owner and visibility (multi-user M1, migration 099): every
 /// fifth session is `unclaimed` — the shape reconcile leaves for a
 /// hand-started tmux session nobody can speak for — and the rest are spread
 /// over the fixture's [`PEOPLE`], so `idx_sessions_owner` is measured against
@@ -133,7 +133,7 @@ pub(crate) fn build(seed: u64, now: i64) -> ScaleFixture {
         )
         .unwrap();
     }
-    // People. Migration 096 minted the personal owner as id 1, so this adds
+    // People. Migration 098 minted the personal owner as id 1, so this adds
     // the colleagues: `session_owner` spreads the sessions over all of them.
     assert_eq!(
         tx.query_row("SELECT COUNT(*) FROM people", [], |r| r.get::<_, i64>(0))

@@ -58,7 +58,7 @@ const EVERYONE: &[Who] = &[
 const ORG_A: i64 = 1;
 const ORG_B: i64 = 2;
 
-/// The hub's personal owner, minted by migration 096 into an empty store —
+/// The hub's personal owner, minted by migration 098 into an empty store —
 /// so it is row 1, exactly as the orgs above are 1 and 2. The fixture
 /// asserts it rather than trusting it.
 const PERSON: i64 = 1;

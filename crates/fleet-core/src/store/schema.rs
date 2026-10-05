@@ -371,7 +371,7 @@ fn client_tokens_has_assets_admin(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 096 (multi-user M1): `client_tokens`
+/// `already_applied` guard of migration 098 (multi-user M1): `client_tokens`
 /// already has `person_id`. That `ALTER TABLE ... ADD COLUMN` is the one
 /// statement in 094 that is not idempotent — the table, both indexes and the
 /// trigger are `IF NOT EXISTS`, and both writes are conditional — so the
@@ -385,7 +385,7 @@ fn client_tokens_has_person(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 099 (multi-user M1, T9d): the one
+/// `already_applied` guard of migration 101 (multi-user M1, T9d): the one
 /// `ADD COLUMN` in the script. The trigger is `IF NOT EXISTS` and the
 /// backfill `UPDATE`s are idempotent, so only the column needs the guard.
 fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
@@ -397,7 +397,7 @@ fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 097 (multi-user M1): `sessions`
+/// `already_applied` guard of migration 101 (multi-user M1): `sessions`
 /// already has `visibility`, the LAST of 097's two `ADD COLUMN`s — the
 /// `work_items_has_status_set_at` convention. Everything else in the script
 /// is `IF NOT EXISTS` or a `DROP`/`CREATE` of the row-version trigger, and
@@ -443,6 +443,28 @@ fn work_items_has_origin(conn: &Connection) -> rusqlite::Result<bool> {
 fn asset_inventory_has_catalog_id(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'catalog_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 096 (`drift_side` on
+/// `asset_inventory`, Assets M5).
+fn asset_inventory_has_drift_side(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('asset_inventory') WHERE name = 'drift_side'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 097 (`decided_at` on
+/// `changeset_items`, Assets M5).
+fn changeset_items_has_decided_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('changeset_items') WHERE name = 'decided_at'",
         [],
         |r| r.get(0),
     )?;
@@ -1081,13 +1103,27 @@ const MIGRATIONS: &[Migration] = &[
     // File downloads: `downloads` (a file a session sent from its host,
     // copied to the data dir). CREATE IF NOT EXISTS: safe to re-run.
     Migration::plain(95, include_str!("../../migrations/095_downloads.sql")),
+    // Assets M5: which side moved on a drifted managed row. ADD COLUMN is
+    // not idempotent: the same guard 087 uses.
+    Migration {
+        version: 96,
+        sql: include_str!("../../migrations/096_inventory_drift_side.sql"),
+        already_applied: Some(asset_inventory_has_drift_side),
+    },
+    // Assets M5: when a changeset item was decided. ADD COLUMN is not
+    // idempotent: guarded.
+    Migration {
+        version: 97,
+        sql: include_str!("../../migrations/097_changeset_item_decided_at.sql"),
+        already_applied: Some(changeset_items_has_decided_at),
+    },
     // Multi-user M1 (T1): `people`, `client_tokens.person_id` with its own
     // narrow auth-epoch trigger, this hub's personal owner, and the backfill
     // that leaves no live device person-less. Guarded: the ADD COLUMN is the
     // one statement here that is not idempotent.
     Migration {
-        version: 96,
-        sql: include_str!("../../migrations/096_people.sql"),
+        version: 98,
+        sql: include_str!("../../migrations/098_people.sql"),
         already_applied: Some(client_tokens_has_person),
     },
     // Multi-user M1 (T3): `sessions.owner_person_id` / `visibility`,
@@ -1098,8 +1134,8 @@ const MIGRATIONS: &[Migration] = &[
     // script — it is `backfill_session_owner`, after the collision repair,
     // for migration 080's reason.
     Migration {
-        version: 97,
-        sql: include_str!("../../migrations/097_session_owner.sql"),
+        version: 99,
+        sql: include_str!("../../migrations/099_session_owner.sql"),
         already_applied: Some(sessions_has_visibility),
     },
     // Multi-user M1 (T4): `session_grants` — the owner's explicit, revocable,
@@ -1108,14 +1144,14 @@ const MIGRATIONS: &[Migration] = &[
     // statement is `IF NOT EXISTS` and there is no ADD COLUMN, so re-running
     // the script changes nothing. The rules it cannot express as constraints
     // are in `store/session_grants.rs`.
-    Migration::plain(98, include_str!("../../migrations/098_session_grants.sql")),
+    Migration::plain(100, include_str!("../../migrations/100_session_grants.sql")),
     // Multi-user M1 (T9d): `tasks.detached_at` plus the `AFTER DELETE ON
     // sessions` trigger that NULLs a reaped session's id out of both ends and
     // stamps the task, so a recycled `sessions.id` can never make another
     // person's task read as theirs. Guarded: the ADD COLUMN.
     Migration {
-        version: 99,
-        sql: include_str!("../../migrations/099_tasks_detach.sql"),
+        version: 101,
+        sql: include_str!("../../migrations/101_tasks_detach.sql"),
         already_applied: Some(tasks_has_detached_at),
     },
 ];
@@ -2831,7 +2867,9 @@ mod tests {
                 "action",
                 "params",
                 "decider",
-                "state"
+                "state",
+                // 097 (Assets M5): `migrate` runs on to the latest.
+                "decided_at"
             ]
         );
         assert_eq!(
@@ -4000,7 +4038,7 @@ mod tests {
                 // Migration 074: its own trigger,
                 // `auth_epoch_client_tokens_assets_admin`.
                 "assets_admin_at",
-                // Multi-user M1 (migration 096): its own trigger,
+                // Multi-user M1 (migration 098): its own trigger,
                 // `auth_epoch_client_tokens_person`. Whose device this is
                 // decides which sessions the caller may read at all, so a
                 // re-binding MUST invalidate every cached caller.
@@ -4044,7 +4082,7 @@ mod tests {
         assert_eq!(s.active_client_tokens().unwrap()[0].org_id, Some(b.id));
     }
 
-    /// Multi-user M1 (migration 096): re-binding a paired device to another
+    /// Multi-user M1 (migration 098): re-binding a paired device to another
     /// person — or unbinding it — changes WHOSE token it is, and therefore
     /// which sessions the caller may read at all. It must invalidate every
     /// cached caller, or a device handed to a colleague would go on reading
@@ -4108,8 +4146,8 @@ mod tests {
     /// back and migrating again — which the guard turns into a record-only
     /// pass — changes nothing.
     #[test]
-    fn migration_096_on_a_populated_v95_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 95;
+    fn migration_098_on_a_populated_v97_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 97;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch(
@@ -4212,8 +4250,8 @@ mod tests {
     /// deletion, and rolling the recorded version back and migrating again —
     /// which the guard turns into a record-only pass — changes nothing.
     #[test]
-    fn migration_097_on_a_populated_v96_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 96;
+    fn migration_099_on_a_populated_v98_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 98;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch(
@@ -4354,13 +4392,13 @@ mod tests {
             .unwrap()
     }
 
-    /// 097's backfill attributes NOTHING once the hub has more than one
+    /// 099's backfill attributes NOTHING once the hub has more than one
     /// person: there is no fact saying which of them started a pre-M1 row,
     /// and the upgrade widens nothing (rule 7). Those rows stay `unclaimed`,
     /// which is a per-host count and not one byte more.
     #[test]
-    fn the_097_backfill_attributes_nothing_on_a_hub_with_two_people() {
-        let s = store_at_version(96);
+    fn the_099_backfill_attributes_nothing_on_a_hub_with_two_people() {
+        let s = store_at_version(98);
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias) VALUES ('h');
@@ -4388,7 +4426,7 @@ mod tests {
         );
     }
 
-    /// Migration 098 on a populated database: the table and its three indexes
+    /// Migration 100 on a populated database: the table and its three indexes
     /// arrive, the grants a hub already holds survive a second open, and the
     /// NULL-safe live index still fires afterwards.
     ///
@@ -4397,8 +4435,8 @@ mod tests {
     /// `Migration::plain` with no `already_applied` guard — this is the test
     /// that says so rather than the comment claiming it.
     #[test]
-    fn migration_098_on_a_populated_database_is_safe_to_rerun() {
-        const SEED_AT: i64 = 97;
+    fn migration_100_on_a_populated_database_is_safe_to_rerun() {
+        const SEED_AT: i64 = 99;
         let s = store_at_version(SEED_AT);
         s.conn
             .execute_batch("INSERT INTO hosts (alias) VALUES ('h');")
@@ -5055,6 +5093,63 @@ mod tests {
         // the ADD COLUMN is not idempotent, so a re-run must be guarded
         s.conn
             .execute_batch("DELETE FROM schema_version WHERE version >= 92;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Assets M5 (R4): `asset_inventory.drift_side`, NULL on every existing
+    /// row, and a re-run is guarded (ADD COLUMN is not idempotent).
+    #[test]
+    fn migration_096_adds_drift_side_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(95);
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias, reachable, provisioned) VALUES ('h', 1, 1); \
+                 INSERT INTO asset_inventory (host_alias, harness, kind, name, state, scanned_at) \
+                   VALUES ('h', 'claude', 'skill', 's', 'drifted', 1);",
+            )
+            .unwrap();
+        assert!(!asset_inventory_has_drift_side(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        assert!(asset_inventory_has_drift_side(&s.conn).unwrap());
+        let side: Option<String> = s
+            .conn
+            .query_row("SELECT drift_side FROM asset_inventory", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(side, None);
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 96;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// Assets M5 (R8): `changeset_items.decided_at`, NULL on existing items,
+    /// guarded on re-run.
+    #[test]
+    fn migration_097_adds_decided_at_as_null_and_is_safe_to_rerun() {
+        let s = store_at_version(96);
+        s.conn
+            .execute_batch(
+                "INSERT INTO changesets (id, kind, summary, state, created_at) \
+                   VALUES (1, 'new', 'New on oci', 'dismissed', 1); \
+                 INSERT INTO changeset_items \
+                   (changeset_id, position, grp, kind, name, action, decider, state) \
+                   VALUES (1, 0, 'core', 'skill', 's', 'import', 'person', 'rejected');",
+            )
+            .unwrap();
+        assert!(!changeset_items_has_decided_at(&s.conn).unwrap());
+        s.migrate().unwrap();
+        assert!(changeset_items_has_decided_at(&s.conn).unwrap());
+        let at: Option<i64> = s
+            .conn
+            .query_row("SELECT decided_at FROM changeset_items", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(at, None, "an item decided before 097 has no time");
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 97;")
             .unwrap();
         s.migrate().unwrap();
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);

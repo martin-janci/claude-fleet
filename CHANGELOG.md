@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.7] - 2026-10-05
+
+### Changed
+- buildkite-verify.sh takes --branch / --commit
+- verify on a persistent Buildkite builder on demand
+- scripts/verify.sh, one verification command for agents
+- give the file-based upgrade test a Windows-only time budget
+- run macOS and Windows clippy in parallel with their tests
+
+### Documentation
+- **buildkite:** install the pinned toolchain as the default before cargo install
+- **audit:** Appendix J — macOS memory and the test-target split
 ## [0.4.6] - 2026-10-04
 
 ### Added
@@ -2572,6 +2584,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.7]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.7
 [0.4.6]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.6
 [0.4.5]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.5
 [0.4.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.4

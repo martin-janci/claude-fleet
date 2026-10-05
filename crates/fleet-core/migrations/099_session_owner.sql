@@ -2,12 +2,12 @@
 -- spec docs/superpowers/specs/2026-09-30-multi-user-gap-analysis.md §4.3): a
 -- SESSION learns whose it is.
 --
--- Migration 094 gave the hub its people; this one gives every session row an
+-- Migration 098 gave the hub its people; this one gives every session row an
 -- owner and a visibility, and records — durably, outliving the row — which
 -- person a Claude conversation belonged to.
 --
 -- What this script does, statement by statement (named rather than counted,
--- 094's convention):
+-- 098's convention):
 --
 --   ALTER TABLE sessions            `owner_person_id`: whose session this is
 --   ALTER TABLE sessions            `visibility`: `private` | `unclaimed`
@@ -247,4 +247,4 @@ BEGIN
   UPDATE sessions SET row_version = OLD.row_version + 1 WHERE id = NEW.id;
 END;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (97);
+INSERT OR IGNORE INTO schema_version (version) VALUES (99);

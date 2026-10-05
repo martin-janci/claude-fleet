@@ -307,7 +307,7 @@ pub struct SessionRow {
     /// `outcome::PR_EVIDENCE_STALE_SECS` describes the past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_checked_at: Option<i64>,
-    /// Whose session this is (migration 097, multi-user M1): the `people`
+    /// Whose session this is (migration 099, multi-user M1): the `people`
     /// row that owns it. `None` for a row nobody can speak for — one
     /// reconcile discovered on a host, or a pre-M1 row fleet did not create
     /// (`visibility = 'unclaimed'`).
@@ -328,7 +328,7 @@ pub struct SessionRow {
     /// Hence no `skip_serializing_if` on either field.
     #[serde(default)]
     pub owner_person_id: Option<i64>,
-    /// [`VISIBILITY_PRIVATE`] or [`VISIBILITY_UNCLAIMED`] (migration 097,
+    /// [`VISIBILITY_PRIVATE`] or [`VISIBILITY_UNCLAIMED`] (migration 099,
     /// whose `CHECK` admits nothing else — in particular no `'org'`, which
     /// the owner removed from M1 because the schema's only referent for
     /// "the org can see it" is a column an admin binds their own device to;
@@ -342,19 +342,19 @@ pub struct SessionRow {
     pub visibility: String,
 }
 
-/// `sessions.visibility` (migration 097): private to its owner, and to the
+/// `sessions.visibility` (migration 100): private to its owner, and to the
 /// people the owner has granted `watch` or `drive` to. The default for
 /// anything a person starts through fleet.
 pub const VISIBILITY_PRIVATE: &str = "private";
 
-/// `sessions.visibility` (migration 097): nobody can speak for this row —
+/// `sessions.visibility` (migration 100): nobody can speak for this row —
 /// reconcile found it on a host, or it predates M1 and fleet did not create
 /// it. An out-of-scope caller learns a per-host COUNT of these and not one
 /// byte more (spec §4.3); claiming one needs proof of host access.
 pub const VISIBILITY_UNCLAIMED: &str = "unclaimed";
 
 /// [`SessionRow::visibility`] when a frame carries no `visibility` key at
-/// all: a hub built before migration 097, or a row read from one.
+/// all: a hub built before migration 099, or a row read from one.
 ///
 /// **It must be a named function.** A bare `#[serde(default)]` on a `String`
 /// yields `String::default()` — the empty string — which is neither
@@ -1189,10 +1189,10 @@ pub struct ClientTokenRow {
     /// (migration 074, `fleet-hub client grant <name> assets`): the hub's
     /// `catalog_admin` tool answers it as it answers the master.
     pub assets_admin_at: Option<i64>,
-    /// Whose device this is (multi-user M1, migration 096): the `people` row
+    /// Whose device this is (multi-user M1, migration 100): the `people` row
     /// this token belongs to. `None` is the `person: None` privilege level —
     /// a caller nobody owns — which every gate must refuse and no scope can
-    /// resolve; migration 096 leaves no live row in that state, and
+    /// resolve; migration 098 leaves no live row in that state, and
     /// `Store::set_client_person` is the only thing that puts one back.
     /// Deliberately no foreign key: deleting a person leaves the token bound
     /// to an id nothing has (fail closed), never widened.
@@ -1270,7 +1270,7 @@ pub struct TaskRow {
     #[serde(skip_serializing, default)]
     pub worker_claude_session_id: Option<String>,
     /// When a session this task names was DELETED, so the task's ends no
-    /// longer identify anybody (migration 099, multi-user M1 T9d).
+    /// longer identify anybody (migration 101, multi-user M1 T9d).
     ///
     /// `sessions.id` is reused, and a task outlives its sessions, so an id
     /// kept past the row's death would make the task read as belonging to
@@ -1351,6 +1351,12 @@ pub struct AssetInventoryRow {
     /// `unmanaged`/`orphan` row, which names nothing the catalog defines.
     #[serde(default)]
     pub catalog_id: Option<i64>,
+    /// Assets M5 (migration 096, Rulings R4): on a `drifted` managed row,
+    /// `host` (edited there) or `catalog` (the host copy is as fleet wrote
+    /// it; the catalog moved on). `None` otherwise, or when the manifest
+    /// entry cannot tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drift_side: Option<String>,
 }
 
 /// A secret name known to the sync engine (migration 031). Never carries the
@@ -1721,7 +1727,7 @@ mod tests {
     }
 
     /// The inverse of the test above, and the privacy-critical one
-    /// (migration 097, spec §3.7): a `SessionRow` parsed from a frame with
+    /// (migration 099, spec §3.7): a `SessionRow` parsed from a frame with
     /// **no `visibility` key at all** — an older hub, or a replayed frame
     /// from before the column — reads [`VISIBILITY_UNCLAIMED`].
     ///

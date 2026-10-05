@@ -11,10 +11,24 @@ impl FleetTools {
         the last scan, plus unmanaged assets on hosts and catalog parse \
         problems. E_CATALOG_NOT_CONFIGURED until a catalog is set (in the \
         app, or `fleet-hub catalog set` on a hub).")]
-    pub(super) async fn list_assets(&self) -> Result<CallToolResult, McpError> {
-        audit("list_assets", "");
+    pub(super) async fn list_assets(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ListAssetsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "list_assets",
+            &format!("all_catalogs={} caller={}", p.all_catalogs, caller.label()),
+        );
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
-        ok_json_compact(&catalog::list_assets(&self.store).map_err(to_mcp_err)?)
+        // Fix round 1: personal-only unless asked — an older desktop keys
+        // its list by name and must never get a second catalog's asset.
+        let scope = if p.all_catalogs {
+            listing_scope(&caller)
+        } else {
+            catalog::ListingScope::Personal
+        };
+        ok_json_compact(&catalog::list_assets_in(&self.store, scope).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Scan hosts for installed skills/agents/hooks/MCP \
@@ -227,11 +241,8 @@ impl FleetTools {
             _ => None,
         };
         let allowed = match &touches {
-            // Every catalog's paths, remotes and grantees, across orgs: the
-            // master's, or a person's own unbound full device.
-            Touches::Nothing => {
-                caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
-            }
+            // Every catalog's paths, remotes and grantees, across orgs.
+            Touches::Nothing => may_list_every_catalog(&caller),
             Touches::MasterOnly(_) => caller.is_master(),
             Touches::Catalog(name) => {
                 may_admin_catalog_row(&caller, &self.store, name, target.as_ref())?
@@ -812,6 +823,28 @@ fn changesets_forbidden(action: &str, catalog: Option<&str>, caller: &Caller) ->
     mcp_err("E_FORBIDDEN", message, None)
 }
 
+/// Assets M5 (R11): every catalog's assets for the master and a person's own
+/// unbound full device — the `list_catalogs` audience (`Touches::Nothing` in
+/// `catalog_admin`); the personal catalog only, as before M5, for a per-host
+/// token and an org-bound, readonly or single-purpose client, so none of
+/// them learns an org catalog's name or assets from the listing.
+pub(crate) fn listing_scope(caller: &Caller) -> catalog::ListingScope {
+    if may_list_every_catalog(caller) {
+        catalog::ListingScope::Every
+    } else {
+        catalog::ListingScope::Personal
+    }
+}
+
+/// Who may see every catalog — its name, paths, remotes, grantees and
+/// assets, across orgs: the master, or a person's own unbound full device.
+/// The one rule behind both `list_catalogs` (`Touches::Nothing` in
+/// `catalog_admin`) and [`listing_scope`], so the two audiences cannot
+/// drift apart (final review, minor 3).
+pub(crate) fn may_list_every_catalog(caller: &Caller) -> bool {
+    caller.is_master() || (caller.is_person_device() && caller.mode == TokenMode::Full)
+}
+
 /// True when `caller` may touch the catalog `name` whose row the caller has
 /// already read (`row`; `None` for personal or an unknown name) — spec:
 /// `may_admin_catalog(caller, catalog_id)`. The master, or a live `full`
@@ -963,6 +996,7 @@ mod confirm_summary_tests {
             )),
             decider: "rule".into(),
             state: "pending".into(),
+            decided_at: None,
         }
     }
 

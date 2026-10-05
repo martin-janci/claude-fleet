@@ -16,37 +16,39 @@ too (2026-10-05), so this list is closed.**
 
 ### The migration numbers in this document are the ORIGINAL ones
 
-Read every "Migration 086 / 087 / 088 / 089" below as **096_people,
-097_session_owner, 098_session_grants, 099_tasks_detach**. They were
-renumbered **twice**, each time because `main` shipped migrations first while
-M1 was in flight: 086–089 → 094–097 (main took 086–093), then 094–097 →
-096–099 (main took 094_changesets and 095_downloads). The task headings keep
-the original numbers because they are the names the commits refer to;
-`store/schema.rs` is the authority on what is actually registered.
+Read every "Migration 086 / 087 / 088 / 089" below as **098_people,
+099_session_owner, 100_session_grants, 101_tasks_detach**. They have been
+renumbered **three times**, each time because `main` shipped migrations first
+while M1 was in flight:
 
-**The trap, and it cost 50 test failures the second time.** Each script ends
-with `INSERT OR IGNORE INTO schema_version (version) VALUES (N);` and **N is
-baked into the SQL**. Renaming the files and the `MIGRATIONS` rows is not
-enough — a claim that "the scripts themselves are unchanged" was made during
-the first renumber and was wrong. A third collision is likely if M1 stays
-unmerged; renumber the files, the rows **and the `VALUES (N)` in each script**,
-then run the suite rather than a check.
+| round | M1 held | `main` had taken | M1 moved to |
+|---|---|---|---|
+| original | 086-089 | — | — |
+| 1 | 086-089 | 086-093 | 094-097 |
+| 2 | 094-097 | 094_changesets, 095_downloads | 096-099 |
+| 3 | 096-099 | 096_inventory_drift_side, 097_changeset_item_decided_at | **098-101** |
 
-Two things to carry forward rather than re-derive, each recorded where it
-belongs rather than only here. The `long_poll_permit` bucketing on
-`caller.label()` is open by decision and is a self-denial-of-service, not a
-leak (acceptance item 6, and the table in T8 below). And the six items T8's
-section recorded as "still open" were closed by the rounds that followed it —
-that table is in T8, with where each one landed, so the original review
-(`m1-t6t8-findings.md`) does not send a reader hunting for them.
+The task headings keep the original numbers because they are the names the
+commits refer to; `store/schema.rs` is the authority on what is registered,
+and a test now holds every migration test's seed version at exactly one below
+the migration it tests.
 
-Revision 2: ownership is always present, the migration no longer makes old
-sessions org-visible, and T4a is new. Revision 3: grants move downward only,
-sharing never confers a terminal, `unclaimed` surfaces as a count and is claimed
-only with proof of host access, and device revocation is separated from grant
-revocation. **Revision 4 replaced the whole T1–T7 breakdown** after a
-thirteen-agent review (nine subsystem maps, three adversarial lenses, one
-synthesis) audited revision 3 against the tree.
+**Two traps, both of which have actually bitten.**
+
+The first: the version is **baked into each script's closing `INSERT OR
+IGNORE INTO schema_version (version) VALUES (N)`**, so renaming the files and
+the `MIGRATIONS` rows is not enough. That was claimed to be unnecessary
+during round 1, was wrong, and cost 50 test failures in round 2.
+
+The second, found in round 3: **renumbering prose with a sequential
+search-and-replace corrupts it.** Replacing 094→096 and then 096→098 in one
+pass double-bumps the references the first rule just wrote, so after round 2
+several sentences about the `people` migration said 098 — the number of
+`session_grants`. Round 3 therefore renumbered every reference by its
+SUBJECT (people / owner / grants / detach), not by arithmetic, and the
+`main`-side references to 096 and 097 — now Assets M5's `drift_side` and
+`decided_at` — were left alone by the same rule. Expect a fourth collision
+while this stays unmerged, and renumber by subject.
 
 ## Revision 6
 

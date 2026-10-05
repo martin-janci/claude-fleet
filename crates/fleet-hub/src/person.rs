@@ -1,5 +1,5 @@
 //! `fleet-hub person …` — the operator's side of the `people` table
-//! (multi-user M1, migration 096).
+//! (multi-user M1, migration 098).
 //!
 //! **Written straight to `state.db`, not through a tool**, for
 //! `session.rs`'s reason and one more. There is no `people` tool at all:

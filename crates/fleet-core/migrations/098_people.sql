@@ -28,7 +28,7 @@
 --               nothing that could break the untrusted-content marker.
 -- display_name  the profile layer (M2). NULL means "show `name`".
 -- disabled_at   the person has left. The row STAYS — grants and (from
---               migration 097) sessions point at it, and re-attributing a
+--               migration 100) sessions point at it, and re-attributing a
 --               departed colleague's work is not an operation M1 has. It is
 --               deliberately not part of the owner index below.
 CREATE TABLE IF NOT EXISTS people (
@@ -127,4 +127,4 @@ UPDATE client_tokens
    AND revoked_at IS NULL
    AND mode NOT IN ('peer', 'updater');
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (96);
+INSERT OR IGNORE INTO schema_version (version) VALUES (98);

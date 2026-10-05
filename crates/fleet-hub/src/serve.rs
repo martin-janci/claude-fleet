@@ -152,7 +152,7 @@ pub fn init(
                 .map_err(|e| e.to_string())?;
         }
         // Multi-user M1: a hub knows whose it is before it serves anything.
-        // Migration 096 inserts the personal owner, so this is normally one
+        // Migration 098 inserts the personal owner, so this is normally one
         // index seek; it is called at every entry point that mints the
         // master token because a store opened outside `init` must have one
         // too, and no single entry point is guaranteed to run first.

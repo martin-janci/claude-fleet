@@ -156,7 +156,7 @@ mod tests {
     }
 
     /// Multi-user M1: the hub's personal owner exists from the first open
-    /// (migration 096 inserts it) and this is a no-op; when the flagged row
+    /// (migration 098 inserts it) and this is a no-op; when the flagged row
     /// is missing it mints exactly one, and a second call finds it. The
     /// partial unique index would refuse a second one anyway — the point
     /// here is that this never tries, and never re-homes the flag.

@@ -893,7 +893,7 @@ pub fn resume_session_args(
     };
     // Whose the resumed session is (multi-user M1, T5). A resume continues
     // somebody's work, so the first answer is the person the CONVERSATION
-    // belonged to: `conversation_owners` (migration 097) outlives the row the
+    // belonged to: `conversation_owners` (migration 099) outlives the row the
     // resume is replacing, which is exactly the case here — a resume exists
     // because the old row is gone. The candidate's own conversation names
     // that person in EVERY mode, not just `last`: `brief` and `fresh` resume

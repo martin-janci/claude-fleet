@@ -14,12 +14,17 @@
 //!
 //! A host card (rollout, drift restore) plans the card's hosts and applies
 //! only what R15 allows; SB6's automatic additive sync shares that path
-//! (`auto_additive`). A Rollout only creates, adopts or updates, and SB6
-//! only creates or adopts (it never picks a drifted copy); a restore — one
-//! asset, one host, picked by a person — may also overwrite, with a backup;
-//! nothing ever removes. A card's host sync runs under its
-//! own cancellation token, never registered, so `cancel_task` cannot stop
-//! it (R27).
+//! (`auto_additive`). A Rollout and SB6 create, adopt, or update a copy the
+//! planner verified untouched since fleet wrote it (Assets M5) — SB6's
+//! update only for a managed copy that is just behind its catalog
+//! (`sb6_due`). Neither ever overwrites a copy, and neither removes an
+//! asset. The one deletion either makes is a moved asset's old location
+//! (a re-pointed `install_as`, F3c's Codex move), backed up, and only when
+//! the planner verified that old copy untouched too (`action_allowed`).
+//! A restore — one asset, one host, picked by a person — may also
+//! overwrite, with a backup. A card's host sync runs under its own
+//! cancellation token, never registered, so `cancel_task` cannot stop it
+//! (R27).
 
 use super::rules::{gap_hash, LayerGap, NEEDS_A_LOOK, UPDATE};
 use super::{
@@ -29,6 +34,7 @@ use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::import::slugify;
 use crate::service::catalog::layer::{split_key, Axis, Layer};
 use crate::service::catalog::model::{Header, Kind, Scope, TargetOverride};
+use crate::service::catalog::sync::manifest::HostCopy;
 use crate::service::catalog::sync::plan::{Action, ActionOp, HostPlan, SyncPlan};
 use crate::service::catalog::sync::{self, ApplyArgs as SyncApplyArgs, PlanArgs};
 use crate::service::catalog::validate::{check_layer_name, check_name};
@@ -38,8 +44,8 @@ use crate::service::catalog::{
 use crate::service::settings;
 use crate::ssh::SshClient;
 use crate::store::{
-    now_unix, now_unix_ms, AppliedRecord, CatalogRow, ChangesetItemRow, ChangesetRow, HostLayerRow,
-    NewChangesetItem, Store, TriageVerdictRow,
+    now_unix, now_unix_ms, AppliedRecord, AssetInventoryRow, CatalogRow, ChangesetItemRow,
+    ChangesetRow, HostLayerRow, NewChangesetItem, Store, TriageVerdictRow,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1412,7 +1418,8 @@ pub(crate) fn follow_up_rollout(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpFilter {
     /// Rollout and SB6: create, adopt, update (the applier backs up every
-    /// file it replaces).
+    /// file it replaces) — an update only over a copy the planner verified
+    /// untouched ([`action_allowed`], Assets M5).
     Additive,
     /// Drift restore, one asset a person picked: update or overwrite.
     Restore,
@@ -1427,14 +1434,28 @@ pub(crate) fn op_allowed(f: OpFilter, op: ActionOp) -> bool {
     }
 }
 
+/// Assets M5 (Rulings R3): whether `a` may go to a host under `f`. On top
+/// of [`op_allowed`], an Additive `Update` (Rollout, SB6) needs the planner
+/// to have verified the host copy untouched since fleet wrote it — never an
+/// edited copy, nor one an entry from before M5 cannot vouch for. So does
+/// any Additive action that deletes a moved asset's old location (final
+/// review I1: a `Create` at a new location, the old copy removed). A
+/// Restore (one asset, one host, a person's pick) may update any copy.
+pub(crate) fn action_allowed(f: OpFilter, a: &Action) -> bool {
+    let needs_verified = a.op == ActionOp::Update || sync::plan::removes_old_locations(a);
+    op_allowed(f, a.op)
+        && (f != OpFilter::Additive || !needs_verified || a.host_copy == Some(HostCopy::Unchanged))
+}
+
 /// Whether `a` is one of `assets` (`<kind>/<name>`) from one of `catalogs`.
 fn card_owns(a: &Action, assets: &BTreeSet<String>, catalogs: &BTreeSet<String>) -> bool {
     assets.contains(&format!("{}/{}", a.kind, a.name))
         && a.catalog.as_ref().is_some_and(|c| catalogs.contains(c))
 }
 
-/// Keep only what the card may apply on this host: an allowed op, for one
-/// of `assets` (`<kind>/<name>`), from one of `catalogs`.
+/// Keep only what the card may apply on this host: an allowed action
+/// ([`action_allowed`]), for one of `assets` (`<kind>/<name>`), from one of
+/// `catalogs`.
 pub(crate) fn narrow(
     hp: &mut HostPlan,
     f: OpFilter,
@@ -1442,7 +1463,39 @@ pub(crate) fn narrow(
     catalogs: &BTreeSet<String>,
 ) {
     hp.actions
-        .retain(|a| op_allowed(f, a.op) && card_owns(a, assets, catalogs));
+        .retain(|a| action_allowed(f, a) && card_owns(a, assets, catalogs));
+}
+
+/// Assets M5 fix round 1: the card's own actions `narrow` drops under `f`
+/// only because the planner could not verify the host copy untouched — an
+/// `Update` over a copy whose manifest entry predates the file hashes, a
+/// moved asset's `Create` that would delete such an old copy (final review
+/// I1), or an `Overwrite` of a copy the hashes show edited (a moved one's
+/// old copy included) — each as the line the card reports: such a host is
+/// left to a person, never counted done.
+fn held_by_host_copy(
+    host: &str,
+    hp: &HostPlan,
+    f: OpFilter,
+    assets: &BTreeSet<String>,
+    catalogs: &BTreeSet<String>,
+) -> Vec<String> {
+    hp.actions
+        .iter()
+        .filter(|a| card_owns(a, assets, catalogs) && !action_allowed(f, a))
+        .filter(|a| {
+            op_allowed(f, a.op)
+                || (a.op == ActionOp::Overwrite && a.host_copy == Some(HostCopy::Edited))
+        })
+        .map(|a| {
+            let why = if a.host_copy == Some(HostCopy::Edited) {
+                "host copy edited"
+            } else {
+                "host copy predates fleet's file hashes"
+            };
+            format!("{}/{} on {host}: {why} — sync it yourself", a.kind, a.name)
+        })
+        .collect()
 }
 
 /// The `${NAME}`s the card's own assets wait on in `hp` — `apply_sync`'s
@@ -1464,7 +1517,9 @@ fn missing_secrets(
 /// that failed or partly applied (PF5: only these fail a card); `skipped`
 /// — a pair not planned (unreachable, scan failed), which is reported, not
 /// a failure; `applied` — a pair applied something; `nothing` — a pair was
-/// planned and nothing the card may do was left on it (never applied).
+/// planned and nothing the card may do was left on it (never applied);
+/// `held` — the card held back an update the planner could not verify
+/// (Assets M5), which keeps the host's items from counting as done.
 /// Who a host sync runs for: a card a person applied, or SB6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RunBy {
@@ -1476,15 +1531,20 @@ enum RunBy {
 struct HostOutcome {
     applied: bool,
     nothing: bool,
+    /// Assets M5 fix round 1: the card held back one of its own updates (or
+    /// an overwrite of an edited copy) because the planner could not verify
+    /// the host copy untouched ([`held_by_host_copy`], named in `skipped`).
+    /// The host's items are then not done, like a skipped host's.
+    held: bool,
     failed: Vec<String>,
     skipped: Vec<String>,
 }
 
 impl HostOutcome {
-    /// The host's items count as applied: no pair failed, and one applied
-    /// or had nothing left to do.
+    /// The host's items count as applied: no pair failed, nothing was held
+    /// back, and one applied or had nothing left to do.
     fn ok(&self) -> bool {
-        self.failed.is_empty() && (self.applied || self.nothing)
+        self.failed.is_empty() && !self.held && (self.applied || self.nothing)
     }
 
     fn failed(why: String) -> HostOutcome {
@@ -1498,7 +1558,10 @@ impl HostOutcome {
 /// Plan each host in `wants` (PF4: `allow_unlayered`, since the plan is
 /// narrowed to the card's assets anyway), narrow it to what `filter` lets
 /// the card write, park what is left as one plan and apply it under its own
-/// token (R27). A pair that was not planned is reported `skipped`, and one
+/// token (R27). An action of the card's that `narrow` drops only for its
+/// host copy ([`held_by_host_copy`]) is reported `skipped` and marks the
+/// host `held` (Assets M5 fix round 1). A pair that was not planned is
+/// reported `skipped`, and one
 /// narrowed to nothing is `nothing` — neither is parked or applied, so a
 /// sync with nothing to write never rescans a host, writes a `sync_runs`
 /// row or emits progress (fix round 1, I1). For a card ([`RunBy::Card`]),
@@ -1559,7 +1622,16 @@ async fn sync_hosts(
                 continue;
             }
             missing.extend(missing_secrets(&hp, assets, catalogs));
+            let held = if hp.status == "planned" {
+                held_by_host_copy(host, &hp, filter, assets, catalogs)
+            } else {
+                Vec::new()
+            };
             narrow(&mut hp, filter, assets, catalogs);
+            if !held.is_empty() {
+                o.held = true;
+                o.skipped.extend(held);
+            }
             if hp.status != "planned" {
                 let why = hp.detail.clone().unwrap_or_else(|| hp.status.clone());
                 o.skipped.push(format!("{host} ({}): {why}", hp.harness));
@@ -1824,13 +1896,30 @@ fn finish_host_card(
     Ok(())
 }
 
+/// Assets M5 (R6): whether SB6 brings `r` up to date — missing; present,
+/// identical and not yet managed (adopt); or managed and only behind its
+/// catalog (`drift_side = catalog`). A copy a person edited, or one its
+/// manifest entry cannot vouch for (`drift_side` unknown), waits for a
+/// person. This only picks what SB6 plans: the planner re-checks the fresh
+/// snapshot (R2) and the Additive filter (R3, `action_allowed`) applies an
+/// Update only over a copy it reads `Unchanged` itself, so a copy edited
+/// after the scan is an Overwrite and dropped — never replaced on the
+/// inventory's say-so.
+pub(crate) fn sb6_due(r: &AssetInventoryRow) -> bool {
+    match r.state.as_str() {
+        "missing" => true,
+        "in_sync" => !r.managed,
+        "drifted" => r.managed && r.drift_side.as_deref() == Some("catalog"),
+        _ => false,
+    }
+}
+
 /// SB6 (R17): with no card, sync additively what a rolled-out layer
 /// introduced and a host lacks (`missing`) or has unmanaged but identical
-/// (`in_sync`, adopted). A `drifted` copy — managed or not — is never due
-/// (final review I1): the planner plans an Update whenever the catalog
-/// moved, even over a copy a person edited on the host, so replacing a
-/// drifted copy is left to a person. Answers how many hosts it applied
-/// something on — 0, with nothing applied or recorded, when nothing is left
+/// (`in_sync`, adopted). A `drifted` copy is due only when it is managed
+/// and only behind its catalog ([`sb6_due`], Assets M5); the planner turns
+/// an edited one into an overwrite, which SB6 never applies. Answers how
+/// many hosts it applied something on — 0, with nothing applied or recorded, when nothing is left
 /// to do. A fleet
 /// with no applied Rollout (pre-M4) answers 0 without planning anything; a
 /// layer's first rollout is always a card (R16). An asset blocked on a
@@ -1839,11 +1928,25 @@ fn finish_host_card(
 /// is left out until its inventory is scanned again ([`Sb6Backoff`], final
 /// review I3).
 pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result<usize, IpcError> {
+    Ok(sb6_pass(store, ssh)
+        .await?
+        .values()
+        .filter(|o| o.applied && o.failed.is_empty())
+        .count())
+}
+
+/// One SB6 pass ([`auto_additive`]): each host it synced, with its
+/// [`HostOutcome`] — the lines it skipped or held included — and none when
+/// nothing was due.
+async fn sb6_pass(
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<BTreeMap<String, HostOutcome>, IpcError> {
     let (rolled, rejected, rows, hosts, configured, backoff, scans) = {
         let s = lock(store)?;
         let rolled = s.rolled_out_layers()?;
         if rolled.is_empty() {
-            return Ok(0);
+            return Ok(BTreeMap::new());
         }
         (
             rolled,
@@ -1887,16 +1990,7 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
                         && r.kind == kind
                         && r.name == name
                 })
-                .is_some_and(|r| match r.state.as_str() {
-                    "missing" => true,
-                    "in_sync" => !r.managed,
-                    // Final review I1 (interim): a drifted copy is never
-                    // due. The planner cannot yet tell "host edited" from
-                    // "host behind the catalog" and plans an Update for
-                    // both, so only a person (a Drift card's restore, or a
-                    // sync they run) ever replaces a drifted copy.
-                    _ => false,
-                });
+                .is_some_and(sb6_due);
             if due {
                 wants
                     .entry(h.alias.clone())
@@ -1907,7 +2001,7 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
         }
     }
     if wants.is_empty() {
-        return Ok(0);
+        return Ok(BTreeMap::new());
     }
     let outcome = sync_hosts(
         &wants,
@@ -1940,10 +2034,7 @@ pub async fn auto_additive(store: &Mutex<Store>, ssh: &Arc<SshClient>) -> Result
             next.write(&s);
         }
     }
-    Ok(outcome
-        .values()
-        .filter(|o| o.applied && o.failed.is_empty())
-        .count())
+    Ok(outcome)
 }
 
 /// Final review I3: the hosts SB6 failed on, each with its newest inventory
@@ -1998,42 +2089,78 @@ impl Sb6Backoff {
     }
 }
 
-/// Fix round 1 (6): every (catalog, layer, host) whose latest decision on
-/// a Rollout card is a person's rejection of its `sync` item — only a
-/// person rejects an item (`reject_item`); a later applied item for the
-/// same triple lifts it. SB6 never syncs what a person said no to.
-pub(super) fn rejected_rollouts(s: &Store) -> Result<BTreeSet<(i64, String, String)>, IpcError> {
-    let mut cards = s.list_changesets()?;
-    cards.sort_by_key(|c| c.id);
-    let mut last: BTreeMap<(i64, String, String), bool> = BTreeMap::new();
-    for card in cards
+/// One rollout `sync` decision, for [`rejected_from`].
+struct Decision {
+    at: i64,
+    card: i64,
+    position: i64,
+    key: (i64, String, String),
+    rejected: bool,
+}
+
+/// Fix round 1 (6) / Assets M5 (R8): the `(catalog, layer, host)` whose
+/// latest decision on a Rollout card's `sync` item is a person's rejection
+/// — only a person rejects an item (`reject_item`); a later applied item
+/// for the same triple lifts it. "Latest" is by when it was decided: the
+/// item's `decided_at`, else (decided before 097) its card's `applied_at`,
+/// else the card's creation (seconds → ms); then card id and position.
+/// Pure.
+pub(super) fn rejected_from(
+    cards: &[(ChangesetRow, Vec<ChangesetItemRow>)],
+) -> BTreeSet<(i64, String, String)> {
+    let mut decisions = Vec::new();
+    for (card, items) in cards
         .iter()
-        .filter(|c| c.kind == CardKind::Rollout.as_str())
+        .filter(|(c, _)| c.kind == CardKind::Rollout.as_str())
     {
-        for i in s.changeset_items(card.id)? {
-            if i.action != ItemAction::Sync.as_str() {
-                continue;
-            }
+        for i in items
+            .iter()
+            .filter(|i| i.action == ItemAction::Sync.as_str())
+        {
+            let rejected = match i.state.as_str() {
+                "rejected" => true,
+                "applied" => false,
+                _ => continue,
+            };
             let (Some(cid), Some(layer)) =
                 (i.catalog_id, ItemParams::parse(i.params.as_deref()).layer)
             else {
                 continue;
             };
-            match i.state.as_str() {
-                "rejected" => {
-                    last.insert((cid, layer, i.name.clone()), true);
-                }
-                "applied" => {
-                    last.insert((cid, layer, i.name.clone()), false);
-                }
-                _ => {}
-            }
+            decisions.push(Decision {
+                at: i
+                    .decided_at
+                    .or(card.applied_at)
+                    .unwrap_or(card.created_at.saturating_mul(1000)),
+                card: card.id,
+                position: i.position,
+                key: (cid, layer, i.name.clone()),
+                rejected,
+            });
         }
     }
-    Ok(last
-        .into_iter()
+    decisions.sort_by_key(|d| (d.at, d.card, d.position));
+    let mut last: BTreeMap<(i64, String, String), bool> = BTreeMap::new();
+    for d in decisions {
+        last.insert(d.key, d.rejected);
+    }
+    last.into_iter()
         .filter_map(|(k, rejected)| rejected.then_some(k))
-        .collect())
+        .collect()
+}
+
+/// [`rejected_from`] over the stored Rollout cards.
+pub(super) fn rejected_rollouts(s: &Store) -> Result<BTreeSet<(i64, String, String)>, IpcError> {
+    let mut cards = Vec::new();
+    for c in s
+        .list_changesets()?
+        .into_iter()
+        .filter(|c| c.kind == CardKind::Rollout.as_str())
+    {
+        let items = s.changeset_items(c.id)?;
+        cards.push((c, items));
+    }
+    Ok(rejected_from(&cards))
 }
 
 #[cfg(test)]
@@ -2063,6 +2190,7 @@ mod filter_tests {
             secret_files: Default::default(),
             remove_entry: None,
             plugin: None,
+            host_copy: None,
         }
     }
 
@@ -2080,8 +2208,23 @@ mod filter_tests {
                 action("w", ActionOp::Create, Some("personal")),
                 action("w2", ActionOp::Overwrite, Some("personal")),
                 action("w3", ActionOp::Remove, None),
-                action("w4", ActionOp::Update, Some("personal")),
+                Action {
+                    host_copy: Some(HostCopy::Unchanged),
+                    ..action("w4", ActionOp::Update, Some("personal"))
+                },
                 action("w5", ActionOp::Adopt, Some("acme")),
+                // Assets M5 (R3, PF3): an update the planner could not
+                // verify (no entry, a pre-M5 entry) or found edited never
+                // rides an Additive card — `narrow` reads `host_copy`.
+                action("w6", ActionOp::Update, Some("personal")),
+                Action {
+                    host_copy: Some(HostCopy::Edited),
+                    ..action("w7", ActionOp::Update, Some("personal"))
+                },
+                Action {
+                    host_copy: Some(HostCopy::Unverified),
+                    ..action("w8", ActionOp::Update, Some("personal"))
+                },
                 action("other", ActionOp::Create, Some("personal")),
                 action("p", ActionOp::PluginInstall, Some("personal")),
             ],
@@ -2095,6 +2238,9 @@ mod filter_tests {
                 "skill/w3",
                 "skill/w4",
                 "skill/w5",
+                "skill/w6",
+                "skill/w7",
+                "skill/w8",
                 "plugin_ref/p",
             ]
             .map(String::from),
@@ -2117,6 +2263,86 @@ mod filter_tests {
         assert!(!op_allowed(OpFilter::Restore, ActionOp::Remove));
         assert!(!op_allowed(OpFilter::Additive, ActionOp::Overwrite));
         assert!(!op_allowed(OpFilter::Additive, ActionOp::PluginInstall));
+    }
+
+    /// Assets M5 (R3): a Rollout or SB6 updates only a copy the planner
+    /// verified untouched; a person's restore may update any copy.
+    #[test]
+    fn additive_updates_only_a_copy_the_planner_verified_untouched() {
+        let mut a = action("w", ActionOp::Update, Some("personal"));
+        for (copy, want) in [
+            (Some(HostCopy::Unchanged), true),
+            (Some(HostCopy::Edited), false),
+            (Some(HostCopy::Unverified), false),
+            (None, false),
+        ] {
+            a.host_copy = copy;
+            assert_eq!(action_allowed(OpFilter::Additive, &a), want, "{copy:?}");
+            assert!(action_allowed(OpFilter::Restore, &a), "restore: {copy:?}");
+        }
+        assert!(action_allowed(
+            OpFilter::Additive,
+            &action("w", ActionOp::Create, Some("personal"))
+        ));
+        assert!(!action_allowed(
+            OpFilter::Additive,
+            &action("w", ActionOp::Overwrite, Some("personal"))
+        ));
+    }
+
+    /// Final review I1: a Rollout or SB6 deletes a moved asset's old
+    /// location only over a copy the planner verified untouched — a
+    /// `Create` (nothing at the new location yet) as much as an `Update`.
+    /// A held one is named as the line the card reports. A `Create` whose
+    /// entry records only locations it writes again deletes nothing.
+    #[test]
+    fn additive_deletes_an_old_location_only_over_a_verified_copy() {
+        use crate::service::catalog::sync::manifest::ManifestEntry;
+        let mut moved = action("w", ActionOp::Create, Some("personal"));
+        moved.files = vec!["~/.claude/skills/w2/SKILL.md".into()];
+        moved.remove_entry = Some(ManifestEntry {
+            files: vec!["~/.claude/skills/w/SKILL.md".into()],
+            ..Default::default()
+        });
+        let mut recreated = moved.clone();
+        recreated.remove_entry = Some(ManifestEntry {
+            files: recreated.files.clone(),
+            ..Default::default()
+        });
+        let assets = BTreeSet::from(["skill/w".to_string()]);
+        let catalogs = BTreeSet::from(["personal".to_string()]);
+        let planned = |actions| HostPlan {
+            host_alias: "oci".into(),
+            harness: "claude".into(),
+            status: "planned".into(),
+            detail: None,
+            actions,
+            snapshot: Default::default(),
+            manifest: Default::default(),
+        };
+        for (copy, want) in [
+            (Some(HostCopy::Unchanged), true),
+            (Some(HostCopy::Edited), false),
+            (Some(HostCopy::Unverified), false),
+            (None, false),
+        ] {
+            moved.host_copy = copy;
+            assert_eq!(action_allowed(OpFilter::Additive, &moved), want, "{copy:?}");
+            recreated.host_copy = copy;
+            assert!(
+                action_allowed(OpFilter::Additive, &recreated),
+                "deletes nothing: {copy:?}"
+            );
+            let hp = planned(vec![moved.clone()]);
+            let held = held_by_host_copy("oci", &hp, OpFilter::Additive, &assets, &catalogs);
+            assert_eq!(held.is_empty(), want, "{copy:?}: {held:?}");
+        }
+        moved.host_copy = Some(HostCopy::Unverified);
+        let hp = planned(vec![moved]);
+        assert_eq!(
+            held_by_host_copy("oci", &hp, OpFilter::Additive, &assets, &catalogs),
+            ["skill/w on oci: host copy predates fleet's file hashes — sync it yourself"]
+        );
     }
 
     /// R15: no filter lets a remove, a plugin op, a no-op or a blocked
@@ -2144,6 +2370,123 @@ mod filter_tests {
             }
         }
     }
+
+    /// Assets M5 (R6): SB6 brings a missing copy, adopts an identical one,
+    /// and now updates a managed copy that is only behind its catalog —
+    /// never an edited or unverified one.
+    #[test]
+    fn sb6_brings_a_copy_that_is_only_behind_and_leaves_an_edited_one() {
+        let row = |state: &str, managed: bool, side: Option<&str>| AssetInventoryRow {
+            state: state.into(),
+            managed,
+            drift_side: side.map(String::from),
+            ..Default::default()
+        };
+        assert!(sb6_due(&row("missing", false, None)));
+        assert!(sb6_due(&row("in_sync", false, None)));
+        assert!(!sb6_due(&row("in_sync", true, None)));
+        assert!(sb6_due(&row("drifted", true, Some("catalog"))));
+        assert!(!sb6_due(&row("drifted", true, Some("host"))));
+        assert!(!sb6_due(&row("drifted", true, None)));
+        assert!(!sb6_due(&row("drifted", false, Some("catalog"))));
+        assert!(!sb6_due(&row("orphan", true, None)));
+    }
+
+    /// Assets M5 (R8): the later DECISION wins per (catalog, layer, host),
+    /// not the larger card id; an item decided before 097 falls back to its
+    /// card's apply time.
+    #[test]
+    fn a_later_decision_wins_by_when_it_was_made_not_by_card_id() {
+        let card = |id: i64, applied_at: Option<i64>| ChangesetRow {
+            id,
+            kind: "rollout".into(),
+            summary: "Roll out core".into(),
+            state: "applied".into(),
+            created_at: 1,
+            applied_at,
+            commits: None,
+            layers_snapshot: None,
+            error: None,
+        };
+        let sync = |card: i64, state: &str, decided_at: Option<i64>| ChangesetItemRow {
+            changeset_id: card,
+            position: 0,
+            grp: "core".into(),
+            catalog_id: Some(1),
+            kind: "host".into(),
+            name: "oci".into(),
+            action: "sync".into(),
+            params: Some(r#"{"layer":"core","assets":["skill/w"]}"#.into()),
+            decider: "person".into(),
+            state: state.into(),
+            decided_at,
+        };
+        let key = (1, "core".to_string(), "oci".to_string());
+        // Card 9 rejected oci at t=100; card 5 (an OLDER id) applied it at t=200.
+        let applied_later = vec![
+            (card(5, Some(200)), vec![sync(5, "applied", Some(200))]),
+            (card(9, None), vec![sync(9, "rejected", Some(100))]),
+        ];
+        assert!(!rejected_from(&applied_later).contains(&key));
+        let rejected_later = vec![
+            (card(5, Some(200)), vec![sync(5, "applied", Some(200))]),
+            (card(9, None), vec![sync(9, "rejected", Some(300))]),
+        ];
+        assert!(rejected_from(&rejected_later).contains(&key));
+        let pre_097 = vec![
+            (card(5, Some(200)), vec![sync(5, "applied", None)]),
+            (card(9, None), vec![sync(9, "rejected", Some(150))]),
+        ];
+        assert!(
+            !rejected_from(&pre_097).contains(&key),
+            "falls back to applied_at"
+        );
+    }
+
+    /// Assets M5 (R8): the store path — an apply on an OLDER card made after
+    /// a newer card's rejection lifts it: decision time, not card id.
+    #[test]
+    fn rejected_rollouts_reads_decision_times_from_the_store() {
+        let s = Store::open_in_memory().unwrap();
+        s.set_catalog_config("/p", None).unwrap();
+        let p = s.personal_catalog().unwrap().unwrap().id;
+        let sync = NewChangesetItem {
+            grp: "core".into(),
+            catalog_id: Some(p),
+            kind: "host".into(),
+            name: "oci".into(),
+            action: "sync".into(),
+            params: Some(r#"{"layer":"core","assets":["skill/w"]}"#.into()),
+            decider: "rule".into(),
+        };
+        let older = s
+            .insert_changeset("rollout", "Roll out core", std::slice::from_ref(&sync))
+            .unwrap();
+        let newer = s
+            .insert_changeset("rollout", "Roll out core", &[sync])
+            .unwrap();
+        let key = (p, "core".to_string(), "oci".to_string());
+        s.set_changeset_item_states(newer.id, &[0], "rejected")
+            .unwrap();
+        assert!(rejected_rollouts(&s).unwrap().contains(&key));
+        // Decision times are milliseconds: let the clock move on.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        s.record_changeset_applied(
+            older.id,
+            &AppliedRecord {
+                applied_at: now_unix_ms(),
+                commits: "{}",
+                layers_snapshot: "[]",
+                applied: &[0],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !rejected_rollouts(&s).unwrap().contains(&key),
+            "the older card's later apply lifts the rejection"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -2152,7 +2495,6 @@ mod tests {
     use crate::service::catalog::changesets::rules::NEEDS_A_LOOK;
     use crate::service::catalog::changesets::testkit::*;
     use crate::service::catalog::lock_registry_for_test;
-    use crate::store::AssetInventoryRow;
 
     const DESC: &str = "A reasonably long description here.";
 
@@ -3844,6 +4186,17 @@ mod tests {
         );
         let v = apply_all(&f, second, &ssh).await.unwrap();
         assert_eq!(v.state, "applied", "{:?}", v.error);
+        // Assets M5 fix round 1: the edited copy is held back and named, so
+        // the host's item is not counted done.
+        assert_eq!(item_states(&v), ["skipped"], "{:?}", v.error);
+        assert!(
+            v.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("skill/edited on oci: host copy edited — sync it yourself"),
+            "{:?}",
+            v.error
+        );
         assert!(skills.join("w/SKILL.md").is_file(), "the create landed");
         assert!(skills.join("gone/SKILL.md").is_file(), "the remove did not");
         assert_eq!(
@@ -3922,6 +4275,121 @@ mod tests {
         assert_eq!(v.state, "applied", "{:?}", v.error);
         assert_eq!(item_states(&v), ["applied"]);
         assert_eq!(last_run(&f), runs, "nothing applied, nothing recorded");
+    }
+
+    /// A person's own sync of everything planned for `oci` — no card, so no
+    /// layer counts as rolled out by it.
+    async fn person_syncs_oci(f: &Fleet, ssh: &Arc<SshClient>) {
+        let planned = sync::plan_sync(
+            PlanArgs {
+                host_alias: Some("oci".into()),
+                allow_unlayered: true,
+                ..Default::default()
+            },
+            &f.store,
+            ssh,
+        )
+        .await
+        .unwrap();
+        sync::apply_sync_with(
+            SyncApplyArgs {
+                plan_id: planned.id,
+                force_partial: false,
+                call_id: None,
+            },
+            &f.store,
+            ssh,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Assets M5 fix round 1 (6): a copy fleet wrote and nobody touched,
+    /// then a catalog change — the Rollout carries the update and the host
+    /// counts as rolled out.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rollout_updates_a_copy_fleet_verified_untouched() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        person_syncs_oci(&f, &ssh).await;
+        let skill = home.path().join(".claude/skills/w/SKILL.md");
+        assert!(skill.is_file());
+
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[("skills/w/body.md", "Steps, revised.\n")],
+        );
+        let card = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, card, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        assert_eq!(item_states(&v), ["applied"], "{:?}", v.error);
+        assert!(std::fs::read_to_string(&skill)
+            .unwrap()
+            .contains("Steps, revised."));
+        assert_eq!(
+            f.store.lock().unwrap().rolled_out_layers().unwrap(),
+            BTreeSet::from([(p, "core".to_string())])
+        );
+    }
+
+    /// Assets M5 fix round 1 (2): a manifest entry from before M5 cannot
+    /// vouch for the host copy, so the Rollout leaves its update to a
+    /// person — and says so: the host's item is skipped with a note, never
+    /// counted applied, and the layer is not rolled out there.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rollout_over_a_copy_fleet_cannot_vouch_for_skips_its_host() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        person_syncs_oci(&f, &ssh).await;
+        let skill = home.path().join(".claude/skills/w/SKILL.md");
+        let before = std::fs::read_to_string(&skill).unwrap();
+
+        // Make the entry one written before M5: no file hashes.
+        let path = home.path().join(".claude/.fleet-assets.json");
+        let mut m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        for e in m["assets"].as_object_mut().unwrap().values_mut() {
+            assert!(e.as_object_mut().unwrap().remove("file_hashes").is_some());
+        }
+        std::fs::write(&path, m.to_string()).unwrap();
+
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[("skills/w/body.md", "Steps, revised.\n")],
+        );
+        let card = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, card, &ssh).await.unwrap();
+        assert_eq!(item_states(&v), ["skipped"], "{:?}", v.error);
+        let note = v.error.clone().unwrap_or_default();
+        assert!(
+            note.contains(
+                "skill/w on oci: host copy predates fleet's file hashes — sync it yourself"
+            ),
+            "{note}"
+        );
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), before);
+        assert!(
+            f.store
+                .lock()
+                .unwrap()
+                .rolled_out_layers()
+                .unwrap()
+                .is_empty(),
+            "core is not rolled out on oci"
+        );
     }
 
     /// I1: a restore with no update or overwrite planned for its asset (the
@@ -4048,6 +4516,7 @@ mod tests {
             secret_like: false,
             fleet_owned: false,
             catalog_id: Some(f.personal.id),
+            drift_side: None,
         }
     }
 
@@ -4195,10 +4664,12 @@ mod tests {
         assert!(home.path().join(".claude/skills/w/SKILL.md").is_file());
     }
 
-    /// Final review I1 (interim): the catalog moved **and** a person edited
-    /// the host copy, so the planner would plan an Update — SB6 never treats
-    /// a `drifted` row as due, so the host copy stays as the person left it
-    /// and nothing is planned, applied or recorded.
+    /// The catalog moved **and** a person edited the host copy — the
+    /// planner plans an Overwrite, which no Additive run carries. The row's
+    /// side is unknown (`drift_side` unset, as for a manifest entry from
+    /// before M5), and `sb6_due` admits a `drifted` row only when it is
+    /// `catalog`: so SB6 does not even plan the host, and the copy stays as
+    /// the person left it, with nothing planned, applied or recorded.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn sb6_never_touches_a_managed_drifted_copy_on_a_rolled_out_layer() {
@@ -4233,6 +4704,147 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&installed).unwrap(), hand);
         assert!(!counter.exists(), "a drifted copy is never planned");
         assert_eq!(last_run(&f), runs, "no sync_runs row");
+    }
+
+    /// Assets M5 (R6, PF4): through the real SB6 pass (`auto_additive` asks
+    /// `sb6_due`), a managed copy on a rolled-out layer that is only behind
+    /// its catalog — exactly as the Rollout wrote it — is brought up to
+    /// date.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sb6_brings_a_managed_copy_only_behind_its_catalog_up_to_date() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let installed = home.path().join(".claude/skills/w/SKILL.md");
+        assert!(!std::fs::read_to_string(&installed)
+            .unwrap()
+            .contains("New steps."));
+
+        f.commit_files(&f.personal_root, p, &[("skills/w/body.md", "New steps.\n")]);
+        let mut row = w_row(&f, "oci", "drifted");
+        row.managed = true;
+        row.drift_side = Some("catalog".into());
+        f.store
+            .lock()
+            .unwrap()
+            .replace_host_inventory("oci", "claude", &[row])
+            .unwrap();
+
+        let runs = last_run(&f);
+        assert_eq!(auto_additive(&f.store, &ssh).await.unwrap(), 1);
+        let now = std::fs::read_to_string(&installed).unwrap();
+        assert!(now.contains("New steps."), "{now}");
+        assert_ne!(last_run(&f), runs, "SB6 recorded its run");
+    }
+
+    /// Assets M5 (R6, PF4, safety): SB6 never acts on the inventory's say-so
+    /// alone. A row that says the copy was edited (`host`) is never planned;
+    /// a row that says `catalog` over a copy a person edited after that scan
+    /// is re-checked by the planner, which plans an overwrite the Additive
+    /// filter drops — the person's copy stays either way.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sb6_leaves_a_copy_edited_on_its_host_whatever_the_scan_said() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let installed = home.path().join(".claude/skills/w/SKILL.md");
+        f.commit_files(&f.personal_root, p, &[("skills/w/body.md", "New steps.\n")]);
+        let hand = "edited by hand\n";
+        std::fs::write(&installed, hand).unwrap();
+        let put = |side: &str| {
+            let mut row = w_row(&f, "oci", "drifted");
+            row.managed = true;
+            row.drift_side = Some(side.into());
+            f.store
+                .lock()
+                .unwrap()
+                .replace_host_inventory("oci", "claude", &[row])
+                .unwrap();
+        };
+
+        put("host");
+        let bin2 = tempfile::tempdir().unwrap();
+        let counter = bin2.path().join("calls");
+        let counting = counting_ssh(bin2.path(), home.path(), &counter, "*");
+        assert_eq!(auto_additive(&f.store, &counting).await.unwrap(), 0);
+        assert!(!counter.exists(), "an edited copy is never planned");
+        assert_eq!(std::fs::read_to_string(&installed).unwrap(), hand);
+
+        // A stale scan: it saw the copy as fleet wrote it.
+        put("catalog");
+        let out = sb6_pass(&f.store, &ssh).await.unwrap();
+        let oci = &out["oci"];
+        assert!(oci.held && !oci.applied, "{oci:?}");
+        assert_eq!(
+            oci.skipped,
+            ["skill/w on oci: host copy edited — sync it yourself"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            hand,
+            "the planner's re-check keeps the person's edit"
+        );
+    }
+
+    /// Final review I1: the asset moved (`install_as`) after its Rollout,
+    /// so its new location is `missing` and SB6 plans it — but the old copy
+    /// a person edited is not deleted: the plan is an overwrite, the
+    /// Additive filter holds it and names the held line. The old copy stays
+    /// as the person left it, and nothing is written at the new location.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn sb6_never_deletes_an_edited_old_copy_of_a_moved_asset() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let home = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let ssh = ssh_with_home(bin.path(), home.path());
+        let id = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+        let v = apply_all(&f, id, &ssh).await.unwrap();
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+        let old = home.path().join(".claude/skills/w/SKILL.md");
+        assert!(old.is_file());
+
+        let moved = format!("{}install_as: w2\n", skill_yaml("w"));
+        f.commit_files(
+            &f.personal_root,
+            p,
+            &[("skills/w/asset.yaml", moved.as_str())],
+        );
+        let hand = "edited by hand\n";
+        std::fs::write(&old, hand).unwrap();
+        f.store
+            .lock()
+            .unwrap()
+            .replace_host_inventory("oci", "claude", &[w_row(&f, "oci", "missing")])
+            .unwrap();
+
+        let runs = last_run(&f);
+        let out = sb6_pass(&f.store, &ssh).await.unwrap();
+        let oci = &out["oci"];
+        assert!(oci.held && !oci.applied, "{oci:?}");
+        assert_eq!(
+            oci.skipped,
+            ["skill/w on oci: host copy edited — sync it yourself"]
+        );
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), hand);
+        assert!(!home.path().join(".claude/skills/w2").exists());
+        assert_eq!(last_run(&f), runs, "nothing applied, no sync_runs row");
     }
 
     /// A drift card on `skill/w` at `host`: take_host (0), restore (1).

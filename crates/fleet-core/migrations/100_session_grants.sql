@@ -2,7 +2,7 @@
 -- spec docs/superpowers/specs/2026-09-30-multi-user-gap-analysis.md §4.3): the
 -- owner SHARES a session, explicitly, revocably, and downward only.
 --
--- Migration 094 gave the hub its people and 095 gave every session an owner
+-- Migration 098 gave the hub its people and 099 gave every session an owner
 -- and a visibility. A `private` row is readable by exactly one person, which
 -- is the point — and useless the first time two colleagues need to look at
 -- the same agent. `session_grants` is the one way a second person ever
@@ -126,4 +126,4 @@ CREATE INDEX IF NOT EXISTS idx_session_grants_person
 CREATE INDEX IF NOT EXISTS idx_session_grants_session
   ON session_grants(session_id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (98);
+INSERT OR IGNORE INTO schema_version (version) VALUES (100);

@@ -38,6 +38,55 @@ describe('SyncPlanDialog', () => {
     expect(screen.getByTestId('plan-action-local-claude-skill-s').textContent).toContain('create');
   });
 
+  it('shows the op and the counts as Badges, toned by what the op does', () => {
+    const p = plan(
+      [hostPlan({ actions: [action({ op: 'overwrite' }), action({ name: 't', op: 'create' })] })],
+      { overwrite: 1, create: 1 },
+    );
+    render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });
+    const row = screen.getByTestId('plan-action-local-claude-skill-s');
+    expect(row.querySelector('.badge.crit')?.textContent).toBe('overwrite');
+    expect(screen.getByTestId('plan-action-local-claude-skill-t').querySelector('.badge.ok')?.textContent).toBe('create');
+    expect(screen.getByTestId('plan-counts').querySelectorAll('.badge')).toHaveLength(2);
+  });
+
+  it('styles an unverified update reason as a warning note, never as an error', () => {
+    const reason = "the catalog changed; the host copy predates fleet's file hashes, so a host edit cannot be ruled out";
+    const p = plan([hostPlan({ actions: [action({ op: 'update', reason })] })], { update: 1 });
+    render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });
+    const note = screen.getByTestId('plan-note-local-claude-skill-s');
+    expect(note.textContent).toBe(reason);
+    expect(note.className).toContain('note');
+    expect(note.className).not.toContain('reason');
+    expect(note.className).not.toContain('error');
+    expect(screen.getByTestId('plan-action-local-claude-skill-s').querySelector('.reason')).toBeNull();
+  });
+
+  it('styles a caution reason (update/overwrite/plugin_update) as warn and an informational one (noop, remove) as muted', () => {
+    const p = plan(
+      [
+        hostPlan({
+          actions: [
+            action({ name: 'u', op: 'update', reason: 'host copy unverified' }),
+            action({ name: 'o', op: 'overwrite', reason: 'edited on host' }),
+            action({ name: 'pu', op: 'plugin_update', reason: 'plugin moved' }),
+            action({ name: 'n', op: 'noop', reason: 'private; withheld from org host, not removed' }),
+            action({ name: 'r', op: 'remove', reason: 'no longer in the catalog' }),
+          ],
+        }),
+      ],
+      { update: 1 },
+    );
+    render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });
+    const note = (n: string) => screen.getByTestId(`plan-note-local-claude-skill-${n}`);
+    for (const n of ['u', 'o', 'pu']) expect(note(n).className).toContain('caution');
+    for (const n of ['n', 'r']) {
+      expect(note(n).className).toContain('note');
+      expect(note(n).className).not.toContain('caution');
+    }
+    expect(note('n').textContent).toBe('private; withheld from org host, not removed');
+  });
+
   it('renders the Apply button red (danger) when the plan overwrites something', () => {
     const p = plan([hostPlan({ actions: [action({ op: 'overwrite' })] })], { overwrite: 1 });
     render(SyncPlanDialog, { plan: p, onclose: () => {}, onapplied: () => {} });
@@ -92,6 +141,7 @@ describe('SyncPlanDialog', () => {
 
     await waitFor(() => expect(screen.getByTestId('plan-outcome-local-claude-skill-s')).toBeTruthy());
     expect(screen.getByTestId('plan-outcome-local-claude-skill-s').textContent).toContain('done');
+    expect(screen.getByTestId('plan-outcome-local-claude-skill-s').className).toContain('ok');
     expect(screen.getByTestId('plan-restart-local')).toBeTruthy();
 
     const call = invoke.mock.calls.find((c) => c[0] === 'catalog_apply_sync');

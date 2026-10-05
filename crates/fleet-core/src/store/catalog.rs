@@ -335,14 +335,15 @@ impl Store {
             // foreign key, which would otherwise roll back and lose this
             // host's ENTIRE inventory over one row's stale reference.
             tx.execute(
-                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, (SELECT id FROM catalogs WHERE id = ?12))",
+                "INSERT INTO asset_inventory (host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id, drift_side)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, (SELECT id FROM catalogs WHERE id = ?12), ?13)",
                 rusqlite::params![
                     host_alias, harness, r.kind, r.name, r.state, r.catalog_hash, r.host_hash, r.scanned_at,
                     if r.managed { 1 } else { 0 },
                     if r.secret_like { 1 } else { 0 },
                     if r.fleet_owned { 1 } else { 0 },
                     r.catalog_id,
+                    r.drift_side,
                 ],
             )?;
         }
@@ -356,7 +357,7 @@ impl Store {
 
     pub fn list_inventory(&self) -> Result<Vec<AssetInventoryRow>, rusqlite::Error> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id
+            "SELECT host_alias, harness, kind, name, state, catalog_hash, host_hash, scanned_at, managed, secret_like, fleet_owned, catalog_id, drift_side
              FROM asset_inventory ORDER BY host_alias, harness, kind, name",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -373,6 +374,7 @@ impl Store {
                 secret_like: row.get::<_, i64>(9)? != 0,
                 fleet_owned: row.get::<_, i64>(10)? != 0,
                 catalog_id: row.get(11)?,
+                drift_side: row.get(12)?,
             })
         })?;
         rows.collect()
@@ -520,19 +522,31 @@ impl Store {
             .optional()
     }
 
-    /// The id of the newest sync run that SB6 did not make — one whose
-    /// summary is not marked `"auto": true` (Assets M4, final review I3).
-    /// A row whose JSON does not parse counts as a person's.
-    pub fn last_person_sync_run_id(&self) -> Result<Option<i64>, rusqlite::Error> {
+    /// The newest sync run a person made — one whose summary is not marked
+    /// `"auto": true`, i.e. SB6 did not make it (Assets M4 final review I3;
+    /// M5 R10). A row whose JSON does not parse counts as a person's.
+    pub fn last_person_sync_run(&self) -> Result<Option<SyncRunRow>, rusqlite::Error> {
         self.conn
             .prepare_cached(
-                "SELECT id FROM sync_runs \
+                "SELECT id, started_at, finished_at, summary_json FROM sync_runs \
                  WHERE NOT (json_valid(summary_json) \
                             AND json_extract(summary_json, '$.auto') IS 1) \
                  ORDER BY id DESC LIMIT 1",
             )?
-            .query_row([], |row| row.get(0))
+            .query_row([], |row| {
+                Ok(SyncRunRow {
+                    id: row.get(0)?,
+                    started_at: row.get(1)?,
+                    finished_at: row.get(2)?,
+                    summary_json: row.get(3)?,
+                })
+            })
             .optional()
+    }
+
+    /// The id of [`Self::last_person_sync_run`] (PF7: one WHERE clause).
+    pub fn last_person_sync_run_id(&self) -> Result<Option<i64>, rusqlite::Error> {
+        Ok(self.last_person_sync_run()?.map(|r| r.id))
     }
 
     /// Emit `sync:progress` (not a store row).
@@ -622,6 +636,7 @@ mod tests {
             secret_like: false,
             fleet_owned: false,
             catalog_id: None,
+            drift_side: None,
         };
         s.replace_host_inventory(
             "local",
@@ -677,6 +692,7 @@ mod tests {
             // No `catalogs` row has this id — not even the personal one,
             // since nothing was configured.
             catalog_id: Some(999_999),
+            drift_side: None,
         };
         s.replace_host_inventory("local", "claude", &[row]).unwrap();
         let rows = s.list_inventory().unwrap();
@@ -726,6 +742,43 @@ mod tests {
         assert!(s.list_inventory().unwrap()[0].managed);
     }
 
+    /// Assets M5 (R4): which side moved survives the store, and a row that
+    /// says nothing reads back as nothing.
+    #[test]
+    fn inventory_round_trips_drift_side() {
+        let s = Store::open_in_memory().unwrap();
+        let row = |name: &str, side: Option<&str>| AssetInventoryRow {
+            host_alias: "local".into(),
+            harness: "claude".into(),
+            kind: "skill".into(),
+            name: name.into(),
+            state: "drifted".into(),
+            managed: true,
+            drift_side: side.map(String::from),
+            ..Default::default()
+        };
+        s.replace_host_inventory(
+            "local",
+            "claude",
+            &[
+                row("a", Some("catalog")),
+                row("b", Some("host")),
+                row("c", None),
+            ],
+        )
+        .unwrap();
+        let got: Vec<Option<String>> = s
+            .list_inventory()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.drift_side)
+            .collect();
+        assert_eq!(
+            got,
+            [Some("catalog".to_string()), Some("host".to_string()), None]
+        );
+    }
+
     #[test]
     fn inventory_round_trips_flags_and_reports_last_scans() {
         let s = Store::open_in_memory().unwrap();
@@ -742,6 +795,7 @@ mod tests {
             secret_like: true,
             fleet_owned: true,
             catalog_id: None,
+            drift_side: None,
         };
         s.replace_host_inventory(
             "local",
@@ -914,5 +968,37 @@ mod tests {
             total: 3,
         });
         assert_eq!(bus.take(), vec!["sync:progress:local:claude:1/3"]);
+    }
+
+    /// Assets M5 (R10): the newest run a person made, past SB6's; the id
+    /// reader answers the same run (PF7).
+    #[test]
+    fn last_person_sync_run_skips_runs_sb6_made() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.last_person_sync_run().unwrap().is_none());
+        assert!(s.last_person_sync_run_id().unwrap().is_none());
+        let person = s
+            .record_sync_run(
+                1,
+                2,
+                r#"{"plan_id":"p1","started_at":1,"finished_at":2,"hosts":[]}"#,
+            )
+            .unwrap();
+        s.record_sync_run(
+            3,
+            4,
+            r#"{"plan_id":"p2","started_at":3,"finished_at":4,"hosts":[],"auto":true}"#,
+        )
+        .unwrap();
+        let got = s.last_person_sync_run().unwrap().unwrap();
+        assert!(got.summary_json.contains("p1"));
+        assert_eq!(got.id, person);
+        assert_eq!(s.last_person_sync_run_id().unwrap(), Some(person));
+        assert!(s
+            .last_sync_run()
+            .unwrap()
+            .unwrap()
+            .summary_json
+            .contains("p2"));
     }
 }

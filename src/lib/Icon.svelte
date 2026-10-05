@@ -18,7 +18,10 @@
     | 'tool'
     | 'circle'
     | 'circle-half'
-    | 'circle-check';
+    | 'circle-check'
+    | 'inbox'
+    | 'library'
+    | 'key';
 </script>
 
 <script lang="ts">
@@ -84,6 +87,13 @@
   {:else if name === 'circle-check'}
     <circle cx="12" cy="12" r="8" />
     <path d="M8.5 12.5l2.5 2.5 4.5-5" />
+  {:else if name === 'inbox'}
+    <path d="M3 12h5l2 3h4l2-3h5" /><path d="M5 5h14l2 7v6a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-6z" />
+  {:else if name === 'library'}
+    <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
+    <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+  {:else if name === 'key'}
+    <circle cx="8" cy="15" r="4" /><path d="m11 12 9-9M17 6l3 3" />
   {/if}
 </svg>
 

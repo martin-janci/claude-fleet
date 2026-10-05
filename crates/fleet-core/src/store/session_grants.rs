@@ -1,4 +1,4 @@
-//! Session grants (multi-user M1, migration 098): the one way a second person
+//! Session grants (multi-user M1, migration 100): the one way a second person
 //! ever reaches a session row.
 //!
 //! A session started through fleet is `private` to its owner, so sharing has

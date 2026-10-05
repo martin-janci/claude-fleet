@@ -182,6 +182,9 @@ admin_calls! {
     "remove_catalog" => RemoveCatalog(CatalogNameArgs),
     "admit_catalog" => AdmitCatalog(AdmitArgs),
     "unadmit_catalog" => UnadmitCatalog(AdmitArgs),
+    /// Assets M5: the commits that touched one asset (the Inspector's
+    /// History), in the catalog the tool's `catalog` parameter names.
+    "asset_history" => AssetHistory(AssetRef),
 }
 
 impl AdminCall {
@@ -205,6 +208,7 @@ impl AdminCall {
                 | AdminCall::RepoStatus
                 | AdminCall::Template(_)
                 | AdminCall::ListCatalogs
+                | AdminCall::AssetHistory(_)
         )
     }
 
@@ -258,6 +262,7 @@ impl AdminCall {
                 | AdminCall::WriteLayer(_)
                 | AdminCall::DeleteLayer(_)
                 | AdminCall::ImportHost(_)
+                | AdminCall::AssetHistory(_)
         )
     }
 
@@ -444,6 +449,7 @@ pub async fn run(
         AdminCall::CommitPending(a) => json(author::commit_pending_in(target, a, store)?),
         AdminCall::Push => json(author::push_in(target, store)?),
         AdminCall::RepoStatus => json(author::repo_status_in(target, store)?),
+        AdminCall::AssetHistory(a) => json(author::asset_history_in(target, a, store)?),
         AdminCall::Template(a) => {
             check_name(&a.name)?;
             json(author::template(a.kind, &a.name))
@@ -616,6 +622,7 @@ mod tests {
                 host_alias: "h".into(),
                 catalog: "acme".into(),
             }),
+            AdminCall::AssetHistory(skill("s")),
         ]
     }
 
@@ -806,6 +813,16 @@ mod tests {
             assert!(!call.is_read(), "{}", call.action());
         }
         assert!(AdminCall::RepoStatus.is_read());
+        // Assets M5: History is a per-catalog read.
+        let history = AdminCall::AssetHistory(AssetRef {
+            kind: Kind::Skill,
+            name: "s".into(),
+        });
+        assert!(history.is_read() && history.is_per_catalog() && !history.writes_catalog());
+        assert_eq!(
+            history.touches(Some("acme")).unwrap(),
+            Touches::Catalog("acme".into())
+        );
     }
 
     /// PF7: every call that writes a checkout or `host_layers` waits for an

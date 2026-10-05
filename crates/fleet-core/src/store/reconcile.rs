@@ -1381,7 +1381,7 @@ mod tests {
         );
     }
 
-    /// Migration 097's conversation-owner triggers have to survive the
+    /// Migration 099's conversation-owner triggers have to survive the
     /// RECONCILE path, and the first version of them did not.
     ///
     /// `INSERT OR IGNORE` and `ON CONFLICT … DO NOTHING` mean the same thing

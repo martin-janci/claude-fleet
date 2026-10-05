@@ -100,7 +100,7 @@ const MARKERS: &[&str] = &[
 ];
 
 /// The four people's names. The hub's own personal owner is already called
-/// `owner` (migration 096), so these are deliberately not role words.
+/// `owner` (migration 100), so these are deliberately not role words.
 const PERSON_OWNER: &str = "ada";
 const PERSON_WATCHER: &str = "bob";
 const PERSON_DRIVER: &str = "cho";
@@ -499,7 +499,7 @@ fn fixture() -> Fx {
     // for every caller here — this matrix is about a SHARED hub. The
     // carve-out has its own tests.
     let admin = s.personal_owner_id().unwrap().expect("096 mints one");
-    // Migration 096 mints the personal owner under the name `owner`, so the
+    // Migration 098 mints the personal owner under the name `owner`, so the
     // four people below are named for their letters rather than their roles:
     // `create_person("owner", …)` is `E_EXISTS` on any hub.
     let owner = s.create_person(PERSON_OWNER, None).unwrap().id;

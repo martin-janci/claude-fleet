@@ -521,9 +521,9 @@
   .resource-row .rel { font-family: ui-monospace, monospace; }
   .resource-row .size { color: var(--fg-muted); }
   .lint { display: flex; flex-direction: column; gap: 2px; }
-  .lint-error { color: #dc2626; margin: 0; font-size: 12px; }
-  .lint-warn { color: #d97706; margin: 0; font-size: 12px; }
-  .error { color: #dc2626; margin: 0; }
+  .lint-error { color: var(--usage-crit); margin: 0; font-size: 12px; }
+  .lint-warn { color: var(--usage-warn); margin: 0; font-size: 12px; }
+  .error { color: var(--usage-crit); margin: 0; }
   .muted { color: var(--fg-muted); font-size: 12px; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
   .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }

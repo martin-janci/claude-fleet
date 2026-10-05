@@ -12,7 +12,7 @@
 -- rather than counted, because the COUNT this header used to give went stale
 -- the first time one of them moved, and a future writer must be covered too.
 -- So this is a trigger, not a call at each site: the same reasoning as 044's
--- `trg_read_cursors_on_session_delete`, and migration 097's
+-- `trg_read_cursors_on_session_delete`, and migration 099's
 -- `trg_conversation_owner_on_session_insert` is the next instance of it.
 --
 -- `WHEN NOT EXISTS`: a live participant already bound to this id (only a

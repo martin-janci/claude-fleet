@@ -104,5 +104,8 @@ expect "full, frontend only" full "verify full: scripts/ci-local.sh --frontend-o
 expect "full, both" full "verify full: scripts/ci-local.sh " -- \
   src/lib/events.ts crates/fleet-core/src/events.rs
 
+expect "remote → the Buildkite client" remote "verify remote: scripts/buildkite-verify.sh" -- \
+  crates/fleet-core/src/service/health.rs
+
 echo "verify-test: $PASS passed, $FAIL failed"
 [[ $FAIL == 0 ]]
