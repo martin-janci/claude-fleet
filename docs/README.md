@@ -10,6 +10,7 @@ A Tauri 2 desktop app for managing long-lived Claude Code sessions in tmux acros
 - **[Troubleshooting](troubleshooting.md)** — common problems and fixes.
 - **[Windows](windows.md)** — the desktop as a client on Windows: what works, OpenSSH, hub-client mode.
 - **[Control API](control-api.md)** — enable the MCP control server; **[reference](control-api-reference.md)** (generated).
+- **[Voice relay](voice.md)** — talk to a remote session with `/voice` through the app's microphone.
 - **[fleet-hub](hub.md)** — run the fleet headless as a daemon, without the desktop app.
 - **[Releasing](RELEASING.md)** — versioning & changelog automation.
 

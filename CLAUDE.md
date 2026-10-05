@@ -434,6 +434,15 @@ REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
   a tool result. The GC sweep drops rows past `downloads.keep_secs`. Desktop:
   the footer's ⤓ Downloads sheet and the file viewer's *Send to downloads*;
   `save_download` picks the destination in its own save dialog.
+- **Voice relay F1** (spec `docs/superpowers/specs/2026-10-05-voice-relay-design.md`, plan
+  `docs/superpowers/plans/2026-10-05-voice-relay-f1.md`, guide `docs/voice.md`):
+  `service/voice` `VoiceRegistry` (one claim per session, process-global),
+  `mcp/voice_route.rs` (`/voice/capture` host token only; `/voice/source`
+  websocket = a client's claim), host stand-in `tools/voice/arecord`
+  provisioned to `~/.claude-fleet/voice/bin` and put first on `claude`'s PATH
+  by `tmux::VOICE_PATH_PREFIX`; desktop `src-tauri/src/voice/` (cpal, macOS /
+  Windows only) and the 🎤 `MicToggle`. `voice.enabled` off by default. Audio is
+  never stored.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
