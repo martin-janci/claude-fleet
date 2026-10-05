@@ -67,9 +67,9 @@ Rules:
   for fleet-core's, against ~0.4 s). Likewise fleet-core takes no
   dev-dependency on a workspace crate it does not already depend on; a test
   that needs one lives in a crate of its own, as `crates/fleet-agent-e2e`
-  does. `src/lib/names.json`,
-  `tools/ag/**` and two `skills/*/SKILL.md` are embedded in fleet-core itself,
-  so editing them does recompile it.
+  does. `src/lib/names.json`, `tools/ag/**`, `tools/voice/arecord` and
+  two `skills/*/SKILL.md` are embedded in fleet-core itself, so editing
+  them does recompile it.
 - `pnpm tauri dev` / `pnpm tauri build` and `cargo build -p fleet-hub` use other
   feature sets. Run them when you need them; in a cloud session (no display,
   ~30 GB disk) do not run the Tauri ones at all.

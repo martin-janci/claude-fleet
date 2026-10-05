@@ -1227,6 +1227,9 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// `--effort`), so the chain below is identical whichever one runs.
 pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then if [ -x "$HOME/.local/share/ag/ag" ]; then cl() { "$HOME/.local/share/ag/ag" claude --yolo "$@"; }; else cl() { claude --dangerously-skip-permissions "$@"; }; fi; fi;"#;
 
+/// Puts fleet's `/voice` recorder ahead of any real `arecord` (docs/voice.md).
+pub(crate) const VOICE_PATH_PREFIX: &str = "PATH=\"$HOME/.claude-fleet/voice/bin:$PATH\"; ";
+
 /// The pane command for a Claude ("work"/"review") session. With a known
 /// session id: resume it, else create it under that id, else a bare `cl` — an
 /// idempotent create-or-resume. Without an id (legacy rows): today's
@@ -1239,11 +1242,12 @@ pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then
 /// (authoritative) instead of inferring it from the cwd, which is ambiguous
 /// once two sessions share a directory.
 ///
-/// The command starts with [`CL_FALLBACK`]: the user's own `cl` wins when it
-/// is on PATH, otherwise fleet's provisioned `ag` launcher, else an inline
-/// `claude --dangerously-skip-permissions`, stands in. Without it a host
-/// whose `cl` lives only in interactive shells printed "command not found:
-/// cl" and dropped straight to the login shell.
+/// The command starts with [`VOICE_PATH_PREFIX`] (fleet's `/voice`
+/// recorder first on PATH), then [`CL_FALLBACK`]: the user's own `cl` wins
+/// when it is on PATH, otherwise fleet's provisioned `ag` launcher, else an
+/// inline `claude --dangerously-skip-permissions`, stands in. Without it a
+/// host whose `cl` lives only in interactive shells printed "command not
+/// found: cl" and dropped straight to the login shell.
 pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> String {
     pane_command_with(claude_session_id, tmux_name, &ClaudeLaunch::default())
 }
@@ -1296,9 +1300,9 @@ pub fn pane_command_with(
     );
     match claude_session_id {
         Some(id) => format!(
-            "{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+            "{VOICE_PATH_PREFIX}{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
         ),
-        None => format!("{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
+        None => format!("{VOICE_PATH_PREFIX}{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -2153,6 +2157,27 @@ mod tests {
                 argv,
                 vec![format!("cl --resume {id} --name dev-x")],
                 "{shell}"
+            );
+        }
+    }
+
+    /// Voice relay F1: fleet's `arecord` stand-in comes ahead of any real one
+    /// on `claude`'s PATH, whichever branch of the chain runs.
+    #[test]
+    fn pane_command_puts_the_voice_bin_first_on_path() {
+        assert_eq!(
+            VOICE_PATH_PREFIX,
+            "PATH=\"$HOME/.claude-fleet/voice/bin:$PATH\"; "
+        );
+        for cmd in [
+            pane_command_for(None, "s"),
+            pane_command_for(Some("550e8400-e29b-41d4-a716-446655440000"), "s"),
+        ] {
+            assert!(cmd.starts_with(VOICE_PATH_PREFIX), "got: {cmd}");
+            assert_eq!(
+                cmd[VOICE_PATH_PREFIX.len()..].find(CL_FALLBACK),
+                Some(0),
+                "the fallback follows the prefix: {cmd}"
             );
         }
     }
