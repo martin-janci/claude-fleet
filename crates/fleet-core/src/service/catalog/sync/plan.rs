@@ -787,16 +787,26 @@ fn action_for(
     }
 
     let (op, reason) = if !present {
-        (
-            ActionOp::Create,
+        match manifest_entry {
             // F3c: the entry lists files this render no longer produces (a
             // Codex skill fleet synced to `~/.codex/skills` before it moved
             // to `~/.agents/skills`). Rule 8's `remove_entry` deletes them;
             // the reason says so, since `files` lists only the new ones.
-            manifest_entry
-                .filter(|entry| has_stale_locations(entry, plan))
-                .map(|_| MOVED_CREATE_REASON.to_string()),
-        )
+            //
+            // Final review I1: when a location the entry records was
+            // edited, deleting it is an overwrite a person sees, as in the
+            // present-and-matching case below. A copy the entry cannot
+            // vouch for (`Unverified`) stays a `Create`, which the Additive
+            // filter holds (`changesets::apply::action_allowed`).
+            Some(entry) if has_stale_locations(entry, plan) => {
+                if host_copy == Some(HostCopy::Edited) {
+                    (ActionOp::Overwrite, Some(edited_reason(entry, plan)))
+                } else {
+                    (ActionOp::Create, Some(MOVED_CREATE_REASON.to_string()))
+                }
+            }
+            _ => (ActionOp::Create, None),
+        }
     } else if matches {
         match manifest_entry {
             // Present, identical and managed — but the entry points at a
@@ -932,6 +942,21 @@ fn has_stale_locations(entry: &ManifestEntry, plan: &RenderPlan) -> bool {
         .merges
         .iter()
         .any(|m| !merges.contains(&(m.file.as_str(), &m.json_path)))
+}
+
+/// Whether applying `action` deletes a location its superseded manifest
+/// entry (`remove_entry`, rule 8) records and the action no longer writes —
+/// a moved asset's old copy. Read from the action alone, so the changeset
+/// filters (`changesets::apply::action_allowed`) need no render.
+pub(crate) fn removes_old_locations(action: &Action) -> bool {
+    let Some(entry) = &action.remove_entry else {
+        return false;
+    };
+    let merges: BTreeSet<&str> = action.merges.iter().map(String::as_str).collect();
+    entry.files.iter().any(|p| !action.files.contains(p))
+        || merge_labels(entry.merges.iter().map(|m| (&m.file, &m.json_path)))
+            .iter()
+            .any(|label| !merges.contains(label.as_str()))
 }
 
 /// Does the host already hold one of `plan`'s files at a path `entry` does
@@ -1823,6 +1848,71 @@ mod tests {
             a.remove_entry.is_some(),
             "the old copy still goes, backed up"
         );
+    }
+
+    /// Final review I1: the asset moved and nothing is at its new location
+    /// yet, so the plan creates it there and deletes the old copy. Deleting
+    /// an old copy a person edited is an overwrite, as when the new
+    /// location is already present; a Rollout or SB6 deletes the old copy
+    /// only when the planner verified it `Unchanged`, never over one an
+    /// entry from before M5 cannot vouch for.
+    #[test]
+    fn a_moved_asset_whose_new_location_is_empty_deletes_only_a_verified_old_copy() {
+        const RENAMED: &str = "kind: skill\nname: foo-bar\ndescription: d\ninstall_as: foo_bar\n";
+        const PLAIN: &str = "kind: skill\nname: foo-bar\ndescription: d\n";
+        let old_plan = substituted(&Claude, &asset(RENAMED), &secrets_map());
+        let mut snap = HostSnapshot::default();
+        satisfy(&mut snap, &old_plan);
+        let entry = Manifest::entry_for(&old_plan.hash(), &old_plan, 0, "personal");
+        let manifest_with = |entry: ManifestEntry| {
+            let mut manifest = Manifest {
+                version: 1,
+                ..Default::default()
+            };
+            manifest.assets.insert("skill/foo-bar".into(), entry);
+            manifest
+        };
+        let catalog = catalog_of(&[PLAIN]);
+
+        // The old copy is exactly as fleet wrote it: the normal move.
+        let manifest = manifest_with(entry.clone());
+        let hp = plan_for(&catalog, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "foo-bar");
+        assert_eq!(
+            (a.op, a.reason.as_deref(), a.host_copy),
+            (
+                ActionOp::Create,
+                Some(MOVED_CREATE_REASON),
+                Some(HostCopy::Unchanged)
+            )
+        );
+        assert!(additive_keeps(&hp, "foo-bar"));
+
+        // A person edited the old copy: deleting it is an overwrite.
+        let mut edited = snap.clone();
+        edited
+            .files
+            .insert(old_plan.files[0].path.clone(), "edited".into());
+        let hp = plan_for(&catalog, &Claude, &edited, &manifest, &secrets_map());
+        let a = act(&hp, "foo-bar");
+        assert_eq!(a.op, ActionOp::Overwrite, "{:?}", a.reason);
+        assert_eq!(a.reason.as_deref(), Some(EDITED_AND_MOVED_REASON));
+        assert_eq!(a.host_copy, Some(HostCopy::Edited));
+        assert!(
+            a.remove_entry.is_some(),
+            "a person's sync still moves it, backed up"
+        );
+        assert!(!additive_keeps(&hp, "foo-bar"), "never on a Rollout or SB6");
+
+        // An entry from before M5 cannot vouch for the old copy.
+        let mut pre_m5 = entry;
+        pre_m5.file_hashes.clear();
+        let manifest = manifest_with(pre_m5);
+        let hp = plan_for(&catalog, &Claude, &snap, &manifest, &secrets_map());
+        let a = act(&hp, "foo-bar");
+        assert_eq!(a.op, ActionOp::Create);
+        assert_eq!(a.host_copy, Some(HostCopy::Unverified));
+        assert!(!additive_keeps(&hp, "foo-bar"), "never on a Rollout or SB6");
     }
 
     /// Fix round 1: `EDITED_ON_HOST_REASON` only for a copy proven edited.
