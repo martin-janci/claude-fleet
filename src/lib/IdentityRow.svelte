@@ -20,6 +20,7 @@
     states,
     why = '',
     select,
+    rowKey,
   }: {
     identity: AssetIdentity;
     order: string[];
@@ -34,6 +35,9 @@
      *  badge of its own. */
     why?: string;
     select?: { key: string; testid: string; selected: boolean; onselect: () => void };
+    /** The plain row's `data-row-key` (the selectable one carries
+     *  `select.key`). */
+    rowKey?: string;
   } = $props();
 
   const internal = $derived(identity.class === 'fleet_internal' || identity.class === 'harness_internal');
@@ -70,7 +74,7 @@
     {@render importer(`Import ${identity.name}`)}
   </div>
 {:else}
-  <div class="row unmanaged" data-testid={testid}>
+  <div class="row unmanaged" data-row-key={rowKey} data-testid={testid}>
     <span class="name">{identity.name}</span>
     <span class="meta">{identity.kind}</span>
     {@render reason()}
