@@ -126,4 +126,4 @@ CREATE INDEX IF NOT EXISTS idx_session_grants_person
 CREATE INDEX IF NOT EXISTS idx_session_grants_session
   ON session_grants(session_id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (96);
+INSERT OR IGNORE INTO schema_version (version) VALUES (98);

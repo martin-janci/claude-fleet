@@ -4359,8 +4359,8 @@ mod tests {
     /// and the upgrade widens nothing (rule 7). Those rows stay `unclaimed`,
     /// which is a per-host count and not one byte more.
     #[test]
-    fn the_095_backfill_attributes_nothing_on_a_hub_with_two_people() {
-        let s = store_at_version(94);
+    fn the_097_backfill_attributes_nothing_on_a_hub_with_two_people() {
+        let s = store_at_version(96);
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias) VALUES ('h');

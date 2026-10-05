@@ -225,4 +225,4 @@ BEGIN
   UPDATE sessions SET row_version = OLD.row_version + 1 WHERE id = NEW.id;
 END;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (95);
+INSERT OR IGNORE INTO schema_version (version) VALUES (97);

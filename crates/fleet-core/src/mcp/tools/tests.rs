@@ -3762,14 +3762,16 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 72,687 on 2026-10-04 after merging Assets M4 into file
     /// downloads (`send_file`, `list_downloads`, `remove_download`, +1,170
     /// bytes).
-    /// Measured on 2026-10-04 after multi-user M1 T12 on top of that
-    /// (+2,051 bytes): the five sharing definitions `session_share`,
+    /// **Measured at 75,229 on 2026-10-05**, merging multi-user M1 T12 on
+    /// top of that: the five sharing definitions `session_share`,
     /// `session_unshare`, `session_narrow`, `session_access` and `my_grants`,
-    /// each with its parameters and its refusal codes. The sixth tool,
-    /// `session_claim`, is `Access::HostToken` and is NOT on the master
-    /// surface this constant measures; `NOT_FOR_HOST_TOKENS` keeps the other
-    /// five off a per-host token's.
-    const BUDGET_BYTES: usize = 74_838;
+    /// each with its parameters and its refusal codes (+2,542 bytes over
+    /// `main`'s 72,687). The sixth tool, `session_claim`, is
+    /// `Access::HostToken` and is NOT on the master surface this constant
+    /// measures; `NOT_FOR_HOST_TOKENS` keeps the other five off a per-host
+    /// token's. The constant is that measurement plus the customary 100
+    /// bytes of headroom.
+    const BUDGET_BYTES: usize = 75_329;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -9862,6 +9864,14 @@ const SESSION_REACH: &[(&str, &[&str])] = &[
     // `claim::claim_session`'s pane check plus the row being unowned, neither
     // of which is a reach.
     ("session_claim", &["Read"]),
+    // downloads.rs (main's file downloads, fenced by M1 at the `own` tier).
+    // The bytes are an unconstrained absolute-path read of the owner's host
+    // (`parse_stat` accepts any `path.starts_with('/')`), which is a subset
+    // of what a terminal gives, and spec §4.3 invariant 5 says no grant
+    // confers one — so a `watch` or `drive` grantee is refused, not served.
+    // `share.ts` has no control for it: sending a file is not a tier the
+    // Share sheet offers.
+    ("send_file", &["Own"]),
 ];
 
 /// Session-addressed tools that deliberately gate no single row, with the
@@ -9904,6 +9914,15 @@ const NO_PER_ROW_GATE: &[(&str, &str)] = &[
          private session). A scope filter, not a reach: there is no row to \
          gate until the name has been resolved, and the resolution is the \
          gate",
+    ),
+    (
+        "list_downloads",
+        "a FILTER, not a gate on one named row: `session_id` narrows WHICH \
+         downloads to show and the page is then cut by \
+         `service::downloads::visible`, which asks `ViewScope::may_own` on \
+         the session each row came out of — the same `own` tier `send_file` \
+         gates one row with. A `session_id` this caller does not own matches \
+         no row rather than refusing, so it is no existence oracle either",
     ),
     (
         "peer_exchange",
@@ -9963,6 +9982,10 @@ const REVIEWED_WITHOUT_A_SESSION: &[(&str, &str)] = &[
     (
         "import_assets",
         "the same catalog, from a host's filesystem into the inventory: it reads files on a host, not sessions",
+    ),
+    (
+        "remove_download",
+        "one DOWNLOAD, by `{id}` — a `downloads` row id, not a session id, which is why the schema clause below cannot see this tool at all. It is reviewed rather than silent: the row it names did come out of a session, so the fence is the same `own` tier `send_file` and `list_downloads` carry (`service::downloads::remove` -> `visible_row` -> `visible` -> `ViewScope::may_own`), and a row this caller may not see answers `Ok(false)` — a no-op, never an `E_NOTFOUND` that would tell it the id exists. A per-host token is additionally refused the tool outright by `NOT_FOR_HOST_TOKENS`",
     ),
     (
         "my_grants",
@@ -10121,6 +10144,10 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
         // handlers are invisible to `reaches_by_tool`, and clause 5 below
         // would read every `SESSION_REACH` row they have as stale.
         "sharing.rs",
+        // `main`'s file downloads, fenced by M1 at the `own` tier. Same
+        // reason: without this line `send_file`'s handler is invisible and
+        // its `SESSION_REACH` row reads as stale.
+        "downloads.rs",
     ] {
         let src = std::fs::read_to_string(dir.join(file)).expect("read a tool file");
         let code = src
@@ -10164,6 +10191,18 @@ fn reaches_in(code: &str) -> Vec<String> {
     // no person gate at all and the table exempted it.
     if code.contains("require_drive_on_item_sessions(") {
         found.push("Drive".into());
+    }
+    // `send_file` reaches its session through `service::downloads::send`,
+    // whose gate is `ViewScope::may_own` — the `own` TIER, written as the
+    // predicate rather than as a `Reach` because it is two-armed: a person
+    // must own the row, and a per-host token (the session's own Claude, this
+    // tool's headline caller) passes §4.4 clauses 1 and 2 through
+    // `sees_session_row` instead, which `may_own` deliberately excludes.
+    // `require_person_sees(.., Reach::Own, ..)` at this layer would refuse
+    // that caller, so the literal cannot live here and the scan would
+    // otherwise read the tool as ungated.
+    if code.contains("downloads::send(") {
+        found.push("Own".into());
     }
     found.sort();
     found.dedup();

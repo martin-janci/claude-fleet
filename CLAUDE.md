@@ -144,7 +144,9 @@ failure is the receipt, not a problem.
 Known Rust flakes — timing-sensitive, so they fail on a loaded box; re-run
 alone before blaming your change: `rewind::tests::the_removal_script_leaves_a_tree_a_live_pane_is_in`,
 `work::scale_tests::*`, the `CHAIN_BUDGET` migration tests in
-`store/schema/tests_upgrade.rs`, and `service::add_project`. Two of those
+`store/schema/tests_upgrade.rs`, `service::add_project`, and
+`fleet-agent`'s `conn::tests::report_frames_stay_under_the_frame_cap_and_carry_the_rest_over`
+(it fails `Elapsed(())` in a parallel run and passes alone in 0.15 s). Two of the others
 moved and neither is now fixed: `work::scale_tests::*` each take their own
 fixture copy since the suite cut, so they no longer queue behind one another
 — their 3,000 ms budgets are still wall-clock and still fail under load; and

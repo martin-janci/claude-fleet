@@ -508,6 +508,12 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
         KindFence::NoSessionContent("an update target's id; also host-bound hidden"),
     ),
     ("grant", KindFence::PerFrame),
+    (
+        "download",
+        KindFence::NoSessionContent(
+            "a file download's row id and nothing else (`RowChange::DownloadChanged(i64)`),             the same ids-only shape as `settings` and `update`, and host-bound hidden             besides. NOT `PerFrame`: the frame names no session to fence it BY — the             download id would have to be resolved to one first — and it does not have to,             because what the id unlocks is already fenced at the `own` tier. A person who             is not the session's owner reads `list_downloads` after this frame and gets             nothing, `GET /downloads/<id>` answers 404, and `remove_download` is a no-op             (`service::downloads::visible`, through `ViewScope::may_own`). The residue is             that a bare integer tells another person's device that SOME download changed;             it names no host, no session, no path and no person, and it buys nothing a             poll of `list_downloads` would not already answer",
+        ),
+    ),
 ];
 
 /// [`KIND_FENCES`] for one kind, or `None` for a kind the table forgot —

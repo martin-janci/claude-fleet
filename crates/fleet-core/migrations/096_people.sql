@@ -127,4 +127,4 @@ UPDATE client_tokens
    AND revoked_at IS NULL
    AND mode NOT IN ('peer', 'updater');
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (94);
+INSERT OR IGNORE INTO schema_version (version) VALUES (96);

@@ -113,25 +113,31 @@ fn a_host_sees_its_own_files_and_an_org_its_own() {
 /// `mcp::downloads_route`, integration decisions Q2 and D2).
 ///
 /// One private session owned by `ada`, one download taken out of it, and
-/// five callers asking for it by every path the feature has — `visible`
-/// (what `list_downloads` filters on), `remove` and `open_ready` (the bytes
-/// `GET /downloads/<id>` streams). The claim is the tier, not merely the
-/// fence: a `watch` grantee and a `drive` grantee are BOTH refused, because
-/// a download is an unconstrained absolute-path read of ada's host and §4.3
-/// invariant 5 says no grant confers a terminal.
+/// every caller shape the feature has, asked through each of its three
+/// paths — `visible` (what `list_downloads` filters on), `open_ready` (the
+/// bytes `GET /downloads/<id>` streams) and `remove`. The claim is the TIER,
+/// not merely the fence: a `watch` grantee and a `drive` grantee are BOTH
+/// refused, because a download is an unconstrained absolute-path read of
+/// ada's host and spec §4.3 invariant 5 says no grant confers a terminal.
 ///
 /// The per-host token arm matters on its own: `downloads_route` refuses a
 /// `host_alias` caller on its first lines, and this holds that deleting that
-/// early return would still not open the route — `visible` refuses it.
+/// early return would still not open the route — the GATE refuses it.
+///
+/// Every scope here is built by `Caller::view_scope`, the one constructor
+/// (`view_scope_tests::only_caller_view_scope_constructs_a_view_scope`), so
+/// what is tested is the real path a request takes and not a hand-made
+/// scope.
 #[test]
 fn only_the_owner_reaches_a_private_sessions_download() {
-    use crate::service::view_scope::{GrantSet, ViewScope};
+    use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+    use crate::service::view_scope::ViewScope;
     use crate::store::{GrantRecipient, GRANT_DRIVE, GRANT_WATCH};
-    use std::collections::BTreeMap;
     test_dir();
     let s = Store::open_in_memory().unwrap();
     let ada = s.create_person("ada", None).unwrap().id;
     let bob = s.create_person("bob", None).unwrap().id;
+    let carol = s.create_person("carol", None).unwrap().id;
     let eve = s.create_person("eve", None).unwrap().id;
     s.upsert_host("web-1").unwrap();
     let session = s
@@ -140,7 +146,6 @@ fn only_the_owner_reaches_a_private_sessions_download() {
     assert!(s.claim_if_unclaimed(session, Some(ada)).unwrap());
     s.grant_session(session, GrantRecipient::Person(bob), GRANT_WATCH, ada)
         .unwrap();
-    let carol = s.create_person("carol", None).unwrap().id;
     s.grant_session(session, GrantRecipient::Person(carol), GRANT_DRIVE, ada)
         .unwrap();
 
@@ -157,62 +162,62 @@ fn only_the_owner_reaches_a_private_sessions_download() {
             note: None,
         })
         .unwrap();
-    std::fs::write(file_of(row.id).unwrap(), b"hello").unwrap();
-    s.finish_download(row.id, "x").unwrap();
-    let row = s.download(row.id).unwrap().unwrap();
+    // `test_dir()` is ONE directory for the whole test binary and
+    // `file_of(id)` names the copy by row id, so two tests that both write a
+    // file for row 1 of their own in-memory store collide — which is exactly
+    // what broke `a_copy_is_written_in_chunks_hashed_and_moved_into_place`
+    // when this test was first written. Move this row out of the way instead
+    // of relying on the order tests happen to run in.
+    let id = 90_001;
+    s.conn_ref()
+        .execute("UPDATE downloads SET id = ?2 WHERE id = ?1", [row.id, id])
+        .unwrap();
+    std::fs::write(file_of(id).unwrap(), b"hello").unwrap();
+    assert!(s.finish_download(id, "x").unwrap(), "the row is ready");
+    let row = s.download(id).unwrap().unwrap();
 
-    let person = |p: i64, grants: &[(i64, &str)]| -> ViewScope {
-        let map: BTreeMap<i64, String> = grants
-            .iter()
-            .map(|(id, lvl)| (*id, (*lvl).to_string()))
-            .collect();
-        // `sole_person: false` — there are four people on this hub, so the
-        // single-install widening in `may_own` cannot be what answers.
-        ViewScope::for_caller(
-            OrgScope::All,
-            Some(p),
-            GrantSet::from_map(map),
-            None,
-            None,
-            false,
-        )
+    // A person's own device, through the one constructor.
+    let device = |person: i64, org: Option<i64>| {
+        Caller {
+            host_alias: None,
+            client: Some(ClientRef {
+                id: 1,
+                name: "phone".into(),
+                trusted: false,
+                org_id: org,
+                person_id: Some(person),
+            }),
+            mode: TokenMode::Full,
+            pane: None,
+            is_personal_owner: false,
+        }
+        .view_scope(&s)
+        .unwrap()
     };
     // The session's own Claude: its host, and the pane this request proves.
-    let host_token = ViewScope::for_caller(
-        OrgScope::Host {
-            alias: "web-1".into(),
-            org: None,
-            isolated: Default::default(),
-        },
-        None,
-        GrantSet::default(),
-        Some("web-1".into()),
-        Some(session),
-        false,
-    );
-    let bound_client = ViewScope::for_caller(
-        OrgScope::Org {
-            org: 7,
-            sees_unassigned: false,
-        },
-        Some(eve),
-        GrantSet::default(),
-        None,
-        None,
-        false,
-    );
+    // No pane header here, and the row is `private` rather than `unclaimed`,
+    // so §4.4 refuses it either way — which is the point.
+    let host_token = Caller {
+        host_alias: Some("web-1".into()),
+        client: None,
+        mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
+    }
+    .view_scope(&s)
+    .unwrap();
 
     // The owner, and the hub's own reader.
-    assert!(visible(&s, &person(ada, &[]), &row), "the owner");
+    assert!(visible(&s, &device(ada, None), &row), "the owner");
     assert!(visible(&s, &ViewScope::internal(), &row), "the hub itself");
 
     // Everybody else — and the two grantees are the point.
     for (label, scope) in [
-        ("a watch grantee", person(bob, &[(session, GRANT_WATCH)])),
-        ("a drive grantee", person(carol, &[(session, GRANT_DRIVE)])),
-        ("another person", person(eve, &[])),
+        ("a watch grantee", device(bob, None)),
+        ("a drive grantee", device(carol, None)),
+        ("another person", device(eve, None)),
         ("the session's own host token", host_token),
-        ("a client bound to another org", bound_client),
+        ("a client bound to another org", device(eve, Some(7))),
     ] {
         assert!(!visible(&s, &scope, &row), "{label} sees the row");
         // The bytes `GET /downloads/<id>` would stream.
@@ -221,8 +226,8 @@ fn only_the_owner_reaches_a_private_sessions_download() {
             codes::E_NOTFOUND,
             "{label} fetches the bytes"
         );
-        // Removing what it cannot see is a no-op, not a leak and not a 404
-        // that tells it the id exists.
+        // Removing what it cannot see is a no-op, not a leak and not an
+        // answer that tells it the id exists.
         assert!(!remove(&s, &scope, row.id).unwrap(), "{label} removes it");
         assert!(
             s.download(row.id).unwrap().is_some(),
@@ -232,7 +237,7 @@ fn only_the_owner_reaches_a_private_sessions_download() {
 
     // The owner really does get the bytes, so the five refusals above are
     // the tier and not a broken fixture.
-    let (got, path) = open_ready(&s, &person(ada, &[]), row.id).unwrap();
+    let (got, path) = open_ready(&s, &device(ada, None), row.id).unwrap();
     assert_eq!(got.id, row.id);
     assert_eq!(std::fs::read(path).unwrap(), b"hello");
 }

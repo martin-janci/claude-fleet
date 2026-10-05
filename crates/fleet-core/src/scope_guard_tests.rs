@@ -252,16 +252,20 @@ const SCOPE_GUARDS: &[Guard] = &[
         code: "OrgScope::All => true,",
         verdict: Verdict::OrgBoundary,
         why: "a SESSION predicate, and the `_org_only` in its name is the \
-              contract. FIVE production call sites, each with its own person \
+              contract. SIX production call sites, each with its own person \
               half beside it: `sees_session_facts` (the person half is the \
               rest of that function), `sees_row_org_only` (a row-shaped \
               wrapper, org-only by its own name), `link_session_visible` \
               (whose person half is `link_person_visible`), `link_visible` \
-              (where `link_hidden` has already run) and \
+              (where `link_hidden` has already run), \
               `person_sees` — the body of `require_person_sees`, and of the \
               T11 long-poll re-check that shares it — where \
               `sees_session_row` has already refused, and this only decides \
-              whether the refusal may say E_PANE_UNPROVEN",
+              whether the refusal may say E_PANE_UNPROVEN, and \
+              `visible` (file downloads), whose person half is `may_own` in \
+              the other arm of the same match: this call is the \
+              session-is-GONE arm, where no person is left to ask and \
+              `DownloadRow.org_id` is the whole of the fence",
     },
     Guard {
         file: "crates/fleet-core/src/service/orgs.rs",

@@ -55,4 +55,4 @@ UPDATE tasks
  WHERE worker_session_id IS NOT NULL
    AND worker_session_id NOT IN (SELECT id FROM sessions);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (97);
+INSERT OR IGNORE INTO schema_version (version) VALUES (99);

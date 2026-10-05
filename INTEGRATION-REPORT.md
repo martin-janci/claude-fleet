@@ -221,6 +221,84 @@ See CONFLICTS — M1's `scale_work_view` single test is gone; the six `#[test]`s
 
 ---
 
+### 7. What the first real test run forced (61 fleet-core failures)
+`cargo fleet-check` is green with every one of these broken, so none of them
+would have been caught by a type-check. **This is the half of the re-apply list
+that is easiest to miss.**
+
+**a. The four renumbered migration scripts record their own version IN the SQL.**
+Renaming the files and the `MIGRATIONS` rows was not enough: each script ends
+with `INSERT OR IGNORE INTO schema_version (version) VALUES (N);` and N is
+baked in. 94→96, 95→97, 96→98, 97→99 inside
+`096_people.sql`, `097_session_owner.sql`, `098_session_grants.sql`,
+`099_tasks_detach.sql`. This alone was **~50 of the 61**: every
+`store::schema::tests::migration_*` assertion read `left: 97, right: 99`
+because the chain stopped recording two short of `LATEST_SCHEMA_VERSION`, and
+`every_migration_records_its_own_version` said so exactly
+(`migration 96 must contain ... VALUES (96);`).
+*The previous scout's "the scripts themselves are unchanged" was wrong, and the
+comment in `store/schema.rs` repeated it. Both are corrected.*
+
+**b. `store::schema::tests::the_095_backfill_attributes_nothing_on_a_hub_with_two_people`**
+seeded `store_at_version(94)` to get a store that already had `people`. With
+`people` now at 096 that version has no such table. Renamed to
+`the_097_backfill_...` and seeded at **96**.
+
+**c. `KIND_FENCES` (`mcp/events_route.rs`) had no row for the `download` kind**,
+and `every_event_kind_is_fenced_or_declared_content_free` refuses a kind nobody
+classified (`fence_frame` also drops it, so it fails closed as well as failing
+its test). Added as `KindFence::NoSessionContent` — ids only, the same shape as
+`settings` and `update` — with the reason it is not `PerFrame` (the frame names
+no session to fence it BY, and does not need to: what the id unlocks is already
+`own`-gated) and the residue named (a bare integer tells another person's device
+that *some* download changed).
+
+**d. The T7 session-gate matrix (`mcp/tools/tests.rs`) had no row for
+`send_file` or `list_downloads`.** `every_session_addressed_tool_declares_its_reach`
+derives its subjects from the tool schemas, so both were unaccounted:
+* `send_file` → `SESSION_REACH` as `&["Own"]`;
+* `list_downloads` → `NO_PER_ROW_GATE` (`session_id` is a filter; the page is
+  cut by `visible`);
+* `remove_download` → `REVIEWED_WITHOUT_A_SESSION` (addressed by download id,
+  so clause 2 cannot see it at all — the row is what keeps the silence honest).
+
+And two mechanical consequences:
+* `tool_blocks()` reads a **fixed file list** and `downloads.rs` was not in it,
+  so `send_file`'s handler was invisible and its new `SESSION_REACH` row read as
+  *stale*. Added, exactly as T12 had to add `sharing.rs`.
+* `reaches_in()` scans the handler for a `Reach::` literal. `send_file` has
+  none, because its gate is two-armed and lives in the service
+  (`may_own` for a person, §4.4 through `sees_session_row` for the session's own
+  Claude — `require_person_sees(.., Reach::Own, ..)` at the tool layer would
+  refuse that caller). Added a `downloads::send(` exception beside the two that
+  already exist for `require_message_recipient(` and
+  `require_drive_on_item_sessions(`.
+
+**e. `BUDGET_BYTES` → `75_329`.** Measured at **75,229** on 2026-10-05
+(master surface, 108 tools) — my merge-time arithmetic guess of 74,838 was 391
+bytes short. The constant is the measurement plus the customary 100 bytes of
+headroom, as the test's own message prescribes. (The *served tool count*
+`assert_eq!(served, 114)` was right first time.)
+
+**f. `scope_guard_tests`' `sees_session_org_only` row undercounted its call
+sites.** `a_row_that_names_call_sites_names_all_of_them` derives the call list
+from the source and the row said FIVE; `downloads::visible` made it six. The
+`why` now names `visible` and what its person half is.
+
+**g. My own new test had two defects the suite caught.**
+* It built scopes with `ViewScope::for_caller`, which
+  `view_scope_tests::only_caller_view_scope_constructs_a_view_scope` forbids
+  outside `view_scope.rs` / `view_scope_tests.rs` / `mcp/auth.rs`. Rewritten to
+  build real `Caller`s and go through **`Caller::view_scope`** — which is better
+  anyway: it tests the path a request actually takes.
+* `test_dir()` is **one directory for the whole test binary** and `file_of(id)`
+  names the copy by row id, so writing a file for row 1 of a fresh in-memory
+  store collided with main's
+  `a_copy_is_written_in_chunks_hashed_and_moved_into_place`. The row is now
+  moved to id 90,001 first, with the reason in a comment.
+
+---
+
 ## MIGRATIONS
 
 **Yes, they collided again.** Main shipped two migrations in the window:
@@ -266,9 +344,90 @@ The repo now prescribes **`scripts/verify.sh`** (main's `cfd22efc`). CLAUDE.md's
 3. scripts/verify.sh full        # before a push (= ci-local.sh, narrowed)
 ```
 
-Results, verbatim, in the order run:
+Results, verbatim, in the order run. `TMPDIR=/dev/shm/m1-tests` throughout —
+still needed, and it is the difference between 6 s and "never finishes" for the
+desktop crate's target.
 
-<!--VALIDATION-->
+```
+$ cargo fmt --all                                        (no output)
+
+$ cargo fleet-fast-check
+    Finished `fast-check` profile [unoptimized + debuginfo] target(s) in 4m 13s
+    EXIT=0
+
+$ pnpm check
+1791145591418 COMPLETED 664 FILES 0 ERRORS 0 WARNINGS 0 FILES_WITH_PROBLEMS
+    EXIT=0
+
+$ cargo fleet-check                      # = check --workspace --all-targets
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6m 19s
+    EXIT=0                               (0 errors; run again after the
+                                          `own`-tier change, also EXIT=0)
+
+$ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
+../src/lib/hub_verdicts.generated.json was regenerated.  <- the designed receipt
+docs/hub.md was regenerated.                              <- the designed receipt
+test result: FAILED. 21 passed; 2 failed                  <- MEANT to fail
+
+$ <claude_fleet_lib binary> contract every_local_only_message verdict_gen
+test result: ok. 61 passed; 0 failed; 0 ignored; 324 filtered out; in 2.45s
+    (generated_json_is_current ok, doc_table_is_current ok, the contract
+     goldens ok — so all four generated artifacts are current)
+
+$ scripts/verify.sh full                 # = scripts/ci-local.sh (the gate)
+==> scripts/check-version-consistency.sh    all carriers agree on 0.4.6
+==> release_assets_smoke                    ok
+==> bash scripts/hub-deploy-scripts-test.sh ok
+==> bash scripts/verify-test.sh             verify-test: 18 passed, 0 failed
+==> bash scripts/ag-test.sh                 ok
+==> cargo fmt --all --check                 ok
+==> cargo clippy --workspace --all-targets -- -D warnings
+    Finished `dev` profile ... in 3m 19s    ok, 0 warnings
+==> cargo test --workspace                  stopped on ONE flake (note 1)
+
+$ cargo test --workspace --no-fail-fast -- --test-threads=4    # at load 5.7
+test result: ok.  385 passed; 0 failed   claude-fleet (lib)
+test result: ok.  107 passed; 0 failed   fleet-agent
+test result: ok. 5059 passed; 0 failed; 3 ignored   fleet-core
+test result: ok.  169 passed; 0 failed   fleet-hub
+test result: ok.   44 passed; 0 failed   fleet-proto
+test result: ok.   45 passed; 0 failed   fleet-proto (integration)
+test result: ok.   37 passed; 0 failed   fleet-update
+test result: ok.    1 passed; 0 failed   fleet-agent-e2e
+    ... and every remaining target ok
+    EXIT=0            <- 5,849 Rust tests, ZERO failures, scale tests included
+
+$ pnpm test
+ Test Files  213 passed (213)
+      Tests  3909 passed (3909)
+    EXIT=0
+```
+
+**The gate is green.** `scripts/verify.sh full` cleared every stage including
+`cargo fmt --all --check` and `cargo clippy --workspace --all-targets -D
+warnings`, and stopped only on note 1's flake; `cargo test --workspace
+--no-fail-fast` then ran the whole suite to **EXIT=0** once the machine was
+quiet.
+
+**Note 1 — the one flake, and it is not M1's.**
+`fleet-agent`'s `conn::tests::report_frames_stay_under_the_frame_cap_and_carry_the_rest_over`
+failed `a frame in time: Elapsed(())` in two loaded runs; it passes alone in
+0.15 s, the crate is 107/107 at `--test-threads=2`, and it is **107/107 in the
+clean full run above**. `fleet-agent` depends on `fleet-proto` only and never on
+`fleet-core`, so nothing in this merge can reach it. Added to CLAUDE.md's flake
+list, which did not name it.
+
+**Note 2 — `work::scale_tests::*` under load.** An earlier run (load 20–70 from
+the other sessions) failed 8 of them on wall clock: p95 3.8–4.3 s against the
+3,000 ms budget, with the fixture itself printing `built in 16429 ms` against
+the ~1.2 s CLAUDE.md documents and main's own re-measurement of this budget
+being **684 ms**. At `--test-threads=2`: 13 of 15. At `--test-threads=1`: 15 of
+15. In the clean run above: **all of them, inside budget.** No `scale_tests` SQL
+changed in this merge — only the scope TYPE at the call sites, and
+`ViewScope::internal()` short-circuits to the same org answer.
+
+**Along the way, 61 fleet-core failures were real and were fixed** — see M1
+CHANGES §7. The run above is after them.
 
 ---
 
@@ -293,17 +452,26 @@ Results, verbatim, in the order run:
    chains still hold `CHAIN_BUDGET` = 5 s. So M1 may keep treating a Linux
    `CHAIN_BUDGET` failure under load as environmental — but must not cite main's
    commit as the fix, and must not dismiss it on Windows any more.
-5. **`work::scale_tests::*` no longer queue.** `e1c0b0d3` gave each test its own
+5. **Two flake facts CLAUDE.md does not yet carry, learned here.**
+   `fleet-agent`'s `conn::tests::report_frames_stay_under_the_frame_cap_and_carry_the_rest_over`
+   is timing-sensitive (`Elapsed(())` in a parallel run, 0.15 s alone) and
+   belongs on the flake list. And a `REGEN_*` chain is expensive in a way worth
+   knowing: each regen writes a file that is `include_str!`-embedded in the test
+   binary, so **every stage of a multi-regen chain pays a full rebuild of that
+   target**. Run them in one cargo invocation with several filters
+   (`REGEN_A=1 REGEN_B=1 cargo fleet-test -- testa testb`), not one after
+   another.
+6. **`work::scale_tests::*` no longer queue.** `e1c0b0d3` gave each test its own
    `copy_for_test()` of the fixture (and did the same for the desktop crate's
    `store()`, 33.3 s → 3.2 s). Their 3,000 ms budgets are unchanged, so they stay
    load-sensitive — but "they serialise" is no longer true and should stop being
    the explanation.
-6. **A test that reads a file outside its crate must read it at run time**
+7. **A test that reads a file outside its crate must read it at run time**
    (`repo_files::read`), never `include_str!` — CLAUDE.md's new rule, with a
    measured reason (~26 s of recompilation per edit vs ~0.4 s). M1 has several
    cross-file tests (`hub_verdicts.generated.json`, `src/lib/*.ts` mirrors);
    check they follow it.
-7. **New CI jobs**: `changes` (skips build/test for prose-only PRs), a separate
+8. **New CI jobs**: `changes` (skips build/test for prose-only PRs), a separate
    `clippy`, and `windows-bundle`. macOS and Windows clippy now run in parallel
    with their tests.
 
