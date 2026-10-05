@@ -26,7 +26,7 @@ export interface CatalogStatus {
   granted?: string[];
 }
 
-export type CardKind = 'bootstrap' | 'new' | 'drift' | 'rollout';
+export type CardKind = 'bootstrap' | 'new' | 'drift' | 'rollout' | 'layer';
 export type CardState = 'proposed' | 'applied' | 'undone' | 'dismissed' | 'failed';
 export interface ChangesetSummary {
   id: number;
@@ -40,27 +40,81 @@ export interface ChangesetSummary {
   groups?: Record<string, number>;
   pending?: number;
   undoable?: boolean;
+  /** The catalogs the card's apply commits to (M6). */
+  catalogs?: string[];
+  /** A drift card whose copy has since changed or gone (M6). */
+  withdrawn?: boolean;
 }
 
-/** One card item, as `changesets { get }` returns it (the full card is M6). */
-export interface ChangesetItem {
-  changeset_id: number;
+/** Why a host's copy was held back by a card's apply (R1). */
+export type HeldWhy = 'edited' | 'unverified' | 'differs';
+export interface HeldLine { kind: string; name: string; why: HeldWhy }
+/** What an applied item left behind. It is per HOST: two items on one host share the same held lines. */
+export interface ItemOutcome { held?: HeldLine[]; note?: string | null }
+export interface ItemParams {
+  from_host?: string; layer?: string; member?: string; host?: string; axis?: string;
+  scope?: string; hash?: string; reason?: string; assets?: string[]; harness?: string;
+  to?: string; members?: string[]; description?: string;
+}
+
+/** One card item, as `changesets { list, id }` answers it. */
+export interface ItemView {
   position: number;
   grp: string;
-  catalog_id?: number | null;
+  catalog?: string | null;
   kind: string;
   name: string;
-  /** import | assign_layer | set_scope | hide | take_host | restore | sync */
-  action: string;
-  params?: string | null;
-  /** rule | jev | haiku | person */
-  decider: string;
-  /** pending | applied | skipped | rejected */
-  state: string;
-  /** Unix **milliseconds** (migration 097); absent while pending and on items
-   *  decided before it. */
-  decided_at?: number;
+  action: 'import' | 'assign_layer' | 'set_scope' | 'hide' | 'take_host' | 'restore' | 'sync'
+    | 'create_layer' | 'rename_layer' | 'move_member';
+  params: ItemParams;
+  decider: 'rule' | 'jev' | 'haiku' | 'person';
+  state: 'pending' | 'applied' | 'skipped' | 'rejected';
+  outcome?: ItemOutcome | null;
 }
+
+export interface ChangesetView {
+  id: number;
+  kind: CardKind;
+  summary: string;
+  state: CardState;
+  created_at: number;
+  /** Unix milliseconds. */
+  applied_at?: number | null;
+  error?: string | null;
+  commits: Record<string, string>;
+  undoable: boolean;
+  catalogs?: string[];
+  withdrawn?: boolean;
+  items: ItemView[];
+}
+
+export type LayerChange =
+  | { op: 'create'; catalog?: string; layer: string; axis?: 'role' | 'context'; description?: string; members?: string[] }
+  | { op: 'rename'; catalog?: string; layer: string; to: string }
+  | { op: 'move'; catalog?: string; member: string; layer: string; to: string };
+
+export interface Provenance { introduced_by: string; overridden_by?: string[]; catalog: string }
+export interface ResolutionView {
+  provenance: Record<string, Provenance>;
+  excluded: Record<string, string>;
+  refused: { kind: string; name: string; reason: string; catalog?: string | null }[];
+  /** `[kind, name]` pairs. */
+  withheld: [string, string][];
+  /** Catalog → why it was held back. */
+  held_back: Record<string, string>;
+  assets: { kind: string; name: string; version: string }[];
+}
+
+/** `path` keeps the planner's `~/…` form. A file holding a `${SECRET}` placeholder is never read, so both texts are absent. */
+export interface DriftFile {
+  path: string;
+  catalog?: string | null;
+  host?: string | null;
+  binary?: boolean;
+  truncated?: boolean;
+  secret?: boolean;
+}
+export interface DriftDiff { host_alias: string; harness: string; files: DriftFile[]; merges_only?: boolean }
 
 export interface CommitEntry { sha: string; at: number; author: string; subject: string }
 
@@ -68,10 +122,12 @@ export interface LayerDef { name: string; axis: 'role' | 'context'; description?
 export interface HostLayerRow { host_alias: string; catalog_id?: number; layer_name: string; axis: string; position: number; active: boolean }
 export interface LayerListing { layers: LayerDef[]; hosts: HostLayerRow[] }
 
-/** The rail's views in M5 (R15); Layers and Hosts join in M6. */
-export type WorkspaceView = 'inbox' | 'library';
+/** The rail's views (R15); Layers and Hosts join in M6. */
+export type WorkspaceView = 'inbox' | 'layers' | 'hosts' | 'library';
 export const RAIL_VIEWS: readonly { id: WorkspaceView; label: string }[] = [
   { id: 'inbox', label: 'Inbox' },
+  { id: 'layers', label: 'Layers' },
+  { id: 'hosts', label: 'Hosts' },
   { id: 'library', label: 'Library' },
 ];
 
@@ -90,6 +146,7 @@ export async function loadCatalogStatuses(): Promise<Result<CatalogStatus[]>> {
 export async function loadChangesets(): Promise<Result<ChangesetSummary[]>> {
   const r = await invokeCmd<ChangesetSummary[]>('catalog_list_changesets');
   changesetSummaries.set(r.ok ? r.value : null);
+  void loadOpenCardViews(r.ok ? r.value : null);
   return r;
 }
 
@@ -97,6 +154,56 @@ export async function loadLayers(): Promise<Result<LayerListing>> {
   const r = await invokeCmd<LayerListing>('catalog_list_layers');
   layerListing.set(r.ok ? r.value : null);
   return r;
+}
+
+export const cardViews = writable<Record<number, ChangesetView>>({});
+export const layersByCatalog = writable<Record<string, LayerListing> | null>(null);
+
+export function getChangeset(id: number) { return invokeCmd<ChangesetView>('catalog_get_changeset', { args: { id } }); }
+export function applyChangeset(id: number, positions?: number[] | null) {
+  return invokeCmd<ChangesetView>('catalog_apply_changeset', { args: positions ? { id, positions } : { id } });
+}
+export function undoChangeset(id: number) { return invokeCmd<ChangesetView>('catalog_undo_changeset', { args: { id } }); }
+export function dismissChangeset(id: number) { return invokeCmd<ChangesetView>('catalog_dismiss_changeset', { args: { id } }); }
+export function rejectItems(id: number, positions: number[]) {
+  return invokeCmd<ChangesetView>('catalog_reject_changeset_items', { args: { id, positions } });
+}
+export function proposeChangesets() { return invokeCmd<ChangesetSummary[]>('catalog_propose_changesets'); }
+export function proposeLayerChange(change: LayerChange) {
+  return invokeCmd<ChangesetView>('catalog_propose_layer_change', { args: { change } });
+}
+export function admitCatalog(host_alias: string, catalog: string) {
+  return invokeCmd<string[]>('catalog_admit_catalog', { args: { host_alias, catalog } });
+}
+export function unadmitCatalog(host_alias: string, catalog: string) {
+  return invokeCmd<string[]>('catalog_unadmit_catalog', { args: { host_alias, catalog } });
+}
+export function listLayersIn(name: string) { return invokeCmd<LayerListing>('catalog_list_layers_in', { args: { name } }); }
+export function hostProvenance(host_alias: string) {
+  return invokeCmd<ResolutionView>('catalog_host_provenance', { args: { host_alias } });
+}
+export function driftDiff(a: { host_alias: string; kind: string; name: string; harness?: string | null; catalog?: string | null }) {
+  return invokeCmd<DriftDiff>('catalog_drift_diff', {
+    args: { ...a, harness: a.harness ?? null, catalog: a.catalog && a.catalog !== PERSONAL ? a.catalog : null },
+  });
+}
+
+/** R12: every open card in full (cards are few; the views need items). */
+export async function loadOpenCardViews(cards: ChangesetSummary[] | null): Promise<void> {
+  const open = (cards ?? []).filter(isOpenCard);
+  const got = await Promise.all(open.map((c) => getChangeset(c.id)));
+  const next: Record<number, ChangesetView> = {};
+  got.forEach((r, i) => { if (r.ok) next[open[i].id] = r.value; });
+  cardViews.set(next);
+}
+
+/** R17: each loaded catalog's layers, by name. */
+export async function loadAllLayers(statuses: CatalogStatus[] | null): Promise<void> {
+  const loaded = (statuses ?? []).filter((s) => s.state === 'loaded');
+  const got = await Promise.all(loaded.map((s) => listLayersIn(s.name)));
+  const next: Record<string, LayerListing> = {};
+  got.forEach((r, i) => { if (r.ok) next[loaded[i].name] = r.value; });
+  layersByCatalog.set(statuses ? next : null);
 }
 
 export function repoStatusOf(catalog: string): Promise<Result<RepoStatus>> {
@@ -120,7 +227,9 @@ export type Selection =
   | { type: 'asset'; catalog: string; kind: string; name: string }
   | { type: 'identity'; kind: string; name: string }
   | { type: 'orphan'; kind: string; name: string }
-  | { type: 'card'; id: number };
+  | { type: 'card'; id: number }
+  | { type: 'layer'; catalog: string; name: string }
+  | { type: 'host'; alias: string };
 
 export function keyOf(s: Selection): string {
   switch (s.type) {
@@ -131,6 +240,10 @@ export function keyOf(s: Selection): string {
       return `${s.type}:${s.kind}/${s.name}`;
     case 'card':
       return `card:${s.id}`;
+    case 'layer':
+      return `layer:${s.catalog}:${s.name}`;
+    case 'host':
+      return `host:${s.alias}`;
   }
 }
 
@@ -142,6 +255,11 @@ export function parseKey(key: string): Selection | null {
   if (type === 'card') {
     const id = Number(body);
     return body !== '' && Number.isInteger(id) ? { type, id } : null;
+  }
+  if (type === 'host') return body ? { type, alias: body } : null;
+  if (type === 'layer') {
+    const j = body.indexOf(':');
+    return j > 0 && j < body.length - 1 ? { type, catalog: body.slice(0, j), name: body.slice(j + 1) } : null;
   }
   let catalog = PERSONAL;
   if (type === 'asset') {

@@ -274,6 +274,10 @@ export interface SyncAction {
   backup: boolean;
   secrets: string[];
   missing_secrets: string[];
+  /** The catalog the asset comes from (absent from an older hub). */
+  catalog?: string | null;
+  /** What the planner found of the host's copy of an `update`/`overwrite`. */
+  host_copy?: 'unchanged' | 'edited' | 'unverified';
 }
 
 export interface HostPlan {

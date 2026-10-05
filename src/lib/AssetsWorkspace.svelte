@@ -13,7 +13,7 @@
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
   import {
-    blockedOnSecrets, canWrite, catalogStatuses, changesetSummaries, keyOf, layerListing, parseKey, PERSONAL,
+    blockedOnSecrets, canWrite, catalogStatuses, changesetSummaries, keyOf, layerListing, layersByCatalog, parseKey, PERSONAL,
     type WorkspaceView,
   } from './assets_workspace';
   import { buildInbox, hostOrderOf, lastScanOf, sentence } from './assets_inbox';
@@ -135,6 +135,11 @@
   });
   const counts = $derived({
     inbox: inbox?.needCount ?? 0,
+    // Layers across every catalog once they are loaded, else the personal listing's.
+    layers: $layersByCatalog
+      ? Object.values($layersByCatalog).reduce((n, l) => n + l.layers.length, 0)
+      : ($layerListing?.layers.length ?? 0),
+    hosts: shown.length,
     library: listing
       ? listing.assets.length + identitiesOf(listing).filter((i) => i.class === 'normal' || i.class === 'needs_person').length
       : 0,
