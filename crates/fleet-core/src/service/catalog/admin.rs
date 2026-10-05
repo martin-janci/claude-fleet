@@ -20,6 +20,7 @@ use super::author::{
     UpdateArgs,
 };
 use super::catalogs::{self, AddCatalogArgs, PERSONAL};
+use super::drift_diff::{self, DriftDiffArgs};
 use super::layer::{Axis, Layer};
 use super::model::Kind;
 use super::sync::{self, ApplyArgs, PlanArgs};
@@ -185,6 +186,10 @@ admin_calls! {
     /// Assets M5: the commits that touched one asset (the Inspector's
     /// History), in the catalog the tool's `catalog` parameter names.
     "asset_history" => AssetHistory(AssetRef),
+    /// Assets M6: the catalog's and the host's text of each file a drifted
+    /// asset renders (`drift_diff.rs`), in the catalog the tool's `catalog`
+    /// parameter names.
+    "drift_diff" => DriftDiff(DriftDiffArgs),
 }
 
 impl AdminCall {
@@ -209,6 +214,7 @@ impl AdminCall {
                 | AdminCall::Template(_)
                 | AdminCall::ListCatalogs
                 | AdminCall::AssetHistory(_)
+                | AdminCall::DriftDiff(_)
         )
     }
 
@@ -263,6 +269,7 @@ impl AdminCall {
                 | AdminCall::DeleteLayer(_)
                 | AdminCall::ImportHost(_)
                 | AdminCall::AssetHistory(_)
+                | AdminCall::DriftDiff(_)
         )
     }
 
@@ -450,6 +457,7 @@ pub async fn run(
         AdminCall::Push => json(author::push_in(target, store)?),
         AdminCall::RepoStatus => json(author::repo_status_in(target, store)?),
         AdminCall::AssetHistory(a) => json(author::asset_history_in(target, a, store)?),
+        AdminCall::DriftDiff(a) => json(drift_diff::drift_diff(target, a, store, ssh).await?),
         AdminCall::Template(a) => {
             check_name(&a.name)?;
             json(author::template(a.kind, &a.name))
@@ -623,6 +631,12 @@ mod tests {
                 catalog: "acme".into(),
             }),
             AdminCall::AssetHistory(skill("s")),
+            AdminCall::DriftDiff(DriftDiffArgs {
+                host_alias: "h".into(),
+                kind: Kind::Skill,
+                name: "s".into(),
+                harness: Some("codex".into()),
+            }),
         ]
     }
 

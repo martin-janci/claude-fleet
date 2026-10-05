@@ -202,6 +202,31 @@ impl Fleet {
             )],
         );
     }
+
+    /// Commit `mcp/<name>.yaml` (an http MCP server) and add it to layer
+    /// `core`, next to skill `w`.
+    pub(crate) fn add_mcp_server_to_core(&self, name: &str) {
+        self.commit_files(
+            &self.personal_root,
+            self.personal.id,
+            &[
+                (
+                    &format!("mcp/{name}.yaml"),
+                    &format!(
+                        "kind: mcp_server\nname: {name}\ndescription: {DESC}\n\
+                         transport: http\nurl: https://example.com/mcp\n"
+                    ),
+                ),
+                (
+                    "layers/core.yaml",
+                    &format!(
+                        "kind: layer\nname: core\naxis: context\n\
+                         members:\n- skill/w\n- mcp_server/{name}\n"
+                    ),
+                ),
+            ],
+        );
+    }
 }
 
 /// `skills/<name>/asset.yaml` for a skill described by [`DESC`].

@@ -303,9 +303,8 @@ pub fn all() -> Vec<Box<dyn Harness>> {
     vec![Box::new(claude::Claude), Box::new(codex::Codex)]
 }
 
-/// Reserved: looks up one harness by id without building the whole
-/// registry via `all()`. Nothing calls this outside tests yet.
-#[allow(dead_code)]
+/// Looks up one harness by id without building the whole registry via
+/// `all()` (`drift_diff`).
 pub fn by_id(id: &str) -> Option<Box<dyn Harness>> {
     match id {
         "claude" => Some(Box::new(claude::Claude)),

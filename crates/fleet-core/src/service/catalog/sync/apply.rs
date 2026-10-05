@@ -139,7 +139,7 @@ pub struct ApplyCtx<'a> {
 /// shell script unquoted? Only `[A-Za-z0-9._/-]`, no empty or `..` segment.
 /// Asset names are validated kebab-case and every directory is a constant,
 /// so a path that fails this has no business being written at all.
-fn is_safe_path(p: &str) -> bool {
+pub(crate) fn is_safe_path(p: &str) -> bool {
     let Some(rest) = p.strip_prefix("~/") else {
         return false;
     };

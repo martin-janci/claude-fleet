@@ -1063,7 +1063,7 @@ pub struct CatalogAdminParams {
     /// apply_sync|last_sync|list_secrets|set_secret|delete_secret|
     /// list_layers|resolve_preview|propose_layers|set_host_layers|set_host_harnesses|
     /// layer_template|write_layer|delete_layer|list_catalogs|add_catalog|
-    /// remove_catalog|admit_catalog|unadmit_catalog|asset_history
+    /// remove_catalog|admit_catalog|unadmit_catalog|asset_history|drift_diff
     pub action: String,
     /// The desktop command's own argument object.
     #[serde(default)]

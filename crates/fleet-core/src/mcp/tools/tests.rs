@@ -3454,8 +3454,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 72,827 on 2026-10-05 after its fix round 1
     /// (`list_assets` takes `all_catalogs`, +126 bytes). M6 Task 3:
     /// changesets propose_layer + change (measured 74,163; the typed
-    /// `LayerChange` schema, three variants, +1,236 bytes).
-    const BUDGET_BYTES: usize = 74_263;
+    /// `LayerChange` schema, three variants, +1,236 bytes). M6 Task 4:
+    /// catalog_admin drift_diff (measured 74,174; the action named in
+    /// `CatalogAdminParams::action`, +11 bytes).
+    const BUDGET_BYTES: usize = 74_274;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
