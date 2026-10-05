@@ -29,7 +29,7 @@
 use super::rules::{gap_hash, LayerGap, NEEDS_A_LOOK, UPDATE};
 use super::{
     is_open, ApplyGuard, CardKind, ChangesetView, Decider, HeldLine, HeldWhy, ItemAction,
-    ItemOutcome, ItemParams, APPLY_LOCK,
+    ItemOutcome, ItemParams, APPLY_LOCK, WITHDRAWN_PREFIX,
 };
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::catalog::import::slugify;
@@ -1397,7 +1397,8 @@ fn record(
 }
 
 /// Step 5's follow-through on an applied card: reload, push when
-/// `catalog.auto_push` (SB4, R18), propose the follow-up Rollout (R14).
+/// `catalog.auto_push` (SB4, R18), re-derive the cards a layer card made
+/// stale (final review I2), propose the follow-up Rollout (R14).
 /// None of these un-applies the card: each failure is a warning in its
 /// `error` (R12), as are the imported files the checkout ignores
 /// (`ignored`, final review I2), which were left out.
@@ -1435,6 +1436,9 @@ fn after_commits(
             }
         }
     }
+    if card.kind == CardKind::Layer.as_str() {
+        warnings.extend(rederive_after_layer_card(selected, store));
+    }
     let written = lock(store).and_then(|s| {
         propose_follow_up(selected, &s)?;
         if !warnings.is_empty() {
@@ -1449,6 +1453,68 @@ fn after_commits(
             e.message
         );
     }
+}
+
+/// Final review I2: after a layer card (create, rename, move) the cards
+/// derived from the old layers are stale. A rename withdraws the open
+/// Rollout cards of its catalog that sync the old layer — the layer they
+/// name is gone — and then one reconcile pass re-derives the New and
+/// Bootstrap cards (refreshed or withdrawn, as the pass decides), so none
+/// adopts into a layer that no longer exists. Called after the reloads,
+/// with `APPLY_LOCK` held by the apply (the pass itself takes no lock but
+/// the store's, store before registry, never held together). Answers the
+/// card note's warnings; best effort, like the rest of the follow-through.
+fn rederive_after_layer_card(selected: &[&ChangesetItemRow], store: &Mutex<Store>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let renames: Vec<(i64, &str, String)> = selected
+        .iter()
+        .filter(|i| i.action == ItemAction::RenameLayer.as_str())
+        .filter_map(|i| {
+            let to = ItemParams::parse(i.params.as_deref()).to?;
+            Some((i.catalog_id?, i.name.as_str(), to))
+        })
+        .collect();
+    if !renames.is_empty() {
+        let withdrawn = lock(store).and_then(|s| {
+            for card in s.list_changesets()? {
+                if card.kind != CardKind::Rollout.as_str() || !is_open(&card.state) {
+                    continue;
+                }
+                let items = s.changeset_items(card.id)?;
+                let hit = renames.iter().find(|(cid, old, _)| {
+                    items.iter().any(|i| {
+                        i.catalog_id == Some(*cid)
+                            && (i.grp == *old
+                                || ItemParams::parse(i.params.as_deref()).layer.as_deref()
+                                    == Some(*old))
+                    })
+                });
+                if let Some((_, old, new)) = hit {
+                    s.withdraw_changeset(
+                        card.id,
+                        &format!("{WITHDRAWN_PREFIX} layer {old} was renamed to {new}"),
+                    )?;
+                }
+            }
+            Ok(())
+        });
+        if let Err(e) = withdrawn {
+            warnings.push(format!(
+                "the old layer's Rollout cards could not be withdrawn: {}",
+                e.message
+            ));
+        }
+    }
+    let pass = lock(store)
+        .map(|s| settings::get_bool(&s, settings::CATALOG_AUTO))
+        .and_then(|auto| super::reconcile::reconcile(store, auto));
+    if let Err(e) = pass {
+        warnings.push(format!(
+            "the cards could not be re-derived (the next pass will): {}",
+            e.message
+        ));
+    }
+    warnings
 }
 
 /// R14 with PF11: propose the Rollout `selected` calls for. Each of its
@@ -5833,5 +5899,114 @@ mod tests {
         let s = f.store.lock().unwrap();
         assert_eq!(s.list_all_host_layers().unwrap(), layers_before);
         assert_eq!(s.get_changeset(v.id).unwrap().unwrap().state, "failed");
+    }
+
+    /// Final review I2: a rename re-derives the open cards that name the old
+    /// layer in the same apply. An open New card adopting into `core` is
+    /// refreshed by the pass to adopt into `base` (and so never re-creates
+    /// `layers/core.yaml`); an open Rollout of `core` is withdrawn, saying
+    /// why.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_rename_rederives_open_cards_and_withdraws_the_old_layers_rollouts() {
+        let _g = lock_registry_for_test();
+        let f = fleet_with_core(&["oci"]);
+        let p = f.personal.id;
+        let (home, bin) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        host_skill(home.path(), "x", DESC);
+        let ssh = ssh_with_home(bin.path(), home.path());
+        f.store
+            .lock()
+            .unwrap()
+            .replace_host_inventory(
+                "oci",
+                "claude",
+                &[AssetInventoryRow {
+                    host_alias: "oci".into(),
+                    harness: "claude".into(),
+                    kind: "skill".into(),
+                    name: "x".into(),
+                    state: "unmanaged".into(),
+                    host_hash: Some("h-x".into()),
+                    scanned_at: 1,
+                    ..Default::default()
+                }],
+            )
+            .unwrap();
+        super::super::reconcile::reconcile(&f.store, false).unwrap();
+        let adopt_layer = |f: &Fleet| -> (String, Option<String>, String) {
+            let s = f.store.lock().unwrap();
+            let card = s
+                .list_changesets()
+                .unwrap()
+                .into_iter()
+                .find(|c| c.kind == "new")
+                .expect("the New card for skill/x");
+            let items = s.changeset_items(card.id).unwrap();
+            let import = items
+                .iter()
+                .find(|i| i.action == "import" && i.name == "x")
+                .expect("its import");
+            (
+                card.state.clone(),
+                ItemParams::parse(import.params.as_deref()).layer,
+                import.grp.clone(),
+            )
+        };
+        assert_eq!(
+            adopt_layer(&f),
+            ("proposed".into(), Some("core".into()), "core".into())
+        );
+        let rollout = rollout_card(&f, &[sync_item("core", p, "oci", &["skill/w"])]);
+
+        let v = propose_and_apply(
+            &f,
+            LayerChange::Rename {
+                catalog: None,
+                layer: "core".into(),
+                to: "base".into(),
+            },
+            &ssh,
+        )
+        .await;
+        assert_eq!(v.state, "applied", "{:?}", v.error);
+
+        let r = f
+            .store
+            .lock()
+            .unwrap()
+            .get_changeset(rollout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(r.state, "dismissed");
+        assert_eq!(
+            r.error.as_deref(),
+            Some("withdrawn: layer core was renamed to base")
+        );
+        assert_eq!(
+            adopt_layer(&f),
+            ("proposed".into(), Some("base".into()), "base".into()),
+            "the pass refreshed the New card onto the renamed layer"
+        );
+        let adopt = f
+            .store
+            .lock()
+            .unwrap()
+            .list_changesets()
+            .unwrap()
+            .into_iter()
+            .find(|c| c.kind == "new")
+            .unwrap()
+            .id;
+        let a = apply_all(&f, adopt, &ssh).await.unwrap();
+        assert_eq!(a.state, "applied", "{:?}", a.error);
+        assert!(
+            !f.personal_root.join("layers/core.yaml").exists(),
+            "the old layer is not re-created"
+        );
+        assert!(layer_in(&f, "base")
+            .members
+            .contains(&"skill/x".to_string()));
+        assert_eq!(contexts(&f, "oci", p), vec!["base".to_string()]);
     }
 }

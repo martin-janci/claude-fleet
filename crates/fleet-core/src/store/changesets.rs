@@ -597,9 +597,13 @@ impl Store {
     }
 
     /// `(catalog_id, layer)` of every layer some rollout card has applied a
-    /// `sync` item for (Rulings R16) — on an applied or a failed card.
+    /// `sync` item for (Rulings R16) — on an applied or a failed card. A
+    /// layer an applied (not undone) layer card renamed since is rolled out
+    /// under its new name too, through any chain of renames (final review
+    /// I2), so SB6 keeps treating it as rolled out.
     pub fn rolled_out_layers(&self) -> Result<BTreeSet<(i64, String)>> {
-        self.conn
+        let mut out: BTreeSet<(i64, String)> = self
+            .conn
             .prepare(
                 "SELECT DISTINCT i.catalog_id, json_extract(i.params, '$.layer') \
                  FROM changeset_items i JOIN changesets c ON c.id = i.changeset_id \
@@ -607,7 +611,33 @@ impl Store {
                    AND i.catalog_id IS NOT NULL AND json_extract(i.params, '$.layer') IS NOT NULL",
             )?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect()
+            .collect::<Result<_>>()?;
+        let renames: Vec<(i64, String, String)> = self
+            .conn
+            .prepare(
+                "SELECT i.catalog_id, i.name, json_extract(i.params, '$.to') \
+                 FROM changeset_items i JOIN changesets c ON c.id = i.changeset_id \
+                 WHERE c.kind = 'layer' AND c.state = 'applied' \
+                   AND i.action = 'rename_layer' AND i.state = 'applied' \
+                   AND i.catalog_id IS NOT NULL AND json_extract(i.params, '$.to') IS NOT NULL",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_>>()?;
+        // Follow renames to a fixed point: each pass adds at least one name,
+        // so it ends after at most `renames.len()` passes.
+        loop {
+            let more: Vec<(i64, String)> = renames
+                .iter()
+                .filter(|(cid, old, new)| {
+                    out.contains(&(*cid, old.clone())) && !out.contains(&(*cid, new.clone()))
+                })
+                .map(|(cid, _, new)| (*cid, new.clone()))
+                .collect();
+            if more.is_empty() {
+                return Ok(out);
+            }
+            out.extend(more);
+        }
     }
 }
 
@@ -975,6 +1005,67 @@ mod tests {
         assert_eq!(
             s.rolled_out_layers().unwrap(),
             BTreeSet::from([(p, "core".to_string())])
+        );
+    }
+
+    /// Final review I2(c): an applied rename carries "rolled out" to the new
+    /// name — through a chain of renames too — so SB6 keeps treating the
+    /// renamed layer as rolled out; an undone rename carries nothing.
+    #[test]
+    fn a_rolled_out_layer_stays_rolled_out_under_its_new_name() {
+        let (s, p) = store();
+        let rollout = s
+            .insert_changeset(
+                "rollout",
+                "Roll out core to oci",
+                &[NewChangesetItem {
+                    grp: "core".into(),
+                    catalog_id: Some(p),
+                    kind: "host".into(),
+                    name: "oci".into(),
+                    action: "sync".into(),
+                    params: Some(r#"{"layer":"core","assets":["skill/w"]}"#.into()),
+                    decider: "rule".into(),
+                }],
+            )
+            .unwrap();
+        s.set_changeset_item_states(rollout.id, &[0], "applied")
+            .unwrap();
+        s.mark_changeset_applied(rollout.id, 1, "{}", "[]", None)
+            .unwrap();
+        let rename = |old: &str, to: &str, state: &str| {
+            let c = s
+                .insert_changeset(
+                    "layer",
+                    &format!("Rename layer {old} to {to} in personal"),
+                    &[NewChangesetItem {
+                        grp: old.into(),
+                        catalog_id: Some(p),
+                        kind: "layer".into(),
+                        name: old.into(),
+                        action: "rename_layer".into(),
+                        params: Some(format!(r#"{{"to":"{to}"}}"#)),
+                        decider: "person".into(),
+                    }],
+                )
+                .unwrap();
+            s.set_changeset_item_states(c.id, &[0], "applied").unwrap();
+            s.mark_changeset_applied(c.id, 2, "{}", "[]", None).unwrap();
+            if state != "applied" {
+                s.set_changeset_state(c.id, state, None).unwrap();
+            }
+        };
+        rename("core", "base", "applied");
+        rename("base", "edge", "applied");
+        rename("other", "gone", "applied");
+        rename("core", "undone-name", "undone");
+        assert_eq!(
+            s.rolled_out_layers().unwrap(),
+            BTreeSet::from([
+                (p, "core".to_string()),
+                (p, "base".to_string()),
+                (p, "edge".to_string()),
+            ])
         );
     }
 
