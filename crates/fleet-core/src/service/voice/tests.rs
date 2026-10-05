@@ -9,6 +9,7 @@ struct Fake {
     starts: AtomicUsize,
     live: Arc<AtomicUsize>,
     fail: bool,
+    revocations: std::sync::Mutex<Vec<RevokeReason>>,
 }
 struct Live(Arc<AtomicUsize>);
 impl Drop for Live {
@@ -25,6 +26,14 @@ impl VoiceSource for Fake {
         self.live.fetch_add(1, Ordering::SeqCst);
         tx.try_send(vec![1, 2, 3, 4]).unwrap();
         Ok(Box::new(Live(Arc::clone(&self.live))))
+    }
+    fn revoked(&self, reason: RevokeReason) {
+        self.revocations.lock().unwrap().push(reason);
+    }
+}
+impl Fake {
+    fn revocations(&self) -> Vec<RevokeReason> {
+        self.revocations.lock().unwrap().clone()
     }
 }
 const TTL: Duration = Duration::from_secs(60);
@@ -154,4 +163,59 @@ async fn a_busy_claim_older_than_the_ttl_stays_busy() {
     drop(cap);
     // Dropping refreshed last_used, so the claim is fresh again.
     assert!(reg.begin_capture(7, TTL).is_ok());
+}
+
+#[tokio::test]
+async fn a_replaced_claim_is_told_it_was_replaced() {
+    let reg = Arc::new(VoiceRegistry::new());
+    let a = Arc::new(Fake::default());
+    let b = Arc::new(Fake::default());
+    reg.claim(7, "client:phone", a.clone());
+    reg.claim(7, "master", b.clone());
+    assert_eq!(a.revocations(), [RevokeReason::Replaced]);
+    assert!(b.revocations().is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_expired_claim_is_told_so_on_the_next_capture() {
+    let reg = Arc::new(VoiceRegistry::new());
+    let a = Arc::new(Fake::default());
+    reg.claim(7, "master", a.clone());
+    tokio::time::advance(Duration::from_secs(61)).await;
+    assert!(
+        a.revocations().is_empty(),
+        "lazy: nothing until a capture asks"
+    );
+    assert_eq!(
+        reg.begin_capture(7, TTL).err(),
+        Some(CaptureRefusal::NoClaim)
+    );
+    assert_eq!(a.revocations(), [RevokeReason::Expired]);
+}
+
+#[tokio::test]
+async fn the_owners_own_release_is_not_a_revocation() {
+    let reg = Arc::new(VoiceRegistry::new());
+    let a = Arc::new(Fake::default());
+    let id = reg.claim(7, "master", a.clone());
+    assert!(reg.release(7, id));
+    assert!(a.revocations().is_empty());
+}
+
+#[test]
+fn each_revocation_has_its_own_close_code_and_words() {
+    assert_eq!(RevokeReason::Replaced.close_code(), 4001);
+    assert_eq!(
+        RevokeReason::Replaced.text(),
+        "microphone claimed elsewhere"
+    );
+    assert_eq!(RevokeReason::Expired.close_code(), 4002);
+    assert_eq!(
+        RevokeReason::Expired.text(),
+        "microphone idle — turn 🎤 on again"
+    );
+    for r in [RevokeReason::Replaced, RevokeReason::Expired] {
+        assert_eq!(RevokeReason::from_close_code(r.close_code()), Some(r));
+    }
+    assert_eq!(RevokeReason::from_close_code(1000), None);
 }

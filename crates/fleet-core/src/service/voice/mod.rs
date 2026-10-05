@@ -23,6 +23,47 @@ pub type PcmRx = tokio::sync::mpsc::Receiver<Vec<u8>>;
 /// until the returned guard is dropped.
 pub trait VoiceSource: Send + Sync {
     fn start(&self, tx: PcmTx) -> Result<Box<dyn Send>, String>;
+
+    /// The registry dropped this source's claim without its owner releasing
+    /// it, for `reason`. Called outside the registry's lock, at most once. A
+    /// source tells its person here (the 🎤 turns off, saying why). The
+    /// owner's own `release` is not a revocation: it already knows.
+    fn revoked(&self, _reason: RevokeReason) {}
+}
+
+/// Why a claim ended without its owner releasing it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevokeReason {
+    /// Another device (or window) claimed the session's microphone.
+    Replaced,
+    /// Unused for longer than `voice.claim_ttl_secs`; found by the next
+    /// capture that asked for it.
+    Expired,
+}
+
+impl RevokeReason {
+    /// What the person is told.
+    pub fn text(self) -> &'static str {
+        match self {
+            RevokeReason::Replaced => "microphone claimed elsewhere",
+            RevokeReason::Expired => "microphone idle — turn 🎤 on again",
+        }
+    }
+
+    /// The close code `/voice/source` ends a revoked socket with.
+    pub fn close_code(self) -> u16 {
+        match self {
+            RevokeReason::Replaced => 4001,
+            RevokeReason::Expired => 4002,
+        }
+    }
+
+    /// The reason a `/voice/source` close code stands for, if any.
+    pub fn from_close_code(code: u16) -> Option<Self> {
+        [RevokeReason::Replaced, RevokeReason::Expired]
+            .into_iter()
+            .find(|r| r.close_code() == code)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -124,10 +165,11 @@ impl VoiceRegistry {
     }
 
     /// Make `source` the session's microphone, replacing any earlier claim
-    /// and revoking a capture the earlier claim has open.
+    /// and revoking a capture the earlier claim has open. The earlier
+    /// claim's source is told (`RevokeReason::Replaced`).
     pub fn claim(&self, session_id: i64, owner: &str, source: Arc<dyn VoiceSource>) -> u64 {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        {
+        let replaced = {
             let mut st = self.lock();
             st.revoke_capture(session_id);
             st.claims.insert(
@@ -138,9 +180,12 @@ impl VoiceRegistry {
                     source,
                     last_used: Instant::now(),
                 },
-            );
-        }
+            )
+        };
         tracing::info!(session_id, owner, "[voice] microphone claimed");
+        if let Some(old) = replaced {
+            old.source.revoked(RevokeReason::Replaced);
+        }
         id
     }
 
@@ -163,7 +208,9 @@ impl VoiceRegistry {
     }
 
     /// Start the session's source. `ttl` of zero never expires a claim; a
-    /// claim with a live capture never expires.
+    /// claim with a live capture never expires. An expired claim is dropped
+    /// here, when a capture finds it, and its source told
+    /// (`RevokeReason::Expired`).
     pub fn begin_capture(
         self: &Arc<Self>,
         session_id: i64,
@@ -179,7 +226,12 @@ impl VoiceRegistry {
                 return Err(CaptureRefusal::Busy);
             }
             if !ttl.is_zero() && c.last_used.elapsed() > ttl {
-                claims.remove(&session_id);
+                let expired = claims.remove(&session_id);
+                drop(st);
+                tracing::info!(session_id, "[voice] microphone claim expired");
+                if let Some(old) = expired {
+                    old.source.revoked(RevokeReason::Expired);
+                }
                 return Err(CaptureRefusal::NoClaim);
             }
             let capture_id = self.next.fetch_add(1, Ordering::Relaxed);

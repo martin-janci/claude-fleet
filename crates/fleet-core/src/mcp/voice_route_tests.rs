@@ -624,3 +624,72 @@ fn pcm_for_a_capture_that_is_gone_stops_the_device() {
     assert!(live.is_none());
     assert_eq!(super::relay_pcm(&mut live, vec![1; 4]), None, "told once");
 }
+
+/// The close frame `ws` ends with, or fail after [`PATIENCE`].
+async fn close_frame(ws: &mut Ws) -> tokio_tungstenite::tungstenite::protocol::CloseFrame {
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match ws.next().await {
+                Some(Ok(WsMessage::Close(frame))) => return frame,
+                Some(Ok(_)) => continue,
+                other => panic!("the socket ended without a close frame: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("no close frame in time")
+    .expect("a close frame with a code")
+}
+
+#[tokio::test]
+async fn an_idle_source_socket_is_closed_with_4002_when_a_capture_finds_it_expired() {
+    let h = hub(true).await;
+    settings::set(
+        &h.store.lock().unwrap(),
+        settings::VOICE_CLAIM_TTL_SECS,
+        "1",
+    )
+    .unwrap();
+    let mut ws = dial(&h, PHONE).await.expect("the upgrade");
+    let sid = h.session_id;
+    eventually(PATIENCE, "the socket never claimed the session", || {
+        registry().owner(sid).as_deref() == Some("client:phone")
+    })
+    .await;
+    // Keep reading (and answering pings) while the claim goes idle, as a
+    // device does.
+    let closed = crate::rt::spawn(async move { close_frame(&mut ws).await });
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(get(h.addr, capture_path(), HOST_A).await.status, 409);
+    let frame = closed.await.unwrap();
+    assert_eq!(u16::from(frame.code), 4002);
+    assert_eq!(frame.reason.as_str(), "microphone idle — turn 🎤 on again");
+}
+
+#[tokio::test]
+async fn a_source_socket_is_pinged_so_proxies_keep_an_idle_claim() {
+    assert!(
+        super::SOURCE_PING <= Duration::from_secs(1),
+        "short under test"
+    );
+    let h = hub(true).await;
+    let mut ws = dial(&h, PHONE).await.expect("the upgrade");
+    let ping = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match ws.next().await {
+                Some(Ok(WsMessage::Ping(_))) => return,
+                Some(Ok(_)) => continue,
+                other => panic!("the socket ended: {other:?}"),
+            }
+        }
+    })
+    .await;
+    assert!(ping.is_ok(), "no ping in {PATIENCE:?}");
+}
+
+#[test]
+fn the_production_ping_is_inside_common_proxy_idle_timeouts() {
+    // nginx's proxy_read_timeout and most load balancers default to 60 s.
+    let every = super::SOURCE_PING_EVERY;
+    assert!(every >= Duration::from_secs(15) && every <= Duration::from_secs(30));
+}

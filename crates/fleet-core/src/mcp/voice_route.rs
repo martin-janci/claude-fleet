@@ -9,7 +9,7 @@
 use super::auth::{refuses_peer, Caller, TokenMode};
 use super::report_route::ReportState;
 use crate::service::settings;
-use crate::service::voice::{registry, Capture, CaptureRefusal, PcmTx, VoiceSource};
+use crate::service::voice::{registry, Capture, CaptureRefusal, PcmTx, RevokeReason, VoiceSource};
 use axum::body::Body;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
@@ -171,13 +171,30 @@ pub struct SourceQuery {
 }
 
 enum SourceCmd {
-    Start { capture: u64, tx: PcmTx },
-    Stop { capture: u64 },
+    Start {
+        capture: u64,
+        tx: PcmTx,
+    },
+    Stop {
+        capture: u64,
+    },
+    /// The registry dropped this socket's claim: close it, saying why.
+    Revoked(RevokeReason),
 }
 
-/// The close code a source socket gets when its claim was replaced or
-/// released elsewhere.
+/// The close code a source socket gets when its claim was released by
+/// someone else (a replacement or an expiry closes with its own
+/// `RevokeReason` code).
 const CLOSE_CLAIMED_ELSEWHERE: u16 = 4001;
+
+/// How often `/voice/source` pings the device. A claim can sit idle for
+/// many minutes between recordings; a proxy in front of the hub drops an
+/// idle socket (nginx's default is 60 s), and with it the claim.
+const SOURCE_PING_EVERY: Duration = Duration::from_secs(20);
+#[cfg(not(test))]
+const SOURCE_PING: Duration = SOURCE_PING_EVERY;
+#[cfg(test)]
+const SOURCE_PING: Duration = Duration::from_millis(200);
 
 /// A claim held by a websocket: `start` asks the device to open its
 /// microphone; the returned guard asks it to close it. The command queue is
@@ -239,6 +256,10 @@ impl VoiceSource for WsSource {
             capture,
         }))
     }
+
+    fn revoked(&self, reason: RevokeReason) {
+        let _ = self.cmds.send(SourceCmd::Revoked(reason));
+    }
 }
 
 pub async fn handle_source(
@@ -294,8 +315,15 @@ async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
     let (source, mut cmd_rx) = WsSource::new();
     let claim_id = registry().claim(session_id, &owner, source);
     let mut live: Option<(u64, PcmTx)> = None;
+    let mut ping = tokio::time::interval_at(Instant::now() + SOURCE_PING, SOURCE_PING);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            _ = ping.tick() => {
+                if sink.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
             cmd = cmd_rx.recv() => match cmd {
                 Some(SourceCmd::Start { capture, tx }) => {
                     live = Some((capture, tx));
@@ -315,8 +343,17 @@ async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
                         break;
                     }
                 }
+                Some(SourceCmd::Revoked(reason)) => {
+                    let _ = sink
+                        .send(Message::Close(Some(CloseFrame {
+                            code: reason.close_code(),
+                            reason: reason.text().into(),
+                        })))
+                        .await;
+                    break;
+                }
                 None => {
-                    // The claim was replaced or released elsewhere.
+                    // The claim was released by someone other than this socket.
                     let _ = sink
                         .send(Message::Close(Some(CloseFrame {
                             code: CLOSE_CLAIMED_ELSEWHERE,
