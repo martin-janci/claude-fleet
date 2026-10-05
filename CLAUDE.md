@@ -152,7 +152,28 @@ fixture copy since the suite cut, so they no longer queue behind one another
 — their 3,000 ms budgets are still wall-clock and still fail under load; and
 `FILE_OPEN_BUDGET` lifted the file-based upgrade test to 30 s **on Windows
 only**, so on Linux `opening_a_pre_work_graph_file_upgrades_it_within_budget`
-and the two in-memory chains still hold `CHAIN_BUDGET` at 5 s. Not a flake:
+and the two in-memory chains still hold `CHAIN_BUDGET` at 5 s.
+
+Two more, added 2026-10-05, both with THIN margins rather than large ones —
+worth knowing before you spend an hour on either:
+`service::transcript::tests::fetch_maps_a_missing_local_transcript_to_e_no_transcript`
+and its `fetch_conversation_` twin answer **`E_TIMEOUT` instead of
+`E_NO_TRANSCRIPT`** on a loaded box: they probe the local host under a 20 s
+deadline and report the timeout rather than the missing transcript, so the
+failure names the wrong cause. Quiet, they pass in **17.66 s** — under the
+limit by 2.3 s, which is why load flips them. And
+`mcp::tools::tests::a_one_person_fleet_still_sees_its_unclaimed_rows` is the
+opposite shape: it **passes in the full suite and fails run alone**, where
+`list_sessions` answers 12 rows for a store holding 2. Not a leak (the master
+is unrestricted by design and these are unclaimed rows it may see) and not
+caused by T14, whose only edit to that file is three `pub(super)` keywords —
+but a test that only pins under load pins nothing, so it is a real defect in
+the test and not yet diagnosed. Ruled out already: cross-test pollution (it
+fails with `--exact` alone), the machine's tmux server (`TMUX_TMPDIR` at an
+empty dir changes nothing), and a seeded template (no migration inserts
+`sessions`).
+
+Not a flake:
 `cargo test -p fleet-core --lib -- --test-threads=1` takes 23–25 minutes
 (4.5k tests; measured on mercury, 2026-10-02), so a `timeout 600` wrapper
 kills it mid-run and the last `test … ...` line names whichever test was in
