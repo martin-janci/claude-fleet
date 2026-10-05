@@ -10,6 +10,7 @@ import { catalog, inventory, lastSyncRun, repoStatusStore, type AssetListing, ty
 import { cardViews, catalogStatuses, changesetSummaries, layerListing, layersByCatalog, type CatalogStatus, type ChangesetSummary, type ChangesetView, type LayerListing } from './assets_workspace';
 import { toasts } from './toasts';
 import { hosts } from './hosts';
+import { orgs, type OrgDetail } from './orgs';
 import { hubStatus, STANDALONE } from './hub';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
@@ -1152,5 +1153,82 @@ describe('AssetsWorkspace layers (R17, R5, R6)', () => {
     // A catalog it may not write opens its layers read-only.
     await fireEvent.click(screen.getByTestId('layer-row-acme-core'));
     expect(screen.queryByTestId('layer-rename')).toBeNull();
+  });
+});
+
+describe('AssetsWorkspace hosts (R18)', () => {
+  const st = (name: string, o: Partial<CatalogStatus> = {}) => ({ id: 1, name, org_id: null, repo_path: '', remote_url: null, head_commit: null, last_loaded_at: null, state: 'loaded', asset_count: 0, admitted: [], ...o }) as CatalogStatus;
+  const PAPAYA = st('papayapos', { id: 2, org_id: 7, admitted: ['local'] });
+  const provenance = { provenance: { 'skill/w': { introduced_by: 'core', catalog: 'personal' } }, excluded: {}, refused: [], withheld: [], held_back: {}, assets: [] };
+  beforeEach(() => {
+    catalogStatuses.set([st('personal'), PAPAYA]);
+    layersByCatalog.set({ personal: LAYERS });
+    orgs.set([{ id: 7, name: 'papayapos' } as OrgDetail]);
+    hosts.update((h) => [...h, { ...h[0], alias: 'trn', ssh_alias: 'trn', org_id: 7 }]);
+  });
+  const hubAnswers = (after: CatalogStatus[] = [st('personal'), PAPAYA]) =>
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_host_provenance') return provenance;
+      if (cmd === 'catalog_admit_catalog' || cmd === 'catalog_unadmit_catalog') return ['oci'];
+      if (cmd === 'catalog_list_catalogs') return after;
+      if (cmd === 'catalog_list_layers_in') return LAYERS;
+      throw { code: 'E_TEST', message: cmd };
+    });
+
+  it('the Hosts rail entry shows the Hosts view and a host selection shows its provenance', async () => {
+    hubAnswers();
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    expect(screen.getByTestId('hosts-view')).toBeTruthy();
+    expect(screen.queryByTestId('assets-new')).toBeNull();
+    expect(screen.getByTestId('host-org-trn')).toHaveTextContent('papayapos');
+    expect(screen.getByTestId('host-role-oci-personal')).toHaveTextContent('role server');
+    await fireEvent.click(screen.getByTestId('host-row-oci'));
+    expect(await screen.findByTestId('host-inspector')).toBeTruthy();
+    expect(await screen.findByTestId('host-prov-line-skill/w')).toHaveTextContent('skill/w — via layer core from personal');
+    expect(cardCalls('catalog_host_provenance')[0][1]).toEqual({ args: { host_alias: 'oci' } });
+    // The Hosts view adds no primary: Sync fleet stays the one.
+    expect(Array.from(document.querySelectorAll('.btn--primary')).map((b) => b.getAttribute('data-testid'))).toEqual(['assets-sync']);
+  });
+
+  it('toggling an admission admits, reloads the catalogs, and says so', async () => {
+    hubAnswers([st('personal'), { ...PAPAYA, admitted: ['local', 'oci'] }]);
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    await fireEvent.click(screen.getByTestId('host-accept-oci-papayapos'));
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'oci now receives papayapos')).toBe(true));
+    expect(cardCalls('catalog_admit_catalog')[0][1]).toEqual({ args: { host_alias: 'oci', catalog: 'papayapos' } });
+    expect(cardCalls('catalog_list_catalogs')).toHaveLength(1);
+    await waitFor(() => expect(screen.getByTestId('host-accept-oci-papayapos')).toHaveAttribute('aria-pressed', 'true'));
+  });
+
+  it('unadmitting says the host keeps what it has', async () => {
+    hubAnswers([st('personal'), { ...PAPAYA, admitted: [] }]);
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    await fireEvent.click(screen.getByTestId('host-accept-local-papayapos'));
+    await waitFor(() =>
+      expect(get(toasts).some((t) => t.message === 'local no longer receives papayapos; what is installed stays until you remove it')).toBe(true),
+    );
+    expect(cardCalls('catalog_unadmit_catalog')[0][1]).toEqual({ args: { host_alias: 'local', catalog: 'papayapos' } });
+  });
+
+  it('a refused admission is an error toast and changes nothing', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_admit_catalog') throw { code: 'E_INVALID', message: 'oci has an org' };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetsWorkspace, handlers());
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    await fireEvent.click(screen.getByTestId('host-accept-oci-papayapos'));
+    await waitFor(() => expect(get(toasts).some((t) => t.kind === 'error')).toBe(true));
+    expect(cardCalls('catalog_list_catalogs')).toHaveLength(0);
+    expect(screen.getByTestId('host-accept-oci-papayapos')).not.toBeDisabled();
+  });
+
+  it('read-only: the Hosts view without admission toggles', async () => {
+    render(AssetsWorkspace, { ...handlers(), readOnly: true });
+    await fireEvent.click(screen.getByTestId('assets-rail-hosts'));
+    expect(screen.getByTestId('host-accept-oci-papayapos')).toBeDisabled();
   });
 });

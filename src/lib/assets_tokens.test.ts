@@ -31,6 +31,8 @@ const GUARDED = [
   'AssetsLayers.svelte',
   'LayerInspector.svelte',
   'LayerChangeForm.svelte',
+  'AssetsHosts.svelte',
+  'HostInspector.svelte',
 ];
 
 const styleOf = (src: string) => src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';

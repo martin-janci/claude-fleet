@@ -5,6 +5,8 @@
   import AssetsLayers from './AssetsLayers.svelte';
   import LayerInspector from './LayerInspector.svelte';
   import LayerChangeForm from './LayerChangeForm.svelte';
+  import AssetsHosts from './AssetsHosts.svelte';
+  import HostInspector from './HostInspector.svelte';
   import AssetList from './AssetList.svelte';
   import AssetInspector from './AssetInspector.svelte';
   import AssetsFooter from './AssetsFooter.svelte';
@@ -17,15 +19,17 @@
   } from './assets';
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
+  import { orgs } from './orgs';
   import {
-    blockedOnSecrets, canWrite, cardViews, catalogStatuses, changesetSummaries, isOpenCard, keyOf, layerListing, layersByCatalog, loadAllLayers,
-    loadChangesets, parseKey, PERSONAL, proposeChangesets, proposeLayerChange,
+    admitCatalog, blockedOnSecrets, canWrite, cardViews, catalogStatuses, changesetSummaries, isOpenCard, keyOf, layerListing, layersByCatalog, loadAllLayers,
+    loadCatalogStatuses, loadChangesets, parseKey, PERSONAL, proposeChangesets, proposeLayerChange, unadmitCatalog,
     type ChangesetSummary, type LayerChange, type WorkspaceView,
   } from './assets_workspace';
   import { coveringNewCard, mergePlans, olderHubWords, primaryVerb } from './assets_cards';
   import { runCardVerb, type CardVerbs } from './card_actions';
   import { buildInbox, hostOrderOf, keepCard, lastScanOf, sentence } from './assets_inbox';
   import { keep, parseQuery, type QueryRow } from './assets_query';
+  import { get } from 'svelte/store';
   import { isEditable } from './terminal_keys';
   import { push, pushError } from './toasts';
 
@@ -348,6 +352,34 @@
     push({ kind: 'info', message: `Proposed again: ${n} open cards` });
   }
 
+  // ── Hosts (R18): the admission toggles ─────────────────────────────────
+  const orgName = (id: number | null) => (id === null ? null : ($orgs.find((o) => o.id === id)?.name ?? `org ${id}`));
+  const selectedHost = $derived(selection?.type === 'host' ? selection.alias : null);
+  /** Admit or unadmit a catalog for a host; then re-read the catalogs (their
+   *  `admitted` lists) and the layers. Unadmitting leaves what is installed. */
+  async function toggleAdmission(host: string, catalogName: string, on: boolean) {
+    if (anyBusy) return;
+    cardBusy = 'admit';
+    let r;
+    try {
+      r = await (on ? admitCatalog(host, catalogName) : unadmitCatalog(host, catalogName));
+      if (r.ok) {
+        await loadCatalogStatuses();
+        void loadAllLayers(get(catalogStatuses));
+      }
+    } finally {
+      cardBusy = '';
+    }
+    if (!r.ok) {
+      pushError(r.error, 'Admission');
+      return;
+    }
+    push({
+      kind: 'info',
+      message: on ? `${host} now receives ${catalogName}` : `${host} no longer receives ${catalogName}; what is installed stays until you remove it`,
+    });
+  }
+
   // ── The keyboard (Rulings R22) ────────────────────────────────────────
   // Focus moves between rows: the DOM order is the display order, a folded
   // section renders no rows. Space/Enter select natively (a static row
@@ -635,6 +667,18 @@
           onnew={() => (creating = !creating)}
           onpropose={proposeAgain}
         />
+      {:else if view === 'hosts'}
+        <AssetsHosts
+          hosts={shown}
+          statuses={$catalogStatuses}
+          layers={layersAll}
+          {orgName}
+          {selectedKey}
+          {readOnly}
+          busy={anyBusy}
+          onselect={select}
+          ontoggle={toggleAdmission}
+        />
       {:else if listing}
         <AssetList
           {listing}
@@ -669,6 +713,8 @@
           onchange={proposeChange}
         />
       {/key}
+    {:else if selectedHost && view === 'hosts'}
+      {#key selectedHost}<HostInspector alias={selectedHost} />{/key}
     {:else}
     <AssetInspector
       {selectedKey}
