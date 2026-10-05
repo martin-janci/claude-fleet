@@ -3,6 +3,7 @@
   import type { DotState } from './assets_visual';
   import HostStrip from './HostStrip.svelte';
   import Badge from './Badge.svelte';
+  import RowName from './RowName.svelte';
 
   /** The one row of an asset found on hosts but not in the catalog (S1a),
    *  shared by the Library's list and the Inbox (spec: "Rows reuse S1a's
@@ -35,7 +36,6 @@
     select?: { key: string; testid: string; selected: boolean; onselect: () => void };
   } = $props();
 
-  const KIND_LETTER: Record<string, string> = { skill: 'S', agent: 'A', hook: 'H', mcp_server: 'M', plugin_ref: 'P' };
   const internal = $derived(identity.class === 'fleet_internal' || identity.class === 'harness_internal');
   const present = $derived([...new Set(identity.hosts.map((h) => h.host_alias))]);
   const odd = $derived(oddHosts(identity));
@@ -44,14 +44,12 @@
 {#snippet reason()}
   {#if identity.class === 'needs_person'}
     <Badge tone="warn" label={identity.reason ?? 'needs a person'} title={identity.reason ?? ''} />
-  {:else if why}
-    <span class="why">{why}</span>
   {/if}
 {/snippet}
 
-{#snippet importer()}
+{#snippet importer(label?: string)}
   {#if !readonly && !internal}
-    <button type="button" class="link" onclick={() => onimport(identity)} title="Import this asset">Import</button>
+    <button type="button" class="link" aria-label={label} onclick={() => onimport(identity)} title="Import this asset">Import</button>
   {/if}
 {/snippet}
 
@@ -66,11 +64,10 @@
       data-testid={select.testid}
       onclick={select.onselect}
     >
-      <span class="kico" title={identity.kind} aria-hidden="true">{KIND_LETTER[identity.kind] ?? '?'}</span>
-      <span class="nm"><b>{identity.name}</b>{@render reason()}</span>
+      <RowName kind={identity.kind} name={identity.name} why={identity.class === 'needs_person' ? '' : why}>{@render reason()}</RowName>
       <HostStrip {order} {present} {odd} {states} />
     </button>
-    {@render importer()}
+    {@render importer(`Import ${identity.name}`)}
   </div>
 {:else}
   <div class="row unmanaged" data-testid={testid}>
@@ -89,7 +86,6 @@
   .name { flex: 1; font-family: ui-monospace, monospace; }
   .meta { color: var(--fg-muted); font-size: 11px; }
   .link { background: none; border: 0; color: var(--accent); cursor: pointer; font-size: 12px; }
-  .why { color: var(--fg-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   .line { display: flex; align-items: center; border-bottom: 1px solid var(--border); }
   .line .link { flex: none; padding: 0 14px; height: 34px; }
@@ -100,10 +96,4 @@
   .row.pick:hover { background: var(--bg-pane); }
   .row.pick.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
   .row.pick:focus-visible, .link:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
-  .nm { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .nm b { font-weight: 560; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .kico {
-    display: grid; place-items: center; width: 16px; height: 16px; border-radius: var(--radius-sm);
-    background: var(--control-bg-active); color: var(--control-fg-quiet); font-family: var(--mono); font-size: 9.5px; font-weight: 700;
-  }
 </style>

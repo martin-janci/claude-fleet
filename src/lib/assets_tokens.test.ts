@@ -14,6 +14,7 @@ const GUARDED = [
   'HostStrip.svelte',
   'Badge.svelte',
   'IdentityRow.svelte',
+  'RowName.svelte',
   'AssetsInbox.svelte',
 ];
 

@@ -55,11 +55,16 @@ describe('AssetsInbox', () => {
     expect(onselect).toHaveBeenCalledWith('asset:personal:skill/edited');
   });
 
-  it('filters by the query; tokens leave the cards out', () => {
+  it('filters by the query; tokens leave the cards alone, free words filter them', () => {
     render(AssetsInbox, props({ query: parseQuery('kind:skill fresh') }));
     expect(screen.getByTestId('inbox-row-identity:skill/fresh')).toBeTruthy();
     expect(screen.queryByTestId('inbox-row-asset:personal:skill/edited')).toBeNull();
     expect(screen.queryByTestId('inbox-row-card:7')).toBeNull();
+  });
+
+  it('says "No matches." when the query filters everything out, not that nothing needs you', () => {
+    render(AssetsInbox, props({ query: parseQuery('zzz-nothing') }));
+    expect(screen.getByTestId('inbox-quiet').textContent).toBe('No matches.');
   });
 
   it('is quiet when nothing needs you', () => {
@@ -83,12 +88,12 @@ describe('AssetsInbox — cards are filtered by free words and catalog only (T7 
     expect(screen.queryByTestId('inbox-row-card:7')).toBeNull();
   });
 
-  it('a catalog: token keeps the card only for the catalog the card is about (the personal one)', () => {
+  it('a catalog: token never hides a card either (the summary does not name its catalogs yet)', () => {
     const { unmount } = render(AssetsInbox, props({ query: parseQuery('catalog:personal') }));
     expect(screen.getByTestId('inbox-row-card:7')).toBeTruthy();
     unmount();
-    render(AssetsInbox, props({ query: parseQuery('catalog:papayapos') }));
-    expect(screen.queryByTestId('inbox-row-card:7')).toBeNull();
+    render(AssetsInbox, props({ query: parseQuery('catalog:acme') }));
+    expect(screen.getByTestId('inbox-row-card:7')).toBeTruthy();
   });
 
   it('a card is a read-only row: selectable and marked, no apply, undo or dismiss', async () => {
@@ -150,6 +155,7 @@ describe('AssetsInbox — every section, and what each row offers', () => {
     expect(split.querySelector('.strip')?.getAttribute('aria-label')).toBe('local: present, oci: differs');
     const imports = screen.getAllByText('Import');
     expect(imports).toHaveLength(2);
+    expect(screen.getByLabelText('Import split')).toBe(imports[0]);
     await fireEvent.click(imports[0]);
     expect(onimport).toHaveBeenCalledWith(expect.objectContaining({ name: 'split' }));
     expect(onselect).not.toHaveBeenCalled();

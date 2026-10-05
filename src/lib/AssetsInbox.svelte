@@ -2,10 +2,11 @@
   import Badge from './Badge.svelte';
   import HostStrip from './HostStrip.svelte';
   import IdentityRow from './IdentityRow.svelte';
+  import RowName from './RowName.svelte';
   import type { AssetIdentity } from './assets';
   import { SECTION_LABEL, type Inbox, type InboxRow, type InboxSection } from './assets_inbox';
   import { keep, type ParsedQuery } from './assets_query';
-  import { PERSONAL, scopeBadge } from './assets_workspace';
+  import { scopeBadge } from './assets_workspace';
 
   /** The Inbox (spec, Workspace shell; Rulings R14, R16): open cards first,
    *  read-only until M6; then Needs you, Drifted, Behind the catalog, New on
@@ -33,15 +34,13 @@
   } = $props();
 
   const OPEN: InboxSection[] = ['needs', 'drifted', 'behind', 'fresh'];
-  const KIND_LETTER: Record<string, string> = { skill: 'S', agent: 'A', hook: 'H', mcp_server: 'M', plugin_ref: 'P' };
   let insyncOpen = $state(false);
 
-  /** A card has no host, scope, layer or state of its own, so only free words
-   *  (against its sentence) and `catalog:` can hide it: a card is about the
-   *  personal catalog, and the summary names no other. */
-  const keepCard = (r: InboxRow) =>
-    (!query.text || query.text.split(' ').every((w) => r.name.toLowerCase().includes(w))) &&
-    query.tokens.every((t) => t.key !== 'catalog' || t.values.includes(PERSONAL));
+  /** A card has no host, scope, layer or state of its own, and the summary
+   *  does not yet name its catalogs (rollout and drift cards are built per
+   *  org catalog too): no token can say it does not match, so only free
+   *  words, against its sentence, hide a card (T7 ruling; catalogs: M6). */
+  const keepCard = (r: InboxRow) => !query.text || query.text.split(' ').every((w) => r.name.toLowerCase().includes(w));
   const keepRow = (r: InboxRow) => (r.card ? keepCard(r) : keep(query, r.query));
 
   const shown = $derived(
@@ -49,6 +48,7 @@
       (Object.keys(inbox.sections) as InboxSection[]).map((s) => [s, inbox.sections[s].filter(keepRow)]),
     ) as Record<InboxSection, InboxRow[]>,
   );
+  const filtered = $derived(query.tokens.length > 0 || query.text !== '');
   const quiet = $derived(shown.cards.length + OPEN.reduce((n, s) => n + shown[s].length, 0) === 0);
 </script>
 
@@ -74,17 +74,14 @@
       data-testid={`inbox-row-${r.key}`}
       onclick={() => onselect(r.key)}
     >
-      <span class="kico" title={r.kind} aria-hidden="true">{KIND_LETTER[r.kind] ?? '?'}</span>
-      <span class="nm">
-        <b>{r.name}</b>
+      <RowName kind={r.kind} name={r.name} why={r.why}>
         {#if r.asset}
           {@const b = scopeBadge(r.asset)}
           <Badge tone={b.tone} dashed={b.dashed} label={b.label} title={b.title} />
         {:else}
           <Badge tone="warn" label="orphan" />
         {/if}
-        {#if r.why}<span class="why">{r.why}</span>{/if}
-      </span>
+      </RowName>
       <HostStrip {order} states={r.dots} />
     </button>
   {/if}
@@ -103,10 +100,7 @@
       onclick={() => onselect(r.key)}
     >
       <Badge tone={c.state === 'failed' ? 'crit' : 'accent'} glyph={c.state === 'failed' ? '✗' : undefined} label={c.state === 'failed' ? `${c.kind} · failed` : c.kind} />
-      <span class="nm">
-        <b class="sentence">{c.summary}</b>
-        {#if c.error}<span class="why" title={c.error}>{c.error}</span>{/if}
-      </span>
+      <RowName name={c.summary} strong why={c.error ?? ''} whyTitle={c.error ?? undefined} />
       <span class="groups">
         {#each Object.entries(c.groups ?? {}).slice(0, 3) as [g, n] (g)}<Badge label={`${g} ${n}`} />{/each}
       </span>
@@ -125,7 +119,9 @@
       {#each shown[s] as r (r.key)}{@render row(r)}{/each}
     {/if}
   {/each}
-  {#if quiet}<p class="quiet" data-testid="inbox-quiet">Nothing needs you.</p>{/if}
+  {#if quiet}
+    <p class="quiet" data-testid="inbox-quiet">{filtered ? 'No matches.' : 'Nothing needs you.'}</p>
+  {/if}
   {#if shown.insync.length}
     <button
       type="button"
@@ -159,14 +155,6 @@
   .row.card { grid-template-columns: auto minmax(0, 1fr) auto; }
   .row:hover { background: var(--bg-pane); }
   .row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
-  .nm { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .nm b { font-weight: 560; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .nm b.sentence { font-weight: 600; }
-  .why { color: var(--fg-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .kico {
-    display: grid; place-items: center; width: 16px; height: 16px; border-radius: var(--radius-sm);
-    background: var(--control-bg-active); color: var(--control-fg-quiet); font-family: var(--mono); font-size: 9.5px; font-weight: 700;
-  }
   .groups { display: flex; gap: 4px; }
   .quiet, .note { margin: 0; padding: 10px 14px; color: var(--fg-muted); font-size: 12px; }
 </style>

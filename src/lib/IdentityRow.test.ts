@@ -22,6 +22,7 @@ describe('IdentityRow — the one unmanaged-identity row (S1a), shared by the li
     expect(row.textContent).toContain('worktree');
     expect(row.querySelector('.badge.warn')?.textContent).toBe('copies differ on oci');
     expect(row.querySelector('.strip')?.getAttribute('aria-label')).toBe('local: present, oci: differs');
+    expect(within(row).getByText('Import').getAttribute('aria-label')).toBeNull();
     await fireEvent.click(within(row).getByText('Import'));
     expect(onimport).toHaveBeenCalledWith(identity);
   });
@@ -51,7 +52,7 @@ describe('IdentityRow — the one unmanaged-identity row (S1a), shared by the li
     expect(pick.querySelector('button')).toBeNull();
     await fireEvent.click(pick);
     expect(onselect).toHaveBeenCalledTimes(1);
-    await fireEvent.click(screen.getByText('Import'));
+    await fireEvent.click(screen.getByLabelText('Import worktree'));
     expect(onimport).toHaveBeenCalledTimes(1);
     expect(onselect).toHaveBeenCalledTimes(1);
   });

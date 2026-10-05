@@ -33,3 +33,6 @@ export function outcomeTone(outcome: string): BadgeTone {
   if (outcome === 'skipped') return 'muted';
   return 'crit';
 }
+
+/** The one-letter mark of an asset kind in a list row. */
+export const KIND_LETTER: Record<string, string> = { skill: 'S', agent: 'A', hook: 'H', mcp_server: 'M', plugin_ref: 'P' };
