@@ -1139,6 +1139,48 @@
       ]
     },
     {
+      "default_widget": "switch",
+      "key": "voice.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Voice relay",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "voice.max_capture_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Voice: longest recording",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "duration",
+      "key": "voice.claim_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Voice: microphone idle release",
+      "widgets": [
+        "number",
+        "duration",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "number",
       "key": "move.max_transcript_mb",
       "kind": {

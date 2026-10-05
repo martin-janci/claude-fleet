@@ -106,6 +106,14 @@
       ]
     },
     {
+      "title": "Voice",
+      "items": [
+        { "type": "field", "key": "voice.enabled" },
+        { "type": "field", "key": "voice.max_capture_secs", "when": { "key": "voice.enabled", "truthy": true } },
+        { "type": "field", "key": "voice.claim_ttl_secs", "when": { "key": "voice.enabled", "truthy": true } }
+      ]
+    },
+    {
       "title": "Usage",
       "items": [
         {

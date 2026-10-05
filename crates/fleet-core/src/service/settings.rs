@@ -351,6 +351,12 @@ pub const DOWNLOADS_MAX_FILE_MB: &str = "downloads.max_file_mb";
 pub const DOWNLOADS_MAX_TOTAL_MB: &str = "downloads.max_total_mb";
 pub const DOWNLOADS_KEEP_SECS: &str = "downloads.keep_secs";
 
+/// Voice relay: the master switch, the longest recording, and how long a
+/// session's microphone claim idles before it releases itself.
+pub const VOICE_ENABLED: &str = "voice.enabled";
+pub const VOICE_MAX_CAPTURE_SECS: &str = "voice.max_capture_secs";
+pub const VOICE_CLAIM_TTL_SECS: &str = "voice.claim_ttl_secs";
+
 /// Upper bound for [`MOVE_MAX_BUNDLE_MB`]: the bundle is relayed through the
 /// orchestrator in 8 MiB chunks via a private temp file, so this bounds relay
 /// time and temp-disk use on the orchestrator and both hosts, not memory.
@@ -747,6 +753,30 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Days)
     .zero("until removed"),
+    Spec::new(
+        VOICE_ENABLED,
+        "false",
+        Kind::Bool,
+        "Voice relay",
+        "Let Claude Code's /voice on a host record from the microphone of the app attached to it. The microphone opens only while you record, for a session you turned 🎤 on for.",
+    ),
+    Spec::new(
+        VOICE_MAX_CAPTURE_SECS,
+        "300",
+        Kind::Secs,
+        "Voice: longest recording",
+        "A recording longer than this is cut off.",
+    )
+    .unit(Unit::Seconds),
+    Spec::new(
+        VOICE_CLAIM_TTL_SECS,
+        "1800",
+        Kind::Secs,
+        "Voice: microphone idle release",
+        "A session's 🎤 turns itself off after this long without a recording.",
+    )
+    .unit(Unit::Seconds)
+    .zero("never"),
     Spec::new(
         MOVE_MAX_TRANSCRIPT_MB,
         "200",

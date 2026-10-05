@@ -503,6 +503,65 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "Let Claude Code's /voice on a host record from the microphone of the app attached to it. The microphone opens only while you record, for a session you turned 🎤 on for.",
+      "key": "voice.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Voice relay",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "300",
+      "help": "A recording longer than this is cut off.",
+      "key": "voice.max_capture_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Voice: longest recording",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "seconds",
+      "value": "300"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "1800",
+      "help": "A session's 🎤 turns itself off after this long without a recording.",
+      "key": "voice.claim_ttl_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 0,
+        "type": "secs"
+      },
+      "label": "Voice: microphone idle release",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "seconds",
+      "value": "1800",
+      "zero": "never"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "200",
       "help": "Largest transcript Move to host copies; a bigger one is refused.",
       "key": "move.max_transcript_mb",
@@ -2260,6 +2319,31 @@
             }
           ],
           "title": "Downloads"
+        },
+        {
+          "items": [
+            {
+              "key": "voice.enabled",
+              "type": "field"
+            },
+            {
+              "key": "voice.max_capture_secs",
+              "type": "field",
+              "when": {
+                "key": "voice.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "voice.claim_ttl_secs",
+              "type": "field",
+              "when": {
+                "key": "voice.enabled",
+                "truthy": true
+              }
+            }
+          ],
+          "title": "Voice"
         },
         {
           "items": [
