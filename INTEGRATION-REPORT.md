@@ -525,11 +525,15 @@ carry verdicts already; `save_download` routes to `list_downloads` and then stre
 `GET /downloads/<id>`. M1 owes nothing to the verdict table here, but the local-mode
 scope had to become `ViewScope::internal()` (M1 CHANGES §3).
 
-### D5 — A new row event and kind
+### D5 — A new row event and kind — **done, classified**
 `download:changed` / kind `download`, in `HOST_BOUND_HIDDEN_KINDS` beside M1's
-`grant`. `EVENT_NAMES` is 28 and `EVENT_KINDS` 16. M1's replay refusal and per-frame
-fence in `events_route.rs` now have one more kind to be right about; the kind is
-hidden from host- and org-bound streams, which is the same answer M1 gave `grant`.
+`grant`. `EVENT_NAMES` is 28 and `EVENT_KINDS` 16. M1's per-frame fence owed it a
+`KIND_FENCES` row and had none, which `every_event_kind_is_fenced_or_declared_content_free`
+caught (and `fence_frame` would have dropped the kind, so it failed closed too).
+Classified `NoSessionContent` — ids only, the shape `settings` and `update`
+already have — with why it is **not** `PerFrame` and what residue that leaves;
+see M1 CHANGES §7c. **Work left for M1:** none, but the residue sentence is the
+one to re-read if `download:changed` ever grows a payload.
 
 ### D6 — Two new migrations and a changed `schema.rs`
 094/095 above, plus `store/changesets.rs`, `store/downloads.rs`, new rows in the
