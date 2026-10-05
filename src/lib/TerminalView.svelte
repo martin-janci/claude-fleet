@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
+  import { get } from 'svelte/store';
   import { invoke } from '@tauri-apps/api/core';
   import { unarchiveSession } from './tidy';
   import { getCurrentWebview } from '@tauri-apps/api/webview';
@@ -19,6 +20,8 @@
   import { createTerminalClipboard, pathsToPasteText } from './terminal_clipboard';
   import { createMouseController } from './terminal_mouse';
   import TransferChip from './TransferChip.svelte';
+  import MicToggle from './MicToggle.svelte';
+  import { voiceState, releaseVoice, followSession, abandonFollow } from './voice';
   import { fitCells } from './terminal_size';
   import { hubStatus, ownsTheFleet } from './hub';
   import { accessOf, noAttachReason } from './access';
@@ -374,6 +377,8 @@
     const sess = $selectedSession;
     if (!sess) {
       void closeTerm();
+      // Nothing attached: the microphone has no session to serve.
+      if (get(voiceState).state !== 'off') void releaseVoice();
       return;
     }
     if (isAttachedTo(sess)) return;
@@ -577,6 +582,7 @@
           scheduleAutoReconnect(target.tmux_name, target.host_alias);
         } else {
           openError = `PTY error: ${toIpcError(e).message}`;
+          abandonFollow(sess.id);
         }
         return;
       }
@@ -595,6 +601,9 @@
       currentHost = sess.host_alias;
       ptyOpen = true;
       attachedAt = Date.now();
+      // The microphone claim follows the attached session (closeTerm runs on
+      // every switch, so release lives on the deselect / destroy paths).
+      followSession(sess.id, get(hostByAlias).get(sess.host_alias)?.transport ?? 'ssh');
       // Work graph M7: a person attaching is a touch — it un-archives the
       // session and keeps tidy-up off it for an hour. Not an automatic
       // reconnect. Best-effort: an older hub without the action refuses it.
@@ -1027,6 +1036,7 @@
     destroyed = true;
     openGeneration += 1;
     void closeTerm();
+    if (get(voiceState).state !== 'off') void releaseVoice();
     mouse.dispose();
   });
 
@@ -1202,6 +1212,7 @@
         >{displayName($selectedSession, $showFriendlyNames)}</span
       >
       <TransferChip session={$selectedSession} />
+      <MicToggle session={$selectedSession} transport={selectedSessionHostTransport} />
       <span class="size" data-testid="terminal-size">
         {#if lastCols > 0}{lastCols}×{lastRows}{:else}measuring…{/if}
       </span>

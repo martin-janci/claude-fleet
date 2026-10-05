@@ -26,6 +26,7 @@ mod tests_token_cache;
 mod token_cache;
 mod tools;
 pub mod update_route;
+mod voice_route;
 pub mod wire;
 
 use crate::cancel::CancellationRegistry;
@@ -491,6 +492,20 @@ fn build_app(
                 .route(
                     "/downloads/{id}",
                     axum::routing::get(downloads_route::handle_download),
+                )
+                .with_state(report_state.clone()),
+        )
+        // The microphone relay (voice relay F1): a host's recorder reads a
+        // session's audio; a person's device supplies it over a websocket.
+        .merge(
+            axum::Router::new()
+                .route(
+                    "/voice/capture",
+                    axum::routing::get(voice_route::handle_capture),
+                )
+                .route(
+                    "/voice/source",
+                    axum::routing::get(voice_route::handle_source),
                 )
                 .with_state(report_state.clone()),
         )

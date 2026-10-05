@@ -40,6 +40,7 @@
   import EmbedSlot from './lib/pages/EmbedSlot.svelte';
   import { mergeInventoryRow, clearInventoryFor, loadAssets, syncProgress, repoStatus } from './lib/assets';
   import { subscribeToRowEvents } from './lib/events';
+  import { startVoiceEvents } from './lib/voice';
   import { accessOf, applyGrantChanges, loadMyGrants } from './lib/access';
   import TransferSheet from './lib/TransferSheet.svelte';
   import ShareSheet from './lib/ShareSheet.svelte';
@@ -180,6 +181,7 @@
   // a sticky error toast (with the E_* code) plus this footer banner.
   let bootstrapError = $state<string | null>(null);
   let unlistenEvents: UnlistenFn | null = null;
+  let unlistenVoice: UnlistenFn | null = null;
   let showWelcome = $state(false);
   // File downloads: the footer button and its sheet.
   let showDownloads = $state(false);
@@ -277,6 +279,7 @@
     // Subscribed BEFORE the first list: a `session:updated` that lands while
     // the list is in flight would otherwise be emitted to no listener and
     // lost until the row changes again.
+    unlistenVoice = await startVoiceEvents();
     unlistenEvents = await subscribeToRowEvents({
       onSessionEvents: onSessionEvents,
       onHostEvents: applyHostEvents,
@@ -481,6 +484,7 @@
     unsubOpened();
     unsubHostsClose();
     unlistenEvents?.();
+    unlistenVoice?.();
     setGapHandler(null);
   });
 

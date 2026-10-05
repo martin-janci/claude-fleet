@@ -14,7 +14,9 @@
 #                  fake claude/codex binaries. CI also runs this under macOS's
 #                  stock /bin/bash 3.2 and shellchecks it on Linux; this
 #                  script only runs the bash test, on whatever bash is first
-#                  on PATH.
+#                  on PATH. Then scripts/voice-arecord-test.sh (tools/voice/
+#                  arecord against fake servers), and its shellcheck when
+#                  shellcheck is installed.
 #   rust job:      cargo fmt --all --check
 #                  cargo clippy --workspace --all-targets -- -D warnings
 #                  cargo test --workspace
@@ -229,6 +231,16 @@ step bash scripts/buildkite-verify-test.sh
 # a few seconds; see .github/workflows/ci.yml's ag job for the matching
 # macOS-under-bash-3.2 leg CI runs that this local step doesn't.
 step bash scripts/ag-test.sh
+
+# tools/voice/arecord (the /voice recorder stand-in) against fake servers,
+# and its shellcheck when shellcheck is installed (CI's ag job runs both on
+# Linux). bash + python3, a few seconds.
+step bash scripts/voice-arecord-test.sh
+if command -v shellcheck >/dev/null; then
+  step shellcheck -s bash tools/voice/arecord scripts/voice-arecord-test.sh
+else
+  echo "ci-local: shellcheck not installed; skipping the voice arecord shellcheck"
+fi
 
 [[ "$RUN_RUST" == 1 ]] && run_rust
 [[ "$RUN_FRONTEND" == 1 ]] && run_frontend

@@ -59,6 +59,12 @@ async-trait = "0.1"
 # Already in the lockfile via fleet-core (the agent transport) and used again
 # here for the attachment thumbnail data URL.
 base64 = "0.22"
+# The voice relay's `/voice/source` client when paired to a hub
+# (`voice/hub_source.rs`), over the socket `fleet_core::http_client::connect`
+# opens — so only the handshake, no TLS of its own. The same versions
+# fleet-core (axum's `ws`) and fleet-agent already put in the lockfile.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
 
 # The macOS keychain, so the client token never touches a child process's
 # argv (which EDR/EndpointSecurity capture and retain). macOS-only: Linux's
@@ -77,6 +83,11 @@ security-framework = "3"
 # only the two API families it calls.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_System_LibraryLoader"] }
+
+# The desktop's microphone for the voice relay (`voice/capture.rs`); Linux
+# has no capture, so it reports voice unsupported and never links it.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+cpal = "0.15"
 
 [dev-dependencies]
 tempfile = "3"
