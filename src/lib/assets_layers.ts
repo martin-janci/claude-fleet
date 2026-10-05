@@ -17,25 +17,24 @@ export function layerFootprint(l: LayerListing): Map<string, Set<string>> {
       seen.add(name);
       if (!out.has(name)) out.set(name, new Set());
       out.get(name)!.add(r.host_alias);
-      name = r.axis === 'role' ? parentOf(l, name) : null;
+      name = parentOf(l, name);
     }
   }
   return out;
 }
 
 export function whyChain(l: LayerListing, host: string, layer: string): string[] {
+  // The resolver follows `extends` from a role and from a context alike
+  // (sync/layers.rs: "A context may itself extend another context").
   for (const r of l.hosts.filter((x) => x.host_alias === host && x.active)) {
-    if (r.axis === 'context' && r.layer_name === layer) return [`context ${layer}`];
-    if (r.axis === 'role') {
-      const chain = [`role ${r.layer_name}`];
-      let name: string | null = r.layer_name;
-      const seen = new Set<string>();
-      while (name && !seen.has(name)) {
-        if (name === layer) return chain;
-        seen.add(name);
-        name = parentOf(l, name);
-        if (name) chain.push(`extends ${name}`);
-      }
+    const chain = [`${r.axis} ${r.layer_name}`];
+    let name: string | null = r.layer_name;
+    const seen = new Set<string>();
+    while (name && !seen.has(name)) {
+      if (name === layer) return chain;
+      seen.add(name);
+      name = parentOf(l, name);
+      if (name) chain.push(`extends ${name}`);
     }
   }
   return [];

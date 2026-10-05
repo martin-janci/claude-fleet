@@ -32,6 +32,25 @@ describe('whyChain', () => {
   });
 });
 
+describe('a context that extends a context', () => {
+  const C: LayerListing = {
+    layers: [
+      { name: 'base', axis: 'context' },
+      { name: 'core', axis: 'context', extends: 'base' },
+    ],
+    hosts: [{ host_alias: 'oci', catalog_id: 1, layer_name: 'core', axis: 'context', position: 0, active: true }],
+  };
+  it('puts the host in the parent context footprint', () => {
+    const f = layerFootprint(C);
+    expect([...f.get('core')!]).toEqual(['oci']);
+    expect([...f.get('base')!]).toEqual(['oci']);
+  });
+  it('explains the parent through the extends chain', () => {
+    expect(whyChain(C, 'oci', 'core')).toEqual(['context core']);
+    expect(whyChain(C, 'oci', 'base')).toEqual(['context core', 'extends base']);
+  });
+});
+
 describe('roleIn', () => {
   it('names the host role in a catalog', () => {
     expect(roleIn(L, 'oci')).toBe('server');
