@@ -19,6 +19,9 @@ const GUARDED = [
   'QueryInput.svelte',
   'Inspector.svelte',
   'AssetInspector.svelte',
+  'JobChip.svelte',
+  'CatalogChip.svelte',
+  'AssetsFooter.svelte',
 ];
 
 const styleOf = (src: string) => src.match(/<style[^>]*>([\s\S]*?)<\/style>/)?.[1] ?? '';
