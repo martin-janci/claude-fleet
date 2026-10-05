@@ -1976,6 +1976,10 @@
               "type": "link"
             },
             {
+              "page": "settings.catalogs",
+              "type": "link"
+            },
+            {
               "page": "settings.decisions",
               "type": "link"
             }
@@ -2868,6 +2872,55 @@
       ],
       "spec": "fleet.page/1",
       "title": "Organisations"
+    },
+    {
+      "id": "settings.catalogs",
+      "intro": "Git repos of assets fleet syncs to hosts. A GitHub org with SSO must allow a catalog's deploy key; an org admin does that once in the org's settings. Grants are given on the hub: fleet-hub client grant CLIENT assets --catalog NAME.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "catalog",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "state",
+              "type": "field"
+            },
+            {
+              "key": "repo_path",
+              "type": "field"
+            },
+            {
+              "key": "remote_url",
+              "type": "field"
+            },
+            {
+              "key": "org",
+              "type": "field"
+            }
+          ],
+          "title": "Where it lives"
+        },
+        {
+          "items": [
+            {
+              "key": "admitted",
+              "type": "field"
+            },
+            {
+              "key": "granted",
+              "type": "field"
+            }
+          ],
+          "title": "Who receives and changes it"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Catalogs"
     },
     {
       "id": "settings.updates",
@@ -3843,6 +3896,230 @@
         "report": false
       },
       "variant_by": "provider"
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "param",
+              "name": "name"
+            }
+          ],
+          [
+            "repo_path",
+            {
+              "from": "param",
+              "name": "repo_path"
+            }
+          ],
+          [
+            "remote_url",
+            {
+              "from": "param",
+              "name": "remote_url"
+            }
+          ],
+          [
+            "org",
+            {
+              "from": "param",
+              "name": "org"
+            }
+          ]
+        ],
+        "command": "catalog_add_catalog",
+        "envelope": "args",
+        "id": "catalog.add",
+        "label": "Add catalog",
+        "params": [
+          {
+            "label": "Name",
+            "max": 64,
+            "name": "name",
+            "placeholder": "papayapos",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Checkout path",
+            "max": 512,
+            "name": "repo_path",
+            "placeholder": "~/catalogs/papayapos",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Remote URL (optional)",
+            "max": 512,
+            "name": "remote_url",
+            "placeholder": "git@github.com:org/catalog.git",
+            "required": false,
+            "type": "text"
+          },
+          {
+            "label": "Org",
+            "name": "org",
+            "required": true,
+            "source": "orgs",
+            "type": "options"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "name",
+            {
+              "from": "record",
+              "name": "name"
+            }
+          ]
+        ],
+        "command": "catalog_remove_catalog",
+        "confirm": "Removes the catalog from fleet's config. Its checkout stays on disk; open cards on it are withdrawn.",
+        "envelope": "args",
+        "id": "catalog.remove",
+        "label": "Remove",
+        "params": [],
+        "report": false
+      },
+      "empty": "No catalogs yet. Add an org's catalog by its checkout path.",
+      "fields": [
+        {
+          "help": "What hosts, grants and cards call it; fixed once added.",
+          "id": "name",
+          "label": "Name",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "help": "Whether fleet could read the catalog's repo the last time it looked.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "loaded",
+              "Loaded"
+            ],
+            [
+              "problem",
+              "Could not load"
+            ],
+            [
+              "not_loaded",
+              "Not loaded"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "Where the catalog's git repo is on this machine.",
+          "id": "repo_path",
+          "label": "Checkout",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "Its git remote, if any.",
+          "id": "remote_url",
+          "label": "Remote",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "The org whose hosts receive it; none for personal.",
+          "id": "org",
+          "label": "Org",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "host_alias",
+                  {
+                    "from": "param",
+                    "name": "host"
+                  }
+                ],
+                [
+                  "catalog",
+                  {
+                    "from": "record",
+                    "name": "name"
+                  }
+                ]
+              ],
+              "command": "catalog_admit_catalog",
+              "envelope": "args",
+              "id": "catalog.admit",
+              "label": "Admit a host",
+              "params": [
+                {
+                  "label": "Host",
+                  "name": "host",
+                  "required": true,
+                  "source": "hosts",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Hosts with no org that receive this catalog. Hosts of its org always do.",
+          "id": "admitted",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Admitted by",
+          "remove": {
+            "bind": [
+              [
+                "host_alias",
+                {
+                  "from": "item"
+                }
+              ],
+              [
+                "catalog",
+                {
+                  "from": "record",
+                  "name": "name"
+                }
+              ]
+            ],
+            "command": "catalog_unadmit_catalog",
+            "envelope": "args",
+            "id": "catalog.unadmit",
+            "label": "Remove",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Paired desktops that may change this catalog. Granted on the hub (see above).",
+          "id": "granted",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Granted to",
+          "type": "items"
+        }
+      ],
+      "help": "Git repos of assets fleet syncs to hosts. `personal` is yours; an org's catalog reaches that org's hosts and the org-less hosts that admit it. A GitHub org with SSO must allow the catalog's deploy key — an org admin does that once in the org's settings. Grants are given on the hub: `fleet-hub client grant <client> assets --catalog <name>`.",
+      "id": "catalog",
+      "id_field": "name",
+      "label": "Catalog",
+      "list": "catalog_list_catalogs",
+      "plural": "Catalogs",
+      "title_field": "name"
     }
   ],
   "sources": [

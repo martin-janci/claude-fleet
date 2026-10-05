@@ -48,6 +48,8 @@ pub enum OptionSource {
     Hosts,
     /// Trackers, by id, labelled by name.
     Trackers,
+    /// Orgs, by name (what `list_orgs` answers).
+    Orgs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -561,8 +563,88 @@ const TRACKER: ResourceType = ResourceType {
     variant_by: Some("provider"),
 };
 
+/// A catalog's load state as `CatalogStatus.state` says it.
+const CATALOG_STATES: &[(&str, &str)] = &[
+    ("loaded", "Loaded"),
+    ("problem", "Could not load"),
+    ("not_loaded", "Not loaded"),
+];
+
+const CATALOG: ResourceType = ResourceType {
+    id: "catalog",
+    label: "Catalog",
+    plural: "Catalogs",
+    help: "Git repos of assets fleet syncs to hosts. `personal` is yours; an org's catalog reaches that org's hosts and the org-less hosts that admit it. A GitHub org with SSO must allow the catalog's deploy key — an org admin does that once in the org's settings. Grants are given on the hub: `fleet-hub client grant <client> assets --catalog <name>`.",
+    list: "catalog_list_catalogs",
+    id_field: "name",
+    title_field: "name",
+    color_field: None,
+    empty: "No catalogs yet. Add an org's catalog by its checkout path.",
+    fields: &[
+        FieldSpec::new("name", "Name", "What hosts, grants and cards call it; fixed once added.", FieldKind::Text { max: 64 }),
+        FieldSpec::new("state", "State", "Whether fleet could read the catalog's repo the last time it looked.", FieldKind::Choice { options: CATALOG_STATES }),
+        FieldSpec::new("repo_path", "Checkout", "Where the catalog's git repo is on this machine.", FieldKind::Text { max: 512 }),
+        FieldSpec::new("remote_url", "Remote", "Its git remote, if any.", FieldKind::Text { max: 512 }),
+        FieldSpec::new("org", "Org", "The org whose hosts receive it; none for personal.", FieldKind::Text { max: 128 }),
+        FieldSpec::new(
+            "admitted",
+            "Admitted by",
+            "Hosts with no org that receive this catalog. Hosts of its org always do.",
+            FieldKind::Items {
+                item_label: ItemLabel::Plain,
+                remove: Some(ActionSpec::new(
+                    "catalog.unadmit",
+                    "Remove",
+                    "catalog_unadmit_catalog",
+                    &[("host_alias", Bind::Item), ("catalog", Bind::Record("name"))],
+                )),
+                add: &[ActionSpec::new(
+                    "catalog.admit",
+                    "Admit a host",
+                    "catalog_admit_catalog",
+                    &[("host_alias", Bind::Param("host")), ("catalog", Bind::Record("name"))],
+                )
+                .params(&[param("host", "Host", ParamKind::Options { source: OptionSource::Hosts }, true)])],
+            },
+        ),
+        FieldSpec::new(
+            "granted",
+            "Granted to",
+            "Paired desktops that may change this catalog. Granted on the hub (see above).",
+            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+        ),
+    ],
+    create: Some(
+        ActionSpec::new(
+            "catalog.add",
+            "Add catalog",
+            "catalog_add_catalog",
+            &[
+                ("name", Bind::Param("name")),
+                ("repo_path", Bind::Param("repo_path")),
+                ("remote_url", Bind::Param("remote_url")),
+                ("org", Bind::Param("org")),
+            ],
+        )
+        .params(&[
+            param("name", "Name", text(64, "papayapos"), true),
+            param("repo_path", "Checkout path", text(512, "~/catalogs/papayapos"), true),
+            param("remote_url", "Remote URL (optional)", text(512, "git@github.com:org/catalog.git"), false),
+            param("org", "Org", ParamKind::Options { source: OptionSource::Orgs }, true),
+        ]),
+    ),
+    update: None,
+    delete: Some(
+        ActionSpec::new("catalog.remove", "Remove", "catalog_remove_catalog", &[("name", Bind::Record("name"))])
+            .confirm("Removes the catalog from fleet's config. Its checkout stays on disk; open cards on it are withdrawn."),
+    ),
+    actions: &[],
+    create_flow: None,
+    variant_by: None,
+};
+
 /// Every resource type.
-pub const RESOURCES: &[ResourceType] = &[ORG, TRACKER];
+pub const RESOURCES: &[ResourceType] = &[ORG, TRACKER, CATALOG];
 
 pub fn resource(id: &str) -> Option<&'static ResourceType> {
     RESOURCES.iter().find(|r| r.id == id)
@@ -729,6 +811,11 @@ mod tests {
                 "add_org_rule",
                 "assign_host_org",
                 "assign_tracker_org",
+                "catalog_add_catalog",
+                "catalog_admit_catalog",
+                "catalog_list_catalogs",
+                "catalog_remove_catalog",
+                "catalog_unadmit_catalog",
                 "flow_back",
                 "flow_cancel",
                 "flow_start",

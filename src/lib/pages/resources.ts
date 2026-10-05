@@ -6,6 +6,7 @@
 import { invokeCmd, type Result } from '../result';
 import { loadOrgs, ruleChip, type OrgRuleRow } from '../orgs';
 import { loadTrackers } from '../trackers';
+import { loadCatalogStatuses } from '../assets_workspace';
 
 export type Bind =
   | { from: 'record'; name: string }
@@ -14,7 +15,7 @@ export type Bind =
   | { from: 'param'; name: string }
   | { from: 'null' };
 
-export type OptionSource = 'hosts' | 'trackers';
+export type OptionSource = 'hosts' | 'trackers' | 'orgs';
 
 export type ParamSpec = { name: string; label: string; required: boolean } & (
   | { type: 'text'; max: number; placeholder: string }
@@ -283,6 +284,7 @@ export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> 
 export const RESOURCE_RELOADERS: Record<string, (() => Promise<unknown>)[]> = {
   org: [loadOrgs, loadTrackers],
   tracker: [loadTrackers, loadOrgs],
+  catalog: [loadCatalogStatuses, loadOrgs],
 };
 
 export async function afterChange(r: ResourceType): Promise<void> {
