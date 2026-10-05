@@ -67,7 +67,9 @@
     sel?.type === 'orphan' && listing ? listing.unmanaged.filter((r) => r.state === 'orphan' && r.kind === sel.kind && r.name === sel.name) : [],
   );
   const card = $derived(sel?.type === 'card' ? ((cards ?? []).find((c) => c.id === sel.id) ?? null) : null);
-  const full = $derived(!!asset && !readOnly && canOpen(asset));
+  // Defence in depth: only a personal asset is ever read through
+  // `catalog_get_asset`, whatever `canOpen` says.
+  const full = $derived(!!asset && !readOnly && catalogOf(asset) === 'personal' && canOpen(asset));
   const tabs = $derived.by((): Tab[] => {
     if (asset) return full ? ['overview', 'source', 'hosts', 'history'] : readOnly ? ['overview', 'hosts'] : ['overview', 'hosts', 'history'];
     if (identity) return ['overview', 'hosts'];
@@ -98,23 +100,31 @@
   // ── History ──────────────────────────────────────────────────────────
   type HistoryState = { key: string; rows: CommitEntry[] | null; error: string | null };
   let history = $state<HistoryState | null>(null);
+  let historySeq = 0;
 
   /** The History tab's words for a refusal (R13): a client without a grant,
    *  and a hub older than M5 that does not know the action. */
   function historyError(e: IpcError, catalog: string): string {
     if (e.code === 'E_FORBIDDEN') return `This client has no grant on catalog ${catalog}; ask the operator to grant assets on it.`;
-    if (e.code === 'E_INVALID' && /unknown|variant/i.test(e.message)) return 'This hub does not keep asset history yet; update the hub.';
+    if (e.code === 'E_INVALID' && /\bunknown\b[^]*\basset_history\b/i.test(e.message)) return 'This hub does not keep asset history yet; update the hub.';
     return e.message;
   }
 
+  // Every entry to the History tab reads it afresh (a Save since the last
+  // visit added a commit; an error earlier deserves a retry): leaving the
+  // tab drops what was shown.
   $effect(() => {
-    if (tab !== 'history' || !asset || !selectedKey) return;
+    if (tab !== 'history' || !asset || !selectedKey) {
+      untrack(() => (history = null));
+      return;
+    }
     const key = selectedKey;
     const a = asset;
     if (untrack(() => history?.key) === key) return;
+    const seq = ++historySeq;
     history = { key, rows: null, error: null };
     void assetHistory(a.kind, a.name, a.catalog).then((r) => {
-      if (history?.key !== key) return;
+      if (seq !== historySeq || history?.key !== key) return;
       history = r.ok ? { key, rows: r.value, error: null } : { key, rows: null, error: historyError(r.error, catalogOf(a)) };
     });
   });
@@ -145,8 +155,10 @@
   <Inspector {eyebrow} {title} tabs={tabs.map((t) => ({ id: t, label: LABEL[t] }))} active={tab} onchange={(id) => (pick = id as Tab)}>
     {#if asset && full}
       <!-- One instance for Overview, Source and Hosts, kept mounted (hidden)
-           under History too, so going back never refetches or loses an
-           edit. Re-created only for another asset or an `e` press. -->
+           under History too, so going back never refetches. An open editor
+           is kept mounted by AssetDetail itself (hidden outside Source), so
+           an unsaved draft survives every tab. Re-created only for another
+           asset or an `e` press. -->
       {#key `${selectedKey}::${editNonce}`}
         <div class="detail" hidden={tab === 'history'}>
           <AssetDetail

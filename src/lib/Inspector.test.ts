@@ -23,6 +23,7 @@ describe('Inspector', () => {
     const panel = screen.getByRole('tabpanel');
     expect(panel.getAttribute('aria-labelledby')).toBe(a.id);
     expect(a.getAttribute('aria-controls')).toBe(panel.id);
+    expect(panel.getAttribute('tabindex')).toBe('0');
     expect(screen.getByTestId('body')).toBeTruthy();
     expect(screen.getByText('skill')).toBeTruthy();
   });

@@ -211,4 +211,70 @@ describe('AssetInspector', () => {
     expect(screen.getByTestId('inspector-tab-overview').getAttribute('aria-selected')).toBe('true');
     expect(screen.getByTestId('inspector-summary')).toBeTruthy();
   });
+
+  it('an unsaved draft survives a visit to Overview and back to Source', async () => {
+    render(AssetInspector, { ...base, selectedKey: 'asset:personal:skill/w', autoEditKey: 'asset:personal:skill/w' });
+    const desc = (await screen.findByTestId('editor-description')) as HTMLTextAreaElement;
+    await fireEvent.input(desc, { target: { value: 'half-typed' } });
+    await fireEvent.click(screen.getByTestId('inspector-tab-overview'));
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    await fireEvent.click(screen.getByTestId('inspector-tab-source'));
+    const back = screen.getByTestId('editor-description') as HTMLTextAreaElement;
+    expect(back).toBe(desc);
+    expect(back.value).toBe('half-typed');
+    expect(invoke.mock.calls.filter((c) => c[0] === 'catalog_get_asset')).toHaveLength(1);
+  });
+
+  it('the editor is hidden, not shown, outside Source', async () => {
+    render(AssetInspector, { ...base, selectedKey: 'asset:personal:skill/w', autoEditKey: 'asset:personal:skill/w' });
+    const desc = await screen.findByTestId('editor-description');
+    await fireEvent.click(screen.getByTestId('inspector-tab-overview'));
+    expect(desc.closest('[hidden]')).not.toBeNull();
+    await fireEvent.click(screen.getByTestId('inspector-tab-source'));
+    expect(desc.closest('[hidden]')).toBeNull();
+  });
+
+  it('History is read afresh on every entry: after a Save, and after an error', async () => {
+    let fail = true;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_get_asset') return { asset: { kind: 'skill', name: 'w', version: '1', description: 'Make one.', tags: [], body: '# b' }, previews: [], hosts: [] };
+      if (cmd === 'catalog_lint_asset') return { errors: [], warnings: [] };
+      if (cmd === 'catalog_update_asset') return { commit: 'f00dfeed1234', lint: { errors: [], warnings: [] } };
+      if (cmd === 'catalog_asset_history') {
+        if (fail) throw { code: 'E_CATALOG_GIT', message: 'git is busy' };
+        return [{ sha: 'abcdef1234567', at: 1, author: 'Martin', subject: 'edit w' }];
+      }
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetInspector, { ...base, selectedKey: 'asset:personal:skill/w', autoEditKey: 'asset:personal:skill/w' });
+    const desc = await screen.findByTestId('editor-description');
+    await fireEvent.click(screen.getByTestId('inspector-tab-history'));
+    await waitFor(() => expect(screen.getByTestId('inspector-history').textContent).toContain('git is busy'));
+    fail = false;
+    await fireEvent.click(screen.getByTestId('inspector-tab-source'));
+    await fireEvent.input(desc, { target: { value: 'changed' } });
+    await fireEvent.click(screen.getByTestId('editor-save'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_update_asset', expect.anything()));
+    await fireEvent.click(screen.getByTestId('inspector-tab-history'));
+    await waitFor(() => expect(screen.getByTestId('inspector-history').textContent).toContain('edit w'));
+    expect(invoke.mock.calls.filter((c) => c[0] === 'catalog_asset_history')).toHaveLength(2);
+  });
+
+  it('a wrong canOpen never reads an org asset as personal', async () => {
+    render(AssetInspector, { ...base, canOpen: () => true, selectedKey: 'asset:papayapos:skill/ppt' });
+    expect(tabLabels()).toEqual(['Overview', 'Hosts', 'History']);
+    expect(screen.getByTestId('inspector-summary').textContent).toContain('Org skill.');
+    expect(invoke.mock.calls.some((c) => c[0] === 'catalog_get_asset')).toBe(false);
+  });
+
+  it('History: an unrelated E_INVALID keeps its own message', async () => {
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_asset_history') throw { code: 'E_INVALID', message: 'unknown catalog nope' };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetInspector, { ...base, selectedKey: 'asset:papayapos:skill/ppt' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-history'));
+    await waitFor(() => expect(screen.getByTestId('inspector-history').textContent).toContain('unknown catalog nope'));
+    expect(screen.getByTestId('inspector-history').textContent).not.toContain('update the hub');
+  });
 });

@@ -230,11 +230,15 @@
     </table>
     {/if}
 
-    {#if show('source')}
+    <!-- The editor stays mounted for as long as `editing` (hidden, not
+         unmounted, under another section) so an unsaved draft survives a
+         visit to Overview or Hosts. -->
     {#if editing}
-      <h4>Edit</h4>
-      <AssetEditor asset={detail.asset} onsaved={onSaved} oncancel={onEditCancel} />
-    {:else}
+      <div class="edit-pane" hidden={!show('source')}>
+        <h4>Edit</h4>
+        <AssetEditor asset={detail.asset} onsaved={onSaved} oncancel={onEditCancel} />
+      </div>
+    {:else if show('source')}
       <h4>Preview</h4>
       <div class="tabs" role="tablist">
         {#each harnesses as h}
@@ -260,7 +264,6 @@
         {/each}
         {#if preview.plan.files.length === 0 && preview.plan.merges.length === 0}<p class="muted">Nothing to install.</p>{/if}
       {/if}
-    {/if}
     {/if}
   {/if}
 </div>

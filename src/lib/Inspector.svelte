@@ -63,7 +63,7 @@
       >{t.label}</button>
     {/each}
   </div>
-  <div class="ib" role="tabpanel" id={`${testid}-panel`} aria-labelledby={`${testid}-tab-${active}`}>
+  <div class="ib" role="tabpanel" tabindex="0" id={`${testid}-panel`} aria-labelledby={`${testid}-tab-${active}`}>
     {@render children()}
   </div>
 </section>
