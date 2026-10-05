@@ -1,0 +1,13 @@
+# The persistent builder's pipeline (docs/buildkite.md). Builds are created
+# on demand by scripts/buildkite-verify.sh (`scripts/verify.sh remote`), not
+# by pushes. One agent, one target dir: concurrency 1, so two builds never
+# write the same target/.
+steps:
+  - label: ":rust: verify full"
+    key: verify
+    command: scripts/buildkite-step.sh
+    agents:
+      queue: rust-persistent
+    concurrency_group: "claude-fleet/verify"
+    concurrency: 1
+    timeout_in_minutes: 45
