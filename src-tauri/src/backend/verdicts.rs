@@ -1304,6 +1304,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "the same as pty_write",
         },
     ),
+    // ── the voice relay's microphone claim ──────────────────────────────────
+    (
+        "voice_claim",
+        Verdict::SameInBoth {
+            why: "the microphone is this machine's: standalone it is registered with the \
+                  embedded server; paired, the desktop holds /voice/source open on the hub",
+        },
+    ),
+    (
+        "voice_release",
+        Verdict::SameInBoth {
+            why: "releases whichever claim voice_claim made on this machine",
+        },
+    ),
     (
         "cancel_command",
         Verdict::SameInBoth {

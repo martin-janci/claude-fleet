@@ -233,6 +233,8 @@
     "pty_write",
     "report_client_error",
     "upload_attachments",
-    "upload_to_session"
+    "upload_to_session",
+    "voice_claim",
+    "voice_release"
   ]
 }

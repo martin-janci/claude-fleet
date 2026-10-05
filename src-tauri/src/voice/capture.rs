@@ -8,7 +8,9 @@ pub fn supported() -> bool {
 }
 
 pub struct CpalSource {
-    /// Told about start / stop / error for the UI (`voice:state`).
+    /// Told about start / stop / error for the UI (`voice:state`). Unread
+    /// where there is no capture.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     pub on_state: std::sync::Arc<dyn Fn(&'static str, Option<String>) + Send + Sync>,
 }
 

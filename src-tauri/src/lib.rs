@@ -347,6 +347,7 @@ pub fn run() {
         .manage(reg)
         .manage(tunnels)
         .manage(upload_allow)
+        .manage(voice::VoiceState::default())
         // Drag-drop reaches a `WebviewWindow` as a window event (and, for a
         // standalone webview, as a webview event) — record dropped paths from
         // both so `upload_to_session` can verify them.
@@ -580,6 +581,8 @@ pub fn run() {
             pty::pty_resize,
             pty::pty_close,
             pty::pty_drain,
+            commands::voice::voice_claim,
+            commands::voice::voice_release,
             cancel_command,
         ])
         .on_window_event(move |window, event| {
