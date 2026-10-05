@@ -6,7 +6,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   keyOf, parseKey, scopeBadge, canWrite, summarizeRun, ago, assetHistory,
   loadChangesets, changesetSummaries, loadCatalogStatuses, catalogStatuses,
-  loadLayers, layerListing, repoStatusOf, isOpenCard, type ChangesetSummary, type ChangesetItem,
+  loadLayers, layerListing, repoStatusOf, isOpenCard, blockedOnSecrets, type ChangesetSummary, type ChangesetItem,
 } from './assets_workspace';
 import type { SyncRunSummary } from './assets';
 
@@ -111,5 +111,26 @@ describe('more reads and keys', () => {
     const run: SyncRunSummary = { plan_id: 'p', started_at: 1, finished_at: 2, hosts: [], auto: true };
     expect(item.decided_at).toBe(1790000000000);
     expect(run.auto).toBe(true);
+  });
+});
+
+describe('blockedOnSecrets', () => {
+  const act = (kind: string, name: string, op: string, detail: string | null) => ({ kind, name, op: op as 'blocked', outcome: op, detail });
+  const run = (actions: ReturnType<typeof act>[]): SyncRunSummary => ({
+    plan_id: 'p', started_at: 1, finished_at: 2,
+    hosts: [{ host_alias: 'oci', harness: 'claude', status: 'partial', detail: null, restart_required: false, actions }],
+  });
+  it('names the assets the last run could not apply for want of a secret', () => {
+    const b = blockedOnSecrets(run([
+      act('mcp', 'fleet', 'blocked', 'missing secrets: FLEET_MCP_TOKEN'),
+      act('skill', 'x', 'blocked', 'unsupported kind'),
+      act('skill', 'y', 'update', null),
+    ]));
+    expect(b({ kind: 'mcp', name: 'fleet' })).toBe(true);
+    expect(b({ kind: 'skill', name: 'x' })).toBe(false);
+    expect(b({ kind: 'skill', name: 'y' })).toBe(false);
+  });
+  it('is false for everything with no run', () => {
+    expect(blockedOnSecrets(null)({ kind: 'mcp', name: 'fleet' })).toBe(false);
   });
 });
