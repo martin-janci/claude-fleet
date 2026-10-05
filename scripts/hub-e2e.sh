@@ -62,6 +62,10 @@ echo "hub-e2e: log root: $ROOT"
 # never trips on it and cleanup() can always test it safely.
 EV_PID=""
 WEV_PIDS=""
+# The multi-user M1 section's own background jobs (two /events streams, one
+# reconnect and a parked long poll): same reason as EV_PID above, and that
+# section empties it again as soon as each is reaped.
+MU_PIDS=""
 # Whatever happens, leave nothing running: every hub and agent this script
 # started records a pid file under $ROOT, and the agent's tmux server lives
 # under $ROOT/tmux (a short path: a tmux socket path is capped at 108 bytes).
@@ -88,11 +92,16 @@ cleanup() {
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
   done
+  for pid in $MU_PIDS; do
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+  done
   # Hub A manages this machine's own (non-isolated) tmux server directly, so a
   # session it created there can outlive a run that is interrupted before its
   # own kill_session step runs. Sweep this run's session names, if any are
   # still around, on that default server too.
-  for n in "${NAME:-}" "${NAME2:-}" "${NAME3:-}" "${NAME4:-}" "${NAME5:-}"; do
+  for n in "${NAME:-}" "${NAME2:-}" "${NAME3:-}" "${NAME4:-}" "${NAME5:-}" \
+           "${NAME6:-}" "${NAME7:-}"; do
     [ -n "$n" ] && tmux has-session -t "$n" 2>/dev/null && tmux kill-session -t "$n" 2>/dev/null
   done
   return 0
@@ -248,7 +257,7 @@ else
   # by the same three names a successful run would have used (never
   # "session id parsed from new_shell_session" here -- that name belongs to
   # the nested SID branch above, a different failure that this path never
-  # reaches), so the tally still adds up to the documented 117 checks.
+  # reaches), so the tally still adds up.
   bad "new_shell_session on local creates a tmux session" "skipped: no fixture project id (see 'list_projects finds the fixture repository' above)"
   bad "capture_session sees the marker" "skipped: no fixture project id"
   bad "kill_session removes the tmux session" "skipped: no fixture project id"
@@ -261,9 +270,21 @@ echo "== Client access (pairing, /events, a client token's reach)"
 # so every redemption below is spaced by that budget. Kept as one named
 # constant so a change to it is a one-line edit here too.
 PAIR_INTERVAL=7
-redeem() { # code -> the /pair response body
-  curl -s -m 10 -X POST "http://127.0.0.1:$PA/pair" \
-    -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$1\"}"
+redeem() { # code [peer address] -> the /pair response body
+  # With an address, the attempt is bucketed under IT rather than under the
+  # loopback peer: `mcp/pairing.rs::limiter_key` believes the last
+  # `X-Forwarded-For` hop from a trusted front end, and loopback is one. That
+  # is how the multi-user M1 section below pairs two people back to back
+  # without spending a PAIR_INTERVAL between them. Two branches rather than an
+  # array: `"${a[@]}"` on an empty array trips `set -u` on bash 3.2 (macOS).
+  if [ -n "${2:-}" ]; then
+    curl -s -m 10 -X POST "http://127.0.0.1:$PA/pair" \
+      -H "Host: $PUB" -H "X-Forwarded-For: $2" \
+      -H 'Content-Type: application/json' -d "{\"code\":\"$1\"}"
+  else
+    curl -s -m 10 -X POST "http://127.0.0.1:$PA/pair" \
+      -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$1\"}"
+  fi
 }
 pair_code() { # tool-response -> the 8-character code out of the escaped JSON
   echo "$1" | grep -oE '\\"code\\": ?\\"[0-9A-Z]{8}\\"' | grep -oE '[0-9A-Z]{8}' | head -1
@@ -390,6 +411,251 @@ check "the other client still works" '[ "$(code -X POST "http://127.0.0.1:$PA/mc
 tbl2=$("$BIN" client list --include-revoked --data-dir "$ROOT/a" --port "$PA" 2>&1)
 check "a revoked client stays listed for the audit trail" 'echo "$tbl2" | grep -q "e2e phone"' "$tbl2"
 check "and is gone from the live list" '! "$BIN" client list --data-dir "$ROOT/a" --port "$PA" 2>&1 | grep -q "e2e phone"' "$("$BIN" client list --data-dir "$ROOT/a" --port "$PA" 2>&1)"
+
+# --- multi-user M1: two people on one hub (T15) -------------------------------
+# The acceptance run for migrations 096_people / 097_session_owner /
+# 098_session_grants / 099_tasks_detach against a real daemon. The authorities
+# are docs/superpowers/specs/2026-09-30-multi-user-gap-analysis.md -- §4.3 for
+# ownership, the two `visibility` values, the seven grant invariants and the
+# `own` TIER's membership, §4.4 for the shared-host rule -- and the task list
+# docs/superpowers/plans/2026-09-30-multi-user-m1-private-sessions.md (T15).
+#
+# It lives in THIS block, not the hub-W one: W is gated on $WBIN (an
+# `--features e2e` build), on `jq` and on the fake tracker, and skips outside
+# CI, while privacy is the thing that must be proven on every local run.
+# Everything below therefore uses this block's own idioms -- `redeem` /
+# `pair_code`, which read the escaped JSON with grep, and never `jq`.
+#
+# Hub A has exactly ONE person right now: migration 096 mints this hub's
+# personal owner, and nothing here has added another. The two pairings below
+# make three, which is what every withholding rule keys on
+# (`Store::sole_enabled_person` -- `None` for a hub with two or more, never a
+# fall-back to the owner). So the one-person reads are taken FIRST, as the
+# positive control for the withholding ones.
+echo "-- multi-user M1 (two people, private sessions, one shared session)"
+MU_A=m1ada          # the owner, in the hub's `people` table
+MU_B=m1bo           # the other person
+NAME6="hube2eU$RANDOM"   # a tmux session fleet did NOT start -> `unclaimed`
+NAME7="hube2eP$RANDOM"   # the session ada starts, private to her
+MU_FR="m1label$RANDOM"   # her friendly name, and §4.3 content
+MU_TAG="m1tag$RANDOM"    # her tag, and §4.3 content
+MU_FR2="m1relabel$RANDOM"
+MU_FR3="m1after$RANDOM"
+MU_WT="m1wt$RANDOM"      # her branch, and §4.3 content ("what the work is")
+
+# `redeem` with an address per person: `POST /pair` allows one attempt per
+# address per ATTEMPT_INTERVAL, and from a loopback peer the hub believes the
+# last `X-Forwarded-For` hop (`mcp/pairing.rs::limiter_key`), so each
+# simulated person redeems out of its own bucket and no PAIR_INTERVAL wait is
+# needed between them.
+pair_token() { echo "$1" | grep -oE '"token":"[0-9a-f]{64}"' | grep -oE '[0-9a-f]{64}'; }
+pair_as() { # display-name person address -> that person's device token
+  local pc_ code_
+  pc_=$(tool "$PA" "$PUB" "$TOKA" pair_client "{\"name\":\"$1\",\"mode\":\"full\",\"person\":\"$2\"}")
+  code_=$(pair_code "$pc_")
+  [ ${#code_} -eq 8 ] || return 1
+  pair_token "$(redeem "$code_" "$3")"
+}
+# `await`, above, is bound to $SSE; these streams are their own files.
+awaitf() { local _; for _ in $(seq 160); do grep -q "$1" "$2" 2>/dev/null && return 0; sleep 0.25; done; return 1; }
+# The escaped-JSON reader the id/repo greps above use, for a numeric field.
+mu_num() { echo "$2" | grep -oE "\\\\\"$1\\\\\": ?[0-9]+" | grep -oE '[0-9]+$' | head -1; }
+
+# (1) An `unclaimed` row, and the count on a one-person hub ------------------
+# A tmux session nobody started through fleet: reconcile inserts it with
+# `owner_person_id = NULL` / `visibility = 'unclaimed'` (store/reconcile.rs --
+# a reconcile pass names no owner), which is the population §4.3's holding
+# state exists for.
+tmux new-session -d -s "$NAME6" 2>/dev/null
+tool "$PA" "$PUB" "$TOKA" list_sessions '{"force":true}' >/dev/null
+unc1=$("$BIN" session unclaimed --host local --data-dir "$ROOT/a" --port "$PA" 2>&1)
+check "a tmux session fleet did not start is reconciled as an unclaimed row" 'echo "$unc1" | grep -q "$NAME6"' "$unc1"
+lh_m=$(tool "$PA" "$PUB" "$TOKA" list_hosts '{}')
+check "on a hub with one person that person is served the per-host unclaimed count" 'echo "$lh_m" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+"' "${lh_m:0:400}"
+
+# (2) Two devices, two people (acceptance 1) ---------------------------------
+TKADA=$(pair_as "m1 laptop (ada)" "$MU_A" 10.88.0.1)
+TKBO=$(pair_as "m1 laptop (bo)" "$MU_B" 10.88.0.2)
+plist=$("$BIN" person list --data-dir "$ROOT/a" --port "$PA" 2>&1)
+gr_a=$(tool "$PA" "$PUB" "${TKADA:-x}" my_grants '{}')
+gr_b=$(tool "$PA" "$PUB" "${TKBO:-x}" my_grants '{}')
+PID_ADA=$(mu_num person_id "$gr_a"); PID_BO=$(mu_num person_id "$gr_b")
+check "two devices pair as two different people the hub now knows by name" '[ ${#TKADA} -eq 64 ] && [ ${#TKBO} -eq 64 ] && echo "$plist" | grep -q "$MU_A" && echo "$plist" | grep -q "$MU_B" && [ -n "$PID_ADA" ] && [ -n "$PID_BO" ] && [ "$PID_ADA" != "$PID_BO" ]' "ada=${TKADA:0:8} bo=${TKBO:0:8} ids=$PID_ADA/$PID_BO | $plist"
+
+# (3) The unclaimed count is withheld now (acceptance 10) --------------------
+# `None`, not `Some(0)`: `0` is a claim about the host and a caller who may
+# not know is not entitled to it, so the assertion is that no NUMBER is
+# served -- the key itself is always on the wire, as `null` (store/rows.rs).
+lh_a=$(tool "$PA" "$PUB" "${TKADA:-x}" list_hosts '{}')
+lh_b=$(tool "$PA" "$PUB" "${TKBO:-x}" list_hosts '{}')
+lh_m2=$(tool "$PA" "$PUB" "$TOKA" list_hosts '{}')
+check "with two people on the hub the unclaimed count is absent from list_hosts for both of them, and for the master" '! echo "$lh_a" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && ! echo "$lh_b" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && ! echo "$lh_m2" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && echo "$lh_a" | grep -qE "\\\\\"alias\\\\\": ?\\\\\"local\\\\\""' "${lh_a:0:300} | ${lh_b:0:300} | ${lh_m2:0:300}"
+unc2=$("$BIN" session unclaimed --data-dir "$ROOT/a" --port "$PA" 2>&1)
+check "and fleet-hub session unclaimed prints the count to the operator instead" 'echo "$unc2" | grep -qE "^local: [0-9]+$"' "$unc2"
+
+# (4) Ada starts a session (acceptance 2) ------------------------------------
+if [ -n "$PID_" ] && [ ${#TKADA} -eq 64 ] && [ ${#TKBO} -eq 64 ]; then
+  mkm=$(tool "$PA" "$PUB" "$TKADA" new_shell_session "{\"host_alias\":\"local\",\"project_id\":${PID_},\"name\":\"$NAME7\",\"new_worktree\":\"$MU_WT\",\"base_branch\":\"main\"}")
+  SIDM=$(mu_num id "$mkm"); WIDM=$(mu_num worktree_id "$mkm")
+  check "a session a person starts is private and owned by them, never by the hub" 'tmux has-session -t "$NAME7" 2>/dev/null && echo "$mkm" | grep -qE "\\\\\"visibility\\\\\": ?\\\\\"private\\\\\"" && echo "$mkm" | grep -qE "\\\\\"owner_person_id\\\\\": ?$PID_ADA([^0-9]|$)" && [ -n "$WIDM" ]' "$(echo "$mkm" | tail -c 500)"
+  tool "$PA" "$PUB" "$TKADA" set_friendly_name "{\"session_id\":${SIDM:-0},\"friendly_name\":\"$MU_FR\"}" >/dev/null
+  tool "$PA" "$PUB" "$TKADA" set_session_tags "{\"session_id\":${SIDM:-0},\"tags\":[\"$MU_TAG\"]}" >/dev/null
+else
+  bad "a session a person starts is private and owned by them, never by the hub" "skipped: no fixture project id, or a pairing failed (see above)"
+fi
+
+if [ -n "${SIDM:-}" ] && [ ${#TKBO} -eq 64 ]; then
+  # (5) Bo's listing names nothing about it (acceptance 3) -------------------
+  # Not "the id is missing": §4.3's table says a session's METADATA is
+  # content, so the tmux name (a branch or a ticket key), the friendly label
+  # and the tags must all be absent too.
+  ls_b=$(tool "$PA" "$PUB" "$TKBO" list_sessions '{}')
+  check "another person's list_sessions does not contain the session and names nothing about it" 'echo "$ls_b" | grep -q "\"isError\":false" && ! echo "$ls_b" | grep -q "$NAME7" && ! echo "$ls_b" | grep -q "$MU_FR" && ! echo "$ls_b" | grep -q "$MU_TAG" && ! echo "$ls_b" | grep -q "$MU_WT" && ! echo "$ls_b" | grep -qE "\\\\\"id\\\\\": ?$SIDM([^0-9]|$)"' "${ls_b:0:600}"
+
+  # (6) Shared at watch, and only watch (acceptance 4, 5) -------------------
+  sh1=$(tool "$PA" "$PUB" "$TKADA" session_share "{\"session_id\":$SIDM,\"person\":\"$MU_B\",\"level\":\"watch\"}")
+  check "the owner shares the session with the other person at watch" 'echo "$sh1" | grep -q "\"isError\":false"' "${sh1:0:400}"
+  ls_b2=$(tool "$PA" "$PUB" "$TKBO" list_sessions '{}')
+  check "the watcher now sees the shared session in list_sessions" 'echo "$ls_b2" | grep -q "$NAME7"' "${ls_b2:0:500}"
+  tmux send-keys -t "$NAME7" "echo m1-watch-marker" Enter; sleep 1
+  cap_b=$(tool "$PA" "$PUB" "$TKBO" capture_session "{\"session_id\":$SIDM}")
+  check "the watcher may read its pane: capture_session succeeds" 'echo "$cap_b" | grep -q m1-watch-marker' "${cap_b:0:400}"
+  sp_b=$(tool "$PA" "$PUB" "$TKBO" send_prompt "{\"session_id\":$SIDM,\"prompt\":\"hello from bo\"}")
+  check "but a watcher is refused send_prompt: a pane write needs drive" 'echo "$sp_b" | grep -q E_FORBIDDEN && echo "$sp_b" | grep -q "needs drive"' "${sp_b:0:400}"
+
+  # (7) The grant set the client derives access from (acceptance 6, R6-j) ---
+  gb=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  MU_N=$(echo "$gb" | grep -oE '\\"session_id\\"' | wc -l | tr -d ' ')
+  check "the watcher's my_grants names that session at watch and nothing else" 'echo "$gb" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"watch\\\\\"" && [ "$MU_N" = 1 ]' "grants=$MU_N ${gb:0:400}"
+
+  # (8) The `own` tier: §4.3 invariant 5's list, which is its own authority --
+  # Every refusal must be the TIER's -- `E_FORBIDDEN` plus
+  # `Reach::Own::needed()`'s words -- and not an argument-validation or
+  # central-guard refusal that happens to share the code. All of these are
+  # `Access::Client`, so the central gate passes them through.
+  mu_own() { # tool args
+    MU_OUT=$(tool "$PA" "$PUB" "$TKBO" "$1" "$2")
+    check "a watcher is refused $1: the spec's own tier, which no grant reaches" 'echo "$MU_OUT" | grep -q E_FORBIDDEN && echo "$MU_OUT" | grep -q "ownership (no grant confers it)"' "${MU_OUT:0:300}"
+  }
+  mu_own kill_session        "{\"session_id\":$SIDM}"
+  mu_own safe_kill_session   "{\"session_id\":$SIDM}"
+  mu_own restart_session     "{\"session_id\":$SIDM}"
+  mu_own recreate_session    "{\"session_id\":$SIDM}"
+  mu_own move_session        "{\"session_id\":$SIDM,\"target_host_alias\":\"local\",\"dry_run\":true}"
+  mu_own spawn_review        "{\"source_session_id\":$SIDM,\"prompt\":\"review this\"}"
+  mu_own rewind_conversation "{\"session_id\":$SIDM,\"mode\":\"fork\"}"
+  mu_own rename_session      "{\"session_id\":$SIDM,\"new_name\":\"${NAME7}x\"}"
+  mu_own set_session_tags    "{\"session_id\":$SIDM,\"tags\":[\"$MU_TAG-bo\"]}"
+  # acceptance 7 -- a grantee cannot grant on (§4.3 invariant 2), enforced at
+  # the same tier as the rest.
+  mu_own session_share       "{\"session_id\":$SIDM,\"person\":\"$MU_A\",\"level\":\"watch\"}"
+  mu_own session_unshare     "{\"session_id\":$SIDM,\"person\":\"$MU_A\"}"
+  mu_own session_narrow      "{\"session_id\":$SIDM,\"person\":\"$MU_A\"}"
+  check "and the session the watcher could not kill is still running" 'tmux has-session -t "$NAME7" 2>/dev/null' "the tmux session is gone"
+  # `delete_worktree` is session-addressed WITHOUT naming a session, so its
+  # refusal is the worktree's and has its own words.
+  if [ -n "${WIDM:-}" ]; then
+    dw_b=$(tool "$PA" "$PUB" "$TKBO" delete_worktree "{\"worktree_id\":$WIDM}")
+    check "a watcher is refused delete_worktree: removing the checkout destroys the work in it" 'echo "$dw_b" | grep -q E_FORBIDDEN && echo "$dw_b" | grep -q "needs \`own\`, which no grant reaches"' "${dw_b:0:400}"
+  else
+    bad "a watcher is refused delete_worktree: removing the checkout destroys the work in it" "skipped: no worktree_id on the new session row"
+  fi
+  # `restore_host_sessions` batches `recreate_session`, so §4.3 names both
+  # ("gating one and not the other gates nothing"). It answers per ITEM: an
+  # id the caller named reads exactly like one that names no session, so the
+  # owner's own dry run is the control that the difference is the fence.
+  rs_b=$(tool "$PA" "$PUB" "$TKBO" restore_host_sessions "{\"host_alias\":\"local\",\"dry_run\":true,\"session_ids\":[$SIDM]}")
+  rs_a=$(tool "$PA" "$PUB" "$TKADA" restore_host_sessions "{\"host_alias\":\"local\",\"dry_run\":true,\"session_ids\":[$SIDM]}")
+  check "a watcher's restore_host_sessions dry run answers as an id that names nothing, while the owner's names the session" 'echo "$rs_b" | grep -q "not found on this host" && ! echo "$rs_b" | grep -q "$NAME7" && ! echo "$rs_b" | grep -q "$MU_FR" && echo "$rs_a" | grep -q "$NAME7" && ! echo "$rs_a" | grep -q "not found on this host"' "bo=${rs_b:0:300} | ada=${rs_a:0:300}"
+  # The batch form of a kill: `work_link { tidy_apply }` takes the same
+  # `Reach::Own` per item, and a refused item carries the gate's sentence.
+  ta_b=$(tool "$PA" "$PUB" "$TKBO" work_link "{\"action\":\"tidy_apply\",\"items\":[{\"session_id\":$SIDM,\"action\":\"kill\"}]}")
+  check "nor may a watcher kill it through work_link tidy_apply, the batch form of the same operation" 'echo "$ta_b" | grep -q "ownership (no grant confers it)" && tmux has-session -t "$NAME7" 2>/dev/null' "${ta_b:0:400}"
+
+  # (9) A grant moves downward only (acceptance 6b, 9) ----------------------
+  un1=$(tool "$PA" "$PUB" "$TKADA" session_unshare "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
+  gb2=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  check "after the revoke the watcher's my_grants names that session no longer" 'echo "$un1" | grep -q "\"isError\":false" && ! echo "$gb2" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM([^0-9]|$)"' "${un1:0:200} | ${gb2:0:400}"
+  sh2=$(tool "$PA" "$PUB" "$TKADA" session_share "{\"session_id\":$SIDM,\"person\":\"$MU_B\",\"level\":\"drive\"}")
+  gb3=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  spd=$(tool "$PA" "$PUB" "$TKBO" send_prompt "{\"session_id\":$SIDM,\"prompt\":\"\",\"keys\":\"Escape\"}")
+  check "re-shared at drive, the grantee's pane write is no longer refused" 'echo "$sh2" | grep -q "\"isError\":false" && echo "$gb3" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"drive\\\\\"" && ! echo "$spd" | grep -q E_FORBIDDEN' "${sh2:0:200} | ${gb3:0:300} | ${spd:0:300}"
+  na1=$(tool "$PA" "$PUB" "$TKADA" session_narrow "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
+  gb4=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  spw=$(tool "$PA" "$PUB" "$TKBO" send_prompt "{\"session_id\":$SIDM,\"prompt\":\"\",\"keys\":\"Escape\"}")
+  check "session_narrow lowers drive to watch, and the pane write is refused again" 'echo "$na1" | grep -q "\"isError\":false" && echo "$gb4" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"watch\\\\\"" && echo "$spw" | grep -q E_FORBIDDEN && echo "$spw" | grep -q "needs drive"' "${na1:0:200} | ${gb4:0:300} | ${spw:0:300}"
+  up1=$(tool "$PA" "$PUB" "$TKADA" session_share "{\"session_id\":$SIDM,\"person\":\"$MU_B\",\"level\":\"drive\"}")
+  na2=$(tool "$PA" "$PUB" "$TKADA" session_narrow "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
+  gb5=$(tool "$PA" "$PUB" "$TKBO" my_grants '{}')
+  check "and no call raises it back: re-granting is E_EXISTS and a second narrow still reads watch" 'echo "$up1" | grep -q E_EXISTS && echo "$up1" | grep -q "re-granting never raises a level" && echo "$gb5" | grep -qE "\\\\\"session_id\\\\\": ?$SIDM,[^}]*\\\\\"level\\\\\": ?\\\\\"watch\\\\\"" && ! echo "$gb5" | grep -q "drive"' "${up1:0:300} | ${na2:0:200} | ${gb5:0:300}"
+
+  # (10) The live stream and a long poll across the revoke (acceptance 11, 12)
+  # Ada's stream is the control: the revoke does not move HER scope, so hers
+  # stays up and carries the touch that bo's must not.
+  SSEADA="$ROOT/events-m1-ada.sse"; SSEBO="$ROOT/events-m1-bo.sse"; SSEBO2="$ROOT/events-m1-bo-resumed.sse"
+  curl -sN -m 120 "http://127.0.0.1:$PA/events?kinds=session" -H "Host: $PUB" -H "Authorization: Bearer $TKADA" >"$SSEADA" 2>/dev/null &
+  EVADA=$!; MU_PIDS="$MU_PIDS $EVADA"
+  curl -sN -m 120 "http://127.0.0.1:$PA/events?kinds=session" -H "Host: $PUB" -H "Authorization: Bearer $TKBO" >"$SSEBO" 2>/dev/null &
+  EVBO=$!; MU_PIDS="$MU_PIDS $EVBO"
+  awaitf "^event: ready" "$SSEADA"; awaitf "^event: ready" "$SSEBO"
+  tool "$PA" "$PUB" "$TKADA" set_friendly_name "{\"session_id\":$SIDM,\"friendly_name\":\"$MU_FR2\"}" >/dev/null
+  awaitf "$NAME7" "$SSEBO"
+  check "while the grant stands the watcher's /events stream carries the session" 'grep -q "^event: session:updated" "$SSEBO" && grep -q "$NAME7" "$SSEBO"' "$(tail -5 "$SSEBO" 2>/dev/null)"
+  LEID=$(grep '^id: ' "$SSEBO" | tail -1 | sed 's/^id: //')
+  # The long poll, parked before the revoke: `turn_gt` a turn no session will
+  # ever reach, so it can only end on the timeout or on the re-check.
+  MUW="$ROOT/m1-bo-wait.json"
+  ( t0=$(date +%s)
+    o=$(tool "$PA" "$PUB" "$TKBO" wait_for_session "{\"session_id\":$SIDM,\"until\":\"turn_gt\",\"turn\":999999999,\"timeout_s\":60}")
+    printf '%s\nMU_ELAPSED=%s\n' "$o" "$(( $(date +%s) - t0 ))" >"$MUW" ) &
+  MUWPID=$!; MU_PIDS="$MU_PIDS $MUWPID"
+  sleep 3
+  un2=$(tool "$PA" "$PUB" "$TKADA" session_unshare "{\"session_id\":$SIDM,\"person\":\"$MU_B\"}")
+  wait "$MUWPID" 2>/dev/null
+  MU_EL=$(sed -n 's/^MU_ELAPSED=//p' "$MUW" 2>/dev/null)
+  check "a long poll the watcher started before the revoke returns E_NOTFOUND after it, not the session" '[ -n "$MU_EL" ] && [ "$MU_EL" -ge 3 ] && [ "$MU_EL" -lt 55 ] && grep -q E_NOTFOUND "$MUW" && ! grep -q satisfied "$MUW"' "elapsed=${MU_EL:-?} $(head -c 400 "$MUW" 2>/dev/null)"
+  check "and the watcher's open /events stream ends when the grant is revoked" 'echo "$un2" | grep -q "\"isError\":false" && until_ok 120 "! kill -0 $EVBO 2>/dev/null"' "${un2:0:200} / still streaming"
+  wait "$EVBO" 2>/dev/null
+  # The resume half, which a stream-only assertion would miss (T9d): the ring
+  # is replayed to the hub's own reader and to nobody else, so a client's
+  # `Last-Event-ID` is answered `resumed: false` -- re-list -- and the gap is
+  # never handed over under the scope it was minted in.
+  if [ -n "$LEID" ]; then
+    curl -sN -m 60 "http://127.0.0.1:$PA/events?kinds=session" -H "Host: $PUB" \
+      -H "Authorization: Bearer $TKBO" -H "Last-Event-ID: $LEID" >"$SSEBO2" 2>/dev/null &
+    EVBO2=$!; MU_PIDS="$MU_PIDS $EVBO2"
+    awaitf "^event: ready" "$SSEBO2"
+    tool "$PA" "$PUB" "$TKADA" set_friendly_name "{\"session_id\":$SIDM,\"friendly_name\":\"$MU_FR3\"}" >/dev/null
+    awaitf "$MU_FR3" "$SSEADA"
+    check "the revoked watcher's resumed reconnect is answered resumed:false and never carries the session" 'grep -A1 "^event: ready" "$SSEBO2" | grep -q "\"resumed\":false" && ! grep -q "$NAME7" "$SSEBO2" && ! grep -q "$MU_FR3" "$SSEBO2" && grep -q "$MU_FR3" "$SSEADA"' "bo: $(head -c 400 "$SSEBO2" 2>/dev/null) | ada: $(grep -c "$MU_FR3" "$SSEADA" 2>/dev/null)"
+    kill "$EVBO2" 2>/dev/null; wait "$EVBO2" 2>/dev/null
+  else
+    bad "the revoked watcher's resumed reconnect is answered resumed:false and never carries the session" "skipped: no Last-Event-ID was minted on the watcher's first stream"
+  fi
+  kill "$EVADA" 2>/dev/null; wait "$EVADA" 2>/dev/null
+  MU_PIDS=""
+
+  # The owner, unlike the watcher, may dispose of her own session.
+  km=$(tool "$PA" "$PUB" "$TKADA" kill_session "{\"session_id\":$SIDM}")
+  check "the owner, who was refused nothing, kills her own session" '! tmux has-session -t "$NAME7" 2>/dev/null' "${km:0:400}"
+else
+  for s in \
+    "another person's list_sessions does not contain the session and names nothing about it" \
+    "the owner shares the session with the other person at watch" \
+    "the watcher now sees the shared session in list_sessions" \
+    "the watcher may read its pane: capture_session succeeds" \
+    "but a watcher is refused send_prompt: a pane write needs drive" \
+    "the watcher's my_grants names that session at watch and nothing else" \
+    "a watcher's restore_host_sessions dry run answers as an id that names nothing, while the owner's names the session" \
+    "after the revoke the watcher's my_grants names that session no longer" \
+    "session_narrow lowers drive to watch, and the pane write is refused again" \
+    "a long poll the watcher started before the revoke returns E_NOTFOUND after it, not the session" \
+    "and the watcher's open /events stream ends when the grant is revoked" \
+    "the revoked watcher's resumed reconnect is answered resumed:false and never carries the session"; do
+    bad "$s" "skipped: ada's session was never created (see the check above)"
+  done
+fi
+tmux kill-session -t "$NAME6" 2>/dev/null
 
 stop_hub a
 check "SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"

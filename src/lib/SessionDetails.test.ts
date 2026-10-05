@@ -950,8 +950,9 @@ describe('SessionDetails Share… and the per-session action gate (multi-user M1
     ]) {
       expect(dis(t), t).toBe(true);
     }
-    // The label is fleet's own metadata about the row, not the tmux name the
-    // `own` tier protects: a driver may still change it.
+    // Spec §4.3: reading the label is content, but WRITING it is not an
+    // owner-only act — it is the sidebar caption, which fleet rewrites itself
+    // without asking anybody — so a driver may still change it.
     expect(dis('label-from-details')).toBe(false);
   });
 

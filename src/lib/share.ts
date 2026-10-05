@@ -130,8 +130,14 @@ const SESSION_TIER = {
   send_message: 'drive',
   dispatch_task: 'drive',
   cancel_task: 'drive',
-  // The label is fleet's own metadata about the row, not the tmux name the
-  // `own` tier protects.
+  // Spec §4.3's reasoning, which this comment used to contradict: READING
+  // `friendly_name` is content and a stranger never sees it, but WRITING it is
+  // not an owner-only act. `rename_session` moves the row's ADDRESS and
+  // `set_session_tags` writes a durable classification; the friendly label is
+  // the sidebar CAPTION, which fleet rewrites itself without asking anybody
+  // (`label_from_prompt`, `fill_session_name`, `tickets::start_one`) — so it is
+  // not a field the owner-only tier is protecting, and a driver correcting the
+  // caption of the session it drives changes nothing the owner cannot re-set.
   set_friendly_name: 'drive',
   repair_session: 'drive',
   dismiss_ghost_session: 'drive',

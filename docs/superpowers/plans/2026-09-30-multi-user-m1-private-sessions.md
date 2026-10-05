@@ -11,8 +11,8 @@ T0–T14 and F1–F3 and D1 are landed, including the sub-tasks the review round
 added that this list does not head in its own right (T2a, T8c, T9a–T9d,
 T10a–T10d, F2a–F2e), and the `fleet-hub person` CLI, which is not a task of
 this plan at all: it closes two limitations D1 had to write down as
-limitations. **T15 — hub-e2e, two people on one hub end to end — is the one
-task of this list still open.**
+limitations. **T15 — hub-e2e, two people on one hub end to end — is landed
+too (2026-10-05), so this list is closed.**
 
 ### The migration numbers in this document are the ORIGINAL ones
 
@@ -2647,6 +2647,42 @@ half is what T9 fixed and what a stream-only assertion would miss.
 **Green at the end.** `scripts/hub-e2e.sh` (opt-in via
 `scripts/ci-local.sh --hub-e2e`); the script's own `passed $PASS, failed $FAIL`
 tally is the contract.
+
+**LANDED** (2026-10-05). The section is in the Client-access block on hub A,
+anchored above its `stop_hub a`, and runs on every local `scripts/hub-e2e.sh`:
+`passed 172, failed 0` — 37 checks, against 135 before it. `redeem` gained an optional peer
+address — two branches rather than an array, since `"${a[@]}"` on an empty one
+trips `set -u` on bash 3.2 — and the W block's `jq` is not used anywhere in it.
+
+Four things worth carrying forward rather than re-deriving.
+
+* **The hub's row JSON on this surface is COMPACT**, so every field pattern
+  has to allow the space rather than require it (`": ?"`), exactly as the
+  block's existing `\"id\": ?[0-9]+` greps do. The first draft asserted
+  `\"visibility\": \"private\"` with a space and failed against a correct
+  hub.
+* **A plain `new_shell_session` leaves `worktree_id` NULL**, so the session is
+  started with `new_worktree` — which also gives the run a unique BRANCH
+  string for the content-absence assertion, and `delete_worktree` a worktree
+  its occupant is a session the watcher may see and not own.
+* **`restore_host_sessions` answers per ITEM, never `E_FORBIDDEN`**, so its
+  check is "the watcher's dry run reads as an id that names nothing while the
+  owner's names the session", with the owner's call as the control.
+* **`work_link { summarize }` is not expressible here** — it is addressed by
+  `key` + `link_id` over a work link with a stored past conversation, and its
+  fence is `require_conversation_person`, not a session reach — so
+  `work_link { tidy_apply }` with a `kill` stands in for `work_link`'s `own`
+  arm: the batch form of the same operation, gated per item at `Reach::Own`.
+
+Each check was confirmed to bite by reverting the rule under it and watching
+that check, and only that check, go red:
+`ViewScope::sees_session_facts`' private fall-through → the content-absence,
+long-poll and stream checks (three, from the one fence); the
+`AccessRecheck` in `SessionRecheck::check` → the long poll runs to its
+timeout instead of `E_NOTFOUND`; and T9d's replay rule together with the
+per-connection frame ids → the resumed reconnect answers `resumed: true`.
+That last one needs BOTH reverted, which is itself worth knowing: three
+independent mechanisms hold `resumed: false` for a paired client.
 
 ---
 

@@ -151,9 +151,22 @@ impl FleetTools {
             p.session_id,
             p.host_alias.as_deref(),
             p.tmux_name.as_deref(),
-            // `drive`, NOT `own`: `friendly_name` is fleet's own metadata about
-            // the row, not the tmux name the `own` tier protects. The desktop's
-            // `SESSION_TIER` makes the same split for the same reason.
+            // `drive`, NOT `own`, with spec §4.3's own reasoning (fix round 3,
+            // which found this sentence saying something else): READING
+            // `friendly_name` IS content — it is a row of that section's
+            // content table, so a stranger never sees it — but WRITING it is
+            // not an owner-only act, and the two halves are not in conflict.
+            // `rename_session` changes the tmux NAME, which is the row's
+            // ADDRESS; `set_session_tags` writes a durable classification the
+            // work graph and the sidebar filters read. The friendly label is
+            // the sidebar CAPTION, and fleet writes it itself without asking
+            // anybody (`sessions::label_from_prompt` on a background agent's
+            // first prompt, `fill_session_name` and `tickets::start_one` on a
+            // start) — a field the hub rewrites on its own is not a field the
+            // owner-only tier is protecting, and a driver correcting the
+            // caption of the session it is driving changes nothing the owner
+            // cannot see and re-set. The desktop's `SESSION_TIER` carries the
+            // same tier, now with the same reason.
             Reach::Drive,
             "the session to label",
         )?;
