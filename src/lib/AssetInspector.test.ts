@@ -200,6 +200,20 @@ describe('AssetInspector', () => {
     expect(screen.getByTestId('inspector-hosts')).toHaveTextContent('skill/w — edited on the host');
   });
 
+  it('a rollout card’s Hosts tab offers Review plan too', async () => {
+    const rollout: ChangesetView = { id: 7, kind: 'rollout', summary: 'Roll out core to oci', state: 'proposed', created_at: 1, commits: {}, undoable: false, items: [
+      { position: 0, grp: 'core', kind: 'host', name: 'oci', action: 'sync', params: {}, decider: 'person', state: 'pending' },
+    ] };
+    cardViews.set({ 7: rollout });
+    const onreview = vi.fn();
+    render(AssetInspector, { ...base, onreview, cards: [{ ...base.cards[0], kind: 'rollout' as const }], selectedKey: 'card:7' });
+    await fireEvent.click(screen.getByTestId('card-review-7'));
+    expect(onreview).toHaveBeenCalledWith(7);
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    await fireEvent.click(screen.getByTestId('card-review-7'));
+    expect(onreview).toHaveBeenCalledTimes(2);
+  });
+
   it('a card applied through the Inspector Undo runs the verb', async () => {
     cardViews.set({ 7: { ...view7, state: 'applied', undoable: true, commits: { personal: 'abcdef12' } } });
     const oncard = { apply: vi.fn(), dismiss: vi.fn(), undo: vi.fn(), synchost: vi.fn() };

@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AssetsWorkspace from './AssetsWorkspace.svelte';
-import { catalog, inventory, lastSyncRun, repoStatusStore, type AssetListing, type SyncRunSummary } from './assets';
+import { catalog, inventory, lastSyncRun, repoStatusStore, type AssetListing, type SyncPlan, type SyncRunSummary } from './assets';
 import { cardViews, catalogStatuses, changesetSummaries, layerListing, type CatalogStatus, type ChangesetSummary, type ChangesetView } from './assets_workspace';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
@@ -320,6 +320,212 @@ describe('AssetsWorkspace', () => {
     const rule = /\.detail\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
     expect(rule).not.toMatch(/overflow/);
     expect(rule).not.toMatch(/height/);
+  });
+});
+
+const ROLLOUT_CARD: ChangesetSummary = { id: 11, kind: 'rollout', summary: 'Roll out core to 2 hosts', state: 'proposed', created_at: 1, catalogs: ['personal'] };
+const ROLLOUT_VIEW: ChangesetView = { id: 11, kind: 'rollout', summary: ROLLOUT_CARD.summary, state: 'proposed', created_at: 1, commits: {}, undoable: false, catalogs: ['personal'], items: [
+  { position: 0, grp: 'core', kind: 'host', name: 'oci', action: 'sync', params: { assets: ['skill/edited', 'skill/fine'] }, decider: 'person', state: 'pending' },
+  { position: 1, grp: 'core', kind: 'host', name: 'htz', action: 'sync', params: { assets: ['skill/fine'] }, decider: 'person', state: 'pending' },
+  { position: 2, grp: 'core', kind: 'host', name: 'old', action: 'sync', params: { assets: ['skill/fine'] }, decider: 'person', state: 'applied' },
+] };
+const PLAN: SyncPlan = {
+  id: 'plan-1', computed_at: 1, counts: { create: 1 },
+  hosts: [{ host_alias: 'oci', harness: 'claude', status: 'planned', detail: null, actions: [
+    { kind: 'skill', name: 'fine', op: 'create', reason: null, files: [], merges: [], backup: false, secrets: [], missing_secrets: [], catalog: 'personal' },
+  ] }],
+};
+const primaries = (region: string) => Array.from(document.querySelectorAll(`${region} .btn--primary`)).map((b) => b.getAttribute('data-testid'));
+
+describe('AssetsWorkspace plan view (R15, R16)', () => {
+  it('while a plan is open it replaces the list; Back closes it', async () => {
+    const onplanclose = vi.fn();
+    render(AssetsWorkspace, { ...handlers(), plan: PLAN, onplanclose });
+    expect(screen.getByTestId('sync-plan-view')).toBeTruthy();
+    expect(screen.getByTestId('assets-workspace').contains(screen.getByTestId('sync-plan-view'))).toBe(true);
+    expect(screen.queryByTestId('assets-inbox')).toBeNull();
+    await fireEvent.click(screen.getByTestId('plan-back'));
+    expect(onplanclose).toHaveBeenCalled();
+  });
+
+  it('Esc closes only the plan: the event is stopped before the App’s window listener', async () => {
+    const onplanclose = vi.fn();
+    const appEsc = vi.fn();
+    window.addEventListener('keydown', appEsc);
+    try {
+      render(AssetsWorkspace, { ...handlers(), plan: PLAN, onplanclose });
+      const back = screen.getByTestId('plan-back');
+      // The view takes focus when it opens, so Esc starts inside the workspace.
+      expect(document.activeElement).toBe(back);
+      const ev = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      back.dispatchEvent(ev);
+      expect(onplanclose).toHaveBeenCalledTimes(1);
+      expect(ev.defaultPrevented).toBe(true);
+      expect(appEsc).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('keydown', appEsc);
+    }
+  });
+
+  it('with no plan open Esc is left to the App', async () => {
+    const appEsc = vi.fn();
+    window.addEventListener('keydown', appEsc);
+    try {
+      render(AssetsWorkspace, handlers());
+      await fireEvent.keyDown(screen.getByTestId('assets-list'), { key: 'Escape' });
+      expect(appEsc).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener('keydown', appEsc);
+    }
+  });
+
+  it('Esc does not close a plan while it is applying, but still does not close the overlay', async () => {
+    const onplanclose = vi.fn();
+    const appEsc = vi.fn();
+    window.addEventListener('keydown', appEsc);
+    try {
+      render(AssetsWorkspace, { ...handlers(), plan: PLAN, onplanclose, busy: 'apply' });
+      await fireEvent.keyDown(screen.getByTestId('assets-workspace'), { key: 'Escape' });
+      expect(onplanclose).not.toHaveBeenCalled();
+      expect(appEsc).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('keydown', appEsc);
+    }
+  });
+
+  it('a field and a dialog keep their Esc', async () => {
+    const onplanclose = vi.fn();
+    render(AssetsWorkspace, { ...handlers(), plan: PLAN, onplanclose });
+    await fireEvent.keyDown(screen.getByTestId('assets-query'), { key: 'Escape' });
+    expect(onplanclose).not.toHaveBeenCalled();
+  });
+
+  it('the hidden list takes no keys while a plan is open', async () => {
+    const h = handlers();
+    withCards([NEW_CARD, NEW_VIEW]);
+    answerCards([[NEW_CARD, NEW_VIEW]]);
+    render(AssetsWorkspace, { ...h, plan: PLAN, selectedKey: 'identity:skill/fresh' });
+    const root = screen.getByTestId('assets-workspace');
+    await fireEvent.keyDown(root, { key: 'a' });
+    await fireEvent.keyDown(root, { key: 'i' });
+    await fireEvent.keyDown(root, { key: 'Enter', metaKey: true });
+    expect(h.onimport).not.toHaveBeenCalled();
+    expect(h.onsync).not.toHaveBeenCalled();
+    expect(cardCalls('catalog_apply_changeset')).toHaveLength(0);
+    expect(cardCalls('catalog_reject_changeset_items')).toHaveLength(0);
+  });
+
+  it('one primary per region with a plan open: the plan’s Apply, never the header Sync (nor a card verb)', async () => {
+    withCards([NEW_CARD, NEW_VIEW]);
+    const { rerender } = render(AssetsWorkspace, { ...handlers(), selectedKey: 'card:7' });
+    expect(primaries('.main')).toEqual(['card-primary-7']);
+    await rerender({ ...handlers(), selectedKey: 'card:7', plan: PLAN });
+    expect(primaries('.main')).toEqual(['plan-apply']);
+    expect(primaries('.insp')).toHaveLength(0);
+    expect(document.querySelectorAll('.btn--primary')).toHaveLength(1);
+    expect(screen.getByTestId('assets-sync')).toHaveClass('btn');
+    expect(screen.getByTestId('assets-sync').textContent).not.toContain('⌘↵');
+    // Closed again: the selected card's verb is back.
+    await rerender({ ...handlers(), selectedKey: 'card:7', plan: null });
+    expect(primaries('.main')).toEqual(['card-primary-7']);
+  });
+
+  it('a plan with nothing selected: Apply is the one primary, header Sync plain', () => {
+    render(AssetsWorkspace, { ...handlers(), plan: PLAN });
+    expect(primaries('.main')).toEqual(['plan-apply']);
+    expect(document.querySelectorAll('.btn--primary')).toHaveLength(1);
+  });
+
+  it('Applying a plan reports it and the plan’s secrets link opens the secrets panel', async () => {
+    const h = handlers();
+    const p: SyncPlan = { ...PLAN, hosts: [{ ...PLAN.hosts[0], actions: [{ ...PLAN.hosts[0].actions[0], op: 'blocked', reason: 'missing', missing_secrets: ['TOKEN'] }] }] };
+    render(AssetsWorkspace, { ...h, plan: p });
+    await fireEvent.click(screen.getByTestId('plan-action-secrets-oci-claude-skill-fine'));
+    expect(h.onsecrets).toHaveBeenCalled();
+  });
+
+  describe('Review plan on a Rollout card', () => {
+    const answerPlans = (fail?: string) =>
+      invoke.mockImplementation(async (cmd: string, a?: { args?: { host_alias?: string } }) => {
+        if (cmd !== 'catalog_plan_sync') throw { code: 'E_TEST', message: cmd };
+        const host = a?.args?.host_alias ?? '';
+        if (host === fail) throw { code: 'E_TEST', message: `no plan for ${host}` };
+        return {
+          id: `p-${host}`, computed_at: 1, counts: { update: 1 },
+          hosts: [{ host_alias: host, harness: 'claude', status: 'planned', detail: null, actions: [
+            { kind: 'skill', name: 'fine', op: 'update', reason: null, files: [], merges: [], backup: false, secrets: [], missing_secrets: [], catalog: 'personal', host_copy: host === 'oci' ? 'unverified' : 'unchanged' },
+            { kind: 'skill', name: 'not-ours', op: 'create', reason: null, files: [], merges: [], backup: false, secrets: [], missing_secrets: [], catalog: 'personal' },
+          ] }],
+        };
+      });
+
+    it('plans each pending host host-scoped and shows them in review mode', async () => {
+      withCards([ROLLOUT_CARD, ROLLOUT_VIEW]);
+      answerPlans();
+      render(AssetsWorkspace, { ...handlers(), selectedKey: 'card:11' });
+      await fireEvent.click(screen.getByTestId('card-review-11'));
+      await screen.findByTestId('sync-plan-view');
+      const planned = cardCalls('catalog_plan_sync').map((c) => (c[1] as { args: { host_alias: string; allow_unlayered: boolean } }).args);
+      expect(planned.map((a) => a.host_alias).sort()).toEqual(['htz', 'oci']);
+      expect(planned.every((a) => a.allow_unlayered === false)).toBe(true);
+      // Review mode: no Apply; the card's own actions only; held ones marked.
+      expect(screen.queryByTestId('plan-apply')).toBeNull();
+      expect(screen.getByRole('heading', { name: 'Roll-out review' })).toBeTruthy();
+      expect(screen.queryByTestId('plan-action-oci-claude-skill-not-ours')).toBeNull();
+      expect(screen.getByTestId('plan-held-oci-claude-skill-fine')).toHaveTextContent('held — sync it yourself');
+      expect(screen.getByTestId('plan-action-htz-claude-skill-fine')).toBeTruthy();
+      expect(screen.getByTestId('plan-review-note')).toBeTruthy();
+      // The list is replaced; only the header Sync is a primary.
+      expect(screen.queryByTestId('assets-inbox')).toBeNull();
+      expect(primaries('.main')).toEqual(['assets-sync']);
+      expect(primaries('.insp')).toHaveLength(0);
+    });
+
+    it('Back and Esc close only the review', async () => {
+      withCards([ROLLOUT_CARD, ROLLOUT_VIEW]);
+      answerPlans();
+      const appEsc = vi.fn();
+      window.addEventListener('keydown', appEsc);
+      try {
+        render(AssetsWorkspace, { ...handlers(), selectedKey: 'card:11' });
+        await fireEvent.click(screen.getByTestId('card-review-11'));
+        await screen.findByTestId('sync-plan-view');
+        await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
+        await waitFor(() => expect(screen.queryByTestId('sync-plan-view')).toBeNull());
+        expect(appEsc).not.toHaveBeenCalled();
+        expect(screen.getByTestId('assets-inbox')).toBeTruthy();
+        await fireEvent.click(screen.getByTestId('card-review-11'));
+        await fireEvent.click(await screen.findByTestId('plan-back'));
+        expect(screen.queryByTestId('sync-plan-view')).toBeNull();
+      } finally {
+        window.removeEventListener('keydown', appEsc);
+      }
+    });
+
+    it('a host whose plan failed is reported and the rest are still shown', async () => {
+      withCards([ROLLOUT_CARD, ROLLOUT_VIEW]);
+      answerPlans('htz');
+      render(AssetsWorkspace, { ...handlers(), selectedKey: 'card:11' });
+      await fireEvent.click(screen.getByTestId('card-review-11'));
+      await screen.findByTestId('sync-plan-view');
+      expect(screen.getByTestId('plan-host-oci-claude')).toBeTruthy();
+      expect(screen.queryByTestId('plan-host-htz-claude')).toBeNull();
+    });
+
+    it('the Hosts tab offers it too', async () => {
+      withCards([ROLLOUT_CARD, ROLLOUT_VIEW]);
+      answerPlans();
+      render(AssetsWorkspace, { ...handlers(), selectedKey: 'card:11' });
+      await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+      await fireEvent.click(screen.getByTestId('card-review-11'));
+      expect(await screen.findByTestId('sync-plan-view')).toBeTruthy();
+    });
+
+    it('a read-only window has no Review plan', () => {
+      withCards([ROLLOUT_CARD, ROLLOUT_VIEW]);
+      render(AssetsWorkspace, { ...handlers(), readOnly: true, selectedKey: 'card:11' });
+      expect(screen.queryByTestId('card-review-11')).toBeNull();
+    });
   });
 });
 

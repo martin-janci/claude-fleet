@@ -112,6 +112,9 @@ describe('AssetsPanel', () => {
     await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === 'catalog_plan_sync')).toBe(true));
     await tick(); await tick();
 
+    // The plan takes the main column; closing it brings the Retry block back.
+    expect(screen.queryByText('Loading…')).toBeNull();
+    await fireEvent.click(await screen.findByTestId('plan-back'));
     expect(screen.queryByText('Loading…')).toBeNull();
     expect(screen.getByTestId('assets-load-failed')).toBeTruthy();
     expect(screen.getByTestId('assets-retry')).toBeTruthy();
@@ -309,7 +312,7 @@ describe('AssetsPanel', () => {
     expect(screen.getByTestId('identity-row-hook-stop')).toBeTruthy();
   });
 
-  it('Sync button calls catalog_plan_sync and opens the plan dialog', async () => {
+  it('Sync button calls catalog_plan_sync and opens the plan view in the workspace', async () => {
     const plan = { id: 'plan-1', computed_at: 1, hosts: [], counts: {} };
     byCmd({ catalog_config: { repo_path: '/r', remote_url: null, head_commit: 'h', last_loaded_at: 1 }, catalog_load: { head: 'h', loaded_at: 1, asset_count: 2, problem_count: 0 }, catalog_list_assets: listing, assets_inventory: [], catalog_last_sync: null, catalog_plan_sync: plan });
     render(AssetsPanel);
@@ -318,7 +321,16 @@ describe('AssetsPanel', () => {
     await fireEvent.click(screen.getByTestId('assets-sync'));
 
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_plan_sync', { args: { host_alias: null, kind: null, name: null, allow_unlayered: false } }));
-    expect(await screen.findByTestId('sync-plan-dialog')).toBeTruthy();
+    expect(await screen.findByTestId('sync-plan-view')).toBeTruthy();
+    // The plan is a view inside the workspace, not a modal; the list is hidden while it is open.
+    const view = screen.getByTestId('sync-plan-view');
+    expect(screen.getByTestId('assets-workspace').contains(view)).toBe(true);
+    expect(view.closest('dialog,[role="dialog"]')).toBeNull();
+    expect(screen.queryByTestId('assets-inbox')).toBeNull();
+    // Back closes it and the list returns.
+    await fireEvent.click(screen.getByTestId('plan-back'));
+    expect(screen.queryByTestId('sync-plan-view')).toBeNull();
+    expect(screen.getByTestId('assets-inbox')).toBeTruthy();
   });
 
   it('Secrets button opens the secrets panel', async () => {
@@ -331,7 +343,7 @@ describe('AssetsPanel', () => {
     expect(await screen.findByTestId('secrets-panel')).toBeTruthy();
   });
 
-  it('applying a plan keeps the dialog mounted, showing outcomes/restart and disabling re-apply', async () => {
+  it('applying a plan keeps the plan view open, showing outcomes/restart and disabling re-apply', async () => {
     const plan = {
       id: 'plan-1',
       computed_at: 1,
@@ -362,15 +374,15 @@ describe('AssetsPanel', () => {
     expect(await screen.findByTestId('assets-sync')).toBeTruthy();
 
     await fireEvent.click(screen.getByTestId('assets-sync'));
-    expect(await screen.findByTestId('sync-plan-dialog')).toBeTruthy();
+    expect(await screen.findByTestId('sync-plan-view')).toBeTruthy();
 
     await fireEvent.click(screen.getByTestId('plan-apply'));
 
     expect(await screen.findByTestId('plan-restart-local')).toBeTruthy();
     expect(screen.getByTestId('plan-outcome-local-claude-skill-worktree').textContent).toContain('done');
-    // The dialog stays mounted (this is the whole point) and re-applying the
+    // The view stays open (this is the whole point) and re-applying the
     // now-consumed plan id is blocked.
-    expect(screen.getByTestId('sync-plan-dialog')).toBeTruthy();
+    expect(screen.getByTestId('sync-plan-view')).toBeTruthy();
     expect(screen.getByTestId('plan-apply')).toBeDisabled();
   });
 

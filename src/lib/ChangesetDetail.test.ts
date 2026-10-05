@@ -7,7 +7,7 @@ const item = (o: Partial<ItemView>): ItemView => ({ position: 0, grp: 'core', ca
 const v: ChangesetView = { id: 7, kind: 'bootstrap', summary: 'Adopt', state: 'proposed', created_at: 1, commits: {}, undoable: false, items: [
   item({ position: 0 }), item({ position: 1, name: 'x' }), item({ position: 2, grp: 'authoring', name: 'y', state: 'rejected' }),
 ] };
-const props = (o = {}) => ({ view: v, readOnly: false, busy: false, onreject: vi.fn(), onapply: vi.fn(), onundo: vi.fn(), ...o });
+const props = (o: Record<string, unknown> = {}) => ({ view: v, readOnly: false, busy: false, onreject: vi.fn(), onapply: vi.fn(), onundo: vi.fn(), ...o });
 
 describe('ChangesetDetail', () => {
   it('lists every item by group with its action, decider and state', () => {
@@ -43,5 +43,31 @@ describe('ChangesetDetail', () => {
     ] };
     render(ChangesetDetail, props({ view: rv }));
     expect(screen.getByTestId('card-item-7-0')).toHaveTextContent('skill/w — edited on the host · sync it yourself');
+  });
+  describe('Review plan (R15)', () => {
+    const rollout: ChangesetView = { ...v, kind: 'rollout', items: [item({ position: 0, kind: 'host', name: 'oci', action: 'sync', state: 'pending' })] };
+    it('an open Rollout card offers it, and it asks for the review', async () => {
+      const onreview = vi.fn();
+      render(ChangesetDetail, props({ view: rollout, onreview }));
+      await fireEvent.click(screen.getByTestId('card-review-7'));
+      expect(onreview).toHaveBeenCalled();
+      expect(screen.getByTestId('card-review-7')).not.toHaveClass('btn--primary');
+    });
+    it('is disabled while busy', () => {
+      render(ChangesetDetail, props({ view: rollout, onreview: vi.fn(), busy: true }));
+      expect(screen.getByTestId('card-review-7')).toBeDisabled();
+    });
+    it('other cards, a closed Rollout, a read-only one and one without a handler have none', () => {
+      render(ChangesetDetail, props({ onreview: vi.fn() }));
+      expect(screen.queryByTestId('card-review-7')).toBeNull();
+    });
+    it.each([
+      ['applied', { view: { ...rollout, state: 'applied' as const }, onreview: vi.fn() }],
+      ['read-only', { view: rollout, onreview: vi.fn(), readOnly: true }],
+      ['no handler', { view: rollout }],
+    ])('%s Rollout: none', (_n, o) => {
+      render(ChangesetDetail, props(o));
+      expect(screen.queryByTestId('card-review-7')).toBeNull();
+    });
   });
 });

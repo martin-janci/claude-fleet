@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 
 // Spec, Visuals: "the existing tokens and controls.css; the hard-coded hex
-// colours in AssetDetail and SyncPlanDialog move to tokens". Held for every
+// colours in AssetDetail and the sync plan view move to tokens". Held for every
 // component of the Assets workspace, so a new one cannot bring one back.
 // Each task that adds an Assets component adds its file here.
 const GUARDED = [
@@ -10,7 +10,7 @@ const GUARDED = [
   'AssetList.svelte',
   'AssetDetail.svelte',
   'AssetEditor.svelte',
-  'SyncPlanDialog.svelte',
+  'SyncPlanView.svelte',
   'HostStrip.svelte',
   'Badge.svelte',
   'IdentityRow.svelte',

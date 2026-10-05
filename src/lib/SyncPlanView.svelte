@@ -1,7 +1,8 @@
 <script lang="ts">
-  import Modal from './Modal.svelte';
   import Badge from './Badge.svelte';
   import { opTone, outcomeTone } from './assets_visual';
+  import { cardMayApply, cardOwns } from './assets_cards';
+  import { onMount } from 'svelte';
   import { applySync, isDestructive, planSync, syncProgress, type SyncPlan, type SyncRunSummary } from './assets';
 
   /** A host plan skipped because the host has no layers assigned — the
@@ -18,6 +19,8 @@
   let {
     plan,
     filter = {},
+    mode = 'sync',
+    owned = null,
     onclose,
     onapplied,
     onopensecrets,
@@ -29,8 +32,13 @@
      *  added) when the user clicks "Plan anyway" on a skipped-unlayered
      *  host. */
     filter?: { hostAlias?: string; kind?: string; name?: string };
+    /** `review` is a Rollout card's read-only plan (R15): no Apply, only the
+     *  card's own actions, and the ones it would hold marked. */
+    mode?: 'sync' | 'review';
+    /** The assets and catalogs a card owns; a review shows only these. */
+    owned?: { assets: Set<string>; catalogs: Set<string> } | null;
     onclose: () => void;
-    onapplied: (summary: SyncRunSummary) => void;
+    onapplied?: (summary: SyncRunSummary) => void;
     /** Optional: a blocked-on-missing-secrets row links here so the caller
      *  can open the SecretsPanel. No-op if omitted. */
     onopensecrets?: () => void;
@@ -43,6 +51,11 @@
      *  sync. No-op if omitted. */
     onreplanned?: (plan: SyncPlan) => void;
   } = $props();
+
+  const review = $derived(mode === 'review');
+  let backEl: HTMLButtonElement | undefined = $state();
+  // The view replaces the list, so the keyboard (Esc) must start inside it.
+  onMount(() => backEl?.focus());
 
   let applying = $state(false);
   let forcePartial = $state(false);
@@ -64,6 +77,10 @@
     onreplanned?.(r.value);
   }
 
+  /** What the view lists: in a review, only what the card owns. */
+  const shownHosts = $derived(
+    review && owned ? plan.hosts.map((h) => ({ ...h, actions: h.actions.filter((a) => cardOwns(a, owned.assets, owned.catalogs)) })) : plan.hosts,
+  );
   const destructive = $derived(isDestructive(plan));
   const hasBlocked = $derived(plan.hosts.some((h) => h.actions.some((a) => a.op === 'blocked')));
   const showForcePartial = $derived(hasBlocked || sawSecretMissing);
@@ -93,7 +110,7 @@
       return;
     }
     summary = r.value;
-    onapplied(summary);
+    onapplied?.(summary);
   }
 
   function cancelApply() {
@@ -101,7 +118,16 @@
   }
 </script>
 
-<Modal title="Sync plan" onclose={applying ? undefined : onclose} width="640px" testid="sync-plan-dialog">
+<section class="plan-view" aria-label="Sync plan" data-testid="sync-plan-view">
+  <header class="line">
+    <button type="button" class="btn btn--quiet" data-testid="plan-back" bind:this={backEl} disabled={applying} onclick={onclose}>← Back</button>
+    <h2>{review ? 'Roll-out review' : 'Sync plan'}</h2>
+  </header>
+
+  {#if review}
+    <p class="muted" data-testid="plan-review-note">Roll out applies only creates, adopts and updates of copies fleet wrote; a held copy waits for your own Sync of that host.</p>
+  {/if}
+
   <div class="counts" data-testid="plan-counts">
     {#each countsEntries as [op, n] (op)}<Badge tone={opTone(op)} label={`${op}: ${n}`} />{/each}
     {#if countsEntries.length === 0}<span class="muted">Nothing to do.</span>{/if}
@@ -111,7 +137,7 @@
   {#if replanError}<p class="error" data-testid="plan-replan-error">{replanError}</p>{/if}
 
   <div class="hosts">
-    {#each plan.hosts as h (h.host_alias + '::' + h.harness)}
+    {#each shownHosts as h (h.host_alias + '::' + h.harness)}
       <div class="host-section" data-testid={`plan-host-${h.host_alias}-${h.harness}`}>
         <div class="host-header">
           <strong>{h.host_alias}</strong>
@@ -131,9 +157,11 @@
         </div>
         {#each h.actions as a (a.kind + '::' + a.name)}
           {@const outcome = outcomeFor(h.host_alias, h.harness, a.kind, a.name)}
-          <div class="action-row" data-testid={`plan-action-${h.host_alias}-${h.harness}-${a.kind}-${a.name}`}>
+          {@const held = review && !!owned && !cardMayApply(a)}
+          <div class="action-row" data-testid={`plan-${held ? 'held' : 'action'}-${h.host_alias}-${h.harness}-${a.kind}-${a.name}`}>
             <Badge tone={opTone(a.op)} label={a.op} />
             <span class="asset">{a.kind}/{a.name}</span>
+            {#if held}<Badge tone="warn" glyph="◐" label="held — sync it yourself" />{/if}
             {#if a.backup}<span class="backup" title="A backup will be made before writing">backup</span>{/if}
             {#if a.secrets.length}<span class="secrets">secrets: {a.secrets.join(', ')}</span>{/if}
             {#if a.op !== 'blocked' && a.reason}
@@ -163,43 +191,48 @@
     {/each}
   </div>
 
-  {#if summary}
+  {#if summary && !review}
     {#each summary.hosts.filter((r) => r.restart_required) as r (r.host_alias)}
       <p class="restart" data-testid={`plan-restart-${r.host_alias}`}>restart Claude on {r.host_alias}</p>
     {/each}
   {/if}
 
-  {#if showForcePartial}
+  {#if showForcePartial && !review}
     <label class="force-partial">
       <input type="checkbox" bind:checked={forcePartial} disabled={applying} data-testid="plan-force-partial" />
       Apply anyway, skipping actions blocked on a missing secret
     </label>
   {/if}
 
-  {#if progress}
+  {#if progress && !review}
     <p class="progress" data-testid="plan-progress">
       {progress.done}/{progress.total}{progress.host_alias ? ` — ${progress.host_alias}/${progress.harness}` : ''}
     </p>
   {/if}
 
-  <div class="actions">
-    <button onclick={onclose} disabled={applying}>{summary ? 'Done' : 'Close'}</button>
-    {#if applying}
-      <button onclick={cancelApply} data-testid="plan-cancel">Cancel</button>
-    {/if}
-    <button
-      class="primary"
-      class:danger={destructive}
-      onclick={apply}
-      disabled={applying || applicableCount === 0 || summary !== null}
-      data-testid="plan-apply"
-    >{applying ? 'Applying…' : 'Apply'}</button>
-  </div>
-</Modal>
+  {#if !review}
+    <div class="actions">
+      {#if applying}
+        <button type="button" class="btn" onclick={cancelApply} data-testid="plan-cancel">Cancel</button>
+      {/if}
+      <button
+        type="button"
+        class="btn btn--primary"
+        class:danger={destructive}
+        onclick={apply}
+        disabled={applying || applicableCount === 0 || summary !== null}
+        data-testid="plan-apply"
+      >{applying ? 'Applying…' : 'Apply'}</button>
+    </div>
+  {/if}
+</section>
 
 <style>
+  .plan-view { display: flex; flex-direction: column; gap: 10px; padding: 10px 14px; min-height: 100%; box-sizing: border-box; }
+  .line { display: flex; align-items: center; gap: 10px; }
+  h2 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -0.005em; }
   .counts { display: flex; gap: 6px; flex-wrap: wrap; font-size: 12px; }
-  .hosts { display: flex; flex-direction: column; gap: 10px; max-height: 50vh; overflow: auto; }
+  .hosts { display: flex; flex-direction: column; gap: 10px; }
   .host-section { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
   .host-header { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 4px; }
   .harness, .status, .detail { color: var(--fg-muted); }
@@ -217,10 +250,7 @@
   .force-partial { display: flex; align-items: center; gap: 6px; font-size: 12px; }
   .progress { font-size: 12px; color: var(--fg-muted); margin: 0; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; }
-  .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
-  .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .actions button.primary { border-color: var(--accent); }
-  .actions button.danger { color: var(--usage-crit); border-color: var(--usage-crit); }
+  .actions button.danger { background: var(--usage-crit); border-color: var(--usage-crit); color: var(--accent-fg); }
   .muted { color: var(--fg-muted); font-size: 12px; }
   .error { color: var(--usage-crit); }
 </style>

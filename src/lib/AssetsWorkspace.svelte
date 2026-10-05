@@ -5,10 +5,12 @@
   import AssetList from './AssetList.svelte';
   import AssetInspector from './AssetInspector.svelte';
   import AssetsFooter from './AssetsFooter.svelte';
+  import SyncPlanView from './SyncPlanView.svelte';
   import QueryInput from './QueryInput.svelte';
   import Badge from './Badge.svelte';
   import {
-    catalog, identitiesOf, inventory, lastSyncRun, type AssetIdentity, type AssetSummary, type HostScanResult,
+    catalog, identitiesOf, inventory, lastSyncRun, planSync,
+    type AssetIdentity, type AssetSummary, type HostScanResult, type SyncPlan, type SyncRunSummary,
   } from './assets';
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
@@ -17,11 +19,12 @@
     loadChangesets, parseKey, PERSONAL,
     type ChangesetSummary, type WorkspaceView,
   } from './assets_workspace';
-  import { coveringNewCard, primaryVerb } from './assets_cards';
+  import { coveringNewCard, mergePlans, primaryVerb } from './assets_cards';
   import { runCardVerb, type CardVerbs } from './card_actions';
   import { buildInbox, hostOrderOf, keepCard, lastScanOf, sentence } from './assets_inbox';
   import { keep, parseQuery, type QueryRow } from './assets_query';
   import { isEditable } from './terminal_keys';
+  import { pushError } from './toasts';
 
   /** The Assets workspace (spec, Workspace shell): rail · list with a
    *  sentence header and the query · Inspector, over a footer. It owns the
@@ -40,6 +43,12 @@
     failed,
     selectedKey = $bindable(null),
     autoEditKey = '',
+    plan = null,
+    planFilter = {},
+    onplanclose = () => {},
+    onapplied = () => {},
+    onapplying = () => {},
+    onreplanned = () => {},
     onscan,
     onsync,
     onimport,
@@ -67,6 +76,14 @@
     selectedKey?: string | null;
     /** A just-created asset's key: the Inspector opens it in Source, editing. */
     autoEditKey?: string;
+    /** An open sync plan: it takes the main column until it is closed (Back, Esc). */
+    plan?: SyncPlan | null;
+    /** The filter `plan` was computed from ("Plan anyway" re-plans with it). */
+    planFilter?: { hostAlias?: string; kind?: string; name?: string };
+    onplanclose?: () => void;
+    onapplied?: (s: SyncRunSummary) => void;
+    onapplying?: (b: boolean) => void;
+    onreplanned?: (p: SyncPlan) => void;
     onscan: () => void;
     onsync: (f: { hostAlias?: string; kind?: string; name?: string }) => void;
     onimport: (identity: AssetIdentity | null) => void;
@@ -164,7 +181,53 @@
   );
 
   function select(key: string) {
+    review = null;
     selectedKey = key;
+  }
+
+  // ── The sync plan and the Rollout review take the main column ──────────
+  /** A Rollout card's plan, read-only: each pending host planned host-scoped
+   *  and joined (R15). Its Apply is the card's own, never this view's. */
+  let review = $state<{ plan: SyncPlan; owned: { assets: Set<string>; catalogs: Set<string> } } | null>(null);
+  const planOpen = $derived(!!review || !!plan);
+  /** A sync plan (with its Apply) is the main column's one primary. */
+  const syncPlanOpen = $derived(!!plan && !review);
+  // A plan computed elsewhere (the header's Sync, `s`) replaces a review.
+  $effect(() => {
+    if (plan) untrack(() => (review = null));
+  });
+  async function reviewRollout(id: number) {
+    const v = $cardViews[id];
+    if (!v || anyBusy) return;
+    const pending = v.items.filter((i) => i.state === 'pending');
+    setCardBusy('review');
+    let plans;
+    try {
+      plans = await Promise.all(pending.map((i) => planSync({ hostAlias: i.name })));
+    } finally {
+      setCardBusy('');
+    }
+    const ok = plans.flatMap((r) => (r.ok ? [r.value] : []));
+    for (const r of plans) if (!r.ok) pushError(r.error, 'Plan');
+    if (plan) onplanclose();
+    review = {
+      plan: mergePlans(ok),
+      owned: { assets: new Set(pending.flatMap((i) => i.params.assets ?? [])), catalogs: new Set(v.catalogs ?? []) },
+    };
+  }
+  /** "Plan anyway" inside a review: that host's plan is swapped in. */
+  function reviewReplanned(p: SyncPlan) {
+    if (!review) return;
+    const aliases = new Set(p.hosts.map((h) => h.host_alias));
+    review = { ...review, plan: mergePlans([{ ...review.plan, hosts: review.plan.hosts.filter((h) => !aliases.has(h.host_alias)) }, p]) };
+  }
+  /** Back and Esc: close the plan or the review — not while an apply runs. */
+  async function closePlan() {
+    if (!planOpen || busy === 'apply') return;
+    review = null;
+    if (plan) onplanclose();
+    await tick();
+    listEl?.focus({ preventScroll: true });
   }
 
   // ── Card verbs (R12, R13): run, reload, toast (`card_actions`) ─────────
@@ -190,7 +253,8 @@
   /** The selected card's verb is on screen and runnable: the main column's one
    *  primary then, and the target of ⌘↵. Otherwise Sync fleet is. */
   const cardPrimary = $derived(
-    !!selectedCard &&
+    !planOpen &&
+      !!selectedCard &&
       !readOnly &&
       view === 'inbox' &&
       cardWritable(selectedCard) &&
@@ -240,6 +304,17 @@
     // PF10: a dialog (a modal or the catalog chip's popover) and a field
     // keep their keys.
     if (!visible || e.defaultPrevented || target?.closest?.('dialog,[role="dialog"]') || isEditable(target)) return;
+    // A plan or a review covers the list: its rows take no keys. Esc closes
+    // only the plan — the event stops here so the App does not also close the
+    // whole Assets overlay (it listens on `window`, after this).
+    if (planOpen) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        void closePlan();
+      }
+      return;
+    }
     if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'Enter') {
       // The region's one primary (R18, R-C): the selected card's verb when
       // it applies (a review verb only selects, so there is nothing to run),
@@ -346,7 +421,10 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="ws" data-testid="assets-workspace" role="group" aria-label="Assets workspace" bind:this={rootEl} onkeydown={onKeydown}>
-  <AssetsRail {view} {counts} {readOnly} busy={busy !== ''} onview={(v) => (view = v)} {onsecrets} />
+  <AssetsRail {view} {counts} {readOnly} busy={busy !== ''} onview={(v) => {
+      view = v;
+      void closePlan();
+    }} {onsecrets} />
 
   <div class="main">
     <header class="head">
@@ -394,8 +472,8 @@
           >{busy === 'scan' ? 'Scanning…' : 'Rescan'}</button
         >
         {#if !readOnly}
-          <button type="button" class="btn" class:btn--primary={!cardPrimary} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
-            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary} <kbd>⌘↵</kbd>{/if}</button
+          <button type="button" class="btn" class:btn--primary={!cardPrimary && !syncPlanOpen} onclick={() => onsync({})} disabled={busy !== ''} data-testid="assets-sync"
+            >{busy === 'plan' ? 'Planning…' : 'Sync fleet'}{#if !cardPrimary && !planOpen} <kbd>⌘↵</kbd>{/if}</button
           >
         {/if}
       </div>
@@ -425,7 +503,18 @@
       <ul class="problems">{#each listing.problems as p (p.path)}<li><code>{p.path}</code> {p.message}</li>{/each}</ul>
     {/if}
     <div class="body" bind:this={listEl} tabindex="-1" data-testid="assets-list">
-      {#if failed}
+      {#if review}
+        <SyncPlanView
+          mode="review"
+          plan={review.plan}
+          owned={review.owned}
+          onclose={closePlan}
+          onopensecrets={onsecrets}
+          onreplanned={reviewReplanned}
+        />
+      {:else if plan}
+        <SyncPlanView {plan} filter={planFilter} onclose={closePlan} {onapplied} onopensecrets={onsecrets} {onapplying} {onreplanned} />
+      {:else if failed}
         {@render failed()}
       {:else if listing && view === 'inbox' && inbox}
         <AssetsInbox
@@ -476,6 +565,7 @@
       {editNonce}
       {onsync}
       oncard={cardVerbs}
+      onreview={reviewRollout}
       onreject={cardVerbs.reject}
       onselect={select}
       cardBusy={anyBusy}

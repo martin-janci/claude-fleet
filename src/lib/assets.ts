@@ -340,7 +340,7 @@ export interface SyncProgress {
 export const lastSyncRun = writable<SyncRunSummary | null>(null);
 
 /** The latest `sync:progress` event forwarded by `App.svelte`'s row-event
- *  subscription, for `SyncPlanDialog` to render a progress line during an
+ *  subscription, for `SyncPlanView` to render a progress line during an
  *  in-flight apply. */
 export const syncProgress = writable<SyncProgress | null>(null);
 
@@ -382,7 +382,7 @@ export function deleteSecret(name: string, hostAlias?: string): Promise<Result<b
 }
 
 /** Whether applying `plan` would overwrite a host-edited asset or remove a
- *  manifest entry — the cases `SyncPlanDialog` renders its Apply button red
+ *  manifest entry — the cases `SyncPlanView` renders its Apply button red
  *  for. */
 export function isDestructive(plan: SyncPlan): boolean {
   return plan.hosts.some((h) => h.actions.some((a) => a.op === 'overwrite' || a.op === 'remove'));

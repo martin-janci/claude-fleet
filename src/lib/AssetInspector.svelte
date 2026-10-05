@@ -38,6 +38,7 @@
     onimport,
     oncard,
     onreject,
+    onreview,
     onselect,
     cardBusy = false,
     cardWritable = () => true,
@@ -61,6 +62,8 @@
     oncard: CardVerbs;
     /** Reject a card's pending items (✕, Skip this group). */
     onreject: (id: number, positions: number[]) => void;
+    /** A Rollout card's Review plan: the workspace plans its hosts. */
+    onreview?: (id: number) => void;
     /** Select another row (a drifted host's link to its Drift card). */
     onselect?: (key: string) => void;
     /** A card verb is running. */
@@ -316,6 +319,9 @@
             {#if h.outcome?.note}<span class="muted">{h.outcome.note}</span>{/if}
           </li>
         {/each}
+        {#if isOpenCard(cardView) && cardView.kind === 'rollout' && onreview && !cardRo}
+          <li><button type="button" class="btn" data-testid={`card-review-${cardView.id}`} disabled={cardBusy} onclick={() => onreview(cardView.id)}>Review plan</button></li>
+        {/if}
       </ul>
     {:else if card && cardView}
       <div class="pad" data-testid="inspector-card">
@@ -332,6 +338,7 @@
             onapply={(positions) => oncard.apply(cardView.id, positions)}
             onundo={() => oncard.undo(cardView.id)}
             onsynchost={oncard.synchost}
+            onreview={onreview ? () => onreview(cardView.id) : undefined}
           />
         {/if}
       </div>

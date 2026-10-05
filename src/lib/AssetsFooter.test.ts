@@ -143,4 +143,39 @@ describe('AssetsFooter', () => {
     await fireEvent.click(screen.getByTestId('assets-push'));
     expect(onpush).toHaveBeenCalled();
   });
+  describe('the live region', () => {
+    const live = () => screen.getByTestId('assets-live');
+    it('is always there, a polite status, empty when idle', () => {
+      render(AssetsFooter, props);
+      expect(live().getAttribute('role')).toBe('status');
+      expect(live().getAttribute('aria-live')).toBe('polite');
+      expect(live().textContent).toBe('');
+    });
+    it('names the job and its progress, says Done. when it ends, and clears on the next job', async () => {
+      const { rerender } = render(AssetsFooter, { ...props, busy: 'scan' });
+      expect(live().textContent).toBe('Scanning hosts…');
+      await rerender({ ...props, busy: 'apply' });
+      expect(live().textContent).toBe('Syncing…');
+      syncProgress.set({ plan_id: 'p', host_alias: 'oci', harness: 'claude', done: 2, total: 5 });
+      await waitFor(() => expect(live().textContent).toBe('Syncing 2 of 5 hosts…'));
+      await rerender({ ...props, busy: '' });
+      await waitFor(() => expect(live().textContent).toBe('Done.'));
+      await rerender({ ...props, busy: 'pull' });
+      await waitFor(() => expect(live().textContent).toBe('Pulling…'));
+    });
+    it('stays the same element across a job, so a screen reader announces its changes', async () => {
+      const { rerender } = render(AssetsFooter, props);
+      const el = live();
+      await rerender({ ...props, busy: 'push' });
+      await rerender({ ...props, busy: '' });
+      expect(live()).toBe(el);
+    });
+    it('is not what the chip announces: the chip is visual only', () => {
+      render(AssetsFooter, { ...props, busy: 'scan' });
+      const chip = screen.getByTestId('assets-job');
+      expect(chip.getAttribute('role')).toBeNull();
+      expect(chip.getAttribute('aria-live')).toBeNull();
+      expect(document.querySelectorAll('[role="status"]')).toHaveLength(1);
+    });
+  });
 });

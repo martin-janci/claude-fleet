@@ -1,6 +1,8 @@
 <script lang="ts">
   /** Background work in the footer (spec: "`JobChip` for scans and
-   *  syncs"): non-modal, announced politely, with a bar when it counts. */
+   *  syncs"): non-modal, with a bar when it counts. Visual only: the
+   *  footer's persistent `role=status` region announces the job, so a chip
+   *  that appears and disappears is never announced twice. */
   let {
     label,
     done = null,
@@ -12,7 +14,7 @@
   const pct = $derived(counted ? Math.round(((done ?? 0) / (total ?? 1)) * 100) : 0);
 </script>
 
-<span class="job" role="status" aria-live="polite" data-testid={testid}>
+<span class="job" data-testid={testid}>
   <span class="spin" aria-hidden="true">⟳</span>
   <span>{label}{#if counted}{' '}{done}/{total}{/if}</span>
   {#if counted}

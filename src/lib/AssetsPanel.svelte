@@ -11,7 +11,6 @@
   import { loadFleetSettings } from './fleet_settings';
   import type { IpcError } from './result';
   import ImportDialog from './ImportDialog.svelte';
-  import SyncPlanDialog from './SyncPlanDialog.svelte';
   import SecretsPanel from './SecretsPanel.svelte';
   import NewAssetDialog from './NewAssetDialog.svelte';
   import LintAllDialog from './LintAllDialog.svelte';
@@ -44,11 +43,11 @@
   // and the Inspector.
   let selectedKey = $state<string | null>(null);
   let syncPlan = $state<SyncPlan | null>(null);
-  // The filter `syncPlan` was computed from, so SyncPlanDialog's "Plan
+  // The filter `syncPlan` was computed from, so the plan view's "Plan
   // anyway" (on a skipped-unlayered host) can re-plan with the same scope
   // plus allowUnlayered.
   let syncFilter = $state<{ hostAlias?: string; kind?: string; name?: string }>({});
-  // The most recent plan computed (kept after the dialog closes) so the
+  // The most recent plan computed (kept after the plan view closes) so the
   // SecretsPanel can offer the names its blocked/missing-secret actions
   // named, without recomputing a plan just to open it.
   let lastPlan = $state<SyncPlan | null>(null);
@@ -322,10 +321,10 @@
   }
 
   function onSyncApplied(summary: SyncRunSummary) {
-    // Keep the dialog mounted: it renders the per-action outcome badges and
+    // Keep the plan view open: it renders the per-action outcome badges and
     // the "restart Claude on <host>" strip from this same `summary`, and it
-    // now disables its own Apply button and relabels Close to "Done" once
-    // `summary` is set. The user dismisses it explicitly.
+    // now disables its own Apply button once `summary` is set. The user
+    // dismisses it with Back.
     lastSyncRun.set(summary);
     void refresh();
   }
@@ -411,6 +410,12 @@
       failed={!$catalog && catalogLoad === 'failed' ? loadFailed : undefined}
       bind:selectedKey
       autoEditKey={pendingAutoEdit}
+      plan={syncPlan}
+      planFilter={syncFilter}
+      onplanclose={() => (syncPlan = null)}
+      onapplied={onSyncApplied}
+      onapplying={(a) => (busy = a ? 'apply' : '')}
+      onreplanned={onSyncReplanned}
       onscan={scan}
       onsync={requestSync}
       onimport={importFrom}
@@ -429,17 +434,6 @@
       only={importPreset?.only ?? []}
       onclose={() => { showImport = false; importPreset = null; }}
       ondone={() => { showImport = false; importPreset = null; reload(false); void repoStatus(); }}
-    />
-  {/if}
-  {#if syncPlan}
-    <SyncPlanDialog
-      plan={syncPlan}
-      filter={syncFilter}
-      onclose={() => (syncPlan = null)}
-      onapplied={onSyncApplied}
-      onopensecrets={() => (showSecrets = true)}
-      onapplying={(a) => (busy = a ? 'apply' : '')}
-      onreplanned={onSyncReplanned}
     />
   {/if}
   {#if showSecrets}

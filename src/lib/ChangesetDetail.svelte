@@ -15,6 +15,7 @@
     busy,
     onreject,
     onundo,
+    onreview,
     diff,
   }: {
     view: ChangesetView;
@@ -24,6 +25,8 @@
     onapply?: (positions?: number[] | null) => void;
     onundo: () => void;
     onsynchost?: (host: string) => void;
+    /** A Rollout card's Review plan: each pending host planned host-scoped, read-only. */
+    onreview?: () => void;
     diff?: Snippet;
   } = $props();
 
@@ -65,6 +68,9 @@
       </ul>
     </section>
   {/each}
+  {#if open && view.kind === 'rollout' && onreview && !readOnly}
+    <button type="button" class="btn" data-testid={`card-review-${view.id}`} disabled={busy} onclick={onreview}>Review plan</button>
+  {/if}
   {#if Object.keys(view.commits).length}
     <p class="commits" data-testid={`card-commits-${view.id}`}>
       {#each Object.entries(view.commits) as [c, sha] (c)}<Badge mono label={`${c} ${sha.slice(0, 7)}`} />{/each}
