@@ -50,9 +50,7 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
   non-interactive shell's `PATH` (seen on `-htz`, `-oci`). A session started
   before provisioning picks it up on its next restart.
 - Reads `~/.claude-fleet/voice.env` (mode 600), written by provisioning next
-  to the hook config: the fleet base URL as the host sees it (the tunnelled
-  loopback port, or the public URL when the hub is public) and the host's
-  token.
+  to the hook config: `voice.env` (URL only); bearer read with `curl -H @~/.claude/fleet-hook.headers`.
 - Claude Code calls exactly three forms; the stand-in accepts only these:
   - `arecord --version` → exit 0.
   - `arecord -f S16_LE -r 16000 -c 1 -t raw /dev/null` (probe, killed after
@@ -60,7 +58,7 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
     regardless of whether a claim exists, so a claim made later still works.
   - `arecord -f S16_LE -r 16000 -c 1 -t raw -q -` → finds its tmux session
     name (`tmux display-message -p '#S'`, `TMUX` is inherited), then
-    `curl -sN --fail -H "Authorization: Bearer <host token>"
+    `curl -sN --fail -H @~/.claude/fleet-hook.headers
     "<base>/voice/capture?tmux=<name>"` with stdout passed through.
 - Fallback: when the fleet request fails (no claim, fleet down), it tries the
   manual `127.0.0.1:4713` path with `~/.config/fleet-voice/token` if that
@@ -88,8 +86,7 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
   unused.
 - `VoiceSource` is a trait: `start(sink) -> CaptureHandle`, dropped to stop.
   fleet-core knows nothing about audio devices.
-- Emits `voice:changed` (ids only: session id, state
-  `claimed | capturing | released | error`), hidden from host-bound streams.
+- The desktop emits a local `voice:state` Tauri event.
 
 ### Desktop
 
@@ -118,9 +115,8 @@ Claude Code has two voice modes: `hold` (hold space to record) and `tap`
   The claim follows the attached session (only one PTY is attached at a
   time). First use shows: "Run `/voice` in the session, then hold space."
   Fleet never runs `/voice` itself.
-- **Commands:** `voice_claim { session_id, on }`, `voice_status`; MCP tool
-  `voice_claim`. Each gets a `verdicts.rs` row (`Routed` to the hub tool when
-  paired), then `REGEN_HUB_VERDICTS=1`.
+- **Commands:** `voice_claim { session_id, on }`, `voice_status` are `SameInBoth`
+  Tauri commands.
 
 ### Data flow
 
@@ -162,14 +158,11 @@ release space → claude kills arecord → connection drops
 
 - Rust: `VoiceRegistry` (claim, last wins, TTL, release on source drop);
   `/voice/capture` auth (foreign host, unknown tmux name, no claim, busy,
-  limit); downmix/resample over fixed inputs; a real loopback socket test in
-  which a fake `VoiceSource` yields a known tone, read back over HTTP, bytes
-  checked, source stopped on disconnect.
+  limit); downmix/resample over fixed inputs; a fleet-core loopback test
+  drives `/voice/capture` and `/voice/source` together.
 - Stand-in: a shell test against a fake server: `--version`, probe, stream,
   rejected token, 4713 fallback.
 - Frontend: the 🎤 toggle's states (Vitest).
-- `scripts/hub-e2e.sh` section V: a host reads audio through the tunnel from
-  a fake client source over `/voice/source`.
 - Manual: real `cpal` capture on a Mac (not in CI).
 
 ## Later phases (outline)
@@ -184,3 +177,9 @@ release space → claude kills arecord → connection drops
 - **F3, agent-transport hosts:** a stream frame pair in `fleet-proto`
   (proto bump) so the agent can serve `/voice/capture` locally and carry it
   over its websocket.
+
+## Revisions (plan, 2026-10-05)
+
+1. No `voice_claim` MCP tool and no `voice_status`: a hub-paired client claims by opening `/voice/source`; closing it releases. The desktop's Tauri commands `voice_claim` / `voice_release` are `SameInBoth` (in-process source standalone, websocket when paired).
+2. No `voice:changed` row event in fleet-core: only the desktop knows it is capturing, so `src-tauri` emits a desktop-local Tauri event `voice:state`.
+3. The host stand-in reuses `~/.claude/fleet-hook.headers` for its bearer, so `voice.env` carries only the URL. The hub-e2e section is replaced by a fleet-core loopback test (route + websocket) — `scripts/hub-e2e.sh` has no websocket client.
