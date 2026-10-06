@@ -1,7 +1,7 @@
 //! Tauri IPC wrappers for project discovery. Logic lives in `service::projects`;
 //! this file only adapts `tauri::State` to plain references.
 //!
-//! Remote mode: all four commands route to the hub tools of the same names.
+//! Remote mode: all six commands route to the hub tools of the same names.
 //! `add_project` and `list_github_repos` clone / run `gh` ON THE HOST over
 //! the hub's transport to it, so the credentials are the host's, not this
 //! machine's. `call_id` stays local: it keys this process's cancellation
@@ -13,9 +13,10 @@ use crate::backend::FleetBackend;
 use fleet_core::cancel::{CancelGuard, CancellationRegistry};
 use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::add_project::{self, AddProjectArgs, AddProjectSource, GithubRepo};
+use fleet_core::service::project_picks::{self, SetProjectPickArgs};
 use fleet_core::service::projects::{self, ProjectTreeRow};
 use fleet_core::ssh::SshClient;
-use fleet_core::store::Store;
+use fleet_core::store::{ProjectPickRow, Store};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -66,6 +67,25 @@ pub async fn list_github_repos(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<Vec<GithubRepo>, IpcError> {
     routed::list_github_repos(&backend, args, &store, &ssh).await
+}
+
+/// The New session picker's choices per project (pinned, hide/keep, group).
+#[tauri::command]
+pub async fn project_picks(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<ProjectPickRow>, IpcError> {
+    routed::project_picks(&backend, &store).await
+}
+
+/// Replace one project's picker choices (full replace). Returns the row.
+#[tauri::command]
+pub async fn set_project_pick(
+    args: SetProjectPickArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<ProjectPickRow, IpcError> {
+    routed::set_project_pick(&backend, &store, args).await
 }
 
 pub(crate) mod routed {
@@ -164,6 +184,26 @@ pub(crate) mod routed {
                 .await
             }
             None => add_project::list_github_repos(&args.host_alias, store, ssh).await,
+        }
+    }
+    pub async fn project_picks(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<ProjectPickRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("project_picks", &serde_json::json!({})).await,
+            None => project_picks::list(store),
+        }
+    }
+
+    pub async fn set_project_pick(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: SetProjectPickArgs,
+    ) -> Result<ProjectPickRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_project_pick", &args).await,
+            None => project_picks::set(store, &args),
         }
     }
 }

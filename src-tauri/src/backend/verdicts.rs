@@ -162,6 +162,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "list_github_repos",
         },
     ),
+    (
+        "project_picks",
+        Verdict::Routed {
+            tool: "project_picks",
+        },
+    ),
+    (
+        "set_project_pick",
+        Verdict::Routed {
+            tool: "set_project_pick",
+        },
+    ),
     // ── sessions ────────────────────────────────────────────────────────────
     (
         "list_sessions",
