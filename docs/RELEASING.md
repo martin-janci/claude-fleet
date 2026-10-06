@@ -100,6 +100,11 @@ generated from it.
    publish a release with the APK. The claude-fleet release body already
    links to it. See [The phone app](#the-phone-app) below.
 
+   The contract rule is `scripts/check-mobile-contract.sh`, and `ci.yml`
+   runs it on every PR against fleet-mobile `main`: a PR that moves
+   `CONTRACT_REVISION` fails until fleet-mobile accepts the new revision;
+   any other PR only warns.
+
 ## The phone app
 
 The Android app lives in its own repository and is built there, never here.
