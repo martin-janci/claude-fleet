@@ -4,6 +4,12 @@
 # lines, exit 1 on any failure.
 set -uo pipefail
 
+# Run from a git hook (ci-local.sh under pre-commit), git exports GIT_DIR,
+# GIT_INDEX_FILE and friends, and every `git -C <throwaway repo>` below would
+# act on the REAL repository instead: `init` re-initialises it (setting
+# core.bare), `update-ref` moves its origin/main. Drop them all first.
+while IFS= read -r v; do unset "$v"; done < <(env | sed -n 's/^\(GIT_[A-Za-z_]*\)=.*/\1/p')
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 C="$REPO/scripts/check-migration-numbers.sh"
 PASS=0; FAIL=0
