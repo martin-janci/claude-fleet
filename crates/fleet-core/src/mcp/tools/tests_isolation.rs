@@ -1072,6 +1072,49 @@ async fn run_matrix(isolate: bool) {
     assert_eq!(v["failed"][0]["project_id"], fx.pid_beta, "{v}");
     assert_eq!(v["failed"][0]["cross_org"], true, "{v}");
 
+    // The start's dry run (task → session spec P-1) is fenced exactly as the
+    // start: no way to read another org's ticket, plan on another host, or
+    // name a session the caller may not see. A cross-org start is a
+    // conflict to choose, never a refusal, for the master.
+    let preview = |key: &str, pid: i64| {
+        json!({ "action": "start", "dry_run": true, "key": key,
+            "project_id": pid, "host_alias": "h-a" })
+    };
+    let master = call(&fx, Who::Master, "work_link", preview("BB-2", fx.pid_acme)).await;
+    let v: Value = serde_json::from_str(text(&master)).unwrap_or_else(|_| panic!("{master:?}"));
+    assert!(
+        v["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["kind"] == "cross_org"),
+        "{v}"
+    );
+    assert_eq!(v["plan"]["project_id"], fx.pid_acme, "{v}");
+    let a_on_b = call(&fx, Who::HostA, "work_link", preview("BB-2", fx.pid_acme)).await;
+    is_code(Who::HostA, &a_on_b, "E_FORBIDDEN", "another org's ticket");
+    let b_on_a = call(&fx, Who::HostB, "work_link", preview("BB-1", fx.pid_beta)).await;
+    is_code(Who::HostB, &b_on_a, "E_FORBIDDEN", "another host");
+    let ro = call(
+        &fx,
+        Who::ClientReadonly,
+        "work_link",
+        preview("BB-2", fx.pid_acme),
+    )
+    .await;
+    is_code(Who::ClientReadonly, &ro, "E_FORBIDDEN", "readonly");
+    // Host A's own AA-1 already runs on it: a conflict naming that session.
+    let own_live = call(&fx, Who::HostA, "work_link", preview("AA-1", fx.pid_acme)).await;
+    let v: Value = serde_json::from_str(text(&own_live)).unwrap_or_else(|_| panic!("{own_live:?}"));
+    let live = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["kind"] == "live_session")
+        .cloned()
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(live["session_id"], fx.s_a, "{v}");
+
     // Agent-written handover (work graph M9.3), per caller. The sessions
     // are idle REPLs here, so a caller past the fences reaches the send
     // (which fails for want of a real host, and is recorded as such).

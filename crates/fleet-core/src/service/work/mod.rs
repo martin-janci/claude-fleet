@@ -434,6 +434,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_project_trust", "work_link", "trust_project"),
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
+    ("preview_start_work", "work_link", "start"),
     ("request_work_handover", "work_link", "handover"),
     ("start_work_multi", "work_link", "start"),
     ("work_tidy", "work", "tidy"),
