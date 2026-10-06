@@ -183,6 +183,31 @@ jobs:
       # (fleet-mobile 0.4.8 shipped at 7 beside a revision-8 hub). A second.
       - name: release-mobile contract guard
         run: bash scripts/release-mobile-test.sh
+      # The same rule against this tree, so a contract bump meets the phone on
+      # its own PR instead of at release time: fleet-mobile main's
+      # MIN/MAX_HUB_CONTRACT must cover this checkout's CONTRACT_REVISION.
+      # It FAILS only the PR that moves CONTRACT_REVISION (merge the
+      # fleet-mobile bump first — a phone that accepts a newer hub is
+      # harmless). Every other PR and every push to main only warns, so an
+      # unrelated PR is never held hostage by the other repo, and an
+      # unreachable GitHub API never fails anything but that bump.
+      - name: fleet-mobile accepts this hub contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          if bash scripts/check-mobile-contract.sh; then exit 0; fi
+          if [ "$EVENT" = pull_request ]; then
+            head_rev="$(bash scripts/check-mobile-contract.sh --print-hub-rev)"
+            base_rev="$(bash scripts/check-mobile-contract.sh --print-hub-rev --hub-ref "$BASE" || true)"
+            if [ "$head_rev" != "$base_rev" ]; then
+              echo "::error::this PR moves CONTRACT_REVISION ${base_rev:-?} -> $head_rev, and fleet-mobile main does not accept it (above): merge the fleet-mobile HubContract.kt bump first"
+              exit 1
+            fi
+          fi
+          echo "::warning::fleet-mobile main does not accept this tree's hub contract (above); a release would refuse to pair them"
       # Migration numbers: on a PR's merge commit a number main took shows up
       # as two files sharing it; with origin/main fetched, an added file at
       # or below main's highest fails too. The pre-push hook runs the same
