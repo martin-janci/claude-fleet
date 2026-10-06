@@ -763,6 +763,16 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::work_scopes`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`
+- `commands::org_devices::list_devices`
+- `commands::org_devices::pair_device`
+- `commands::org_devices::revoke_device`
+- `commands::org_devices::set_device_trust`
+- `commands::org_devices::bind_device_org`
+- `commands::org_devices::set_device_person`
+- `commands::org_devices::grant_device_catalog`
+- `commands::org_devices::list_people`
+- `commands::org_devices::rename_person`
+- `commands::org_devices::disable_person`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`
