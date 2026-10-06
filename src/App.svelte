@@ -84,7 +84,8 @@
   import { loadComposerPresets, refreshComposerPresetsIfIdle } from './lib/composer_presets';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
-  import { startHubConnection, setGapHandler } from './lib/hub_connection';
+  import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
+  import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
 
@@ -324,6 +325,10 @@
       // into a startup error would report a problem that changes nothing.
       loadMyGrants(),
     ]);
+    // The picker's pins and groups. Outside the `Promise.all` on purpose: a
+    // hub older than the feature has no answer, and that is not a startup
+    // failure (the picker then runs on its rules alone).
+    void loadProjectPicks();
     const failures = [
       healthFailure,
       reportBootstrap('projects', pr),
@@ -528,6 +533,14 @@
   // TerminalView is never mounted for it at all.
   const selOwned = $derived(selAccess === 'own');
   const selWatchOnly = $derived(!!$selectedSession && !selNoPane && !selOwned);
+  // The picker's choices live on the hub when paired: re-read them when the
+  // connection comes (back).
+  let lastHubState: string | null = null;
+  $effect(() => {
+    const st = $hubConnection.state;
+    if (lastHubState !== null && st !== lastHubState) void loadProjectPicks();
+    lastHubState = st;
+  });
   $effect(() => {
     if (selId === null || selNoPane) filesMode = false;
   });
