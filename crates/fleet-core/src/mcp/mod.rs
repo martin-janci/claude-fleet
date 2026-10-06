@@ -1049,6 +1049,7 @@ mod tests {
         // one-attempt-per-6s budget would refuse the second one. The budget
         // gets its own app at the end of this test.
         pair_state.attempt_interval = std::time::Duration::ZERO;
+        pair_state.global_interval = std::time::Duration::ZERO;
         let app = build_app(
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
@@ -1599,6 +1600,32 @@ mod tests {
         assert!(
             first.contains("404"),
             "the first guess is answered, not throttled:\n{first}"
+        );
+        // A guess from another address — a fresh forwarded hop behind the
+        // believed loopback front end — inside the same second is refused
+        // by the hub-wide budget: minting addresses buys no extra guesses.
+        let forwarded = |xff: &str| {
+            let body = r#"{"code":"YYYYYYYY"}"#;
+            format!(
+                "POST /pair HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Forwarded-For: {xff}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let minted_addr = round_trip(addr3, &forwarded("203.0.113.50")).await;
+        assert!(
+            minted_addr.contains("429"),
+            "a second address inside the hub-wide second must be throttled:\n{minted_addr}"
+        );
+        tokio::time::sleep(
+            pairing::GLOBAL_ATTEMPT_INTERVAL + std::time::Duration::from_millis(100),
+        )
+        .await;
+        let later = round_trip(addr3, &forwarded("203.0.113.51")).await;
+        assert!(
+            later.contains("404"),
+            "past the hub-wide second a new address is answered:\n{later}"
         );
         // Even a GOOD code is refused inside the window: the budget is spent
         // before the code is looked at.

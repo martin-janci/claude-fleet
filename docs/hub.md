@@ -3423,8 +3423,10 @@ deliberately.
   to a token an agent holds. What crosses the room in the QR is a
   single-use, minutes-long pairing *code* in a URL fragment — not a token —
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
-  rate-limited to one attempt per address every six seconds. See *Pair a
-  phone* and *Clients* above.
+  rate-limited to one attempt per address every six seconds (an IPv6
+  address counts as its /64) and to one attempt a second across the whole
+  hub, so minting addresses buys no extra guesses. See *Pair a phone* and
+  *Clients* above.
 - **Failed bearers are logged once per address.** A bad or missing token on
   any authenticated route is answered `401`, every time — a client reads
   `401` as "pair again", never as a busy hub. The `[mcp] rejected request`
@@ -3589,7 +3591,8 @@ deliberately.
 - **The phone says the pairing code is invalid** — a code is single-use, it
   expires (10 minutes by default), and a hub restart voids every outstanding
   one. Mint a fresh one with `fleet-hub pair`. A `429` instead means the
-  address has spent its attempt budget: one every six seconds.
+  address has spent its attempt budget (one every six seconds), or another
+  attempt landed in the same second hub-wide; retry after `Retry-After`.
 - **`fleet-hub pair` refuses with `E_EXISTS`** — a live client already holds
   that name. `fleet-hub client revoke <name>` first, or pair under another
   name; a revoked row does not block the name.

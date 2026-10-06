@@ -43,6 +43,18 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
 /// every 6 s, i.e. the ten-a-minute budget the design asks for.
 pub const ATTEMPT_INTERVAL: Duration = Duration::from_secs(6);
 
+/// Minimum spacing between two `POST /pair` attempts across the whole hub,
+/// whatever address they come from. The per-address budget alone is only as
+/// good as the address: a peer behind a believed front end can name a fresh
+/// `X-Forwarded-For` address per request, and an IPv6 host owns a /64 of
+/// them. Pairing is a rare, human-paced event, so one attempt a second
+/// hub-wide costs nobody anything and caps guessing at 60 a minute however
+/// the addresses are minted.
+pub const GLOBAL_ATTEMPT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The bucket key every `POST /pair` attempt is also counted against.
+const GLOBAL_BUCKET: &str = "pair:*";
+
 /// Largest `POST /pair` body accepted. The real one is a few dozen bytes.
 const MAX_BODY: usize = 4 * 1024;
 
@@ -142,6 +154,20 @@ pub(crate) fn limiter_key(
         return peer.to_string();
     }
     forwarded_last_hop(headers).unwrap_or_else(|| peer.to_string())
+}
+
+/// The per-address bucket for a [`limiter_key`]: an IPv6 address counts as
+/// its /64, the block one host or one subscriber line is handed, so cycling
+/// addresses inside it does not mint fresh buckets. IPv4 (mapped or not) and
+/// a non-address key are their own bucket.
+fn address_bucket(key: &str) -> String {
+    match key.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        _ => key.to_string(),
+    }
 }
 
 /// The last `X-Forwarded-For` hop that parses as an IP address. Several
@@ -356,6 +382,10 @@ pub struct PairState {
     /// so only this crate's tests can weaken the budget — an embedder must
     /// not be able to switch it off.
     pub(crate) attempt_interval: Duration,
+    /// Minimum spacing between two attempts hub-wide.
+    /// [`GLOBAL_ATTEMPT_INTERVAL`] in production; `pub(crate)` for the same
+    /// reason as `attempt_interval`.
+    pub(crate) global_interval: Duration,
 }
 
 impl PairState {
@@ -371,6 +401,7 @@ impl PairState {
             rate,
             base_url: Arc::new(base_url),
             attempt_interval: ATTEMPT_INTERVAL,
+            global_interval: GLOBAL_ATTEMPT_INTERVAL,
         }
     }
 }
@@ -454,11 +485,19 @@ pub async fn handle_pair(
         request.headers(),
     );
     // Spend the attempt budget before parsing anything: a flood of guesses
-    // must cost the hub a hash-map probe, not a body read.
-    if let Err(left) = state
+    // must cost the hub a hash-map probe, not a body read. The hub-wide
+    // budget first, so a flood of minted addresses is cut off before each
+    // one gets a bucket of its own.
+    let budget = state
         .rate
-        .check(&format!("pair:{peer}"), state.attempt_interval)
-    {
+        .check(GLOBAL_BUCKET, state.global_interval)
+        .and_then(|()| {
+            state.rate.check(
+                &format!("pair:{}", address_bucket(&peer)),
+                state.attempt_interval,
+            )
+        });
+    if let Err(left) = budget {
         let retry = left.as_secs().max(1).to_string();
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -725,6 +764,22 @@ mod tests {
     /// Testing only the rightmost element would find nothing, fall back to
     /// the peer, and collapse every client behind that proxy into the proxy's
     /// own bucket. The scan walks left until something parses.
+    #[test]
+    fn an_ipv6_address_is_bucketed_by_its_64() {
+        assert_eq!(
+            address_bucket("2001:db8:1:2:aaaa::1"),
+            address_bucket("2001:db8:1:2:ffff:ffff:ffff:ffff")
+        );
+        assert_eq!(address_bucket("2001:db8:1:2::9"), "2001:db8:1:2::/64");
+        assert_ne!(
+            address_bucket("2001:db8:1:2::1"),
+            address_bucket("2001:db8:1:3::1")
+        );
+        assert_eq!(address_bucket("203.0.113.7"), "203.0.113.7");
+        assert_eq!(address_bucket("::ffff:203.0.113.7"), "::ffff:203.0.113.7");
+        assert_eq!(address_bucket(UNKNOWN_PEER), UNKNOWN_PEER);
+    }
+
     #[test]
     fn a_non_address_last_hop_does_not_collapse_everyone_into_the_proxy() {
         let hdrs = |vals: &[&str]| {
