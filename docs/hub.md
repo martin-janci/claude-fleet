@@ -2151,6 +2151,11 @@ curl -s --compressed https://fleet.example.com/mcp/json \
 (The `Accept` header still offers both types — rmcp requires the pair on
 either mount.)
 
+Both mounts read a request body of at most 8 MiB and answer `413` past it (a
+declared `Content-Length` over the cap is refused before a byte is read). No
+tool call comes near it; the cap is what stops one oversized POST from any
+valid token buffering until the hub runs out of memory.
+
 What it is worth, measured on a 44-session fleet: `list_sessions`
 `{summary:false}` is 51 968 B unframed and 7 767 B gzipped, `list_projects`
 7 660 → 1 308 B, `list_hosts` 1 707 → 475 B. A phone's cold start is those

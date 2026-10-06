@@ -80,3 +80,62 @@ async fn a_repeated_bad_bearer_is_still_401() {
         "the bucket refills after the interval"
     );
 }
+
+/// The raw response head to `head` + `body` written as-is to `/mcp`.
+async fn raw_status(addr: std::net::SocketAddr, head: &str, body: &[u8]) -> String {
+    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    s.write_all(head.as_bytes()).await.unwrap();
+    // The hub may answer and close before the whole body is written.
+    let _ = s.write_all(body).await;
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut buf)).await;
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// `/mcp` refuses a body over `MCP_BODY_MAX` with 413, whether it declares
+/// its length or streams it chunked, and still serves one under the cap.
+#[tokio::test]
+async fn an_oversized_mcp_body_is_413() {
+    let addr = serve_test_app().await;
+    let head = |len: usize| {
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer s3cret\r\n\
+             Content-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+        )
+    };
+    let declared = raw_status(addr, &head(MCP_BODY_MAX + 1), b"").await;
+    assert!(
+        declared.contains("413"),
+        "declared length over the cap: {declared}"
+    );
+
+    let chunk = vec![b'x'; 1024 * 1024];
+    let mut chunked = Vec::new();
+    for _ in 0..(MCP_BODY_MAX / chunk.len() + 1) {
+        chunked.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+        chunked.extend_from_slice(&chunk);
+        chunked.extend_from_slice(b"\r\n");
+    }
+    chunked.extend_from_slice(b"0\r\n\r\n");
+    let streamed = raw_status(
+        addr,
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer s3cret\r\n\
+         Content-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        &chunked,
+    )
+    .await;
+    assert!(
+        streamed.contains("413"),
+        "chunked body over the cap: {streamed}"
+    );
+
+    let ok = raw_status(addr, &head(2), b"{}").await;
+    assert!(
+        ok.contains("200"),
+        "a body under the cap still reaches /mcp: {ok}"
+    );
+}

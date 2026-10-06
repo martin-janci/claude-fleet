@@ -406,6 +406,45 @@ async fn healthz() -> impl axum::response::IntoResponse {
     )
 }
 
+/// The largest `/mcp` request body the hub reads. Far above any real tool
+/// call (prompts and clipboard text cap at 64 KiB, a repo file at 512 KiB,
+/// JSON escaping at most doubles them).
+pub(crate) const MCP_BODY_MAX: usize = 8 * 1024 * 1024;
+
+/// Buffers an `/mcp` request body up to [`MCP_BODY_MAX`] and answers 413
+/// past it, before the MCP service sees the request. A declared
+/// `Content-Length` over the cap is refused without reading a byte.
+async fn limit_mcp_body(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let too_large = || {
+        (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            format!("request body over {MCP_BODY_MAX} bytes\n"),
+        )
+            .into_response()
+    };
+    let declared = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|n| n > MCP_BODY_MAX as u64) {
+        return too_large();
+    }
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MCP_BODY_MAX).await else {
+        return too_large();
+    };
+    next.run(axum::extract::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
 /// Build the axum app: `/mcp` and `/mcp/json` (rmcp services), `/hook`,
 /// `/report` and `/reports` behind [`authorize`], plus the unauthenticated
 /// `/healthz` liveness and `/pair` exchange routes. Shared by `start` and the
@@ -442,6 +481,11 @@ fn build_app(
     if let Some(json_service) = mcp_json_service {
         mcp_routes = mcp_routes.route("/mcp/json", json_service);
     }
+    // rmcp reads a request body whole, with no limit, and axum's
+    // `DefaultBodyLimit` binds only its own extractors, never a mounted
+    // service; so without this cap one huge POST from any valid token
+    // buffered until the hub ran out of memory.
+    let mcp_routes = mcp_routes.layer(axum::middleware::from_fn(limit_mcp_body));
     let authorized = mcp_routes
         .route("/hook", axum::routing::post(hooks::handle_hook))
         .with_state(hook_state)
