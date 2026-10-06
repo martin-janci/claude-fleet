@@ -486,6 +486,19 @@ describe('QuickSwitcher — New session mode', () => {
   }
   const activeLabel = (input: HTMLInputElement) =>
     document.getElementById(input.getAttribute('aria-activedescendant') ?? '')?.textContent ?? '';
+  /** Clear the query (Esc), so the empty-query keys (⌘Z, ⌘⌫) are the picker's. */
+  async function clearQuery(input: HTMLInputElement) {
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await tick();
+    expect(input.value).toBe('');
+  }
+  /** Highlight the row with this data-key (the mouse moves onto it). */
+  async function highlight(key: string) {
+    const row = document.querySelector(`[data-key="${key}"]`);
+    expect(row).not.toBeNull();
+    await fireEvent.mouseMove(row!);
+    await tick();
+  }
 
   it('opens from the request with the mode chip, projects only, Hidden folded', async () => {
     sessions.set([sess({ id: 1, project_id: 1 })]);
@@ -565,8 +578,85 @@ describe('QuickSwitcher — New session mode', () => {
     await tick();
     await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
     await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+    await clearQuery(input);
     await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
     await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    // The undo says what it undid.
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Undid: Pinned openmarket-ai'));
+  });
+
+  it('Ctrl+Z with a query is the input’s own undo: the pin stays', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
+    const calls = vi.mocked(__invoke).mock.calls.length;
+    expect(await fireEvent.keyDown(input, { key: 'z', ctrlKey: true })).toBe(true); // not defaultPrevented
+    await tick();
+    expect(vi.mocked(__invoke).mock.calls.length).toBe(calls);
+    expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+  });
+
+  it('Ctrl+Z after a close and reopen undoes nothing (undo is per open)', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
+    await clearQuery(input);
+    await fireEvent.keyDown(input, { key: 'Escape' }); // closes
+    await tick();
+    const input2 = await openNew();
+    const calls = vi.mocked(__invoke).mock.calls.filter((c) => c[0] === 'set_project_pick').length;
+    expect(await fireEvent.keyDown(input2, { key: 'z', ctrlKey: true })).toBe(true); // not taken
+    await tick();
+    await Promise.resolve();
+    expect(vi.mocked(__invoke).mock.calls.filter((c) => c[0] === 'set_project_pick').length).toBe(calls);
+    expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+  });
+
+  it('Ctrl+Backspace with a query is left to the input; with none it hides the highlighted row', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await tick();
+    expect(screen.queryByText('Ctrl⌫ hide')).toBeNull(); // the hint only offers it on an empty query
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true })).toBe(true); // not defaultPrevented
+    await tick();
+    expect(get(projectPicks).get('pp/openmarket-docs')?.vis ?? null).toBeNull();
+    await clearQuery(input);
+    expect(screen.getByText('Ctrl⌫ hide')).toBeTruthy();
+    await highlight('project:3@g:c:pp:openmarket');
+    expect(await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true })).toBe(false);
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-docs')?.vis).toBe('hide'));
+  });
+
+  it('after Hide the highlight lands on the row that followed the hidden one', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await highlight('project:3@g:c:pp:openmarket');
+    expect(activeLabel(input)).toContain('openmarket-docs');
+    await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true });
+    await tick();
+    await tick();
+    expect(activeLabel(input)).toContain('openmarket-app');
+  });
+
+  it('a project moved into an automatic group of the same name still offers Back to automatic', async () => {
+    projects.set([fleet, ...om, epic, p(6, 'pp', 'zeta-tool', 60)]);
+    projectPicks.set(new Map([['pp/zeta-tool', { owner: 'pp', repo: 'zeta-tool', pinned: false, vis: null, grp: 'OpenMarket' }]]));
+    render(QuickSwitcher);
+    const input = await openNew();
+    // One openmarket section, with zeta-tool in it.
+    expect(document.querySelector('[data-key="project:6@g:c:pp:openmarket"]')).not.toBeNull();
+    await fireEvent.input(input, { target: { value: 'zeta' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'g', ctrlKey: true });
+    await tick();
+    expect(screen.getByText('Back to automatic')).toBeTruthy();
   });
 
   it('Ctrl+Z works at once, before the pin write answers', async () => {
@@ -583,6 +673,7 @@ describe('QuickSwitcher — New session mode', () => {
     await tick();
     await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
     expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+    await clearQuery(input);
     await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
     release();
     await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
@@ -613,6 +704,7 @@ describe('QuickSwitcher — New session mode', () => {
     await tick();
     await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
     await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    await clearQuery(input);
     const calls = vi.mocked(__invoke).mock.calls.length;
     await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
     await tick();
@@ -623,8 +715,7 @@ describe('QuickSwitcher — New session mode', () => {
     projectPicks.set(new Map([['pp/openmarket-ai', { owner: 'pp', repo: 'openmarket-ai', pinned: true, vis: null, grp: null }]]));
     render(QuickSwitcher);
     const input = await openNew();
-    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
-    await tick();
+    await highlight('project:2@pinned');
     await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true });
     await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Hid openmarket-ai (unpinned)'));
     expect(get(projectPicks).get('pp/openmarket-ai')).toMatchObject({ pinned: false, vis: 'hide' });
@@ -666,6 +757,7 @@ describe('QuickSwitcher — New session mode', () => {
     await tick();
     expect(screen.getByTestId('quick-switcher')).toBeTruthy();
     await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+    await clearQuery(input);
     await fireEvent.keyDown(input, { key: 'z', metaKey: true });
     await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
     expect(screen.getByTestId('quick-switcher')).toBeTruthy();
@@ -682,8 +774,8 @@ describe('QuickSwitcher — New session mode', () => {
     await tick();
     await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
     await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
-    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
-    await tick();
+    await clearQuery(input);
+    await highlight('project:3@g:c:pp:openmarket');
     await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true });
     await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Hid openmarket-docs'));
     const before = get(projectPicks);

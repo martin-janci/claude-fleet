@@ -344,6 +344,8 @@
     preferredHost = host;
     toggled = new Set();
     menu = null;
+    // Undo belongs to this open: a ⌘Z an hour later never reverts a pin.
+    lastUndo = null;
     open = true;
     seq++;
     void loadTickets();
@@ -433,7 +435,10 @@
       ? () => {
           void write.then((r) => {
             if (!r.ok) return;
-            void setProjectPick(owner, repo, { pinned: prev.pinned, vis: prev.vis, grp: prev.grp }).then(() => seq++);
+            void setProjectPick(owner, repo, { pinned: prev.pinned, vis: prev.vis, grp: prev.grp }).then((u) => {
+              seq++;
+              if (u.ok) push({ kind: 'info', message: `Undid: ${said}` });
+            });
             seq++;
           });
         }
@@ -470,9 +475,21 @@
     else act(e, { pinned: true }, `Pinned ${e.label}`);
   }
   function toggleHide(e: Entry) {
-    if (e.hidden) act(e, { vis: 'keep' }, `Unhid ${e.label}`);
-    else if (e.pinned) act(e, { vis: 'hide', pinned: false }, `Hid ${e.label} (unpinned)`);
+    if (e.hidden) {
+      act(e, { vis: 'keep' }, `Unhid ${e.label}`);
+      return;
+    }
+    // The highlight stays where it was in the list: on the row that followed
+    // the hidden one, else the one before (never another row of the same
+    // project, which leaves the list with it).
+    const keys = listKeys;
+    const at = entryOf(activeKey)?.id === e.id ? keys.indexOf(activeKey!) : -1;
+    const other = (k: string) => idOfKey(k) !== e.id;
+    const next =
+      at === -1 ? null : (keys.slice(at + 1).find(other) ?? keys.slice(0, at).reverse().find(other) ?? null);
+    if (e.pinned) act(e, { vis: 'hide', pinned: false }, `Hid ${e.label} (unpinned)`);
     else act(e, { vis: 'hide' }, `Hid ${e.label}`);
+    if (next !== null) activeKey = next;
   }
   function setGroup(e: Entry, g: string | null) {
     act(e, { grp: g }, g ? `Moved ${e.label} to ${g}` : `${e.label} is grouped automatically`);
@@ -718,7 +735,8 @@
       togglePin(cur);
       return handled();
     }
-    if (mod && e.key === 'Backspace' && cur) {
+    // With a query, ⌘⌫ / ⌘Z are the input's own (delete, undo typing).
+    if (mod && e.key === 'Backspace' && query === '' && cur) {
       toggleHide(cur);
       return handled();
     }
@@ -726,7 +744,7 @@
       openMenu(activeKey!, 'groups');
       return handled();
     }
-    if (mod && e.key.toLowerCase() === 'z' && lastUndo) {
+    if (mod && e.key.toLowerCase() === 'z' && query === '' && lastUndo) {
       const u = lastUndo;
       lastUndo = null;
       u();
@@ -838,7 +856,7 @@
             hidden={!!e.hidden}
             groups={menuGroups}
             currentGroup={e.group.name}
-            manualGroup={e.group.key.startsWith('m:')}
+            manualGroup={e.manualGroup}
             startIn={menu.startIn}
             onpin={() => {
               togglePin(e);
@@ -859,7 +877,8 @@
         <span>↵ open</span>
         <span>{modKey}↵ start with last settings</span>
         <span>{modKey}P pin</span>
-        <span>{modKey}⌫ hide</span>
+        <!-- With a query ⌘⌫ / ⌘Z are the input's own; the menu still hides. -->
+        {#if !query}<span>{modKey}⌫ hide</span>{/if}
         <span>⇧F10 more</span>
         <span>esc close</span>
       {:else}
