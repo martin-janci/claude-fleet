@@ -25,24 +25,49 @@
   let draft = $state('');
   let root: HTMLElement | undefined = $state();
 
+  // Exact name first, then prefix matches, then other substring matches, so
+  // an exact name is never cut by the six-row cap.
+  function rank(g: string, d: string): number {
+    const l = g.toLowerCase();
+    const q = d.toLowerCase();
+    return l === q ? 0 : l.startsWith(q) ? 1 : 2;
+  }
+
   const shown = $derived.by(() => {
     const d = draft.trim();
-    const list = groups.filter((g) => !d || g.toLowerCase().includes(d.toLowerCase())).slice(0, 6);
+    const list = groups
+      .filter((g) => !d || g.toLowerCase().includes(d.toLowerCase()))
+      .map((g, i) => ({ g, i, r: d ? rank(g, d) : 0 }))
+      .sort((a, b) => a.r - b.r || a.i - b.i)
+      .slice(0, 6)
+      .map((x) => x.g);
     const out: { label: string; value: string | null; current: boolean }[] = list.map((g) => ({ label: g, value: g, current: g === currentGroup }));
     if (d && !groups.some((g) => g.toLowerCase() === d.toLowerCase())) out.push({ label: `New group “${d}”`, value: d, current: false });
     if (!d && manualGroup) out.push({ label: 'Back to automatic', value: null, current: false });
     return out;
   });
 
-  async function focusFirst() {
-    await tick();
+  // Enter: an empty draft does nothing; otherwise the existing group whose
+  // name equals the draft (any case), else a new group named by the draft.
+  function commitDraft() {
+    const d = draft.trim();
+    if (!d) return;
+    const exact = groups.find((g) => g.toLowerCase() === d.toLowerCase());
+    ongroup(exact ?? d);
+  }
+
+  function focusNow() {
     const el =
       mode === 'groups'
         ? root?.querySelector<HTMLElement>('input')
         : root?.querySelector<HTMLElement>('[role=menuitem]');
     el?.focus();
   }
-  onMount(focusFirst);
+  async function focusFirst() {
+    await tick();
+    focusNow();
+  }
+  onMount(focusNow);
 
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Escape') {
@@ -52,7 +77,7 @@
       return;
     }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-    const items = Array.from(root?.querySelectorAll<HTMLElement>('[role^=menuitem]') ?? []);
+    const items = Array.from(root?.querySelectorAll<HTMLElement>('input, [role^=menuitem]') ?? []);
     if (!items.length) return;
     e.preventDefault();
     const i = items.indexOf(document.activeElement as HTMLElement);
@@ -63,7 +88,7 @@
 
 <!-- svelte-ignore a11y_interactive_supports_focus -->
 <div class="menu" role="menu" aria-label={title} bind:this={root} onkeydown={onKey} data-testid="project-actions">
-  <div class="title">{title}</div>
+  <div class="title" role="presentation">{title}</div>
   {#if mode === 'main'}
     <button type="button" role="menuitem" class="mi" onclick={onpin}>{pinned ? 'Unpin' : 'Pin to top'}<kbd>⌘P</kbd></button>
     <button type="button" role="menuitem" class="mi" onclick={() => { mode = 'groups'; void focusFirst(); }}>Move to group…<kbd>⌘G</kbd></button>
@@ -77,10 +102,11 @@
       bind:value={draft}
       autocomplete="off"
       spellcheck="false"
+      maxlength={40}
       onkeydown={(e) => {
-        if (e.key === 'Enter' && shown[0]) {
+        if (e.key === 'Enter') {
           e.preventDefault();
-          ongroup(shown[0].value);
+          commitDraft();
         }
       }}
     />
