@@ -64,9 +64,12 @@ pub(crate) fn open_store_with_bus(
     }
     let db_path = data_dir.join("state.db");
     let store = Store::open_with_bus(&db_path, bus).map_err(|e| {
+        let advice = fleet_core::store::open_failure_advice(
+            &e,
+            "\nIf the file is corrupt, deleting it resets all hub state — hosts, projects and sessions are re-discovered.",
+        );
         format!(
-            "failed to open the claude-fleet database at {}: {e}\n\
-             If the file is corrupt, deleting it resets all hub state — hosts, projects and sessions are re-discovered.",
+            "failed to open the claude-fleet database at {}: {e}{advice}",
             db_path.display()
         )
     })?;

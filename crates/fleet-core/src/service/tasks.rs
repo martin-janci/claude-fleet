@@ -407,6 +407,18 @@ pub fn create_task(
             "task prompt must be non-empty",
         ));
     }
+    // The paste at delivery caps it anyway; refusing here keeps an
+    // undeliverable prompt out of the table and out of `list_tasks`.
+    if prompt.len() > crate::service::sessions::MAX_PROMPT_BYTES {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            format!(
+                "task prompt is {} bytes; the limit is {} bytes",
+                prompt.len(),
+                crate::service::sessions::MAX_PROMPT_BYTES
+            ),
+        ));
+    }
     let nonce = make_nonce();
     let task = s.insert_task(requester_session_id, worker_session_id, prompt, &nonce)?;
     if let Some(req) = requester_session_id {
@@ -1217,6 +1229,17 @@ mod tests {
             Some(ticket.id),
             "depth stays one"
         );
+    }
+
+    #[test]
+    fn an_oversized_task_prompt_is_refused_before_it_is_stored() {
+        let s = Store::open_in_memory().unwrap();
+        let w = seed(&s, "local", "w");
+        let big = "x".repeat(crate::service::sessions::MAX_PROMPT_BYTES + 1);
+        let err = create_task(&s, None, Some(w), &big).unwrap_err();
+        assert_eq!(err.code, codes::E_VALIDATE);
+        let at_cap = "x".repeat(crate::service::sessions::MAX_PROMPT_BYTES);
+        create_task(&s, None, Some(w), &at_cap).unwrap();
     }
 
     #[test]
