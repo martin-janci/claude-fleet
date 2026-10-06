@@ -249,6 +249,7 @@
       "hosts_reachable",
       "hosts_total",
       "hub",
+      "org_budgets",
       "peer_links_down",
       "peer_links_total",
       "schema_version",

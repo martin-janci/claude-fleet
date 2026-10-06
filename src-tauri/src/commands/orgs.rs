@@ -305,7 +305,7 @@ pub(crate) mod routed {
     ) -> Result<Vec<OrgDetail>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("list_orgs", &read("orgs")).await,
-            None => orgs::org_details(store, &ViewScope::internal(), orgs::DeviceView::Shown),
+            None => orgs::org_details(store, &ViewScope::internal(), orgs::AdminView::Admin),
         }
     }
 

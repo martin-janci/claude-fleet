@@ -253,9 +253,9 @@ fn scopes_list_orgs_then_uncovered_owners_then_the_rest() {
         .iter()
         .all(|e| e.id != Some(a.id)));
     // Details carry the rules; out-of-scope orgs are not listed.
-    let d = org_details(&st, &vs(&OrgScope::All), DeviceView::Hidden).unwrap();
+    let d = org_details(&st, &vs(&OrgScope::All), AdminView::Other).unwrap();
     assert_eq!(d[0].rules.len(), 1);
-    assert!(org_details(&st, &vs(&outsider), DeviceView::Hidden)
+    assert!(org_details(&st, &vs(&outsider), AdminView::Other)
         .unwrap()
         .is_empty());
     let _ = WorkTarget::Key("unused");
@@ -685,7 +685,7 @@ fn org_details_carry_the_overview_and_devices_only_for_the_administrator() {
         s.insert_client_token("loose", "digest-2", "full").unwrap();
         (a, b)
     };
-    let d = org_details(&st, &vs(&OrgScope::All), DeviceView::Shown).unwrap();
+    let d = org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap();
     let (da, db) = (&d[0], &d[1]);
     assert_eq!((da.org.id, db.org.id), (a.id, b.id));
     assert_eq!(da.catalogs, vec!["acme-assets".to_string()]);
@@ -707,14 +707,14 @@ fn org_details_carry_the_overview_and_devices_only_for_the_administrator() {
     assert_eq!(db.devices.as_deref(), Some(&[][..]));
 
     // Anyone else: the same orgs and counts, and no `devices` key at all.
-    let hidden = org_details(&st, &vs(&OrgScope::All), DeviceView::Hidden).unwrap();
+    let hidden = org_details(&st, &vs(&OrgScope::All), AdminView::Other).unwrap();
     assert!(hidden.iter().all(|o| o.devices.is_none()));
     let json = serde_json::to_value(&hidden[0]).unwrap();
     assert!(json.get("devices").is_none(), "{json}");
     assert_eq!(json["session_count"], 2);
 
     // A host in no org counts none of Company A's sessions.
-    assert!(org_details(&st, &vs(&host(None, &[])), DeviceView::Hidden)
+    assert!(org_details(&st, &vs(&host(None, &[])), AdminView::Other)
         .unwrap()
         .is_empty());
 }
@@ -729,4 +729,47 @@ fn an_org_detail_from_an_older_hub_reads_an_empty_overview() {
     let d: OrgDetail = serde_json::from_value(old).unwrap();
     assert!(d.catalogs.is_empty() && d.devices.is_none());
     assert_eq!((d.session_count, d.needs_you), (0, 0));
+}
+
+/// Org administration phase C: the administrator reads an org's own
+/// settings, spend and budget; nobody else does, and a caller that does not
+/// see every session gets no spend even as the administrator.
+#[test]
+fn an_orgs_spend_settings_and_budget_are_the_administrators_only() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let org = {
+        let s = st.lock().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        crate::service::settings::set_for_org(
+            &s,
+            org,
+            crate::service::settings::BUDGET_ORG_DAILY_USD,
+            Some("5"),
+            crate::service::settings::Actor::Person,
+        )
+        .unwrap();
+        org
+    };
+    let d = &org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap()[0];
+    assert_eq!(d.org.id, org);
+    assert_eq!(
+        (d.spent_today_micros, d.budget_daily_usd),
+        (Some(0), Some(5))
+    );
+    assert!(d.over_budget.is_empty());
+    let settings = d.settings.as_ref().expect("the administrator reads them");
+    assert!(settings
+        .iter()
+        .any(|v| v["setting"]["key"] == "budget.org_daily_usd" && v["own"] == "5"));
+    let other = &org_details(&st, &vs(&OrgScope::All), AdminView::Other).unwrap()[0];
+    assert!(other.settings.is_none() && other.spent_today_micros.is_none());
+    let json = serde_json::to_value(other).unwrap();
+    for k in [
+        "settings",
+        "spent_today_micros",
+        "budget_daily_usd",
+        "over_budget",
+    ] {
+        assert!(json.get(k).is_none(), "{k}: {json}");
+    }
 }

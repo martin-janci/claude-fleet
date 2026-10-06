@@ -265,7 +265,7 @@ Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_
 
 Administer the company from your own device: orgs (as work_admin's org actions), paired devices (list, pair_device → a one-time code and its QR, revoke, trust, bind to an org, hand to a person, grant a catalog) and people (list, rename, disable). Lists for any of your full devices; changes need a trusted full one, and never lock out the device in use.
 
-Parameters: `action`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `path_prefix`, `person`, `person_id`, `repo`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`
+Parameters: `action`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `path_prefix`, `person`, `person_id`, `repo`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 

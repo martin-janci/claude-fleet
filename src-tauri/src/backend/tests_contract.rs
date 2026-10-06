@@ -351,6 +351,15 @@ fn sample_health() -> Health {
         peer_links_total: 2,
         updates: None,
         decide: Some(sample_decide_health()),
+        // Org administration phase C: an org over its daily budget, which the
+        // desktop raises as an Attention item.
+        org_budgets: vec![fleet_core::service::org_spend::OrgBudgetAlert {
+            org_id: 1,
+            org: "Acme".into(),
+            period: fleet_core::service::org_spend::Period::Daily,
+            spent_micros: 31_000_000,
+            budget_micros: 30_000_000,
+        }],
     }
 }
 

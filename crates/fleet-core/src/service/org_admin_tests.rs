@@ -30,6 +30,7 @@ fn every_action_parses_and_assign_client_is_not_one() {
         "assign_host",
         "unassign_host",
         "assign_tracker",
+        "set_org_setting",
         "list_devices",
         "pair_device",
         "revoke_device",
@@ -254,4 +255,49 @@ fn the_audit_line_names_ids_and_names_and_escapes_them() {
     let line = a.audit_summary();
     assert!(!line.contains('\n'), "{line}");
     assert!(line.contains("org_id=3"), "{line}");
+}
+
+#[test]
+fn an_org_sets_and_clears_its_own_value_of_a_per_org_setting() {
+    let st = store();
+    let mut add = args("add_org");
+    add.name = Some("Acme".into());
+    run(&add, &st, Me::LOCAL).unwrap();
+    let mut set = args("set_org_setting");
+    set.org = Some("Acme".into());
+    set.key = Some(crate::service::settings::BUDGET_ORG_DAILY_USD.into());
+    set.value = Some("25".into());
+    let v = run(
+        &set,
+        &st,
+        Me {
+            device: Some("laptop"),
+        },
+    )
+    .unwrap();
+    let row = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["setting"]["key"] == crate::service::settings::BUDGET_ORG_DAILY_USD)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (row["own"].as_str(), row["setting"]["value"].as_str()),
+        (Some("25"), Some("0"))
+    );
+    // The write is the device's, in the audit trail.
+    let audit = st
+        .lock()
+        .unwrap()
+        .setting_audit("budget.org_daily_usd@org:1", 5)
+        .unwrap();
+    assert_eq!(audit[0].actor_detail.as_deref(), Some("laptop"));
+    // Absent value: inherit again. A key no org may set is refused.
+    set.value = None;
+    let v = run(&set, &st, Me::LOCAL).unwrap();
+    assert!(v.as_array().unwrap().iter().all(|r| r.get("own").is_none()));
+    set.key = Some(crate::service::settings::GC_ENABLED.into());
+    set.value = Some("false".into());
+    assert_eq!(err_code(run(&set, &st, Me::LOCAL)), "E_INVALID");
 }

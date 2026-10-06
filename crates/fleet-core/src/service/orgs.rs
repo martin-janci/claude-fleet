@@ -962,11 +962,33 @@ pub struct OrgDetail {
     #[serde(default)]
     pub needs_you: usize,
     /// The live paired devices bound to it — only for the fleet's
-    /// administrator ([`DeviceView::Shown`]). `None` (no key at all) for
+    /// administrator ([`AdminView::Admin`]). `None` (no key at all) for
     /// everyone else, so a host or an org-bound device never learns another
     /// device's name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub devices: Option<Vec<OrgDevice>>,
+    /// Phase C, administrator only: the per-org settings
+    /// ([`crate::service::settings::OrgSetting`]: the setting described with
+    /// the fleet's value, and the org's own). Kept as JSON, so a desktop
+    /// reads a hub's whatever settings that hub has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Vec<serde_json::Value>>,
+    /// Phase C, administrator only and only for a caller that sees every
+    /// session: live spend in micro-USD today, over the last 7 days and this
+    /// month (UTC), and the budgets in whole USD (`0` none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_today_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_week_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_month_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_daily_usd: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_monthly_usd: Option<u64>,
+    /// `daily` / `monthly`: the budgets it has reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub over_budget: Vec<crate::service::org_spend::Period>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -987,23 +1009,26 @@ pub struct OrgDevice {
     pub last_seen_at: Option<i64>,
 }
 
-/// Whether [`org_details`] lists each org's bound devices.
+/// Whether [`org_details`] carries what only the fleet's administrator
+/// sees of an org: its bound devices, its own settings and — when the
+/// caller also sees every session (`org_spend::sees_all_spend`) — its
+/// spend and budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeviceView {
+pub enum AdminView {
     /// The fleet's administrator: the desktop's own store, the master token,
     /// or the hub's personal owner on an unbound device.
-    Shown,
+    Admin,
     /// Everyone else.
-    Hidden,
+    Other,
 }
 
-impl DeviceView {
+impl AdminView {
     /// The one rule for an MCP caller (`work { action: orgs }`).
     pub fn for_caller(caller: &crate::mcp::auth::Caller) -> Self {
         if caller.is_master() || (caller.is_person_device() && caller.is_personal_owner) {
-            DeviceView::Shown
+            AdminView::Admin
         } else {
-            DeviceView::Hidden
+            AdminView::Other
         }
     }
 }
@@ -1011,7 +1036,7 @@ impl DeviceView {
 pub fn org_details(
     store: &Mutex<Store>,
     view: &crate::service::view_scope::ViewScope,
-    devices: DeviceView,
+    devices: AdminView,
 ) -> Result<Vec<OrgDetail>, IpcError> {
     org_details_locked(&*lock(store)?, view, devices)
 }
@@ -1111,7 +1136,7 @@ pub fn admin(
             return to_json(&org_details_locked(
                 s,
                 &crate::service::view_scope::ViewScope::internal(),
-                DeviceView::Shown,
+                AdminView::Admin,
             )?);
         }
         OrgAction::AddOrg => {
@@ -1230,7 +1255,7 @@ pub fn admin(
 fn org_details_locked(
     s: &Store,
     view: &crate::service::view_scope::ViewScope,
-    devices: DeviceView,
+    devices: AdminView,
 ) -> Result<Vec<OrgDetail>, IpcError> {
     let scope = &view.org;
     let rules = s.list_org_rules()?;
@@ -1238,17 +1263,17 @@ fn org_details_locked(
     let catalogs = s.list_catalogs()?;
     let needs = needs_person(s);
     let counts = org_session_counts(&counted_rows(s, view)?, &needs);
-    let clients = match devices {
-        DeviceView::Shown => Some(s.list_client_tokens(false)?),
-        DeviceView::Hidden => None,
-    };
+    let admin = devices == AdminView::Admin;
+    let clients = admin.then(|| s.list_client_tokens(false)).transpose()?;
+    let spend = (admin && crate::service::org_spend::sees_all_spend(s, view))
+        .then(|| crate::service::org_spend::spend_by_org(s, crate::service::catalog::now_secs()));
     let mut out = Vec::new();
     for o in s.list_orgs()? {
         if !scope.sees_org(Some(o.id)) {
             continue;
         }
         let (session_count, needs_you) = counts.get(&o.id).copied().unwrap_or_default();
-        out.push(OrgDetail {
+        let mut d = OrgDetail {
             catalogs: catalogs
                 .iter()
                 .filter(|c| c.org_id == Some(o.id))
@@ -1278,8 +1303,35 @@ fn org_details_locked(
                 .into_iter()
                 .map(|(id, name)| OrgTrackerRef { id, name })
                 .collect(),
+            settings: admin.then(|| {
+                crate::service::settings::org_settings(s, o.id)
+                    .iter()
+                    .filter_map(|v| serde_json::to_value(v).ok())
+                    .collect()
+            }),
+            spent_today_micros: None,
+            spent_week_micros: None,
+            spent_month_micros: None,
+            budget_daily_usd: None,
+            budget_monthly_usd: None,
+            over_budget: Vec::new(),
             org: o,
-        });
+        };
+        if let Some(spend) = &spend {
+            use crate::service::org_spend as os;
+            let got = spend.get(&d.org.id).copied().unwrap_or_default();
+            let (daily, monthly) = os::budgets(s, d.org.id);
+            d.spent_today_micros = Some(got.today_micros);
+            d.spent_week_micros = Some(got.week_micros);
+            d.spent_month_micros = Some(got.month_micros);
+            d.budget_daily_usd = Some(daily);
+            d.budget_monthly_usd = Some(monthly);
+            d.over_budget = os::reached(got, (daily, monthly))
+                .into_iter()
+                .map(|(p, ..)| p)
+                .collect();
+        }
+        out.push(d);
     }
     Ok(out)
 }

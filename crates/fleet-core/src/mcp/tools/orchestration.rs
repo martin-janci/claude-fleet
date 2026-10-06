@@ -864,7 +864,7 @@ impl FleetTools {
                 &crate::service::orgs::org_details(
                     &self.store,
                     &view_scope,
-                    crate::service::orgs::DeviceView::for_caller(&caller),
+                    crate::service::orgs::AdminView::for_caller(&caller),
                 )
                 .map_err(to_mcp_err)?,
             ),

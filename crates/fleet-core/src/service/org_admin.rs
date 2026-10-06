@@ -35,7 +35,7 @@ use std::sync::Mutex;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "OrgAdminParams")]
 pub struct OrgAdminArgs {
-    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|list_devices|pair_device|revoke_device|set_device_trust|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person
+    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person
     pub action: String,
     /// Org name (add/update_org), or a person's new name (rename_person).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,6 +106,12 @@ pub struct OrgAdminArgs {
     /// Pairing code lifetime, seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_s: Option<u64>,
+    /// set_org_setting: a setting an org may set for itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// set_org_setting: the org's own value; absent inherits the fleet's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
 }
 
 impl OrgAdminArgs {
@@ -126,6 +132,8 @@ impl OrgAdminArgs {
             ("person", &self.person),
             ("catalog", &self.catalog),
             ("mode", &self.mode),
+            ("key", &self.key),
+            ("value", &self.value),
         ] {
             if let Some(v) = v {
                 out.push_str(&format!(" {k}={}", v.escape_debug()));
@@ -155,6 +163,8 @@ impl OrgAdminArgs {
 pub enum Action {
     /// One of `orgs::admin`'s, run unchanged.
     Org(OrgAction),
+    /// An org's own value of a per-org setting (phase C).
+    SetOrgSetting,
     ListDevices,
     /// Minted by the hub's pairing registry, so only the MCP tool runs it.
     PairDevice,
@@ -171,6 +181,7 @@ pub enum Action {
 impl Action {
     pub fn parse(s: &str) -> Result<Self, IpcError> {
         Ok(match s {
+            "set_org_setting" => Action::SetOrgSetting,
             "list_devices" => Action::ListDevices,
             "pair_device" => Action::PairDevice,
             "revoke_device" => Action::RevokeDevice,
@@ -434,6 +445,18 @@ pub fn run(
                 },
                 &s,
             )
+        }
+        Action::SetOrgSetting => {
+            let org = org_of(&s, args)?.ok_or_else(|| {
+                IpcError::new(codes::E_INVALID, "set_org_setting needs org_id or org")
+            })?;
+            let key = need(&args.key, name, "key")?;
+            let actor = match me.device {
+                Some(d) => crate::service::settings::Actor::PersonVia(d),
+                None => crate::service::settings::Actor::Person,
+            };
+            crate::service::settings::set_for_org(&s, org, key, args.value.as_deref(), actor)?;
+            to_json(&crate::service::settings::org_settings(&s, org))
         }
         Action::ListDevices => to_json(&list_devices(&s, me)?),
         Action::ListPeople => to_json(&list_people(&s)?),
