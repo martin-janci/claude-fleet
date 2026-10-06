@@ -501,7 +501,19 @@ describe('NewSessionDialog — generated names', () => {
     expect(screen.getByTestId('path-preview').textContent).toContain(`/r/cf/.worktrees/${slug}`);
   });
 
-  it('a second session on the same worktree gets a name-suffixed tmux name instead of a collision', async () => {
+  it('previews a branch-shaped worktree name in a flat directory', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    const input = screen.getByTestId('new-worktree-name') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'feat/imports' } });
+    await tick();
+    expect(input.value).toBe('feat/imports');
+    expect(screen.getByTestId('path-preview').textContent).toContain('/r/cf/.worktrees/feat-imports');
+  });
+
+    it('a second session on the same worktree gets a name-suffixed tmux name instead of a collision', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
       return null;
