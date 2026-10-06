@@ -650,6 +650,53 @@ describe('QuickSwitcher — New session mode', () => {
     await tick();
     expect(input.value).toBe('');
     expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    // On an empty query Esc is left alone, so the dialog's cancel closes it.
+    expect(await fireEvent.keyDown(input, { key: 'Escape' })).toBe(true); // not defaultPrevented
+  });
+
+  it('macOS: ⌘N opens it, ⌘P pins and the picker stays open, ⌘Z undoes', async () => {
+    render(QuickSwitcher, { props: { isMac: true } });
+    await fireEvent.keyDown(window, { key: 'n', metaKey: true });
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    expect(screen.getByTestId('mode-chip')).toBeTruthy();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', metaKey: true });
+    await tick();
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+    await fireEvent.keyDown(input, { key: 'z', metaKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+    // ⌘K still closes it.
+    await fireEvent.keyDown(input, { key: 'k', metaKey: true });
+    await tick();
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('an older toast’s Undo does nothing once a newer change was made', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Hid openmarket-docs'));
+    const before = get(projectPicks);
+    const calls = vi.mocked(__invoke).mock.calls.length;
+    get(toasts).find((t) => t.message === 'Pinned openmarket-ai')!.action!.run();
+    await tick();
+    await Promise.resolve();
+    expect(vi.mocked(__invoke).mock.calls.length).toBe(calls);
+    expect(get(projectPicks)).toBe(before);
+    expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+    // The newest toast's Undo still works.
+    get(toasts).find((t) => t.message === 'Hid openmarket-docs')!.action!.run();
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-docs')?.vis).toBeNull());
   });
 
   it('no match offers Add project with the query; an owner/repo prefills the clone URL', async () => {

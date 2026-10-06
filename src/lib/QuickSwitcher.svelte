@@ -344,7 +344,6 @@
     preferredHost = host;
     toggled = new Set();
     menu = null;
-    lastUndo = null;
     open = true;
     seq++;
     void loadTickets();
@@ -382,6 +381,9 @@
       else show('new');
       return;
     }
+    // ⌘P is the pin key in New session mode: leave it to the input. (⌘K, and
+    // Ctrl+Shift+K / P elsewhere, still close the switcher.)
+    if (open && mode === 'new' && isMac && e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'p') return;
     if (!isSwitcherChord(e, isMac)) return;
     // Another modal (settings, new-session…) owns the keyboard while open;
     // don't stack the switcher on top of it.
@@ -449,8 +451,11 @@
         action: undo
           ? {
               label: 'Undo',
+              // Only while it is still the latest change: an older toast
+              // never reverts a newer pin / hide / group.
               run: () => {
-                if (lastUndo === undo) lastUndo = null;
+                if (lastUndo !== undo) return;
+                lastUndo = null;
                 undo();
               },
             }

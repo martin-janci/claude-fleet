@@ -332,7 +332,7 @@ describe('App: the Hosts view', () => {
     expect(await screen.findByTestId('mode-chip')).toBeTruthy();
     // The fixture's projects have no recent session: their group starts folded.
     const list = screen.getByTestId('switcher-list');
-    await fireEvent.click(list.querySelector('[data-key="fold:g:f"]')!);
+    await fireEvent.click(within(list).getByRole('option', { name: /^Forks & others · / }));
     const [pick] = within(list).getAllByRole('option', { name: /^claude-fleet/ });
     await fireEvent.click(pick);
     const dialog = await screen.findByRole('dialog', { name: 'New session' });
