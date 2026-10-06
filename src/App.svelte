@@ -57,6 +57,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession, restoreLastSession, selectSessionExplicitly, onSessionOpened } from './lib/selection';
   import {
+    addProjectRequest,
     appChord,
     assetsViewRequest,
     hostsChordLabel,
@@ -724,7 +725,6 @@
     viewHostSessions(alias);
   }
   function onHostsNewSession(alias: string) {
-    sidebarCollapsed = false;
     requestNewSessionOnHost(alias);
   }
 
@@ -732,6 +732,13 @@
   // view's Stale section) brings a collapsed sidebar back so it can open.
   $effect(() => {
     if ($tidyRequest) sidebarCollapsed = false;
+  });
+
+  // The Add project dialog is mounted by the Sidebar, which is unmounted while
+  // the rail is collapsed: a request from the switcher's Add row brings it
+  // back, and the mounted Sidebar then consumes the request.
+  $effect(() => {
+    if ($addProjectRequest) sidebarCollapsed = false;
   });
 
   // "Insert into composer" (work graph M9.2) shows where the text went: the

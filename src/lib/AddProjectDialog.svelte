@@ -336,7 +336,7 @@
       </p>
     {/if}
     {#if blocked}
-      <p class="err" data-testid="add-blocked">{blocked}</p>
+      <p class="err" role="alert" data-testid="add-blocked">{blocked}</p>
     {/if}
     {#if error}
       <p class="err" role="alert" data-testid="add-error">{error}</p>

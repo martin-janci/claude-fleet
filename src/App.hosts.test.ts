@@ -11,7 +11,7 @@ import { onboardingDismissed, onboardingWelcomed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
 import { clearSelection, selectSession, selectedSession } from './lib/selection';
 import { hostFilter } from './lib/hosts';
-import { hostsViewOpen, settingsOpen } from './lib/app_views';
+import { addProjectRequest, hostsViewOpen, settingsOpen } from './lib/app_views';
 import { clearNewSessionRequest } from './lib/new_session_request';
 import { agentPanelOpen, operatorState } from './lib/operator';
 import type { SessionRow } from './lib/sessions';
@@ -97,6 +97,7 @@ afterEach(() => {
   // not leave it open for the next mount.
   clearNewSessionRequest();
   settingsOpen.set(false);
+  addProjectRequest.set(null);
   onboardingDismissed.set(true);
 });
 
@@ -319,6 +320,19 @@ describe('App: the Hosts view', () => {
     expect(screen.queryByTestId('sidebar-expand')).toBeNull();
     await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
     expect(get(hostFilter)).toBe('mefistos');
+  });
+
+  it('an Add project request from the switcher expands a collapsed sidebar and opens the dialog prefilled', async () => {
+    // The dialog is mounted by the Sidebar, which is unmounted behind the
+    // collapsed rail: without the expand, the request would sit unanswered.
+    localStorage.setItem('cf:pref:layout.sidebar-collapsed', 'true');
+    render(App);
+    await waitFor(() => expect(screen.getByTestId('sidebar-expand')).toBeTruthy());
+    addProjectRequest.set({ cloneUrl: 'o/r' });
+    await waitFor(() => expect(screen.getByTestId('add-project-dialog')).toBeTruthy());
+    expect((screen.getByTestId('clone-url') as HTMLInputElement).value).toBe('o/r');
+    expect(screen.queryByTestId('sidebar-expand')).toBeNull();
+    expect(get(addProjectRequest)).toBeNull();
   });
 
   it('n opens the switcher in New session mode, then New session with that host preselected', async () => {

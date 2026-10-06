@@ -716,6 +716,17 @@ describe('QuickSwitcher — New session mode', () => {
     expect(get(addProjectRequest)).toEqual({ cloneUrl: undefined });
   });
 
+  it('with no projects at all the Add row is still offered, and Enter on it asks for Add project', async () => {
+    projects.set([]);
+    render(QuickSwitcher);
+    const input = await openNew();
+    expect(screen.getByTestId('switcher-add')).toBeTruthy();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(addProjectRequest)).toEqual({ cloneUrl: undefined });
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
   it('Enter on a fold row unfolds it', async () => {
     render(QuickSwitcher);
     const input = await openNew();
