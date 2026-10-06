@@ -5,6 +5,7 @@ import { derived, get, writable, type Readable, type Writable } from 'svelte/sto
 import { invokeCmd } from './result';
 import { restartSession, sessions, type SessionRow } from './sessions';
 import { sessionActionBlocked } from './share';
+import { pushError } from './toasts';
 
 export type OperatorBlocked =
   | 'absent'
@@ -54,6 +55,13 @@ export const operatorHost: Writable<string> = writable('local');
  * stranded agent without asking.
  */
 export const operatorFallback: Writable<string | null> = writable(null);
+/**
+ * Why the last press of the panel's `lost` button did nothing, shown under
+ * the button; null when it worked or was never pressed. The button used to
+ * fail in silence — after mefistos rebooted it answered `E_SELF_TARGET` and
+ * then `E_TMUX`, and the panel looked exactly as before the click.
+ */
+export const operatorError: Writable<string | null> = writable(null);
 
 /**
  * The operator's row as the app currently knows it.
@@ -158,6 +166,7 @@ export function blockedCopy(
 
 /** Read status without changing anything else. */
 export async function refreshOperator(): Promise<void> {
+  operatorError.set(null);
   const r = await invokeCmd<OperatorStatus>('operator_status');
   if (!r.ok) {
     operatorState.set('absent');
@@ -262,20 +271,35 @@ export function toggleAgent(): Promise<void> {
 /**
  * Restart the operator's session (the `lost` recovery) and refresh status
  * afterward. If the session row is not in the store — the panel was never
- * opened, or status has not resolved yet — this does nothing: there is
- * nothing to restart.
+ * opened, or status has not resolved yet — there is nothing to restart.
+ *
+ * Every way this stops short says why in `operatorError`, which the panel
+ * shows under the button; a failed restart also raises the sticky error
+ * toast every other restart does (Sidebar, SessionDetails).
  */
 export async function restartOperator(): Promise<void> {
+  operatorError.set(null);
   const session = get(operatorSession);
-  if (!session) return;
+  if (!session) {
+    operatorError.set("The agent's session is not known yet. Close the panel and open it again.");
+    return;
+  }
   // The operator's session is an ordinary fleet row with an owner, so a
   // restart of it is `restart_session`, spec §4.3's `own` tier (multi-user M1,
   // F2b). The gate lives HERE rather than on AgentPanel's button because this
   // is the funnel: the panel's `lost` recovery, and anything else that comes
   // to want it, both arrive through this function.
-  if (sessionActionBlocked(session, 'restart_session') !== null) return;
+  const blocked = sessionActionBlocked(session, 'restart_session');
+  if (blocked !== null) {
+    operatorError.set(blocked);
+    return;
+  }
   const r = await restartSession(session.host_alias, session.tmux_name);
-  if (!r.ok) return;
+  if (!r.ok) {
+    operatorError.set(`Restart failed: ${r.error.message}`);
+    pushError(r.error, 'Restart failed');
+    return;
+  }
   await refreshOperator();
 }
 
