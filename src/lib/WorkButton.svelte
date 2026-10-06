@@ -21,6 +21,7 @@
   import { startWork } from './trackers';
   import StartPopover from './StartPopover.svelte';
   import AttachPicker from './AttachPicker.svelte';
+  import { operatorRow } from './operator';
   import type { AttachTarget, Attached } from './attach';
   import {
     PRIMARY_LABEL,
@@ -77,6 +78,7 @@
           ref: task.item_id != null ? { item_id: task.item_id } : { key: task.key ?? '' },
           key: task.key,
           linkedSessionIds: new Set(grouped.active.map((l) => l.session_id).filter((id): id is number => id != null)),
+          operatorId: $operatorRow?.id ?? null,
           projectIds: new Set(
             [task.project_id, ...(task.sessions ?? []).map((l) => $sessions.find((r) => r.id === l.session_id)?.project_id)].filter(
               (id): id is number => id != null,

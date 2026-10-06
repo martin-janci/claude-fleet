@@ -55,6 +55,13 @@ describe('attachCandidates', () => {
     expect(got).toEqual([4, 3, 2]);
   });
 
+  it('never offers a lost session or the operator', () => {
+    const lost = session('oci', 'gone', { id: 8, lost_at: 1 });
+    const operator = session('oci', 'ux-agent', { id: 9 });
+    const got = attachCandidates([lost, operator, otherRepoFree], { ...target, operatorId: 9 }).map((r) => r.id);
+    expect(got).toEqual([2]);
+  });
+
   it('filters by name, host or the key a session is on', () => {
     const rows = [otherRepoFree, sameRepoBusy, sameRepoFree];
     expect(attachCandidates(rows, target, 'web').map((r) => r.id)).toEqual([2]);

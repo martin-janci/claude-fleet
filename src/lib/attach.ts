@@ -23,6 +23,9 @@ export interface AttachTarget {
   linkedSessionIds: ReadonlySet<number>;
   /** Projects the task has run in before: those sessions come first. */
   projectIds: ReadonlySet<number>;
+  /** The operator's own session, never offered: it gets no work links
+   *  (spec §3.3), only threads. */
+  operatorId?: number | null;
 }
 
 /** The task a session is on, unless it is this task. */
@@ -42,14 +45,15 @@ function rank(row: SessionRow, target: AttachTarget): number[] {
   ];
 }
 
-/** The sessions the picker offers: every session not already on the task,
- *  in the same repository first, then those with no task, then idle ones
- *  (spec J3), then by name. `filter` matches the name, host or task key. */
+/** The sessions the picker offers: every running session not already on
+ *  the task — not a lost one, not the operator — in the same repository
+ *  first, then those with no task, then idle ones (spec J3), then by name.
+ *  `filter` matches the name, host or task key. */
 export function attachCandidates(rows: readonly SessionRow[], target: AttachTarget, filter = ''): SessionRow[] {
   const q = filter.trim().toLowerCase();
   const name = (r: SessionRow) => r.friendly_name ?? r.tmux_name;
   return rows
-    .filter((r) => !target.linkedSessionIds.has(r.id))
+    .filter((r) => !target.linkedSessionIds.has(r.id) && r.lost_at == null && r.id !== target.operatorId)
     .filter(
       (r) =>
         !q ||
