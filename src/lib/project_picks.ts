@@ -5,7 +5,7 @@
 // patch this store optimistically.
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
-import { pushError } from './toasts';
+import { push, pushError } from './toasts';
 
 export type Vis = 'hide' | 'keep';
 
@@ -46,13 +46,25 @@ const EMPTY = (owner: string, repo: string): ProjectPick => ({
   grp: null,
 });
 
+// An older hub has no `set_project_pick` tool (E_HUB_PROTOCOL) and a token
+// it refuses gets E_FORBIDDEN: neither will change on a retry, so say it
+// once per session rather than on every pin.
+const UNSUPPORTED = new Set(['E_HUB_PROTOCOL', 'E_FORBIDDEN']);
+let unsupportedSaid = false;
+
+export function resetPickNoticeForTests(): void {
+  unsupportedSaid = false;
+}
+
 /** Change some of one project's choices. The command is a full replace, so
  *  the fields not in `patch` are sent as they are now. Optimistic: the store
- *  changes at once and rolls back (with a toast) if the write fails. */
+ *  changes at once and rolls back if the write fails — with a toast, unless
+ *  `quiet` (a write the person did not ask for). */
 export async function setProjectPick(
   owner: string,
   repo: string,
   patch: { pinned?: boolean; vis?: Vis | null; grp?: string | null },
+  opts: { quiet?: boolean } = {},
 ): Promise<Result<ProjectPick>> {
   const key = pickKey(owner, repo);
   const before = get(projectPicks).get(key) ?? EMPTY(owner, repo);
@@ -73,7 +85,13 @@ export async function setProjectPick(
     projectPicks.update((m) => new Map(m).set(key, saved));
   } else if (!r.ok) {
     projectPicks.update((m) => new Map(m).set(key, before));
-    pushError(r.error, 'Could not save the project choice');
+    if (opts.quiet) return r;
+    if (UNSUPPORTED.has(r.error.code)) {
+      if (!unsupportedSaid) push({ kind: 'info', message: "This hub doesn't support project pins yet" });
+      unsupportedSaid = true;
+    } else {
+      pushError(r.error, 'Could not save the project choice');
+    }
   }
   return r;
 }

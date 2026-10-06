@@ -838,6 +838,29 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('newowner/fresh-repo');
   });
 
+  it('a failed keep write after Add project stays quiet (no toast)', async () => {
+    const added = {
+      project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false, system: false },
+      worktrees: [],
+    };
+    mockBackend(fakeProjects, []);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'set_project_pick') throw { code: 'E_HUB_PROTOCOL', message: 'the hub refused the set_project_pick call' };
+      return cmd === 'add_project' ? added : base(cmd, args);
+    });
+    clearToasts();
+    render(Sidebar);
+    await tick(); await tick();
+    addProjectRequest.set({ cloneUrl: 'newowner/fresh-repo' });
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
+    await vi.waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith('set_project_pick', expect.anything()));
+    await tick();
+    expect(get(toasts)).toEqual([]);
+  });
+
   it('after a successful add, NewSessionDialog opens on the returned project', async () => {
     const added = {
       project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false, system: false },

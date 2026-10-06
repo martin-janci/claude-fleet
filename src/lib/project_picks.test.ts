@@ -3,7 +3,10 @@ import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { loadProjectPicks, pickKey, previousPick, projectPicks, setProjectPick } from './project_picks';
+import {
+  resetPickNoticeForTests, loadProjectPicks, pickKey, previousPick, projectPicks, setProjectPick,
+} from './project_picks';
+import { toasts } from './toasts';
 
 const inv = mockedInvoke as ReturnType<typeof vi.fn>;
 const row = (over = {}) => ({ owner: 'o', repo: 'r', pinned: false, vis: null, grp: null, ...over });
@@ -11,7 +14,10 @@ const row = (over = {}) => ({ owner: 'o', repo: 'r', pinned: false, vis: null, g
 beforeEach(() => {
   inv.mockReset();
   projectPicks.set(new Map());
+  toasts.set([]);
+  resetPickNoticeForTests();
 });
+const messages = () => get(toasts).map((t) => t.message);
 
 describe('project_picks', () => {
   it('loads into a map keyed owner/repo', async () => {
@@ -50,5 +56,35 @@ describe('project_picks', () => {
     const r = await setProjectPick('o', 'r', { vis: 'hide' });
     expect(r.ok).toBe(false);
     expect(get(projectPicks).get('o/r')?.vis).toBe(null);
+  });
+
+  it('a generic failure toasts each time', async () => {
+    inv.mockRejectedValue({ code: 'E_HUB', message: 'down' });
+    await setProjectPick('o', 'r', { pinned: true });
+    await setProjectPick('o', 'r', { pinned: true });
+    // The toast store folds a repeat into a count.
+    expect(get(toasts).find((t) => t.message.includes('Could not save the project choice'))?.count).toBe(2);
+  });
+
+  it('an older hub (no such tool) or a refused token says so once per session, and rolls back', async () => {
+    for (const code of ['E_HUB_PROTOCOL', 'E_FORBIDDEN']) {
+      resetPickNoticeForTests();
+      toasts.set([]);
+      inv.mockRejectedValue({ code, message: 'the hub refused the set_project_pick call' });
+      const r1 = await setProjectPick('o', 'r', { pinned: true });
+      await setProjectPick('o', 'r', { vis: 'hide' });
+      expect(r1.ok).toBe(false);
+      expect(get(projectPicks).get('o/r')).toMatchObject({ pinned: false, vis: null });
+      expect(messages()).toEqual(["This hub doesn't support project pins yet"]);
+      expect(get(toasts)[0].count).toBe(1);
+    }
+  });
+
+  it('quiet: a failure rolls back without a toast', async () => {
+    inv.mockRejectedValue({ code: 'E_HUB', message: 'down' });
+    const r = await setProjectPick('o', 'r', { vis: 'keep' }, { quiet: true });
+    expect(r.ok).toBe(false);
+    expect(get(projectPicks).get('o/r')?.vis).toBe(null);
+    expect(messages()).toEqual([]);
   });
 });

@@ -878,8 +878,9 @@
   // The user added a project in order to start a session in it: go straight
   // to NewSessionDialog on the new row (already merged into `projects`).
   function onProjectAdded(row: ProjectTreeRow, host: string) {
-    // Adding a project is the person saying it matters: keep it in the picker.
-    void setProjectPick(row.project.owner, row.project.repo, { vis: 'keep' });
+    // Adding a project is the person saying it matters: keep it in the picker
+    // (quietly: they asked to add a project, not to save a picker choice).
+    void setProjectPick(row.project.owner, row.project.repo, { vis: 'keep' }, { quiet: true });
     showAddProject = false;
     dialogHost = host;
     dialogProject = row;
@@ -1915,7 +1916,6 @@
   .filtered-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
   .filtered-empty p { margin: 0; }
   .filtered-empty strong { color: var(--fg); font-weight: 500; }
-  .pad { padding: 0.5rem 0.6rem; }
 
   .orphan-section {
     border-top: 1px solid var(--border);
