@@ -1195,6 +1195,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/103_changeset_withdrawn_at.sql"),
         already_applied: Some(changesets_has_withdrawn_at),
     },
+    // The New session picker: a person's pin / visibility / group per
+    // project, keyed by owner/repo TEXT. A new table only, so plain.
+    Migration::plain(104, include_str!("../../migrations/104_project_picks.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
