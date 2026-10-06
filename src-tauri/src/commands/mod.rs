@@ -13,6 +13,7 @@ pub mod move_session;
 pub mod mutate;
 pub mod onboarding;
 pub mod operator;
+pub mod org_devices;
 pub mod orgs;
 pub mod pages;
 pub mod projects;

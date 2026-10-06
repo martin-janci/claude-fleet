@@ -361,6 +361,12 @@ fn every_routed_read_names_its_tool_and_arguments() {
 /// The table [`every_routed_read_names_its_tool_and_arguments`] runs; also run against a configured hub this
 /// launch cannot use, which must refuse every row.
 fn routed_read_cases() -> Vec<Case> {
+    let mut cases = routed_read_cases_but_org_admin();
+    cases.extend(org_admin_read_cases());
+    cases
+}
+
+fn routed_read_cases_but_org_admin() -> Vec<Case> {
     use fleet_core::service::repo::SessionIdArgs;
     use fleet_core::service::repo_read::{
         RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
@@ -1525,7 +1531,321 @@ fn new_session_never_sends_an_owner_over_the_wire() {
 fn routed_mutation_cases() -> Vec<Case> {
     let mut cases = routed_mutation_cases_but_the_catalog();
     cases.extend(catalog_admin_cases());
+    cases.extend(org_admin_mutation_cases());
     cases
+}
+
+/// Org administration phase B: the reads of the hub's `org_admin`.
+fn org_admin_read_cases() -> Vec<Case> {
+    use fleet_core::service::org_admin::OrgAdminArgs;
+    vec![
+        (
+            "list_devices",
+            "org_admin",
+            json!({ "action": "list_devices" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::list_devices(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        ..OrgAdminArgs::new("list_devices")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_people",
+            "org_admin",
+            json!({ "action": "list_people" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::list_people(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        ..OrgAdminArgs::new("list_people")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+    ]
+}
+
+/// Org administration phase B: every org, device and people change routes
+/// to the hub's `org_admin` under its own action.
+fn org_admin_mutation_cases() -> Vec<Case> {
+    use fleet_core::service::org_admin::OrgAdminArgs;
+    vec![
+        (
+            "add_org",
+            "org_admin",
+            json!({ "action": "add_org", "name": "Acme" }),
+            r#"{"id":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::add_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        name: Some("Acme".into()),
+                        ..OrgAdminArgs::new("add_org")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "update_org",
+            "org_admin",
+            json!({ "action": "update_org", "org_id": 1, "jev": "on" }),
+            r#"{"id":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::update_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        jev: Some("on".into()),
+                        ..OrgAdminArgs::new("update_org")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org",
+            "org_admin",
+            json!({ "action": "remove_org", "org_id": 1 }),
+            r#"{"removed":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        ..OrgAdminArgs::new("remove_org")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_org_rule",
+            "org_admin",
+            json!({ "action": "add_rule", "org_id": 1, "owner": "acme" }),
+            r#"{"id":3}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::add_org_rule(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        owner: Some("acme".into()),
+                        ..OrgAdminArgs::new("add_rule")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org_rule",
+            "org_admin",
+            json!({ "action": "remove_rule", "rule_id": 3 }),
+            r#"{"removed":3}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org_rule(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        rule_id: Some(3),
+                        ..OrgAdminArgs::new("remove_rule")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "assign_host_org",
+            "org_admin",
+            json!({ "action": "assign_host", "host_alias": "h", "org_id": 1 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::assign_host_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        host_alias: Some("h".into()),
+                        org_id: Some(1),
+                        ..OrgAdminArgs::new("assign_host")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "assign_tracker_org",
+            "org_admin",
+            json!({ "action": "assign_tracker", "tracker_id": 2, "org_id": 1 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::assign_tracker_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        tracker_id: Some(2),
+                        org_id: Some(1),
+                        ..OrgAdminArgs::new("assign_tracker")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "pair_device",
+            "org_admin",
+            json!({ "action": "pair_device", "device": "phone", "mode": "readonly" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::pair_device(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        mode: Some("readonly".into()),
+                        ..OrgAdminArgs::new("pair_device")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_device",
+            "org_admin",
+            json!({ "action": "revoke_device", "device": "phone" }),
+            r#"{"revoked":"phone"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::revoke_device(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        ..OrgAdminArgs::new("revoke_device")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_device_trust",
+            "org_admin",
+            json!({ "action": "set_device_trust", "device": "phone", "trusted": true }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::set_device_trust(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        trusted: Some(true),
+                        ..OrgAdminArgs::new("set_device_trust")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "bind_device_org",
+            "org_admin",
+            json!({ "action": "bind_device", "device": "phone", "org": "Acme" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::bind_device_org(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        org: Some("Acme".into()),
+                        ..OrgAdminArgs::new("bind_device")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_device_person",
+            "org_admin",
+            json!({ "action": "set_device_person", "device": "phone", "person": "ada" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::set_device_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        person: Some("ada".into()),
+                        ..OrgAdminArgs::new("set_device_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "grant_device_catalog",
+            "org_admin",
+            json!({ "action": "grant_catalog", "device": "phone", "catalog": "personal", "on": true }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::grant_device_catalog(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        device: Some("phone".into()),
+                        catalog: Some("personal".into()),
+                        on: Some(true),
+                        ..OrgAdminArgs::new("grant_catalog")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "rename_person",
+            "org_admin",
+            json!({ "action": "rename_person", "person_id": 2, "name": "ada" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::rename_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        person_id: Some(2),
+                        name: Some("ada".into()),
+                        ..OrgAdminArgs::new("rename_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "disable_person",
+            "org_admin",
+            json!({ "action": "disable_person", "person_id": 2 }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::disable_person(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        person_id: Some(2),
+                        ..OrgAdminArgs::new("disable_person")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+    ]
 }
 
 /// The mutations outside the asset catalog; [`catalog_admin_cases`] is the rest.
@@ -4787,6 +5107,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/trackers.rs"),
     ),
     ("commands/orgs.rs", include_str!("../commands/orgs.rs")),
+    (
+        "commands/org_devices.rs",
+        include_str!("../commands/org_devices.rs"),
+    ),
     (
         "commands/worktrees.rs",
         include_str!("../commands/worktrees.rs"),
