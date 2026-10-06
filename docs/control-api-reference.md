@@ -760,6 +760,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::remove_org_rule`
 - `commands::orgs::assign_host_org`
 - `commands::orgs::assign_tracker_org`
+- `commands::orgs::set_org_setting`
 - `commands::orgs::work_scopes`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`

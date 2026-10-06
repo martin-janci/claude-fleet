@@ -1580,6 +1580,25 @@ fn org_admin_mutation_cases() -> Vec<Case> {
     use fleet_core::service::org_admin::OrgAdminArgs;
     vec![
         (
+            "set_org_setting",
+            "org_admin",
+            json!({ "action": "set_org_setting", "org_id": 1, "key": "budget.org_daily_usd", "value": "5" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::set_org_setting(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        key: Some("budget.org_daily_usd".into()),
+                        value: Some("5".into()),
+                        ..OrgAdminArgs::new("set_org_setting")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "add_org",
             "org_admin",
             json!({ "action": "add_org", "name": "Acme" }),

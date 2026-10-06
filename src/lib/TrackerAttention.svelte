@@ -16,6 +16,7 @@
   import { hubStatus } from './hub';
   import { refreshTrackersHealth, trackerAttentionItems, trackersHealth } from './tracker_health';
   import { decideAttentionItem, decideHealth } from './decide_health';
+  import { orgBudgetItems, orgBudgets } from './org_budget';
 
   /** Tracker health moves on the sync's scale (minutes). */
   const REFRESH_MS = 60_000;
@@ -24,6 +25,9 @@
   // The Jev envelope's calls failing (test map §7) rides the same strip and
   // the same read: one item, to Settings → Decisions (Jev).
   const jev = $derived(decideAttentionItem($decideHealth));
+  // An org over its budget (org administration phase C): one item each, to
+  // Settings → Organisations.
+  const budgets = $derived(orgBudgetItems($orgBudgets));
 
   onMount(() => {
     const t = setInterval(() => {
@@ -34,8 +38,13 @@
   });
 </script>
 
-{#if items.length > 0 || jev}
+{#if items.length > 0 || jev || budgets.length > 0}
   <div class="trackers" data-testid="tracker-attention">
+    {#each budgets as b (b.key)}
+      <button class="pill hot" data-testid="org-budget-item" title={b.detail} onclick={() => openSettingsAt(b.page)}>
+        ⚠ {b.label} →
+      </button>
+    {/each}
     {#if jev}
       <button
         class="pill hot"

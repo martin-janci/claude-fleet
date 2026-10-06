@@ -206,6 +206,7 @@
     "set_device_person",
     "set_device_trust",
     "set_fleet_setting",
+    "set_org_setting",
     "set_primary_work",
     "set_quick_replies",
     "set_session_friendly_name",

@@ -2,8 +2,8 @@
 
 Status: design. Scope was chosen by the owner in conversation on 2026-10-06:
 all four parts below, built into **Settings → Organisations**, not as a
-separate screen. Phases A and B are built (2026-10-06). C and D are
-specified here and each waits for its own plan.
+separate screen. Phases A, B and C are built (2026-10-06). D is
+specified here and waits for the owner's answers.
 
 ## Problem
 
@@ -107,29 +107,50 @@ The hub's CLI-only administration became one hub tool a desktop routes to.
 - **Older hub:** a hub without `org_admin` answers an unknown tool, which
   the desktop shows as the hub's error; nothing else changes on it.
 
-## Phase C — settings, spend and budgets per org
+## Phase C — settings, spend and budgets per org (built)
 
-- **Overrides as data.** Migration `org_settings(org_id, key, value,
-  set_at, set_by)`. A `SPECS` row opts in with `org_override: true` (part of
-  `every_spec_has_consistent_metadata`). `settings::get_for_org(store, key,
-  org)` resolves org → fleet → default; every reader of an opted-in key that
-  knows the session's or host's org calls it. Writes go through
-  `settings::set_by` (audited, `Actor`), as fleet writes do.
-- **First keys:** `work.auto_tidy` (the `orgs.auto_tidy` column is migrated
-  into the table and kept readable for one release), `work.classify_nudge`,
-  `work.session_start_context`, `work.summary_model`,
-  `work.tidy_idle_unlinked_days`, `health.context_red_pct`,
-  `downloads.keep_secs`. `orgs.jev_allowed` stays a column: it is consent,
-  not a setting.
-- **Page:** a section *Settings for this org* — one row per opted-in key:
-  *Inherit (fleet: X)* or a value, validated by the spec's own kind.
-- **Spend:** `usage_daily` gains `org_id` (migration re-keys it by `(day,
-  host_alias, org_id, backfill)`, the session's org at booking time). The
-  overview shows today / 7 days / 30 days; Usage gets an org filter.
-- **Budgets:** `org_settings` keys `budget.daily_usd` and
-  `budget.monthly_usd`. Crossing one raises an Attention item
-  (`org_budget`) and a `fleet_health.orgs[]` entry. Fleet never stops a
-  session over a budget: it warns.
+- **Overrides as data.** Migration 104 adds `org_settings(org_id, key,
+  value, set_at)`. A `SPECS` row opts in with `.per_org()` (shown as
+  `per_org` in `describe`). `settings::get_string_for` / `get_bool_for`
+  read the org's own valid value, else the fleet's; `org_values` gives a
+  pass every org's value of one key. `settings::set_for_org` validates and
+  normalises like a fleet write and audits under `<key>@org:<id>`, with the
+  device that made it.
+- **The keys, and who reads them per org:** `work.classify_nudge` (the
+  nudge, by the session's org), `work.summary_model` (Summarise, by the past
+  link's `snap_org_id`), `work.tidy_idle_unlinked_days` (Tidy's planner,
+  `TidyConfig::unlinked_idle_for`), and the new budgets. Not migrated:
+  `orgs.auto_tidy` stays its own column — it already was a per-org override
+  with an Inherit control — and `orgs.jev_allowed` stays consent. Keys whose
+  readers do not know the org (`work.session_start_context`, which also
+  decides whether the hook is installed; `health.context_red_pct`, read once
+  per pass) stay fleet-wide.
+- **Spend:** `usage_daily_org(day, org_id, backfill, …)`, booked beside
+  `usage_daily` in the same `apply_usage` pass, by the session's org at
+  booking time (`session_org_sql!`). Additive rather than re-keying
+  `usage_daily`, so no existing roll-up moves. It starts empty: spend before
+  the upgrade has no org. Live rows only count (`org_live_cost_since`).
+- **Budgets:** `budget.org_daily_usd` and `budget.org_monthly_usd` (whole
+  USD, `0` none; Settings → Limits → *Company budgets*, and per org on its
+  page). `service::org_spend` reads spend (today, 7 days, calendar month,
+  UTC) and which budgets are reached. Fleet warns; it never stops a session.
+- **Who sees spend:** an org's spend sums other people's private sessions,
+  so it follows `usage_by_day`'s rule for a person's device — all or
+  nothing, only for a caller that sees every session row
+  (`org_spend::sees_all_spend`). `OrgDetail` carries the org's own settings
+  for the administrator (`AdminView::Admin`) and its spend and budgets only
+  when that administrator also sees every session.
+  `fleet_health.org_budgets` lists the orgs at or over a budget for
+  `HealthView::Fleet` and a person's device that sees every session; it is
+  in the hub contract (additive), and the desktop raises one Attention item
+  per org and period, "Acme over its daily budget", opening Settings →
+  Organisations.
+- **Page:** the org page's *Overview* shows spent today / last 7 days / this
+  month and the budgets reached; *Its own settings* lists each per-org
+  setting inheriting the fleet's value (with *Set for this org*) or with the
+  org's own (the ordinary settings row, with *Inherit*). Resource field
+  kinds `money` and `settings`; `org_admin { set_org_setting }` and the
+  desktop command `set_org_setting` (routed).
 
 ## Phase D — members and roles (multi-user M2)
 

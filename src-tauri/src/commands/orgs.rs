@@ -250,6 +250,35 @@ pub async fn assign_tracker_org(
     )
 }
 
+/// Org administration phase C: an org's own value of a per-org setting;
+/// `value: None` inherits the fleet's again.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetOrgSettingArgs {
+    pub org_id: i64,
+    pub key: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[tauri::command]
+pub async fn set_org_setting(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: SetOrgSettingArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::set_org_setting(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            key: Some(args.key),
+            value: args.value,
+            ..OrgAdminArgs::new("set_org_setting")
+        },
+    )
+    .await
+}
+
 // --- reads (routed) ------------------------------------------------------------
 
 #[tauri::command]
@@ -316,6 +345,17 @@ pub(crate) mod routed {
         store: &Mutex<Store>,
     ) -> Result<serde_json::Value, IpcError> {
         fleet_core::service::org_admin::run(args, store, fleet_core::service::org_admin::Me::LOCAL)
+    }
+
+    pub async fn set_org_setting(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_org_setting", &args).await,
+            None => local(&args, store),
+        }
     }
 
     pub async fn add_org(

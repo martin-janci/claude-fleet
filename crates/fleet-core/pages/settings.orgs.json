@@ -36,6 +36,22 @@
         {
           "type": "field",
           "key": "needs_you"
+        },
+        {
+          "type": "field",
+          "key": "spent_today_micros"
+        },
+        {
+          "type": "field",
+          "key": "spent_week_micros"
+        },
+        {
+          "type": "field",
+          "key": "spent_month_micros"
+        },
+        {
+          "type": "field",
+          "key": "over_budget"
         }
       ]
     },
@@ -102,6 +118,20 @@
         {
           "type": "field",
           "key": "jev_allowed"
+        }
+      ]
+    },
+    {
+      "title": "Its own settings",
+      "items": [
+        {
+          "type": "field",
+          "key": "settings"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "The fleet-wide values are in Settings → Limits and Settings → Work; what is set here applies to this org's sessions only."
         }
       ]
     }

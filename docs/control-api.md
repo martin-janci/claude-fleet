@@ -265,7 +265,9 @@ Index by area (names only; see the reference for details):
 
 - **Fleet & hosts** — `fleet_health` (with `trackers`: each tracker's sync
   health and the detection backlog, from cached sync state; a per-host token
-  sees its own org's trackers), `usage_report` (estimated token
+  sees its own org's trackers; and `org_budgets`, the orgs at or over a
+  daily or monthly budget, for a caller that sees every session),
+  `usage_report` (estimated token
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `hide_host`, `provision_hosts`,
@@ -796,7 +798,9 @@ Index by area (names only; see the reference for details):
   and `work_admin`. Orgs: `work_admin`'s org actions under the same names
   (`list_orgs`, `add_org`, `update_org`, `remove_org`, `add_rule`,
   `remove_rule`, `assign_host`, `unassign_host`, `assign_tracker`), with an
-  org named by `org_id` or `org`. Devices: `list_devices` (name, mode,
+  org named by `org_id` or `org`, and `set_org_setting { org, key, value }`
+  (an org's own value of a per-org setting; no `value` inherits the
+  fleet's). Devices: `list_devices` (name, mode,
   trust, org, person, catalog grants, `this_device`; never a peer link or an
   updater token), `pair_device { device, mode: full|readonly, trusted, org,
   person, ttl_s }` (a one-time code, its URL and the URL's QR as rows of

@@ -11,6 +11,7 @@
 // with one owner sees no new chrome — and a persisted scope that no longer
 // exists (or a single-scope fleet) reads as "all", never as a filter nobody
 // can see.
+import type { Descriptor } from './pages/pages';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { readPref, writePref } from './prefs';
@@ -66,6 +67,22 @@ export interface OrgDetail extends OrgRow {
   needs_you?: number;
   /** Its bound paired devices — present only for the fleet's administrator. */
   devices?: { name: string; mode: string; trusted: boolean; last_seen_at?: number }[];
+  /** Phase C, administrator only: its per-org settings. */
+  settings?: OrgSettingRow[];
+  /** Phase C, administrator only, when the caller sees every session. */
+  spent_today_micros?: number;
+  spent_week_micros?: number;
+  spent_month_micros?: number;
+  budget_daily_usd?: number;
+  budget_monthly_usd?: number;
+  over_budget?: ('daily' | 'monthly')[];
+}
+
+/** One per-org setting on an org's page: the setting described with the
+ *  fleet's value, and the org's own when it set one. */
+export interface OrgSettingRow {
+  setting: Descriptor;
+  own?: string;
 }
 
 /** `org_suggestions`: create org `name` from `owner/*` and/or for a tracker. */

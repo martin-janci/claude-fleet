@@ -67,6 +67,8 @@ export type FieldKind =
   | { type: 'choice'; options: [string, string][] }
   | { type: 'time' }
   | { type: 'count' }
+  | { type: 'money' }
+  | { type: 'settings'; set: ActionSpec }
   | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[] };
 
 export type FieldSpec = {
@@ -166,6 +168,12 @@ export function choiceLabel(f: FieldSpec, v: string): string {
   return f.type === 'choice' ? (f.options.find(([o]) => o === v)?.[1] ?? v) : v;
 }
 
+/** Micro-USD as dollars: `$12.34`, `$0.00`. */
+export function dollars(micros: unknown): string {
+  const n = typeof micros === 'number' ? micros : 0;
+  return `$${(n / 1_000_000).toFixed(2)}`;
+}
+
 /** Unix seconds as how long ago, from `now`. */
 export function ago(secs: unknown, now: number): string {
   if (typeof secs !== 'number') return 'never';
@@ -186,7 +194,7 @@ export function applies(r: ResourceType, a: ActionSpec, record: ResourceRecord):
 export function recordValues(r: ResourceType, record: ResourceRecord): Record<string, string> {
   const out: Record<string, string> = {};
   for (const f of r.fields) {
-    if (f.type === 'items') continue;
+    if (f.type === 'items' || f.type === 'settings') continue;
     out[f.id] = String(fieldValue(f, record));
   }
   return out;

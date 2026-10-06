@@ -187,6 +187,88 @@
           "type": "count"
         },
         {
+          "help": "Estimated cost of its sessions today (UTC). Shown when you can see every session.",
+          "id": "spent_today_micros",
+          "label": "Spent today",
+          "type": "money"
+        },
+        {
+          "help": "Estimated cost of its sessions over the last 7 days.",
+          "id": "spent_week_micros",
+          "label": "Last 7 days",
+          "type": "money"
+        },
+        {
+          "help": "Estimated cost of its sessions this calendar month (UTC).",
+          "id": "spent_month_micros",
+          "label": "This month",
+          "type": "money"
+        },
+        {
+          "add": [],
+          "help": "The budgets it has reached. Fleet only warns; it never stops a session.",
+          "id": "over_budget",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Over budget",
+          "type": "items"
+        },
+        {
+          "help": "Settings this org may set for itself; the rest of the fleet keeps its value. Inherit takes the fleet's again.",
+          "id": "settings",
+          "label": "Its own settings",
+          "set": {
+            "bind": [
+              [
+                "org_id",
+                {
+                  "from": "record",
+                  "name": "id"
+                }
+              ],
+              [
+                "key",
+                {
+                  "from": "param",
+                  "name": "key"
+                }
+              ],
+              [
+                "value",
+                {
+                  "from": "param",
+                  "name": "value"
+                }
+              ]
+            ],
+            "command": "set_org_setting",
+            "envelope": "args",
+            "id": "org.set_setting",
+            "label": "Set",
+            "params": [
+              {
+                "label": "Setting",
+                "max": 128,
+                "name": "key",
+                "placeholder": "",
+                "required": true,
+                "type": "text"
+              },
+              {
+                "label": "Value",
+                "max": 4096,
+                "name": "value",
+                "placeholder": "",
+                "required": false,
+                "type": "text"
+              }
+            ],
+            "report": false
+          },
+          "type": "settings"
+        },
+        {
           "add": [
             {
               "bind": [

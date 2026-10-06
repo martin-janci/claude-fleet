@@ -900,7 +900,15 @@ hand it to a person, let it change a catalog, or revoke it) and **People**
 made to them). On a desktop paired with a hub these change the hub's orgs,
 devices and people, and need this desktop to be trusted (`fleet-hub client
 trust <name>`); none of them can lock out the device you are using. The
-later phases (per-org settings and budgets, members and roles) are in
+**Its own settings** on an org's page let it keep a different value of a
+few settings — the classification nudge, the summary model, how long Tidy
+up waits for an unlinked session, and its budgets — while every other
+session keeps the fleet's. The overview shows what the org's sessions cost
+today, over the last 7 days and this month (counted from the upgrade that
+added it), and a daily or monthly budget (Settings → Limits → Company
+budgets, or per org) raises an Attention item when the org reaches it;
+fleet only warns. Spend is shown only to someone who sees every session.
+Members and roles, the last phase, are in
 `docs/superpowers/specs/2026-10-06-org-administration-design.md`.
 
 ## Trackers in fleet health
