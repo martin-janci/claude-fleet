@@ -51,7 +51,12 @@ in <project>" rows, ranked differently (after every session, by
 | Sidebar "+ New session" button | switcher, New session mode |
 | ⌘N (macOS) / Ctrl+Shift+N | same |
 | Hosts view `n` on a host | same, preferred host = that host |
-| ⌘K / ⌘P | switcher, normal mode (unchanged), whose project rows now use the same ranking |
+| ⌘K / ⌘P | switcher, normal mode (unchanged), whose empty-query project rows drop picker-hidden projects (a query still finds them) |
+
+Phase 1 ships only that much of normal mode: its project rows keep their
+own ranking and merely leave out what the picker hides, so both surfaces
+agree on what is hidden. Giving normal ⌘K the full shared ranking (pins,
+Suggested, groups) is a follow-up.
 
 In New session mode the input carries a leading chip **New session in**
 and the placeholder `project or ticket…`. Backspace on an empty query
@@ -95,7 +100,13 @@ current-session +80; hidden −400 and tagged `hidden · <reason>`. Last row:
 
 A project's group, first match wins:
 
-1. the person's group (`project_picks.grp`);
+1. the person's group (`project_picks.grp`) — named case-insensitively:
+   when it equals an automatic prefix cluster of **that project's owner**
+   (step 2), the project joins that cluster's section (its name and
+   subtitle) instead of making a second section of the same name; any
+   other person's group is one section per lower-cased name (`Mine` and
+   `mine` are one). The actions menu still offers *Back to automatic* for
+   a project the person placed, also when it joined a cluster;
 2. **prefix cluster**: per owner, over **all** that owner's projects (so a
    hide never moves a neighbour), the longest dash-separated prefix shared
    by ≥ 3 repos (`sales-twins-app`, `-mobile`, `-revonaut-fixes` →
@@ -142,10 +153,10 @@ group, fold) — data arriving mid-open never moves the highlight.
 | ⌘↵ | start with the last settings (dialog autostarts) / start the ticket |
 | ⌘1…⌘9 | open the numbered Pinned/Suggested row |
 | ⌘P | pin / unpin the highlighted project |
-| ⌘⌫ | hide / unhide, with an Undo toast |
+| ⌘⌫ | with an empty query: hide / unhide, with an Undo toast; the highlight moves to the row that followed (else the one before). With a query the key is the input's (delete a word / line) and the hint row drops it; the menu still hides |
 | ⌘G | the group menu for the highlighted project |
 | ⇧F10, context-menu key, right-click | the actions menu (`role=menu`) |
-| ⌘Z | undo the last pin / hide / group change |
+| ⌘Z | with an empty query: undo the last pin / hide / group change made in this open (opening the switcher forgets it), with an `Undid: …` toast. With a query the key is the input's own undo |
 | Esc | close a menu; else clear a non-empty query; else close |
 
 Hover shows icon buttons (pin, group, hide) on a project row; they are
@@ -187,7 +198,10 @@ CREATE TABLE project_picks (
 - The frontend loads picks at startup (and when the hub connection
   changes) and again in the background each time the switcher opens; a
   write patches the store optimistically and rolls back with an error
-  toast on failure.
+  toast on failure — except a hub without the tool (`E_HUB_PROTOCOL`) or
+  one that refuses the token (`E_FORBIDDEN`), which says *This hub doesn't
+  support project pins yet* once per session, and *Add project*'s `keep`
+  write, which rolls back quietly.
 
 ### Starting with the last settings
 
