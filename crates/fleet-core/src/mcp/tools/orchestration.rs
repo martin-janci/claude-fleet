@@ -990,7 +990,8 @@ impl FleetTools {
         suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
         the updated row. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
-        ticket (project_ids: one per repo; dry_run; parallel). handover {session_id}: ask it to \
+        ticket (project_ids: one per repo; parallel: beside a live one); \
+        preview_start: where it would land, nothing made. handover {session_id}: ask it to \
         write its hand-off. summarize {key, link_id}: \
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
@@ -1040,17 +1041,7 @@ impl FleetTools {
             ),
             _ => None,
         };
-        // `matches!`, not `args.action == "start"`: that literal is how
-        // `umbrella_arms` finds the arm that SERVES an action (see `accept`).
-        let dry_run = args.dry_run == Some(true) && matches!(args.action.as_str(), "start");
-        if dry_run && multi.is_some() {
-            return Err(mcp_err(
-                "E_INVALID",
-                "dry_run previews one repository: pass project_id, not project_ids",
-                None,
-            ));
-        }
-        if caller.is_operator() && !dry_run && matches!(args.action.as_str(), "resume" | "start") {
+        if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start") {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
             // start or resume is never gated.)
@@ -1485,6 +1476,37 @@ impl FleetTools {
             report.results.extend(refused);
             return ok_json(&report);
         }
+        if args.action == "preview_start" {
+            // Task → session spec P-1: where `start` with these arguments would
+            // land, what it would send and what is in the way. Nothing is
+            // made, so nothing is confirmed, the operator's included; the
+            // fences are `plan_resolved`'s own, through the WHOLE scope as the
+            // start's are (its conflicts name a session only when the caller
+            // may see it). Its own action, not a flag on `start`: a hub older
+            // than this answers `E_INVALID "unknown work_link action"` instead
+            // of starting a session it was only asked to preview.
+            if args.project_ids.is_some() {
+                return Err(mcp_err(
+                    "E_INVALID",
+                    "preview_start previews one repository: pass project_id, not project_ids",
+                    None,
+                ));
+            }
+            let owner = {
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
+                super::fleet::owner_for(&caller, &s)
+            };
+            let view_scope = self.view_scope(&caller)?;
+            let preview = crate::service::trackers::tickets::preview_start(
+                &self.store,
+                &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
+                &view_scope,
+                &crate::service::trackers::default_net(),
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&preview);
+        }
         if args.action == "start" {
             // The caller decides whose start it is (D34): an agent's links
             // `agent_started`, never a person's `started`.
@@ -1509,20 +1531,6 @@ impl FleetTools {
             // `may_drive` strength, per planned sibling for the multi-repo
             // form, which is why the gate is there and not here.
             let view_scope = self.view_scope(&caller)?;
-            if dry_run {
-                // Task → session spec P-1: where it would land, what it would
-                // send and what is in the way. Nothing is made, so nothing is
-                // confirmed; the fences are `plan_resolved`'s own.
-                let preview = crate::service::trackers::tickets::preview_start(
-                    &self.store,
-                    &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
-                    &view_scope,
-                    &crate::service::trackers::default_net(),
-                )
-                .await
-                .map_err(to_mcp_err)?;
-                return ok_json(&preview);
-            }
             if let Some(ids) = multi.as_deref() {
                 // Work graph M9.6: one sibling per repository, same branch.
                 let out = crate::service::trackers::tickets::start_work_many(

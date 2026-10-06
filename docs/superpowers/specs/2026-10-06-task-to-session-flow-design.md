@@ -77,7 +77,7 @@ There are three modes, all over the **same** task, link and start primitives:
 
 Each primitive is built once and called by the desktop, the phone, the operator and the run executor.
 
-**P-1. Start preview: `work_link { action: start, dry_run: true }`** (desktop: `preview_start_work`). It answers without creating anything:
+**P-1. Start preview: `work_link { action: preview_start }`** (desktop: `preview_start_work`). It answers without creating anything. It is its own action rather than a `dry_run` flag on `start` (changed at implementation): an older hub ignores an unknown field and would *start* the session it was asked to preview, as `wire_contract.rs` records for `move_session`; an unknown action is refused instead (`E_INVALID`), and the desktop then starts as before.
 - the resolved `StartPlan`: project, host, branch, and whether the worktree is new or reused;
 - `candidates { projects[], hosts[] }`, sorted by recent use and reachability;
 - `checkout { exists, dirty?, busy_by? }`. The dirty probe is best-effort: 3 s, and `null` when unknown;
@@ -513,7 +513,7 @@ New journal kinds: `decision` and `verify`. New settings live on an **Orchestrat
 
 | Surface | Additions |
 |---|---|
-| `work_link` | `start {dry_run}`, `switch`, `abandon_start`, `propose_tree`, `accept_many`*, `plan_put`, `run`, `retry`, `pause`, `resume`, `stop`, `verify`, `grant`*, `revoke`*, `level`* (* person-only: refused to per-host tokens **and** to the operator) |
+| `work_link` | `preview_start`, `start {parallel}`, `switch`, `abandon_start`, `propose_tree`, `accept_many`*, `plan_put`, `run`, `retry`, `pause`, `resume`, `stop`, `verify`, `grant`*, `revoke`*, `level`* (* person-only: refused to per-host tokens **and** to the operator) |
 | `link` | `details.live_elsewhere[]`, `ack_live` |
 | `work { tickets }` (the desktop's `work_tickets` command) | `include_local` |
 | `work` | `plan { plan_id }`: plan, waves, board and budget burn |
@@ -542,7 +542,7 @@ The order follows the owner's stated pain first: *"chýba mi to hlavne na deskto
 | # | Slice | Contents | Roadmap part |
 |---|---|---|---|
 | **A0** | Fix now | **Done 2026-10-06.** The operator may not accept or reject proposals (gap 9). The operator is excluded from detection and the classification nudge (gap 12). | 1 |
-| **A1** | Start preview + Work button | P-1, P-8, the split button and popover in TaskList and WorkTaskDetail, the brief on by default for tickets, J1/J2/J5/J6, keyboard | 1 |
+| **A1** | Start preview + Work button | **Done 2026-10-06.** P-1 (`work_link { preview_start }`, `preview_start_work`), P-8 (`parallel`), the Work split button in TaskList (Open / Continue / Start, ▾ Start new… / Continue ‹session› / Copy key, `j`/`k`/`s`/⇧S) and the start popover (repo, host, branch, brief preview, conflicts with their choices), the task page's Start new through the same preview, the brief on by default for tickets, J1/J2/J5/J6. **Left for later:** the task page keeps its own Open / Continue buttons (their share gating is pinned by `resume_gates.test.ts`); *Remember for this task* (no write path for a native item's project yet); the dirty-checkout probe (`checkout.dirty`, A3); "Accept & start" as the row's label (proposals are not listed rows; the popover offers it). | 1 |
 | **A2** | Attach and switch | P-2, P-3, P-4, **P-7 link windows**, J3/J4, the attach picker, Undo | 1 |
 | **C0** | Brainstorm skill | `fleet-brainstorm` in the operator's directory; the plan goes to the root task's notes and journal. No new tables. **The owner asked that this not be forgotten, so it comes early.** | 3 / 4 |
 | **A3** | Polish | P-5 progress strip, P-6 Cancel start, J7 multi-repo in the popover, empty states | 1 |

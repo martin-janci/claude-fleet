@@ -1750,10 +1750,10 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "preview_start_work",
             "work_link",
-            // The start's own fields, plus the dry run.
-            json!({ "session_id": null, "action": "start", "key": "ABC-1", "item_id": null,
+            // The start's own fields, under its own action.
+            json!({ "session_id": null, "action": "preview_start", "key": "ABC-1", "item_id": null,
                     "link_id": null, "source": null, "project_id": 3, "host_alias": "h",
-                    "with_brief": true, "parallel": true, "dry_run": true }),
+                    "with_brief": true, "parallel": true }),
             r#"{"key":"ABC-1","title":"","item_id":null,"plan":null,"missing":"host","projects":[],"hosts":[],"conflicts":[],"brief":null,"checkout":null}"#,
             Box::new(|b, s, _| {
                 block_on(commands::trackers::routed::preview_start_work(

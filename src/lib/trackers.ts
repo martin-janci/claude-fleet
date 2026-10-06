@@ -187,6 +187,8 @@ export interface StartWorkArgs {
   worktree?: string;
   /** Start across organisations anyway (work graph M5). */
   force_cross_org?: boolean;
+  /** Start beside a live session on the same key, in a checkout of its own. */
+  parallel?: boolean;
 }
 
 /** Start work on a ticket: one call, on the hub when paired. `E_EXISTS`

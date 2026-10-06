@@ -547,7 +547,7 @@ pub(crate) mod routed {
         store: &Arc<Mutex<Store>>,
     ) -> Result<StartPreview, IpcError> {
         let wire = WorkLinkArgs {
-            dry_run: Some(true),
+            action: "preview_start".into(),
             ..start_wire(&args)
         };
         match backend.hub() {

@@ -65,6 +65,18 @@ const flush = async () => {
     await tick();
   }
 };
+/** A preview with everything resolved and nothing in the way. */
+const cleanPreview = {
+  key: 'TASK-1',
+  title: 'Write notes',
+  item_id: 1,
+  plan: { key: 'TASK-1', title: 'Write notes', item_id: 1, project_id: 3, host_alias: 'mac', branch: 'task-1-write-notes', name: 'TASK-1 Write notes' },
+  projects: [{ id: 3, owner: 'acme', repo: 'api' }],
+  hosts: [{ alias: 'mac', reachable: true }],
+  conflicts: [],
+  brief: 'Write notes',
+  checkout: { exists: false },
+};
 const calls = (cmd: string) => (invoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === cmd);
 
 beforeEach(() => {
@@ -75,6 +87,7 @@ beforeEach(() => {
     if (cmd === 'list_projects') return [];
     if (cmd === 'create_work_task') return { id: 9, key: 'TASK-9', title: 'New', source: 'local' };
     if (cmd === 'start_work') return { id: 50, host_alias: 'mac', tmux_name: 'x' };
+    if (cmd === 'preview_start_work') return cleanPreview;
     return null;
   });
 });
@@ -116,7 +129,7 @@ describe('TaskList', () => {
     expect(screen.getByTestId('task-section-done').querySelector('ul')).toBeNull();
   });
 
-  it('quick add creates a task; Start starts one by item id', async () => {
+  it('quick add creates a task; the Work button previews, then starts where the preview said', async () => {
     render(TaskList);
     await flush();
     const input = screen.getByTestId('task-add-input') as HTMLInputElement;
@@ -124,9 +137,32 @@ describe('TaskList', () => {
     await fireEvent.keyDown(input, { key: 'Enter' });
     await flush();
     expect(calls('create_work_task')[0][1]).toEqual({ args: { title: 'New' } });
-    await fireEvent.click(screen.getByTestId('task-start'));
+    const row = screen.getByTestId('task-section-todo');
+    const primary = row.querySelector('[data-testid="work-button-primary"]') as HTMLButtonElement;
+    expect(primary.textContent).toBe('Start');
+    await fireEvent.click(primary);
     await flush();
-    expect(calls('start_work')[0][1]).toEqual({ args: { item_id: 1, project_id: 3 } });
+    expect(calls('preview_start_work')[0][1]).toEqual({ args: { item_id: 1, project_id: 3, with_brief: true } });
+    expect(calls('start_work')[0][1]).toEqual({
+      args: { item_id: 1, project_id: 3, host_alias: 'mac', with_brief: true },
+    });
+    expect(screen.queryByTestId('start-popover')).toBeNull();
+  });
+
+  it('a task with a live session opens it; s and ⇧S act on the selected row', async () => {
+    render(TaskList);
+    await flush();
+    const doing = screen.getByTestId('task-section-doing');
+    // OM-110 has an active count but no live link in the fixture: Start.
+    expect(doing.querySelector('[data-testid="work-button-primary"]')?.textContent).toBe('Start');
+    const list = screen.getByTestId('task-list');
+    await fireEvent.keyDown(list, { key: 'j' });
+    await flush();
+    await fireEvent.keyDown(list, { key: 'S', shiftKey: true });
+    await flush();
+    expect(calls('preview_start_work')).toHaveLength(1);
+    expect(screen.getByTestId('start-popover')).toBeTruthy();
+    expect(calls('start_work')).toHaveLength(0);
   });
 
   it('▾ adds a project and notes to the new task', async () => {

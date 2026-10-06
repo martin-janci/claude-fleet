@@ -3783,10 +3783,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// M1's sharing tools, 75,369) into Assets M6 (the changesets
     /// propose_layer / change / `LayerChange` and drift_diff growth,
     /// +1,347 bytes over `main`): exactly the two sides' sum.
-    /// Measured at 76,891 on 2026-10-06 after the task → session spec's A1
-    /// (`work_link { start }` takes `dry_run` and `parallel`, named in the
-    /// description and as two parameters, +175 bytes).
-    const BUDGET_BYTES: usize = 76_991;
+    /// Measured at 76,892 on 2026-10-06 after the task → session spec's A1
+    /// (`work_link { start }` takes `parallel`, and a `preview_start` action
+    /// sits beside it, named in the description and the action enum, +176
+    /// bytes).
+    const BUDGET_BYTES: usize = 76_992;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10585,6 +10586,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `new_session` is exempt too", which stopped being true when T8d moved
     // `new_session` into `SESSION_REACH` (T9b).
     ("work_link", "start", &["ViewScope"]),
+    // The start's preview (task → session spec P-1) plans exactly as `start`
+    // does, through `plan_resolved`, so it threads the same whole scope.
+    ("work_link", "preview_start", &["ViewScope"]),
 ];
 
 /// **Every `ViewScope` row's PROOF: the behavioural test that shows the fence
@@ -10742,6 +10746,15 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
         "start",
         "a_start_refusal_names_no_session_another_person_cannot_see",
         "a_start_does_not_land_in_another_persons_worktree",
+    ),
+    // The start's preview plans through the same `plan_resolved`, and its
+    // conflicts are the `E_EXISTS` prose turned into data: the same two
+    // fences, and their own two tests.
+    (
+        "work_link",
+        "preview_start",
+        "a_start_preview_names_no_session_another_person_cannot_see",
+        "a_start_preview_does_not_plan_into_another_persons_worktree",
     ),
 ];
 
@@ -15347,6 +15360,138 @@ async fn a_start_does_not_land_in_another_persons_worktree() {
     assert!(
         !e.contains("E_FORBIDDEN"),
         "a drive grantee is past the landing fence: {e}"
+    );
+}
+
+/// The start preview's `live_session` conflict is the start's `E_EXISTS`
+/// prose turned into data: it must name the session on the key — its name,
+/// its host, its id — only to a caller who may see it, exactly as the
+/// refusal does.
+#[tokio::test]
+async fn a_start_preview_names_no_session_another_person_cannot_see() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let a_row = s
+        .upsert_session(
+            "dev-ada-PAY-123",
+            "h",
+            Some(pid),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    assert!(s.claim_if_unclaimed(a_row, Some(ada)).unwrap());
+    s.set_friendly_name("h", "dev-ada-PAY-123", Some("Ada on payments"))
+        .unwrap();
+    s.link_session_work(a_row, crate::store::WorkTarget::Key("PAY-123"), "manual")
+        .unwrap();
+    let t = test_tools(s);
+    let preview = |caller: Caller| {
+        let t = t.clone();
+        async move {
+            let r = t
+                .work_link(
+                    Extension(caller),
+                    Parameters(
+                        serde_json::from_value(serde_json::json!({
+                            "action": "preview_start", "key": "PAY-123",
+                            "project_id": pid, "host_alias": "h",
+                        }))
+                        .unwrap(),
+                    ),
+                )
+                .await
+                .expect("a preview answers, busy key or not");
+            format!("{r:?}")
+        }
+    };
+
+    let bobs = preview(device_of(bob, ada)).await;
+    assert!(
+        bobs.contains("live_session") && bobs.contains("Someone is already working on this"),
+        "the key is busy either way, and that much is not a secret: {bobs}"
+    );
+    for secret in ["dev-ada-PAY-123", "Ada on payments"] {
+        assert!(
+            !bobs.contains(secret),
+            "the preview handed Bob {secret}: {bobs}"
+        );
+    }
+    assert!(
+        !bobs.contains(&format!("session_id\\\":{a_row}")),
+        "nor the id: {bobs}"
+    );
+    let adas = preview(device_of(ada, ada)).await;
+    assert!(
+        adas.contains("Ada on payments") && adas.contains(&format!("{a_row}")),
+        "her own session is hers to be told about: {adas}"
+    );
+    let s = t.store.lock().unwrap();
+    assert_eq!(
+        s.live_work_sessions_for_key("PAY-123").unwrap().len(),
+        1,
+        "a preview makes nothing"
+    );
+}
+
+/// The preview plans the landing exactly as the start does, so it is refused
+/// the same checkout: never a plan, nor a name, for a pane in another
+/// person's tree — the LOST row a reboot left there included.
+#[tokio::test]
+async fn a_start_preview_does_not_plan_into_another_persons_worktree() {
+    let s = Store::open_in_memory().unwrap();
+    let host = crate::service::projects::LOCAL_HOST;
+    s.upsert_host(host).unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let wt = s
+        .upsert_worktree(pid, "pay-123", "/p/.worktrees/pay-123", Some("pay-123"))
+        .unwrap();
+    let a_row = s
+        .upsert_session(
+            "dev-ada-feature",
+            host,
+            Some(pid),
+            Some(wt),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    assert!(s.claim_if_unclaimed(a_row, Some(ada)).unwrap());
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET status='ghost', lost_at=10, lost_reason='reboot' WHERE id=?1",
+            rusqlite::params![a_row],
+        )
+        .unwrap();
+    let t = test_tools(s);
+    let e = t
+        .work_link(
+            Extension(device_of(bob, ada)),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "preview_start", "key": "PAY-123",
+                    "project_id": pid, "host_alias": host, "worktree": "pay-123",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect_err("Bob is not given a plan into Ada's checkout");
+    let e = format!("{e:?}");
+    assert!(e.contains("E_FORBIDDEN"), "refused, not planned: {e}");
+    assert!(
+        !e.contains("dev-ada-feature"),
+        "and the refusal names no session: {e}"
     );
 }
 

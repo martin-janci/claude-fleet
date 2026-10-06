@@ -168,9 +168,6 @@ pub struct WorkLinkArgs {
     /// Start: beside a live one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel: Option<bool>,
-    /// Start: preview only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dry_run: Option<bool>,
     /// Snooze (7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<u32>,
@@ -387,6 +384,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "trust_project",
     "resume",
     "start",
+    "preview_start",
     "handover",
     "archive",
     "unarchive",
@@ -434,7 +432,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_project_trust", "work_link", "trust_project"),
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
-    ("preview_start_work", "work_link", "start"),
+    ("preview_start_work", "work_link", "preview_start"),
     ("request_work_handover", "work_link", "handover"),
     ("start_work_multi", "work_link", "start"),
     ("work_tidy", "work", "tidy"),
