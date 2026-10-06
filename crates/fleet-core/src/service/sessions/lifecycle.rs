@@ -1824,22 +1824,6 @@ where
         .await
 }
 
-/// Poll the tmux pane until `cl`'s REPL prompt appears, up to ~6s. Returns
-/// when ready, or after the timeout (best-effort — a missed prompt just means
-/// the user presses Enter / re-sends manually; spawn_review already soft-fails
-/// the seed). `cl`'s prompt box draws a border (│) and a `>` prompt; we look
-/// for either as a readiness signal.
-pub(super) async fn wait_for_repl_ready(tmux: &dyn TmuxExec, name: &str) {
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        if let Ok(pane) = tmux.capture_pane(name).await {
-            if pane.contains('>') || pane.contains('│') {
-                return;
-            }
-        }
-    }
-}
-
 /// The pane command to relaunch when (re)creating a session. `shell` → a bare
 /// shell; otherwise resume the session's own Claude id (or `--continue` for a
 /// legacy session with no stored id). A stored id is validated before use so a

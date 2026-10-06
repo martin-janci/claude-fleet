@@ -1000,10 +1000,6 @@ pub async fn handle_stop_for_worker(
     }
 }
 
-/// How long `wait_for_repl_ready` polls a freshly spawned worker's pane.
-const REPL_READY_TIMEOUT: Duration = Duration::from_secs(20);
-const REPL_READY_POLL: Duration = Duration::from_secs(1);
-
 /// PURE: does a pane tail show the Claude REPL's input chrome (i.e. it will
 /// accept a typed prompt)? The same cues `pane_intel::derive_status` treats
 /// as idle.
@@ -1017,34 +1013,6 @@ pub fn pane_shows_repl(text: &str) -> bool {
     ]
     .iter()
     .any(|cue| lower.contains(cue))
-}
-
-/// After `new_session` the tmux pane exists but Claude may still be
-/// starting; text typed before the REPL is up lands in the wrong process.
-/// Poll the pane (bounded) until it shows the REPL chrome. Best-effort: on
-/// timeout or capture failure the caller proceeds anyway.
-pub async fn wait_for_repl_ready(ssh: &Arc<SshClient>, host_alias: &str, tmux_name: &str) {
-    let tmux: Box<dyn crate::tmux::TmuxExec> = if host_alias == "local" {
-        Box::new(crate::tmux::LocalTmux)
-    } else {
-        Box::new(crate::tmux::RemoteTmux {
-            client: Arc::clone(ssh),
-            host: host_alias.to_string(),
-        })
-    };
-    let deadline = tokio::time::Instant::now() + REPL_READY_TIMEOUT;
-    loop {
-        if let Ok(text) = tmux.capture_pane(tmux_name).await {
-            if pane_shows_repl(&text) {
-                return;
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!("REPL of {host_alias}/{tmux_name} not ready after {REPL_READY_TIMEOUT:?}; sending anyway");
-            return;
-        }
-        tokio::time::sleep(REPL_READY_POLL).await;
-    }
 }
 
 /// The worker's last transcript turn, or `None` when it cannot be read.

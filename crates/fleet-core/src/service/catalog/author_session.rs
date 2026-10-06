@@ -18,8 +18,7 @@ use crate::cancel::CancellationRegistry;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::add_project::{add_project, AddProjectArgs, AddProjectSource};
-use crate::service::sessions::{new_session, send_prompt, NewSessionArgs, SendPromptArgs};
-use crate::service::tasks::wait_for_repl_ready;
+use crate::service::sessions::{new_session, NewSessionArgs};
 use crate::ssh::SshClient;
 use crate::store::{SessionRow, Store};
 use serde::Deserialize;
@@ -267,27 +266,14 @@ pub async fn spawn_author_session(
     )
     .await?;
 
-    wait_for_repl_ready(ssh, "local", &row.tmux_name).await;
-    // Soft-fail: the session is already spawned and registered. If seeding
-    // the prompt fails, DON'T discard it — return it anyway so the user can
-    // type the authoring instructions manually. Mirrors `spawn_review`.
-    if let Err(e) = send_prompt(
-        SendPromptArgs {
-            host_alias: "local".to_string(),
-            tmux_name: row.tmux_name.clone(),
-            prompt,
-            submit: true,
-            keys: None,
-        },
-        store,
-        ssh,
-    )
-    .await
-    {
+    // Soft-fail: the session is already spawned and registered. If the
+    // prompt is not typed (the REPL did not come up, a dialog is up), DON'T
+    // discard it — return it anyway so the user can type the authoring
+    // instructions manually. Mirrors `spawn_review`.
+    if !crate::service::sessions::seed::seed_now(store, ssh, &row, &prompt).await {
         tracing::warn!(
             session = %row.tmux_name,
-            error = %e,
-            "[spawn_author_session] seeding the author prompt failed (the session is live; seed it manually)"
+            "[spawn_author_session] the author prompt was not typed (the session is live; seed it manually)"
         );
     }
 
