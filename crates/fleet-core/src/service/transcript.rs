@@ -2474,6 +2474,17 @@ pub async fn fetch_conversation(
     Ok(conv)
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// A test's private `$HOME` for the scripts [`run_shell`] runs. A local
+    /// read otherwise searches the developer's real `~/.claude/projects`
+    /// (gigabytes on a busy machine), which on a loaded box outlasts
+    /// [`READ_WALL_CLOCK`] and turns `E_NO_TRANSCRIPT` into `E_TIMEOUT`.
+    /// Task-local rather than `std::env::set_var`, which would race every
+    /// other test in the process that reads `HOME`.
+    static TEST_HOME: std::path::PathBuf;
+}
+
 /// Run a bash script on `host_alias` (local or via ssh), bounded by
 /// [`READ_WALL_CLOCK`].
 async fn run_shell(
@@ -2481,6 +2492,17 @@ async fn run_shell(
     host_alias: &str,
     script: &str,
 ) -> Result<std::process::Output, IpcError> {
+    #[cfg(test)]
+    let pinned = TEST_HOME
+        .try_with(|h| {
+            format!(
+                "HOME={}; export HOME\n{script}",
+                quote(&h.to_string_lossy())
+            )
+        })
+        .ok();
+    #[cfg(test)]
+    let script = pinned.as_deref().unwrap_or(script);
     crate::ssh::run_shell_bounded(
         ssh.as_ref(),
         host_alias,
@@ -4749,20 +4771,26 @@ mod tests {
     async fn fetch_conversation_maps_a_missing_local_transcript_to_e_no_transcript() {
         let ssh = Arc::new(SshClient::new());
         let dir = tempfile::tempdir().unwrap();
-        let err = fetch_conversation(
-            TranscriptArgs {
-                host_alias: "local".into(),
-                tmux_name: None,
-                transcript_path: None,
-                cwd: Some(dir.path().to_string_lossy().into_owned()),
-                claude_session_id: "00000000-0000-0000-0000-00000000beef".into(),
-                turns: CONV_TURNS,
-                max_chars: CONV_MAX_CHARS,
-            },
-            &ssh,
-        )
-        .await
-        .unwrap_err();
+        // An empty `$HOME`, not the developer's own (see `TEST_HOME`).
+        let home = tempfile::tempdir().unwrap();
+        let err = TEST_HOME
+            .scope(
+                home.path().to_path_buf(),
+                fetch_conversation(
+                    TranscriptArgs {
+                        host_alias: "local".into(),
+                        tmux_name: None,
+                        transcript_path: None,
+                        cwd: Some(dir.path().to_string_lossy().into_owned()),
+                        claude_session_id: "00000000-0000-0000-0000-00000000beef".into(),
+                        turns: CONV_TURNS,
+                        max_chars: CONV_MAX_CHARS,
+                    },
+                    &ssh,
+                ),
+            )
+            .await
+            .unwrap_err();
         assert_eq!(err.code, "E_NO_TRANSCRIPT");
     }
 
@@ -4792,20 +4820,26 @@ mod tests {
     async fn fetch_maps_a_missing_local_transcript_to_e_no_transcript() {
         let ssh = Arc::new(SshClient::new());
         let dir = tempfile::tempdir().unwrap();
-        let err = fetch_transcript(
-            TranscriptArgs {
-                host_alias: "local".into(),
-                tmux_name: None,
-                transcript_path: None,
-                cwd: Some(dir.path().to_string_lossy().into_owned()),
-                claude_session_id: "00000000-0000-0000-0000-00000000dead".into(),
-                turns: 1,
-                max_chars: 100,
-            },
-            &ssh,
-        )
-        .await
-        .unwrap_err();
+        // An empty `$HOME`, not the developer's own (see `TEST_HOME`).
+        let home = tempfile::tempdir().unwrap();
+        let err = TEST_HOME
+            .scope(
+                home.path().to_path_buf(),
+                fetch_transcript(
+                    TranscriptArgs {
+                        host_alias: "local".into(),
+                        tmux_name: None,
+                        transcript_path: None,
+                        cwd: Some(dir.path().to_string_lossy().into_owned()),
+                        claude_session_id: "00000000-0000-0000-0000-00000000dead".into(),
+                        turns: 1,
+                        max_chars: 100,
+                    },
+                    &ssh,
+                ),
+            )
+            .await
+            .unwrap_err();
         assert_eq!(err.code, "E_NO_TRANSCRIPT");
     }
 

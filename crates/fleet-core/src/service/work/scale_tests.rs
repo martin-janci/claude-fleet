@@ -5,7 +5,8 @@
 //! Each call is timed over a handful of runs; the p50 / p95 are printed
 //! (`cargo test -p fleet-core scale_ -- --nocapture` shows them) and the p95
 //! is held under a budget with a wide margin, for an unoptimised test build
-//! on a slow CI runner. Timing is the noisy half, so every call also has its
+//! on a slow CI runner — enforced only with `FLEET_SCALE_BUDGETS=1`, which
+//! CI sets ([`budget`]). Timing is the noisy half, so every call also has its
 //! statements traced and their `EXPLAIN QUERY PLAN` checked: no full scan of
 //! a big table (`scale_fixture::BIG_TABLES`). That half is exact, and it is what
 //! catches a lost index long before the clock would.
@@ -92,11 +93,23 @@ fn measure<T>(label: &str, mut f: impl FnMut() -> T) -> (f64, f64) {
     (p50, p95)
 }
 
+/// Set to `1` to fail a test whose p95 is over its budget (CI does). Unset,
+/// an over-budget call is only printed: the budgets are wall-clock, so on a
+/// loaded box they fail for the load, not the code. The query-plan checks
+/// below are exact and always enforced.
+const BUDGETS_ENV: &str = "FLEET_SCALE_BUDGETS";
+
 fn budget(label: &str, p95: f64, max_ms: f64) {
-    assert!(
-        p95 < max_ms,
+    if p95 < max_ms {
+        return;
+    }
+    let msg = format!(
         "{label}: p95 {p95:.1} ms is over its {max_ms} ms budget (see the M12 plan's Revisions)"
     );
+    if std::env::var(BUDGETS_ENV).is_ok_and(|v| v == "1") {
+        panic!("{msg}");
+    }
+    println!("[m12.2 scale] {msg}; not enforced without {BUDGETS_ENV}=1");
 }
 
 /// The statements `f` runs, traced on the store.
