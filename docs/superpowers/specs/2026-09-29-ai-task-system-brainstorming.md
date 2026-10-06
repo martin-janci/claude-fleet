@@ -99,3 +99,13 @@ Používateľ otvoril možnosť využiť existujúcu natívnu funkcionalitu agen
 - Natívne označenie „done“ je signál o dokončení kroku podľa agenta; splnenie celej úlohy sa posudzuje podľa dohodnutých kritérií a podkladov.
 
 Cieľom je využiť silné stránky agentov a doplniť spoločný kontext, kontinuitu a koordináciu, nie budovať druhú implementáciu každej ich schopnosti.
+
+## Pokračovanie 6. októbra 2026: od tasky k session, operátor a brainstorming
+
+Používateľ upresnil tok práce. Návrh je rozpracovaný v `2026-10-06-task-to-session-flow-design.md`. Ten zatiaľ nie je schválený; otvorené rozhodnutia TS1–TS13 sú v jeho §9.
+
+- **Manuálne.** Z tasky (Jira, Asana alebo vlastná `TASK-<id>`) sa jedným tlačidlom **Work** vytvorí session, pokračuje sa v nej, otvorí sa alebo sa pripojí existujúca session. Konflikty sa ukážu ešte pred akciou. Hlavná medzera je na desktope.
+- **Spoločný agent (operátor).** Konverzácie si spravuje sám ako **vlákna**: jedno vlákno na tasku alebo tému. Pri zmene témy sa vlákno odloží a dá sa k nemu vrátiť. Nič sa nemaže.
+- **Brainstorming je samostatná funkcia a nesmie sa zabudnúť.** Bude to skill `fleet-brainstorm` a „brainstorm vlákno“ s fázami rozbor možností → zúženie → rozhodnutie → plán. Z plánu vznikne strom navrhnutých úloh s podmienkami dokončenia (`done_when`).
+- **Vykonanie.** Na úlohách sa spustí jeden agent alebo viac, podľa závislostí a toho, ktorých repozitárov sa úlohy týkajú.
+- **Ovládač autonómie.** L0 (manuálne) až L3 (plne automaticky), vždy v rámci rozpočtu a podpísaného povolenia (*run grant*). Pause all aj kill switch zostávajú používateľovi, takže má plnú kontrolu.

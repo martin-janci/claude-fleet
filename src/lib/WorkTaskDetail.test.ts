@@ -199,6 +199,17 @@ describe('WorkTaskDetail', () => {
   it('Open, Continue (resume last) and Start new', async () => {
     handlers.resume_work = () => session('mefistos', 'resumed', { id: 11 });
     handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
+    handlers.preview_start_work = () => ({
+      key: 'ABC-12',
+      title: 'Login',
+      item_id: 12,
+      plan: { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'abc-12-login', name: 'ABC-12 Login' },
+      projects: [{ id: 3, owner: 'acme', repo: 'api' }],
+      hosts: [{ alias: 'mefistos', reachable: true }],
+      conflicts: [],
+      brief: null,
+      checkout: { exists: false },
+    });
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
     await fireEvent.click(screen.getByTestId('work-task-open'));
@@ -209,8 +220,101 @@ describe('WorkTaskDetail', () => {
     expect(get(selectedSession)?.id).toBe(11);
     await fireEvent.click(screen.getByTestId('work-task-start'));
     await flush();
-    expect(calls('start_work')[0]).toEqual({ item_id: 12 });
+    expect(calls('preview_start_work')[0]).toEqual({ item_id: 12, with_brief: true });
+    expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true, project_id: 3, host_alias: 'mefistos' });
     expect(get(selectedSession)?.id).toBe(12);
+  });
+
+  it('Start new opens the start popover when something must be chosen, and sends the choice', async () => {
+    handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
+    const preview = (over: Record<string, unknown> = {}) => ({
+      key: 'ABC-12',
+      title: 'Login',
+      item_id: 12,
+      plan: null,
+      missing: 'project',
+      projects: [
+        { id: 3, owner: 'acme', repo: 'api' },
+        { id: 4, owner: 'acme', repo: 'web' },
+      ],
+      hosts: [
+        { alias: 'mefistos', reachable: true },
+        { alias: 'oci', reachable: false },
+      ],
+      conflicts: [{ kind: 'done', message: 'This task is done.' }],
+      brief: 'Steps: log in',
+      checkout: null,
+      ...over,
+    });
+    handlers.preview_start_work = (a) =>
+      a.project_id === 4
+        ? preview({
+            plan: { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 4, host_alias: 'mefistos', branch: 'abc-12-login', name: 'ABC-12 Login' },
+            missing: null,
+            checkout: { exists: false },
+          })
+        : preview();
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await flush();
+    const pop = screen.getByTestId('start-popover');
+    expect(pop.textContent).toContain('This task is done.');
+    expect((screen.getByTestId('start-popover-go') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('start-popover-why').textContent).toBe('Pick a repository.');
+    expect(calls('start_work')).toHaveLength(0);
+    // The brief is shown as text, on request.
+    await fireEvent.click(screen.getByTestId('start-popover-brief-toggle'));
+    expect(screen.getByTestId('start-popover-brief-text').textContent).toBe('Steps: log in');
+    // Picking a repository re-reads the preview with it.
+    await fireEvent.change(screen.getByTestId('start-popover-project'), { target: { value: '4' } });
+    await new Promise((r) => setTimeout(r, 300));
+    await flush();
+    expect(calls('preview_start_work').at(-1)).toEqual({ item_id: 12, with_brief: true, project_id: 4 });
+    expect(screen.getByTestId('start-popover-checkout').textContent).toBe('new');
+    await fireEvent.click(screen.getByTestId('start-popover-go'));
+    await flush();
+    expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true, project_id: 4, host_alias: 'mefistos' });
+    expect(get(selectedSession)?.id).toBe(12);
+    expect(screen.queryByTestId('start-popover')).toBeNull();
+  });
+
+  it('a hub without the preview starts as before', async () => {
+    handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
+    handlers.preview_start_work = () => {
+      throw { code: 'E_INVALID', message: 'preview_start needs session_id' };
+    };
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await flush();
+    expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true });
+    expect(get(selectedSession)?.id).toBe(12);
+    expect(screen.queryByTestId('start-popover')).toBeNull();
+  });
+
+  it('a live session on the key makes Start a parallel start; Esc closes the popover', async () => {
+    handlers.preview_start_work = () => ({
+      key: 'ABC-12',
+      title: 'Login',
+      item_id: 12,
+      plan: { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'abc-12-login-2', name: 'ABC-12 Login', parallel: true },
+      projects: [{ id: 3, owner: 'acme', repo: 'api' }],
+      hosts: [{ alias: 'mefistos', reachable: true }],
+      conflicts: [{ kind: 'live_session', message: 'ABC-12 is already open in api on mefistos.', session_id: 7 }],
+      brief: null,
+      checkout: { exists: false },
+    });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await flush();
+    expect(screen.getByTestId('start-popover-go').textContent).toContain('Start parallel');
+    expect(screen.getByTestId('start-popover-open-live')).toBeTruthy();
+    await fireEvent.keyDown(screen.getByTestId('start-popover'), { key: 'Escape' });
+    await flush();
+    expect(screen.queryByTestId('start-popover')).toBeNull();
+    expect(calls('start_work')).toHaveLength(0);
   });
 
   it('Assign org shows the impact exactly, then moves with its token', async () => {

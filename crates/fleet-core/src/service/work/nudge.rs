@@ -110,6 +110,11 @@ pub fn classify_nudge(
     if !crate::service::settings::get_bool(s, crate::service::settings::WORK_CLASSIFY_NUDGE) {
         return Ok(None);
     }
+    // The operator coordinates every task and is never a detection subject
+    // (`detect::subject_state`), so it is never asked to classify itself.
+    if crate::service::operator::is_operator_session(s, &row.host_alias, &row.tmux_name) {
+        return Ok(None);
+    }
     if s.conversation_nudged(row.id, conversation)? {
         return Ok(None);
     }

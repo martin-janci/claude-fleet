@@ -3784,7 +3784,13 @@ fn the_served_definition_budget_stays_bounded() {
     /// M1's sharing tools, 75,369) into Assets M6 (the changesets
     /// propose_layer / change / `LayerChange` and drift_diff growth,
     /// +1,347 bytes over `main`): exactly the two sides' sum.
-    const BUDGET_BYTES: usize = 76_816;
+    /// Measured at 76,892 on 2026-10-06 after the task → session spec's A1
+    /// (`work_link { start }` takes `parallel`, and a `preview_start` action
+    /// sits beside it, named in the description and the action enum, +176
+    /// bytes). Measured at 76,964 on 2026-10-06 after merging `main`
+    /// (76,788: the operator's other-host start and the project picker,
+    /// +72 bytes over 76,716) into it: exactly the two sides' sum.
+    const BUDGET_BYTES: usize = 77_064;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -7813,6 +7819,60 @@ async fn an_operator_summary_is_confirmed_and_refused_without_an_approver() {
     assert!(hub.guards.confirms.pending_tools().is_empty());
 }
 
+/// The operator is an unbound client, so its org scope is `All` — the very
+/// fence `work::local::decide` uses to keep agents off proposals. It is still
+/// an agent: it may propose, never accept or reject, whoever proposed. A
+/// person (here the master) still decides, so the proposal is left as it was.
+#[tokio::test]
+async fn the_operator_never_decides_a_proposal() {
+    let s = Store::open_in_memory().unwrap();
+    let parent = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Ship v1",
+            ..Default::default()
+        })
+        .unwrap();
+    let proposal = s
+        .propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "a worker's idea",
+            notes: None,
+            why: None,
+            proposed_by: "dev-web",
+        })
+        .unwrap();
+    let t = test_tools(s);
+    let decide = async |caller: Caller, action: &str| {
+        let args = serde_json::json!({ "action": action, "item_id": proposal.id });
+        t.work_link(
+            Extension(caller),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+        .await
+    };
+    for action in ["accept", "reject"] {
+        let e = decide(operator(), action)
+            .await
+            .expect_err("the operator does not decide proposals");
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person decides"),
+            "{action}: {}",
+            e.message
+        );
+    }
+    let still = t
+        .store
+        .lock()
+        .unwrap()
+        .get_work_item(proposal.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.proposal_state.as_deref(), Some("proposed"));
+    decide(Caller::master(), "accept")
+        .await
+        .expect("a person accepts");
+}
+
 fn operator() -> Caller {
     client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -10584,6 +10644,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `new_session` is exempt too", which stopped being true when T8d moved
     // `new_session` into `SESSION_REACH` (T9b).
     ("work_link", "start", &["ViewScope"]),
+    // The start's preview (task → session spec P-1) plans exactly as `start`
+    // does, through `plan_resolved`, so it threads the same whole scope.
+    ("work_link", "preview_start", &["ViewScope"]),
 ];
 
 /// **Every `ViewScope` row's PROOF: the behavioural test that shows the fence
@@ -10742,6 +10805,15 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
         "a_start_refusal_names_no_session_another_person_cannot_see",
         "a_start_does_not_land_in_another_persons_worktree",
     ),
+    // The start's preview plans through the same `plan_resolved`, and its
+    // conflicts are the `E_EXISTS` prose turned into data: the same two
+    // fences, and their own two tests.
+    (
+        "work_link",
+        "preview_start",
+        "a_start_preview_names_no_session_another_person_cannot_see",
+        "a_start_preview_does_not_plan_into_another_persons_worktree",
+    ),
 ];
 
 /// The arms that reach no session row, with the reason. A row here is a claim
@@ -10803,8 +10875,9 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "accept",
         "a person's decision on a proposal, by `item_id`: no session is \
          named, and `work::local::decide` refuses every scoped caller — a \
-         per-host token and a bound client alike — because an agent never \
-         accepts a proposal. `reject` in this shape takes the same arm; in \
+         per-host token and a bound client alike — and the arm refuses the \
+         operator, because an agent never accepts a proposal. `reject` in \
+         this shape takes the same arm; in \
          its session-addressed shape it falls through to the tail and is in \
          `WORK_ACTION_REACH` at `Drive`",
     ),
@@ -15345,6 +15418,138 @@ async fn a_start_does_not_land_in_another_persons_worktree() {
     assert!(
         !e.contains("E_FORBIDDEN"),
         "a drive grantee is past the landing fence: {e}"
+    );
+}
+
+/// The start preview's `live_session` conflict is the start's `E_EXISTS`
+/// prose turned into data: it must name the session on the key — its name,
+/// its host, its id — only to a caller who may see it, exactly as the
+/// refusal does.
+#[tokio::test]
+async fn a_start_preview_names_no_session_another_person_cannot_see() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let a_row = s
+        .upsert_session(
+            "dev-ada-PAY-123",
+            "h",
+            Some(pid),
+            None,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    assert!(s.claim_if_unclaimed(a_row, Some(ada)).unwrap());
+    s.set_friendly_name("h", "dev-ada-PAY-123", Some("Ada on payments"))
+        .unwrap();
+    s.link_session_work(a_row, crate::store::WorkTarget::Key("PAY-123"), "manual")
+        .unwrap();
+    let t = test_tools(s);
+    let preview = |caller: Caller| {
+        let t = t.clone();
+        async move {
+            let r = t
+                .work_link(
+                    Extension(caller),
+                    Parameters(
+                        serde_json::from_value(serde_json::json!({
+                            "action": "preview_start", "key": "PAY-123",
+                            "project_id": pid, "host_alias": "h",
+                        }))
+                        .unwrap(),
+                    ),
+                )
+                .await
+                .expect("a preview answers, busy key or not");
+            format!("{r:?}")
+        }
+    };
+
+    let bobs = preview(device_of(bob, ada)).await;
+    assert!(
+        bobs.contains("live_session") && bobs.contains("Someone is already working on this"),
+        "the key is busy either way, and that much is not a secret: {bobs}"
+    );
+    for secret in ["dev-ada-PAY-123", "Ada on payments"] {
+        assert!(
+            !bobs.contains(secret),
+            "the preview handed Bob {secret}: {bobs}"
+        );
+    }
+    assert!(
+        !bobs.contains(&format!("session_id\\\":{a_row}")),
+        "nor the id: {bobs}"
+    );
+    let adas = preview(device_of(ada, ada)).await;
+    assert!(
+        adas.contains("Ada on payments") && adas.contains(&format!("{a_row}")),
+        "her own session is hers to be told about: {adas}"
+    );
+    let s = t.store.lock().unwrap();
+    assert_eq!(
+        s.live_work_sessions_for_key("PAY-123").unwrap().len(),
+        1,
+        "a preview makes nothing"
+    );
+}
+
+/// The preview plans the landing exactly as the start does, so it is refused
+/// the same checkout: never a plan, nor a name, for a pane in another
+/// person's tree — the LOST row a reboot left there included.
+#[tokio::test]
+async fn a_start_preview_does_not_plan_into_another_persons_worktree() {
+    let s = Store::open_in_memory().unwrap();
+    let host = crate::service::projects::LOCAL_HOST;
+    s.upsert_host(host).unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let wt = s
+        .upsert_worktree(pid, "pay-123", "/p/.worktrees/pay-123", Some("pay-123"))
+        .unwrap();
+    let a_row = s
+        .upsert_session(
+            "dev-ada-feature",
+            host,
+            Some(pid),
+            Some(wt),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    assert!(s.claim_if_unclaimed(a_row, Some(ada)).unwrap());
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET status='ghost', lost_at=10, lost_reason='reboot' WHERE id=?1",
+            rusqlite::params![a_row],
+        )
+        .unwrap();
+    let t = test_tools(s);
+    let e = t
+        .work_link(
+            Extension(device_of(bob, ada)),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "preview_start", "key": "PAY-123",
+                    "project_id": pid, "host_alias": host, "worktree": "pay-123",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect_err("Bob is not given a plan into Ada's checkout");
+    let e = format!("{e:?}");
+    assert!(e.contains("E_FORBIDDEN"), "refused, not planned: {e}");
+    assert!(
+        !e.contains("dev-ada-feature"),
+        "and the refusal names no session: {e}"
     );
 }
 

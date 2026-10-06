@@ -204,6 +204,20 @@ person's Clear work holds against the unchanged branch / PR (R9u, migration
 Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
+Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
+a brainstorming draft with open decisions TS1–TS14): A0 and A1 are landed.
+The operator never accepts or rejects a proposal and is never a detection
+or classification-nudge subject (`operator::is_operator_session`,
+`detect::subject_state`). `work_link { preview_start }`
+(`preview_start_work`, `tickets::preview_start`) answers a `StartPreview`:
+the plan or what is `missing`, candidates, the brief and every conflict as
+data; `parallel: true` starts beside a live session in a `<slug>-N`
+checkout. The Work tab's `WorkButton` / `StartPopover` (`start_preview.ts`)
+read it. The preview is its own action, never a flag on `start`: an older
+hub answers it `E_INVALID` (the desktop then starts as before) instead of
+ignoring an unknown field and starting a session (`wire_contract.rs`'s
+`dry_run` lesson).
+
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
 `rewind_conversation` (`service/rewind.rs`), which copies the transcript up

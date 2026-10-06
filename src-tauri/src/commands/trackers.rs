@@ -23,7 +23,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::decide::status_map;
 use fleet_core::service::trackers::admin::{self, TestReport, WorkAdminArgs};
 use fleet_core::service::trackers::sync::SyncMetrics;
-use fleet_core::service::trackers::tickets::{MultiStart, Ticket};
+use fleet_core::service::trackers::tickets::{MultiStart, StartPreview, Ticket};
 use fleet_core::service::work::retention;
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store, TrackerRow};
@@ -336,6 +336,10 @@ pub struct StartWorkArgs {
     /// Start on another org's ticket anyway (work graph M5).
     #[serde(default)]
     pub force_cross_org: bool,
+    /// Start beside a live session on the same key, in a checkout of its
+    /// own (task → session spec P-8).
+    #[serde(default)]
+    pub parallel: bool,
 }
 
 #[tauri::command]
@@ -382,6 +386,17 @@ pub async fn start_work_multi(
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<MultiStart, IpcError> {
     routed::start_work_multi(&backend, args, &store, &ssh, &reg).await
+}
+
+/// Where a start would land, what it would send and what is in the way —
+/// nothing is made (task → session spec P-1). The Work button's popover.
+#[tauri::command]
+pub async fn preview_start_work(
+    args: StartWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<StartPreview, IpcError> {
+    routed::preview_start_work(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -506,15 +521,10 @@ pub(crate) mod routed {
         }
     }
 
-    pub async fn start_work(
-        backend: &FleetBackend,
-        args: StartWorkArgs,
-        store: &Arc<Mutex<Store>>,
-        ssh: &Arc<SshClient>,
-        reg: &Arc<CancellationRegistry>,
-    ) -> Result<SessionRow, IpcError> {
+    /// One start's wire arguments, the same for the start and its preview.
+    fn start_wire(args: &StartWorkArgs) -> WorkLinkArgs {
         let is_url = args.reference.as_deref().is_some_and(|r| r.contains("://"));
-        let wire = WorkLinkArgs {
+        WorkLinkArgs {
             action: "start".into(),
             key: args.reference.clone().filter(|_| !is_url),
             url: args.reference.clone().filter(|_| is_url),
@@ -526,8 +536,42 @@ pub(crate) mod routed {
             name: args.name.clone(),
             worktree: args.worktree.clone(),
             force_cross_org: args.force_cross_org.then_some(true),
+            parallel: args.parallel.then_some(true),
             ..Default::default()
+        }
+    }
+
+    pub async fn preview_start_work(
+        backend: &FleetBackend,
+        args: StartWorkArgs,
+        store: &Arc<Mutex<Store>>,
+    ) -> Result<StartPreview, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "preview_start".into(),
+            ..start_wire(&args)
         };
+        match backend.hub() {
+            Some(hub) => hub.route("preview_start_work", &wire).await,
+            None => {
+                tickets::preview_start(
+                    store,
+                    &fleet_core::service::work::start_args(&wire),
+                    &fleet_core::service::view_scope::ViewScope::internal(),
+                    &default_net(),
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn start_work(
+        backend: &FleetBackend,
+        args: StartWorkArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<SessionRow, IpcError> {
+        let wire = start_wire(&args);
         match backend.hub() {
             Some(hub) => hub.route("start_work", &wire).await,
             None => {

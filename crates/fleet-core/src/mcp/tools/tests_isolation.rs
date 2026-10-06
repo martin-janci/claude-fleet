@@ -1072,6 +1072,72 @@ async fn run_matrix(isolate: bool) {
     assert_eq!(v["failed"][0]["project_id"], fx.pid_beta, "{v}");
     assert_eq!(v["failed"][0]["cross_org"], true, "{v}");
 
+    // The start's preview (task → session spec P-1) is fenced exactly as the
+    // start: no way to read another org's ticket, plan on another host, or
+    // name a session the caller may not see. A cross-org start is a
+    // conflict to choose, never a refusal, for the master.
+    let preview = |key: &str, pid: i64| {
+        json!({ "action": "preview_start", "key": key,
+            "project_id": pid, "host_alias": "h-a" })
+    };
+    m.row(
+        "work_link",
+        "preview_start",
+        move |fx, who| {
+            if who == Who::HostB {
+                preview("BB-1", fx.pid_beta)
+            } else {
+                preview("BB-2", fx.pid_acme)
+            }
+        },
+        |fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone => {
+                    is_code(who, a, "E_FORBIDDEN", "another org's ticket")
+                }
+                Who::HostB => is_code(who, a, "E_FORBIDDEN", "another host"),
+                // B's ticket is not A's to read (a bare key to it), and an
+                // A-repo session is A's: planned, with nothing to cross.
+                Who::BoundA => {
+                    is_ok(who, a, "own org's repo");
+                    let v: Value = serde_json::from_str(text(a)).unwrap();
+                    assert_eq!(v["plan"]["project_id"], fx.pid_acme, "{v}");
+                    assert_eq!(v["title"], "", "no ticket text of another org: {v}");
+                }
+                // Never planned where the session would be another org's.
+                Who::BoundB => is_code(who, a, "E_FORBIDDEN", "another org's repo"),
+                _ => {
+                    is_ok(who, a, "preview");
+                    let v: Value = serde_json::from_str(text(a)).unwrap();
+                    assert!(
+                        v["conflicts"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|c| c["kind"] == "cross_org"),
+                        "{who:?}: {v}"
+                    );
+                    assert_eq!(v["plan"]["project_id"], fx.pid_acme, "{v}");
+                }
+            }
+        },
+    )
+    .await;
+    // Host A's own AA-1 already runs on it: a conflict naming that session.
+    let own_live = call(&fx, Who::HostA, "work_link", preview("AA-1", fx.pid_acme)).await;
+    let v: Value = serde_json::from_str(text(&own_live)).unwrap_or_else(|_| panic!("{own_live:?}"));
+    let live = v["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["kind"] == "live_session")
+        .cloned()
+        .unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(live["session_id"], fx.s_a, "{v}");
+
     // Agent-written handover (work graph M9.3), per caller. The sessions
     // are idle REPLs here, so a caller past the fences reaches the send
     // (which fails for want of a real host, and is recorded as such).

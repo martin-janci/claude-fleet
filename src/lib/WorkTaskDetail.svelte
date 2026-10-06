@@ -22,6 +22,16 @@
   import { assessRow, hasReading, verdictColor, verdictLabel } from './evidence';
   import { changedAny, describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
+  import StartPopover from './StartPopover.svelte';
+  import {
+    baseStartArgs,
+    previewIsClean,
+    previewStartWork,
+    previewUnsupported,
+    startFromPreview,
+    type StartPreview,
+  } from './start_preview';
+  import type { SessionRow } from './sessions';
   import { hubStatus, hubActionBlocked } from './hub';
   import { sessionIdBlocked } from './share';
   import { hubConnection } from './hub_connection';
@@ -78,6 +88,9 @@
   let placing = $state(false);
   let assigning = $state(false);
   let ruleDraft = $state<WorkRuleDraft | null>(null);
+  /** The start popover's preview while it is open (task → session §2.2). */
+  let startPreview = $state<StartPreview | null>(null);
+  let startBtn: HTMLButtonElement | undefined = $state();
 
   let loadSeq = 0;
   async function load(id: string) {
@@ -132,6 +145,7 @@
     refreshError = null;
     actionError = null;
     existingSession = null;
+    startPreview = null;
     void load(id);
   });
 
@@ -241,20 +255,42 @@
     return key ? (get(sessions).find((r) => r.work?.key?.toUpperCase() === key)?.id ?? null) : null;
   }
 
-  async function startNew() {
+  /** Start new: the start preview first (task → session spec P-1). A clean
+   *  one starts at once; a repository or host to pick, a live session, an
+   *  organisation to cross or a done task opens the start popover. */
+  async function startNew(ask = false) {
     const t = task;
     if (!t || acting) return;
     acting = true;
     actionError = null;
     existingSession = null;
-    const r = await startWork(t.item_id != null ? { item_id: t.item_id } : { reference: t.key ?? '' });
-    acting = false;
-    if (r.ok) {
-      selectSessionExplicitly(r.value);
+    const base = baseStartArgs(t);
+    const p = await previewStartWork(base);
+    if (!p.ok && !previewUnsupported(p.error)) {
+      acting = false;
+      actionError = p.error.message;
       return;
     }
-    actionError = r.error.message;
-    if (r.error.code === 'E_EXISTS') existingSession = existingOf(r.error, t);
+    // A clean preview starts where it said; an older hub, with no preview,
+    // starts as before.
+    if (!p.ok || (!ask && previewIsClean(p.value))) {
+      const r = p.ok ? await startFromPreview(base, p.value) : await startWork(base);
+      acting = false;
+      if (r.ok) {
+        selectSessionExplicitly(r.value);
+        return;
+      }
+      actionError = r.error.message;
+      if (r.error.code === 'E_EXISTS') existingSession = existingOf(r.error, t);
+      return;
+    }
+    acting = false;
+    startPreview = p.value;
+  }
+
+  function startedFromPopover(row: SessionRow) {
+    startPreview = null;
+    selectSessionExplicitly(row);
   }
 
   function openExisting() {
@@ -405,11 +441,25 @@
         class="btn"
         type="button"
         data-testid="work-task-start"
+        bind:this={startBtn}
         disabled={(!task.item_id && !task.key) || acting || startBlocked !== null}
-        title={startBlocked ?? 'Start a new session for this task'}
-        onclick={() => void startNew()}>Start new</button
+        title={startBlocked ?? 'Start a new session for this task (Alt-click to choose where)'}
+        onclick={(e) => void startNew(e.altKey)}>Start new</button
       >
     </div>
+    {#if startPreview}
+      <StartPopover
+        base={baseStartArgs(task)}
+        preview={startPreview}
+        heading={`Start ${task.key ?? ''}${task.title ? ` · ${task.title}` : ''}`.trim()}
+        blocked={startBlocked}
+        onclose={(refocus) => {
+          startPreview = null;
+          if (refocus) startBtn?.focus();
+        }}
+        onstarted={startedFromPopover}
+      />
+    {/if}
     {#if actionError}
       <p class="err" role="alert" data-testid="work-task-action-error">
         {actionError}

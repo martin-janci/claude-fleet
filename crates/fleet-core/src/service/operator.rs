@@ -56,6 +56,13 @@ pub fn operator_ref(store: &Store) -> Option<OperatorRef> {
         .and_then(parse_ref)
 }
 
+/// Whether `(host_alias, tmux_name)` is the recorded operator. Reads as
+/// `false` when no operator was ever created, or when the store cannot say,
+/// as [`operator_ref`] does.
+pub fn is_operator_session(store: &Store, host_alias: &str, tmux_name: &str) -> bool {
+    operator_ref(store).is_some_and(|r| r.host_alias == host_alias && r.tmux_name == tmux_name)
+}
+
 /// Record the operator's whereabouts. Called once by `ensure_operator`.
 pub fn set_operator_ref(store: &Store, r: &OperatorRef) -> Result<(), IpcError> {
     store
@@ -100,16 +107,16 @@ pub fn refuse_if_operator(
     tmux_name: &str,
     what: &str,
 ) -> Result<(), IpcError> {
-    match operator_ref(store) {
-        Some(r) if r.host_alias == host_alias && r.tmux_name == tmux_name => Err(IpcError::new(
+    if is_operator_session(store, host_alias, tmux_name) {
+        return Err(IpcError::new(
             codes::E_FORBIDDEN,
             format!(
                 "{what} refused: {tmux_name} on {host_alias} is the UX agent's own session. \
                  Close the agent panel and act on it from the sidebar if you mean it."
             ),
-        )),
-        _ => Ok(()),
+        ));
     }
+    Ok(())
 }
 
 /// Owner/repo of the operator's own project row. Not a real repository —

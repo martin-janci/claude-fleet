@@ -18,11 +18,10 @@
     type WorkTask,
     type WorkTreePage,
   } from './work_view';
-  import { providerInfo, startWork } from './trackers';
+  import { providerInfo } from './trackers';
   import { projects, loadProjects } from './projects';
-  import { selectSessionExplicitly } from './selection';
-  import { hubStatus, hubActionBlocked } from './hub';
-  import { hubConnection } from './hub_connection';
+  import { workButtonFor } from './start_preview';
+  import WorkButton from './WorkButton.svelte';
   import { displayTitle, groupTasksByStatus, type StatusSections, type TaskNode } from './task_list';
   import type { IpcError } from './result';
 
@@ -34,8 +33,6 @@
     /** Each page read, so the header can name its orgs and trackers. */
     onpage,
   }: { debounceMs?: number; maxWaitMs?: number; onpage?: (p: WorkTreePage) => void } = $props();
-
-  const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
 
   let tasks = $state.raw<WorkTask[]>([]);
   let orgNames = $state.raw<Map<number, string>>(new Map());
@@ -113,20 +110,35 @@
     void load();
   }
 
-  async function start(t: WorkTask) {
-    if (t.item_id == null || busy) return;
-    busy = true;
-    const r = await startWork({ item_id: t.item_id, ...(t.project_id != null ? { project_id: t.project_id } : {}) });
-    busy = false;
-    if (!r.ok) {
-      actionError = readErrorText(r.error);
-      return;
-    }
-    actionError = null;
-    selectSessionExplicitly(r.value);
-  }
+  /** The task rows in the order they show: To do, Doing, then Done when
+   *  it is open. */
+  const visibleRows = $derived(
+    [...sections.todo, ...sections.doing, ...(doneOpen ? sections.done : [])].map((n) => n.task.task_id),
+  );
 
-  const canStart = (t: WorkTask) => (t.counts?.active ?? 0) === 0 && t.status_category !== 'done' && t.item_id != null;
+  /** The list's keyboard (task → session spec §2.2): `j` / `k` move the
+   *  selection, `s` runs the selected task's Work button, ⇧S opens its
+   *  start popover. Never inside a field, a menu or a dialog. */
+  function onkey(e: KeyboardEvent) {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest('input, textarea, select, [role="dialog"], [role="menu"]')) return;
+    const at = visibleRows.indexOf(get(selectedTaskId) ?? '');
+    if (e.key === 'j' || e.key === 'k') {
+      if (visibleRows.length === 0) return;
+      e.preventDefault();
+      const next = e.key === 'j' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
+      const id = visibleRows[at < 0 ? 0 : next];
+      openTask(id);
+      document.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"] .main`)?.focus();
+    } else if ((e.key === 's' || e.key === 'S') && at >= 0) {
+      const b = workButtonFor(visibleRows[at]);
+      if (!b) return;
+      e.preventDefault();
+      if (e.shiftKey) b.ask();
+      else b.primary();
+    }
+  }
   // The same badge as the Grouped tree's row.
   function badge(t: WorkTask): string {
     if (t.kind === 'local') return 'local';
@@ -137,7 +149,8 @@
     p.project.owner && p.project.owner !== 'local' ? `${p.project.owner}/${p.project.repo}` : p.project.repo;
 </script>
 
-<div class="task-list" data-testid="task-list">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="task-list" data-testid="task-list" onkeydown={onkey}>
   <div class="add">
     <input
       placeholder="+ New task"
@@ -234,16 +247,7 @@
                     >{t.open_proposals} to review</span
                   >
                 {/if}
-                {#if canStart(t)}
-                  <button
-                    class="btn"
-                    type="button"
-                    data-testid="task-start"
-                    disabled={busy || startBlocked !== null}
-                    title={startBlocked ?? 'Start a session for this task'}
-                    onclick={() => void start(t)}>Start</button
-                  >
-                {/if}
+                <WorkButton task={t} />
               </span>
             </div>
             {#if n.children.length > 0}
