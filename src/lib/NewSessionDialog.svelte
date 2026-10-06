@@ -507,7 +507,9 @@
       chosenHost === 'local' ? project.project.base_path : projectDir(remoteRoot, projectsLayout, owner, repo);
     if (inNewMode) {
       const slug = finalizeBranchSlug(newWorktreeName);
-      return slug ? `${root}/${worktreeDir}/${slug}` : root;
+      // The branch keeps its `/`; the directory is flat (`feat/x` →
+      // `feat-x`), as `projects::worktree_dir_name` creates it.
+      return slug ? `${root}/${worktreeDir}/${slug.replaceAll('/', '-')}` : root;
     }
     const wt = chosenWorktree;
     if (!wt || wt.name === 'main') return root;

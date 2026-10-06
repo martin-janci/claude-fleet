@@ -1570,11 +1570,8 @@ fn apply_worktree_hook(
                 format!("worktree_path {path} is not under a known project on host {host}"),
             ));
         };
-        let name = Path::new(&path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unnamed")
-            .to_string();
+        let name =
+            crate::projects::worktree_name_for_path(&path).unwrap_or_else(|| "unnamed".to_string());
         s.upsert_worktree_on(host, project_id, &name, &path, branch)?;
         return Ok(());
     }
@@ -1585,11 +1582,8 @@ fn apply_worktree_hook(
     crate::service::hub::ensure_local_allowed(host)?;
     let path = canonical_str(&path);
     validate_worktree_path(&path)?;
-    let name = Path::new(&path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unnamed")
-        .to_string();
+    let name =
+        crate::projects::worktree_name_for_path(&path).unwrap_or_else(|| "unnamed".to_string());
     let projects = {
         let s = lock(store)?;
         s.list_projects()?

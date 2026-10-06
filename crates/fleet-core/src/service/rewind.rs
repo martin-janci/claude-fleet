@@ -242,7 +242,8 @@ pub const BAD_BRANCH: &str = "__CF_BAD_BRANCH__";
 /// branch's tip, or at a detached source's commit) and the repo root (the
 /// first entry of `git worktree list`, the main checkout, so the new tree is
 /// never nested inside the source's). The directory convention is
-/// `new_session`'s own ([`crate::service::sessions::WORKTREE_BASE_SNIPPET`]).
+/// `new_session`'s own ([`crate::service::sessions::WORKTREE_BASE_SNIPPET`],
+/// in [`crate::projects::worktree_dir_name`]'s flattened directory).
 /// A name the host's git refuses as a branch exits 7 with [`BAD_BRANCH`]
 /// before anything else runs. Unlike `worktree_add_script` it never adopts
 /// an existing directory or branch: either one exits 6 with [`WT_EXISTS`]. The only stdout is the
@@ -266,7 +267,7 @@ if [ -z "$src" ]; then echo "no checkout to fork from" >&2; exit 1; fi
 head=$(git -C "$src" rev-parse --verify HEAD)
 root=$(git -C "$src" worktree list --porcelain | sed -n '1s/^worktree //p')
 cd -- "$root"
-{snippet}wt="$base/$name"
+{snippet}wt="$base/"{wtdir_q}
 if [ -e "$wt" ] || git show-ref --verify --quiet "refs/heads/$name"; then
   printf '{WT_EXISTS} %s
 ' "$name" >&2
@@ -277,6 +278,7 @@ git worktree add "$wt" -b "$name" "$head" 1>&2
 "#,
         name_q = quote(name),
         dir_q = quote(src_dir.unwrap_or("")),
+        wtdir_q = quote(&crate::projects::worktree_dir_name(name)),
         snippet = crate::service::sessions::WORKTREE_BASE_SNIPPET,
     )
 }
@@ -819,7 +821,7 @@ async fn rewind_conversation_with(
                     s.upsert_worktree_on(
                         &sess.host_alias,
                         wt.project_id,
-                        &wt.name,
+                        &crate::projects::worktree_dir_name(&wt.name),
                         &wt.path,
                         Some(&wt.name),
                     )
@@ -919,6 +921,7 @@ async fn rewind_conversation_with(
 /// A fork's freshly created worktree, carried through the steps after it so
 /// any failure can undo it ([`undo_new_worktree`]).
 struct NewWorktree {
+    /// The branch; the row and directory are `projects::worktree_dir_name` of it.
     name: String,
     /// Physical path on the host (`pwd -P`).
     path: String,
@@ -2727,6 +2730,25 @@ mod tests {
         assert!(git(&repo, &["branch", "--list", "fork-x"]).is_empty());
         assert!(src.exists(), "the source is untouched");
         assert_eq!(git(&src, &["rev-parse", "HEAD"]), head);
+
+        // A branch-shaped name: the tree is one flat directory (the name its
+        // row gets), the branch keeps its `/`.
+        let out = run(&fork_worktree_script(
+            None,
+            Some(src.to_str().unwrap()),
+            "fork/y",
+        ));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let flat = repo.canonicalize().unwrap().join(".worktrees/fork-y");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            flat.to_str().unwrap()
+        );
+        assert_eq!(git(&flat, &["rev-parse", "--abbrev-ref", "HEAD"]), "fork/y");
         std::fs::remove_dir_all(&d).ok();
     }
 

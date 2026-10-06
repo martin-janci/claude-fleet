@@ -3513,6 +3513,7 @@ fn host_paths(root: &str, layout: crate::projects::Layout) -> HostPaths {
         root: root.into(),
         layout,
         worktrees: Vec::new(),
+        named: Vec::new(),
     }
 }
 
@@ -3979,6 +3980,67 @@ fn worktree_key_extracts_dot_worktrees_named_worktree() {
     );
 }
 
+/// A checkout at `.worktrees/feat/imports` (made before new worktrees were
+/// flattened) is recorded as `feat-imports`; a cwd anywhere in it keys to
+/// that row, not to `feat`, the first component below the marker. Without
+/// a row the path alone cannot tell, so the first component stays.
+#[test]
+fn worktree_key_of_a_nested_checkout_follows_its_recorded_row() {
+    use crate::projects::Layout;
+    let wt = "/home/dev/projects/github.com/o/r/.worktrees/feat/imports";
+    let mut paths = host_paths("~/projects/github.com", Layout::Github);
+    assert_eq!(worktree_key_for_host(wt, &paths), Some("feat".into()));
+    paths.named = vec![(wt.into(), "feat-imports".into())];
+    assert_eq!(
+        worktree_key_for_host(wt, &paths),
+        Some("feat-imports".into())
+    );
+    assert_eq!(
+        worktree_key_for_host(&format!("{wt}/src/lib"), &paths),
+        Some("feat-imports".into())
+    );
+    // A sibling `.worktrees/feat-x` is not inside the row: its own name.
+    assert_eq!(
+        worktree_key_for_host(
+            "/home/dev/projects/github.com/o/r/.worktrees/feat-x",
+            &paths
+        ),
+        Some("feat-x".into())
+    );
+    // The main checkout stays `main`.
+    assert_eq!(
+        worktree_key_for_host("/home/dev/projects/github.com/o/r/src", &paths),
+        Some("main".into())
+    );
+}
+
+/// `HostPaths::for_host` carries the host's linked worktree rows by name,
+/// and not its `main` row.
+#[test]
+fn host_paths_for_host_names_linked_worktrees_only() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("trn").unwrap();
+    let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+    s.upsert_worktree_on("trn", pid, "main", "/h/o/r", None)
+        .unwrap();
+    s.upsert_worktree_on(
+        "trn",
+        pid,
+        "feat-imports",
+        "/h/o/r/.worktrees/feat/imports",
+        None,
+    )
+    .unwrap();
+    let paths = HostPaths::for_host(&s, "trn");
+    assert_eq!(
+        paths.named,
+        vec![(
+            "/h/o/r/.worktrees/feat/imports".to_string(),
+            "feat-imports".to_string()
+        )]
+    );
+}
+
 #[test]
 fn worktree_key_other_subdir_is_main() {
     assert_eq!(
@@ -4087,6 +4149,14 @@ fn worktree_add_script_contains_expected_fragments() {
         script.contains("( cd \"$wt\" && pwd -P )"),
         "reports the physical path: {script}"
     );
+}
+
+#[test]
+fn worktree_add_script_puts_a_branch_shaped_name_in_a_flat_directory() {
+    let script = worktree_add_script("/repo/root", "feat/imports", None);
+    assert!(script.contains("name='feat/imports'"), "branch: {script}");
+    assert!(script.contains("dir='feat-imports'"), "directory: {script}");
+    assert!(script.contains("wt=\"$base/$dir\""), "{script}");
 }
 
 #[test]
