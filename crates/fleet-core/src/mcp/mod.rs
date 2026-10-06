@@ -8,6 +8,7 @@
 // `pub(crate)` for `agent::ws`'s tests, which mint a client token the way the
 // pairing flow does; the public surface stays the `pub use`s below.
 pub(crate) mod auth;
+mod conn;
 #[cfg(test)]
 mod doc_gen;
 pub mod downloads_route;
@@ -944,43 +945,20 @@ pub async fn start_with_listener<A: TlsAcceptor>(
 
         let scheme = if tls.is_some() { "https" } else { "http" };
         tracing::info!("[mcp] control API listening on {scheme}://{addr}/mcp");
-        // `into_make_service_with_connect_info` is what puts the peer address
-        // in the request extensions, which is what `/pair` keys its
-        // per-address attempt budget on.
-        let shutdown_signal = async move {
-            serve_shutdown.cancelled().await;
-        };
-        let result = match tls {
-            // Unchanged: the `TcpListener` goes straight to axum.
-            None => {
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .with_graceful_shutdown(shutdown_signal)
-                .await
-            }
+        // `conn::serve` puts the peer address in each request's extensions
+        // (`ConnectInfo`), which is what `/pair` keys its per-address attempt
+        // budget on, and bounds slow and surplus connections.
+        match tls {
+            None => conn::serve(listener, app, serve_shutdown, conn::Limits::default()).await,
             Some(acceptor) => match listener::TlsListener::spawn(listener, acceptor) {
                 Err(e) => {
                     tracing::error!(error = %e, "[mcp] could not take over the listener");
                     return;
                 }
-                // `tap_io` is a no-op here; it is how axum lets a custom
-                // listener keep `SocketAddr` as its connect info (the
-                // `Connected` impl is written against `TapIo`).
                 Ok(tls_listener) => {
-                    use axum::serve::ListenerExt as _;
-                    axum::serve(
-                        tls_listener.tap_io(|_| {}),
-                        app.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(shutdown_signal)
-                    .await
+                    conn::serve(tls_listener, app, serve_shutdown, conn::Limits::default()).await
                 }
             },
-        };
-        if let Err(e) = result {
-            tracing::error!(error = %e, "[mcp] server error");
         }
         tracing::info!("[mcp] control API stopped");
     });

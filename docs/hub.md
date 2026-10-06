@@ -3432,6 +3432,16 @@ deliberately.
   address (the peer, or the last `X-Forwarded-For` hop when the peer is a
   private or loopback proxy — the same rule `/pair` uses); repeats inside
   that second are logged at debug. Successes do not touch the bucket.
+- **Slow and surplus connections are closed.** A connection must deliver
+  each request's head (request line and headers) within 30 s of the hub
+  starting to wait for it, so a peer that connects and sends nothing, drips
+  a header byte at a time, or leaves a kept-alive connection idle is closed
+  without a token ever being checked. At most 512 connections are served at
+  once; one past that is closed on accept (logged at warn, at most once a
+  minute), so a flood fills that cap before it can exhaust the process's
+  file descriptors. Long-lived streams (`/events`, `/agent`, the `/mcp` long
+  polls) are unaffected once their request is in. The hub speaks HTTP/1.1
+  only.
 - **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
   reaches the `peer_exchange` tool only — every other tool answers
   `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there
