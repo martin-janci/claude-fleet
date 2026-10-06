@@ -186,6 +186,7 @@ pub(crate) mod routed {
             None => add_project::list_github_repos(&args.host_alias, store, ssh).await,
         }
     }
+
     pub async fn project_picks(
         backend: &FleetBackend,
         store: &Mutex<Store>,

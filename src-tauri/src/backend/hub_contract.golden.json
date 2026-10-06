@@ -354,6 +354,13 @@
       "level",
       "session_id"
     ],
+    "ProjectPickRow": [
+      "grp",
+      "owner",
+      "pinned",
+      "repo",
+      "vis"
+    ],
     "ProjectRow": [
       "adopted",
       "base_path",
