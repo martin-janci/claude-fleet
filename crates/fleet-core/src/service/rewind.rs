@@ -2781,7 +2781,15 @@ mod tests {
             return;
         }
         let d = tmp();
-        let sock = d.join("tmux");
+        // The server's socket is `$TMUX_TMPDIR/tmux-<uid>/default`, and a
+        // unix socket path is capped at 104 bytes on macOS (108 on Linux).
+        // Under a long TMPDIR (macOS's /var/folders/…, a deep worktree) the
+        // test dir alone is past that and tmux fails to start, so the socket
+        // gets a short dir of its own under /tmp.
+        let sock = std::path::PathBuf::from(format!(
+            "/tmp/cf-rw-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         std::fs::create_dir_all(&sock).unwrap();
         let repo = d.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
@@ -2838,5 +2846,6 @@ mod tests {
             assert!(!wt.exists(), "{dir}: no pane: the tree goes");
         }
         std::fs::remove_dir_all(&d).ok();
+        std::fs::remove_dir_all(&sock).ok();
     }
 }

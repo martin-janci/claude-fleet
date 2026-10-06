@@ -21,10 +21,14 @@
 #   staged path matches src/, package.json, pnpm-lock.yaml, pnpm-workspace.yaml,
 #   vite/vitest/svelte/tsconfig config files or index.html
 #       -> scripts/ci-local.sh --frontend-only  (install, check, test, build, audit)
+#          The audit only WARNS here (CI_LOCAL_AUDIT=warn): an advisory that is
+#          already on main is not this commit's to fix, and a blocking audit
+#          taught agents to skip the whole hook with --no-verify, which let a
+#          stale docs/control-api-reference.md through. CI's audit still fails.
 #
 # `cargo test` and `cargo deny check` are deliberately not run here (they take
-# minutes); run `scripts/ci-local.sh --rust-only` before pushing, or wire it
-# into a pre-push hook in this directory if you want that automated.
+# minutes); run `scripts/verify.sh full` before pushing. The pre-push hook in
+# this directory checks migration numbers against origin/main.
 #
 # Note: the checks run against the working tree, not the staged index, so
 # unstaged edits in the same files are checked too.
@@ -90,5 +94,5 @@ if [[ "$run_rust" == 1 ]]; then
 fi
 if [[ "$run_frontend" == 1 ]]; then
   echo "pre-commit: frontend files staged -> scripts/ci-local.sh --frontend-only"
-  scripts/ci-local.sh --frontend-only
+  CI_LOCAL_AUDIT=warn scripts/ci-local.sh --frontend-only
 fi
