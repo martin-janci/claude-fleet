@@ -92,6 +92,28 @@ pub struct SetPrimaryWorkArgs {
     pub expected_primary: Option<i64>,
 }
 
+/// `switch_session_work` (task → session P-2): end link `link_id` and make
+/// the target (`key` or `item_id`) the session's primary, in one step.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SwitchSessionWorkArgs {
+    pub session_id: i64,
+    pub link_id: i64,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub item_id: Option<i64>,
+    /// The primary the person saw (0: none); absent: no check.
+    #[serde(default)]
+    pub expected_primary: Option<i64>,
+    /// `false`: refuse with `E_EXISTS` when the target has another live
+    /// session (P-3); `true`: the person saw that and goes ahead.
+    #[serde(default)]
+    pub ack_live: Option<bool>,
+    /// Another org's work anyway: a person saw the refusal and meant it.
+    #[serde(default)]
+    pub force_cross_org: bool,
+}
+
 /// `reconsider_work_link` / `ack_work_link`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkLinkDecisionArgs {
@@ -248,6 +270,15 @@ pub async fn work_org_impact(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<OrgImpact, IpcError> {
     routed::work_org_impact(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn switch_session_work(
+    args: SwitchSessionWorkArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::switch_session_work(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -487,6 +518,28 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("set_primary_work", &wire).await,
             None => work::work_link(&wire, store, &OrgScope::All),
+        }
+    }
+
+    pub async fn switch_session_work(
+        backend: &FleetBackend,
+        args: SwitchSessionWorkArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        let wire = WorkLinkArgs {
+            key: args.key,
+            item_id: args.item_id,
+            expected_primary: args.expected_primary,
+            ack_live: args.ack_live,
+            force_cross_org: args.force_cross_org.then_some(true),
+            ..decide("switch", args.session_id, args.link_id)
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("switch_session_work", &wire).await,
+            None => {
+                work::check_live_elsewhere(&wire, store, &internal_view())?;
+                work::work_link(&wire, store, &OrgScope::All)
+            }
         }
     }
 

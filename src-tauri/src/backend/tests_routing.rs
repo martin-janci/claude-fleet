@@ -756,7 +756,7 @@ fn routed_read_cases() -> Vec<Case> {
             "work_tickets",
             "work",
             json!({ "session_id": null, "key": null, "action": "tickets",
-                    "view": "mine", "query": "login", "limit": 20 }),
+                    "view": "mine", "query": "login", "limit": 20, "include_local": true }),
             r#"[{"id":3,"source":"jira","key":"ABC-1","title":"Login","status_category":"todo","created_at":1,"updated_at":1}]"#,
             Box::new(|b, s, _| {
                 block_on(commands::trackers::routed::work_tickets(
@@ -766,6 +766,7 @@ fn routed_read_cases() -> Vec<Case> {
                         view: Some("mine".into()),
                         query: Some("login".into()),
                         limit: Some(20),
+                        include_local: Some(true),
                     },
                     s,
                 ))
@@ -2665,6 +2666,29 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         session_id: 7,
                         link_id: 5,
                         expected_primary: Some(4),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "switch_session_work",
+            "work_link",
+            json!({ "session_id": 7, "action": "switch", "key": "PAY-2", "item_id": null,
+                    "link_id": 5, "source": null, "expected_primary": 5, "ack_live": false }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work_view::routed::switch_session_work(
+                    b,
+                    commands::work_view::SwitchSessionWorkArgs {
+                        session_id: 7,
+                        link_id: 5,
+                        key: Some("PAY-2".into()),
+                        item_id: None,
+                        expected_primary: Some(5),
+                        ack_live: Some(false),
+                        force_cross_org: false,
                     },
                     s,
                 ))

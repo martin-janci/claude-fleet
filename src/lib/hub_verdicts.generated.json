@@ -211,6 +211,7 @@
     "start_work",
     "start_work_multi",
     "summarize_past_work",
+    "switch_session_work",
     "tidy_apply",
     "unarchive_session_work",
     "unlink_session_work",

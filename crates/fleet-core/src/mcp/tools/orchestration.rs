@@ -826,12 +826,13 @@ impl FleetTools {
                 ok_json(&w::work_purge_impact(&args, &self.store, &scope).map_err(to_mcp_err)?)
             }
             WorkAction::Tickets => {
-                let rows = crate::service::trackers::tickets::tickets(
+                let rows = crate::service::trackers::tickets::tickets_and_tasks(
                     &self.store,
                     args.tracker_id,
                     args.view.as_deref(),
                     args.query.as_deref(),
                     args.limit,
+                    args.include_local == Some(true),
                     &view_scope,
                 )
                 .map_err(to_mcp_err)?;
@@ -988,7 +989,8 @@ impl FleetTools {
     #[tool(description = "Decide a session's work: action link (becomes its \
         primary; key or item_id), reject (sticky 'not this'; or a \
         suggestion's link_id), confirm (link_id), unlink (link_id). Returns \
-        the updated row. trust_project {project_id, on}. resume {key, mode}: \
+        the updated row. switch {link_id, key|item_id}: end that link, take \
+        the primary. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
         ticket (project_ids: one per repo; parallel: beside a live one); \
         preview_start: where it would land, nothing made. handover {session_id}: ask it to \
@@ -1696,6 +1698,10 @@ impl FleetTools {
         // them and they are checked against the CONVERSATION's owner instead
         // (`require_conversation_person`).
         self.resolve_target_row(&caller, Some(sid), None, None, Reach::Drive, "the session")?;
+        // Task → session P-3, asked for with `ack_live: false`: the task's
+        // other live sessions, named only when this caller may see them.
+        crate::service::work::check_live_elsewhere(&args, &self.store, &self.view_scope(&caller)?)
+            .map_err(to_mcp_err)?;
         // The caller, not the `source` it passes, decides whether this is a
         // person's decision or an agent's (D34). A decision on one link by
         // id also answers that link's new version (`link_version`).
