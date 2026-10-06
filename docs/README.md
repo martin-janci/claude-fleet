@@ -15,4 +15,4 @@ A Tauri 2 desktop app for managing long-lived Claude Code sessions in tmux acros
 - **[Releasing](RELEASING.md)** — versioning & changelog automation.
 - **[Buildkite builder](buildkite.md)** — the persistent builder that runs an agent's full verification (`scripts/verify.sh remote`), and how to set it up.
 
-**For contributors:** start with [CLAUDE.md](../CLAUDE.md) for repo orientation, then browse [specs/](specs/) for per-iteration design documents and [plans/](plans/) for implementation plans.
+**For contributors:** start with [CLAUDE.md](../CLAUDE.md) for repo orientation, [Architecture](architecture.md) for how each subsystem is put together and [Status](status.md) for what is landed or off, then browse [specs/](specs/) for per-iteration design documents and [plans/](plans/) for implementation plans.
