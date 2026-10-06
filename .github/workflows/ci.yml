@@ -58,6 +58,7 @@ concurrency:
 #   windows-bundle     (new: the bundle, split out of rust-windows)   60
 #   clippy             (new: macOS/Windows lint, split out of the test jobs)   30
 #   hub-headless            16:39         60
+#   hub-image          (new: the hub Dockerfile, built before a tag)   30
 #
 # Raise one when the work in it legitimately grows; do not remove it.
 
@@ -471,6 +472,44 @@ jobs:
           path: hub-e2e-logs.tar.gz
           if-no-files-found: ignore
           retention-days: 7
+
+  # THE HUB IMAGE, BUILT BEFORE A TAG NEEDS IT. hub-image.yml builds
+  # crates/fleet-hub/Dockerfile only for a pushed v* tag, so a Dockerfile the
+  # tree has outgrown failed only after the release was out: v0.4.10 published
+  # its desktop bundles and APK with no fleet-hub image at all, because the
+  # build context lacked tools/voice (fixed in #450). hub-headless above
+  # compiles fleet-hub from the full checkout and cannot see that. This builds
+  # the same Dockerfile from the same context, amd64 only, pushes nothing, and
+  # runs the image once: `fleet-hub --version` through the real ENTRYPOINT.
+  # It reads the release builds' amd64 layer cache and writes none, so a PR
+  # never evicts what the next tag build reuses.
+  hub-image:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build crates/fleet-hub/Dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/fleet-hub/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            FLEET_GIT_SHA=${{ github.sha }}
+            FLEET_BUILD_ID=ci-${{ github.run_id }}
+          load: true
+          push: false
+          tags: fleet-hub:ci
+          cache-from: type=gha,scope=linux/amd64
+      - name: Run the image
+        run: |
+          set -euo pipefail
+          out="$(docker run --rm fleet-hub:ci --version)"
+          echo "$out"
+          case "$out" in "fleet-hub "*) ;; *) echo "unexpected --version output"; exit 1 ;; esac
 
   frontend:
     needs: changes
