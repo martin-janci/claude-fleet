@@ -3783,7 +3783,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// M1's sharing tools, 75,369) into Assets M6 (the changesets
     /// propose_layer / change / `LayerChange` and drift_diff growth,
     /// +1,347 bytes over `main`): exactly the two sides' sum.
-    const BUDGET_BYTES: usize = 76_816;
+    /// Measured at 76,891 on 2026-10-06 after the task → session spec's A1
+    /// (`work_link { start }` takes `dry_run` and `parallel`, named in the
+    /// description and as two parameters, +175 bytes).
+    const BUDGET_BYTES: usize = 76_991;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

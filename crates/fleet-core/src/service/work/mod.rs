@@ -165,6 +165,12 @@ pub struct WorkLinkArgs {
     /// Link across orgs anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_cross_org: Option<bool>,
+    /// Start: beside a live one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<bool>,
+    /// Start: preview only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry_run: Option<bool>,
     /// Snooze (7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<u32>,
@@ -680,6 +686,7 @@ pub fn start_args_as(
         worktree: args.worktree.clone(),
         force_cross_org: args.force_cross_org.unwrap_or(false),
         per_project: false,
+        parallel: args.parallel.unwrap_or(false),
     }
 }
 
