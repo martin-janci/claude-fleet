@@ -75,6 +75,8 @@ import { hubConnection } from './hub_connection';
 import { workFilters, mineItemIds, mineLoaded, DEFAULT_WORK_FILTERS } from './work_filters';
 import { resetAccessForTests, setMyGrants } from './access';
 import { trackers } from './trackers';
+import { switcherRequest } from './switcher_request';
+import { addProjectRequest } from './app_views';
 
 /** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
 async function openFilters() {
@@ -142,6 +144,8 @@ beforeEach(() => {
   sessionFocus.set(null);
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
+  switcherRequest.set(null);
+  addProjectRequest.set(null);
   // Multi-user M1: forget who this client is, the way a fresh launch has not
   // asked yet. Standalone (the default above) owns every row regardless, so
   // every existing test in this file is unaffected by the access gate.
@@ -802,95 +806,36 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(cfRows.some((r) => r.textContent?.includes('otherperson/'))).toBe(true);
   });
 
-  it('footer "+ New session" button opens project picker', async () => {
+  it('"+ New session" opens the switcher in New session mode', async () => {
     mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    const newBtn = screen.getByTestId('new-session-footer');
-    await fireEvent.click(newBtn);
-    // Picker now lists all known projects, even those without sessions.
-    await tick();
-    expect(screen.getByRole('listbox')).toBeInTheDocument();
-  });
-
-  it('project picker shows ALL projects regardless of recency/search filter', async () => {
-    // Filter to "1d" so only the freshest project (claude-fleet, 60s ago)
-    // would be in the main tree. The picker must still list everything.
-    mockBackend(fakeProjects, [sessionFor(1, 'dev-a')]);
-    render(Sidebar);
-    await tick(); await tick();
-    // Apply a restrictive filter.
-    await openFilters();
-    await fireEvent.click(screen.getByTestId('recency-1d'));
-    await fireEvent.input(screen.getByTestId('sidebar-search'), { target: { value: 'phone' } });
-    await tick();
-    // Open the picker.
     await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const listbox = screen.getByRole('listbox');
-    // All three fixture projects should be in the picker, including
-    // pos-frontend (14 days old, would be filtered by "1d") and
-    // phone-manager (no last_session_at at all).
-    expect(listbox.textContent).toContain('claude-fleet');
-    expect(listbox.textContent).toContain('pos-frontend');
-    expect(listbox.textContent).toContain('phone-manager');
+    expect(get(switcherRequest)).toEqual({ mode: 'new', host: undefined });
+    expect(screen.queryByRole('listbox', { name: 'Pick project for new session' })).toBeNull();
   });
 
-  it('the project picker hides the UX agent\'s system project, but the tree still shows its session', async () => {
-    // The design: "flagged `system` and hidden from the project picker".
-    // Starting an ordinary session in `~/.claude-fleet/operator` — not a
-    // repository, and the agent's own working directory — is never what
-    // "+ New session" means. The tree is a different question: the operator
-    // session is meant to be visible, attachable and restartable there.
-    const operatorProject = {
-      project: {
-        id: 9,
-        owner: 'fleet',
-        repo: 'operator',
-        base_path: '/home/u/.claude-fleet/operator',
-        last_session_at: Math.floor(Date.now() / 1000),
-        adopted: false,
-        system: true,
-      },
+  it('an Add project request opens the dialog prefilled, and the added project is kept', async () => {
+    const added = {
+      project: { id: 42, owner: 'newowner', repo: 'fresh-repo', base_path: '/r/fresh', last_session_at: null, adopted: false, system: false },
       worktrees: [],
     };
-    mockBackend([...fakeProjects, operatorProject], [sessionFor(9, 'fleet-operator')]);
+    mockBackend(fakeProjects, []);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, args?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'add_project' ? added : cmd === 'set_project_pick' ? (args as { args: unknown }).args : base(cmd, args),
+    );
     render(Sidebar);
     await tick(); await tick();
-    expect(screen.getByText('fleet-operator')).toBeInTheDocument();
-
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const listbox = screen.getByRole('listbox');
-    expect(listbox.textContent).toContain('claude-fleet');
-    expect(listbox.textContent).not.toContain('operator');
-  });
-
-  it('the project picker offers Add project, which opens the dialog', async () => {
-    mockBackend(fakeProjects, [sessionFor(1)]);
-    render(Sidebar);
+    addProjectRequest.set({ cloneUrl: 'newowner/fresh-repo' });
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const addRow = screen.getByTestId('add-project-row');
-    // Pinned first, above the projects.
-    expect(screen.getByRole('listbox').firstElementChild).toBe(addRow);
-    await fireEvent.click(addRow);
-    await tick();
-    expect(screen.getByTestId('add-project-dialog')).toBeInTheDocument();
-    // The popover closes behind the dialog.
-    expect(screen.queryByTestId('add-project-row')).toBeNull();
-  });
-
-  it('Add project is reachable with no projects at all', async () => {
-    mockBackend([], []);
-    render(Sidebar);
-    await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    await fireEvent.click(screen.getByTestId('add-project-row'));
-    await tick();
-    expect(screen.getByTestId('add-project-dialog')).toBeInTheDocument();
+    expect((screen.getByTestId('clone-url') as HTMLInputElement).value).toBe('newowner/fresh-repo');
+    await fireEvent.click(screen.getByTestId('add-create'));
+    await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
+    expect(mockedInvoke).toHaveBeenCalledWith('set_project_pick', {
+      args: { owner: 'newowner', repo: 'fresh-repo', pinned: false, vis: 'keep', grp: null },
+    });
+    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('newowner/fresh-repo');
   });
 
   it('after a successful add, NewSessionDialog opens on the returned project', async () => {
@@ -905,10 +850,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     );
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    await fireEvent.click(screen.getByTestId('add-project-row'));
-    await tick();
+    addProjectRequest.set({});
+    await tick(); await tick();
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'newowner/fresh-repo' } });
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
@@ -933,10 +876,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     ]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    await fireEvent.click(screen.getByTestId('add-project-row'));
-    await tick();
+    addProjectRequest.set({});
+    await tick(); await tick();
     const chipFor = (alias: string) =>
       Array.from(document.querySelectorAll<HTMLButtonElement>('.host-pick')).find((b) => (b as HTMLElement).dataset.alias === alias)!;
     await fireEvent.click(chipFor('mefistos'));
@@ -950,12 +891,10 @@ describe('Sidebar (sessions-grouped view)', () => {
   });
 
   it('a native <dialog> close on NewSessionDialog still closes it (Modal reopen only when the parent declines)', async () => {
-    mockBackend(fakeProjects, []);
+    mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    await fireEvent.click(screen.getByText('claude-fleet'));
+    await fireEvent.click(screen.getAllByTitle('New session in this project')[0]);
     await tick();
     const dlg = screen.getByRole('dialog', { name: 'New session' }) as HTMLDialogElement;
     dlg.removeAttribute('open');
@@ -1932,11 +1871,10 @@ describe('Sidebar: a hub contract skew', () => {
     mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const addRow = screen.getByTestId('add-project-row') as HTMLButtonElement;
-    expect(addRow.disabled).toBe(false);
-    expect(addRow.title).toBe('');
+    addProjectRequest.set({ cloneUrl: 'acme/widgets' });
+    await tick(); await tick();
+    expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByTestId('add-blocked')).toBeNull();
   });
 
   it('Add project is disabled with the offline sentence while the hub is unreachable', async () => {
@@ -1945,12 +1883,14 @@ describe('Sidebar: a hub contract skew', () => {
     mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
-    await tick();
-    const addRow = screen.getByTestId('add-project-row') as HTMLButtonElement;
-    expect(addRow.disabled).toBe(true);
-    expect(addRow.title).toContain('unreachable');
-    expect(addRow.title).toContain('fleet.example.com');
+    addProjectRequest.set({});
+    await tick(); await tick();
+    // A valid repository would enable Create anywhere else; the blocked hub holds it.
+    await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'acme/widgets' } });
+    expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
+    const why = screen.getByTestId('add-blocked');
+    expect(why.textContent).toContain('unreachable');
+    expect(why.textContent).toContain('fleet.example.com');
   });
 });
 

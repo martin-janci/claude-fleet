@@ -45,11 +45,14 @@
   import { onboardingDismissed } from './onboarding';
   import {
     hostsViewOpen,
-    newSessionHostRequest,
+    addProjectRequest,
     requestHostsView,
     settingsOpen,
   } from './app_views';
   import { hintAnchor } from './hints';
+  import { openNewSessionPicker } from './switcher_request';
+  import { setProjectPick } from './project_picks';
+  import { detectMac } from './terminal_keys';
   import {
     buildSessionsByProject,
     buildOutsideFleet,
@@ -822,27 +825,13 @@
         ),
   );
 
-  // Picker for the footer "+ New session" — shows ALL projects regardless
-  // of the recency filter or search query. The filter is for the live-
-  // sessions tree; when starting a new session the user shouldn't be
-  // restricted to projects with recent activity.
-  const allProjectsSorted = $derived(
-    // System projects are filtered out: `fleet/operator` is the UX agent's
-    // own working directory, not a repository, and starting an ordinary
-    // session in it is never what "+ New session" means. The tree above
-    // still shows it while the agent is running. See `ProjectRow.system`.
-    [...$projects.filter((p) => !p.project.system)].sort((a, b) => {
-      const aLabel = (a.project.owner + '/' + a.project.repo).toLowerCase();
-      const bLabel = (b.project.owner + '/' + b.project.repo).toLowerCase();
-      return aLabel.localeCompare(bLabel);
-    }),
-  );
-
   let dialogProject: ProjectTreeRow | null = $state(null);
-  let showProjectPicker = $state(false);
   let showAddProject = $state(false);
+  /** Clone URL the switcher's Add row hands over, prefilled in the dialog. */
+  let initialCloneUrl: string | undefined = $state(undefined);
   /** Host to preselect in NewSessionDialog: where Add project put the project. */
   let dialogHost: string | undefined = $state(undefined);
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
 
   // Add project ROUTES to the hub now (the clone runs on the host through the
   // hub's transport), so it is gated on the live link like every other routed
@@ -863,57 +852,34 @@
       : null,
   );
 
-  /** Host the open project picker preselects (the Hosts view's `n`). */
-  let pickerHost: string | undefined = $state(undefined);
-
   // Onboarding card actions — open the same flows as existing UI. Hosts are
   // managed in the Hosts view, not Settings.
   const openAddHost = () => requestHostsView();
-  const openNewSession = () => {
-    pickerHost = undefined;
-    showProjectPicker = true;
-  };
+  const openNewSession = () => openNewSessionPicker();
 
-  function toggleProjectPicker() {
-    pickerHost = undefined;
-    showProjectPicker = !showProjectPicker;
-  }
-
-  // "New session on <host>" from the Hosts view: the same project picker,
-  // then NewSessionDialog with that host preselected.
-  $effect(() => {
-    const host = $newSessionHostRequest;
-    if (host === null) return;
-    newSessionHostRequest.set(null);
-    pickerHost = host;
-    showProjectPicker = true;
-    // Keyboard flow from the Hosts view: land on the first project.
-    void tick().then(() => {
-      const first =
-        sidebarEl?.querySelector<HTMLElement>('.picker .picker-item:not(.add-project)') ??
-        sidebarEl?.querySelector<HTMLElement>('.picker .picker-item');
-      first?.focus();
-    });
-  });
-
+  // A project row's own `+`: straight to NewSessionDialog for that project.
+  // (The switcher's New session mode is the one place a project is picked.)
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
-    // A row's own `+` has no host intent; the picker may carry one.
-    dialogHost = e ? undefined : pickerHost;
-    pickerHost = undefined;
+    dialogHost = undefined;
     dialogProject = p;
-    showProjectPicker = false;
   }
 
-  function openAddProject() {
-    pickerHost = undefined;
-    showProjectPicker = false;
+  // The switcher's Add row asks for the Add project dialog (App-level stores
+  // cannot reach this component's state directly).
+  $effect(() => {
+    const req = $addProjectRequest;
+    if (req === null) return;
+    addProjectRequest.set(null);
+    initialCloneUrl = req.cloneUrl;
     showAddProject = true;
-  }
+  });
 
   // The user added a project in order to start a session in it: go straight
   // to NewSessionDialog on the new row (already merged into `projects`).
   function onProjectAdded(row: ProjectTreeRow, host: string) {
+    // Adding a project is the person saying it matters: keep it in the picker.
+    void setProjectPick(row.project.owner, row.project.repo, { vis: 'keep' });
     showAddProject = false;
     dialogHost = host;
     dialogProject = row;
@@ -1575,8 +1541,10 @@
     <div class="footer-row">
       <button
         class="new-btn"
-        onclick={toggleProjectPicker}
+        onclick={() => openNewSessionPicker()}
         data-testid="new-session-footer"
+        title={isMac ? 'New session (⌘N)' : 'New session (Ctrl+Shift+N)'}
+        aria-keyshortcuts={isMac ? 'Meta+N' : 'Control+Shift+N'}
       >
         + New session
       </button>
@@ -1596,40 +1564,16 @@
     >
       theme: {$theme}
     </button>
-    {#if showProjectPicker}
-      <div class="picker" role="listbox" aria-label="Pick project for new session">
-        <button
-          class="picker-item add-project"
-          disabled={addProjectBlocked !== null}
-          title={addProjectBlocked ?? ''}
-          onclick={openAddProject}
-          data-testid="add-project-row"
-        >
-          ＋ Add project…
-        </button>
-        {#each allProjectsSorted as row (row.project.id)}
-          <button class="picker-item" onclick={() => openNew(row)}>
-            {#if collidingRepos.has(row.project.repo)}<span class="owner"
-                >{row.project.owner}/</span
-              >{/if}{row.project.repo}
-          </button>
-        {/each}
-        {#if allProjectsSorted.length === 0}
-          <p class="empty pad">No projects yet. Add one, or refresh.</p>
-        {/if}
-      </div>
-    {/if}
   </footer>
 </div>
 
-<!-- The project picker is a popover, not a modal; the modals below handle
-     their own Escape through <dialog>'s cancel event. -->
-<svelte:window onkeydown={(e) => {
-  if (e.key === 'Escape' && showProjectPicker) showProjectPicker = false;
-}} />
-
 {#if showAddProject}
-  <AddProjectDialog onCreated={onProjectAdded} onCancel={() => (showAddProject = false)} />
+  <AddProjectDialog
+    onCreated={onProjectAdded}
+    onCancel={() => (showAddProject = false)}
+    {initialCloneUrl}
+    blocked={addProjectBlocked}
+  />
 {/if}
 
 {#if dialogProject}
@@ -2087,32 +2031,4 @@
     cursor: pointer;
   }
   .theme-toggle:hover { color: var(--fg); border-color: var(--accent); }
-
-  .picker {
-    position: absolute;
-    bottom: 100%;
-    left: 0;
-    right: 0;
-    margin-bottom: 0.3rem;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    border-radius: 5px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.3);
-    max-height: 240px;
-    overflow: auto;
-    z-index: 5;
-  }
-  .picker-item {
-    display: block;
-    width: 100%;
-    text-align: left;
-    border: none;
-    background: transparent;
-    color: var(--fg);
-    font-size: 0.85rem;
-    padding: 0.4rem 0.6rem;
-    cursor: pointer;
-  }
-  .picker-item:hover { background: var(--bg-pane); }
-  .picker-item.add-project { color: var(--accent); border-bottom: 1px solid var(--border); }
 </style>

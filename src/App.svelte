@@ -839,9 +839,11 @@
 <McpConfirmDialog />
 <AgentFab />
 <AgentPanel contextInput={agentContextInput} />
-<!-- Cmd/Ctrl+K / Cmd/Ctrl+P. Its "new session" rows publish a request that
-     mounts the dialog here (the Sidebar keeps its own instance for its
-     footer button until it adopts the store post-#46). -->
+<!-- Cmd/Ctrl+K / Cmd/Ctrl+P, and the one place a project is picked for a new
+     session (the sidebar's "+ New session" and the Hosts view's `n` open it
+     in New session mode). Its rows publish a request that mounts the dialog
+     here; the Sidebar's own dialog mount remains for a project row's `+` and
+     for Add project. -->
 <QuickSwitcher />
 {#if $newSessionRequest}
   <NewSessionDialog
