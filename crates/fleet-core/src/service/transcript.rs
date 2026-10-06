@@ -257,11 +257,15 @@ fn one_line(s: &str) -> String {
 }
 
 /// What a tool call touched, for its compact line: a path, a pattern, a
-/// URL, a query or the first line of a command. `None` when nothing
-/// identifying is in the input.
-pub fn tool_target(_name: &str, input: Option<&serde_json::Value>) -> Option<String> {
+/// URL, a query or the first line of a command — and, for a `SendMessage`,
+/// the agent it was sent to, which its input names in `to` and nothing
+/// else. `None` when nothing identifying is in the input.
+pub fn tool_target(name: &str, input: Option<&serde_json::Value>) -> Option<String> {
     let map = input?.as_object()?;
-    for key in [
+    // Only `SendMessage`: a `to` in some other tool's input is not known to
+    // name what that tool touched.
+    let addressee: &[&str] = if name == "SendMessage" { &["to"] } else { &[] };
+    for key in addressee.iter().copied().chain([
         "file_path",
         "notebook_path",
         "pattern",
@@ -271,7 +275,7 @@ pub fn tool_target(_name: &str, input: Option<&serde_json::Value>) -> Option<Str
         "path",
         "skill",
         "description",
-    ] {
+    ]) {
         if let Some(s) = map.get(key).and_then(|v| v.as_str()) {
             let first = s.lines().next().unwrap_or("").trim();
             if first.is_empty() {
@@ -3983,6 +3987,20 @@ mod tests {
         );
         assert_eq!(
             tool_target("TodoWrite", j(serde_json::json!({"todos":[]})).as_ref()),
+            None
+        );
+        // A SendMessage names its addressee, not the message it carries.
+        assert_eq!(
+            tool_target(
+                "SendMessage",
+                j(serde_json::json!({"to":"implementer","message":"## Task 8\n- fix it"})).as_ref()
+            )
+            .as_deref(),
+            Some("implementer")
+        );
+        // `to` is read for SendMessage only.
+        assert_eq!(
+            tool_target("send_email", j(serde_json::json!({"to":"a@b.c"})).as_ref()),
             None
         );
         let long = "x".repeat(300);
