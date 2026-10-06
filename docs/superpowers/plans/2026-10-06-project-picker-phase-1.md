@@ -4,7 +4,7 @@
 
 **Goal:** Replace the sidebar's flat "+ New session" popover with a *New session* mode of the existing ⌘K switcher: Start from work (tickets), Pinned, Suggested (frecency + context), every project in its group (dormant dimmed), Hidden folded — backed by stored pin/visibility/group per project and keyboard actions with undo.
 
-**Architecture:** Backend: migration 102 adds one TEXT-keyed table `project_picks`; two hub tools / Tauri commands (`project_picks`, `set_project_pick`), `Access::PersonDevice`, `Routed` on a hub client. Frontend: a picks store, a local frecency pref, a pure ranking module (`project_rank.ts`) that builds the sections, small extensions to `PickerList`, an actions menu component, a `mode` in `QuickSwitcher`, `autostart` in `NewSessionDialog`; the Sidebar popover is deleted and every entry point opens the switcher.
+**Architecture:** Backend: migration 104 adds one TEXT-keyed table `project_picks`; two hub tools / Tauri commands (`project_picks`, `set_project_pick`), `Access::PersonDevice`, `Routed` on a hub client. Frontend: a picks store, a local frecency pref, a pure ranking module (`project_rank.ts`) that builds the sections, small extensions to `PickerList`, an actions menu component, a `mode` in `QuickSwitcher`, `autostart` in `NewSessionDialog`; the Sidebar popover is deleted and every entry point opens the switcher.
 
 **Tech Stack:** Rust (rusqlite, rmcp `#[tool]`, Tauri 2 commands), Svelte 5 runes + svelte/store, Vitest + @testing-library/svelte.
 
@@ -23,13 +23,13 @@
 - The ranking is snapshotted when the switcher opens; recomputed only on query change, a fold, or the person's own action. Highlight by key.
 - UI copy: English, sentence case — "New session in", "project or ticket…", "Start from work", "Pinned", "Suggested", "Hidden", "More from <owner>", "Forks & others", "Add project…", "Pin to top", "Unpin", "Hide", "Unhide", "Move to group…", "Back to automatic". No emoji in shipped UI; icons are inline stroke SVGs.
 - Frontend tests: `npx vitest run <file>`; type-check `npx svelte-check --threshold error`; run `pnpm install --frozen-lockfile` once first.
-- Rust: foreground, one command per call (fmt, clippy, test separately). Before calling a failure "pre-existing", check `origin/main`. Never judge a run through `| tail`.
+- Rust: the repo's validation ladder (CLAUDE.md): `cargo fleet-fast-check` while editing, `cargo fleet-test -- <filter>` for tests, `cargo fleet-lint` for clippy, `scripts/verify.sh` before each commit; never `-p <crate>`, never `cargo build` to check compilation. A `REGEN_*` run is meant to fail once; re-run without the variable. Foreground, one command per call. Before calling a failure "pre-existing", check `origin/main`. Never judge a run through `| tail`.
 
 ## File map
 
 | File | Status | Task |
 |------|--------|------|
-| `crates/fleet-core/migrations/102_project_picks.sql` | create | 1 |
+| `crates/fleet-core/migrations/104_project_picks.sql` | create | 1 |
 | `crates/fleet-core/src/store/project_picks.rs` | create | 1 |
 | `crates/fleet-core/src/store/schema.rs`, `store/mod.rs` | modify | 1 |
 | `crates/fleet-core/src/service/project_picks.rs`, `service/mod.rs` | create / modify | 2 |
@@ -49,12 +49,12 @@
 
 ---
 
-### Task 1: Storage — migration 102 and the store module
+### Task 1: Storage — migration 104 and the store module
 
 **Files:**
-- Create: `crates/fleet-core/migrations/102_project_picks.sql`
+- Create: `crates/fleet-core/migrations/104_project_picks.sql`
 - Create: `crates/fleet-core/src/store/project_picks.rs`
-- Modify: `crates/fleet-core/src/store/schema.rs` (append to `MIGRATIONS` after `version: 101`)
+- Modify: `crates/fleet-core/src/store/schema.rs` (append to `MIGRATIONS` after the `version: 103` entry)
 - Modify: `crates/fleet-core/src/store/mod.rs` (`mod project_picks;` beside `mod projects;`; re-export beside `pub use reports::…`)
 
 **Interfaces — produces (`crate::store`):**
@@ -63,7 +63,7 @@
 - `Store::list_project_picks(&self) -> Result<Vec<ProjectPickRow>, IpcError>`
 - `Store::set_project_pick(&self, owner: &str, repo: &str, pinned: bool, vis: Option<&str>, grp: Option<&str>, now: i64) -> Result<ProjectPickRow, IpcError>`
 
-- [ ] **Step 1: The migration** — `102_project_picks.sql` (renumber everywhere in this task if 102 is taken on `origin/main`):
+- [ ] **Step 1: The migration** — `104_project_picks.sql` (renumber everywhere in this task if 104 is taken on `origin/main`):
 
 ```sql
 -- The New session picker (docs/superpowers/specs/2026-10-05-project-picker-design.md):
@@ -81,15 +81,15 @@ CREATE TABLE IF NOT EXISTS project_picks (
   PRIMARY KEY (owner, repo)
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (102);
+INSERT OR IGNORE INTO schema_version (version) VALUES (104);
 ```
 
-- [ ] **Step 2: Register it** — in `schema.rs` after the `version: 101` entry:
+- [ ] **Step 2: Register it** — in `schema.rs` after the `version: 103` entry:
 
 ```rust
     // The New session picker: a person's pin / visibility / group per
     // project, keyed by owner/repo TEXT. A new table only, so plain.
-    Migration::plain(102, include_str!("../../migrations/102_project_picks.sql")),
+    Migration::plain(104, include_str!("../../migrations/104_project_picks.sql")),
 ```
 
 - [ ] **Step 3: Write the failing tests** — create `store/project_picks.rs` with `use super::*;` and:
@@ -170,7 +170,7 @@ mod tests {
 
 Register in `store/mod.rs`: `mod project_picks;` and `pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};`.
 
-- [ ] **Step 4: Run to verify failure** — `cargo test -p fleet-core --lib store::project_picks` → compile errors (types/methods missing).
+- [ ] **Step 4: Run to verify failure** — `cargo fleet-test -- store::project_picks` → compile errors (types/methods missing).
 
 - [ ] **Step 5: Implement** — above the tests:
 
@@ -291,13 +291,13 @@ impl Store {
 }
 ```
 
-- [ ] **Step 6: Run** — `cargo test -p fleet-core --lib store::project_picks` → `5 passed`.
-- [ ] **Step 7: Store suite** — `cargo test -p fleet-core --lib store::` → all pass. A golden pinning the schema version names its REGEN variable in its failure; regenerate, never hand-edit.
-- [ ] **Step 8: fmt + clippy** — `cargo fmt --all`; `cargo clippy -p fleet-core --all-targets -- -D warnings`.
+- [ ] **Step 6: Run** — `cargo fleet-test -- store::project_picks` → `5 passed`.
+- [ ] **Step 7: Store suite** — `cargo fleet-test -- store::` → all pass. A golden pinning the schema version names its REGEN variable in its failure; regenerate, never hand-edit.
+- [ ] **Step 8: fmt + clippy** — `cargo fmt --all`; `cargo fleet-lint`.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/fleet-core/migrations/102_project_picks.sql crates/fleet-core/src/store/project_picks.rs crates/fleet-core/src/store/schema.rs crates/fleet-core/src/store/mod.rs
+git add crates/fleet-core/migrations/104_project_picks.sql crates/fleet-core/src/store/project_picks.rs crates/fleet-core/src/store/schema.rs crates/fleet-core/src/store/mod.rs
 git commit -m "feat(picker): project_picks — pinned, visibility and group per owner/repo"
 ```
 
@@ -366,7 +366,7 @@ async fn set_project_pick_round_trips_through_the_tools() {
 }
 ```
 
-- [ ] **Step 2: Verify failure** — `cargo test -p fleet-core --lib project_pick` → compile error.
+- [ ] **Step 2: Verify failure** — `cargo fleet-test -- project_pick` → compile error.
 
 - [ ] **Step 3: Service** — `service/project_picks.rs`:
 
@@ -465,8 +465,8 @@ pub fn set(store: &Mutex<Store>, args: &SetProjectPickArgs) -> Result<ProjectPic
     },
 ```
 
-- [ ] **Step 6: Run** — `cargo test -p fleet-core --lib project_pick` → the 2 new tests plus Task 1's pass.
-- [ ] **Step 7: Regen + suite** — `REGEN_DOCS=1 cargo test -p fleet-core reference_is_current`, then `cargo test -p fleet-core` → all pass. A test enumerating tools/policies will name what it needs; add exactly that, never loosen an assertion. `tests_isolation.rs` covers `work*` actions only.
+- [ ] **Step 6: Run** — `cargo fleet-test -- project_pick` → the 2 new tests plus Task 1's pass.
+- [ ] **Step 7: Regen + suite** — `REGEN_DOCS=1 cargo fleet-test -- reference_is_current` (meant to fail once — re-run without the variable), then `scripts/verify.sh` → all pass. A test enumerating tools/policies will name what it needs; add exactly that, never loosen an assertion. `tests_isolation.rs` covers `work*` actions only.
 - [ ] **Step 8: fmt + clippy**, then commit:
 
 ```bash
@@ -530,7 +530,7 @@ Mutation case (every field non-default, so the whole struct is proven to cross t
 
 Match the neighbouring cases' exact tuple shape if it differs.
 
-- [ ] **Step 2: Verify failure** — `cargo test -p claude-fleet --lib backend::tests_routing` → compile error.
+- [ ] **Step 2: Verify failure** — `cargo fleet-test -- backend::tests_routing` → compile error.
 
 - [ ] **Step 3: Commands** — imports in `commands/projects.rs`:
 
@@ -611,7 +611,7 @@ Update the module doc ("all four commands route…" → "all six"). Register in 
     ),
 ```
 
-- [ ] **Step 5: Regen + suite** — `REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen`; `REGEN_DOCS=1 cargo test -p fleet-core reference_is_current`; `cargo test -p claude-fleet --lib` → all pass. If `tests_contract` fails on `hub_contract.golden.json`, run once with `REGEN_HUB_CONTRACT=1` (that run still says FAILED), re-run without it, and check the diff only adds the two tools. Leave `CONTRACT_REVISION` alone.
+- [ ] **Step 5: Regen + suite** — `REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen`; `REGEN_DOCS=1 cargo fleet-test -- reference_is_current`; `scripts/verify.sh` → all pass. If `tests_contract` fails on `hub_contract.golden.json`, run once with `REGEN_HUB_CONTRACT=1` (that run still says FAILED), re-run without it, and check the diff only adds the two tools. Leave `CONTRACT_REVISION` alone.
 - [ ] **Step 6: fmt + clippy (workspace)**, then commit:
 
 ```bash
@@ -2392,7 +2392,7 @@ git commit -m "feat(picker): + New session and Hosts n open the switcher; the si
 
 ### Task 12: Whole-tree verification
 
-- [ ] **Step 1: Sync** — `git fetch origin && git log --oneline HEAD..origin/main | head`. If `main` moved, merge `origin/main` locally (likely conflict: the migration number — renumber 102), resolve, continue.
+- [ ] **Step 1: Sync** — `git fetch origin && git log --oneline HEAD..origin/main | head`. If `main` moved, merge `origin/main` locally (likely conflict: the migration number — renumber 104), resolve, continue.
 - [ ] **Step 2: Local CI**, foreground, unpiped: `scripts/ci-local.sh` → every stage green; read the whole output.
 - [ ] **Step 3: Generated files current** — `git status --short` shows nothing after the run; a rewritten generated file means a missed REGEN: re-run it, commit.
 - [ ] **Step 4: What jsdom cannot prove** (WKWebView): Esc with a query clears without closing the Modal; ⌘N reaches the window handler (no native menu item takes it); hover actions do not cover the chip; dark-theme contrast of chip, kbd and dimmed rows. Check in a sandboxed dev run only — never against the real HOME (the dev build migrates the production `state.db` and kills the installed app).
