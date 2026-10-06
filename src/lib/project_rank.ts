@@ -60,12 +60,8 @@ export function groupProjects(
         count.set(pre, (count.get(pre) ?? 0) + 1);
       }
     }
+    const auto = new Map<number, GroupInfo>();
     for (const r of list) {
-      const manual = picks.get(pickKey(owner, r.project.repo))?.grp;
-      if (manual) {
-        out.set(r.project.id, { key: `m:${manual}`, name: manual, sub: 'your group', ownerOrder: 0 });
-        continue;
-      }
       const t = toks(r);
       let best: string | null = null;
       for (let n = t.length - 1; n >= 1; n--) {
@@ -77,12 +73,32 @@ export function groupProjects(
       }
       if (!best && t.length === 1 && (count.get(t[0]) ?? 0) >= CLUSTER_MIN) best = t[0];
       if (best) {
-        out.set(r.project.id, { key: `c:${owner}:${best}`, name: best, sub: `${best}-* · ${owner}`, ownerOrder: 1 + i });
+        auto.set(r.project.id, { key: `c:${owner}:${best}`, name: best, sub: `${best}-* · ${owner}`, ownerOrder: 1 + i });
       } else if (list.length >= OWNER_GROUP_MIN) {
-        out.set(r.project.id, { key: `o:${owner}`, name: `More from ${owner}`, sub: '', ownerOrder: 1 + i });
+        auto.set(r.project.id, { key: `o:${owner}`, name: `More from ${owner}`, sub: '', ownerOrder: 1 + i });
       } else {
-        out.set(r.project.id, { key: 'f', name: FORKS, sub: '', ownerOrder: 10_000 });
+        auto.set(r.project.id, { key: 'f', name: FORKS, sub: '', ownerOrder: 10_000 });
       }
+    }
+    // This owner's automatic clusters that someone is in, by lower-cased
+    // name: a person's group of the same name joins it (one section).
+    const clusters = new Map<string, GroupInfo>();
+    for (const r of list) {
+      if (picks.get(pickKey(owner, r.project.repo))?.grp) continue;
+      const g = auto.get(r.project.id)!;
+      if (g.key.startsWith('c:')) clusters.set(g.name.toLowerCase(), g);
+    }
+    for (const r of list) {
+      const manual = picks.get(pickKey(owner, r.project.repo))?.grp;
+      if (!manual) {
+        out.set(r.project.id, auto.get(r.project.id)!);
+        continue;
+      }
+      const lower = manual.toLowerCase();
+      out.set(
+        r.project.id,
+        clusters.get(lower) ?? { key: `m:${lower}`, name: manual, sub: 'your group', ownerOrder: 0 },
+      );
     }
   });
   return out;
@@ -97,6 +113,8 @@ export interface Entry {
   hidden: HiddenReason | null;
   dormant: boolean;
   group: GroupInfo;
+  /** The person put it in a group (also when that joined an automatic one). */
+  manualGroup: boolean;
 }
 
 export function entriesOf(
@@ -120,6 +138,7 @@ export function entriesOf(
       hidden: hiddenReason(p, pk, now),
       dormant: isDormant(p, now),
       group: groups.get(p.project.id)!,
+      manualGroup: !!pk?.grp,
     };
   });
 }

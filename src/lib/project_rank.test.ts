@@ -62,6 +62,37 @@ describe('groupProjects', () => {
     expect(g.get(rows[0].project.id)?.name).toBe('ab');
     expect(g.get(rows[3].project.id)).toMatchObject({ name: 'Mine', sub: 'your group' });
   });
+  it('a person’s group named like an automatic group of the same owner joins it (one section)', () => {
+    const rows = [
+      proj('F', 'sales-twins-app'), proj('F', 'sales-twins-mobile', null), proj('F', 'sales-twins-revonaut-fixes', null),
+      proj('F', 'stw-fix2', null), proj('G', 'other', null),
+    ];
+    const g = groupProjects(
+      rows,
+      picks({ owner: 'F', repo: 'stw-fix2', grp: 'Sales-Twins' }, { owner: 'G', repo: 'other', grp: 'sales-twins' }),
+    );
+    expect(g.get(rows[3].project.id)).toEqual(g.get(rows[0].project.id));
+    // Another owner's project keeps its own (person's) group.
+    expect(g.get(rows[4].project.id)).toMatchObject({ key: 'm:sales-twins', sub: 'your group' });
+    const s = buildSections(entriesOf(rows, picks({ owner: 'F', repo: 'stw-fix2', grp: 'Sales-Twins' }), NOW), noCtx, {}, NOW);
+    expect(s.filter((x) => x.label.toLowerCase() === 'sales-twins')).toHaveLength(1);
+    expect(labels(s.find((x) => x.label === 'sales-twins'))).toContain('stw-fix2');
+  });
+  it('a person’s groups differing only in case are one section', () => {
+    const a = proj('o', 'alpha');
+    const b = proj('q', 'beta');
+    const e = entriesOf([a, b], picks({ owner: 'o', repo: 'alpha', grp: 'Mine' }, { owner: 'q', repo: 'beta', grp: 'mine' }), NOW);
+    expect(e[0].group.key).toBe('m:mine');
+    expect(e[1].group.key).toBe('m:mine');
+    expect(buildSections(e, noCtx, {}, NOW).filter((x) => x.key === 'g:m:mine')).toHaveLength(1);
+  });
+  it('manualGroup follows the pick, also when the pick joined an automatic group', () => {
+    const rows = [proj('F', 'sales-twins-a'), proj('F', 'sales-twins-b'), proj('F', 'sales-twins-c'), proj('F', 'stw')];
+    const e = entriesOf(rows, picks({ owner: 'F', repo: 'stw', grp: 'sales-twins' }), NOW);
+    expect(e[3].group.key).toBe('c:F:sales-twins');
+    expect(e[3].manualGroup).toBe(true);
+    expect(e[0].manualGroup).toBe(false);
+  });
 });
 
 describe('buildSections', () => {
