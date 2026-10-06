@@ -154,6 +154,9 @@ const SESSION_TIER = {
   // Which of the session's links groups it — a per-session work-graph write,
   // like `link_session_work`.
   set_primary_work: 'drive',
+  // Task → session P-2: end one of the session's links and take the
+  // primary — the two per-session writes above, in one step.
+  switch_session_work: 'drive',
   // Undo of a confirm / reject: the link goes back to a suggestion. A
   // per-session work-graph write like `link_session_work`.
   reconsider_work_link: 'drive',
