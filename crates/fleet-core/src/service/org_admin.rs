@@ -273,6 +273,46 @@ pub struct PersonSummary {
     pub devices: Vec<String>,
 }
 
+/// Whose hosts' unclaimed counts `person` is served (phase D): every host
+/// for a host administrator — the hub's owner, or an admin of the company
+/// that owns the hub (owner's answer 1) — else the hosts of each org they
+/// administer whose `admins_see_unclaimed` the hub's owner turned on
+/// (answer 3).
+pub fn unclaimed_reach(
+    s: &Store,
+    person: i64,
+) -> Result<crate::service::view_scope::UnclaimedReach, IpcError> {
+    use crate::service::view_scope::UnclaimedReach;
+    if matches!(s.personal_owner_id()?, Some(o) if o == person) {
+        return Ok(UnclaimedReach::Every);
+    }
+    let admin_of: Vec<i64> = s
+        .memberships_of(person)?
+        .into_iter()
+        .filter(|m| m.is_live() && m.role == crate::store::ROLE_ADMIN)
+        .map(|m| m.org_id)
+        .collect();
+    if admin_of.is_empty() {
+        return Ok(UnclaimedReach::None);
+    }
+    if let Some(h) = s.hub_owner_org()? {
+        if admin_of.contains(&h) {
+            return Ok(UnclaimedReach::Every);
+        }
+    }
+    let mut orgs = std::collections::BTreeSet::new();
+    for o in admin_of {
+        if s.get_org(o)?.is_some_and(|r| r.admins_see_unclaimed) {
+            orgs.insert(o);
+        }
+    }
+    Ok(if orgs.is_empty() {
+        UnclaimedReach::None
+    } else {
+        UnclaimedReach::Orgs(orgs)
+    })
+}
+
 fn to_json<T: Serialize>(v: &T) -> Result<serde_json::Value, IpcError> {
     serde_json::to_value(v).map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))
 }

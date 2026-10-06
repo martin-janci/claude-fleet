@@ -9680,12 +9680,15 @@ async fn a_one_person_fleet_still_sees_its_unclaimed_rows() {
     );
 }
 
-/// R5-d. The per-host count of `unclaimed` sessions is served to the one
-/// person on a one-person hub and to nobody else — the master on a hub with
-/// two people included. `None` is not `Some(0)`: the first says "you are not
-/// being told", the second is a claim about the host.
+/// R5-d, as org administration phase D re-reads it. The per-host count of
+/// `unclaimed` sessions is served to the one person on a one-person hub; on
+/// a hub with more people, to whoever administers hosts (owner's answer 1:
+/// the hub's owner, or the admins of the company that owns the hub), and to
+/// an org's admins on its own hosts when the hub's owner switched that on
+/// (answer 3). Nobody else. `None` is not `Some(0)`: the first says "you are
+/// not being told", the second is a claim about the host.
 #[tokio::test]
-async fn list_hosts_serves_the_unclaimed_count_only_on_a_one_person_fleet() {
+async fn list_hosts_serves_the_unclaimed_count_to_whoever_administers_the_host() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("empty").unwrap();
     s.upsert_host("h").unwrap();
@@ -9708,13 +9711,56 @@ async fn list_hosts_serves_the_unclaimed_count_only_on_a_one_person_fleet() {
     );
     assert_eq!(host_counts(&t, device_of(ada, ada)).await, want);
 
-    t.store.lock().unwrap().create_person("bob", None).unwrap();
+    let (bob, acme) = {
+        let s = t.store.lock().unwrap();
+        let bob = s.create_person("bob", None).unwrap().id;
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        s.set_host_org("h", Some(acme)).unwrap();
+        (bob, acme)
+    };
     for who in [Caller::master(), device_of(ada, ada)] {
-        assert!(
-            host_counts(&t, who).await.iter().all(|(_, n)| n.is_none()),
-            "two people: nobody is served the count through the API"
+        assert_eq!(
+            host_counts(&t, who).await,
+            want,
+            "two people: the hub's owner administers its hosts"
         );
     }
+    let none = vec![("empty".to_string(), None), ("h".to_string(), None)];
+    assert_eq!(
+        host_counts(&t, device_of(bob, ada)).await,
+        none,
+        "a colleague is not told"
+    );
+    t.store
+        .lock()
+        .unwrap()
+        .set_org_member(acme, bob, crate::store::ROLE_ADMIN, None)
+        .unwrap();
+    assert_eq!(
+        host_counts(&t, device_of(bob, ada)).await,
+        none,
+        "an org's admin, until the hub's owner switches it on"
+    );
+    t.store
+        .lock()
+        .unwrap()
+        .set_org_admins_see_unclaimed(acme, true)
+        .unwrap();
+    assert_eq!(
+        host_counts(&t, device_of(bob, ada)).await,
+        vec![("empty".to_string(), None), ("h".to_string(), Some(2))],
+        "then on the org's own hosts only"
+    );
+    t.store
+        .lock()
+        .unwrap()
+        .set_hub_owner_org(Some(acme))
+        .unwrap();
+    assert_eq!(
+        host_counts(&t, device_of(bob, ada)).await,
+        want,
+        "an admin of the company that owns the hub administers every host"
+    );
 }
 
 // ---- multi-user M1, choke point 2 (T7): one session gate ----
@@ -16690,6 +16736,7 @@ async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
             Parameters(SessionShareParams {
                 session_id: id,
                 person,
+                org: None,
                 level,
             }),
         )
@@ -16725,6 +16772,7 @@ async fn a_level_outside_watch_and_drive_is_refused() {
                 Parameters(SessionShareParams {
                     session_id: f.a_row,
                     person: "bob".into(),
+                    org: None,
                     level: bad.into(),
                 }),
             )
@@ -16739,6 +16787,7 @@ async fn a_level_outside_watch_and_drive_is_refused() {
             Parameters(SessionShareParams {
                 session_id: f.a_row,
                 person: "bob".into(),
+                org: None,
                 level: "own".into(),
             }),
         )
@@ -16765,6 +16814,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
         Parameters(SessionShareParams {
             session_id: f.a_row,
             person: "bob".into(),
+            org: None,
             level: "drive".into(),
         }),
     )
@@ -16786,6 +16836,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             Parameters(SessionShareParams {
                 session_id: f.a_row,
                 person: "carol".into(),
+                org: None,
                 level: "watch".into(),
             }),
         )
@@ -16828,6 +16879,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             Parameters(SessionGrantParams {
                 session_id: f.a_row,
                 person: "bob".into(),
+                org: None,
             }),
         )
         .await
@@ -16852,6 +16904,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             Parameters(SessionShareParams {
                 session_id: f.a_row,
                 person: "bob".into(),
+                org: None,
                 level: "drive".into(),
             }),
         )
@@ -16865,6 +16918,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
         Parameters(SessionGrantParams {
             session_id: f.a_row,
             person: "bob".into(),
+            org: None,
         }),
     )
     .await
@@ -16893,6 +16947,7 @@ async fn my_grants_answers_the_callers_own_person_and_nobody_elses() {
         Parameters(SessionShareParams {
             session_id: f.a_row,
             person: "bob".into(),
+            org: None,
             level: "watch".into(),
         }),
     )

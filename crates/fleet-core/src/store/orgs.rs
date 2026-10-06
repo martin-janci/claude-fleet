@@ -99,6 +99,14 @@ pub struct OrgRow {
     /// hub, which has no bound client.
     #[serde(default = "bound_sees_unassigned_default")]
     pub bound_sees_unassigned: bool,
+    /// Org administration phase D (migration 105): this company owns the
+    /// hub, so its admins administer hosts. At most one org.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owns_hub: bool,
+    /// Phase D: its admins see the count of unclaimed sessions on its hosts
+    /// (the hub owner's switch, off by default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admins_see_unclaimed: bool,
 }
 
 fn bound_sees_unassigned_default() -> bool {
@@ -280,7 +288,7 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
 }
 
 const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy, jev_allowed, \
-                           bound_sees_unassigned";
+                           bound_sees_unassigned, owns_hub, admins_see_unclaimed";
 const RULE_COLUMNS: &str = "id, org_id, owner, repo, path_prefix, host_alias";
 
 fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
@@ -293,6 +301,8 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         auto_tidy: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
         jev_allowed: r.get::<_, i64>(6)? != 0,
         bound_sees_unassigned: r.get::<_, i64>(7)? != 0,
+        owns_hub: r.get::<_, i64>(8)? != 0,
+        admins_see_unclaimed: r.get::<_, i64>(9)? != 0,
     })
 }
 
@@ -563,8 +573,24 @@ impl Store {
             "DELETE FROM usage_daily_org WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
+        // Phase D (migration 105): its members become FORMER members — the
+        // row stays, so a person whose last company this was reads nothing
+        // of any org rather than every org's work — and what was shared with
+        // the org reaches nobody.
+        let now = now_unix();
+        tx.execute(
+            "UPDATE org_members SET removed_at = ?2 WHERE org_id = ?1 AND removed_at IS NULL",
+            rusqlite::params![id, now],
+        )?;
+        let revoked = tx.execute(
+            "UPDATE session_grants SET revoked_at = ?2 WHERE org_id = ?1 AND revoked_at IS NULL",
+            rusqlite::params![id, now],
+        )?;
         let removed = tx.execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])? > 0;
         tx.commit()?;
+        if revoked > 0 {
+            super::session_grants::bump_grant_generation();
+        }
         Ok(removed)
     }
 

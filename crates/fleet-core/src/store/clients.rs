@@ -578,7 +578,9 @@ impl Store {
         &self,
         id: i64,
     ) -> Result<Option<ClientBinding>, crate::ipc_error::IpcError> {
-        Ok(self
+        // The binding as the auth layer resolves it (org administration
+        // phase D): a membership change ends the stream like a re-bind.
+        let stored = self
             .conn
             .query_row(
                 "SELECT org_id, person_id FROM client_tokens \
@@ -591,7 +593,8 @@ impl Store {
                     })
                 },
             )
-            .optional()?)
+            .optional()?;
+        stored.map(|b| self.effective_binding(b)).transpose()
     }
 }
 

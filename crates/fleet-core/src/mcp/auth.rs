@@ -344,6 +344,13 @@ impl Caller {
         // never widen one.
         let sole_person =
             matches!((person, store.sole_enabled_person()?), (Some(p), Some(o)) if p == o);
+        // Org administration phase D: who administers a host (owner's answer
+        // 1) and the per-org switch (answer 3). A person-less caller —
+        // a per-host token — is served no count beyond its own rows.
+        let unclaimed = match person {
+            Some(p) => crate::service::org_admin::unclaimed_reach(store, p)?,
+            None => crate::service::view_scope::UnclaimedReach::None,
+        };
         Ok(ViewScope::for_caller(
             org,
             person,
@@ -351,6 +358,7 @@ impl Caller {
             self.host_alias.clone(),
             proven_session,
             sole_person,
+            unclaimed,
         ))
     }
 

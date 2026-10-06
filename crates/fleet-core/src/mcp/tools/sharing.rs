@@ -34,10 +34,11 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = sharing_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "Share a session you OWN with one person at watch \
-        (read it) or drive (also prompt it). Owner only — a grantee cannot \
-        share on — and there is no org recipient and no 'own' level. Sharing \
-        never gives a terminal. Returns the session row. \
+    #[tool(description = "Share a session you OWN with one person, or with an \
+        org you are a member of (its members and admins, from now on), at \
+        watch (read it) or drive (also prompt it). Owner only — a grantee \
+        cannot share on — and no 'own' level. Sharing never gives a terminal. \
+        Returns the session row. \
         Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.")]
     pub(super) async fn session_share(
         &self,
@@ -47,8 +48,8 @@ impl FleetTools {
         audit(
             "session_share",
             &format!(
-                "session_id={} person={:?} level={:?}",
-                p.session_id, p.person, p.level
+                "session_id={} person={:?} org={:?} level={:?}",
+                p.session_id, p.person, p.org, p.level
             ),
         );
         let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -65,14 +66,15 @@ impl FleetTools {
             "the session to share",
         )?;
         let granter = super::fleet::owner_for(&caller, &s);
-        let row = sessions::share_session(&s, p.session_id, &p.person, &p.level, granter)
+        let to = sessions::ShareTo::from_fields(&p.person, p.org.as_deref()).map_err(to_mcp_err)?;
+        let row = sessions::share_session_to(&s, p.session_id, to, &p.level, granter)
             .map_err(to_mcp_err)?;
         ok_json(&row)
     }
 
-    #[tool(description = "Revoke one person's grant on your session (owner \
-        only); the row is kept, revoked, for the audit trail. Returns the \
-        session row. Errors: E_NOTFOUND, E_FORBIDDEN.")]
+    #[tool(description = "Revoke one person's (or org's) grant on your \
+        session (owner only); the row is kept, revoked, for the audit trail. \
+        Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.")]
     pub(super) async fn session_unshare(
         &self,
         Extension(caller): Extension<Caller>,
@@ -80,7 +82,10 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit(
             "session_unshare",
-            &format!("session_id={} person={:?}", p.session_id, p.person),
+            &format!(
+                "session_id={} person={:?} org={:?}",
+                p.session_id, p.person, p.org
+            ),
         );
         let s = lock(&self.store).map_err(to_mcp_err)?;
         resolve_row_and_gate(
@@ -93,15 +98,18 @@ impl FleetTools {
             "the session to unshare",
         )?;
         let granter = super::fleet::owner_for(&caller, &s);
+        let to = sessions::ShareTo::from_fields(&p.person, p.org.as_deref()).map_err(to_mcp_err)?;
         let row =
-            sessions::unshare_session(&s, p.session_id, &p.person, granter).map_err(to_mcp_err)?;
+            sessions::unshare_session_to(&s, p.session_id, to, granter).map_err(to_mcp_err)?;
         ok_json(&row)
     }
 
-    #[tool(description = "Lower one person's grant on your session from \
+    #[tool(
+        description = "Lower one person's (or org's) grant on your session from \
         drive to watch (owner only). Nothing raises a grant: widen by \
         revoking and sharing again. Returns the session row. \
-        Errors: E_NOTFOUND, E_FORBIDDEN.")]
+        Errors: E_NOTFOUND, E_FORBIDDEN."
+    )]
     pub(super) async fn session_narrow(
         &self,
         Extension(caller): Extension<Caller>,
@@ -109,7 +117,10 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit(
             "session_narrow",
-            &format!("session_id={} person={:?}", p.session_id, p.person),
+            &format!(
+                "session_id={} person={:?} org={:?}",
+                p.session_id, p.person, p.org
+            ),
         );
         let s = lock(&self.store).map_err(to_mcp_err)?;
         resolve_row_and_gate(
@@ -122,8 +133,9 @@ impl FleetTools {
             "the session to narrow a grant on",
         )?;
         let granter = super::fleet::owner_for(&caller, &s);
-        let row = sessions::narrow_session_share(&s, p.session_id, &p.person, granter)
-            .map_err(to_mcp_err)?;
+        let to = sessions::ShareTo::from_fields(&p.person, p.org.as_deref()).map_err(to_mcp_err)?;
+        let row =
+            sessions::narrow_session_share_to(&s, p.session_id, to, granter).map_err(to_mcp_err)?;
         ok_json(&row)
     }
 

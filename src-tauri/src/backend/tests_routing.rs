@@ -3161,6 +3161,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::sessions::SessionShareArgs {
                         session_id: 42,
                         person: "jane".into(),
+                        org: None,
                         level: "drive".into(),
                     },
                     s,
@@ -3179,6 +3180,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::sessions::SessionGrantArgs {
                         session_id: 42,
                         person: "jane".into(),
+                        org: None,
                     },
                     s,
                 ))
@@ -3196,6 +3198,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     commands::sessions::SessionGrantArgs {
                         session_id: 42,
                         person: "jane".into(),
+                        org: None,
                     },
                     s,
                 ))
@@ -3590,6 +3593,7 @@ fn the_standalone_sharing_arm_is_this_fleets_own_person() {
         commands::sessions::SessionShareArgs {
             session_id: 1,
             person: "nobody-by-that-name".into(),
+            org: None,
             level: "watch".into(),
         },
         &st,
@@ -3643,6 +3647,7 @@ fn the_sharing_commands_address_a_session_by_id_and_nothing_reusable() {
         keys(&SessionShareArgs {
             session_id: 1,
             person: "jane".into(),
+            org: None,
             level: "watch".into(),
         }),
         want(&["session_id", "person", "level"])
@@ -3651,6 +3656,7 @@ fn the_sharing_commands_address_a_session_by_id_and_nothing_reusable() {
         keys(&SessionGrantArgs {
             session_id: 1,
             person: "jane".into(),
+            org: None,
         }),
         want(&["session_id", "person"])
     );

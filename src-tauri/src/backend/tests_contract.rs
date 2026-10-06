@@ -640,6 +640,9 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             person_id: Some(3),
             person_name: Some("jane".into()),
             person_display_name: Some("Jane Q".into()),
+            // Org administration phase D: an org recipient (additive).
+            org_id: Some(2),
+            org_name: Some("acme".into()),
             level: "watch".into(),
             granted_by: 1,
             granted_at: 1_700_000_000,
