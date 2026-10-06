@@ -1272,6 +1272,17 @@ impl FleetTools {
             && args.key.is_none()
             && matches!(args.action.as_str(), "accept" | "reject");
         if args.action == "accept" || proposal_decision {
+            // The operator is an unbound client, so its scope is `All` and
+            // `decide`'s scope fence lets it through; but it is an agent, and
+            // an agent never decides a proposal — not its own, not a worker's.
+            if caller.is_operator() {
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "a person decides proposals, from the desktop or the phone; \
+                     the operator may only propose",
+                    None,
+                ));
+            }
             return ok_json(
                 &crate::service::work::local::decide(
                     &args,

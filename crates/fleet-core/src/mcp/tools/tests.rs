@@ -7812,6 +7812,60 @@ async fn an_operator_summary_is_confirmed_and_refused_without_an_approver() {
     assert!(hub.guards.confirms.pending_tools().is_empty());
 }
 
+/// The operator is an unbound client, so its org scope is `All` — the very
+/// fence `work::local::decide` uses to keep agents off proposals. It is still
+/// an agent: it may propose, never accept or reject, whoever proposed. A
+/// person (here the master) still decides, so the proposal is left as it was.
+#[tokio::test]
+async fn the_operator_never_decides_a_proposal() {
+    let s = Store::open_in_memory().unwrap();
+    let parent = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Ship v1",
+            ..Default::default()
+        })
+        .unwrap();
+    let proposal = s
+        .propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "a worker's idea",
+            notes: None,
+            why: None,
+            proposed_by: "dev-web",
+        })
+        .unwrap();
+    let t = test_tools(s);
+    let decide = async |caller: Caller, action: &str| {
+        let args = serde_json::json!({ "action": action, "item_id": proposal.id });
+        t.work_link(
+            Extension(caller),
+            Parameters(serde_json::from_value(args).unwrap()),
+        )
+        .await
+    };
+    for action in ["accept", "reject"] {
+        let e = decide(operator(), action)
+            .await
+            .expect_err("the operator does not decide proposals");
+        assert!(
+            e.message.starts_with("E_FORBIDDEN") && e.message.contains("a person decides"),
+            "{action}: {}",
+            e.message
+        );
+    }
+    let still = t
+        .store
+        .lock()
+        .unwrap()
+        .get_work_item(proposal.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(still.proposal_state.as_deref(), Some("proposed"));
+    decide(Caller::master(), "accept")
+        .await
+        .expect("a person accepts");
+}
+
 fn operator() -> Caller {
     client_caller(
         crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -10747,8 +10801,9 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "accept",
         "a person's decision on a proposal, by `item_id`: no session is \
          named, and `work::local::decide` refuses every scoped caller — a \
-         per-host token and a bound client alike — because an agent never \
-         accepts a proposal. `reject` in this shape takes the same arm; in \
+         per-host token and a bound client alike — and the arm refuses the \
+         operator, because an agent never accepts a proposal. `reject` in \
+         this shape takes the same arm; in \
          its session-addressed shape it falls through to the tail and is in \
          `WORK_ACTION_REACH` at `Drive`",
     ),
