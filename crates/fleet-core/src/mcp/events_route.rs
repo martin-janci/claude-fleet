@@ -720,6 +720,44 @@ pub(crate) fn fence_frame(
     fence_frame_as(scope, msg, store, Delivery::Live)
 }
 
+/// The org half of a [`KindFence::NoSessionContent`] frame, on the stream
+/// of a client bound to an org (work graph M14): a frame that names a host
+/// or an account passes only when the client sees it
+/// ([`BoundInfra`](crate::service::health::BoundInfra)), as `list_hosts`,
+/// `list_accounts` and `list_worktrees` answer it. A frame whose host or
+/// account cannot be placed is dropped (`host:removed` among them); one that
+/// names neither — a project, the catalog, a removed worktree's id — passes.
+/// Every other scope passes them all.
+fn fence_bound_infra(
+    scope: &ViewScope,
+    msg: &EventMessage,
+    store: &Mutex<Store>,
+) -> Option<serde_json::Value> {
+    if !matches!(scope.org, crate::service::orgs::OrgScope::Org { .. }) {
+        return Some(msg.payload.clone());
+    }
+    let p = &msg.payload;
+    let text = |k: &str| p.get(k).and_then(serde_json::Value::as_str);
+    let infra = || {
+        let s = store.lock().ok()?;
+        crate::service::health::BoundInfra::of(&s, &scope.org)
+    };
+    let visible = match msg.kind() {
+        "host" => text("alias").is_some_and(|a| infra().is_some_and(|i| i.sees_host(a))),
+        "worktree" | "asset_inventory" | "sync" => match text("host_alias") {
+            Some(h) => infra().is_some_and(|i| i.sees_host(h)),
+            // `worktree:removed` names an id only.
+            None => msg.kind() == "worktree",
+        },
+        "account" => text("uuid").is_some_and(|u| infra().is_some_and(|i| i.sees_account(u))),
+        "account_usage" => {
+            text("account_uuid").is_some_and(|u| infra().is_some_and(|i| i.sees_account(u)))
+        }
+        _ => true,
+    };
+    visible.then(|| p.clone())
+}
+
 /// [`fence_frame`] for a frame whose [`Delivery`] is not the live path.
 pub(crate) fn fence_frame_as(
     scope: &ViewScope,
@@ -750,7 +788,7 @@ pub(crate) fn fence_frame_as(
             );
             None
         }
-        Some(KindFence::NoSessionContent(_)) => Some(msg.payload.clone()),
+        Some(KindFence::NoSessionContent(_)) => fence_bound_infra(scope, msg, store),
         Some(KindFence::PerFrame) => match msg.kind() {
             "session" => fence_session_frame(scope, msg, store),
             "task" => fence_task_frame(scope, msg, store),

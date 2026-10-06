@@ -74,6 +74,9 @@ pub(super) fn visible_to(caller: &Caller, tool: &str) -> bool {
     }
     // Refused to every per-host token at the central gate (`enforce_admin`);
     // listing it would cost every host's Claude a definition it can never use.
+    if caller.is_org_bound() && guard::ORG_BOUND_REFUSED.contains(&tool) {
+        return false;
+    }
     if caller.host_alias.is_some() && guard::NOT_FOR_HOST_TOKENS.contains(&tool) {
         return false;
     }

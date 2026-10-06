@@ -1012,6 +1012,38 @@ pub fn hosts_in_scope(s: &Store, scope: &OrgScope) -> Vec<HostRow> {
         .collect()
 }
 
+/// What a client bound to an org sees of the fleet's machines (work graph
+/// M14): the hosts in [`hosts_in_scope`] and the accounts they use. `None`
+/// for every other scope — a per-host token's and an unbound caller's host
+/// view is fleet-wide by design.
+#[derive(Debug, Clone, Default)]
+pub struct BoundInfra {
+    hosts: std::collections::BTreeSet<String>,
+    accounts: std::collections::BTreeSet<String>,
+}
+
+impl BoundInfra {
+    pub fn of(s: &Store, scope: &OrgScope) -> Option<BoundInfra> {
+        if !matches!(scope, OrgScope::Org { .. }) {
+            return None;
+        }
+        let mut out = BoundInfra::default();
+        for h in hosts_in_scope(s, scope) {
+            out.accounts.extend(h.account_uuid);
+            out.hosts.insert(h.alias);
+        }
+        Some(out)
+    }
+
+    pub fn sees_host(&self, alias: &str) -> bool {
+        self.hosts.contains(alias)
+    }
+
+    pub fn sees_account(&self, uuid: &str) -> bool {
+        self.accounts.contains(uuid)
+    }
+}
+
 /// Every roll-up blanked, for an org-bound client whose scope could not be
 /// read: it is told nothing rather than the whole fleet.
 pub fn blank_rollups(h: &mut Health) {

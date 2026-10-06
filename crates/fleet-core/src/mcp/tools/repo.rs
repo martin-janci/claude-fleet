@@ -39,6 +39,7 @@ impl FleetTools {
         sessions in).")]
     pub(super) async fn list_projects(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListProjectsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
@@ -54,6 +55,7 @@ impl FleetTools {
             projects::list_projects(self.reader())
         }
         .map_err(to_mcp_err)?;
+        self.fence_project_worktrees(&caller, &mut trees)?;
         // After the filter, so a capped page is a page of matches — the same
         // order `list_sessions` applies its own `limit` in.
         if let Some(n) = p.limit {
@@ -71,13 +73,16 @@ impl FleetTools {
         removed repositories and worktrees; returns the project list. \
         On a hub with hub.local_host off there is no local projects \
         directory: nothing is scanned and the stored list is returned.")]
-    pub(super) async fn refresh_projects(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn refresh_projects(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("refresh_projects", "");
-        ok_json_compact(
-            &projects::refresh_projects(&self.store)
-                .await
-                .map_err(to_mcp_err)?,
-        )
+        let mut trees = projects::refresh_projects(&self.store)
+            .await
+            .map_err(to_mcp_err)?;
+        self.fence_project_worktrees(&caller, &mut trees)?;
+        ok_json_compact(&trees)
     }
 
     #[tool(description = "Drop a project row and its worktrees (ghost \
@@ -236,6 +241,10 @@ impl FleetTools {
         if let Some(host) = p.host_alias.as_deref() {
             out.retain(|w| w.worktree.host_alias == host);
         }
+        // A client bound to an org: the worktrees on the hosts it sees.
+        if let Some(i) = self.bound_infra(&caller)? {
+            out.retain(|w| i.sees_host(&w.worktree.host_alias));
+        }
         // Multi-user M1 (T8d): the OCCUPANTS are fenced by person, the
         // worktrees are not.
         //
@@ -331,6 +340,7 @@ impl FleetTools {
         // same argument `list_worktrees` makes one function up). The master
         // token and every paired client are unbound and pass.
         require_host(&caller, &p.host_alias, "the worktrees to scan")?;
+        self.require_bound_host(&caller, &p.host_alias)?;
         let args = worktrees::ListHostWorktreesArgs {
             host_alias: p.host_alias,
             project_id: p.project_id,
@@ -354,6 +364,18 @@ impl FleetTools {
             "delete_worktree",
             &format!("worktree_id={} force={}", p.worktree_id, p.force),
         );
+        // A client bound to an org deletes only on a host it sees; an id that
+        // does not exist is left to the service's own "not found".
+        if caller.is_org_bound() {
+            let host = lock(&self.store)
+                .map_err(to_mcp_err)?
+                .get_worktree_row(p.worktree_id)
+                .map_err(|e| to_mcp_err(IpcError::from(e)))?
+                .map(|w| w.host_alias);
+            if let Some(h) = host {
+                self.require_bound_host(&caller, &h)?;
+            }
+        }
         // Multi-user M1 (T7): the session gate, by worktree id.
         //
         // This tool is session-addressed without naming a session — it

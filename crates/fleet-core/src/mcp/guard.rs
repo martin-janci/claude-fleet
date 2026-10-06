@@ -1286,6 +1286,25 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "my_grants",
 ];
 
+/// `Client` tools a client bound to an org (work graph M14) is nonetheless
+/// refused, at the central gate and in the tool list alike, as
+/// [`NOT_FOR_HOST_TOKENS`] is for a per-host token. Each reads the fleet's
+/// machines or catalog as a whole with no grant of its own to check:
+/// `discover_hosts` the hub's SSH config, `scan_assets` / `plan_sync` every
+/// host by default, `list_layers` / `propose_layers` every host's
+/// assignment, `resolve_preview` any host's effective set. The catalog tools
+/// that do check a grant (`list_assets`, `import_assets`, `catalog_admin`,
+/// `changesets`) answer for themselves, as `list_catalogs` refuses an
+/// org-bound client in `catalog_admin`.
+pub const ORG_BOUND_REFUSED: &[&str] = &[
+    "discover_hosts",
+    "scan_assets",
+    "plan_sync",
+    "list_layers",
+    "propose_layers",
+    "resolve_preview",
+];
+
 // --- legacy name lists -------------------------------------------------------
 //
 // `tools/fleet.rs`, `tools/assets.rs`, `tools/lifecycle.rs` and

@@ -501,7 +501,7 @@ pub(super) fn require_bound_client_may_create(
     host: &str,
     project_id: i64,
 ) -> Result<(), McpError> {
-    if caller.client.as_ref().is_none_or(|c| c.org_id.is_none()) {
+    if !caller.is_org_bound() {
         return Ok(());
     }
     // Its org's projects and hosts — and unassigned ones only while the
@@ -607,7 +607,7 @@ pub(super) fn require_bound_client_sees_host(
     caller: &Caller,
     host: &str,
 ) -> Result<(), McpError> {
-    if caller.client.as_ref().is_none_or(|c| c.org_id.is_none()) {
+    if !caller.is_org_bound() {
         return Ok(());
     }
     let scope = caller.org_scope(s).map_err(to_mcp_err)?;
@@ -632,7 +632,7 @@ pub(super) fn require_bound_client_sees(
     caller: &Caller,
     row: &crate::store::SessionRow,
 ) -> Result<(), McpError> {
-    if caller.client.as_ref().is_none_or(|c| c.org_id.is_none()) {
+    if !caller.is_org_bound() {
         return Ok(());
     }
     let scope = caller.org_scope(s).map_err(to_mcp_err)?;
@@ -1178,6 +1178,17 @@ pub(super) fn enforce_admin(caller: &Caller, tool: &str) -> Result<(), McpError>
             "E_FORBIDDEN",
             format!(
                 "{tool} is never a per-host token's ({} refused)",
+                caller.label()
+            ),
+            None,
+        ));
+    }
+    if caller.is_org_bound() && guard::ORG_BOUND_REFUSED.contains(&tool) {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            format!(
+                "{tool} reads the fleet's machines or catalog as a whole; a client bound to an \
+                 org does not ({} refused)",
                 caller.label()
             ),
             None,
@@ -2360,6 +2371,46 @@ impl FleetTools {
     /// the caller may not see and an id that does not exist are the same
     /// answer (the old `E_FORBIDDEN` was an existence oracle over the whole
     /// task table). Visible but below `reach` → `E_FORBIDDEN`.
+    /// What a client bound to an org sees of hosts and accounts
+    /// ([`BoundInfra`](crate::service::health::BoundInfra)); `None` for
+    /// every other caller, who reads every host and account.
+    pub(super) fn bound_infra(
+        &self,
+        caller: &Caller,
+    ) -> Result<Option<crate::service::health::BoundInfra>, McpError> {
+        if !caller.is_org_bound() {
+            return Ok(None);
+        }
+        let s = lock(self.reader()).map_err(to_mcp_err)?;
+        let scope = caller.org_scope(&s).map_err(to_mcp_err)?;
+        Ok(crate::service::health::BoundInfra::of(&s, &scope))
+    }
+
+    /// [`require_bound_client_sees_host`] under the store lock, for a tool
+    /// that names a host and holds no guard of its own.
+    pub(super) fn require_bound_host(&self, caller: &Caller, host: &str) -> Result<(), McpError> {
+        if !caller.is_org_bound() {
+            return Ok(());
+        }
+        let s = lock(&self.store).map_err(to_mcp_err)?;
+        require_bound_client_sees_host(&s, caller, host)
+    }
+
+    /// A project is navigation, never a boundary, so every caller lists them
+    /// all; a bound client's list carries only the worktrees on its hosts.
+    pub(super) fn fence_project_worktrees(
+        &self,
+        caller: &Caller,
+        trees: &mut [crate::service::projects::ProjectTreeRow],
+    ) -> Result<(), McpError> {
+        if let Some(infra) = self.bound_infra(caller)? {
+            for t in trees {
+                t.worktrees.retain(|w| infra.sees_host(&w.host_alias));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn visible_task(
         &self,
         caller: &Caller,

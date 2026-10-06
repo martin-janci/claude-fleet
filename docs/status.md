@@ -72,7 +72,9 @@ org BOUNDARY for per-host tokens — `service::orgs::OrgScope`, made only by
 per-host ticket fence is kept (composed with the org). Cross-org links need
 `force_cross_org` for every caller; `isolate_sessions` (D7) is per org, off.
 Any new `work` / `work_link` / `work_admin` action needs a row in the
-isolation matrix (`mcp/tools/tests_isolation.rs`), which fails otherwise.
+isolation matrix (`mcp/tools/tests_isolation.rs`), and any new client tool a
+harness arm there, an `ORG_BOUND_REFUSED` entry or a `FENCED_BY` row naming
+its gate; the matrix fails otherwise.
 Work graph M6 (more providers) is landed: GitHub Issues (through `gh` on a
 host, `transport = via_cli:<host>`, no token in fleet), Asana (`asana:<gid>`
 keys, events-API sync tokens, the section map), Linear, and Jira Data Center

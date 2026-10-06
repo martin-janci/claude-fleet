@@ -521,6 +521,15 @@ impl FleetTools {
                 // (it could otherwise read another host's output back via
                 // wait_for_task / list_tasks / its inbox).
                 require_host(&caller, &spec.host_alias, "the new worker")?;
+                {
+                    let s = lock(&self.store).map_err(to_mcp_err)?;
+                    require_bound_client_may_create(
+                        &s,
+                        &caller,
+                        &spec.host_alias,
+                        spec.project_id,
+                    )?;
+                }
                 // A new worker is a start: the operator's needs a person (D12).
                 self.confirm_gate(
                     "dispatch_task",

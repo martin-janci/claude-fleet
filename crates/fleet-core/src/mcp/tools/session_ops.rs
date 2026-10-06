@@ -640,6 +640,7 @@ impl FleetTools {
             &format!("host={} dry_run={}", args.host_alias, args.dry_run),
         );
         require_host(&caller, &args.host_alias, "the lost sessions")?;
+        self.require_bound_host(&caller, &args.host_alias)?;
         let (host_alias, dry_run) = (args.host_alias.clone(), args.dry_run);
         // Multi-user M1 (T7): the batch is gated like the primitive it
         // batches over.
@@ -714,6 +715,7 @@ impl FleetTools {
             &format!("host={} limit={:?}", args.host_alias, args.limit),
         );
         require_host(&caller, &args.host_alias, "the lost sessions")?;
+        self.require_bound_host(&caller, &args.host_alias)?;
         let candidates = sessions::discover_lost_sessions(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
@@ -830,6 +832,7 @@ impl FleetTools {
             &format!("host={} name={}", args.host_alias, args.name),
         );
         require_host(&caller, &args.host_alias, "the new background session")?;
+        self.require_bound_host(&caller, &args.host_alias)?;
         self.confirm_gate(
             "new_bg_session",
             confirm_nonce.as_deref(),
@@ -884,8 +887,20 @@ impl FleetTools {
     #[tool(
         description = "Ensure the UX agent's operator session exists on a reachable host; returns its row."
     )]
-    pub(super) async fn ensure_operator(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn ensure_operator(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("ensure_operator", "");
+        // A client bound to an org starts the agent only on a host it sees:
+        // its home, and the fallback it would move to when that is down.
+        if caller.is_org_bound() {
+            let status =
+                crate::service::operator::operator_status(&self.store).map_err(to_mcp_err)?;
+            for host in std::iter::once(&status.host).chain(status.fallback.as_ref()) {
+                self.require_bound_host(&caller, host)?;
+            }
+        }
         let row = crate::service::operator::ensure_operator(&self.store, &self.ssh, &self.reg)
             .await
             .map_err(to_mcp_err)?;
@@ -895,9 +910,26 @@ impl FleetTools {
     #[tool(
         description = "Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host|host_down; fallback: where ensure_operator moves it."
     )]
-    pub(super) async fn operator_status(&self) -> Result<CallToolResult, McpError> {
+    pub(super) async fn operator_status(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
         audit("operator_status", "");
-        let status = crate::service::operator::operator_status(&self.store).map_err(to_mcp_err)?;
+        let mut status =
+            crate::service::operator::operator_status(&self.store).map_err(to_mcp_err)?;
+        // A bound client that does not see the operator's host reads what a
+        // fleet without that host answers, and is never named a fallback
+        // host it does not see.
+        if let Some(i) = self.bound_infra(&caller)? {
+            if !i.sees_host(&status.host) {
+                status.ready = false;
+                status.session = None;
+                status.blocked = Some("no_host".into());
+                status.fallback = None;
+            } else if status.fallback.as_deref().is_some_and(|f| !i.sees_host(f)) {
+                status.fallback = None;
+            }
+        }
         ok_json(&status)
     }
 

@@ -40,7 +40,7 @@ prompt box, unsent.
 
 **Work reads**
 
-- `work` is one grouped MCP tool (`mcp/tools/orchestration.rs`), `Access::Client`, readonly. Its actions come from ONE table, `service::work::WORK_ACTIONS` (`service/work/mod.rs`): the parser (`WorkArgs::parsed_action`), the schema `enum` (M8.0) and the isolation matrix's coverage check all read it. A new action is a table row + an enum variant + a dispatch arm; `every_action_has_a_matrix_row` fails until the matrix has a row.
+- `work` is one grouped MCP tool (`mcp/tools/orchestration.rs`), `Access::Client`, readonly. Its actions come from ONE table, `service::work::WORK_ACTIONS` (`service/work/mod.rs`): the parser (`WorkArgs::parsed_action`), the schema `enum` (M8.0) and the isolation matrix's coverage check all read it. A new action is a table row + an enum variant + a dispatch arm; the isolation matrix (`the_isolation_matrix_holds_*`) fails until it has a row.
 - `ROUTED_WORK_COMMANDS` in the same file maps each desktop command to `(tool, action)`; `src-tauri`'s routing tests hold it to `backend/verdicts.rs` (163 `Verdict::` rows incl. the enum's own), and `every_routed_work_command_names_a_covered_action` to the matrix.
 - The tool budget: `BUDGET_BYTES = 69_271` (`mcp/tools/tests.rs`), measured 69,171 after M8.0.
 - Every work read takes an `OrgScope` from `Caller::org_scope` (`service/orgs.rs`): `All` for master / clients / the desktop, `Host { alias, org, isolated }` for a per-host token. `sees_row`, `sees_org`, `redact_row`, `scope_links` (a host sees past links only of its own host) and the tickets fence (`tickets::allowed`: items linked on the host's sessions, inside its org) are the building blocks.

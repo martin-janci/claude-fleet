@@ -6851,14 +6851,22 @@ async fn list_projects_has_sessions_keeps_only_projects_a_live_session_names() {
             .collect()
     };
 
-    let all = repos(t.list_projects(Parameters(params(false))).await.unwrap());
+    let all = repos(
+        t.list_projects(Extension(Caller::master()), Parameters(params(false)))
+            .await
+            .unwrap(),
+    );
     assert_eq!(
         all.len(),
         3,
         "the default still lists every project: {all:?}"
     );
 
-    let live = repos(t.list_projects(Parameters(params(true))).await.unwrap());
+    let live = repos(
+        t.list_projects(Extension(Caller::master()), Parameters(params(true)))
+            .await
+            .unwrap(),
+    );
     assert_eq!(live, vec!["used".to_string()], "got {live:?}");
 }
 

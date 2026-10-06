@@ -366,7 +366,13 @@ impl Caller {
     /// hole; a gate that means "restricted" reads
     /// [`Caller::view_scope`] instead.
     pub fn is_scoped(&self) -> bool {
-        self.host_alias.is_some() || self.client.as_ref().is_some_and(|c| c.org_id.is_some())
+        self.host_alias.is_some() || self.is_org_bound()
+    }
+
+    /// A paired client bound to an org (work graph M14): it reads its org's
+    /// work, sessions and machines only (`service::orgs::BoundInfra`).
+    pub fn is_org_bound(&self) -> bool {
+        self.client.as_ref().is_some_and(|c| c.org_id.is_some())
     }
 
     /// Short identity label for audit rows and rate-limit buckets.

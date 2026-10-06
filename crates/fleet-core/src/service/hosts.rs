@@ -79,6 +79,11 @@ pub fn list_hosts(
 ) -> Result<Vec<HostRow>, IpcError> {
     let s = lock(store)?;
     let mut rows = s.list_hosts().map_err(IpcError::from)?;
+    // A client bound to an org sees its org's hosts (and unassigned ones
+    // under D31), as `fleet_health.hosts[]` does.
+    if matches!(scope.org, crate::service::orgs::OrgScope::Org { .. }) {
+        rows.retain(|h| scope.org.sees_org(h.org_id));
+    }
     if scope.is_internal() || scope.is_sole_person() {
         let counts = s.unclaimed_counts_by_host()?;
         for h in &mut rows {

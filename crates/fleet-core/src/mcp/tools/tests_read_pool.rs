@@ -72,8 +72,11 @@ async fn call(t: &FleetTools, tool: &str) -> Result<CallToolResult, McpError> {
             .await
         }
         "list_projects" => {
-            t.list_projects(Parameters(serde_json::from_value(empty()).unwrap()))
-                .await
+            t.list_projects(
+                Extension(Caller::master()),
+                Parameters(serde_json::from_value(empty()).unwrap()),
+            )
+            .await
         }
         "fleet_health" => t.fleet_health(Extension(host_caller())).await,
         "list_sessions" => {
