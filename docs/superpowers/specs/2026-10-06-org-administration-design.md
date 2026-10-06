@@ -2,8 +2,7 @@
 
 Status: design. Scope was chosen by the owner in conversation on 2026-10-06:
 all four parts below, built into **Settings → Organisations**, not as a
-separate screen. Phases A, B and C are built (2026-10-06). D is
-specified here and waits for the owner's answers.
+separate screen. Phases A–D are built (2026-10-06).
 
 ## Problem
 
@@ -152,28 +151,56 @@ The hub's CLI-only administration became one hub tool a desktop routes to.
   kinds `money` and `settings`; `org_admin { set_org_setting }` and the
   desktop command `set_org_setting` (routed).
 
-## Phase D — members and roles (multi-user M2)
+## Phase D — members and roles (multi-user M2, built)
 
-This is the M2 the multi-user gap analysis defers
-(`2026-09-30-multi-user-gap-analysis.md`, roadmap row M2).
+Plan: `docs/superpowers/plans/2026-10-06-org-administration-phase-d.md`.
 
-- Migration `org_members(org_id, person_id, role, added_at, added_by)`,
-  `role` ∈ `admin | member | viewer`.
-- **Org admin** (gap analysis §"Org admin"): may do everything in phases
-  A–C **for that org only**. They never reach fleet administration
-  (hosts' registration, peers, updates, other orgs) and never read members'
-  private sessions; there is no break-glass (Q11).
-- **Member:** sees the org's work and `visibility = 'org'` sessions;
-  `session_share { org }` returns.
-- **Viewer:** reads the org's work view and overview.
-- A device's org is its person's membership; `client_tokens.org_id`
-  becomes derived and stops being written by `assign_client`.
-- The page gains a **Members** section (person, role; add / change /
-  remove), and the overview shows who is in the company.
+**The owner's answers (2026-10-06)** to the gap analysis's open M2
+questions: a host is administered by **the hub's owner, or — when a company
+owns the hub — that company** (its admins); an org admin **may** revoke or
+narrow the grants a departing member was given (downward only); and whether
+an org admin sees the unclaimed count on the org's hosts is **an option**,
+the hub owner's, off by default.
 
-D needs the owner's answers on the gap analysis's open M2 questions (who
-administers a host; the departed member's grants; the unclaimed count on a
-multi-person hub) before its plan is written.
+- Migration 105: `org_members(org_id, person_id, role, added_at, added_by,
+  shares_since, removed_at)`, `role` ∈ `admin | member | viewer`; a removed
+  member keeps the row (`removed_at`). `orgs.owns_hub` (at most one) and
+  `orgs.admins_see_unclaimed`. Every membership write moves the auth epoch.
+- **A device's org follows its person** (`store::effective_device`, applied
+  to the auth rows and the `/events` re-check): the hub's owner and a person
+  in no org keep their binding; a member's device is fenced to one of their
+  orgs (`client_tokens.org_id` picks which; `bind_device` refuses another);
+  a viewer's device is read-only; a former member's reads nothing of any org
+  (`NO_ORG`). So `client_tokens.org_id` is no longer the authority for a
+  member — their membership is — and `assign_client` remains only the hub
+  owner's way to bind their own or a non-member's device.
+- **Team sharing is a grant to an org**, not `visibility = 'org'`: the gap
+  analysis calls the two the same capability, and the grant carries the rule
+  the owner set — a membership change never widens an existing grant. It
+  reaches members and admins whose `shares_since` is not after `granted_at`;
+  a viewer never. Only the session's owner shares, with an org they are a
+  member of (or as the hub's owner). `sessions.visibility` keeps its two
+  values.
+- **Org admin** (`org_admin::Authority::Org`): everything in phases A–C for
+  that org only — its settings, colour, isolation, auto-tidy, Jev consent,
+  own settings, spend, members, its members' devices and its catalogs'
+  grants. Rules, tracker routing, `bound_sees_unassigned`, other orgs,
+  people's names, disabling and the two switches stay the hub owner's (each
+  decides which company something belongs to). Host routing is a host
+  administrator's. No admin reads a member's private session; there is no
+  break-glass (Q11).
+- **Member** sees the org's work and what is shared with the org; **viewer**
+  reads the org's work view and overview.
+- Departure: `remove_member` revokes the grants TO that person on the org's
+  sessions unless `keep_grants`; `member_grants` / `revoke_member_grants` /
+  `narrow_member_grants` act on a member's grants there (counts only — a
+  list would name sessions).
+- The unclaimed count (`HostRow.unclaimed_sessions`): the one person of a
+  one-person hub, the hub's owner and the owning company's admins on every
+  host, an org's admins on its hosts when `admins_see_unclaimed` is on.
+- The page's **Members** section (person, role; add / change / remove), and
+  the overview's `members` and `my_role`; the Share sheet's *an org*;
+  `fleet-hub org member|own-hub|unclaimed-count`.
 
 ## Not in scope
 

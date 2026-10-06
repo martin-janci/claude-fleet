@@ -288,7 +288,9 @@ Index by area (names only; see the reference for details):
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one
-  person `watch` or `drive` on a session you own), `session_unshare` (take it
+  person `watch` or `drive` on a session you own — or, with `org` instead of
+  `person`, an org you are a member of: its members and admins as of now,
+  never a later joiner or a viewer), `session_unshare` (take it
   back), `session_narrow` (`drive` → `watch`; there is deliberately no tool
   that raises a grant — widen by revoking and sharing again),
   `session_access` (who holds a live grant on your session), `my_grants`
@@ -813,6 +815,26 @@ Index by area (names only; see the reference for details):
   device is refused the tool, which is not readonly); a change needs a
   **trusted `full`** device, and none may revoke, untrust, bind, hand over
   or take a grant from the device the call comes through.
+
+  **Phase D — members and an org admin.** The row is `Access::Device` (a
+  person's device, bound to an org or not), and the tool decides the
+  authority: the hub owner's unbound device administers the fleet, as
+  above; a device fenced to an org its person administers acts on that org
+  only, and is refused everything else (`E_FORBIDDEN`) — rules, tracker
+  routing, `bound_sees_unassigned`, other orgs, people's names and
+  disabling, and the two hub-owner switches stay the hub owner's; routing a
+  host (`assign_host` / `unassign_host`) is a host administrator's (the hub
+  owner, or an admin of the org that owns the hub). Its lists name its own
+  org's devices and members only, and `pair_device` pairs for a member of
+  the org (`person` required), fenced to it. Members: `list_members { org }`,
+  `set_member { org, person | person_id, role: admin|member|viewer }` (adds,
+  or changes a role; a new name becomes a person), `remove_member { org,
+  person, keep_grants }` (revokes what was shared with them on the org's
+  sessions unless `keep_grants`), `member_grants` (`{ watch, drive }`
+  counts), `revoke_member_grants` and `narrow_member_grants` — downward
+  only. An org admin never changes their own membership or the hub owner's.
+  Hub owner only: `set_hub_org { org }` (no org: none), and `update_org`'s
+  `owns_hub` / `admins_see_unclaimed`.
 - **`guide`** — step-by-step guides in Settings → Guides (declarative
   pages, layout `guide`; `docs/pages.md` → *Guides*). Any token, a host's
   own included, calls `catalog` (the rules, every setting's key, label and

@@ -1143,7 +1143,11 @@ What a client may do:
   server somebody started by hand — belongs to nobody and is `unclaimed`.
   Such a row leaks nothing: a caller who is not entitled to it is told a
   per-host COUNT and no more, and on a hub with one person that count is the
-  only thing that changes about the rows they could already see. Claiming one
+  only thing that changes about the rows they could already see. On a hub with
+  more people the count goes to whoever administers the host — the hub's
+  owner, or the admins of the company that owns the hub — and to an org's
+  admins for its hosts when the owner switched that on (*Companies: members
+  and roles*). Claiming one
   needs proof that the claimant is IN the session's pane — never host access
   on its own, and never org membership: the agent inside the session calls
   `session_claim` and its request's `X-Fleet-Pane` header has to name that
@@ -1328,6 +1332,60 @@ run as the person at its console, like `client bind-person` and `session
 claim`. It needs no running hub, and a running one honours it from its next
 request.
 
+### Companies: members and roles
+
+A person can be a **member** of an organisation (org administration phase D,
+`docs/superpowers/plans/2026-10-06-org-administration-phase-d.md`), with one of
+three roles:
+
+| Role | What they get |
+|---|---|
+| **admin** | Everything the hub's owner can do to that org in Settings → Organisations — its settings, colour, isolation, auto-tidy, Jev consent, its own settings, its spend, its members, its members' devices (pair, trust, revoke) and its catalogs' grants — and nothing outside it. |
+| **member** | The org's work, and what is shared with the org. |
+| **viewer** | The org's work view and overview, read-only. |
+
+A member's **devices follow their memberships**: a colleague's phone is fenced
+to the org they are in (to one of them, when they are in several — `bind_device`
+picks which), and a viewer's phone is read-only whatever it was paired as. The
+hub's owner and a person in no org keep whatever their device was bound to, so
+an upgrade changes nobody. A person taken out of their last org keeps their
+row and their sessions, but their devices then read nothing of any org — a
+departed colleague does not fall back to the whole fleet's work.
+
+Some things stay the **hub owner's** whoever administers an org, because each
+decides which company something belongs to: the orgs' rules, which org a
+tracker belongs to, whether bound devices see unassigned work, people's names,
+disabling a person, and the two switches below. **Who administers a host** is
+the hub's owner — or, when a company owns the hub (`org own-hub`), that
+company's admins: they route hosts into orgs and see how many sessions on each
+host nobody has claimed. An org's own admins see that count for its hosts only
+when the hub's owner turns it on (`org unclaimed-count`). Registering,
+removing and provisioning hosts stay the operator's, as before.
+
+```bash
+fleet-hub org member add 1 jane --role admin    # a new name becomes a person
+fleet-hub org member list 1
+fleet-hub org member grants 1 bob [--narrow | --revoke]
+fleet-hub org member rm 1 bob                   # also revokes what was shared with
+                                                # bob on the org's sessions
+fleet-hub org own-hub 1 | --none                # the company that owns this hub
+fleet-hub org unclaimed-count 1 on|off          # its admins see unclaimed counts
+```
+
+These write `state.db` directly, like `person` and `client bind-person`; a
+running hub honours them from its next request. From a device, the org page's
+**Members** section does the same (`org_admin`).
+
+**Sharing with a team** is a grant to an org: the owner of a session shares it
+with an org they are a member of (`session_share { org }`, or *an org* in the
+Share sheet), and it reaches the org's members and admins who are in it at that
+moment. Somebody who joins later gets nothing from it until the owner shares
+again — changing a membership never widens a grant — and a viewer never
+receives one. Taking a member out of the org revokes what was shared with them
+on its sessions (`--keep-grants` keeps it); an admin can also lower or revoke
+those grants while they stay. Downward only: no admin can widen a grant, add a
+recipient or redirect one, and **no admin reads a member's private session**.
+
 ### Two people on one host
 
 Give each person their own unix account on a shared host, and add each account
@@ -1402,7 +1460,7 @@ only one of them is fenced:
 
 | Role | Fenced? |
 |---|---|
-| **Org admin** — authority over an organisation's settings and membership | **Yes.** There is no path to a member's session content. |
+| **Org admin** — authority over an organisation's settings and membership (*Companies: members and roles*) | **Yes.** There is no path to a member's session content: they see the org's spend and members, never a member's private session. |
 | **Hub operator** — holds the master token and `state.db` | **No, and by design.** They pair a device as any person, read the database, and reach the hosts. |
 
 The operator is unfenced on purpose rather than by omission. `fleet-hub pair

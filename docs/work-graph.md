@@ -908,8 +908,16 @@ today, over the last 7 days and this month (counted from the upgrade that
 added it), and a daily or monthly budget (Settings → Limits → Company
 budgets, or per org) raises an Attention item when the org reaches it;
 fleet only warns. Spend is shown only to someone who sees every session.
-Members and roles, the last phase, are in
-`docs/superpowers/specs/2026-10-06-org-administration-design.md`.
+**Members** puts people in the company, each as an admin (administers the
+org — its settings, members and their devices), a member (sees its work and
+what is shared with it) or a viewer (reads only). A member's devices are fenced
+to the org. An org's admin manages it from their own device; the hub's owner
+keeps the rules, the trackers, people's names and which company owns the hub.
+Share a session with your whole team from the Share sheet (*an org*): it
+reaches the people in the org now, not someone who joins later. Removing a
+member takes back what was shared with them on the org's sessions; nobody —
+no admin either — reads someone else's private session. Details:
+`docs/hub.md` → *Companies: members and roles*.
 
 ## Trackers in fleet health
 
