@@ -465,6 +465,73 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// One org's own value of setting `key` (migration 104), or `None` when
+    /// it inherits the fleet's.
+    pub fn org_setting(&self, org_id: i64, key: &str) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM org_settings WHERE org_id = ?1 AND key = ?2",
+                rusqlite::params![org_id, key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every org's own value of `key`: `org id → value`, for the orgs that
+    /// set one.
+    pub fn org_settings_for_key(
+        &self,
+        key: &str,
+    ) -> Result<std::collections::HashMap<i64, String>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT org_id, value FROM org_settings WHERE key = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// One org's own values, by key.
+    pub fn org_settings(
+        &self,
+        org_id: i64,
+    ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT key, value FROM org_settings WHERE org_id = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![org_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Set org `org_id`'s own value of `key`, or clear it (`None`: inherit
+    /// the fleet's). The caller validated the value against the key's spec.
+    /// `E_NOTFOUND` for an unknown org.
+    pub fn set_org_setting(
+        &self,
+        org_id: i64,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), IpcError> {
+        if self.get_org(org_id)?.is_none() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("org {org_id} not found"),
+            ));
+        }
+        match value {
+            Some(v) => self.conn.execute(
+                "INSERT INTO org_settings (org_id, key, value, set_at) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(org_id, key) DO UPDATE SET value = excluded.value, set_at = excluded.set_at",
+                rusqlite::params![org_id, key, v, now_unix()],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM org_settings WHERE org_id = ?1 AND key = ?2",
+                rusqlite::params![org_id, key],
+            )?,
+        };
+        Ok(())
+    }
+
     /// Delete an org: its rules go with it, its hosts become unassigned, and
     /// so do its past links (the `snap_org_id` snapshot, which has no FK):
     /// a removed org's work must not stay fenced from every host forever,
@@ -484,6 +551,16 @@ impl Store {
         )?;
         tx.execute(
             "DELETE FROM org_rules WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        // Org administration phase C (migration 104): its own settings and
+        // its spend roll-up go with it.
+        tx.execute(
+            "DELETE FROM org_settings WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM usage_daily_org WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
         let removed = tx.execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])? > 0;

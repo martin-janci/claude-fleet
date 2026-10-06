@@ -1216,6 +1216,7 @@
       },
       "label": "Classification nudge",
       "modified": false,
+      "per_org": true,
       "restart": "none",
       "tags": [
         "experimental",
@@ -1242,6 +1243,7 @@
       },
       "label": "Summary model",
       "modified": false,
+      "per_org": true,
       "restart": "none",
       "tags": [
         "ai"
@@ -1304,6 +1306,7 @@
       },
       "label": "Tidy: unlinked for",
       "modified": false,
+      "per_org": true,
       "restart": "none",
       "tags": [],
       "unit": "days",
@@ -1980,6 +1983,50 @@
       ],
       "unit": "seconds",
       "value": "30"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "Estimated spend an org's sessions may reach in one UTC day before fleet warns. Each org can set its own. Fleet only warns; it never stops a session.",
+      "key": "budget.org_daily_usd",
+      "kind": {
+        "max": 1000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Org daily budget",
+      "modified": false,
+      "per_org": true,
+      "restart": "none",
+      "tags": [],
+      "unit": "usd",
+      "value": "0",
+      "zero": "none"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "0",
+      "help": "Estimated spend an org's sessions may reach in one calendar month (UTC) before fleet warns. Each org can set its own. Fleet only warns; it never stops a session.",
+      "key": "budget.org_monthly_usd",
+      "kind": {
+        "max": 10000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Org monthly budget",
+      "modified": false,
+      "per_org": true,
+      "restart": "none",
+      "tags": [],
+      "unit": "usd",
+      "value": "0",
+      "zero": "none"
     }
   ],
   "pages": [
@@ -2392,6 +2439,24 @@
             }
           ],
           "title": "Usage"
+        },
+        {
+          "items": [
+            {
+              "key": "budget.org_daily_usd",
+              "type": "field"
+            },
+            {
+              "key": "budget.org_monthly_usd",
+              "type": "field"
+            },
+            {
+              "text": "Each org can set its own budget on its page in Settings → Organisations. Spend is the estimated cost of the org's sessions, counted from the day this version was installed.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "Company budgets"
         },
         {
           "advanced": true,

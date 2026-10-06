@@ -199,3 +199,10 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `mcp.port` | `4180` | 1–65535 | The localhost port the control API listens on. Read-only here: change it with Settings → Control API. |
 | `mcp.confirm_destructive` | `false` | on / off | Every destructive control API call waits for a confirmation on the desktop. Read-only here: change it with Settings → Control API. |
 | `mcp.broadcast_interval_secs` | `30` | seconds | Shortest time between two broadcast prompts from the same caller. Read-only here: change it with the settings table only. |
+
+## budget
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `budget.org_daily_usd` | `0` | 0–1000000 USD, `0` = none | Estimated spend an org's sessions may reach in one UTC day before fleet warns. Each org can set its own. Fleet only warns; it never stops a session. |
+| `budget.org_monthly_usd` | `0` | 0–10000000 USD, `0` = none | Estimated spend an org's sessions may reach in one calendar month (UTC) before fleet warns. Each org can set its own. Fleet only warns; it never stops a session. |

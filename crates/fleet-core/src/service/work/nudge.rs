@@ -107,7 +107,13 @@ pub fn classify_nudge(
     conversation: &str,
     now: i64,
 ) -> Result<Option<String>, IpcError> {
-    if !crate::service::settings::get_bool(s, crate::service::settings::WORK_CLASSIFY_NUDGE) {
+    // Org administration phase C: the session's org may turn it on or off
+    // for itself.
+    if !crate::service::settings::get_bool_for(
+        s,
+        crate::service::settings::WORK_CLASSIFY_NUDGE,
+        row.org_id,
+    ) {
         return Ok(None);
     }
     if s.conversation_nudged(row.id, conversation)? {

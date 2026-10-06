@@ -2863,6 +2863,34 @@
         "duration",
         "readonly"
       ]
+    },
+    {
+      "default_widget": "number",
+      "key": "budget.org_daily_usd",
+      "kind": {
+        "max": 1000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Org daily budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "budget.org_monthly_usd",
+      "kind": {
+        "max": 10000000,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Org monthly budget",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
     }
   ],
   "slots": [

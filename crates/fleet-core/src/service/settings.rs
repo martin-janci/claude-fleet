@@ -95,6 +95,9 @@ pub struct Spec {
     /// Display labels for a `Choice` / `ChoiceSet`'s options, `(value,
     /// label)`, covering every option when set; empty shows the raw values.
     pub option_labels: &'static [(&'static str, &'static str)],
+    /// An org may set its own value (org administration phase C): a session
+    /// of that org reads it instead of the fleet's ([`get_string_for`]).
+    pub per_org: bool,
 }
 
 /// The unit a setting's value is shown in (see [`Spec::unit`]).
@@ -112,6 +115,8 @@ pub enum Unit {
     Mib,
     Tokens,
     Count,
+    /// Whole US dollars.
+    Usd,
 }
 
 impl Unit {
@@ -129,6 +134,7 @@ impl Unit {
             Unit::Mib => "MiB",
             Unit::Tokens => "tokens",
             Unit::Count => "",
+            Unit::Usd => "USD",
         }
     }
 }
@@ -201,6 +207,14 @@ impl Spec {
             ai: AiPolicy::Suggest,
             owned_by: None,
             option_labels: &[],
+            per_org: false,
+        }
+    }
+    /// An org may set its own value of it.
+    pub const fn per_org(self) -> Self {
+        Spec {
+            per_org: true,
+            ..self
         }
     }
     pub const fn unit(self, unit: Unit) -> Self {
@@ -537,6 +551,11 @@ pub const DECIDE_JEV_BREAKER_FAILURES: &str = "decide.jev.breaker_failures";
 pub const DECIDE_JEV_BREAKER_OPEN_SECS: &str = "decide.jev.breaker_open_secs";
 /// Input tokens the decision model may be sent per UTC day (`0` = none).
 pub const DECIDE_JEV_DAILY_TOKEN_BUDGET: &str = "decide.jev.daily_token_budget";
+/// Org administration phase C: the estimated spend (whole USD) an org's
+/// sessions may reach in a UTC day / calendar month before fleet warns; `0`
+/// is none. Per org.
+pub const BUDGET_ORG_DAILY_USD: &str = "budget.org_daily_usd";
+pub const BUDGET_ORG_MONTHLY_USD: &str = "budget.org_monthly_usd";
 /// The model version a request names. Pinned by default: TypeSafe advises
 /// pinning when thresholds are tuned against a version.
 pub const DECIDE_JEV_MODEL: &str = "decide.jev.model";
@@ -1074,7 +1093,8 @@ pub const SPECS: &[Spec] = &[
         "Classification nudge",
         "After three prompts with no ticket, ask Claude once which of your few open tickets it is on. Its answer is only ever a suggestion.",
     )
-    .tags(&[Tag::Experimental, Tag::Ai]),
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .per_org(),
     Spec::new(
         WORK_SUMMARY_MODEL,
         "haiku",
@@ -1082,7 +1102,8 @@ pub const SPECS: &[Spec] = &[
         "Summary model",
         "The model Summarise runs on for a past session, on that session's own host and account.",
     )
-    .tags(&[Tag::Ai]),
+    .tags(&[Tag::Ai])
+    .per_org(),
     Spec::new(
         WORK_TIDY_DONE_DAYS,
         "2",
@@ -1106,7 +1127,8 @@ pub const SPECS: &[Spec] = &[
         "Tidy: unlinked for",
         "Days a session with no work linked must sit idle and unprompted before Tidy up suggests it. Only ever suggested, never auto-tidied.",
     )
-    .unit(Unit::Days),
+    .unit(Unit::Days)
+    .per_org(),
     Spec::new(
         WORK_AUTO_TIDY,
         "false",
@@ -1358,6 +1380,32 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .owned_by("the settings table only")
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        BUDGET_ORG_DAILY_USD,
+        "0",
+        Kind::Int {
+            min: 0,
+            max: 1_000_000,
+        },
+        "Org daily budget",
+        "Estimated spend an org's sessions may reach in one UTC day before fleet warns. Each org can set its own. Fleet only warns; it never stops a session.",
+    )
+    .unit(Unit::Usd)
+    .zero("none")
+    .per_org(),
+    Spec::new(
+        BUDGET_ORG_MONTHLY_USD,
+        "0",
+        Kind::Int {
+            min: 0,
+            max: 10_000_000,
+        },
+        "Org monthly budget",
+        "Estimated spend an org's sessions may reach in one calendar month (UTC) before fleet warns. Each org can set its own. Fleet only warns; it never stops a session.",
+    )
+    .unit(Unit::Usd)
+    .zero("none")
+    .per_org(),
 ];
 
 /// Parse + validate a `Kind::ChoiceSet` value into the chosen options, in
@@ -1534,6 +1582,98 @@ pub fn get_string(s: &Store, key: &str) -> String {
     resolve(key, raw.as_deref())
 }
 
+/// The value `key` has for a session or host of `org` (org administration
+/// phase C): the org's own value when the key is [`Spec::per_org`] and the
+/// org set a valid one, else the fleet's ([`get_string`]).
+pub fn get_string_for(s: &Store, key: &str, org: Option<i64>) -> String {
+    if let (Some(org), Some(sp)) = (org, spec(key)) {
+        if sp.per_org {
+            if let Ok(Some(v)) = s.org_setting(org, key) {
+                if validate(key, v.trim()).is_ok() {
+                    return v.trim().to_string();
+                }
+            }
+        }
+    }
+    get_string(s, key)
+}
+
+pub fn get_bool_for(s: &Store, key: &str, org: Option<i64>) -> bool {
+    get_string_for(s, key, org) == "true"
+}
+
+/// Every org's own valid value of the per-org `key`, as `org id → value`:
+/// for a pass that reads the key for many sessions at once.
+pub fn org_values(s: &Store, key: &str) -> std::collections::HashMap<i64, String> {
+    if !spec(key).is_some_and(|sp| sp.per_org) {
+        return Default::default();
+    }
+    s.org_settings_for_key(key)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(_, v)| validate(key, v.trim()).is_ok())
+        .map(|(o, v)| (o, v.trim().to_string()))
+        .collect()
+}
+
+/// One per-org setting as an org's page shows it: the setting described
+/// with the FLEET's value, and the org's own value when it set one.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OrgSetting {
+    pub setting: Descriptor,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own: Option<String>,
+}
+
+/// Every per-org setting for org `org`, in display order.
+pub fn org_settings(s: &Store, org: i64) -> Vec<OrgSetting> {
+    let own = s.org_settings(org).unwrap_or_default();
+    SPECS
+        .iter()
+        .filter(|sp| sp.per_org)
+        .map(|sp| OrgSetting {
+            setting: sp.describe(effective(s, sp)),
+            own: own
+                .get(sp.key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| validate(sp.key, v).is_ok()),
+        })
+        .collect()
+}
+
+/// Set org `org`'s own value of the per-org `key`, or clear it (`None`:
+/// inherit the fleet's), on behalf of `actor`. Validated and stored as a
+/// fleet write is; audited under `<key>@org:<id>`.
+pub fn set_for_org(
+    s: &Store,
+    org: i64,
+    key: &str,
+    value: Option<&str>,
+    actor: Actor<'_>,
+) -> Result<(), IpcError> {
+    let Some(sp) = spec(key).filter(|sp| sp.per_org) else {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{key} is not a setting an org can set for itself"),
+        ));
+    };
+    let stored = value.map(|v| normalize(sp.key, v)).transpose()?;
+    let before = s.org_setting(org, key)?;
+    s.set_org_setting(org, key, stored.as_deref())?;
+    if before != stored {
+        s.insert_setting_audit(
+            &format!("{key}@org:{org}"),
+            before.as_deref(),
+            stored.as_deref().unwrap_or(""),
+            actor.word(),
+            actor.detail(),
+            None,
+        )?;
+    }
+    s.emit_settings_changed(key);
+    Ok(())
+}
+
 /// What a page shows for `spec`: the resolved value of an editable setting,
 /// or, for a key another subsystem owns, its stored text as that owner wrote
 /// it (else the default) — the owner may read spellings `resolve` would not.
@@ -1636,6 +1776,9 @@ pub struct Descriptor {
     pub owned_by: Option<&'static str>,
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub option_labels: &'static [(&'static str, &'static str)],
+    /// An org may set its own value.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub per_org: bool,
 }
 
 impl Spec {
@@ -1657,6 +1800,7 @@ impl Spec {
             ai: self.ai,
             owned_by: self.owned_by,
             option_labels: self.option_labels,
+            per_org: self.per_org,
         }
     }
 }
@@ -2232,6 +2376,51 @@ mod tests {
     /// `2026-09-28-declarative-pages-design.md`): a label and help for every
     /// setting, a unit that fits its kind, `zero` only where 0 is allowed,
     /// and no agent write where a change needs confirming.
+    /// Org administration phase C: a per-org key reads the org's own valid
+    /// value, else the fleet's; a key that is not per-org ignores any row;
+    /// the write is validated and audited under `<key>@org:<id>`.
+    #[test]
+    fn a_per_org_setting_reads_the_orgs_own_value_else_the_fleets() {
+        let s = Store::open_in_memory().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        set(&s, WORK_SUMMARY_MODEL, "sonnet").unwrap();
+        assert_eq!(get_string_for(&s, WORK_SUMMARY_MODEL, Some(org)), "sonnet");
+        set_for_org(&s, org, WORK_SUMMARY_MODEL, Some("opus"), Actor::Person).unwrap();
+        assert_eq!(get_string_for(&s, WORK_SUMMARY_MODEL, Some(org)), "opus");
+        assert_eq!(get_string_for(&s, WORK_SUMMARY_MODEL, None), "sonnet");
+        assert!(
+            set_for_org(&s, org, WORK_SUMMARY_MODEL, Some("gpt"), Actor::Person).is_err(),
+            "validated like a fleet write"
+        );
+        assert!(
+            set_for_org(&s, org, GC_ENABLED, Some("false"), Actor::Person).is_err(),
+            "not a per-org key"
+        );
+        let views = org_settings(&s, org);
+        let summary = views
+            .iter()
+            .find(|v| v.setting.key == WORK_SUMMARY_MODEL)
+            .unwrap();
+        assert_eq!(
+            (summary.setting.value.as_str(), summary.own.as_deref()),
+            ("sonnet", Some("opus"))
+        );
+        assert!(views.iter().all(|v| v.setting.per_org));
+        assert_eq!(
+            org_values(&s, WORK_SUMMARY_MODEL)
+                .get(&org)
+                .map(String::as_str),
+            Some("opus")
+        );
+        // Clearing inherits again.
+        set_for_org(&s, org, WORK_SUMMARY_MODEL, None, Actor::Person).unwrap();
+        assert_eq!(get_string_for(&s, WORK_SUMMARY_MODEL, Some(org)), "sonnet");
+        let audit = s
+            .setting_audit(&format!("{WORK_SUMMARY_MODEL}@org:{org}"), 10)
+            .unwrap();
+        assert_eq!(audit.len(), 2, "{audit:?}");
+    }
+
     #[test]
     fn every_spec_has_consistent_metadata() {
         let mut labels = std::collections::BTreeSet::new();

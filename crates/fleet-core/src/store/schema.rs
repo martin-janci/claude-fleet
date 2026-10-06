@@ -1195,6 +1195,10 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/103_changeset_withdrawn_at.sql"),
         already_applied: Some(changesets_has_withdrawn_at),
     },
+    Migration::plain(
+        104,
+        include_str!("../../migrations/104_org_settings_and_spend.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
