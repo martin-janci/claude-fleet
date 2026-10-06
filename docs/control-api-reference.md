@@ -261,6 +261,12 @@ Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`
 
 Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host.
 
+### `org_admin`
+
+Administer the company from your own device: orgs (as work_admin's org actions), paired devices (list, pair_device → a one-time code and its QR, revoke, trust, bind to an org, hand to a person, grant a catalog) and people (list, rename, disable). Lists for any of your full devices; changes need a trusted full one, and never lock out the device in use.
+
+Parameters: `action`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `path_prefix`, `person`, `person_id`, `repo`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`
+
 ### `pair_client`
 
 Mint a single-use pairing code for a new client device (phone, browser) and return the URL to show as a QR. The code (not a token) travels in the URL FRAGMENT, so no proxy or access log sees it; the device posts it to /pair once for a token of its own. name: 1-64 chars, no control characters, not a live client's. mode full drives sessions fleet-wide, readonly observes, peer is another hub's link (see peer_exchange), updater is fleet-updater's (/update only); fleet-admin tools stay out of a client's reach. Codes are in memory only: a hub restart voids them. org_id binds it to one org (its work and sessions only). person names whose device it is; the default is this hub's owner, and its sessions are private to that person. Master token only. Returns { url, code, expires_in_s, name, mode, trusted, org_id, person }.

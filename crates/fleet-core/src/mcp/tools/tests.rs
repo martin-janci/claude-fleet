@@ -2301,8 +2301,8 @@ fn router_sum_serves_every_tool() {
         "a router block is missing from tool_router()"
     );
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
-    // claim tools (T12).
-    assert_eq!(served, 114);
+    // claim tools (T12) + org administration's `org_admin` (phase B).
+    assert_eq!(served, 115);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -16987,4 +16987,109 @@ async fn a_session_row_carries_the_facts_and_never_the_callers_own_access() {
             );
         }
     }
+}
+
+// ---- organisation administration, phase B (`org_admin`) ----
+
+/// Who reaches `org_admin`: the hub owner's own full device bound to no org.
+/// Never the master (it has `fleet-hub org|client|person`), a host's token,
+/// an org-bound device, a second person's device, or a readonly one (the
+/// tool is not readonly, so its lists ride along).
+#[test]
+fn org_admin_reaches_the_owners_full_device_only() {
+    let can = |c: &Caller| {
+        enforce_mode(c, "org_admin")
+            .and_then(|()| enforce_admin(c, "org_admin"))
+            .is_ok()
+            && present::visible_to(c, "org_admin")
+    };
+    assert!(can(&client_caller("laptop", TokenMode::Full)));
+    assert!(can(&trusted(client_caller("laptop", TokenMode::Full))));
+    assert!(!can(&Caller::master()), "not served to the master");
+    assert!(!can(&client_caller("phone", TokenMode::Readonly)));
+    assert!(!can(&host_caller("hosta", TokenMode::Full)));
+    assert!(!can(&org_bound(trusted(client_caller(
+        "acme",
+        TokenMode::Full
+    )))));
+    assert!(!can(&another_person(trusted(client_caller(
+        "ada",
+        TokenMode::Full
+    )))));
+    for machine in [
+        client_caller("hub-b", TokenMode::Peer),
+        client_caller("fleet-updater", TokenMode::Updater),
+    ] {
+        assert!(!can(&machine), "{:?}", machine.mode);
+    }
+}
+
+fn org_admin_args(action: &str) -> crate::service::org_admin::OrgAdminArgs {
+    crate::service::org_admin::OrgAdminArgs::new(action)
+}
+
+/// A device lists; a change needs it trusted; pairing answers a code, its
+/// URL and the URL's QR; a peer link is not paired here; and the device in
+/// use cannot revoke itself.
+#[tokio::test]
+async fn org_admin_lists_for_a_device_and_changes_only_for_a_trusted_one() {
+    let (tools, _guards, store) = client_tools();
+    store
+        .lock()
+        .unwrap()
+        .insert_client_token("laptop", "digest-laptop", "full")
+        .unwrap();
+    let call = |c: Caller, a: crate::service::org_admin::OrgAdminArgs| {
+        tools.org_admin(Extension(c), Parameters(a))
+    };
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let v = result_json(
+        &call(laptop.clone(), org_admin_args("list_devices"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v[0]["name"], "laptop");
+    assert_eq!(v[0]["this_device"], true);
+    let mut pair = org_admin_args("pair_device");
+    pair.device = Some("phone".into());
+    assert!(
+        call(laptop.clone(), pair.clone()).await.is_err(),
+        "an untrusted device does not pair another"
+    );
+
+    let me = trusted(laptop);
+    let v = result_json(&call(me.clone(), pair.clone()).await.expect("trusted pairs"));
+    assert_eq!(v["name"], "phone");
+    assert!(v["url"]
+        .as_str()
+        .unwrap()
+        .contains(v["code"].as_str().unwrap()));
+    let rows: Vec<&str> = v["qr"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert!(rows.len() >= 21, "a QR is at least 21 modules wide");
+    assert!(rows
+        .iter()
+        .all(|r| r.len() == rows.len() && r.chars().all(|c| c == '0' || c == '1')));
+
+    pair.device = Some("hub-c".into());
+    pair.mode = Some("peer".into());
+    assert!(
+        call(me.clone(), pair).await.is_err(),
+        "a peer link is paired on the hub"
+    );
+
+    let mut revoke = org_admin_args("revoke_device");
+    revoke.device = Some("laptop".into());
+    assert!(
+        call(me, revoke).await.is_err(),
+        "the device in use cannot revoke itself"
+    );
+    assert_eq!(
+        store.lock().unwrap().active_client_tokens().unwrap().len(),
+        1
+    );
 }

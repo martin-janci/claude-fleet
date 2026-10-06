@@ -789,6 +789,26 @@ Index by area (names only; see the reference for details):
   The ticks and sweeps read their settings every pass, so a change takes
   effect on the next one. On a hub, this is how `reports.*` and `work.*`,
   which have no flag, are set.
+- **`org_admin`** — the company's administration from the hub owner's
+  own device (org administration phase B,
+  `docs/superpowers/specs/2026-10-06-org-administration-design.md`). Served
+  to that device and not to the master, who has `fleet-hub org|client|person`
+  and `work_admin`. Orgs: `work_admin`'s org actions under the same names
+  (`list_orgs`, `add_org`, `update_org`, `remove_org`, `add_rule`,
+  `remove_rule`, `assign_host`, `unassign_host`, `assign_tracker`), with an
+  org named by `org_id` or `org`. Devices: `list_devices` (name, mode,
+  trust, org, person, catalog grants, `this_device`; never a peer link or an
+  updater token), `pair_device { device, mode: full|readonly, trusted, org,
+  person, ttl_s }` (a one-time code, its URL and the URL's QR as rows of
+  `1` / `0`), `revoke_device`, `set_device_trust`, `bind_device { device,
+  org }` (no org unbinds), `set_device_person { device, person }` (created
+  when new) and `grant_catalog { device, catalog, on }`. People:
+  `list_people`, `rename_person { person_id, name, display_name }` and
+  `disable_person` (revokes their devices and the shares made to them;
+  never the owner). Any of the owner's `full` devices lists (a readonly
+  device is refused the tool, which is not readonly); a change needs a
+  **trusted `full`** device, and none may revoke, untrust, bind, hand over
+  or take a grant from the device the call comes through.
 - **`guide`** — step-by-step guides in Settings → Guides (declarative
   pages, layout `guide`; `docs/pages.md` → *Guides*). Any token, a host's
   own included, calls `catalog` (the rules, every setting's key, label and

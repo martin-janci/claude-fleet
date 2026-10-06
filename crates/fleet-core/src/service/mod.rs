@@ -39,6 +39,7 @@ pub mod names;
 pub mod nl;
 pub mod onboarding;
 pub mod operator;
+pub mod org_admin;
 pub mod orgs;
 pub mod outcome;
 pub mod pane_intel;

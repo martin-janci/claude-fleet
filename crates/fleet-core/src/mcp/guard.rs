@@ -401,6 +401,18 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Organisation administration, phase B: the company's orgs, devices and
+    // people from the hub owner's own device. Not served to the master (it
+    // has `fleet-hub org|client|person` and `work_admin`); the lists are for
+    // any such device, a change needs a trusted full one (checked in the
+    // tool, `org_admin_writer`), and no change locks out the device in use.
+    ToolPolicy {
+        name: "org_admin",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Guides (declarative pages, layout guide): any token reads the catalog,
     // validates and proposes — a host's session is who writes one, with the
     // fleet-guides skill — and lists. Deciding and removing are a person's:
