@@ -202,7 +202,8 @@ export type Unit =
   | 'kib'
   | 'mib'
   | 'tokens'
-  | 'count';
+  | 'count'
+  | 'usd';
 
 export interface Descriptor {
   key: string;
@@ -324,6 +325,7 @@ export const UNIT_WORDS: Record<Unit, string> = {
   mib: 'MiB',
   tokens: 'tokens',
   count: '',
+  usd: 'USD',
 };
 
 /** "1–365 days", "0 = never", bounds in the shown unit, for the help line. */

@@ -7,22 +7,29 @@ import { invokeCmd, type Result } from '../result';
 import { loadOrgs, ruleChip, type OrgRuleRow } from '../orgs';
 import { loadTrackers } from '../trackers';
 import { loadCatalogStatuses } from '../assets_workspace';
+import { loadDevices } from '../devices';
 
 export type Bind =
   | { from: 'record'; name: string }
   | { from: 'item' }
   | { from: 'item_field'; name: string }
   | { from: 'param'; name: string }
-  | { from: 'null' };
+  | { from: 'null' }
+  | { from: 'true' }
+  | { from: 'false' };
 
-export type OptionSource = 'hosts' | 'trackers' | 'orgs';
+export type OptionSource = 'hosts' | 'trackers' | 'orgs' | 'devices' | 'catalogs';
 
 export type ParamSpec = { name: string; label: string; required: boolean } & (
   | { type: 'text'; max: number; placeholder: string }
   | { type: 'color' }
   | { type: 'secret' }
   | { type: 'options'; source: OptionSource }
+  | { type: 'choice'; options: [string, string][] }
 );
+
+/** How an action's answer is shown (`ResultView`). */
+export type ResultView = 'pairing';
 
 export interface ActionSpec {
   id: string;
@@ -36,9 +43,16 @@ export interface ActionSpec {
   variants?: string[];
   /** The command answers `{ ok, error? }`. */
   report: boolean;
+  /** Its answer is shown by this formatter. */
+  result?: ResultView;
 }
 
-export type ItemLabel = { type: 'plain' } | { type: 'field'; field: string } | { type: 'org_rule' };
+export type ItemLabel =
+  | { type: 'plain' }
+  | { type: 'field'; field: string }
+  | { type: 'org_rule' }
+  | { type: 'device' }
+  | { type: 'member' };
 
 export type Badge =
   | { when: 'true'; text: string }
@@ -53,6 +67,9 @@ export type FieldKind =
   | { type: 'inherit' }
   | { type: 'choice'; options: [string, string][] }
   | { type: 'time' }
+  | { type: 'count' }
+  | { type: 'money' }
+  | { type: 'settings'; set: ActionSpec }
   | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[] };
 
 export type FieldSpec = {
@@ -152,6 +169,12 @@ export function choiceLabel(f: FieldSpec, v: string): string {
   return f.type === 'choice' ? (f.options.find(([o]) => o === v)?.[1] ?? v) : v;
 }
 
+/** Micro-USD as dollars: `$12.34`, `$0.00`. */
+export function dollars(micros: unknown): string {
+  const n = typeof micros === 'number' ? micros : 0;
+  return `$${(n / 1_000_000).toFixed(2)}`;
+}
+
 /** Unix seconds as how long ago, from `now`. */
 export function ago(secs: unknown, now: number): string {
   if (typeof secs !== 'number') return 'never';
@@ -172,7 +195,7 @@ export function applies(r: ResourceType, a: ActionSpec, record: ResourceRecord):
 export function recordValues(r: ResourceType, record: ResourceRecord): Record<string, string> {
   const out: Record<string, string> = {};
   for (const f of r.fields) {
-    if (f.type === 'items') continue;
+    if (f.type === 'items' || f.type === 'settings') continue;
     out[f.id] = String(fieldValue(f, record));
   }
   return out;
@@ -186,13 +209,33 @@ export function itemsOf(f: FieldSpec, record: ResourceRecord): unknown[] {
 export function itemLabel(label: ItemLabel, item: unknown): string {
   if (label.type === 'plain') return String(item);
   if (label.type === 'org_rule') return ruleChip(item as OrgRuleRow);
+  if (label.type === 'device') return deviceChip(item as DeviceItem);
+  if (label.type === 'member') {
+    const m = item as { name?: string; display_name?: string; role?: string };
+    return `${m.display_name || m.name || ''} · ${m.role ?? ''}`;
+  }
   const v = (item as Record<string, unknown> | null)?.[label.field];
   return v === undefined || v === null ? '' : String(v);
 }
 
-/** A stable key for a sub-item: its `id`, else the item itself. */
+/** A paired device in an org's `devices` (`OrgDevice`). */
+export interface DeviceItem {
+  name: string;
+  mode: string;
+  trusted: boolean;
+  last_seen_at?: number;
+}
+
+function deviceChip(d: DeviceItem): string {
+  const tags = [d.mode === 'readonly' ? 'read-only' : null, d.trusted ? 'trusted' : null].filter(Boolean);
+  return tags.length ? `${d.name} · ${tags.join(', ')}` : d.name;
+}
+
+/** A stable key for a sub-item: its `id`, else its `name`, else the item
+ *  itself. */
 export function itemKey(item: unknown): string {
   if (item && typeof item === 'object' && 'id' in item) return String((item as { id: unknown }).id);
+  if (item && typeof item === 'object' && 'name' in item) return String((item as { name: unknown }).name);
   return String(item);
 }
 
@@ -258,14 +301,31 @@ export function buildArgs(
       case 'null':
         out[arg] = null;
         break;
+      case 'true':
+        out[arg] = true;
+        break;
+      case 'false':
+        out[arg] = false;
+        break;
     }
   }
   return out;
 }
 
+/** A param's value as the form holds it: what was typed or picked, else
+ *  a choice's first option (preselected). */
+export function paramValue(p: ParamSpec, params: Record<string, string>): string {
+  return params[p.name] ?? (p.type === 'choice' ? (p.options[0]?.[0] ?? '') : '');
+}
+
 /** The form can be sent: every required param has a value. */
 export function formReady(action: ActionSpec, params: Record<string, string>): boolean {
-  return action.params.every((p) => !p.required || (params[p.name] ?? '').trim() !== '');
+  return action.params.every((p) => !p.required || paramValue(p, params).trim() !== '');
+}
+
+/** What the form sends: its values, with each choice's preselected option. */
+export function formValues(action: ActionSpec, params: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(action.params.map((p) => [p.name, paramValue(p, params)]));
 }
 
 export function runAction(action: ActionSpec, args: Record<string, unknown>): Promise<Result<unknown>> {
@@ -282,9 +342,11 @@ export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> 
  * like the custom components.
  */
 export const RESOURCE_RELOADERS: Record<string, (() => Promise<unknown>)[]> = {
-  org: [loadOrgs, loadTrackers],
+  org: [loadOrgs, loadTrackers, loadDevices],
   tracker: [loadTrackers, loadOrgs],
   catalog: [loadCatalogStatuses, loadOrgs],
+  device: [loadDevices, loadOrgs, loadCatalogStatuses],
+  person: [loadDevices],
 };
 
 export async function afterChange(r: ResourceType): Promise<void> {

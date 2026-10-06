@@ -36,8 +36,7 @@ use crate::store::{GrantRecipient, SessionGrantRow};
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionGrantView {
     pub session_id: i64,
-    /// The recipient. M1 writes person recipients only; `org_id` stays in the
-    /// schema for M2 and the store refuses it until then.
+    /// The recipient: a person, or (org administration phase D) an org.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub person_id: Option<i64>,
     /// The recipient's current name, or `None` for a grant whose `people` row
@@ -47,6 +46,12 @@ pub struct SessionGrantView {
     pub person_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub person_display_name: Option<String>,
+    /// An org recipient: its members and admins (from when they could
+    /// receive shares).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
     /// `watch` or `drive`.
     pub level: String,
     pub granted_by: i64,
@@ -62,11 +67,17 @@ impl SessionGrantView {
             Some(p) => s.get_person(p)?,
             None => None,
         };
+        let org = match row.org_id {
+            Some(o) => s.get_org(o)?,
+            None => None,
+        };
         Ok(SessionGrantView {
             session_id: row.session_id,
             person_id: row.person_id,
             person_name: person.as_ref().map(|p| p.name.clone()),
             person_display_name: person.and_then(|p| p.display_name),
+            org_id: row.org_id,
+            org_name: org.map(|o| o.name),
             level: row.level,
             granted_by: row.granted_by,
             granted_at: row.granted_at,
@@ -120,6 +131,90 @@ pub fn person_named(s: &Store, name: &str) -> Result<i64, IpcError> {
             ),
         )
     })
+}
+
+/// Who a share is addressed to, by name: a person, or (org administration
+/// phase D) an org — its members and admins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShareTo<'a> {
+    Person(&'a str),
+    Org(&'a str),
+}
+
+impl<'a> ShareTo<'a> {
+    /// From a tool's or a command's two fields: exactly one names someone.
+    pub fn from_fields(person: &'a str, org: Option<&'a str>) -> Result<Self, IpcError> {
+        let org = org.map(str::trim).filter(|o| !o.is_empty());
+        match (person.trim(), org) {
+            ("", Some(o)) => Ok(ShareTo::Org(o)),
+            (p, None) if !p.is_empty() => Ok(ShareTo::Person(p)),
+            ("", None) => Err(IpcError::new(
+                codes::E_VALIDATE,
+                "name a person or an org: a grant is addressed to someone",
+            )),
+            _ => Err(IpcError::new(
+                codes::E_VALIDATE,
+                "a grant is addressed to a person or an org, not both",
+            )),
+        }
+    }
+
+    fn resolve(self, s: &Store) -> Result<GrantRecipient, IpcError> {
+        Ok(match self {
+            ShareTo::Person(name) => GrantRecipient::Person(person_named(s, name)?),
+            ShareTo::Org(name) => GrantRecipient::Org(org_named(s, name)?),
+        })
+    }
+}
+
+/// The org named `name` (case-insensitively, as org names are unique).
+pub fn org_named(s: &Store, name: &str) -> Result<i64, IpcError> {
+    let name = name.trim();
+    s.list_orgs()?
+        .into_iter()
+        .find(|o| o.name.eq_ignore_ascii_case(name))
+        .map(|o| o.id)
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no org named {name:?}")))
+}
+
+/// [`share_session`] to a person or an org.
+pub fn share_session_to(
+    s: &Store,
+    session_id: i64,
+    to: ShareTo<'_>,
+    level: &str,
+    granter: Option<i64>,
+) -> Result<SessionRow, IpcError> {
+    let granter = require_granter(granter, "share")?;
+    let to = to.resolve(s)?;
+    s.grant_session(session_id, to, level, granter)?;
+    row_after(s, session_id)
+}
+
+/// [`unshare_session`] for a person or an org recipient.
+pub fn unshare_session_to(
+    s: &Store,
+    session_id: i64,
+    to: ShareTo<'_>,
+    granter: Option<i64>,
+) -> Result<SessionRow, IpcError> {
+    let granter = require_granter(granter, "revoke a grant on")?;
+    let to = to.resolve(s)?;
+    s.revoke_session_grant_to(session_id, to, granter)?;
+    row_after(s, session_id)
+}
+
+/// [`narrow_session_share`] for a person or an org recipient.
+pub fn narrow_session_share_to(
+    s: &Store,
+    session_id: i64,
+    to: ShareTo<'_>,
+    granter: Option<i64>,
+) -> Result<SessionRow, IpcError> {
+    let granter = require_granter(granter, "narrow a grant on")?;
+    let to = to.resolve(s)?;
+    s.narrow_session_grant_to(session_id, to, granter)?;
+    row_after(s, session_id)
 }
 
 /// Share `session_id` with the person named `person`, at `level`, as

@@ -35,6 +35,7 @@ fn person_scope(person: Option<i64>, grants: &[(i64, &str)], sole: bool) -> View
         None,
         None,
         sole,
+        UnclaimedReach::None,
     )
 }
 
@@ -51,6 +52,7 @@ fn host_scope(alias: &str, proven: Option<i64>) -> ViewScope {
         Some(alias.into()),
         proven,
         false,
+        UnclaimedReach::None,
     )
 }
 

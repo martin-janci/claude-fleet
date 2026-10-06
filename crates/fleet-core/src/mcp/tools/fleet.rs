@@ -194,8 +194,8 @@ impl FleetTools {
 
     #[tool(description = "Registered hosts: reachability, claude/tmux \
         versions, linked account. unclaimed_sessions is how many sessions \
-        on that host nobody owns, served only on a one-person fleet: null \
-        means you are not told, 0 means there are none.")]
+        on that host nobody owns, served to a one-person fleet and to who \
+        administers the host: null means not told, 0 means none.")]
     pub(super) async fn list_hosts(
         &self,
         Extension(caller): Extension<Caller>,
@@ -411,6 +411,17 @@ impl FleetTools {
         &self,
         Parameters(p): Parameters<PairClientParams>,
     ) -> Result<CallToolResult, McpError> {
+        ok_json(&self.mint_pairing(p, "pair_client")?)
+    }
+
+    /// Mint a pairing code: `pair_client`'s body, shared with `org_admin {
+    /// pair_device }` (org administration phase B), which narrows the modes
+    /// before it gets here. `tool` names the audit line.
+    pub(super) fn mint_pairing(
+        &self,
+        p: PairClientParams,
+        tool: &str,
+    ) -> Result<serde_json::Value, McpError> {
         // Validate BEFORE auditing: the name reaches a `tracing` line, and a
         // refused mint must not be able to put a line break (or an ANSI
         // escape) into the hub's log through it. The validator also returns
@@ -462,7 +473,7 @@ impl FleetTools {
             .transpose()
             .map_err(to_mcp_err)?;
         audit(
-            "pair_client",
+            tool,
             &format!(
                 "name={name} mode={mode} trusted={} ttl_s={:?} org_id={:?} person={}",
                 p.trusted,
@@ -538,7 +549,7 @@ impl FleetTools {
             person: person.as_deref(),
             ttl,
         });
-        ok_json(&serde_json::json!({
+        Ok(serde_json::json!({
             "url": crate::mcp::pair_url(&base.url, &req.code),
             "code": req.code,
             "expires_in_s": ttl.as_secs(),
@@ -748,6 +759,158 @@ impl FleetTools {
         ok_json_compact(&crate::pages::bundle())
     }
 
+    // ---- organisation administration (phase B) ----
+
+    #[tool(description = "Administer the company: orgs (work_admin's org \
+        actions), devices (list, pair_device → code + QR, revoke, trust, bind, \
+        hand over, grant a catalog), people and members (roles, a member's \
+        grants). Hub owner's device: all; an org admin's: their org. Changes \
+        need a trusted full device, never locking out the one in use.")]
+    pub(super) async fn org_admin(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<crate::service::org_admin::OrgAdminArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::service::org_admin::{self as oa, Action, Me};
+        audit("org_admin", &args.audit_summary());
+        let action = Action::parse(&args.action).map_err(to_mcp_err)?;
+        if !action.is_read() {
+            org_admin_writer(&caller)?;
+        }
+        // Phase D: whose authority this device carries — the hub owner's
+        // unbound device for the fleet, an org admin's for their org.
+        let authority = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            oa::authority_for(
+                &s,
+                caller.is_personal_owner && caller.is_person_device(),
+                caller.person(),
+                caller.client.as_ref().and_then(|c| c.org_id),
+            )
+            .map_err(to_mcp_err)?
+        }
+        .ok_or_else(|| {
+            mcp_err(
+                "E_FORBIDDEN",
+                "org_admin is for the hub owner's own device, or an org admin's for \
+                 their org; this device administers no org",
+                None,
+            )
+        })?;
+        let me = Me {
+            device: caller.client.as_ref().map(|c| c.name.as_str()),
+            person: caller.person(),
+            authority,
+        };
+        if action == Action::PairDevice {
+            return ok_json(&self.pair_device(args, authority)?);
+        }
+        let out = oa::run(&args, &self.store, me).map_err(to_mcp_err)?;
+        ok_json_compact(&out)
+    }
+
+    /// `org_admin { pair_device }`: a person's device only — never a peer
+    /// link or an updater token, which stay `fleet-hub pair --mode …` — and
+    /// the answer carries the URL's QR as rows of `1` (dark) and `0`, so the
+    /// desktop draws it without a QR library of its own.
+    fn pair_device(
+        &self,
+        args: crate::service::org_admin::OrgAdminArgs,
+        authority: crate::service::org_admin::Authority,
+    ) -> Result<serde_json::Value, McpError> {
+        let mode = args.mode.clone().unwrap_or_else(|| "full".into());
+        if !matches!(mode.as_str(), "full" | "readonly") {
+            return Err(mcp_err(
+                codes::E_VALIDATE,
+                format!(
+                    "pair_device pairs a person's device (full or readonly), not {mode:?}; \
+                     a peer link or an updater token is paired on the hub (fleet-hub pair --mode)"
+                ),
+                None,
+            ));
+        }
+        let org_id = match (args.org_id, args.org.as_deref()) {
+            (Some(id), _) => Some(id),
+            (None, Some(name)) if !name.trim().is_empty() => {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                Some(
+                    s.list_orgs()
+                        .map_err(to_mcp_err)?
+                        .into_iter()
+                        .find(|o| o.name == name.trim())
+                        .ok_or_else(|| {
+                            mcp_err(codes::E_NOTFOUND, format!("no org named {name:?}"), None)
+                        })?
+                        .id,
+                )
+            }
+            _ => None,
+        };
+        // Phase D: an org admin pairs a device for a member of their org, and
+        // it is fenced to that org.
+        let org_id = match authority {
+            crate::service::org_admin::Authority::Fleet => org_id,
+            crate::service::org_admin::Authority::Org { org, .. } => {
+                if org_id.is_some_and(|o| o != org) {
+                    return Err(mcp_err(
+                        "E_FORBIDDEN",
+                        "an org admin pairs devices for their own org only",
+                        None,
+                    ));
+                }
+                let person = args
+                    .person
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| {
+                        mcp_err(
+                            codes::E_INVALID,
+                            "pair_device needs person: whose device, a member of your org",
+                            None,
+                        )
+                    })?;
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let member = match s.get_person_by_name(person).map_err(to_mcp_err)? {
+                    Some(p) => {
+                        s.personal_owner_id().map_err(to_mcp_err)? != Some(p.id)
+                            && s.org_role(org, p.id).map_err(to_mcp_err)?.is_some()
+                    }
+                    None => false,
+                };
+                if !member {
+                    return Err(mcp_err(
+                        "E_FORBIDDEN",
+                        format!(
+                            "{person:?} is not a member of your org; add them first (set_member)"
+                        ),
+                        None,
+                    ));
+                }
+                Some(org)
+            }
+        };
+        let name = args
+            .device
+            .clone()
+            .or(args.name.clone())
+            .ok_or_else(|| mcp_err(codes::E_INVALID, "pair_device needs device", None))?;
+        let mut out = self.mint_pairing(
+            PairClientParams {
+                name,
+                mode: Some(mode),
+                ttl_s: args.ttl_s,
+                trusted: args.trusted.unwrap_or(false),
+                org_id,
+                person: args.person.clone().filter(|p| !p.trim().is_empty()),
+            },
+            "org_admin",
+        )?;
+        let url = out["url"].as_str().unwrap_or_default().to_string();
+        out["qr"] = qr_rows(&url)?;
+        Ok(out)
+    }
+
     // ---- guides (declarative pages, layout guide) ----
 
     #[tool(description = "Settings guides. catalog: what one may name; \
@@ -954,6 +1117,47 @@ pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), 
             None,
         )),
     }
+}
+
+/// An `org_admin` change: the master, or a trusted `full` device — the
+/// tool's `Access::PersonDevice` row already made it the hub owner's own
+/// device bound to no org. A readonly or untrusted device lists.
+pub(super) fn org_admin_writer(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_master() || (caller.is_trusted_client() && caller.mode == TokenMode::Full) {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        format!(
+            "this device may read the company's orgs, devices and people; to change them, \
+             the hub's operator trusts it (a full device): fleet-hub client trust {}",
+            caller.client.as_ref().map_or("<name>", |c| c.name.as_str())
+        ),
+        None,
+    ))
+}
+
+/// A QR code of `text` as rows of `1` (dark) / `0`, no quiet zone: the
+/// desktop draws it as an SVG of squares.
+fn qr_rows(text: &str) -> Result<serde_json::Value, McpError> {
+    let code = qrcode::QrCode::new(text.as_bytes()).map_err(|e| {
+        mcp_err(
+            codes::E_INTERNAL,
+            format!("could not encode the pairing URL as a QR code: {e}"),
+            None,
+        )
+    })?;
+    let width = code.width();
+    let rows: Vec<String> = code
+        .to_colors()
+        .chunks(width)
+        .map(|row| {
+            row.iter()
+                .map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' })
+                .collect()
+        })
+        .collect();
+    Ok(serde_json::json!(rows))
 }
 
 /// Deciding or removing a guide is a person's, as a settings write is:

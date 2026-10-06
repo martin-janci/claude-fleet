@@ -99,6 +99,14 @@ pub struct OrgRow {
     /// hub, which has no bound client.
     #[serde(default = "bound_sees_unassigned_default")]
     pub bound_sees_unassigned: bool,
+    /// Org administration phase D (migration 107): this company owns the
+    /// hub, so its admins administer hosts. At most one org.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owns_hub: bool,
+    /// Phase D: its admins see the count of unclaimed sessions on its hosts
+    /// (the hub owner's switch, off by default).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admins_see_unclaimed: bool,
 }
 
 fn bound_sees_unassigned_default() -> bool {
@@ -280,7 +288,7 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
 }
 
 const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy, jev_allowed, \
-                           bound_sees_unassigned";
+                           bound_sees_unassigned, owns_hub, admins_see_unclaimed";
 const RULE_COLUMNS: &str = "id, org_id, owner, repo, path_prefix, host_alias";
 
 fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
@@ -293,6 +301,8 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         auto_tidy: r.get::<_, Option<i64>>(5)?.map(|v| v != 0),
         jev_allowed: r.get::<_, i64>(6)? != 0,
         bound_sees_unassigned: r.get::<_, i64>(7)? != 0,
+        owns_hub: r.get::<_, i64>(8)? != 0,
+        admins_see_unclaimed: r.get::<_, i64>(9)? != 0,
     })
 }
 
@@ -465,6 +475,73 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// One org's own value of setting `key` (migration 106), or `None` when
+    /// it inherits the fleet's.
+    pub fn org_setting(&self, org_id: i64, key: &str) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT value FROM org_settings WHERE org_id = ?1 AND key = ?2",
+                rusqlite::params![org_id, key],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Every org's own value of `key`: `org id → value`, for the orgs that
+    /// set one.
+    pub fn org_settings_for_key(
+        &self,
+        key: &str,
+    ) -> Result<std::collections::HashMap<i64, String>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT org_id, value FROM org_settings WHERE key = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![key], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// One org's own values, by key.
+    pub fn org_settings(
+        &self,
+        org_id: i64,
+    ) -> Result<std::collections::BTreeMap<String, String>, IpcError> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT key, value FROM org_settings WHERE org_id = ?1")?;
+        let rows = stmt.query_map(rusqlite::params![org_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Set org `org_id`'s own value of `key`, or clear it (`None`: inherit
+    /// the fleet's). The caller validated the value against the key's spec.
+    /// `E_NOTFOUND` for an unknown org.
+    pub fn set_org_setting(
+        &self,
+        org_id: i64,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<(), IpcError> {
+        if self.get_org(org_id)?.is_none() {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("org {org_id} not found"),
+            ));
+        }
+        match value {
+            Some(v) => self.conn.execute(
+                "INSERT INTO org_settings (org_id, key, value, set_at) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(org_id, key) DO UPDATE SET value = excluded.value, set_at = excluded.set_at",
+                rusqlite::params![org_id, key, v, now_unix()],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM org_settings WHERE org_id = ?1 AND key = ?2",
+                rusqlite::params![org_id, key],
+            )?,
+        };
+        Ok(())
+    }
+
     /// Delete an org: its rules go with it, its hosts become unassigned, and
     /// so do its past links (the `snap_org_id` snapshot, which has no FK):
     /// a removed org's work must not stay fenced from every host forever,
@@ -486,8 +563,34 @@ impl Store {
             "DELETE FROM org_rules WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
+        // Org administration phase C (migration 106): its own settings and
+        // its spend roll-up go with it.
+        tx.execute(
+            "DELETE FROM org_settings WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM usage_daily_org WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
+        // Phase D (migration 107): its members become FORMER members — the
+        // row stays, so a person whose last company this was reads nothing
+        // of any org rather than every org's work — and what was shared with
+        // the org reaches nobody.
+        let now = now_unix();
+        tx.execute(
+            "UPDATE org_members SET removed_at = ?2 WHERE org_id = ?1 AND removed_at IS NULL",
+            rusqlite::params![id, now],
+        )?;
+        let revoked = tx.execute(
+            "UPDATE session_grants SET revoked_at = ?2 WHERE org_id = ?1 AND revoked_at IS NULL",
+            rusqlite::params![id, now],
+        )?;
         let removed = tx.execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])? > 0;
         tx.commit()?;
+        if revoked > 0 {
+            super::session_grants::bump_grant_generation();
+        }
         Ok(removed)
     }
 

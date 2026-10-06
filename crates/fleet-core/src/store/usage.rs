@@ -313,22 +313,89 @@ impl Store {
         // rows like a first read's. Otherwise each day's slice goes to its
         // own row, history from a fresh cursor to the backfill row.
         let today = d.now.div_euclid(86_400);
+        // Org administration phase C: the same slices again, keyed by the
+        // session's org as it is now, for the org's spend and budget.
+        let org: Option<i64> = self.conn.query_row(
+            concat!(
+                "SELECT ",
+                crate::session_org_sql!("s"),
+                " FROM sessions s WHERE s.id = ?1"
+            ),
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )?;
+        let book = |day: i64, backfill: bool, t: &UsageTotals| -> Result<(), rusqlite::Error> {
+            self.add_usage_daily(day, host_alias, backfill, t)?;
+            if let Some(org) = org {
+                self.add_usage_daily_org(day, org, backfill, t)?;
+            }
+            Ok(())
+        };
         if d.by_day.is_empty() {
             if !daily.is_zero() {
-                self.add_usage_daily(today, host_alias, false, &daily)?;
+                book(today, false, &daily)?;
             }
         } else if d.reset {
             for (day, backfill, t) in split_reset_growth(daily, &d.by_day, today) {
-                self.add_usage_daily(day, host_alias, backfill, &t)?;
+                book(day, backfill, &t)?;
             }
         } else {
             for slice in &d.by_day {
                 if !slice.totals.is_zero() {
-                    self.add_usage_daily(slice.day, host_alias, slice.backfill, &slice.totals)?;
+                    book(slice.day, slice.backfill, &slice.totals)?;
                 }
             }
         }
         Ok(changed)
+    }
+
+    /// Add `t` to one `usage_daily_org` row (migration 106), keyed `(day,
+    /// org_id, backfill)`.
+    fn add_usage_daily_org(
+        &self,
+        day: i64,
+        org_id: i64,
+        backfill: bool,
+        t: &UsageTotals,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO usage_daily_org (day, org_id, backfill, input_tokens, output_tokens, \
+             cache_write_tokens, cache_read_tokens, cost_micros) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(day, org_id, backfill) DO UPDATE SET \
+             input_tokens = input_tokens + excluded.input_tokens, \
+             output_tokens = output_tokens + excluded.output_tokens, \
+             cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens, \
+             cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens, \
+             cost_micros = cost_micros + excluded.cost_micros",
+            rusqlite::params![
+                day,
+                org_id,
+                backfill as i64,
+                t.input_tokens,
+                t.output_tokens,
+                t.cache_write_tokens,
+                t.cache_read_tokens,
+                t.cost_micros
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Each org's LIVE spend (backfill rows left out: that is history a
+    /// first read booked, not spend in the window) in micro-USD, summed over
+    /// `since_day..` (UTC day numbers): `org id → cost_micros`.
+    pub fn org_live_cost_since(
+        &self,
+        since_day: i64,
+    ) -> Result<std::collections::BTreeMap<i64, i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT org_id, SUM(cost_micros) FROM usage_daily_org \
+             WHERE day >= ?1 AND backfill = 0 GROUP BY org_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![since_day], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
     }
 
     /// Add `t` to one `usage_daily` row, keyed `(day, host_alias, backfill)`.
@@ -437,6 +504,66 @@ fn split_reset_growth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn delta(cost: i64, now: i64) -> UsageDelta {
+        UsageDelta {
+            reset: false,
+            totals: UsageTotals {
+                input_tokens: cost / 10,
+                cost_micros: cost,
+                ..Default::default()
+            },
+            model: Some("claude-opus-5".into()),
+            offset: cost,
+            source: "s.jsonl".into(),
+            last_msg_id: None,
+            last_msg_usage: None,
+            now,
+            by_day: Vec::new(),
+            backfill_until: None,
+        }
+    }
+
+    /// Org administration phase C: a session in an org books its spend into
+    /// `usage_daily_org` too, beside its host's row; a session in no org
+    /// books nothing there.
+    #[test]
+    fn spend_is_booked_to_the_sessions_org_beside_its_host() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("a", Some("a")).unwrap();
+        s.insert_host("b", Some("b")).unwrap();
+        let org = s.add_org("Acme", None, false).unwrap();
+        s.set_host_org("a", Some(org.id)).unwrap();
+        let in_org = s
+            .upsert_session("x", "a", None, None, 1, 1, "running", None)
+            .unwrap();
+        let loose = s
+            .upsert_session("y", "b", None, None, 1, 1, "running", None)
+            .unwrap();
+        let day = 20_000;
+        s.apply_usage(in_org, "a", &delta(500, day * 86_400))
+            .unwrap();
+        s.apply_usage(in_org, "a", &delta(800, day * 86_400 + 60))
+            .unwrap();
+        s.apply_usage(loose, "b", &delta(900, day * 86_400))
+            .unwrap();
+        let spent = s.org_live_cost_since(day).unwrap();
+        // Each pass's totals are its growth: 500 then 800 more.
+        assert_eq!(spent.get(&org.id), Some(&1_300), "{spent:?}");
+        assert_eq!(spent.len(), 1, "no org, nothing booked: {spent:?}");
+        assert!(s.org_live_cost_since(day + 1).unwrap().is_empty());
+        // The host's roll-up is untouched by the second booking.
+        let total: i64 = s
+            .usage_daily_since(0, None)
+            .unwrap()
+            .iter()
+            .map(|(_, _, _, t)| t.cost_micros)
+            .sum();
+        assert_eq!(total, 2_200);
+        // Removing the org takes its roll-up with it.
+        assert!(s.remove_org(org.id).unwrap());
+        assert!(s.org_live_cost_since(0).unwrap().is_empty());
+    }
 
     #[test]
     fn inherit_usage_cursor_and_carry_totals_follow_a_moved_session() {

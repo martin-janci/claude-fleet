@@ -797,6 +797,47 @@ fn require_key_bound(s: &Store, scope: &OrgScope, key: &str) -> Result<(), IpcEr
     }
 }
 
+/// The live session rows `view` may count: what `work { action: scopes }`
+/// and the org overview tally. Two org clauses, and both earn their place:
+/// `sees_row_org_only` is the host/org answer (see the ORG_HALF_SITES note on
+/// this file's other sites — an internal-and-narrowed scope is fenced by it
+/// alone), and `sees_org` is what keeps another org's row on a per-host
+/// token's OWN host out of the tally, which the first does not ask.
+/// `view.sees_session_row` is the person half (multi-user M1, T9b).
+fn counted_rows(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<SessionRow>, IpcError> {
+    let scope = &view.org;
+    Ok(s.list_all_sessions()?
+        .into_iter()
+        .filter(|r| r.status != "ghost" && scope.sees_row_org_only(r) && scope.sees_org(r.org_id))
+        .filter(|r| view.sees_session_row(r).is_visible())
+        .collect())
+}
+
+/// Whether a row waits on a person (`service::attention::needs_attention`).
+fn needs_person(s: &Store) -> impl Fn(&SessionRow) -> bool {
+    let red = crate::service::health::context_red_pct(s);
+    move |r: &SessionRow| crate::service::attention::needs_attention_with(r, red).is_some()
+}
+
+/// `org id → (sessions, sessions that need a person)` over `rows`.
+fn org_session_counts(
+    rows: &[SessionRow],
+    needs: &dyn Fn(&SessionRow) -> bool,
+) -> BTreeMap<i64, (usize, usize)> {
+    let mut out: BTreeMap<i64, (usize, usize)> = BTreeMap::new();
+    for r in rows {
+        if let Some(org) = r.org_id {
+            let slot = out.entry(org).or_default();
+            slot.0 += 1;
+            slot.1 += usize::from(needs(r));
+        }
+    }
+    out
+}
+
 /// One entry of `work { action: scopes }`: a named org, or — zero-config —
 /// a project owner no org covers, or the unassigned rest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -844,32 +885,20 @@ pub fn scopes(
         .filter(|p| p.owner != "local" && !p.system)
         .map(|p| (p.id, p.owner))
         .collect();
-    let rows: Vec<SessionRow> = s
-        .list_all_sessions()?
-        .into_iter()
-        // Two org clauses, and both earn their place: `sees_row_org_only` is
-        // the host/org answer (see the ORG_HALF_SITES note on this file's
-        // other sites — an internal-and-narrowed scope is fenced by it alone),
-        // and `sees_org` is what keeps another org's row on a per-host token's
-        // OWN host out of the tally, which the first does not ask.
-        // Org half; `view.sees_session_row` on the next line is the person
-        // half.
-        .filter(|r| r.status != "ghost" && scope.sees_row_org_only(r) && scope.sees_org(r.org_id))
-        .filter(|r| view.sees_session_row(r).is_visible())
-        .collect();
-    let red = crate::service::health::context_red_pct(&s);
-    let needs = |r: &SessionRow| crate::service::attention::needs_attention_with(r, red).is_some();
+    let rows = counted_rows(&s, view)?;
+    let needs = needs_person(&s);
+    let per_org = org_session_counts(&rows, &needs);
     let mut out = Vec::new();
     for o in orgs.iter().filter(|o| scope.sees_org(Some(o.id))) {
-        let mine: Vec<&SessionRow> = rows.iter().filter(|r| r.org_id == Some(o.id)).collect();
+        let (session_count, needs_you) = per_org.get(&o.id).copied().unwrap_or_default();
         out.push(ScopeEntry {
             id: Some(o.id),
             owner: None,
             unassigned: false,
             label: o.name.clone(),
             color: o.color.clone(),
-            session_count: mine.len(),
-            needs_you: mine.iter().filter(|r| needs(r)).count(),
+            session_count,
+            needs_you,
         });
     }
     let mut by_owner: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -908,7 +937,9 @@ pub fn scopes(
 }
 
 /// `work { action: orgs }`: the orgs with their rules, hosts and trackers,
-/// for Settings → Organisations (read-only; changes are `work_admin`).
+/// and what the org overview shows (org administration, phase A), for
+/// Settings → Organisations (read-only; changes are `work_admin`). Every
+/// field past `trackers` is absent from an older hub and reads empty.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrgDetail {
     #[serde(flatten)]
@@ -920,6 +951,62 @@ pub struct OrgDetail {
     /// `(id, name)` of the trackers assigned to it.
     #[serde(default)]
     pub trackers: Vec<OrgTrackerRef>,
+    /// The asset catalogs it owns (`catalogs.org_id`), by name.
+    #[serde(default)]
+    pub catalogs: Vec<String>,
+    /// Its live sessions the caller may count, as `work { action: scopes }`
+    /// counts them.
+    #[serde(default)]
+    pub session_count: usize,
+    /// Of those, the ones waiting on a person.
+    #[serde(default)]
+    pub needs_you: usize,
+    /// The live paired devices bound to it — only for the fleet's
+    /// administrator ([`AdminView::Admin`]). `None` (no key at all) for
+    /// everyone else, so a host or an org-bound device never learns another
+    /// device's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<OrgDevice>>,
+    /// Phase C, administrator only: the per-org settings
+    /// ([`crate::service::settings::OrgSetting`]: the setting described with
+    /// the fleet's value, and the org's own). Kept as JSON, so a desktop
+    /// reads a hub's whatever settings that hub has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Vec<serde_json::Value>>,
+    /// Phase C, administrator only and only for a caller that sees every
+    /// session: live spend in micro-USD today, over the last 7 days and this
+    /// month (UTC), and the budgets in whole USD (`0` none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_today_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_week_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_month_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_daily_usd: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_monthly_usd: Option<u64>,
+    /// `daily` / `monthly`: the budgets it has reached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub over_budget: Vec<crate::service::org_spend::Period>,
+    /// Phase D: who is in the company, with their roles — for the fleet's
+    /// administrator and for the org's own people. Absent for anyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<OrgMember>>,
+    /// Phase D: the caller's own role in it (`admin` / `member` / `viewer`),
+    /// so a page offers what the caller may do. Absent when they have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub my_role: Option<String>,
+}
+
+/// One member as the org overview lists them (phase D).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgMember {
+    pub person_id: i64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    pub role: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -928,8 +1015,87 @@ pub struct OrgTrackerRef {
     pub name: String,
 }
 
-pub fn org_details(store: &Mutex<Store>, scope: &OrgScope) -> Result<Vec<OrgDetail>, IpcError> {
-    org_details_locked(&*lock(store)?, scope)
+/// A paired client bound to an org, as the org overview lists it. Never
+/// carries the token digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrgDevice {
+    pub name: String,
+    /// `full` or `readonly`.
+    pub mode: String,
+    pub trusted: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<i64>,
+}
+
+/// Whether [`org_details`] carries what only the fleet's administrator
+/// sees of an org: its bound devices, its own settings and — when the
+/// caller also sees every session (`org_spend::sees_all_spend`) — its
+/// spend and budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminView {
+    /// The fleet's administrator: the desktop's own store, the master token,
+    /// or the hub's personal owner on an unbound device.
+    Admin,
+    /// A person's device (phase D): the orgs they administer — whose
+    /// devices, own settings and spend they see, as the fleet's
+    /// administrator does — and every org they are in, live (whose members
+    /// they see), with their role.
+    Person { roles: BTreeMap<i64, String> },
+    /// Everyone else.
+    Other,
+}
+
+impl AdminView {
+    /// The one rule for an MCP caller (`work { action: orgs }`).
+    pub fn for_caller(
+        caller: &crate::mcp::auth::Caller,
+        store: &Mutex<Store>,
+    ) -> Result<Self, IpcError> {
+        if caller.is_master() || (caller.is_person_device() && caller.is_personal_owner) {
+            return Ok(AdminView::Admin);
+        }
+        let Some(p) = caller.person() else {
+            return Ok(AdminView::Other);
+        };
+        let s = lock(store)?;
+        let mut roles: BTreeMap<i64, String> = s
+            .memberships_of(p)?
+            .into_iter()
+            .filter(|m| m.is_live())
+            .map(|m| (m.org_id, m.role))
+            .collect();
+        // The hub's owner on a device bound to an org administers it.
+        if caller.is_personal_owner {
+            if let Some(o) = caller.client.as_ref().and_then(|c| c.org_id) {
+                roles.insert(o, crate::store::ROLE_ADMIN.to_string());
+            }
+        }
+        Ok(if roles.is_empty() {
+            AdminView::Other
+        } else {
+            AdminView::Person { roles }
+        })
+    }
+
+    fn role(&self, org: i64) -> Option<&str> {
+        match self {
+            AdminView::Person { roles } => roles.get(&org).map(String::as_str),
+            _ => None,
+        }
+    }
+
+    /// Sees `org`'s administrator data: devices, own settings, spend.
+    fn administers(&self, org: i64) -> bool {
+        matches!(self, AdminView::Admin) || self.role(org) == Some(crate::store::ROLE_ADMIN)
+    }
+}
+
+pub fn org_details(
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+    devices: AdminView,
+) -> Result<Vec<OrgDetail>, IpcError> {
+    org_details_locked(&*lock(store)?, view, devices)
 }
 
 // --- administration (work graph M5.2) ------------------------------------------
@@ -1024,7 +1190,11 @@ pub fn admin(
     let before = s.session_orgs()?;
     let out = match action {
         OrgAction::ListOrgs => {
-            return to_json(&org_details_locked(s, &OrgScope::All)?);
+            return to_json(&org_details_locked(
+                s,
+                &crate::service::view_scope::ViewScope::internal(),
+                AdminView::Admin,
+            )?);
         }
         OrgAction::AddOrg => {
             let auto = parse_auto_tidy(args.auto_tidy.as_deref())?;
@@ -1139,15 +1309,70 @@ pub fn admin(
     Ok(out)
 }
 
-fn org_details_locked(s: &Store, scope: &OrgScope) -> Result<Vec<OrgDetail>, IpcError> {
+fn org_details_locked(
+    s: &Store,
+    view: &crate::service::view_scope::ViewScope,
+    devices: AdminView,
+) -> Result<Vec<OrgDetail>, IpcError> {
+    let scope = &view.org;
     let rules = s.list_org_rules()?;
     let hosts = s.list_hosts()?;
+    let catalogs = s.list_catalogs()?;
+    let needs = needs_person(s);
+    let counts = org_session_counts(&counted_rows(s, view)?, &needs);
+    let admin = devices == AdminView::Admin;
+    let any_admin = admin || matches!(devices, AdminView::Person { .. });
+    // The devices as the auth layer resolves them: an org admin sees the
+    // devices fenced to their org by membership (phase D); the fleet's
+    // administrator, the ones bound to it.
+    let clients = any_admin
+        .then(|| {
+            if admin {
+                s.list_client_tokens(false)
+            } else {
+                s.auth_client_tokens()
+            }
+        })
+        .transpose()?;
+    let owner = s.personal_owner_id()?;
+    // An org admin sees their own org's spend (phases A–C, for that org);
+    // the fleet's administrator every org's, when they see every session.
+    let spend = (any_admin && (!admin || crate::service::org_spend::sees_all_spend(s, view)))
+        .then(|| crate::service::org_spend::spend_by_org(s, crate::service::catalog::now_secs()));
     let mut out = Vec::new();
     for o in s.list_orgs()? {
         if !scope.sees_org(Some(o.id)) {
             continue;
         }
-        out.push(OrgDetail {
+        let (session_count, needs_you) = counts.get(&o.id).copied().unwrap_or_default();
+        let administers = devices.administers(o.id);
+        let my_role = devices.role(o.id).map(str::to_string);
+        let members = (admin || my_role.is_some())
+            .then(|| org_member_list(s, o.id))
+            .transpose()?;
+        let mut d = OrgDetail {
+            members,
+            my_role,
+            catalogs: catalogs
+                .iter()
+                .filter(|c| c.org_id == Some(o.id))
+                .map(|c| c.name.clone())
+                .collect(),
+            session_count,
+            needs_you,
+            devices: clients.as_ref().filter(|_| administers).map(|cs| {
+                cs.iter()
+                    .filter(|c| c.org_id == Some(o.id))
+                    .filter(|c| admin || !(c.person_id.is_some() && c.person_id == owner))
+                    .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
+                    .map(|c| OrgDevice {
+                        name: c.name.clone(),
+                        mode: c.mode.clone(),
+                        trusted: c.trusted_at.is_some(),
+                        last_seen_at: c.last_seen_at,
+                    })
+                    .collect()
+            }),
             rules: rules.iter().filter(|r| r.org_id == o.id).cloned().collect(),
             hosts: hosts
                 .iter()
@@ -1159,8 +1384,54 @@ fn org_details_locked(s: &Store, scope: &OrgScope) -> Result<Vec<OrgDetail>, Ipc
                 .into_iter()
                 .map(|(id, name)| OrgTrackerRef { id, name })
                 .collect(),
+            settings: administers.then(|| {
+                crate::service::settings::org_settings(s, o.id)
+                    .iter()
+                    .filter_map(|v| serde_json::to_value(v).ok())
+                    .collect()
+            }),
+            spent_today_micros: None,
+            spent_week_micros: None,
+            spent_month_micros: None,
+            budget_daily_usd: None,
+            budget_monthly_usd: None,
+            over_budget: Vec::new(),
             org: o,
-        });
+        };
+        if let Some(spend) = spend.as_ref().filter(|_| administers) {
+            use crate::service::org_spend as os;
+            let got = spend.get(&d.org.id).copied().unwrap_or_default();
+            let (daily, monthly) = os::budgets(s, d.org.id);
+            d.spent_today_micros = Some(got.today_micros);
+            d.spent_week_micros = Some(got.week_micros);
+            d.spent_month_micros = Some(got.month_micros);
+            d.budget_daily_usd = Some(daily);
+            d.budget_monthly_usd = Some(monthly);
+            d.over_budget = os::reached(got, (daily, monthly))
+                .into_iter()
+                .map(|(p, ..)| p)
+                .collect();
+        }
+        out.push(d);
+    }
+    Ok(out)
+}
+
+/// The live members of `org`, admins first, as the overview lists them.
+fn org_member_list(s: &Store, org: i64) -> Result<Vec<OrgMember>, IpcError> {
+    let mut out = Vec::new();
+    for m in s.org_members(org)? {
+        if let Some(p) = s
+            .get_person(m.person_id)?
+            .filter(|p| p.disabled_at.is_none())
+        {
+            out.push(OrgMember {
+                person_id: p.id,
+                name: p.name,
+                display_name: p.display_name,
+                role: m.role,
+            });
+        }
     }
     Ok(out)
 }

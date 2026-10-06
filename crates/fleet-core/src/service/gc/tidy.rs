@@ -167,6 +167,9 @@ pub struct TidyConfig {
     /// Per-org overrides of [`Self::auto`] (`orgs.auto_tidy`, work graph M5):
     /// a session of an org listed here follows its org, the rest `auto`.
     pub org_auto: HashMap<i64, bool>,
+    /// Per-org overrides of [`Self::unlinked_idle_secs`] (org
+    /// administration phase C, `work.tidy_idle_unlinked_days` per org).
+    pub org_unlinked_idle_secs: HashMap<i64, i64>,
 }
 
 impl TidyConfig {
@@ -174,6 +177,12 @@ impl TidyConfig {
     pub fn auto_for(&self, org: Option<i64>) -> bool {
         org.and_then(|o| self.org_auto.get(&o).copied())
             .unwrap_or(self.auto)
+    }
+
+    /// The unlinked-idle window for a session of `org`.
+    pub fn unlinked_idle_for(&self, org: Option<i64>) -> i64 {
+        org.and_then(|o| self.org_unlinked_idle_secs.get(&o).copied())
+            .unwrap_or(self.unlinked_idle_secs)
     }
 
     /// Whether auto-tidy is on anywhere (globally or for some org).
@@ -192,6 +201,7 @@ impl Default for TidyConfig {
             auto: false,
             auto_reasons: vec![TidyReason::DoneIdle, TidyReason::PrMergedIdle],
             org_auto: HashMap::new(),
+            org_unlinked_idle_secs: HashMap::new(),
         }
     }
 }
@@ -385,7 +395,8 @@ fn idle_since(r: &SessionRow) -> Option<i64> {
 /// stamp is not idle.
 fn idle_unlinked_since(s: &TidySession, cfg: &TidyConfig, now: i64) -> Option<i64> {
     let r = &s.row;
-    if r.kind != "work" || r.worktree_id.is_none() || !s.unlinked() || cfg.unlinked_idle_secs <= 0 {
+    let window = cfg.unlinked_idle_for(r.org_id);
+    if r.kind != "work" || r.worktree_id.is_none() || !s.unlinked() || window <= 0 {
         return None;
     }
     let idle = r.idle_since?;
@@ -400,7 +411,7 @@ fn idle_unlinked_since(s: &TidySession, cfg: &TidyConfig, now: i64) -> Option<i6
     .into_iter()
     .flatten()
     .max()?;
-    (now - last_use >= cfg.unlinked_idle_secs).then_some(last_use)
+    (now - last_use >= window).then_some(last_use)
 }
 
 /// Live sessions grouped by worktree: `(host, project, worktree_key)`. Every

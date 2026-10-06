@@ -1148,8 +1148,12 @@ pub struct RemoveDownloadParams {
 pub struct SessionShareParams {
     /// The session to share, by fleet row id.
     pub session_id: i64,
-    /// Who to share it with, by person name (`fleet-hub pair --person`).
+    /// A person's name, or none with `org` (an org's name).
+    #[serde(default)]
     pub person: String,
+    /// Or an org.
+    #[serde(default)]
+    pub org: Option<String>,
     /// watch (read it) or drive (also prompt it). Nothing else — "own" is
     /// not a grantable level.
     pub level: String,
@@ -1159,8 +1163,12 @@ pub struct SessionShareParams {
 pub struct SessionGrantParams {
     /// The session, by fleet row id.
     pub session_id: i64,
-    /// Whose grant, by person name.
+    /// A person's name, or none with `org`.
+    #[serde(default)]
     pub person: String,
+    /// Or an org.
+    #[serde(default)]
+    pub org: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

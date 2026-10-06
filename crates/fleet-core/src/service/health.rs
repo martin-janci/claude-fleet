@@ -107,6 +107,13 @@ pub struct Health {
     /// default: an older hub omits it.
     #[serde(default)]
     pub decide: Option<crate::service::decide::DecideHealth>,
+    /// Org administration phase C: the orgs at or over a budget
+    /// (`service::org_spend::alerts`). Only for a caller that sees every
+    /// session — the master, the desktop, a one-person fleet's owner — since
+    /// an org's spend sums other people's private sessions; empty (and not
+    /// sent) otherwise and from an older hub.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub org_budgets: Vec<crate::service::org_spend::OrgBudgetAlert>,
 }
 
 /// `fleet_health.hub`: this process's uptime and its last reconcile pass.
@@ -992,6 +999,13 @@ pub fn health_for(
         } else {
             None
         },
+        org_budgets: match view {
+            HealthView::Fleet => crate::service::org_spend::alerts(s, now),
+            HealthView::Person(person) if crate::service::org_spend::sees_all_spend(s, person) => {
+                crate::service::org_spend::alerts(s, now)
+            }
+            _ => Vec::new(),
+        },
     };
     h.set_tunnels(tunnels);
     if matches!(view, HealthView::Blank) {
@@ -1029,6 +1043,7 @@ pub fn blank_rollups(h: &mut Health) {
     h.trackers = Default::default();
     h.hosts.clear();
     h.decide = None;
+    h.org_budgets.clear();
 }
 
 fn now_unix() -> i64 {
@@ -1074,6 +1089,7 @@ pub fn unready_health() -> Health {
         updates: None,
         hosts: Vec::new(),
         decide: None,
+        org_budgets: Vec::new(),
     }
 }
 
@@ -1915,6 +1931,7 @@ mod tests {
             updates: None,
             hosts: Vec::new(),
             decide: None,
+            org_budgets: Vec::new(),
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");

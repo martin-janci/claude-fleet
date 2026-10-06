@@ -2347,8 +2347,8 @@ fn router_sum_serves_every_tool() {
     );
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
     // claim tools (T12) + the New session picker's `project_picks` /
-    // `set_project_pick`.
-    assert_eq!(served, 116);
+    // `set_project_pick` + org administration's `org_admin` (phase B).
+    assert_eq!(served, 117);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3369,7 +3369,12 @@ fn a_readonly_token_is_served_no_mutating_tools_and_a_client_no_admin_tools() {
     let master = served(&Caller::master());
     let device_only = guard::TOOL_POLICIES
         .iter()
-        .filter(|p| p.access == guard::Access::PersonDevice)
+        .filter(|p| {
+            matches!(
+                p.access,
+                guard::Access::PersonDevice | guard::Access::Device
+            )
+        })
         .count();
     // Multi-user M1 (T12): the third term. `Access::HostToken` is the agent
     // in a session's own pane and nobody else — the master's path to a claim
@@ -9841,12 +9846,15 @@ async fn a_one_person_fleet_still_sees_its_unclaimed_rows() {
     );
 }
 
-/// R5-d. The per-host count of `unclaimed` sessions is served to the one
-/// person on a one-person hub and to nobody else — the master on a hub with
-/// two people included. `None` is not `Some(0)`: the first says "you are not
-/// being told", the second is a claim about the host.
+/// R5-d, as org administration phase D re-reads it. The per-host count of
+/// `unclaimed` sessions is served to the one person on a one-person hub; on
+/// a hub with more people, to whoever administers hosts (owner's answer 1:
+/// the hub's owner, or the admins of the company that owns the hub), and to
+/// an org's admins on its own hosts when the hub's owner switched that on
+/// (answer 3). Nobody else. `None` is not `Some(0)`: the first says "you are
+/// not being told", the second is a claim about the host.
 #[tokio::test]
-async fn list_hosts_serves_the_unclaimed_count_only_on_a_one_person_fleet() {
+async fn list_hosts_serves_the_unclaimed_count_to_whoever_administers_the_host() {
     let s = Store::open_in_memory().unwrap();
     s.upsert_host("empty").unwrap();
     s.upsert_host("h").unwrap();
@@ -9869,13 +9877,56 @@ async fn list_hosts_serves_the_unclaimed_count_only_on_a_one_person_fleet() {
     );
     assert_eq!(host_counts(&t, device_of(ada, ada)).await, want);
 
-    t.store.lock().unwrap().create_person("bob", None).unwrap();
+    let (bob, acme) = {
+        let s = t.store.lock().unwrap();
+        let bob = s.create_person("bob", None).unwrap().id;
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        s.set_host_org("h", Some(acme)).unwrap();
+        (bob, acme)
+    };
     for who in [Caller::master(), device_of(ada, ada)] {
-        assert!(
-            host_counts(&t, who).await.iter().all(|(_, n)| n.is_none()),
-            "two people: nobody is served the count through the API"
+        assert_eq!(
+            host_counts(&t, who).await,
+            want,
+            "two people: the hub's owner administers its hosts"
         );
     }
+    let none = vec![("empty".to_string(), None), ("h".to_string(), None)];
+    assert_eq!(
+        host_counts(&t, device_of(bob, ada)).await,
+        none,
+        "a colleague is not told"
+    );
+    t.store
+        .lock()
+        .unwrap()
+        .set_org_member(acme, bob, crate::store::ROLE_ADMIN, None)
+        .unwrap();
+    assert_eq!(
+        host_counts(&t, device_of(bob, ada)).await,
+        none,
+        "an org's admin, until the hub's owner switches it on"
+    );
+    t.store
+        .lock()
+        .unwrap()
+        .set_org_admins_see_unclaimed(acme, true)
+        .unwrap();
+    assert_eq!(
+        host_counts(&t, device_of(bob, ada)).await,
+        vec![("empty".to_string(), None), ("h".to_string(), Some(2))],
+        "then on the org's own hosts only"
+    );
+    t.store
+        .lock()
+        .unwrap()
+        .set_hub_owner_org(Some(acme))
+        .unwrap();
+    assert_eq!(
+        host_counts(&t, device_of(bob, ada)).await,
+        want,
+        "an admin of the company that owns the hub administers every host"
+    );
 }
 
 // ---- multi-user M1, choke point 2 (T7): one session gate ----
@@ -16740,12 +16791,12 @@ fn the_sharing_tools_are_never_a_per_host_tokens() {
     }
 }
 
-/// There is no `org` recipient and no third level to name — M1 ships
-/// person-to-person grants only, and the SCHEMA is where that is enforced:
+/// No third level to name, and (org administration phase D) exactly one
+/// more recipient: an org, by name. The SCHEMA is where the shape is held:
 /// an argument that does not exist cannot be passed by a client built against
 /// a later hub.
 #[test]
-fn the_share_schema_offers_no_org_recipient() {
+fn the_share_schema_offers_a_person_or_an_org_and_nothing_else() {
     let tool = FleetTools::tool_router_for_doc()
         .list_all()
         .into_iter()
@@ -16758,24 +16809,25 @@ fn the_share_schema_offers_no_org_recipient() {
     names.sort();
     assert_eq!(
         names,
-        vec!["level", "person", "session_id"],
-        "session_share's arguments are exactly these three: no `org`, and no \
+        vec!["level", "org", "person", "session_id"],
+        "session_share's arguments are exactly these: a person or an org, and no \
          `host_alias`/`tmux_name` pair (a tmux name is reused by the next \
          session on that host)"
     );
-    // The store refuses the arm anyway, so M2 adds a recipient rather than a
-    // column — but nothing in M1 can reach it.
+    // The arm is live: the hub's owner shares with any org (a member, with
+    // their own; `store::session_grants` pins who else may).
     let f = shared_fixture();
-    let err = f
+    let org = f.store().add_org("platform", None, false).unwrap().id;
+    let g = f
         .store()
         .grant_session(
             f.a_row,
-            crate::store::GrantRecipient::Org(1),
+            crate::store::GrantRecipient::Org(org),
             "watch",
             f.ada,
         )
-        .expect_err("no org recipient in M1");
-    assert_eq!(err.code, codes::E_INVALID);
+        .expect("the hub's owner shares with an org");
+    assert_eq!((g.person_id, g.org_id), (None, Some(org)));
 }
 
 // ---- the behavioural half: the claim --------------------------------------
@@ -16996,6 +17048,7 @@ async fn sharing_is_the_owners_alone_and_a_grantee_cannot_share_on() {
             Parameters(SessionShareParams {
                 session_id: id,
                 person,
+                org: None,
                 level,
             }),
         )
@@ -17031,6 +17084,7 @@ async fn a_level_outside_watch_and_drive_is_refused() {
                 Parameters(SessionShareParams {
                     session_id: f.a_row,
                     person: "bob".into(),
+                    org: None,
                     level: bad.into(),
                 }),
             )
@@ -17045,6 +17099,7 @@ async fn a_level_outside_watch_and_drive_is_refused() {
             Parameters(SessionShareParams {
                 session_id: f.a_row,
                 person: "bob".into(),
+                org: None,
                 level: "own".into(),
             }),
         )
@@ -17071,6 +17126,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
         Parameters(SessionShareParams {
             session_id: f.a_row,
             person: "bob".into(),
+            org: None,
             level: "drive".into(),
         }),
     )
@@ -17092,6 +17148,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             Parameters(SessionShareParams {
                 session_id: f.a_row,
                 person: "carol".into(),
+                org: None,
                 level: "watch".into(),
             }),
         )
@@ -17134,6 +17191,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             Parameters(SessionGrantParams {
                 session_id: f.a_row,
                 person: "bob".into(),
+                org: None,
             }),
         )
         .await
@@ -17158,6 +17216,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
             Parameters(SessionShareParams {
                 session_id: f.a_row,
                 person: "bob".into(),
+                org: None,
                 level: "drive".into(),
             }),
         )
@@ -17171,6 +17230,7 @@ async fn the_grant_moves_downward_and_a_grantee_cannot_share_on() {
         Parameters(SessionGrantParams {
             session_id: f.a_row,
             person: "bob".into(),
+            org: None,
         }),
     )
     .await
@@ -17199,6 +17259,7 @@ async fn my_grants_answers_the_callers_own_person_and_nobody_elses() {
         Parameters(SessionShareParams {
             session_id: f.a_row,
             person: "bob".into(),
+            org: None,
             level: "watch".into(),
         }),
     )
@@ -17293,4 +17354,167 @@ async fn a_session_row_carries_the_facts_and_never_the_callers_own_access() {
             );
         }
     }
+}
+
+// ---- organisation administration, phase B (`org_admin`) ----
+
+/// Who reaches `org_admin` at the gate: a person's full device, bound to an
+/// org or not (phase D — the tool then decides the authority, see
+/// `org_admin_refuses_a_device_that_administers_nothing`). Never the master
+/// (it has `fleet-hub org|client|person`), a host's token, a readonly device
+/// (the tool is not readonly, so its lists ride along), a machine token, or
+/// a device that proves no person.
+#[test]
+fn org_admin_reaches_a_persons_full_device_only() {
+    let can = |c: &Caller| {
+        enforce_mode(c, "org_admin")
+            .and_then(|()| enforce_admin(c, "org_admin"))
+            .is_ok()
+            && present::visible_to(c, "org_admin")
+    };
+    assert!(can(&client_caller("laptop", TokenMode::Full)));
+    assert!(can(&trusted(client_caller("laptop", TokenMode::Full))));
+    assert!(!can(&Caller::master()), "not served to the master");
+    assert!(!can(&client_caller("phone", TokenMode::Readonly)));
+    assert!(!can(&host_caller("hosta", TokenMode::Full)));
+    assert!(can(&org_bound(trusted(client_caller(
+        "acme",
+        TokenMode::Full
+    )))));
+    assert!(can(&another_person(trusted(client_caller(
+        "ada",
+        TokenMode::Full
+    )))));
+    let mut nobody = client_caller("lost", TokenMode::Full);
+    if let Some(c) = nobody.client.as_mut() {
+        c.person_id = None;
+    }
+    assert!(!can(&nobody), "a device that proves no person");
+    for machine in [
+        client_caller("hub-b", TokenMode::Peer),
+        client_caller("fleet-updater", TokenMode::Updater),
+    ] {
+        assert!(!can(&machine), "{:?}", machine.mode);
+    }
+}
+
+/// Phase D, the tool's half of the gate: a person's device that administers
+/// no org is refused every action, lists included; an org admin's device
+/// reaches its own org, and pairs devices only for that org's members.
+#[tokio::test]
+async fn org_admin_refuses_a_device_that_administers_nothing() {
+    let (tools, _guards, store) = client_tools();
+    let (acme, jane) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        s.set_org_member(acme, jane, "admin", None).unwrap();
+        s.set_org_member(acme, bob, "member", None).unwrap();
+        (acme, jane)
+    };
+    let call = |c: Caller, a: crate::service::org_admin::OrgAdminArgs| {
+        tools.org_admin(Extension(c), Parameters(a))
+    };
+    let colleague = another_person(trusted(client_caller("ada", TokenMode::Full)));
+    let e = call(colleague, org_admin_args("list_orgs"))
+        .await
+        .expect_err("administers nothing");
+    assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{e:?}");
+
+    let mut admin = trusted(client_caller("jane-phone", TokenMode::Full));
+    if let Some(c) = admin.client.as_mut() {
+        c.person_id = Some(jane);
+        c.org_id = Some(acme);
+    }
+    admin.is_personal_owner = false;
+    let mut members = org_admin_args("list_members");
+    members.org_id = Some(acme);
+    let v = result_json(&call(admin.clone(), members).await.expect("her org"));
+    assert_eq!(v.as_array().unwrap().len(), 2);
+    let mut pair = org_admin_args("pair_device");
+    pair.device = Some("bob-phone".into());
+    pair.person = Some("bob".into());
+    let v = result_json(&call(admin.clone(), pair.clone()).await.expect("a member's"));
+    assert_eq!(v["name"], "bob-phone");
+    pair.person = Some("stranger".into());
+    assert!(
+        call(admin.clone(), pair.clone()).await.is_err(),
+        "not a member"
+    );
+    pair.person = None;
+    assert!(
+        call(admin, pair).await.is_err(),
+        "whose device must be named"
+    );
+}
+
+fn org_admin_args(action: &str) -> crate::service::org_admin::OrgAdminArgs {
+    crate::service::org_admin::OrgAdminArgs::new(action)
+}
+
+/// A device lists; a change needs it trusted; pairing answers a code, its
+/// URL and the URL's QR; a peer link is not paired here; and the device in
+/// use cannot revoke itself.
+#[tokio::test]
+async fn org_admin_lists_for_a_device_and_changes_only_for_a_trusted_one() {
+    let (tools, _guards, store) = client_tools();
+    store
+        .lock()
+        .unwrap()
+        .insert_client_token("laptop", "digest-laptop", "full")
+        .unwrap();
+    let call = |c: Caller, a: crate::service::org_admin::OrgAdminArgs| {
+        tools.org_admin(Extension(c), Parameters(a))
+    };
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let v = result_json(
+        &call(laptop.clone(), org_admin_args("list_devices"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(v[0]["name"], "laptop");
+    assert_eq!(v[0]["this_device"], true);
+    let mut pair = org_admin_args("pair_device");
+    pair.device = Some("phone".into());
+    assert!(
+        call(laptop.clone(), pair.clone()).await.is_err(),
+        "an untrusted device does not pair another"
+    );
+
+    let me = trusted(laptop);
+    let v = result_json(&call(me.clone(), pair.clone()).await.expect("trusted pairs"));
+    assert_eq!(v["name"], "phone");
+    assert!(v["url"]
+        .as_str()
+        .unwrap()
+        .contains(v["code"].as_str().unwrap()));
+    let rows: Vec<&str> = v["qr"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert!(rows.len() >= 21, "a QR is at least 21 modules wide");
+    assert!(rows
+        .iter()
+        .all(|r| r.len() == rows.len() && r.chars().all(|c| c == '0' || c == '1')));
+
+    pair.device = Some("hub-c".into());
+    pair.mode = Some("peer".into());
+    assert!(
+        call(me.clone(), pair).await.is_err(),
+        "a peer link is paired on the hub"
+    );
+
+    let mut revoke = org_admin_args("revoke_device");
+    revoke.device = Some("laptop".into());
+    assert!(
+        call(me, revoke).await.is_err(),
+        "the device in use cannot revoke itself"
+    );
+    assert_eq!(
+        store.lock().unwrap().active_client_tokens().unwrap().len(),
+        1
+    );
 }

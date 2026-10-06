@@ -221,8 +221,13 @@ type declares:
   - `choice`, a closed set of values with labels (shown read-only, or as a
     `label` badge);
   - `time`, a unix time shown as "5 min ago";
+  - `count`, a whole number the backend counts, shown and never edited (an
+    absent value reads `0`);
   - `items`: a list changed through its own `remove` and `add` actions,
-    shown by a closed formatter (`plain`, `field`, `org_rule`);
+    shown by a closed formatter (`plain`, `field`, `org_rule`, `device`).
+    A record that carries no such key at all (an older hub, or a list only
+    the operator is shown) leaves the field out rather than showing it
+    empty;
 - which fields are editable (`edit` names the update argument), with a
   `badge` shown in the list and a `confirm` asked before Apply. A field kept
   inside a JSON argument (a tracker's `settings.write_back.pr_remote_link`)

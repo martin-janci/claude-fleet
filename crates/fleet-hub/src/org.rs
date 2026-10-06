@@ -112,6 +112,87 @@ pub enum OrgCmd {
         #[arg(long, conflicts_with = "org")]
         none: bool,
     },
+    /// Who is in an org, with which role (org administration phase D).
+    /// Writes `state.db` directly, as `fleet-hub person` does; a running hub
+    /// honours a change from its next request.
+    Member {
+        #[command(subcommand)]
+        cmd: MemberCmd,
+    },
+    /// The company that owns this hub: its admins administer hosts (route
+    /// them into orgs, see unclaimed counts). Writes `state.db` directly.
+    OwnHub {
+        /// The org's id; omit with --none for no company.
+        org: Option<i64>,
+        #[arg(long, conflicts_with = "org")]
+        none: bool,
+    },
+    /// Whether an org's admins see the count of unclaimed sessions on the
+    /// org's hosts (off by default). Writes `state.db` directly.
+    UnclaimedCount {
+        org: i64,
+        #[arg(value_enum)]
+        state: OnOff,
+    },
+}
+
+/// A member's role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Role {
+    /// Administers the org: its settings, members and their devices.
+    Admin,
+    /// Sees the org's work and what is shared with the org.
+    Member,
+    /// Reads the org's work view and overview, read-only.
+    Viewer,
+}
+
+impl Role {
+    fn as_str(self) -> &'static str {
+        match self {
+            Role::Admin => "admin",
+            Role::Member => "member",
+            Role::Viewer => "viewer",
+        }
+    }
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MemberCmd {
+    /// The org's live members, admins first.
+    List {
+        org: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a person to the org (by name; a new name becomes a person), or
+    /// change their role. Their devices are then fenced to the org.
+    Add {
+        org: i64,
+        person: String,
+        #[arg(long, value_enum, default_value = "member")]
+        role: Role,
+    },
+    /// Take a person out of the org. What was shared with them on the org's
+    /// sessions is revoked too, unless --keep-grants. Their own sessions
+    /// stay theirs; if this was their last org, their devices read nothing
+    /// of any org.
+    Rm {
+        org: i64,
+        person: String,
+        #[arg(long)]
+        keep_grants: bool,
+    },
+    /// How many grants TO a member stand on the org's sessions; --narrow
+    /// lowers every drive to watch, --revoke takes them all back.
+    Grants {
+        org: i64,
+        person: String,
+        #[arg(long, conflicts_with = "revoke")]
+        narrow: bool,
+        #[arg(long)]
+        revoke: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -227,6 +308,9 @@ fn admin_args(cmd: &OrgCmd) -> Result<Value, String> {
             (None, true) => json!({ "action": "assign_tracker", "tracker_id": tracker }),
             _ => return Err("give the org's id, or --none".into()),
         },
+        OrgCmd::Member { .. } | OrgCmd::OwnHub { .. } | OrgCmd::UnclaimedCount { .. } => {
+            return Err("this subcommand writes state.db directly".into())
+        }
     };
     // Unset optional fields travel as absent, not null.
     if let Some(m) = a.as_object_mut() {
@@ -295,6 +379,14 @@ fn org_lines(o: &Value) -> Vec<String> {
                 "  [sends to Jev]"
             } else {
                 ""
+            } + if o["owns_hub"].as_bool().unwrap_or(false) {
+                "  [owns this hub]"
+            } else {
+                ""
+            } + if o["admins_see_unclaimed"].as_bool().unwrap_or(false) {
+                "  [admins see unclaimed]"
+            } else {
+                ""
             }
         ),
         format!("      rules:    {}", names("rules", &rule_chip)),
@@ -313,11 +405,153 @@ fn org_lines(o: &Value) -> Vec<String> {
     ]
 }
 
+/// The phase-D subcommands, straight to `state.db` (see `fleet-hub
+/// person`'s module docs for why that is the operator's authority).
+fn run_direct(
+    cmd: &OrgCmd,
+    opts: &HubOptions,
+    env: &HashMap<String, String>,
+) -> Result<(), String> {
+    crate::serve::existing_db(&crate::config::resolve_data_dir(opts, env))?;
+    let store = crate::serve::open_store(opts, env)?;
+    let e = |e: fleet_core::ipc_error::IpcError| e.message;
+    let person = |name: &str, create: bool| -> Result<i64, String> {
+        let name = fleet_core::store::validate_person_name(name).map_err(e)?;
+        match store.get_person_by_name(&name).map_err(e)? {
+            Some(p) => Ok(p.id),
+            None if create => Ok(store.create_person(&name, None).map_err(e)?.id),
+            None => Err(format!(
+                "no live person named '{name}'; `fleet-hub person list` names them"
+            )),
+        }
+    };
+    match cmd {
+        OrgCmd::Member { cmd } => match cmd {
+            MemberCmd::List { org, json } => {
+                let members =
+                    fleet_core::service::org_admin::list_members(&store, *org).map_err(e)?;
+                if *json {
+                    out::line(&serde_json::to_string_pretty(&members).map_err(|e| e.to_string())?);
+                } else if members.is_empty() {
+                    out::line(&format!(
+                        "org {org} has no members; add one with `fleet-hub org member add {org} <person>`"
+                    ));
+                } else {
+                    let rows: Vec<Vec<String>> = members
+                        .iter()
+                        .map(|m| {
+                            vec![
+                                m.person_id.to_string(),
+                                m.name.clone(),
+                                m.role.clone(),
+                                m.devices.join(", "),
+                            ]
+                        })
+                        .collect();
+                    out::line(&crate::pair::table(
+                        &["ID", "PERSON", "ROLE", "DEVICES"],
+                        &rows,
+                    ));
+                }
+            }
+            MemberCmd::Add {
+                org,
+                person: name,
+                role,
+            } => {
+                let p = person(name, true)?;
+                let m = store
+                    .set_org_member(*org, p, role.as_str(), None)
+                    .map_err(e)?;
+                out::line(&format!(
+                    "{name} is {} of org {org}; their devices are fenced to it from their next request",
+                    m.role
+                ));
+            }
+            MemberCmd::Rm {
+                org,
+                person: name,
+                keep_grants,
+            } => {
+                let p = person(name, false)?;
+                if !store.remove_org_member(*org, p).map_err(e)? {
+                    return Err(format!("{name} is not a member of org {org}"));
+                }
+                let revoked = if *keep_grants {
+                    0
+                } else {
+                    store.revoke_person_grants_in_org(p, *org).map_err(e)?
+                };
+                out::line(&format!(
+                    "{name} left org {org}; {revoked} grant(s) on its sessions revoked; their own \
+                     sessions are still theirs"
+                ));
+            }
+            MemberCmd::Grants {
+                org,
+                person: name,
+                narrow,
+                revoke,
+            } => {
+                let p = person(name, false)?;
+                if *revoke {
+                    let n = store.revoke_person_grants_in_org(p, *org).map_err(e)?;
+                    out::line(&format!(
+                        "revoked {n} grant(s) to {name} on org {org}'s sessions"
+                    ));
+                } else if *narrow {
+                    let n = store.narrow_person_grants_in_org(p, *org).map_err(e)?;
+                    out::line(&format!("narrowed {n} grant(s) to {name} to watch"));
+                } else {
+                    let (watch, drive) = store.person_grants_in_org(p, *org).map_err(e)?;
+                    out::line(&format!(
+                        "{name} holds {watch} watch and {drive} drive grant(s) on org {org}'s sessions"
+                    ));
+                }
+            }
+        },
+        OrgCmd::OwnHub { org, none } => {
+            let org = match (org, none) {
+                (Some(o), false) => Some(*o),
+                (None, true) => None,
+                _ => return Err("give the org's id, or --none".into()),
+            };
+            store.set_hub_owner_org(org).map_err(e)?;
+            out::line(&match org {
+                Some(o) => format!("org {o} owns this hub: its admins administer hosts"),
+                None => "no company owns this hub: its owner administers hosts".into(),
+            });
+        }
+        OrgCmd::UnclaimedCount { org, state } => {
+            store
+                .set_org_admins_see_unclaimed(*org, state.on())
+                .map_err(e)?;
+            out::line(&format!(
+                "org {org}'s admins {} the unclaimed count on its hosts",
+                if state.on() {
+                    "now see"
+                } else {
+                    "no longer see"
+                }
+            ));
+        }
+        _ => unreachable!("only the direct subcommands come here"),
+    }
+    Ok(())
+}
+
 pub async fn run(
     cmd: OrgCmd,
     opts: &HubOptions,
     env: &HashMap<String, String>,
 ) -> Result<ExitCode, String> {
+    if matches!(
+        cmd,
+        OrgCmd::Member { .. } | OrgCmd::OwnHub { .. } | OrgCmd::UnclaimedCount { .. }
+    ) {
+        run_direct(&cmd, opts, env)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let args = admin_args(&cmd)?;
     let conn = hub_conn(opts, env)?;
     let v = call_tool(&conn, "work_admin", args).await?;
@@ -359,6 +593,7 @@ pub async fn run(
                 "host {host} has no org; its token now reads only unassigned work"
             )),
         },
+        OrgCmd::Member { .. } | OrgCmd::OwnHub { .. } | OrgCmd::UnclaimedCount { .. } => {}
         OrgCmd::AssignTracker { tracker, .. } => out::line(&format!(
             "tracker {tracker}: org {}",
             v["org_id"]
@@ -459,6 +694,25 @@ mod tests {
             args(&["assign-tracker", "3", "--none"]),
             json!({ "action": "assign_tracker", "tracker_id": 3 })
         );
+    }
+
+    #[test]
+    fn the_member_commands_parse_and_never_reach_work_admin() {
+        for a in [
+            &["member", "list", "1"][..],
+            &["member", "add", "1", "jane", "--role", "admin"],
+            &["member", "rm", "1", "jane", "--keep-grants"],
+            &["member", "grants", "1", "jane", "--narrow"],
+            &["own-hub", "1"],
+            &["own-hub", "--none"],
+            &["unclaimed-count", "1", "on"],
+        ] {
+            let cmd = parse(a).unwrap_or_else(|e| panic!("{a:?}: {e}"));
+            assert!(admin_args(&cmd).is_err(), "{a:?} is not a work_admin call");
+        }
+        assert!(parse(&["member", "add", "1", "jane", "--role", "owner"]).is_err());
+        assert!(parse(&["member", "grants", "1", "jane", "--narrow", "--revoke"]).is_err());
+        assert!(parse(&["own-hub", "1", "--none"]).is_err());
     }
 
     #[test]
