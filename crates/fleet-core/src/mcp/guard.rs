@@ -100,6 +100,15 @@ pub enum Access {
     /// (`the_served_definition_budget_stays_bounded`), the same reasoning
     /// [`Access::PersonDevice`] records one variant up.
     HostToken,
+    /// A PERSON's paired device, bound to an org or not (org administration
+    /// phase D): never the master (the operator has `fleet-hub org|client`),
+    /// a per-host token, a single-purpose token or a device that proves no
+    /// person. It exists for `org_admin`, whose every action then checks the
+    /// caller's authority itself (`service::org_admin::Authority`): the hub
+    /// owner's unbound device administers the fleet, an org's admin that
+    /// org, and anybody else is refused there — a row cannot say "an admin
+    /// of the org this device is bound to", because that is a store read.
+    Device,
 }
 
 /// Whether `caller` may call `tool` by its row's [`Access`] — the one
@@ -149,6 +158,16 @@ pub fn access_allows(caller: &crate::mcp::Caller, tool: &str) -> bool {
         // every paired desktop and the operator's own client. WHICH row such
         // a token may claim is the pane proof's question, not this one.
         Some(Access::HostToken) => caller.host_alias.is_some(),
+        // Phase D: WHAT the caller is (a person's device); whose authority it
+        // carries is the tool's question (`org_admin::authority_for`).
+        Some(Access::Device) => {
+            caller.host_alias.is_none()
+                && !caller.mode.is_single_purpose()
+                && caller
+                    .client
+                    .as_ref()
+                    .is_some_and(|c| c.person_id.is_some())
+        }
         Some(Access::Master) | None => caller.is_master(),
     }
 }
@@ -401,14 +420,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // Organisation administration, phase B: the company's orgs, devices and
-    // people from the hub owner's own device. Not served to the master (it
-    // has `fleet-hub org|client|person` and `work_admin`); the lists are for
-    // any such device, a change needs a trusted full one (checked in the
-    // tool, `org_admin_writer`), and no change locks out the device in use.
+    // Organisation administration: the company's orgs, devices, people and
+    // (phase D) members, from the hub owner's own device — or, for its own
+    // org only, from an org admin's. Not served to the master (it has
+    // `fleet-hub org|client|person` and `work_admin`). The tool decides the
+    // authority (`org_admin::authority_for`); a change needs a trusted full
+    // device (`org_admin_writer`), and no change locks out the device in use.
     ToolPolicy {
         name: "org_admin",
-        access: Access::PersonDevice,
+        access: Access::Device,
         readonly: false,
         confirm: false,
         deadline: Deadline::Quick,

@@ -93,6 +93,7 @@ fn devices_list_their_org_person_and_grants_and_never_a_machine_token() {
         &st.lock().unwrap(),
         Me {
             device: Some("phone"),
+            ..Me::LOCAL
         },
     )
     .unwrap();
@@ -125,6 +126,7 @@ fn the_device_in_hand_cannot_be_locked_out_through_itself() {
         .unwrap();
     let me = Me {
         device: Some("desk"),
+        ..Me::LOCAL
     };
     let mut a = args("revoke_device");
     a.device = Some("desk".into());
@@ -165,7 +167,8 @@ fn the_device_in_hand_cannot_be_locked_out_through_itself() {
             &a,
             &st,
             Me {
-                device: Some("other")
+                device: Some("other"),
+                ..Me::LOCAL
             }
         )
         .unwrap()["revoked"],
@@ -272,6 +275,7 @@ fn an_org_sets_and_clears_its_own_value_of_a_per_org_setting() {
         &st,
         Me {
             device: Some("laptop"),
+            ..Me::LOCAL
         },
     )
     .unwrap();
@@ -300,4 +304,294 @@ fn an_org_sets_and_clears_its_own_value_of_a_per_org_setting() {
     set.key = Some(crate::service::settings::GC_ENABLED.into());
     set.value = Some("false".into());
     assert_eq!(err_code(run(&set, &st, Me::LOCAL)), "E_INVALID");
+}
+
+// ---- phase D: members, roles and an org admin's authority ----
+
+/// Acme and Beta; jane administers Acme through her phone, bob is a member.
+struct Company {
+    st: Mutex<Store>,
+    acme: i64,
+    beta: i64,
+    jane: i64,
+    bob: i64,
+}
+
+fn company() -> Company {
+    let st = store();
+    let (acme, beta, jane, bob) = {
+        let s = st.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        s.set_org_member(acme, jane, "admin", None).unwrap();
+        s.set_org_member(acme, bob, "member", None).unwrap();
+        for (name, person) in [("jane-phone", jane), ("bob-phone", bob)] {
+            s.insert_client_token(name, &format!("digest-{name}"), "full")
+                .unwrap();
+            s.set_client_person(name, Some(person)).unwrap();
+        }
+        (acme, beta, jane, bob)
+    };
+    Company {
+        st,
+        acme,
+        beta,
+        jane,
+        bob,
+    }
+}
+
+impl Company {
+    fn jane(&self) -> Me<'static> {
+        Me {
+            device: Some("jane-phone"),
+            person: Some(self.jane),
+            authority: Authority::Org {
+                org: self.acme,
+                hub: false,
+            },
+        }
+    }
+
+    fn with_org(&self, action: &str, org: i64) -> OrgAdminArgs {
+        OrgAdminArgs {
+            org_id: Some(org),
+            ..args(action)
+        }
+    }
+}
+
+#[test]
+fn the_new_actions_parse_and_the_member_reads_are_reads() {
+    for a in [
+        "list_members",
+        "set_member",
+        "remove_member",
+        "member_grants",
+        "revoke_member_grants",
+        "narrow_member_grants",
+        "set_hub_org",
+        "set_admins_see_unclaimed",
+    ] {
+        assert!(Action::parse(a).is_ok(), "{a}");
+    }
+    assert!(Action::parse("list_members").unwrap().is_read());
+    assert!(Action::parse("member_grants").unwrap().is_read());
+    assert!(!Action::parse("set_member").unwrap().is_read());
+}
+
+#[test]
+fn a_device_administers_the_org_its_person_is_admin_of_and_nothing_else() {
+    let c = company();
+    let s = c.st.lock().unwrap();
+    let owner = s.personal_owner_id().unwrap();
+    assert_eq!(
+        authority_for(&s, true, owner, None).unwrap(),
+        Some(Authority::Fleet)
+    );
+    assert_eq!(
+        authority_for(&s, false, Some(c.jane), Some(c.acme)).unwrap(),
+        Some(Authority::Org {
+            org: c.acme,
+            hub: false
+        })
+    );
+    // A member is no admin; an admin's device fenced elsewhere administers
+    // nothing there; a former member's device administers nothing.
+    assert_eq!(
+        authority_for(&s, false, Some(c.bob), Some(c.acme)).unwrap(),
+        None
+    );
+    assert_eq!(
+        authority_for(&s, false, Some(c.jane), Some(c.beta)).unwrap(),
+        None
+    );
+    assert_eq!(
+        authority_for(&s, false, Some(c.jane), Some(crate::store::NO_ORG)).unwrap(),
+        None
+    );
+    assert_eq!(authority_for(&s, false, None, Some(c.acme)).unwrap(), None);
+    // The hub's owner on a bound device administers that org; an org that
+    // owns the hub routes hosts.
+    s.set_hub_owner_org(Some(c.acme)).unwrap();
+    assert_eq!(
+        authority_for(&s, false, owner, Some(c.beta)).unwrap(),
+        Some(Authority::Org {
+            org: c.beta,
+            hub: false
+        })
+    );
+    assert_eq!(
+        authority_for(&s, false, Some(c.jane), Some(c.acme)).unwrap(),
+        Some(Authority::Org {
+            org: c.acme,
+            hub: true
+        })
+    );
+}
+
+#[test]
+fn an_org_admin_manages_their_own_orgs_members_and_nobody_elses() {
+    let c = company();
+    let me = c.jane();
+    // Invite a new colleague: the person is created.
+    let mut add = c.with_org("set_member", c.acme);
+    add.person = Some("cleo".into());
+    add.role = Some("viewer".into());
+    let members = run(&add, &c.st, me).unwrap();
+    let names: Vec<&str> = members
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["jane", "bob", "cleo"], "admins first");
+    // Another org: refused.
+    let mut other = c.with_org("set_member", c.beta);
+    other.person = Some("cleo".into());
+    other.role = Some("member".into());
+    assert_eq!(err_code(run(&other, &c.st, me)), "E_FORBIDDEN");
+    // Their own membership, and the hub owner's: not theirs.
+    let mut myself = c.with_org("set_member", c.acme);
+    myself.person_id = Some(c.jane);
+    myself.role = Some("viewer".into());
+    assert_eq!(err_code(run(&myself, &c.st, me)), "E_INVALID_STATE");
+    let mut owner = c.with_org("set_member", c.acme);
+    owner.person = Some(crate::store::PERSONAL_OWNER_NAME.into());
+    owner.role = Some("member".into());
+    assert_eq!(err_code(run(&owner, &c.st, me)), "E_FORBIDDEN");
+    // The hub owner's levers.
+    for (action, org) in [
+        ("add_org", None),
+        ("remove_org", Some(c.acme)),
+        ("add_rule", Some(c.acme)),
+        ("assign_host", Some(c.acme)),
+        ("bind_device", Some(c.acme)),
+        ("disable_person", None),
+        ("rename_person", None),
+        ("set_hub_org", Some(c.acme)),
+        ("set_admins_see_unclaimed", Some(c.acme)),
+    ] {
+        let a = OrgAdminArgs {
+            org_id: org,
+            ..args(action)
+        };
+        assert_eq!(err_code(run(&a, &c.st, me)), "E_FORBIDDEN", "{action}");
+    }
+    let mut unassigned = c.with_org("update_org", c.acme);
+    unassigned.bound_sees_unassigned = Some(false);
+    assert_eq!(err_code(run(&unassigned, &c.st, me)), "E_FORBIDDEN");
+    let mut color = c.with_org("update_org", c.acme);
+    color.color = Some("#112233".into());
+    run(&color, &c.st, me).expect("their own org's colour");
+    // Lists are narrowed to their org.
+    let orgs = run(&args("list_orgs"), &c.st, me).unwrap();
+    assert_eq!(orgs.as_array().unwrap().len(), 1);
+    let people = run(&args("list_people"), &c.st, me).unwrap();
+    assert_eq!(people.as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn an_org_admin_sees_and_acts_on_their_orgs_devices_only() {
+    let c = company();
+    {
+        let s = c.st.lock().unwrap();
+        s.insert_client_token("owner-phone", "digest-owner", "full")
+            .unwrap();
+        s.set_client_person("owner-phone", s.personal_owner_id().unwrap())
+            .unwrap();
+        let eve = s.create_person("eve", None).unwrap().id;
+        s.set_org_member(c.beta, eve, "member", None).unwrap();
+        s.insert_client_token("eve-phone", "digest-eve", "full")
+            .unwrap();
+        s.set_client_person("eve-phone", Some(eve)).unwrap();
+    }
+    let me = c.jane();
+    let listed: Vec<String> = list_devices(&c.st.lock().unwrap(), me)
+        .unwrap()
+        .into_iter()
+        .map(|d| {
+            assert_eq!(d.org_id, Some(c.acme), "{d:?}");
+            d.name
+        })
+        .collect();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    for name in ["owner-phone", "eve-phone"] {
+        let mut a = args("revoke_device");
+        a.device = Some(name.into());
+        assert_eq!(err_code(run(&a, &c.st, me)), "E_FORBIDDEN", "{name}");
+    }
+    let mut trust = args("set_device_trust");
+    trust.device = Some("bob-phone".into());
+    trust.trusted = Some(true);
+    assert_eq!(run(&trust, &c.st, me).unwrap()["trusted"], true);
+}
+
+#[test]
+fn removing_a_member_takes_back_what_was_shared_with_them_in_the_org() {
+    let c = company();
+    let session = {
+        let s = c.st.lock().unwrap();
+        s.upsert_host("box").unwrap();
+        s.set_host_org("box", Some(c.acme)).unwrap();
+        let id = s
+            .upsert_session("work", "box", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.claim_if_unclaimed(id, Some(c.jane)).unwrap();
+        s.grant_session(
+            id,
+            crate::store::GrantRecipient::Person(c.bob),
+            crate::store::GRANT_DRIVE,
+            c.jane,
+        )
+        .unwrap();
+        id
+    };
+    let me = c.jane();
+    let mut counts = c.with_org("member_grants", c.acme);
+    counts.person = Some("bob".into());
+    assert_eq!(
+        run(&counts, &c.st, me).unwrap(),
+        serde_json::json!({ "watch": 0, "drive": 1 })
+    );
+    let mut narrow = c.with_org("narrow_member_grants", c.acme);
+    narrow.person = Some("bob".into());
+    assert_eq!(run(&narrow, &c.st, me).unwrap()["narrowed"], 1);
+    let mut remove = c.with_org("remove_member", c.acme);
+    remove.person = Some("bob".into());
+    assert_eq!(
+        run(&remove, &c.st, me).unwrap(),
+        serde_json::json!({ "removed": true, "revoked_grants": 1 })
+    );
+    let s = c.st.lock().unwrap();
+    assert!(s.grants_for_person(c.bob).unwrap().is_empty());
+    assert!(s.grants_for_session(session).unwrap().is_empty());
+    // Bob's phone now reads nothing of any org.
+    let bob = s
+        .auth_client_tokens()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.name == "bob-phone")
+        .unwrap();
+    assert_eq!(
+        (bob.org_id, bob.mode.as_str()),
+        (Some(crate::store::NO_ORG), "readonly")
+    );
+}
+
+#[test]
+fn the_hub_owner_binds_a_members_device_only_to_one_of_their_orgs() {
+    let c = company();
+    let mut bind = args("bind_device");
+    bind.device = Some("bob-phone".into());
+    bind.org_id = Some(c.beta);
+    assert_eq!(err_code(run(&bind, &c.st, Me::LOCAL)), "E_VALIDATE");
+    bind.org_id = Some(c.acme);
+    run(&bind, &c.st, Me::LOCAL).expect("one of his");
+    let mut own = args("set_hub_org");
+    own.org_id = Some(c.acme);
+    run(&own, &c.st, Me::LOCAL).unwrap();
+    assert_eq!(c.st.lock().unwrap().hub_owner_org().unwrap(), Some(c.acme));
 }

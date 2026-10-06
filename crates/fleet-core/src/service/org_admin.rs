@@ -25,6 +25,19 @@
 //!   manage them.
 //! * **The owner cannot be disabled** (`Store::disable_person` refuses it).
 
+//!
+//! **Phase D: an org's admin, for that org.** [`Authority`] is who is
+//! asking: [`Authority::Fleet`] (the desktop's own store, the hub owner's
+//! unbound device) reaches every action, as above; [`Authority::Org`] — a
+//! person's device fenced to an org they administer — reaches its own org
+//! only, and [`check`] refuses everything else before a row is touched:
+//! rules, tracker routing, `bound_sees_unassigned`, which company owns the
+//! hub, the unclaimed-count switch, other orgs, people's names and disabling
+//! stay the hub owner's. Routing a host into an org is a host
+//! administrator's (owner's answer 1): the hub's owner, or an admin of the
+//! company that owns the hub. The lists are narrowed to the org's own
+//! devices and members.
+
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::{self, OrgAction};
 use crate::service::trackers::admin::WorkAdminArgs;
@@ -35,7 +48,7 @@ use std::sync::Mutex;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "OrgAdminParams")]
 pub struct OrgAdminArgs {
-    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person
+    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed
     pub action: String,
     /// Org name (add/update_org), or a person's new name (rename_person).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,6 +125,12 @@ pub struct OrgAdminArgs {
     /// set_org_setting: the org's own value; absent inherits the fleet's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// set_member: admin|member|viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// remove_member: keep what was shared with them on the org's sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_grants: Option<bool>,
 }
 
 impl OrgAdminArgs {
@@ -134,6 +153,7 @@ impl OrgAdminArgs {
             ("mode", &self.mode),
             ("key", &self.key),
             ("value", &self.value),
+            ("role", &self.role),
         ] {
             if let Some(v) = v {
                 out.push_str(&format!(" {k}={}", v.escape_debug()));
@@ -149,7 +169,11 @@ impl OrgAdminArgs {
                 out.push_str(&format!(" {k}={v}"));
             }
         }
-        for (k, v) in [("trusted", self.trusted), ("on", self.on)] {
+        for (k, v) in [
+            ("trusted", self.trusted),
+            ("on", self.on),
+            ("keep_grants", self.keep_grants),
+        ] {
             if let Some(v) = v {
                 out.push_str(&format!(" {k}={v}"));
             }
@@ -176,6 +200,19 @@ pub enum Action {
     ListPeople,
     RenamePerson,
     DisablePerson,
+    // Phase D: members and roles.
+    ListMembers,
+    /// Add a person to the org, or change their role.
+    SetMember,
+    RemoveMember,
+    /// How many live grants TO a member stand on the org's sessions.
+    MemberGrants,
+    RevokeMemberGrants,
+    NarrowMemberGrants,
+    /// Which company owns the hub (owner's answer 1).
+    SetHubOrg,
+    /// The org's admins see the unclaimed count on its hosts (answer 3).
+    SetAdminsSeeUnclaimed,
 }
 
 impl Action {
@@ -192,6 +229,14 @@ impl Action {
             "list_people" => Action::ListPeople,
             "rename_person" => Action::RenamePerson,
             "disable_person" => Action::DisablePerson,
+            "list_members" => Action::ListMembers,
+            "set_member" => Action::SetMember,
+            "remove_member" => Action::RemoveMember,
+            "member_grants" => Action::MemberGrants,
+            "revoke_member_grants" => Action::RevokeMemberGrants,
+            "narrow_member_grants" => Action::NarrowMemberGrants,
+            "set_hub_org" => Action::SetHubOrg,
+            "set_admins_see_unclaimed" => Action::SetAdminsSeeUnclaimed,
             // A device's org is `bind_device`, which keeps the lock-out rule
             // `assign_client` does not know about.
             other => match OrgAction::parse(other) {
@@ -211,9 +256,52 @@ impl Action {
     pub fn is_read(self) -> bool {
         matches!(
             self,
-            Action::Org(OrgAction::ListOrgs) | Action::ListDevices | Action::ListPeople
+            Action::Org(OrgAction::ListOrgs)
+                | Action::ListDevices
+                | Action::ListPeople
+                | Action::ListMembers
+                | Action::MemberGrants
         )
     }
+}
+
+/// Who is asking, as far as WHAT they may administer goes (phase D).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Authority {
+    /// The desktop's own store, or the hub owner's own unbound device:
+    /// every action.
+    Fleet,
+    /// An admin of `org`, through a device fenced to it. `hub`: that org
+    /// owns the hub, so they also route hosts (owner's answer 1).
+    Org { org: i64, hub: bool },
+}
+
+/// The authority of a person's device, or `None` when it has none:
+/// `fleet` is the hub owner's unbound device (`Access::PersonDevice`'s
+/// rule); otherwise the device's (effective) org, when its person
+/// administers it — the hub's owner counts as every org's admin. A former
+/// member's device ([`crate::store::NO_ORG`]) administers nothing.
+pub fn authority_for(
+    s: &Store,
+    fleet: bool,
+    person: Option<i64>,
+    device_org: Option<i64>,
+) -> Result<Option<Authority>, IpcError> {
+    if fleet {
+        return Ok(Some(Authority::Fleet));
+    }
+    let (Some(p), Some(o)) = (person, device_org) else {
+        return Ok(None);
+    };
+    if o == crate::store::NO_ORG || s.get_org(o)?.is_none() {
+        return Ok(None);
+    }
+    let owner = matches!(s.personal_owner_id()?, Some(x) if x == p);
+    let admin = owner || s.org_role(o, p)?.as_deref() == Some(crate::store::ROLE_ADMIN);
+    Ok(admin.then(|| Authority::Org {
+        org: o,
+        hub: s.hub_owner_org().ok().flatten() == Some(o),
+    }))
 }
 
 /// Who is asking, as far as the lock-out rule cares: the name of the device
@@ -221,10 +309,18 @@ impl Action {
 #[derive(Debug, Clone, Copy)]
 pub struct Me<'a> {
     pub device: Option<&'a str>,
+    /// The device's person (phase D: an admin does not change their own
+    /// membership through it).
+    pub person: Option<i64>,
+    pub authority: Authority,
 }
 
 impl Me<'_> {
-    pub const LOCAL: Me<'static> = Me { device: None };
+    pub const LOCAL: Me<'static> = Me {
+        device: None,
+        person: None,
+        authority: Authority::Fleet,
+    };
 }
 
 /// A person's paired device, as Settings → Devices lists it. Never carries
@@ -313,6 +409,202 @@ pub fn unclaimed_reach(
     })
 }
 
+/// One live member of an org, as the org page lists them (phase D).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberSummary {
+    pub person_id: i64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// admin | member | viewer.
+    pub role: String,
+    pub added_at: i64,
+    /// The hub's owner (who administers every org anyway).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub owner: bool,
+    /// Their live devices, by name.
+    #[serde(default)]
+    pub devices: Vec<String>,
+}
+
+/// The live members of `org`, admins first.
+pub fn list_members(s: &Store, org: i64) -> Result<Vec<MemberSummary>, IpcError> {
+    let owner = s.personal_owner_id()?;
+    let devices = s.active_client_tokens()?;
+    let mut out = Vec::new();
+    for m in s.org_members(org)? {
+        let Some(p) = s.get_person(m.person_id)? else {
+            continue;
+        };
+        if p.disabled_at.is_some() {
+            continue;
+        }
+        out.push(MemberSummary {
+            person_id: p.id,
+            devices: devices
+                .iter()
+                .filter(|d| d.person_id == Some(p.id))
+                .map(|d| d.name.clone())
+                .collect(),
+            name: p.name,
+            display_name: p.display_name,
+            role: m.role,
+            added_at: m.added_at,
+            owner: owner == Some(m.person_id),
+        });
+    }
+    Ok(out)
+}
+
+fn forbidden(what: &str) -> IpcError {
+    IpcError::new(
+        codes::E_FORBIDDEN,
+        format!(
+            "{what} is the hub owner's to change, not an org admin's: it decides which \
+             company something belongs to, or reaches beyond one org"
+        ),
+    )
+}
+
+/// The refusals an org admin gets before any row is touched (phase D; see
+/// the module docs). [`Authority::Fleet`] passes everything.
+fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(), IpcError> {
+    let Authority::Org { org, hub } = me.authority else {
+        return Ok(());
+    };
+    let own_org = || -> Result<(), IpcError> {
+        match org_of(s, args)? {
+            Some(o) if o == org => Ok(()),
+            Some(_) => Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                "an org admin administers their own org only",
+            )),
+            None => Err(IpcError::new(
+                codes::E_INVALID,
+                format!("{} needs org_id or org", args.action),
+            )),
+        }
+    };
+    match action {
+        Action::Org(OrgAction::ListOrgs) | Action::ListDevices | Action::ListPeople => Ok(()),
+        Action::Org(OrgAction::UpdateOrg) => {
+            own_org()?;
+            if args.bound_sees_unassigned.is_some() {
+                return Err(forbidden("whether its devices see unassigned work"));
+            }
+            Ok(())
+        }
+        Action::Org(OrgAction::AssignHost | OrgAction::UnassignHost) if hub => Ok(()),
+        Action::Org(OrgAction::AssignHost | OrgAction::UnassignHost) => Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "routing a host into an org is a host administrator's: the hub's owner, or \
+             an admin of the company that owns the hub",
+        )),
+        Action::Org(OrgAction::AddOrg | OrgAction::RemoveOrg) => {
+            Err(forbidden("adding or removing an org"))
+        }
+        Action::Org(OrgAction::AddRule | OrgAction::RemoveRule) => {
+            Err(forbidden("an org's routing rules"))
+        }
+        Action::Org(OrgAction::AssignTracker | OrgAction::AssignClient) => {
+            Err(forbidden("which org a tracker or a device belongs to"))
+        }
+        Action::SetOrgSetting
+        | Action::ListMembers
+        | Action::SetMember
+        | Action::RemoveMember
+        | Action::MemberGrants
+        | Action::RevokeMemberGrants
+        | Action::NarrowMemberGrants => own_org(),
+        // The device's org is checked in the arm, against the device.
+        Action::PairDevice
+        | Action::RevokeDevice
+        | Action::SetDeviceTrust
+        | Action::GrantCatalog => Ok(()),
+        Action::BindDevice => Err(forbidden("which org a device is bound to")),
+        Action::SetDevicePerson => Err(forbidden("whose device it is")),
+        Action::RenamePerson => Err(forbidden("a person's name")),
+        Action::DisablePerson => Err(forbidden("disabling a person")),
+        Action::SetHubOrg => Err(forbidden("which company owns the hub")),
+        Action::SetAdminsSeeUnclaimed => Err(forbidden("who sees the unclaimed count")),
+    }
+}
+
+/// For an org admin: `row` is a device of their org (fenced to it, by its
+/// membership) and not the hub owner's.
+fn require_org_device(s: &Store, row: &ClientTokenRow, me: Me<'_>) -> Result<(), IpcError> {
+    let Authority::Org { org, .. } = me.authority else {
+        return Ok(());
+    };
+    let effective = s
+        .auth_client_tokens()?
+        .into_iter()
+        .find(|c| c.id == row.id)
+        .and_then(|c| c.org_id);
+    let owners = row.person_id.is_some() && row.person_id == s.personal_owner_id()?;
+    if effective != Some(org) || owners {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!("{:?} is not a device of your org's members", row.name),
+        ));
+    }
+    Ok(())
+}
+
+/// A person named in `args` (`person_id`, else `person` by name). `create`:
+/// a new name becomes a person (an admin inviting a colleague).
+fn person_of(s: &Store, args: &OrgAdminArgs, create: bool) -> Result<i64, IpcError> {
+    if let Some(id) = args.person_id {
+        return s
+            .get_person(id)?
+            .map(|p| p.id)
+            .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no person {id}")));
+    }
+    let name = args
+        .person
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                format!("{} needs person or person_id", args.action),
+            )
+        })?;
+    let name = crate::store::validate_person_name(name)?;
+    match s.get_person_by_name(&name)? {
+        Some(p) => Ok(p.id),
+        None if create => Ok(s.create_person(&name, None)?.id),
+        None => Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("this hub knows no live person named {name:?}"),
+        )),
+    }
+}
+
+/// An org admin's own membership, and the hub owner's, are not theirs to
+/// change: the first would take away the access they are using, the second
+/// is the hub's.
+fn require_other_member(s: &Store, person: i64, me: Me<'_>) -> Result<(), IpcError> {
+    if !matches!(me.authority, Authority::Org { .. }) {
+        return Ok(());
+    }
+    if me.person == Some(person) {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            "that is your own membership: another admin of the org, or the hub's owner, \
+             changes it",
+        ));
+    }
+    if s.personal_owner_id()? == Some(person) {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            "the hub's owner administers every org; their membership is theirs",
+        ));
+    }
+    Ok(())
+}
+
 fn to_json<T: Serialize>(v: &T) -> Result<serde_json::Value, IpcError> {
     serde_json::to_value(v).map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))
 }
@@ -378,6 +670,15 @@ fn device_row(s: &Store, name: &str, me: Me<'_>, what: &str) -> Result<ClientTok
 
 /// Every live person's device, newest first.
 pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcError> {
+    // The org a device is fenced to is the one its person's memberships make
+    // it (phase D), so that is the org shown — and an org admin lists only
+    // their org's devices, never the hub owner's.
+    let effective: std::collections::BTreeMap<i64, Option<i64>> = s
+        .auth_client_tokens()?
+        .into_iter()
+        .map(|c| (c.id, c.org_id))
+        .collect();
+    let owner = s.personal_owner_id()?;
     let orgs: std::collections::BTreeMap<i64, String> =
         s.list_orgs()?.into_iter().map(|o| (o.id, o.name)).collect();
     let people: std::collections::BTreeMap<i64, String> = s
@@ -394,6 +695,16 @@ pub fn list_devices(s: &Store, me: Me<'_>) -> Result<Vec<DeviceSummary>, IpcErro
     Ok(s.active_client_tokens()?
         .into_iter()
         .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
+        .map(|mut c| {
+            c.org_id = effective.get(&c.id).copied().flatten();
+            c
+        })
+        .filter(|c| match me.authority {
+            Authority::Fleet => true,
+            Authority::Org { org, .. } => {
+                c.org_id == Some(org) && !(c.person_id.is_some() && c.person_id == owner)
+            }
+        })
         .map(|c| DeviceSummary {
             org: c.org_id.and_then(|o| orgs.get(&o).cloned()),
             person: c.person_id.and_then(|p| people.get(&p).cloned()),
@@ -458,7 +769,18 @@ pub fn run(
     let action = Action::parse(&args.action)?;
     let s = lock(store)?;
     let name = args.action.as_str();
+    check(&s, action, args, me)?;
     match action {
+        Action::Org(OrgAction::ListOrgs) if matches!(me.authority, Authority::Org { .. }) => {
+            let Authority::Org { org, .. } = me.authority else {
+                unreachable!()
+            };
+            let mut all = orgs::admin(OrgAction::ListOrgs, &WorkAdminArgs::default(), &s)?;
+            if let Some(list) = all.as_array_mut() {
+                list.retain(|o| o["id"].as_i64() == Some(org));
+            }
+            Ok(all)
+        }
         Action::Org(a) => {
             let org_id = match a {
                 OrgAction::AddOrg => None,
@@ -499,13 +821,98 @@ pub fn run(
             to_json(&crate::service::settings::org_settings(&s, org))
         }
         Action::ListDevices => to_json(&list_devices(&s, me)?),
-        Action::ListPeople => to_json(&list_people(&s)?),
+        Action::ListPeople => match me.authority {
+            Authority::Fleet => to_json(&list_people(&s)?),
+            Authority::Org { org, .. } => {
+                let members: std::collections::BTreeSet<i64> = s
+                    .org_members(org)?
+                    .into_iter()
+                    .map(|m| m.person_id)
+                    .collect();
+                let mut people = list_people(&s)?;
+                people.retain(|p| members.contains(&p.id));
+                to_json(&people)
+            }
+        },
+        Action::ListMembers => {
+            let org = org_of(&s, args)?.ok_or_else(|| {
+                IpcError::new(codes::E_INVALID, "list_members needs org_id or org")
+            })?;
+            to_json(&list_members(&s, org)?)
+        }
+        Action::SetMember => {
+            let org = org_of(&s, args)?
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "set_member needs org_id or org"))?;
+            let role = need(&args.role, name, "role")?;
+            let person = person_of(&s, args, true)?;
+            require_other_member(&s, person, me)?;
+            s.set_org_member(org, person, role, me.person)?;
+            tracing::info!(org, person, role = %role, "[org_admin] set a member");
+            to_json(&list_members(&s, org)?)
+        }
+        Action::RemoveMember => {
+            let org = org_of(&s, args)?.ok_or_else(|| {
+                IpcError::new(codes::E_INVALID, "remove_member needs org_id or org")
+            })?;
+            let person = person_of(&s, args, false)?;
+            require_other_member(&s, person, me)?;
+            let removed = s.remove_org_member(org, person)?;
+            // Owner's answer 2: what was shared with them on the org's
+            // sessions goes too, unless the admin keeps it.
+            let revoked = if removed && !args.keep_grants.unwrap_or(false) {
+                s.revoke_person_grants_in_org(person, org)?
+            } else {
+                0
+            };
+            tracing::info!(org, person, revoked, "[org_admin] removed a member");
+            Ok(serde_json::json!({ "removed": removed, "revoked_grants": revoked }))
+        }
+        Action::MemberGrants | Action::RevokeMemberGrants | Action::NarrowMemberGrants => {
+            let org = org_of(&s, args)?.ok_or_else(|| {
+                IpcError::new(codes::E_INVALID, format!("{name} needs org_id or org"))
+            })?;
+            let person = person_of(&s, args, false)?;
+            if matches!(me.authority, Authority::Org { .. }) && s.org_member(org, person)?.is_none()
+            {
+                return Err(IpcError::new(
+                    codes::E_FORBIDDEN,
+                    "an org admin acts on the grants of the org's own members only",
+                ));
+            }
+            match action {
+                Action::RevokeMemberGrants => Ok(serde_json::json!({
+                    "revoked": s.revoke_person_grants_in_org(person, org)?
+                })),
+                Action::NarrowMemberGrants => Ok(serde_json::json!({
+                    "narrowed": s.narrow_person_grants_in_org(person, org)?
+                })),
+                _ => {
+                    let (watch, drive) = s.person_grants_in_org(person, org)?;
+                    Ok(serde_json::json!({ "watch": watch, "drive": drive }))
+                }
+            }
+        }
+        Action::SetHubOrg => {
+            let org = org_of(&s, args)?;
+            s.set_hub_owner_org(org)?;
+            Ok(serde_json::json!({ "owns_hub": org }))
+        }
+        Action::SetAdminsSeeUnclaimed => {
+            let org = org_of(&s, args)?.ok_or_else(|| {
+                IpcError::new(
+                    codes::E_INVALID,
+                    "set_admins_see_unclaimed needs org_id or org",
+                )
+            })?;
+            to_json(&s.set_org_admins_see_unclaimed(org, *need(&args.on, name, "on")?)?)
+        }
         Action::PairDevice => Err(IpcError::new(
             codes::E_INVALID_STATE,
             "pairing codes are minted by a hub (fleet-hub pair); pair this desktop with one first",
         )),
         Action::RevokeDevice => {
             let row = device_row(&s, need(&args.device, name, "device")?, me, "revoking")?;
+            require_org_device(&s, &row, me)?;
             s.revoke_client_token(&row.name)?;
             tracing::info!(client = %row.name, "[org_admin] revoked a device");
             Ok(serde_json::json!({ "revoked": row.name }))
@@ -520,12 +927,33 @@ pub fn run(
             } else {
                 device_row(&s, device, me, "untrusting")?
             };
+            require_org_device(&s, &row, me)?;
             s.set_client_trust(&row.name, on)?;
             device_json(&s, &row.name, me)
         }
         Action::BindDevice => {
             let row = device_row(&s, need(&args.device, name, "device")?, me, "binding")?;
             let org = org_of(&s, args)?;
+            // Phase D: a device's org is one of its person's memberships.
+            if let (Some(p), Some(o)) = (row.person_id, org) {
+                let owner = s.personal_owner_id()? == Some(p);
+                let live: Vec<i64> = s
+                    .memberships_of(p)?
+                    .into_iter()
+                    .filter(|m| m.is_live())
+                    .map(|m| m.org_id)
+                    .collect();
+                if !owner && !live.is_empty() && !live.contains(&o) {
+                    return Err(IpcError::new(
+                        codes::E_VALIDATE,
+                        format!(
+                            "{:?} belongs to a person who is not in that org; add them to it \
+                             first (set_member)",
+                            row.name
+                        ),
+                    ));
+                }
+            }
             // Through `orgs::admin`, so the org generation moves and the
             // device's streams re-read their scope at once.
             orgs::admin(
@@ -576,7 +1004,19 @@ pub fn run(
             } else {
                 device_row(&s, device, me, "taking a grant from")?
             };
+            require_org_device(&s, &row, me)?;
             let catalog = need(&args.catalog, name, "catalog")?.trim().to_string();
+            if let Authority::Org { org, .. } = me.authority {
+                let ours = s
+                    .get_catalog_by_name(&catalog)?
+                    .is_some_and(|c| c.org_id == Some(org));
+                if !ours {
+                    return Err(IpcError::new(
+                        codes::E_FORBIDDEN,
+                        "an org admin grants their org's own catalogs only",
+                    ));
+                }
+            }
             if catalog == crate::service::catalog::catalogs::PERSONAL {
                 s.set_client_assets_admin(&row.name, on)?;
             } else {

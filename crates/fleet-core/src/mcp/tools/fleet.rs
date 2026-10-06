@@ -194,8 +194,8 @@ impl FleetTools {
 
     #[tool(description = "Registered hosts: reachability, claude/tmux \
         versions, linked account. unclaimed_sessions is how many sessions \
-        on that host nobody owns, served only on a one-person fleet: null \
-        means you are not told, 0 means there are none.")]
+        on that host nobody owns, served to a one-person fleet and to who \
+        administers the host: null means not told, 0 means none.")]
     pub(super) async fn list_hosts(
         &self,
         Extension(caller): Extension<Caller>,
@@ -761,12 +761,11 @@ impl FleetTools {
 
     // ---- organisation administration (phase B) ----
 
-    #[tool(description = "Administer the company from your own device: orgs \
-        (as work_admin's org actions), paired devices (list, pair_device → a \
-        one-time code and its QR, revoke, trust, bind to an org, hand to a \
-        person, grant a catalog) and people (list, rename, disable). Lists \
-        for any of your full devices; changes need a trusted full one, and never \
-        lock out the device in use.")]
+    #[tool(description = "Administer the company: orgs (work_admin's org \
+        actions), devices (list, pair_device → code + QR, revoke, trust, bind, \
+        hand over, grant a catalog), people and members (roles, a member's \
+        grants). Hub owner's device: all; an org admin's: their org. Changes \
+        need a trusted full device, never locking out the one in use.")]
     pub(super) async fn org_admin(
         &self,
         Extension(caller): Extension<Caller>,
@@ -778,11 +777,33 @@ impl FleetTools {
         if !action.is_read() {
             org_admin_writer(&caller)?;
         }
+        // Phase D: whose authority this device carries — the hub owner's
+        // unbound device for the fleet, an org admin's for their org.
+        let authority = {
+            let s = lock(&self.store).map_err(to_mcp_err)?;
+            oa::authority_for(
+                &s,
+                caller.is_personal_owner && caller.is_person_device(),
+                caller.person(),
+                caller.client.as_ref().and_then(|c| c.org_id),
+            )
+            .map_err(to_mcp_err)?
+        }
+        .ok_or_else(|| {
+            mcp_err(
+                "E_FORBIDDEN",
+                "org_admin is for the hub owner's own device, or an org admin's for \
+                 their org; this device administers no org",
+                None,
+            )
+        })?;
         let me = Me {
             device: caller.client.as_ref().map(|c| c.name.as_str()),
+            person: caller.person(),
+            authority,
         };
         if action == Action::PairDevice {
-            return ok_json(&self.pair_device(args)?);
+            return ok_json(&self.pair_device(args, authority)?);
         }
         let out = oa::run(&args, &self.store, me).map_err(to_mcp_err)?;
         ok_json_compact(&out)
@@ -795,6 +816,7 @@ impl FleetTools {
     fn pair_device(
         &self,
         args: crate::service::org_admin::OrgAdminArgs,
+        authority: crate::service::org_admin::Authority,
     ) -> Result<serde_json::Value, McpError> {
         let mode = args.mode.clone().unwrap_or_else(|| "full".into());
         if !matches!(mode.as_str(), "full" | "readonly") {
@@ -823,6 +845,50 @@ impl FleetTools {
                 )
             }
             _ => None,
+        };
+        // Phase D: an org admin pairs a device for a member of their org, and
+        // it is fenced to that org.
+        let org_id = match authority {
+            crate::service::org_admin::Authority::Fleet => org_id,
+            crate::service::org_admin::Authority::Org { org, .. } => {
+                if org_id.is_some_and(|o| o != org) {
+                    return Err(mcp_err(
+                        "E_FORBIDDEN",
+                        "an org admin pairs devices for their own org only",
+                        None,
+                    ));
+                }
+                let person = args
+                    .person
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .ok_or_else(|| {
+                        mcp_err(
+                            codes::E_INVALID,
+                            "pair_device needs person: whose device, a member of your org",
+                            None,
+                        )
+                    })?;
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                let member = match s.get_person_by_name(person).map_err(to_mcp_err)? {
+                    Some(p) => {
+                        s.personal_owner_id().map_err(to_mcp_err)? != Some(p.id)
+                            && s.org_role(org, p.id).map_err(to_mcp_err)?.is_some()
+                    }
+                    None => false,
+                };
+                if !member {
+                    return Err(mcp_err(
+                        "E_FORBIDDEN",
+                        format!(
+                            "{person:?} is not a member of your org; add them first (set_member)"
+                        ),
+                        None,
+                    ));
+                }
+                Some(org)
+            }
         };
         let name = args
             .device

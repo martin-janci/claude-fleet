@@ -34,11 +34,9 @@ use crate::ipc_error::lock;
 
 #[tool_router(router = sharing_router, vis = "pub(super)")]
 impl FleetTools {
-    #[tool(description = "Share a session you OWN with one person, or with an \
-        org you are a member of (its members and admins, from now on), at \
-        watch (read it) or drive (also prompt it). Owner only — a grantee \
-        cannot share on — and no 'own' level. Sharing never gives a terminal. \
-        Returns the session row. \
+    #[tool(description = "Share a session you OWN with a person, or an org \
+        you are in (its members from now), at watch (read) or drive (also \
+        prompt). Owner only; never 'own' or a terminal. Returns the row. \
         Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.")]
     pub(super) async fn session_share(
         &self,
@@ -72,9 +70,9 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Revoke one person's (or org's) grant on your \
-        session (owner only); the row is kept, revoked, for the audit trail. \
-        Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.")]
+    #[tool(description = "Revoke a person's or org's grant on your session \
+        (owner only; kept, revoked, for audit). Returns the session row. \
+        Errors: E_NOTFOUND, E_FORBIDDEN.")]
     pub(super) async fn session_unshare(
         &self,
         Extension(caller): Extension<Caller>,
@@ -104,12 +102,9 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(
-        description = "Lower one person's (or org's) grant on your session from \
-        drive to watch (owner only). Nothing raises a grant: widen by \
-        revoking and sharing again. Returns the session row. \
-        Errors: E_NOTFOUND, E_FORBIDDEN."
-    )]
+    #[tool(description = "Lower a person's or org's grant on your session from \
+        drive to watch (owner only). Nothing raises one: revoke and share \
+        again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.")]
     pub(super) async fn session_narrow(
         &self,
         Extension(caller): Extension<Caller>,
@@ -139,9 +134,9 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Who holds a live grant on your session: person, \
-        level, who granted it and when. Owner only — the list names other \
-        people, so a grantee is not told. Errors: E_NOTFOUND, E_FORBIDDEN.")]
+    #[tool(description = "Who holds a live grant on your session (a person \
+        or an org), the level, who granted it and when. Owner only: it names \
+        others. Errors: E_NOTFOUND, E_FORBIDDEN.")]
     pub(super) async fn session_access(
         &self,
         Extension(caller): Extension<Caller>,
