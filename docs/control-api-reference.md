@@ -95,7 +95,7 @@ Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_i
 
 ### `ensure_operator`
 
-Ensure the UX agent's operator session exists; returns its row.
+Ensure the UX agent's operator session exists on a reachable host; returns its row.
 
 ### `fleet_health`
 
@@ -259,7 +259,7 @@ Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`
 
 ### `operator_status`
 
-Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host.
+Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host|host_down; fallback: where ensure_operator moves it.
 
 ### `pair_client`
 

@@ -15,6 +15,7 @@ import {
   restartOperator,
   refreshOperator,
   operatorHost,
+  operatorFallback,
   blockedCopy,
 } from './operator';
 import { sessions, applySessionEvents, type SessionRow } from './sessions';
@@ -57,6 +58,48 @@ describe('openAgent', () => {
     // Only the status call — ensure_operator must not run when the control
     // API is off: it would create a session that cannot reach any tool.
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('an agent stranded on a host that went down is started on the fallback', async () => {
+    invoke.mockResolvedValueOnce({
+      ready: false,
+      session: { id: 3, tmux_name: 'fleet-operator', host_alias: 'mefistos' },
+      blocked: 'host_down',
+      host: 'mefistos',
+      fallback: 'oci',
+    });
+    invoke.mockResolvedValueOnce({ id: 9, tmux_name: 'fleet-operator', host_alias: 'oci' });
+    await openAgent();
+    expect(invoke).toHaveBeenNthCalledWith(2, 'ensure_operator', undefined);
+    expect(get(operatorState)).toBe('ready');
+    expect(get(operatorSession)?.host_alias).toBe('oci');
+    expect(get(operatorFallback)).toBeNull();
+  });
+
+  it('a stranded agent with nowhere to go stays host_down, and nothing is started', async () => {
+    invoke.mockResolvedValueOnce({
+      ready: false,
+      session: { id: 3, tmux_name: 'fleet-operator', host_alias: 'mefistos' },
+      blocked: 'host_down',
+      host: 'mefistos',
+      fallback: null,
+    });
+    await openAgent();
+    expect(get(operatorState)).toBe('host_down');
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed move keeps host_down, so its button can try again', async () => {
+    invoke.mockResolvedValueOnce({
+      ready: false,
+      session: null,
+      blocked: 'host_down',
+      host: 'mefistos',
+      fallback: 'oci',
+    });
+    invoke.mockRejectedValueOnce({ code: 'E_SSH', message: 'oci went away too' });
+    await openAgent();
+    expect(get(operatorState)).toBe('host_down');
   });
 
   it('a ready agent is not re-created', async () => {
@@ -109,6 +152,22 @@ describe('blockedCopy', () => {
     expect(onGhost).toContain('not in this fleet');
     expect(onGhost).not.toContain('hub.local_host');
     expect(blockedCopy('no_host', 'mefistos').action).toBeNull();
+  });
+});
+
+describe('host_down', () => {
+  it('offers to start the agent on the fallback, and names both hosts', () => {
+    const c = blockedCopy('host_down', 'mefistos', 'oci');
+    expect(c.action).toContain('oci');
+    expect(c.title).toContain('mefistos');
+    expect(c.title).toContain('oci');
+  });
+
+  it('with no fallback, says what a host needs and offers nothing', () => {
+    const c = blockedCopy('host_down', 'mefistos');
+    expect(c.action).toBeNull();
+    expect(c.title).toContain('mefistos');
+    expect(c.title).toContain('no other host');
   });
 });
 
