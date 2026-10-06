@@ -880,15 +880,22 @@
   }
 
   // The picker's ⌘↵ (project picker spec v2): once this host's worktree
-  // list is in, submit once with what the dialog remembered. Anything that
-  // needs a person — a new worktree without a name, a blocked hub, an error —
-  // leaves the dialog open, as if the person had pressed Create.
+  // list has settled, look ONCE and, if nothing needs a person, submit with
+  // what the dialog remembered. The first look is final: a blocked hub, a
+  // new worktree without a name, or a scan that failed (`error` /
+  // `unlistable` — its empty list would otherwise silently create a
+  // generated worktree) leaves the dialog open as if the person had not
+  // pressed ⌘↵, and a later reconnect or edit never fires a submit.
+  // A ticket start has its own path (`submitTicket`, with a preview the
+  // person confirms); the picker never passes a ticket.
   let autostarted = false;
   $effect(() => {
     if (!autostart || autostarted || busy) return;
     if (hostWorktrees.status === 'loading') return;
-    if (newSessionBlocked || (inNewMode && !newWorktreeName.trim())) return;
     autostarted = true;
+    if (ticket) return;
+    if (hostWorktrees.status !== 'ready') return;
+    if (newSessionBlocked || (inNewMode && !newWorktreeName.trim())) return;
     void submit();
   });
 
