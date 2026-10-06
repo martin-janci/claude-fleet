@@ -65,23 +65,8 @@ fi
 # The phone must accept the hub this release ships. Both numbers are read at
 # the exact refs being paired — the claude-fleet tag and the fleet-mobile
 # commit about to be tagged — never from a local checkout, which can be on
-# any branch. An unreadable number refuses: guessing would be the same
-# silent skew this check exists to stop.
-file_at() { # file_at <repo> <path> <ref>
-  gh api -H "Accept: application/vnd.github.raw" "repos/$1/contents/$2?ref=$3" 2>/dev/null || true
-}
-HUB_REV="$(file_at "$FLEET_REPO" crates/fleet-core/src/wire_contract.rs "$TAG" \
-  | sed -nE 's/^pub const CONTRACT_REVISION: u32 = ([0-9]+);.*/\1/p')"
-[[ "$HUB_REV" =~ ^[0-9]+$ ]] \
-  || die "could not read CONTRACT_REVISION from $FLEET_REPO $TAG (crates/fleet-core/src/wire_contract.rs)"
-MOBILE_CONTRACT="$(file_at "$MOBILE_REPO" shared/src/commonMain/kotlin/dev/claudefleet/mobile/net/HubContract.kt "$HEAD_SHA")"
-MOBILE_MIN="$(sed -nE 's/^const val MIN_HUB_CONTRACT: Int = ([0-9]+).*/\1/p' <<<"$MOBILE_CONTRACT")"
-MOBILE_MAX="$(sed -nE 's/^const val MAX_HUB_CONTRACT: Int = ([0-9]+).*/\1/p' <<<"$MOBILE_CONTRACT")"
-[[ "$MOBILE_MIN" =~ ^[0-9]+$ && "$MOBILE_MAX" =~ ^[0-9]+$ ]] \
-  || die "could not read MIN/MAX_HUB_CONTRACT from $MOBILE_REPO main ${HEAD_SHA:0:12} (shared/…/net/HubContract.kt)"
-((MOBILE_MIN <= HUB_REV && HUB_REV <= MOBILE_MAX)) \
-  || die "$MOBILE_REPO main ${HEAD_SHA:0:12} accepts hub contracts $MOBILE_MIN..$MOBILE_MAX, but claude-fleet $TAG ships hub contract $HUB_REV — the app would refuse its own hub; bump fleet-mobile's HubContract.kt first"
-echo "$MOBILE_REPO main ${HEAD_SHA:0:12}: accepts hub contract $HUB_REV ($MOBILE_MIN..$MOBILE_MAX)"
+# any branch.
+bash "$(dirname "${BASH_SOURCE[0]}")/check-mobile-contract.sh" --hub-ref "$TAG" --mobile-ref "$HEAD_SHA"
 
 # The newest CI run for exactly this commit — an older green run on another
 # commit says nothing about this one.
