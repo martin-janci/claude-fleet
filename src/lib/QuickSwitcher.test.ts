@@ -448,3 +448,314 @@ describe('QuickSwitcher assets and commands', () => {
     expect(kinds.lastIndexOf('asset')).toBeLessThan(kinds.indexOf('command'));
   });
 });
+
+// ---- New session mode (project picker spec v2) -------------------------------
+
+import { switcherRequest, openNewSessionPicker } from './switcher_request';
+import { projectPicks } from './project_picks';
+import { newSessionHostRequest, addProjectRequest } from './app_views';
+import { toasts } from './toasts';
+import { readFrecency } from './frecency';
+
+describe('QuickSwitcher — New session mode', () => {
+  const NOW = Math.floor(Date.now() / 1000);
+  const p = (id: number, owner: string, repo: string, ago: number | null) => ({
+    project: { id, owner, repo, base_path: `/r/${repo}`, last_session_at: ago === null ? null : NOW - ago, adopted: false, system: false },
+    worktrees: [],
+  });
+  const fleet = p(1, 'me', 'claude-fleet', 60);
+  const om = [p(2, 'pp', 'openmarket-ai', 3600), p(3, 'pp', 'openmarket-docs', 7200), p(4, 'pp', 'openmarket-app', null)];
+  const epic = p(5, 'me', 'ppt-epic-145', null);
+
+  beforeEach(() => {
+    projects.set([fleet, ...om, epic]);
+    sessions.set([]);
+    projectPicks.set(new Map());
+    switcherRequest.set(null);
+    addProjectRequest.set(null);
+    toasts.set([]);
+    __trackers.set([]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) =>
+      cmd === 'set_project_pick' ? (args as { args: unknown }).args : null);
+  });
+
+  async function openNew(host?: string) {
+    openNewSessionPicker(host);
+    await tick();
+    return screen.getByTestId('switcher-input') as HTMLInputElement;
+  }
+  const activeLabel = (input: HTMLInputElement) =>
+    document.getElementById(input.getAttribute('aria-activedescendant') ?? '')?.textContent ?? '';
+
+  it('opens from the request with the mode chip, projects only, Hidden folded', async () => {
+    sessions.set([sess({ id: 1, project_id: 1 })]);
+    render(QuickSwitcher);
+    await openNew();
+    expect(screen.getByTestId('mode-chip').textContent).toBe('New session in');
+    expect(screen.queryAllByTestId('switcher-session')).toHaveLength(0);
+    expect(screen.getByText('openmarket-* · pp')).toBeTruthy(); // the cluster heading's subtitle
+    expect(screen.getByText(/Show 1 in Hidden/)).toBeTruthy();
+    expect(screen.queryByText('ppt-epic-145')).toBeNull();
+  });
+
+  it('Ctrl+Shift+N opens it; Backspace on an empty query leaves the mode', async () => {
+    render(QuickSwitcher);
+    await fireEvent.keyDown(window, { key: 'N', ctrlKey: true, shiftKey: true });
+    await tick();
+    const input = screen.getByTestId('switcher-input');
+    expect(screen.getByTestId('mode-chip')).toBeTruthy();
+    await fireEvent.keyDown(input, { key: 'Backspace' });
+    await tick();
+    expect(screen.queryByTestId('mode-chip')).toBeNull();
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+  });
+
+  it('the Hosts view request opens it with that host as context', async () => {
+    sessions.set([sess({ id: 9, project_id: 3, host_alias: 'mefistos' })]);
+    render(QuickSwitcher);
+    newSessionHostRequest.set('mefistos');
+    await tick(); await tick();
+    expect(screen.getByText('on mefistos')).toBeTruthy();
+    expect(get(newSessionHostRequest)).toBeNull();
+  });
+
+  it('Enter opens the dialog and records the pick; Ctrl+Enter asks for autostart', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(newSessionRequest)?.project.project.repo).toBe('openmarket-docs');
+    expect(readFrecency()['pp/openmarket-docs']).toBeTruthy(); // the pref, under the app's prefix
+    clearNewSessionRequest();
+    const input2 = await openNew();
+    await fireEvent.input(input2, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input2, { key: 'Enter', ctrlKey: true });
+    await tick();
+    expect(get(newSessionRequest)?.autostart).toBe(true);
+  });
+
+  it('a host request carries the host into the dialog', async () => {
+    render(QuickSwitcher);
+    const input = await openNew('mefistos');
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(get(newSessionRequest)?.initialHost).toBe('mefistos');
+  });
+
+  it('Ctrl+1 opens the first numbered row', async () => {
+    projectPicks.set(new Map([['pp/openmarket-app', { owner: 'pp', repo: 'openmarket-app', pinned: true, vis: null, grp: null }]]));
+    render(QuickSwitcher);
+    const input = await openNew();
+    expect(screen.getByText('Ctrl+1')).toBeTruthy();
+    await fireEvent.keyDown(input, { key: '1', ctrlKey: true });
+    await tick();
+    expect(get(newSessionRequest)?.project.project.repo).toBe('openmarket-app');
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+  });
+
+  it('Ctrl+P pins the highlighted project; Ctrl+Z undoes it', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true));
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+  });
+
+  it('Ctrl+Z works at once, before the pin write answers', async () => {
+    let release: () => void = () => {};
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'set_project_pick') return null;
+      const a = (args as { args: { pinned: boolean } }).args;
+      if (a.pinned) await new Promise<void>((r) => (release = r));
+      return a;
+    });
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(true);
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    release();
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+  });
+
+  it('a pin shows on the list at once (the person acted), with an Undo toast once saved', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    expect(screen.queryByText('Pinned')).toBeNull();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await fireEvent.input(input, { target: { value: '' } });
+    await tick();
+    expect(screen.getByText('Pinned')).toBeTruthy();
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Pinned openmarket-ai'));
+    expect(get(toasts).find((t) => t.message === 'Pinned openmarket-ai')?.action?.label).toBe('Undo');
+  });
+
+  it('a failed write leaves nothing to undo', async () => {
+    vi.mocked(__invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'set_project_pick') throw { code: 'E_INTERNAL', message: 'nope' };
+      return null;
+    });
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'p', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')?.pinned).toBe(false));
+    const calls = vi.mocked(__invoke).mock.calls.length;
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    await tick();
+    expect(vi.mocked(__invoke).mock.calls.length).toBe(calls);
+  });
+
+  it('hiding a pinned project unpins it too, and says so', async () => {
+    projectPicks.set(new Map([['pp/openmarket-ai', { owner: 'pp', repo: 'openmarket-ai', pinned: true, vis: null, grp: null }]]));
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Backspace', ctrlKey: true });
+    await vi.waitFor(() => expect(get(toasts).map((t) => t.message)).toContain('Hid openmarket-ai (unpinned)'));
+    expect(get(projectPicks).get('pp/openmarket-ai')).toMatchObject({ pinned: false, vis: 'hide' });
+    await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+    await vi.waitFor(() => expect(get(projectPicks).get('pp/openmarket-ai')).toMatchObject({ pinned: true, vis: null }));
+  });
+
+  it('the order is frozen while open: picks arriving later do not move the highlight', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    const before = input.getAttribute('aria-activedescendant');
+    projectPicks.set(new Map([['pp/openmarket-app', { owner: 'pp', repo: 'openmarket-app', pinned: true, vis: null, grp: null }]]));
+    await tick();
+    expect(input.getAttribute('aria-activedescendant')).toBe(before);
+    expect(screen.queryByText('Pinned')).toBeNull(); // shown on the next open
+  });
+
+  it('Esc clears a query first, then closes', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'zz' } });
+    await fireEvent.keyDown(input, { key: 'Escape' });
+    await tick();
+    expect(input.value).toBe('');
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+  });
+
+  it('no match offers Add project with the query; an owner/repo prefills the clone URL', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'acme/widgets' } });
+    await tick();
+    expect(screen.getByText('Add project “acme/widgets”…')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('switcher-add'));
+    await tick();
+    expect(get(addProjectRequest)).toEqual({ cloneUrl: 'acme/widgets' });
+    expect(screen.queryByTestId('quick-switcher')).toBeNull();
+    const input2 = await openNew();
+    await fireEvent.input(input2, { target: { value: 'widgets thing' } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('switcher-add'));
+    expect(get(addProjectRequest)).toEqual({ cloneUrl: undefined });
+  });
+
+  it('Enter on a fold row unfolds it', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    const fold = screen.getByText(/Show 1 in Hidden/).closest('[role=option]')!;
+    await fireEvent.mouseMove(fold);
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    expect(screen.getByText('ppt-epic-145')).toBeTruthy();
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+  });
+
+  it('a folded group is one row with its count; ArrowLeft folds an open group', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-docs' } });
+    await fireEvent.input(input, { target: { value: '' } });
+    await tick();
+    // Highlight a member of the open openmarket group, then fold it.
+    const row = Array.from(document.querySelectorAll('[data-testid=switcher-project]')).find(
+      (e) => e.textContent?.includes('openmarket-app'),
+    )!;
+    await fireEvent.mouseMove(row);
+    await fireEvent.keyDown(input, { key: 'ArrowLeft' });
+    await tick();
+    expect(screen.getByText('openmarket · 3 projects')).toBeTruthy();
+    expect(activeLabel(input)).toContain('openmarket · 3 projects');
+    await fireEvent.keyDown(input, { key: 'ArrowRight' });
+    await tick();
+    expect(screen.queryByText('openmarket · 3 projects')).toBeNull();
+  });
+
+  it('Shift+F10 opens the actions menu; Esc closes it and focus returns to the input', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'openmarket-ai' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'F10', shiftKey: true });
+    await tick();
+    const menu = screen.getByTestId('project-actions');
+    expect(menu.getAttribute('aria-label')).toBe('pp/openmarket-ai');
+    await fireEvent.keyDown(menu, { key: 'Escape' });
+    await tick(); await tick();
+    expect(screen.queryByTestId('project-actions')).toBeNull();
+    expect(document.activeElement).toBe(input);
+    expect(screen.getByTestId('quick-switcher')).toBeTruthy();
+  });
+
+  it('Ctrl+G moves the project to a group through the menu', async () => {
+    render(QuickSwitcher);
+    const input = await openNew();
+    await fireEvent.input(input, { target: { value: 'claude-fleet' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'g', ctrlKey: true });
+    await tick();
+    const gi = screen.getByLabelText('Group name');
+    await fireEvent.input(gi, { target: { value: 'Mine' } });
+    await fireEvent.keyDown(gi, { key: 'Enter' });
+    await vi.waitFor(() => expect(get(projectPicks).get('me/claude-fleet')?.grp).toBe('Mine'));
+    expect(screen.queryByTestId('project-actions')).toBeNull();
+  });
+
+  it('My work tickets with no session head the list under Start from work', async () => {
+    __trackers.set([
+      { id: 1, provider: 'jira', name: 'acme', site_url: 'https://acme.atlassian.net', state: 'ok', created_at: 1, config: { key_prefixes: ['ABC'] } },
+    ]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      const view = (args as { args?: { view?: string } } | undefined)?.args?.view;
+      const t = (key: string, live: number[] = []) => ({ id: 100 + Number(key.split('-')[1]), tracker_id: 1, source: 'jira', key, title: `${key} title`, status_category: 'todo', status_name: 'To Do', created_at: 1, updated_at: 1, live_session_ids: live });
+      if (cmd === 'work_tickets' && view === 'mine') return [t('ABC-1'), t('ABC-2', [6])];
+      if (cmd === 'work_tickets') return [];
+      return null;
+    });
+    render(QuickSwitcher);
+    await openNew();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    expect(screen.getByText('Start from work')).toBeTruthy();
+    expect(screen.getAllByTestId('switcher-ticket')[0].getAttribute('data-key')).toBe('ticket:ABC-1');
+  });
+
+  it('normal ⌘K mode drops picker-hidden projects from the empty-query list, keeps them for a query', async () => {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    expect(screen.queryByTestId('mode-chip')).toBeNull();
+    expect(document.querySelector('[data-key="project:4"]')).not.toBeNull(); // unknown, not hidden
+    expect(document.querySelector('[data-key="project:5"]')).toBeNull();
+    await fireEvent.input(input, { target: { value: 'ppt-epic' } });
+    await tick();
+    expect(document.querySelector('[data-key="project:5"]')).not.toBeNull();
+  });
+});

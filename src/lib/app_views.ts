@@ -74,14 +74,19 @@ export function openSettingsAt(section: string): void {
 }
 
 /**
- * "Start a new session on this host": the Sidebar opens its project picker
- * and preselects the host in the NewSessionDialog that follows.
+ * "Start a new session on this host" (the Hosts view's `n`): the quick
+ * switcher opens in New session mode preferring that host, and preselects
+ * it in the NewSessionDialog that follows.
  */
 export const newSessionHostRequest = writable<string | null>(null);
 
 export function requestNewSessionOnHost(host: string): void {
   newSessionHostRequest.set(host);
 }
+
+/** "Open Add project" from the switcher's Add row; the Sidebar owns the
+ *  dialog. `cloneUrl` prefills the Clone URL field. */
+export const addProjectRequest = writable<{ cloneUrl?: string } | null>(null);
 
 /**
  * "Open this file in the Files tab": a path clicked in the Conversation tab.

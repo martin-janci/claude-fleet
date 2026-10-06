@@ -7,7 +7,24 @@
   // the name. The chord is taken even while the terminal has focus (VS Code
   // does the same for its quick open), so the switcher is reachable from the
   // state the user is in 90% of the time.
-  import { onMount, onDestroy, tick } from 'svelte';
+  //
+  // New session mode (project picker spec v2): ⌘N / Ctrl+Shift+N, the
+  // sidebar's "+ New session" (`switcher_request.ts`) and the Hosts view's
+  // `n` (`newSessionHostRequest`) open the same box listing only tickets and
+  // projects — Start from work, Pinned, Suggested, every group, Hidden — with
+  // keys to pin, hide, group and undo. Its ranking is a snapshot taken on
+  // open: it is recomputed on a query change, a fold or the person's own
+  // action, never because data arrived.
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
+  import { get } from 'svelte/store';
+  import ProjectActionsMenu from './ProjectActionsMenu.svelte';
+  import { switcherRequest } from './switcher_request';
+  import { newSessionHostRequest, addProjectRequest } from './app_views';
+  import { loadProjectPicks, pickKey, previousPick, projectPicks, setProjectPick } from './project_picks';
+  import { readFrecency, recordPick } from './frecency';
+  import { buildSections, entriesOf, hiddenReason, searchEntries, type Entry, type ViewRow } from './project_rank';
+  import { fuzzyMatchFields } from './fuzzy';
+  import { parseRepoUrl } from './repo_url';
   import Modal from './Modal.svelte';
   import PickerList, { optionId } from './PickerList.svelte';
   import type { PickerItem } from './PickerList.svelte';
@@ -32,6 +49,8 @@
     assetEntries,
     commandEntries,
     placeForTicket,
+    isNewSessionChord,
+    workBlock,
     type SwitcherEntry,
     type SwitcherTicket,
     scopeEntries,
@@ -62,6 +81,19 @@
   let open = $state(false);
   let query = $state('');
   let activeKey = $state<string | null>(null);
+  let mode = $state<'switch' | 'new'>('switch');
+  // New session mode: the host to prefer ("on <host>" suggestions, the
+  // dialog's preselected host), the folds the person toggled, and the
+  // actions menu.
+  let preferredHost = $state<string | null>(null);
+  let toggled = $state<ReadonlySet<string>>(new Set());
+  // Re-rank triggers besides the query: open, the person's own actions, folds.
+  let seq = $state(0);
+  let menu = $state<{ key: string; startIn: 'main' | 'groups' } | null>(null);
+  let menuAt = $state<{ top?: number; bottom?: number }>({ top: 0 });
+  let listWrap: HTMLElement | undefined = $state();
+  let lastUndo: (() => void) | null = null;
+  const nowSec = () => Math.floor(Date.now() / 1000);
 
   const modKey = $derived(isMac ? '⌘' : 'Ctrl');
   const chord = $derived(chordLabel(isMac));
@@ -131,7 +163,23 @@
       trackerOrg,
     ),
   );
-  const ranked: SwitcherEntry[] = $derived(rankEntries(entries, query, $recentSessions));
+  // Normal ⌘K drops picker-hidden projects from its empty-query list, so
+  // both surfaces agree on what is hidden; a query still finds them.
+  const visibleEntries = $derived(
+    query.trim()
+      ? entries
+      : entries.filter(
+          (e) =>
+            e.kind !== 'project' ||
+            !e.project ||
+            !hiddenReason(
+              e.project,
+              $projectPicks.get(pickKey(e.project.project.owner, e.project.project.repo)),
+              nowSec(),
+            ),
+        ),
+  );
+  const ranked: SwitcherEntry[] = $derived(rankEntries(visibleEntries, query, $recentSessions));
   const items: PickerItem[] = $derived(
     ranked.map((e) => ({
       key: e.key,
@@ -157,28 +205,183 @@
     })),
   );
 
+  // ── New session mode ──
+  // The frozen view: the stores are read untracked, so data arriving while
+  // open never re-ranks; `seq`, the query and the folds do.
+  const newView = $derived.by(() => {
+    void seq;
+    void query;
+    void toggled;
+    if (mode !== 'new') return null;
+    return untrack(() => {
+      const now = nowSec();
+      const entries = entriesOf(get(projects), get(projectPicks), now);
+      const ctx = {
+        selectedProjectId: get(selectedSession)?.project_id ?? null,
+        preferredHost,
+        sessions: get(sessions),
+      };
+      const f = readFrecency();
+      return {
+        entries,
+        sections: buildSections(entries, ctx, f, now),
+        search: searchEntries(entries, query, ctx, f, now),
+      };
+    });
+  });
+
+  /** ⌘1 on macOS, Ctrl+1 elsewhere (the ranking labels them ⌘N). */
+  const kbdLabel = (k: string) => (isMac || !k ? k : k.replace('⌘', 'Ctrl+'));
+  const countText = (n: number) => `${n} project${n === 1 ? '' : 's'}`;
+  /** A section's rule subtitle, or '' when it is only the member count. */
+  const ruleSub = (sub: string) => (/^\d+ projects?$/.test(sub) ? '' : sub);
+  const isFoldable = (sectionKey: string) => sectionKey.startsWith('g:') || sectionKey === 'hidden';
+
+  // A project is listed once per section it is in (Suggested and its
+  // group both list it, D5), so its row key names the section too.
+  const rowKey = (id: number, sectionKey: string) => `project:${id}@${sectionKey}`;
+  const idOfKey = (key: string | null): number | null => {
+    const m = key ? /^project:(\d+)@/.exec(key) : null;
+    return m ? Number(m[1]) : null;
+  };
+  const projectItem = (r: ViewRow, group: string, groupKey: string, groupSub: string, description?: string): PickerItem => ({
+    key: rowKey(r.entry.id, groupKey),
+    label: r.entry.label,
+    description,
+    meta: r.meta,
+    chip: r.chip || undefined,
+    kbd: kbdLabel(r.kbd) || undefined,
+    dim: r.entry.dormant || !!r.entry.hidden,
+    group,
+    groupKey,
+    groupSub,
+    actionable: true,
+    testid: 'switcher-project',
+  });
+
+  const newItems: PickerItem[] = $derived.by(() => {
+    const v = newView;
+    if (!v) return [];
+    const out: PickerItem[] = [];
+    const q = query.trim();
+    const work = q
+      ? [...ticketRows.filter((e) => fuzzyMatchFields(q, e.fields) !== null), ...(lookupRow ? [lookupRow] : [])]
+      : workBlock(tickets)
+          .map((t) => ticketRows.find((e) => e.ticket?.key === t.ticket.key))
+          .filter((e): e is SwitcherEntry => !!e);
+    for (const e of work) {
+      const place = e.ticket
+        ? placeForTicket(e.ticket.key ?? '', $sessions, $projects, (s) => workKeyFor(s, branchById)?.key ?? null)
+        : null;
+      out.push({
+        key: e.key,
+        label: e.label,
+        description: place ? `→ ${place.project.project.repo} · ${place.host}` : e.description,
+        badge: e.badge,
+        group: q ? 'Tickets' : 'Start from work',
+        groupKey: 'work',
+        groupSub: q ? '' : 'My work · no session yet',
+        testid: e.kind === 'lookup' ? 'switcher-lookup' : 'switcher-ticket',
+      });
+    }
+    if (q) {
+      const n = v.search.length;
+      for (const r of v.search) {
+        const g = r.entry.group;
+        // The group says where a match lives, unless it is only the owner.
+        const where = g.key.startsWith('o:') || g.key === 'f' ? undefined : g.name;
+        out.push(projectItem(r, countText(n), 'search', '', where));
+      }
+    } else {
+      for (const s of v.sections) {
+        const open = s.foldable ? (s.openByDefault ? !toggled.has(s.key) : toggled.has(s.key)) : true;
+        if (open) {
+          const sub = s.foldable && s.key !== 'hidden' ? ruleSub(s.sub) || countText(s.rows.length) : s.sub;
+          s.rows.forEach((r) => out.push(projectItem(r, s.label, s.key, sub)));
+        } else {
+          // A folded section is one option row, so the keyboard reaches it.
+          out.push({
+            key: `fold:${s.key}`,
+            label:
+              s.key === 'hidden' ? `Show ${s.rows.length} in Hidden` : `${s.label} · ${countText(s.rows.length)}`,
+            description: s.key === 'hidden' ? s.sub : ruleSub(s.sub) || undefined,
+            meta: '▸',
+            testid: 'switcher-fold',
+          });
+        }
+      }
+    }
+    out.push({
+      key: 'add',
+      label: q ? `Add project “${q}”…` : 'Add project…',
+      group: q ? 'Not here?' : ' ',
+      testid: 'switcher-add',
+    });
+    return out;
+  });
+
+  /** The rows ↑↓ walk and the highlight lives on, in either mode. */
+  const listKeys = $derived(mode === 'new' ? newItems.map((i) => i.key) : ranked.map((e) => e.key));
+
   // Keep the highlight on a row that still exists; default to the first.
   // Only while open: a closed switcher must not re-rank on every session
-  // event (reading `ranked` here is what would make it recompute).
+  // event (reading `ranked` here is what would make it recompute). A
+  // project whose row moved (pinned, unpinned, regrouped) keeps it.
   $effect(() => {
     if (!open) return;
-    const keys = ranked.map((e) => e.key);
+    const keys = listKeys;
     if (activeKey === null || !keys.includes(activeKey)) {
-      activeKey = keys[0] ?? null;
+      const id = idOfKey(activeKey);
+      const moved = id === null ? undefined : keys.find((k) => idOfKey(k) === id);
+      activeKey = moved ?? keys[0] ?? null;
     }
   });
 
-  function show() {
+  function show(next: 'switch' | 'new' = 'switch', host: string | null = null) {
     query = '';
     activeKey = null;
+    mode = next;
+    preferredHost = host;
+    toggled = new Set();
+    menu = null;
+    lastUndo = null;
     open = true;
+    seq++;
     void loadTickets();
+    // Fresh picks for the NEXT open: this one's view is frozen.
+    if (next === 'new') void loadProjectPicks();
   }
   function hide() {
     open = false;
+    menu = null;
   }
 
+  // The sidebar's "+ New session" and the Hosts view's `n` (which names the
+  // host to prefer) cannot reach this component; they publish a request.
+  const unsubReq = switcherRequest.subscribe((r) => {
+    if (!r) return;
+    switcherRequest.set(null);
+    show('new', r.host ?? null);
+  });
+  const unsubHost = newSessionHostRequest.subscribe((h) => {
+    if (h === null) return;
+    newSessionHostRequest.set(null);
+    show('new', h);
+  });
+  onDestroy(() => {
+    unsubReq();
+    unsubHost();
+  });
+
   function onWindowKeydown(e: KeyboardEvent) {
+    if (isNewSessionChord(e, isMac)) {
+      if (!open && (e.target as Element | null)?.closest?.('dialog')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (open && mode === 'new') hide();
+      else show('new');
+      return;
+    }
     if (!isSwitcherChord(e, isMac)) return;
     // Another modal (settings, new-session…) owns the keyboard while open;
     // don't stack the switcher on top of it.
@@ -198,13 +401,160 @@
   });
 
   function move(delta: number) {
-    if (ranked.length === 0) return;
-    const i = ranked.findIndex((e) => e.key === activeKey);
-    const next = i === -1 ? 0 : (i + delta + ranked.length) % ranked.length;
-    activeKey = ranked[next].key;
+    const keys = listKeys;
+    if (keys.length === 0) return;
+    const i = keys.findIndex((k) => k === activeKey);
+    const next = i === -1 ? 0 : (i + delta + keys.length) % keys.length;
+    activeKey = keys[next];
+  }
+
+  const entryOf = (key: string | null): Entry | null => {
+    const id = idOfKey(key);
+    return id === null ? null : (newView?.entries.find((e) => e.id === id) ?? null);
+  };
+  /** A ticket or lookup row of New session mode. */
+  const workEntryOf = (key: string | null): SwitcherEntry | null =>
+    key === null ? null : (ticketRows.find((e) => e.key === key) ?? (lookupRow?.key === key ? lookupRow : null));
+
+  /** Pin / hide / group one project. The store changes at once (the person
+   *  sees their own change: `seq` re-ranks); Undo is ready at once too, and
+   *  its toast comes once the write is saved. */
+  function act(e: Entry, patch: Parameters<typeof setProjectPick>[2], said: string) {
+    const { owner, repo } = e.project.project;
+    const write = setProjectPick(owner, repo, patch);
+    seq++;
+    // Recorded by setProjectPick before its first await.
+    const prev = previousPick(owner, repo);
+    // Chained after the write, so a late answer to it never lands on top of
+    // the undo; a failed write was rolled back already and needs none.
+    const undo = prev
+      ? () => {
+          void write.then((r) => {
+            if (!r.ok) return;
+            void setProjectPick(owner, repo, { pinned: prev.pinned, vis: prev.vis, grp: prev.grp }).then(() => seq++);
+            seq++;
+          });
+        }
+      : null;
+    lastUndo = undo;
+    void write.then((r) => {
+      seq++;
+      if (!r.ok) {
+        if (lastUndo === undo) lastUndo = null;
+        return;
+      }
+      push({
+        kind: 'info',
+        message: said,
+        action: undo
+          ? {
+              label: 'Undo',
+              run: () => {
+                if (lastUndo === undo) lastUndo = null;
+                undo();
+              },
+            }
+          : undefined,
+      });
+    });
+  }
+  function togglePin(e: Entry) {
+    if (e.pinned) act(e, { pinned: false }, `Unpinned ${e.label}`);
+    // Never in both Pinned and Hidden: pinning what the person hid unhides it.
+    else if (e.hidden === 'hidden by you') act(e, { pinned: true, vis: null }, `Pinned ${e.label} (unhidden)`);
+    else act(e, { pinned: true }, `Pinned ${e.label}`);
+  }
+  function toggleHide(e: Entry) {
+    if (e.hidden) act(e, { vis: 'keep' }, `Unhid ${e.label}`);
+    else if (e.pinned) act(e, { vis: 'hide', pinned: false }, `Hid ${e.label} (unpinned)`);
+    else act(e, { vis: 'hide' }, `Hid ${e.label}`);
+  }
+  function setGroup(e: Entry, g: string | null) {
+    act(e, { grp: g }, g ? `Moved ${e.label} to ${g}` : `${e.label} is grouped automatically`);
+    closeMenu();
+  }
+  function pickProject(e: Entry, autostart = false) {
+    recordPick(e.key);
+    requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, autostart });
+    hide();
+  }
+  function toggleFold(sectionKey: string) {
+    const n = new Set(toggled);
+    if (n.has(sectionKey)) n.delete(sectionKey);
+    else n.add(sectionKey);
+    toggled = n;
+  }
+  /** Unfold a folded section and land on its first row. */
+  function unfold(sectionKey: string) {
+    toggleFold(sectionKey);
+    const first = newView?.sections.find((s) => s.key === sectionKey)?.rows[0];
+    activeKey = first ? rowKey(first.entry.id, sectionKey) : null;
+  }
+  function onGroupClick(sectionKey: string) {
+    if (!isFoldable(sectionKey)) return;
+    const inside = newItems.find((i) => i.key === activeKey)?.groupKey === sectionKey;
+    toggleFold(sectionKey);
+    if (inside) activeKey = `fold:${sectionKey}`;
+  }
+
+  function openMenu(key: string, startIn: 'main' | 'groups') {
+    if (!entryOf(key)) return;
+    activeKey = key;
+    // Beside the row: below it, or above when the room is below the fold.
+    const row = listWrap?.querySelector<HTMLElement>(`[data-key="${CSS.escape(key)}"]`);
+    if (listWrap && row) {
+      const w = listWrap.getBoundingClientRect();
+      const r = row.getBoundingClientRect();
+      const room = 200;
+      menuAt = r.bottom - w.top + room > w.height && r.top - w.top > room ? { bottom: w.bottom - r.top } : { top: r.bottom - w.top };
+    } else {
+      menuAt = { top: 0 };
+    }
+    menu = { key, startIn };
+  }
+  function closeMenu() {
+    menu = null;
+    void tick().then(() => document.querySelector<HTMLInputElement>('[data-testid=switcher-input]')?.focus());
+  }
+  /** Existing group names for the menu: the person's and the clusters. */
+  const menuGroups = $derived(
+    [
+      ...new Set(
+        (newView?.entries ?? [])
+          .map((x) => x.group)
+          .filter((g) => !g.key.startsWith('o:') && g.key !== 'f')
+          .map((g) => g.name),
+      ),
+    ].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
+  );
+
+  function pickNew(key: string) {
+    if (key === 'add') {
+      const q = query.trim();
+      // An `owner/repo` or a GitHub URL prefills the Clone URL field.
+      addProjectRequest.set({ cloneUrl: q && parseRepoUrl(q) ? q : undefined });
+      hide();
+      return;
+    }
+    if (key.startsWith('fold:')) {
+      unfold(key.slice(5));
+      return;
+    }
+    const e = entryOf(key);
+    if (e) {
+      pickProject(e);
+      return;
+    }
+    const w = workEntryOf(key);
+    if (w?.ticket) openTicket(w.ticket);
+    else if (w?.lookup) void lookupThenOpen(w.lookup);
   }
 
   function pick(key: string) {
+    if (mode === 'new') {
+      pickNew(key);
+      return;
+    }
     const e = ranked.find((x) => x.key === key);
     if (!e) return;
     if (e.kind === 'session' && e.session) {
@@ -328,7 +678,85 @@
     hide();
   }
 
+  /** New session mode's keys; true when the key was handled. */
+  function onNewModeKeydown(e: KeyboardEvent): boolean {
+    const mod = e.metaKey || e.ctrlKey;
+    const cur = entryOf(activeKey);
+    const handled = () => {
+      e.preventDefault();
+      return true;
+    };
+    if (e.key === 'Escape' && (menu || query)) {
+      e.stopPropagation();
+      if (menu) closeMenu();
+      else {
+        query = '';
+        activeKey = null;
+      }
+      return handled();
+    }
+    if (e.key === 'Backspace' && query === '' && !mod) {
+      mode = 'switch';
+      activeKey = null;
+      menu = null;
+      return handled();
+    }
+    if (e.key === 'Enter') {
+      if (mod) {
+        const w = workEntryOf(activeKey);
+        if (cur) pickProject(cur, true);
+        else if (w) void startTicketNow(w);
+      } else if (activeKey !== null) pickNew(activeKey);
+      return handled();
+    }
+    if (mod && e.key.toLowerCase() === 'p' && cur) {
+      togglePin(cur);
+      return handled();
+    }
+    if (mod && e.key === 'Backspace' && cur) {
+      toggleHide(cur);
+      return handled();
+    }
+    if (mod && e.key.toLowerCase() === 'g' && cur) {
+      openMenu(activeKey!, 'groups');
+      return handled();
+    }
+    if (mod && e.key.toLowerCase() === 'z' && lastUndo) {
+      const u = lastUndo;
+      lastUndo = null;
+      u();
+      return handled();
+    }
+    if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') {
+      if (cur) openMenu(activeKey!, 'main');
+      return handled();
+    }
+    if (mod && /^[1-9]$/.test(e.key)) {
+      const it = newItems.find((i) => i.kbd === kbdLabel(`⌘${e.key}`));
+      const en = entryOf(it?.key ?? null);
+      if (en) {
+        pickProject(en);
+        return handled();
+      }
+      return false;
+    }
+    if (e.key === 'ArrowRight' && activeKey?.startsWith('fold:')) {
+      unfold(activeKey.slice(5));
+      return handled();
+    }
+    if (e.key === 'ArrowLeft' && cur) {
+      const sec = newItems.find((i) => i.key === activeKey)?.groupKey;
+      if (sec && isFoldable(sec)) {
+        toggleFold(sec);
+        activeKey = `fold:${sec}`;
+        return handled();
+      }
+    }
+    return false;
+  }
+
   function onInputKeydown(e: KeyboardEvent) {
+    if (mode === 'new' && onNewModeKeydown(e)) return;
     if (e.key === 'ArrowDown' || (e.ctrlKey && e.key.toLowerCase() === 'n')) {
       e.preventDefault();
       move(1);
@@ -348,41 +776,138 @@
 </script>
 
 {#if open}
-  <Modal label="Quick switcher" onclose={hide} width="560px" testid="quick-switcher">
-    <input
-      class="query"
-      data-testid="switcher-input"
-      data-autofocus
-      role="combobox"
-      aria-expanded="true"
-      aria-controls={LIST_ID}
-      aria-autocomplete="list"
-      aria-activedescendant={activeKey !== null ? optionId(LIST_ID, activeKey) : undefined}
-      bind:value={query}
-      onkeydown={onInputKeydown}
-      placeholder="Jump to a session, host, ticket or asset… (name, key, project, host, branch, status, or paste a ticket URL)"
-      autocomplete="off"
-      spellcheck="false"
-    />
-    <PickerList
-      {items}
-      {activeKey}
-      onactivate={(k) => (activeKey = k)}
-      onpick={pick}
-      maxHeight="min(60vh, 24rem)"
-      emptyText={query ? `No session matches “${query}” — ${modKey}↵ creates one with that name.` : 'No sessions yet.'}
-      ariaLabel="Sessions"
-      listId={LIST_ID}
-      testid="switcher-list"
-    />
+  <Modal label={mode === 'new' ? 'New session' : 'Quick switcher'} onclose={hide} width="560px" testid="quick-switcher">
+    <div class="qrow">
+      {#if mode === 'new'}<span class="mode-chip" data-testid="mode-chip">New session in</span>{/if}
+      <input
+        class="query"
+        data-testid="switcher-input"
+        data-autofocus
+        role="combobox"
+        aria-expanded="true"
+        aria-controls={LIST_ID}
+        aria-autocomplete="list"
+        aria-activedescendant={activeKey !== null ? optionId(LIST_ID, activeKey) : undefined}
+        bind:value={query}
+        oninput={() => {
+          // A new query highlights its best match.
+          if (mode === 'new') activeKey = null;
+        }}
+        onfocus={() => {
+          if (menu) menu = null;
+        }}
+        onkeydown={onInputKeydown}
+        placeholder={mode === 'new'
+          ? 'project or ticket…'
+          : 'Jump to a session, host, ticket or asset… (name, key, project, host, branch, status, or paste a ticket URL)'}
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </div>
+    <div class="listwrap" bind:this={listWrap}>
+      <PickerList
+        items={mode === 'new' ? newItems : items}
+        {activeKey}
+        onactivate={(k) => (activeKey = k)}
+        onpick={pick}
+        maxHeight={mode === 'new' ? 'min(70vh, 34rem)' : 'min(60vh, 24rem)'}
+        emptyText={query ? `No session matches “${query}” — ${modKey}↵ creates one with that name.` : 'No sessions yet.'}
+        ariaLabel={mode === 'new' ? 'Projects and tickets' : 'Sessions'}
+        listId={LIST_ID}
+        testid="switcher-list"
+        ongroupclick={mode === 'new' ? onGroupClick : undefined}
+        oncontext={mode === 'new' ? (k) => openMenu(k, 'main') : undefined}
+        rowActions={mode === 'new' ? actions : undefined}
+      />
+      {#if menu && entryOf(menu.key)}
+        {@const e = entryOf(menu.key)!}
+        <div
+          class="menu-anchor"
+          class:up={menuAt.bottom !== undefined}
+          style:top={menuAt.top !== undefined ? `${menuAt.top}px` : undefined}
+          style:bottom={menuAt.bottom !== undefined ? `${menuAt.bottom}px` : undefined}
+        >
+          <ProjectActionsMenu
+            title={e.key}
+            pinned={e.pinned}
+            hidden={!!e.hidden}
+            groups={menuGroups}
+            currentGroup={e.group.name}
+            manualGroup={e.group.key.startsWith('m:')}
+            startIn={menu.startIn}
+            onpin={() => {
+              togglePin(e);
+              closeMenu();
+            }}
+            onhide={() => {
+              toggleHide(e);
+              closeMenu();
+            }}
+            ongroup={(g) => setGroup(e, g)}
+            onclose={closeMenu}
+          />
+        </div>
+      {/if}
+    </div>
     <div class="hint">
-      <span>↑↓ move</span>
-      <span>↵ attach / open</span>
-      <span>{modKey}↵ new session named “{query.trim() || '…'}” (on a ticket: start it)</span>
-      <span>esc / {chord} close</span>
+      {#if mode === 'new'}
+        <span>↵ open</span>
+        <span>{modKey}↵ start with last settings</span>
+        <span>{modKey}P pin</span>
+        <span>{modKey}⌫ hide</span>
+        <span>⇧F10 more</span>
+        <span>esc close</span>
+      {:else}
+        <span>↑↓ move</span>
+        <span>↵ attach / open</span>
+        <span>{modKey}↵ new session named “{query.trim() || '…'}” (on a ticket: start it)</span>
+        <span>esc / {chord} close</span>
+      {/if}
     </div>
   </Modal>
 {/if}
+
+<!-- Hover actions on a project row: a mouse convenience (aria-hidden, not
+     focusable); the keys and the actions menu are the accessible path. -->
+{#snippet actions(item: PickerItem)}
+  {@const e = entryOf(item.key)}
+  {#if e}
+    <button
+      type="button"
+      tabindex="-1"
+      class="ib"
+      class:on={e.pinned}
+      title={e.pinned ? 'Unpin' : 'Pin to top'}
+      onclick={(ev) => {
+        ev.stopPropagation();
+        togglePin(e);
+      }}
+      ><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></svg
+    ></button>
+    <button
+      type="button"
+      tabindex="-1"
+      class="ib"
+      title="Move to group…"
+      onclick={(ev) => {
+        ev.stopPropagation();
+        openMenu(item.key, 'groups');
+      }}
+      ><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></svg
+    ></button>
+    <button
+      type="button"
+      tabindex="-1"
+      class="ib"
+      title={e.hidden ? 'Unhide' : 'Hide'}
+      onclick={(ev) => {
+        ev.stopPropagation();
+        toggleHide(e);
+      }}
+      ><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.73 5.08A10.4 10.4 0 0 1 12 5c7 0 10 7 10 7a13 13 0 0 1-1.67 2.68" /><path d="M6.61 6.61A13.5 13.5 0 0 0 2 12s3 7 10 7a9.7 9.7 0 0 0 5.39-1.61" /><path d="m2 2 20 20" /><path d="M14.08 14.16a3 3 0 0 1-4.24-4.24" /></svg
+    ></button>
+  {/if}
+{/snippet}
 
 <style>
   .query {
@@ -399,6 +924,57 @@
   .query:focus {
     outline: none;
     border-color: var(--accent);
+  }
+  .qrow {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .mode-chip {
+    flex: 0 0 auto;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0.15rem 0.5rem;
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    color: var(--accent);
+    white-space: nowrap;
+  }
+  .listwrap {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  /* A zero-height line beside the row; the menu hangs below it, or above
+     it (.up) when the room is below the list's fold. */
+  .menu-anchor {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 0;
+  }
+  .menu-anchor.up :global([role='menu']) {
+    bottom: 0;
+  }
+  .ib {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  .ib:hover {
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .ib.on {
+    color: var(--accent);
   }
   .hint {
     display: flex;
