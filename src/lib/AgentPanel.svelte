@@ -5,11 +5,12 @@
   // here is the frame, the chip, and the four states where the agent cannot
   // simply be talked to.
   //
-  // Only two of the four blocked states get a button (`blockedCopy`'s own
-  // rule): `absent` -> openAgent() wakes it, `lost` -> restartOperator()
-  // brings the session back. `no_mcp` / `token_revoked` are explanatory
-  // only — their fixes live outside this panel (Settings, the sidebar), so
-  // there is nothing here to wire a click to.
+  // Three of the blocked states get a button (`blockedCopy`'s own rule):
+  // `absent` -> openAgent() wakes it, `lost` -> restartOperator() brings the
+  // session back, and `host_down` with a fallback -> openAgent() starts it
+  // on that host (which openAgent already does unasked; the button is the
+  // retry). `no_mcp` / `token_revoked` / `no_host` are explanatory only —
+  // their fixes live outside this panel, so there is nothing to wire.
   //
   // This sheet used to own a composer of its own, because the chip's prefix
   // had to be glued onto the prompt and ConversationPanel knew nothing about
@@ -25,6 +26,7 @@
     agentPanelOpen,
     operatorState,
     operatorHost,
+    operatorFallback,
     operatorRow,
     blockedCopy,
     closeAgent,
@@ -66,14 +68,15 @@
 
   const blocked = $derived(
     $operatorState !== 'ready' && $operatorState !== 'waking' && $operatorState !== 'unknown'
-      ? blockedCopy($operatorState as OperatorBlocked, $operatorHost)
+      ? blockedCopy($operatorState as OperatorBlocked, $operatorHost, $operatorFallback)
       : null,
   );
   // Which function a blocked-state button runs, keyed on the actual state
   // rather than matching the copy string — `absent` wakes, `lost` restarts,
-  // everything else has no button at all (`blocked.action` is null there).
+  // `host_down` with a fallback starts the agent there, everything else has
+  // no button at all (`blocked.action` is null there).
   const blockedAction = $derived(
-    $operatorState === 'absent'
+    $operatorState === 'absent' || ($operatorState === 'host_down' && $operatorFallback)
       ? () => void openAgent()
       : $operatorState === 'lost'
         ? () => void restartOperator()

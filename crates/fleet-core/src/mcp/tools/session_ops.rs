@@ -881,7 +881,9 @@ impl FleetTools {
         ok_json(&res)
     }
 
-    #[tool(description = "Ensure the UX agent's operator session exists; returns its row.")]
+    #[tool(
+        description = "Ensure the UX agent's operator session exists on a reachable host; returns its row."
+    )]
     pub(super) async fn ensure_operator(&self) -> Result<CallToolResult, McpError> {
         audit("ensure_operator", "");
         let row = crate::service::operator::ensure_operator(&self.store, &self.ssh, &self.reg)
@@ -891,7 +893,7 @@ impl FleetTools {
     }
 
     #[tool(
-        description = "Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host."
+        description = "Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host|host_down; fallback: where ensure_operator moves it."
     )]
     pub(super) async fn operator_status(&self) -> Result<CallToolResult, McpError> {
         audit("operator_status", "");
