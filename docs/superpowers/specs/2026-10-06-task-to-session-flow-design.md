@@ -69,7 +69,7 @@ There are three modes, all over the **same** task, link and start primitives:
 9. **The operator can accept proposals, including a worker's.** The operator is the unbound `ux-agent` client, so `Caller::org_scope` gives it `OrgScope::All`. `service/work/local.rs::decide` refuses only callers whose scope is not `All`, and the `accept` / `reject` path in `mcp/tools/orchestration.rs` calls no confirm gate. That contradicts the shared-context rule that only a person decides. **Fixed 2026-10-06 (TS15):** `work_link { accept | reject }` refuses `caller.is_operator()` with `E_FORBIDDEN` (test `the_operator_never_decides_a_proposal`). `accept_many` must keep the same refusal when it is added.
 10. **A hub has no approver.** `fleet-hub serve` builds its guards `.without_approver()` (`serve.rs:903`), so every confirm forced on the operator answers `E_FORBIDDEN` on a hub. Operator-driven starts there need a hub confirm queue (§4.4).
 11. **Stop does not stop.** `cancel_task` only marks the task cancelled, and the worker keeps going. There is no primitive to pause one agent either.
-12. **The operator is not excluded from detection.** `work/detect*` never checks `operator_ref`, so every key the operator mentions becomes a link suggestion.
+12. **The operator is not excluded from detection.** `work/detect*` never checks `operator_ref`, so every key the operator mentions becomes a link suggestion. **Fixed 2026-10-06 (A0):** `detect::subject_state` answers `None` for the operator, so its prompts, its `agent_inferred` links and re-resolves suggest nothing; the classification nudge skips it too (`operator::is_operator_session`; tests `the_operator_is_never_a_detection_subject`, `the_operator_is_never_nudged_to_classify`).
 
 ---
 
@@ -541,7 +541,7 @@ The order follows the owner's stated pain first: *"chýba mi to hlavne na deskto
 
 | # | Slice | Contents | Roadmap part |
 |---|---|---|---|
-| **A0** | Fix now | ~~The operator may not accept or reject proposals (gap 9)~~ done 2026-10-06. The operator is excluded from detection (gap 12). | 1 |
+| **A0** | Fix now | **Done 2026-10-06.** The operator may not accept or reject proposals (gap 9). The operator is excluded from detection and the classification nudge (gap 12). | 1 |
 | **A1** | Start preview + Work button | P-1, P-8, the split button and popover in TaskList and WorkTaskDetail, the brief on by default for tickets, J1/J2/J5/J6, keyboard | 1 |
 | **A2** | Attach and switch | P-2, P-3, P-4, **P-7 link windows**, J3/J4, the attach picker, Undo | 1 |
 | **C0** | Brainstorm skill | `fleet-brainstorm` in the operator's directory; the plan goes to the root task's notes and journal. No new tables. **The owner asked that this not be forgotten, so it comes early.** | 3 / 4 |
