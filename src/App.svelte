@@ -849,6 +849,7 @@
     initialName={$newSessionRequest.initialName}
     initialHost={$newSessionRequest.initialHost}
     ticket={$newSessionRequest.ticket}
+    autostart={$newSessionRequest.autostart}
     onCreate={(s) => {
       clearNewSessionRequest();
       selectSessionExplicitly(s);

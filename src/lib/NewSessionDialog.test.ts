@@ -973,6 +973,54 @@ describe('NewSessionDialog: Enter is gated the same as the Create button', () =>
   });
 });
 
+// The picker's ⌘↵ (project picker spec v2): `autostart` submits once with the
+// remembered choices, and leaves the dialog open when something needs a person.
+describe('NewSessionDialog autostart', () => {
+  const newSessionCalls = () =>
+    (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'new_session');
+
+  function answerNewSession() {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'new_session') return okRow();
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  }
+
+  it('submits once with the remembered choices', async () => {
+    answerNewSession();
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(newSessionCalls()).toHaveLength(1));
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(1);
+    expect((newSessionCalls()[0][1] as any).args.host_alias).toBe('local');
+  });
+
+  it('does nothing while a hub blocks new_session', async () => {
+    answerNewSession();
+    hubStatus.set({
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+      client_mode: null,
+      configured_url: 'https://fleet.example.com',
+      configured_client_name: 'laptop',
+      allow_plaintext: false,
+      warning: null,
+      restart_required: false,
+      unavailable: null,
+    });
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    expect(screen.getByRole('dialog', { name: 'New session' })).toBeTruthy();
+  });
+});
+
 // #168: `list_host_worktrees` now routes to a hub tool, so a hub client
 // scans a remote host through the hub and gets real rows. What it must NOT
 // do is invent them: never read `project.worktrees` as a substitute (those

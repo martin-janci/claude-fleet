@@ -38,6 +38,7 @@
     initialName,
     initialHost,
     ticket,
+    autostart = false,
     clock = () => Math.floor(Date.now() / 1000),
     locale,
     timeZone,
@@ -54,6 +55,9 @@
      *  Claude with the ticket" with an editable preview, and creating goes
      *  through `start_work`, which links the session `started`. */
     ticket?: TicketRow;
+    /** Start at once with the remembered choices (the picker's ⌘↵); the
+     *  dialog stays open only if something needs a person. */
+    autostart?: boolean;
     /** Unix seconds for the host chips' usage wording; injectable for tests. */
     clock?: () => number;
     locale?: string;
@@ -874,6 +878,19 @@
     remember(submittedHost, submittedWorktreeId);
     onCreate(r.value);
   }
+
+  // The picker's ⌘↵ (project picker spec v2): once this host's worktree
+  // list is in, submit once with what the dialog remembered. Anything that
+  // needs a person — a new worktree without a name, a blocked hub, an error —
+  // leaves the dialog open, as if the person had pressed Create.
+  let autostarted = false;
+  $effect(() => {
+    if (!autostart || autostarted || busy) return;
+    if (hostWorktrees.status === 'loading') return;
+    if (newSessionBlocked || (inNewMode && !newWorktreeName.trim())) return;
+    autostarted = true;
+    void submit();
+  });
 
   function cancelCreate() {
     createController?.abort();

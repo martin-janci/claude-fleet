@@ -17,6 +17,9 @@ export interface NewSessionRequest {
   /** Start work on this ticket (work graph M3): the dialog offers the
    *  "Brief Claude with the ticket" preview, and creating links it. */
   ticket?: TicketRow;
+  /** Start at once with the remembered choices (the picker's ⌘↵); the
+   *  dialog stays open only if something needs a person. */
+  autostart?: boolean;
 }
 
 export const newSessionRequest = writable<NewSessionRequest | null>(null);
