@@ -77,7 +77,8 @@
 
   async function continueFrom(l: WorkTaskLink | undefined) {
     if (!task.key || !l || busy) return;
-    const why = continueBlocked(l);
+    // Re-asked at the write, on the SOURCE session, not only on the button.
+    const why = startBlocked ?? $sessionIdBlocked(l.session_id ?? null, 'resume_work');
     if (why) {
       error = why;
       return;
