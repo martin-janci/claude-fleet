@@ -166,8 +166,9 @@ cargo deny check                # licenses + advisories
 ```
 
 Run `scripts/ci-local.sh` (or `--rust-only` / `--frontend-only`) before
-pushing; it mirrors CI. Opt in to the fast pre-commit hook with
-`git config core.hooksPath .githooks`.
+pushing; it mirrors CI. Opt in to the hooks with
+`git config core.hooksPath .githooks`: a fast pre-commit check, and a
+pre-push check that the migrations you add are numbered above `origin/main`'s.
 
 ### Project layout
 

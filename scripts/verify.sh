@@ -7,7 +7,9 @@
 #   scripts/verify.sh            # = quick
 #   scripts/verify.sh quick      # before a commit
 #   scripts/verify.sh full       # before a push: scripts/ci-local.sh, narrowed
-#                                #   to the jobs the change touches
+#                                #   to the jobs the change touches; every mode
+#                                #   first checks migration numbers against
+#                                #   origin/main (scripts/check-migration-numbers.sh)
 #   scripts/verify.sh remote     # the same `full`, on the persistent Buildkite
 #                                #   builder, for the pushed HEAD
 #                                #   (scripts/buildkite-verify.sh, docs/buildkite.md)

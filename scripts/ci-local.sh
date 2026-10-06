@@ -2,6 +2,11 @@
 # Local mirror of .github/workflows/ci.yml. Runs the same steps, in the same
 # order, so a green run here should mean a green run in CI:
 #
+#   migrations:    scripts/check-migration-numbers.sh --fetch — every
+#                  migration this tree adds is numbered above origin/main's
+#                  highest, and no two share a number (main took a branch's
+#                  number four times in one week); then its own test,
+#                  scripts/check-migration-numbers-test.sh. Every mode.
 #   version job:   scripts/check-version-consistency.sh — the six version
 #                  carriers, their Cargo.lock entries and fleet-core's
 #                  allowlisted 0.1.0; then a smoke test of
@@ -35,7 +40,10 @@
 #                  pnpm run check
 #                  pnpm run test
 #                  pnpm run build
-#                  pnpm audit --audit-level=high
+#                  pnpm audit --audit-level=high (CI_LOCAL_AUDIT=warn reports
+#                  a failure and goes on; the pre-commit hook sets it, so an
+#                  advisory already on main does not block a commit — CI and
+#                  a plain run of this script still fail on it)
 #   hub-e2e:       scripts/hub-e2e.sh, opt-in via --hub-e2e (mirrors the
 #                  hub-headless CI job's e2e step; see that script's own
 #                  header), work-graph leg included: like CI, it builds a
@@ -193,10 +201,22 @@ run_frontend() {
   step "${PNPM[@]}" run check
   step "${PNPM[@]}" run test
   step "${PNPM[@]}" run build
-  step "${PNPM[@]}" audit --audit-level=high
+  if [[ "${CI_LOCAL_AUDIT:-}" == warn ]]; then
+    if ! step "${PNPM[@]}" audit --audit-level=high; then
+      printf '\n\033[1;33mci-local: pnpm audit found advisories (not blocking: CI_LOCAL_AUDIT=warn; CI fails on them)\033[0m\n' >&2
+    fi
+  else
+    step "${PNPM[@]}" audit --audit-level=high
+  fi
 }
 
-# Always, and first: ci.yml's version-consistency job. Cheap, and a mismatch
+# Always, and first: no migration this tree adds collides with main's numbers.
+# Fetches origin's main so the comparison is against today's main, not the
+# clone's last fetch (best-effort: offline it checks the local ref).
+step scripts/check-migration-numbers.sh --fetch
+step bash scripts/check-migration-numbers-test.sh
+
+# ci.yml's version-consistency job. Cheap, and a mismatch
 # here is what turns a release tag into three different advertised versions.
 step scripts/check-version-consistency.sh
 
