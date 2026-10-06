@@ -77,6 +77,20 @@
       ]
     },
     {
+      "title": "Members",
+      "items": [
+        {
+          "type": "field",
+          "key": "members"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. A new person gets a device in Settings → Devices (Pair a device, for them)."
+        }
+      ]
+    },
+    {
       "title": "Devices",
       "items": [
         {
@@ -105,6 +119,14 @@
         {
           "type": "field",
           "key": "bound_sees_unassigned"
+        },
+        {
+          "type": "field",
+          "key": "owns_hub"
+        },
+        {
+          "type": "field",
+          "key": "admins_see_unclaimed"
         }
       ]
     },

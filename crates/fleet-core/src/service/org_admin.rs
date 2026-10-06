@@ -131,6 +131,12 @@ pub struct OrgAdminArgs {
     /// remove_member: keep what was shared with them on the org's sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keep_grants: Option<bool>,
+    /// update_org: this company owns the hub (hub owner only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owns_hub: Option<bool>,
+    /// update_org: its admins see the unclaimed count (hub owner only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admins_see_unclaimed: Option<bool>,
 }
 
 impl OrgAdminArgs {
@@ -173,6 +179,8 @@ impl OrgAdminArgs {
             ("trusted", self.trusted),
             ("on", self.on),
             ("keep_grants", self.keep_grants),
+            ("owns_hub", self.owns_hub),
+            ("admins_see_unclaimed", self.admins_see_unclaimed),
         ] {
             if let Some(v) = v {
                 out.push_str(&format!(" {k}={v}"));
@@ -492,6 +500,12 @@ fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(
             if args.bound_sees_unassigned.is_some() {
                 return Err(forbidden("whether its devices see unassigned work"));
             }
+            if args.owns_hub.is_some() {
+                return Err(forbidden("which company owns the hub"));
+            }
+            if args.admins_see_unclaimed.is_some() {
+                return Err(forbidden("who sees the unclaimed count"));
+            }
             Ok(())
         }
         Action::Org(OrgAction::AssignHost | OrgAction::UnassignHost) if hub => Ok(()),
@@ -786,6 +800,18 @@ pub fn run(
                 OrgAction::AddOrg => None,
                 _ => org_of(&s, args)?,
             };
+            // Phase D's two switches ride update_org, so the org page edits
+            // them like any other (`check` keeps them the hub owner's).
+            if let (OrgAction::UpdateOrg, Some(o)) = (a, org_id) {
+                match args.owns_hub {
+                    Some(true) => s.set_hub_owner_org(Some(o))?,
+                    Some(false) if s.hub_owner_org()? == Some(o) => s.set_hub_owner_org(None)?,
+                    _ => {}
+                }
+                if let Some(on) = args.admins_see_unclaimed {
+                    s.set_org_admins_see_unclaimed(o, on)?;
+                }
+            }
             orgs::admin(
                 a,
                 &WorkAdminArgs {

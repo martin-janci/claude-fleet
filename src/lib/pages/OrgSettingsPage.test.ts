@@ -67,6 +67,8 @@ function route(list: OrgDetail[]) {
   invoke.mockImplementation(async (cmd: string) => {
     if (cmd === 'list_orgs') return list;
     if (cmd === 'set_org_setting') return [];
+    if (cmd === 'set_org_member') return [];
+    if (cmd === 'remove_org_member') return { removed: true, revoked_grants: 0 };
     return null;
   });
 }
@@ -104,6 +106,38 @@ describe('an org’s spend and its own settings', () => {
     expect(screen.getByTestId('org-setting-fleet-work.summary_model').textContent).toContain("(the fleet's)");
     await fireEvent.click(screen.getByTestId('org-setting-own-work.summary_model'));
     await waitFor(() => expect(argsOf('set_org_setting')).toEqual({ org_id: 1, key: 'work.summary_model', value: 'haiku' }));
+  });
+});
+
+describe('an org’s members (phase D)', () => {
+  it('lists who is in it with their role, adds one and removes one', async () => {
+    route([
+      {
+        ...acme,
+        members: [
+          { person_id: 2, name: 'jane', role: 'admin' },
+          { person_id: 3, name: 'bob', display_name: 'Bob B', role: 'member' },
+        ],
+      },
+    ]);
+    render(ResourcePage, { props: { page, resource } });
+    await waitFor(() => expect(screen.getByTestId('record-field-members').textContent).toContain('jane · admin'));
+    expect(screen.getByTestId('record-field-members').textContent).toContain('Bob B · member');
+    await fireEvent.input(screen.getByTestId('param-org.set_member-person'), { target: { value: 'cleo' } });
+    await fireEvent.change(screen.getByTestId('param-org.set_member-role'), { target: { value: 'viewer' } });
+    await fireEvent.click(screen.getByTestId('run-org.set_member'));
+    await waitFor(() => expect(argsOf('set_org_member')).toEqual({ org_id: 1, person: 'cleo', role: 'viewer' }));
+    await fireEvent.click(screen.getAllByTestId('item-remove-members')[1]);
+    expect((await screen.findByTestId('confirm-dialog')).textContent).toContain('taken back');
+    await fireEvent.click(screen.getByTestId('record-confirm'));
+    await waitFor(() => expect(argsOf('remove_org_member')).toEqual({ org_id: 1, person_id: 3 }));
+  });
+
+  it('leaves the members out for someone the hub does not show them to', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    await waitFor(() => expect(screen.getByTestId('record-field-name')).toBeTruthy());
+    expect(screen.queryByTestId('record-field-members')).toBeNull();
   });
 });
 

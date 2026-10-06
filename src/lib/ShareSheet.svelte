@@ -21,12 +21,10 @@
   //      terminal is this machine's own `ssh … tmux attach`, with no hub in the
   //      path to refuse it later (spec §4.3 invariant 4).
   //
-  // There is **no team / org recipient in M1**. `'org'` visibility was removed
-  // from the milestone by the owner's decision: with no membership table, "the
-  // org can see it" has exactly one referent — `client_tokens.org_id`, written
-  // by an admin binding their own device — which is the privacy hole the
-  // decision closed. Team sharing returns in M2 with memberships and a defined
-  // reader. So this sheet names PEOPLE, and nothing in it offers a team.
+  // Org administration phase D brought team sharing back, as a GRANT to an
+  // org: it reaches the org's members and admins who are in it when the share
+  // is made — never someone who joins later (changing a membership never
+  // widens a grant), never a viewer. The sheet says so beside the control.
   import Modal from './Modal.svelte';
   import { accessOf } from './access';
   import type { Result } from './result';
@@ -37,6 +35,7 @@
     sessions,
     unshareSession,
     type SessionGrant,
+    type ShareTo,
   } from './sessions';
   import { shareSheetFor, sessionBlocked } from './share';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -80,6 +79,8 @@
   let grants = $state<SessionGrant[] | null>(null);
   let listError = $state<string | null>(null);
   let person = $state('');
+  /** Who the draft share is for: a person, or an org (phase D). */
+  let kind = $state<'person' | 'org'>('person');
   let level = $state<'watch' | 'drive'>('watch');
   /** Which person's grant is one click from being revoked. Revoking is not
    *  destructive the way a kill is, but it is invisible to the person it
@@ -108,6 +109,7 @@
   $effect(() => {
     const forId = id;
     person = '';
+    kind = 'person';
     level = 'watch';
     confirming = null;
     error = null;
@@ -162,32 +164,40 @@
     const forId = id;
     const name = person.trim();
     if (forId === null || !name) return;
+    const to: ShareTo = kind === 'org' ? { org: name } : name;
     void run(forId, shareBlocked, async () => {
-      const r = await shareSession(forId, name, level);
+      const r = await shareSession(forId, to, level);
       if (r.ok) person = '';
       return r;
     });
   }
 
-  function doNarrow(name: string) {
+  function doNarrow(to: ShareTo) {
     const forId = id;
     if (forId === null) return;
-    void run(forId, narrowBlocked, () => narrowShare(forId, name));
+    void run(forId, narrowBlocked, () => narrowShare(forId, to));
   }
 
-  function doRevoke(name: string) {
+  function doRevoke(to: ShareTo) {
     const forId = id;
     if (forId === null) return;
-    void run(forId, revokeBlocked, () => unshareSession(forId, name));
+    void run(forId, revokeBlocked, () => unshareSession(forId, to));
   }
 
-  /** What to call a recipient, and what to send back as `person`. The hub's
-   *  own name is what the sharing tools take, so a grant with no name is
-   *  shown by id and its controls are disabled rather than guessing one. */
-  function recipientName(g: SessionGrant): string | null {
+  /** What to send back as the recipient. The hub's own name is what the
+   *  sharing tools take, so a grant with no name is shown by id and its
+   *  controls are disabled rather than guessing one. */
+  function recipientOf(g: SessionGrant): ShareTo | null {
+    if (g.org_id != null) return g.org_name ? { org: g.org_name } : null;
     return g.person_name ?? null;
   }
+  /** The key the two-step revoke remembers: one per recipient. */
+  function keyOf(to: ShareTo | null): string | null {
+    if (to === null) return null;
+    return typeof to === 'string' ? `p:${to}` : `o:${to.org}`;
+  }
   function recipientLabel(g: SessionGrant): string {
+    if (g.org_id != null) return `${g.org_name || `org #${g.org_id}`} (its members)`;
     return g.person_display_name || g.person_name || (g.person_id === null ? 'unknown' : `person #${g.person_id}`);
   }
 </script>
@@ -211,18 +221,22 @@
       </div>
     {:else}
       <p class="hint">
-        Shares this session through Fleet with one person at a time. Revoke it
-        whenever you like — a share is never permanent and never passes on: the
-        person you share with cannot share it further.
+        Shares this session through Fleet with a person, or with an org you are
+        in. Revoke it whenever you like — a share is never permanent and never
+        passes on: whoever you share with cannot share it further.
       </p>
 
       <section class="block">
-        <h4>Share with a person</h4>
+        <h4>Share</h4>
         <div class="row">
+          <select data-testid="share-kind" aria-label="Share with" bind:value={kind} disabled={busy}>
+            <option value="person">a person</option>
+            <option value="org">an org</option>
+          </select>
           <input
             data-testid="share-person"
-            aria-label="Person"
-            placeholder="their name on this fleet"
+            aria-label={kind === 'org' ? 'Org' : 'Person'}
+            placeholder={kind === 'org' ? 'an org you are a member of' : 'their name on this fleet'}
             bind:value={person}
             disabled={busy}
           />
@@ -235,16 +249,16 @@
             class="primary"
             data-testid="share-confirm"
             disabled={busy || person.trim() === '' || shareBlocked !== null}
-            title={shareBlocked ?? 'Share this session with one person'}
+            title={shareBlocked ?? 'Share this session'}
             onclick={doShare}>{busy ? 'Sharing…' : 'Share'}</button
           >
         </div>
-        <!-- There is no team / org option here on purpose (see the comment at
-             the top of this file): M1 has no membership table, so there is
-             nothing a team share could honestly mean. -->
-        <p class="note" data-testid="share-no-team">
-          People only for now — sharing with a whole team needs memberships and
-          is not part of this release.
+        <!-- Phase D: an org share is a grant to the org's members of today
+             (see the comment at the top of this file). -->
+        <p class="note" data-testid="share-org-note">
+          An org share reaches its members and admins who are in it now — not
+          anyone who joins later, and never a viewer. Share again to include
+          newcomers.
         </p>
       </section>
 
@@ -260,12 +274,12 @@
           </p>
         {:else}
           <ul class="grants" data-testid="share-list">
-            {#each grants as g (`${g.person_id}:${g.level}`)}
-              {@const name = recipientName(g)}
+            {#each grants as g (`${g.person_id}:${g.org_id}:${g.level}`)}
+              {@const name = recipientOf(g)}
               <li class="grant" data-testid="share-grant">
                 <span class="who" data-testid="share-grant-who">{recipientLabel(g)}</span>
                 <span class="level" data-testid="share-grant-level">{g.level}</span>
-                {#if confirming === name && name !== null}
+                {#if confirming !== null && confirming === keyOf(name) && name !== null}
                   <span class="confirm" data-testid="share-revoke-confirm">
                     Revoke?
                     <button
@@ -274,7 +288,7 @@
                       data-testid="share-revoke-yes"
                       disabled={busy || revokeBlocked !== null}
                       title={revokeBlocked ?? 'Revoke this grant'}
-                      onclick={() => doRevoke(name)}>Revoke</button
+                      onclick={() => name !== null && doRevoke(name)}>Revoke</button
                     >
                     <button type="button" data-testid="share-revoke-no" disabled={busy}
                       onclick={() => (confirming = null)}>Keep</button
@@ -304,7 +318,7 @@
                     title={name === null
                       ? 'This hub did not name the recipient, so this app cannot act on the grant — use fleet-hub'
                       : (revokeBlocked ?? 'Revoke this grant')}
-                    onclick={() => (confirming = name)}>Revoke</button
+                    onclick={() => (confirming = keyOf(name))}>Revoke</button
                   >
                 {/if}
               </li>

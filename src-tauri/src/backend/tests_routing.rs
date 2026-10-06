@@ -1580,6 +1580,43 @@ fn org_admin_mutation_cases() -> Vec<Case> {
     use fleet_core::service::org_admin::OrgAdminArgs;
     vec![
         (
+            "set_org_member",
+            "org_admin",
+            json!({ "action": "set_member", "org_id": 1, "person": "jane", "role": "admin" }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::set_org_member(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person: Some("jane".into()),
+                        role: Some("admin".into()),
+                        ..OrgAdminArgs::new("set_member")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_org_member",
+            "org_admin",
+            json!({ "action": "remove_member", "org_id": 1, "person_id": 3 }),
+            r#"{"removed":true,"revoked_grants":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::remove_org_member(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person_id: Some(3),
+                        ..OrgAdminArgs::new("remove_member")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "set_org_setting",
             "org_admin",
             json!({ "action": "set_org_setting", "org_id": 1, "key": "budget.org_daily_usd", "value": "5" }),

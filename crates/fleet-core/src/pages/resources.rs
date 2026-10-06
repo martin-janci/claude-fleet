@@ -246,6 +246,8 @@ pub enum ItemLabel {
     OrgRule,
     /// A paired device: its name, then `read-only` / `trusted` when so.
     Device,
+    /// An org's member (phase D): their name, then their role.
+    Member,
 }
 
 /// A badge in the list and the detail header while a field has a value.
@@ -435,6 +437,16 @@ const ORG_RULE_ADDS: &[ActionSpec] = &[
     .params(&[param("host_alias", "Host", text(100, "hetzner-a"), true)]),
 ];
 
+/// The roles of an org member (`store::ORG_ROLES`), as a form offers them.
+pub const ORG_ROLE_CHOICES: &[(&str, &str)] = &[
+    (
+        "member",
+        "Member — sees its work and what is shared with it",
+    ),
+    ("admin", "Admin — administers the org"),
+    ("viewer", "Viewer — reads only"),
+];
+
 const ORG: ResourceType = ResourceType {
     id: "org",
     label: "Organisation",
@@ -535,6 +547,49 @@ const ORG: ResourceType = ResourceType {
                     .params(&[param("device", "Device", ParamKind::Options { source: OptionSource::Devices }, true)])],
             },
         ),
+        FieldSpec::new(
+            "members",
+            "Members",
+            "Who is in the company. An admin administers it (its settings, members and their devices); a member sees its work and what is shared with it; a viewer only reads. Nobody sees another person's private sessions.",
+            FieldKind::Items {
+                item_label: ItemLabel::Member,
+                remove: Some(
+                    ActionSpec::new(
+                        "org.remove_member",
+                        "Remove from the org",
+                        "remove_org_member",
+                        &[ORG_ID, ("person_id", Bind::ItemField("person_id"))],
+                    )
+                    .confirm("What was shared with them on this org's sessions is taken back too. Their own sessions stay theirs; if this was their last org, their devices see nothing of any org."),
+                ),
+                add: &[ActionSpec::new(
+                    "org.set_member",
+                    "Add or change a member",
+                    "set_org_member",
+                    &[ORG_ID, ("person", Bind::Param("person")), ("role", Bind::Param("role"))],
+                )
+                .params(&[
+                    param("person", "Person", text(64, "jane"), true),
+                    param("role", "Role", ParamKind::Choice { options: ORG_ROLE_CHOICES }, true),
+                ])],
+            },
+        ),
+        FieldSpec::new(
+            "owns_hub",
+            "Owns this hub",
+            "This company owns the hub: its admins administer hosts — route them into orgs and see how many sessions on them nobody has claimed. One org at most. Only the hub's owner changes it.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .edit("owns_hub")
+        .badge(Badge::True { text: "owns the hub" })
+        .confirm("This org's admins will administer every host on the hub."),
+        FieldSpec::new(
+            "admins_see_unclaimed",
+            "Admins see unclaimed sessions",
+            "Its admins see how many sessions on its hosts nobody has claimed — a count, never the sessions. Off by default; only the hub's owner changes it.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .edit("admins_see_unclaimed"),
         FieldSpec::new(
             "isolate_sessions",
             "Isolate sessions",
@@ -1050,12 +1105,14 @@ mod tests {
                 "list_trackers",
                 "pair_device",
                 "remove_org",
+                "remove_org_member",
                 "remove_org_rule",
                 "remove_tracker",
                 "rename_person",
                 "revoke_device",
                 "set_device_person",
                 "set_device_trust",
+                "set_org_member",
                 "set_org_setting",
                 "set_tracker_credential",
                 "test_tracker",

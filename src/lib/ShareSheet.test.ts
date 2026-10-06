@@ -2,9 +2,8 @@
 // smallest sheet test in the repo: mock the `sessions.ts` wrappers, render the
 // component, drive the controls.
 //
-// What it pins beyond the three buttons working: that the sheet NAMES no team
-// (M1 has no membership table, so a team share has no referent), that it offers
-// nothing that raises a level, and that it says out loud the two things a
+// What it pins beyond the three buttons working: that an org share says what
+// it reaches (phase D), that it offers nothing that raises a level, and that it says out loud the two things a
 // sharer is deciding without being told — the recipient gets the history from
 // before the share, and watch/drive are Fleet's rule and not SSH's.
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -89,7 +88,7 @@ describe('ShareSheet', () => {
     expect(screen.getByTestId('share-list-empty').textContent).toMatch(/not shared with anyone/i);
   });
 
-  it('shares with one PERSON at a level, and offers no team anywhere', async () => {
+  it('shares with one PERSON at a level', async () => {
     mockedShare.mockResolvedValue({ ok: true, value: null });
     render(ShareSheet);
     await settle();
@@ -102,16 +101,35 @@ describe('ShareSheet', () => {
     // The list is re-read rather than patched: the hub is the authority on what
     // the grant set now is.
     expect(mockedList).toHaveBeenCalledTimes(2);
-    // M1 names people only. Nothing in the sheet offers a team, an org, or a
-    // "share with my team" control — team sharing needs memberships and is M2.
-    expect(screen.getByTestId('share-no-team').textContent).toMatch(/people only/i);
-    const text = screen.getByTestId('share-sheet').textContent ?? '';
-    expect(text).not.toMatch(/\borg\b|organisation|organization/i);
+    // Phase D: an org is the other recipient, and the sheet says what an org
+    // share does and does not reach.
+    expect(screen.getByTestId('share-org-note').textContent).toMatch(/not\s+anyone\s+who\s+joins\s+later/i);
     const levels = Array.from(
       screen.getByTestId('share-level').querySelectorAll('option'),
       (o) => (o as HTMLOptionElement).value,
     );
     expect(levels).toEqual(['watch', 'drive']);
+  });
+
+  it('shares with an ORG by name, and revokes an org grant by its name', async () => {
+    mockedShare.mockResolvedValue({ ok: true, value: null });
+    mockedUnshare.mockResolvedValue({ ok: true, value: null });
+    mockedList.mockResolvedValue({
+      ok: true,
+      value: [grant({ person_id: null, person_name: null, person_display_name: null, org_id: 5, org_name: 'Acme' })],
+    });
+    render(ShareSheet);
+    await settle();
+    await fireEvent.change(screen.getByTestId('share-kind'), { target: { value: 'org' } });
+    await fireEvent.input(screen.getByTestId('share-person'), { target: { value: 'Acme' } });
+    await fireEvent.click(screen.getByTestId('share-confirm'));
+    await settle();
+    expect(mockedShare).toHaveBeenCalledWith(42, { org: 'Acme' }, 'watch');
+    expect(screen.getByTestId('share-grant-who').textContent).toContain('Acme');
+    await fireEvent.click(screen.getByTestId('share-revoke'));
+    await fireEvent.click(screen.getByTestId('share-revoke-yes'));
+    await settle();
+    expect(mockedUnshare).toHaveBeenCalledWith(42, { org: 'Acme' });
   });
 
   it('will not submit an empty recipient', async () => {

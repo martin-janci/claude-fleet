@@ -49,6 +49,12 @@ pub struct UpdateOrgArgs {
     /// work and sessions.
     #[serde(default)]
     pub bound_sees_unassigned: Option<bool>,
+    /// Org administration phase D: this company owns the hub.
+    #[serde(default)]
+    pub owns_hub: Option<bool>,
+    /// Phase D: its admins see the unclaimed count on its hosts.
+    #[serde(default)]
+    pub admins_see_unclaimed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -140,6 +146,8 @@ pub async fn update_org(
                 auto_tidy: args.auto_tidy,
                 jev: args.jev,
                 bound_sees_unassigned: args.bound_sees_unassigned,
+                owns_hub: args.owns_hub,
+                admins_see_unclaimed: args.admins_see_unclaimed,
                 ..OrgAdminArgs::new("update_org")
             },
         )
@@ -279,6 +287,67 @@ pub async fn set_org_setting(
     .await
 }
 
+/// Org administration phase D: add a person to an org (a new name becomes
+/// a person), or change their role.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetOrgMemberArgs {
+    pub org_id: i64,
+    #[serde(default)]
+    pub person: Option<String>,
+    #[serde(default)]
+    pub person_id: Option<i64>,
+    pub role: String,
+}
+
+#[tauri::command]
+pub async fn set_org_member(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: SetOrgMemberArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::set_org_member(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            person: args.person,
+            person_id: args.person_id,
+            role: Some(args.role),
+            ..OrgAdminArgs::new("set_member")
+        },
+    )
+    .await
+}
+
+/// Phase D: take a person out of an org; what was shared with them on its
+/// sessions goes too unless `keep_grants`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoveOrgMemberArgs {
+    pub org_id: i64,
+    pub person_id: i64,
+    #[serde(default)]
+    pub keep_grants: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn remove_org_member(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: RemoveOrgMemberArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::remove_org_member(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            person_id: Some(args.person_id),
+            keep_grants: args.keep_grants,
+            ..OrgAdminArgs::new("remove_member")
+        },
+    )
+    .await
+}
+
 // --- reads (routed) ------------------------------------------------------------
 
 #[tauri::command]
@@ -354,6 +423,28 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("set_org_setting", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn set_org_member(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_org_member", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn remove_org_member(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("remove_org_member", &args).await,
             None => local(&args, store),
         }
     }

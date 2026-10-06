@@ -51,7 +51,8 @@ export type ItemLabel =
   | { type: 'plain' }
   | { type: 'field'; field: string }
   | { type: 'org_rule' }
-  | { type: 'device' };
+  | { type: 'device' }
+  | { type: 'member' };
 
 export type Badge =
   | { when: 'true'; text: string }
@@ -209,6 +210,10 @@ export function itemLabel(label: ItemLabel, item: unknown): string {
   if (label.type === 'plain') return String(item);
   if (label.type === 'org_rule') return ruleChip(item as OrgRuleRow);
   if (label.type === 'device') return deviceChip(item as DeviceItem);
+  if (label.type === 'member') {
+    const m = item as { name?: string; display_name?: string; role?: string };
+    return `${m.display_name || m.name || ''} · ${m.role ?? ''}`;
+  }
   const v = (item as Record<string, unknown> | null)?.[label.field];
   return v === undefined || v === null ? '' : String(v);
 }

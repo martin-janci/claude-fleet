@@ -433,6 +433,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("assign_host_org", Verdict::Routed { tool: "org_admin" }),
     ("assign_tracker_org", Verdict::Routed { tool: "org_admin" }),
     ("set_org_setting", Verdict::Routed { tool: "org_admin" }),
+    ("set_org_member", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org_member", Verdict::Routed { tool: "org_admin" }),
     ("work_scopes", Verdict::Routed { tool: "work" }),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),

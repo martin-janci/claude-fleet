@@ -3037,6 +3037,20 @@
         {
           "items": [
             {
+              "key": "members",
+              "type": "field"
+            },
+            {
+              "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. A new person gets a device in Settings → Devices (Pair a device, for them).",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "Members"
+        },
+        {
+          "items": [
+            {
               "key": "devices",
               "type": "field"
             },
@@ -3061,6 +3075,14 @@
             },
             {
               "key": "bound_sees_unassigned",
+              "type": "field"
+            },
+            {
+              "key": "owns_hub",
+              "type": "field"
+            },
+            {
+              "key": "admins_see_unclaimed",
               "type": "field"
             }
           ],
@@ -4026,6 +4048,125 @@
             "report": false
           },
           "type": "items"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ],
+                [
+                  "person",
+                  {
+                    "from": "param",
+                    "name": "person"
+                  }
+                ],
+                [
+                  "role",
+                  {
+                    "from": "param",
+                    "name": "role"
+                  }
+                ]
+              ],
+              "command": "set_org_member",
+              "envelope": "args",
+              "id": "org.set_member",
+              "label": "Add or change a member",
+              "params": [
+                {
+                  "label": "Person",
+                  "max": 64,
+                  "name": "person",
+                  "placeholder": "jane",
+                  "required": true,
+                  "type": "text"
+                },
+                {
+                  "label": "Role",
+                  "name": "role",
+                  "options": [
+                    [
+                      "member",
+                      "Member — sees its work and what is shared with it"
+                    ],
+                    [
+                      "admin",
+                      "Admin — administers the org"
+                    ],
+                    [
+                      "viewer",
+                      "Viewer — reads only"
+                    ]
+                  ],
+                  "required": true,
+                  "type": "choice"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Who is in the company. An admin administers it (its settings, members and their devices); a member sees its work and what is shared with it; a viewer only reads. Nobody sees another person's private sessions.",
+          "id": "members",
+          "item_label": {
+            "type": "member"
+          },
+          "label": "Members",
+          "remove": {
+            "bind": [
+              [
+                "org_id",
+                {
+                  "from": "record",
+                  "name": "id"
+                }
+              ],
+              [
+                "person_id",
+                {
+                  "from": "item_field",
+                  "name": "person_id"
+                }
+              ]
+            ],
+            "command": "remove_org_member",
+            "confirm": "What was shared with them on this org's sessions is taken back too. Their own sessions stay theirs; if this was their last org, their devices see nothing of any org.",
+            "envelope": "args",
+            "id": "org.remove_member",
+            "label": "Remove from the org",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "badge": {
+            "text": "owns the hub",
+            "when": "true"
+          },
+          "confirm": "This org's admins will administer every host on the hub.",
+          "default": false,
+          "edit": "owns_hub",
+          "help": "This company owns the hub: its admins administer hosts — route them into orgs and see how many sessions on them nobody has claimed. One org at most. Only the hub's owner changes it.",
+          "id": "owns_hub",
+          "label": "Owns this hub",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "default": false,
+          "edit": "admins_see_unclaimed",
+          "help": "Its admins see how many sessions on its hosts nobody has claimed — a count, never the sessions. Off by default; only the hub's owner changes it.",
+          "id": "admins_see_unclaimed",
+          "label": "Admins see unclaimed sessions",
+          "on_off": false,
+          "type": "bool"
         },
         {
           "badge": {

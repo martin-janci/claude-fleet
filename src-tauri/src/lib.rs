@@ -445,6 +445,8 @@ pub fn run() {
             commands::orgs::assign_host_org,
             commands::orgs::assign_tracker_org,
             commands::orgs::set_org_setting,
+            commands::orgs::set_org_member,
+            commands::orgs::remove_org_member,
             commands::orgs::work_scopes,
             commands::orgs::list_orgs,
             commands::orgs::org_suggestions,

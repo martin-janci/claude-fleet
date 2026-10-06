@@ -76,6 +76,14 @@ export interface OrgDetail extends OrgRow {
   budget_daily_usd?: number;
   budget_monthly_usd?: number;
   over_budget?: ('daily' | 'monthly')[];
+  /** Phase D: who is in the company, for its people and the hub's owner. */
+  members?: { person_id: number; name: string; display_name?: string; role: string }[];
+  /** Phase D: the caller's own role in it. */
+  my_role?: 'admin' | 'member' | 'viewer';
+  /** Phase D: this company owns the hub. */
+  owns_hub?: boolean;
+  /** Phase D: its admins see the unclaimed count on its hosts. */
+  admins_see_unclaimed?: boolean;
 }
 
 /** One per-org setting on an org's page: the setting described with the
