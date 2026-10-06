@@ -8,6 +8,7 @@ pub mod author;
 pub mod author_session;
 pub mod catalogs;
 pub mod changesets;
+pub mod drift_diff;
 pub mod effective;
 pub mod harness;
 pub mod harness_set;

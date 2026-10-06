@@ -6,6 +6,8 @@ import { vi } from 'vitest';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
+import { get } from 'svelte/store';
+import { assetsViewRequest, requestAssetsView } from './lib/app_views';
 
 beforeEach(() => {
   // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
@@ -180,6 +182,15 @@ describe('App layout', () => {
     expect(getByTestId('tab-session').getAttribute('aria-selected')).toBe('false');
     expect(getByTestId('tab-assets').classList.contains('active')).toBe(true);
     expect(getByTestId('tab-assets').getAttribute('aria-selected')).toBe('true');
+  });
+
+  it('a quick-switcher request opens the Assets overlay, and the panel takes the request', async () => {
+    const { getByTestId, queryByTestId } = render(App);
+    expect(queryByTestId('assets-overlay')).toBeNull();
+    requestAssetsView({ select: 'asset:personal:skill/w' });
+    await waitFor(() => expect(queryByTestId('assets-overlay')).not.toBeNull());
+    expect(getByTestId('tab-assets').classList.contains('active')).toBe(true);
+    await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
   });
 
   it('swallows a drop outside a drop target so the webview cannot navigate', async () => {

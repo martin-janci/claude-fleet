@@ -6,7 +6,9 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import {
   keyOf, parseKey, scopeBadge, canWrite, summarizeRun, ago, assetHistory,
   loadChangesets, changesetSummaries, loadCatalogStatuses, catalogStatuses,
-  loadLayers, layerListing, repoStatusOf, isOpenCard, blockedOnSecrets, type ChangesetSummary, type ChangesetItem,
+  loadLayers, layerListing, repoStatusOf, isOpenCard, blockedOnSecrets, blockedSecretKeys, type ChangesetSummary, type ItemView,
+  applyChangeset, rejectItems, undoChangeset, dismissChangeset, getChangeset, proposeChangesets, proposeLayerChange,
+  loadOpenCardViews, loadAllLayers, cardViews, layersByCatalog, driftDiff, admitCatalog, hostProvenance,
 } from './assets_workspace';
 import type { SyncRunSummary } from './assets';
 
@@ -107,9 +109,9 @@ describe('more reads and keys', () => {
     expect(summarizeRun({ plan_id: 'p', started_at: 1, finished_at: 2, hosts: [] })).toContain('no hosts');
   });
   it('types carry the M5 fields', () => {
-    const item: ChangesetItem = { changeset_id: 1, position: 0, grp: 'core', kind: 'skill', name: 's', action: 'import', decider: 'rule', state: 'applied', decided_at: 1790000000000 };
+    const item: ItemView = { position: 0, grp: 'core', kind: 'skill', name: 's', action: 'import', params: {}, decider: 'rule', state: 'applied', outcome: { held: [{ kind: 'skill', name: 'w', why: 'edited' }] } };
     const run: SyncRunSummary = { plan_id: 'p', started_at: 1, finished_at: 2, hosts: [], auto: true };
-    expect(item.decided_at).toBe(1790000000000);
+    expect(item.outcome?.held?.[0].why).toBe('edited');
     expect(run.auto).toBe(true);
   });
 });
@@ -130,7 +132,108 @@ describe('blockedOnSecrets', () => {
     expect(b({ kind: 'skill', name: 'x' })).toBe(false);
     expect(b({ kind: 'skill', name: 'y' })).toBe(false);
   });
+  it('keys blocked assets by catalog too', () => {
+    const r = {
+      plan_id: 'p', started_at: 1, finished_at: 2,
+      hosts: [{ host_alias: 'oci', harness: 'claude', status: 'partial', detail: null, restart_required: false,
+        actions: [{ kind: 'skill', name: 'w', op: 'blocked', outcome: 'blocked', detail: 'missing secrets: TOKEN', catalog: 'acme' }] }],
+    } as never;
+    expect(blockedSecretKeys(r)).toEqual(['acme:skill/w']);
+    const blocked = blockedOnSecrets(r);
+    expect(blocked({ kind: 'skill', name: 'w', catalog: 'acme' })).toBe(true);
+    expect(blocked({ kind: 'skill', name: 'w', catalog: 'personal' })).toBe(false);
+    expect(blocked({ kind: 'skill', name: 'w' })).toBe(false);
+  });
+  it('a result without a catalog (a hub before M6) keys as personal', () => {
+    const b = blockedOnSecrets(run([act('skill', 'w', 'blocked', 'missing secrets: TOKEN')]));
+    expect(b({ kind: 'skill', name: 'w', catalog: 'personal' })).toBe(true);
+    expect(b({ kind: 'skill', name: 'w' })).toBe(true);
+    expect(b({ kind: 'skill', name: 'w', catalog: 'acme' })).toBe(false);
+  });
   it('is false for everything with no run', () => {
     expect(blockedOnSecrets(null)({ kind: 'mcp', name: 'fleet' })).toBe(false);
+  });
+});
+
+describe('card verbs', () => {
+  beforeEach(() => { invoke.mockReset(); });
+  it('applies with positions only when given', async () => {
+    invoke.mockResolvedValue({ id: 3 });
+    await applyChangeset(3);
+    expect(invoke).toHaveBeenLastCalledWith('catalog_apply_changeset', { args: { id: 3 } });
+    await applyChangeset(3, [1]);
+    expect(invoke).toHaveBeenLastCalledWith('catalog_apply_changeset', { args: { id: 3, positions: [1] } });
+  });
+  it('rejects, undoes, dismisses, gets, proposes', async () => {
+    invoke.mockResolvedValue({});
+    await rejectItems(3, [0, 1]);
+    expect(invoke).toHaveBeenLastCalledWith('catalog_reject_changeset_items', { args: { id: 3, positions: [0, 1] } });
+    await undoChangeset(3);
+    expect(invoke).toHaveBeenLastCalledWith('catalog_undo_changeset', { args: { id: 3 } });
+    await dismissChangeset(3);
+    expect(invoke).toHaveBeenLastCalledWith('catalog_dismiss_changeset', { args: { id: 3 } });
+    await getChangeset(3);
+    expect(invoke).toHaveBeenLastCalledWith('catalog_get_changeset', { args: { id: 3 } });
+    await proposeChangesets();
+    expect(invoke).toHaveBeenLastCalledWith('catalog_propose_changesets', undefined);
+    await proposeLayerChange({ op: 'rename', layer: 'core', to: 'base' });
+    expect(invoke).toHaveBeenLastCalledWith('catalog_propose_layer_change', { args: { change: { op: 'rename', layer: 'core', to: 'base' } } });
+  });
+  it('admits, reads provenance, and sends the drift diff with nulls', async () => {
+    invoke.mockResolvedValue({});
+    await admitCatalog('mef', 'acme');
+    expect(invoke).toHaveBeenLastCalledWith('catalog_admit_catalog', { args: { host_alias: 'mef', catalog: 'acme' } });
+    await hostProvenance('oci');
+    expect(invoke).toHaveBeenLastCalledWith('catalog_host_provenance', { args: { host_alias: 'oci' } });
+    await driftDiff({ host_alias: 'oci', kind: 'skill', name: 'w', catalog: 'personal' });
+    expect(invoke).toHaveBeenLastCalledWith('catalog_drift_diff', { args: { host_alias: 'oci', kind: 'skill', name: 'w', harness: null, catalog: null } });
+    await driftDiff({ host_alias: 'oci', kind: 'skill', name: 'w', harness: 'claude', catalog: 'acme' });
+    expect(invoke).toHaveBeenLastCalledWith('catalog_drift_diff', { args: { host_alias: 'oci', kind: 'skill', name: 'w', harness: 'claude', catalog: 'acme' } });
+  });
+  it('loads the open cards in full', async () => {
+    invoke.mockImplementation(async (_c: string, a: { args: { id: number } }) => ({ id: a.args.id, items: [] }));
+    await loadOpenCardViews([
+      { id: 1, kind: 'new', summary: '', state: 'proposed', created_at: 1 },
+      { id: 2, kind: 'new', summary: '', state: 'applied', created_at: 1 },
+      { id: 3, kind: 'rollout', summary: '', state: 'applied', created_at: 1, held_hosts: ['oci'] },
+    ]);
+    expect(Object.keys(get(cardViews))).toEqual(['1', '3']);
+  });
+  it('an older overlapping load that finishes last does not overwrite the newer one', async () => {
+    cardViews.set({});
+    const resolvers: ((v: unknown) => void)[] = [];
+    invoke.mockImplementation(() => new Promise((res) => { resolvers.push(res); }));
+    const card = { id: 1, kind: 'new' as const, summary: '', state: 'proposed' as const, created_at: 1 };
+    const first = loadOpenCardViews([card]);
+    const second = loadOpenCardViews([card]);
+    resolvers[1]({ id: 1, summary: 'newer', items: [] });
+    await second;
+    resolvers[0]({ id: 1, summary: 'stale', items: [] });
+    await first;
+    expect(get(cardViews)[1].summary).toBe('newer');
+  });
+  it('a failed fetch keeps the card\'s previous view', async () => {
+    cardViews.set({});
+    const card = { id: 1, kind: 'new' as const, summary: '', state: 'proposed' as const, created_at: 1 };
+    invoke.mockResolvedValueOnce({ id: 1, summary: 'kept', items: [] });
+    await loadOpenCardViews([card]);
+    invoke.mockRejectedValueOnce({ code: 'E_HUB_TIMEOUT', message: 'slow' });
+    await loadOpenCardViews([card]);
+    expect(get(cardViews)[1].summary).toBe('kept');
+  });
+  it('loads layers for every loaded catalog by name', async () => {
+    invoke.mockResolvedValue({ layers: [], hosts: [] });
+    await loadAllLayers([
+      { id: 1, name: 'personal', org_id: null, repo_path: '', remote_url: null, head_commit: null, last_loaded_at: null, state: 'loaded', asset_count: 0 },
+      { id: 2, name: 'acme', org_id: 7, repo_path: '', remote_url: null, head_commit: null, last_loaded_at: null, state: 'problem', asset_count: 0 },
+    ]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('catalog_list_layers_in', { args: { name: 'personal' } });
+    expect(Object.keys(get(layersByCatalog)!)).toEqual(['personal']);
+  });
+  it('round-trips the new selection keys', () => {
+    for (const s of [{ type: 'layer', catalog: 'acme', name: 'core' }, { type: 'host', alias: 'oci' }] as const) {
+      expect(parseKey(keyOf(s))).toEqual(s);
+    }
   });
 });

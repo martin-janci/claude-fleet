@@ -2,7 +2,9 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
-import { clearToasts } from './lib/toasts';
+import { clearToasts, toasts } from './lib/toasts';
+import { get } from 'svelte/store';
+import { catalog } from './lib/assets';
 import { hubStatus, STANDALONE, type HubStatus } from './lib/hub';
 import { hubConnection } from './lib/hub_connection';
 
@@ -371,6 +373,82 @@ describe('the commands the UI calls unprompted', () => {
       expect(names).toContain('hub_status');
       expect(names.indexOf('hub_status')).toBeLessThan(names.indexOf('health_check'));
       expect(names.indexOf('hub_status')).toBeLessThan(names.lastIndexOf('list_sessions'));
+    } finally {
+      restore();
+    }
+  });
+});
+
+// Assets M6 (⌘K lists assets): the quick switcher reads the `catalog` store,
+// which only the Assets panel used to fill, so a fresh launch listed none.
+describe('the asset catalog at startup (the quick switcher)', () => {
+  const listing = { assets: [], unmanaged: [], problems: [], hosts: [] };
+  const cfg = { repo_path: '/c', remote_url: null, head_commit: null, last_loaded_at: null };
+
+  it('a hub client reads the hub listing at launch, and a refusal is silent', async () => {
+    const { inv, restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return remote;
+      if (cmd === 'catalog_list_assets') {
+        return Object.assign(new Error('refused'), { code: 'E_HUB_DENIED', message: 'no grant' });
+      }
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'catalog_list_assets')).toBe(true));
+      await new Promise((r) => setTimeout(r, 0));
+      // The hub loaded its own catalog; this window loads nothing.
+      expect(inv.mock.calls.some((c) => c[0] === 'catalog_load')).toBe(false);
+      expect(get(toasts)).toEqual([]);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a standalone window loads its configured catalog, then lists it', async () => {
+    const { inv, restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return STANDALONE;
+      if (cmd === 'catalog_config') return cfg;
+      if (cmd === 'catalog_load') return { head: 'abc', loaded_at: 1, asset_count: 0, problem_count: 0 };
+      if (cmd === 'catalog_list_assets') return listing;
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(get(catalog)).toEqual(listing));
+      const names = inv.mock.calls.map((c) => c[0] as string);
+      expect(names.indexOf('catalog_load')).toBeGreaterThan(-1);
+      expect(names.indexOf('catalog_load')).toBeLessThan(names.indexOf('catalog_list_assets'));
+    } finally {
+      restore();
+      catalog.set(null);
+    }
+  });
+
+  it('a standalone window with no catalog configured asks for no listing', async () => {
+    const { inv, restore } = await routeInvoke((cmd) => {
+      if (cmd === 'hub_status') return STANDALONE;
+      if (cmd === 'catalog_config') return null;
+      return undefined;
+    });
+    try {
+      render(App);
+      await waitFor(() => expect(inv.mock.calls.some((c) => c[0] === 'catalog_config')).toBe(true));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(inv.mock.calls.some((c) => c[0] === 'catalog_load' || c[0] === 'catalog_list_assets')).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a window whose hub is unusable asks for nothing', async () => {
+    const unusable: HubStatus = { ...STANDALONE, configured_url: 'https://fleet.example.com', unavailable: 'no token' };
+    const { inv, restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? unusable : undefined));
+    try {
+      render(App);
+      await screen.findByTestId('hub-unavailable');
+      await new Promise((r) => setTimeout(r, 0));
+      expect(inv.mock.calls.some((c) => String(c[0]).startsWith('catalog_'))).toBe(false);
     } finally {
       restore();
     }

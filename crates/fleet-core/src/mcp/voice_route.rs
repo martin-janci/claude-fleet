@@ -349,7 +349,7 @@ async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
                 }
                 Some(SourceCmd::Stop { capture }) => {
                     // Not live: the device was already told (`relay_pcm`).
-                    if !live.as_ref().is_some_and(|(c, _)| *c == capture) {
+                    if live.as_ref().is_none_or(|(c, _)| *c != capture) {
                         continue;
                     }
                     live = None;

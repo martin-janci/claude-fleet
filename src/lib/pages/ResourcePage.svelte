@@ -11,6 +11,7 @@
   import FlowView from './FlowView.svelte';
   import OrgSuggestions from '../OrgSuggestions.svelte';
   import { hosts } from '../hosts';
+  import { orgs } from '../orgs';
   import { trackers } from '../trackers';
   import { push, pushError } from '../toasts';
   import type { Page } from './pages';
@@ -26,6 +27,7 @@
     titleOf,
     type ActionSpec,
     type FieldSpec,
+    type OptionSource,
     type ResourceRecord,
     type ResourceType,
   } from './resources';
@@ -72,7 +74,7 @@
 
   onMount(() => {
     void reload();
-    // The stores the option selects read (hosts, trackers) and other views
+    // The stores the option selects read (hosts, trackers, orgs) and other views
     // keep of this resource, fresh when the page opens.
     void afterChange(resource);
   });
@@ -106,6 +108,13 @@
     }
   }
 
+  /** What an option source offers, from the store the renderer already holds. */
+  function sourceOptions(source: OptionSource): { value: string; label: string }[] {
+    if (source === 'hosts') return get(hosts).map((h) => ({ value: h.alias, label: h.alias }));
+    if (source === 'orgs') return get(orgs).map((o) => ({ value: o.name, label: o.name }));
+    return get(trackers).map((t) => ({ value: String(t.id), label: t.name }));
+  }
+
   /** A select's choices for a list field's add form: the source's values,
    *  minus the ones the record already has. */
   function options(field: FieldSpec, param: string): { value: string; label: string }[] {
@@ -113,11 +122,13 @@
     const spec = action?.params.find((p) => p.name === param);
     if (!spec || spec.type !== 'options' || !current) return [];
     const have = new Set(itemsOf(field, current).map(itemValue));
-    const all =
-      spec.source === 'hosts'
-        ? get(hosts).map((h) => ({ value: h.alias, label: h.alias }))
-        : get(trackers).map((t) => ({ value: String(t.id), label: t.name }));
-    return all.filter((o) => !have.has(o.value));
+    return sourceOptions(spec.source).filter((o) => !have.has(o.value));
+  }
+
+  /** The create form's choices: the source's values, nothing to leave out. */
+  function createOptions(param: string): { value: string; label: string }[] {
+    const spec = resource.create?.params.find((p) => p.name === param);
+    return spec?.type === 'options' ? sourceOptions(spec.source) : [];
   }
 </script>
 
@@ -164,7 +175,7 @@
         >
       {:else if !readonly && resource.create}
         {#if adding}
-          <ActionForm action={resource.create} {busy} onrun={(p) => void create(p)} testid="resource-create" />
+          <ActionForm action={resource.create} {busy} options={createOptions} onrun={(p) => void create(p)} testid="resource-create" />
         {:else}
           <button type="button" class="btn" data-testid="resource-add" onclick={() => (adding = true)}>{resource.create.label}</button>
         {/if}

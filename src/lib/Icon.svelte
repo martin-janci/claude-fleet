@@ -21,7 +21,9 @@
     | 'circle-check'
     | 'inbox'
     | 'library'
-    | 'key';
+    | 'key'
+    | 'layers'
+    | 'hosts';
 </script>
 
 <script lang="ts">
@@ -92,6 +94,11 @@
   {:else if name === 'library'}
     <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" />
     <rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+  {:else if name === 'layers'}
+    <path d="M12 3l9 4.5-9 4.5-9-4.5z" /><path d="M3 12l9 4.5 9-4.5" /><path d="M3 16.5L12 21l9-4.5" />
+  {:else if name === 'hosts'}
+    <rect x="3" y="4" width="18" height="6.5" rx="1.5" /><rect x="3" y="13.5" width="18" height="6.5" rx="1.5" />
+    <path d="M7 7.25h.01M7 16.75h.01" />
   {:else if name === 'key'}
     <circle cx="8" cy="15" r="4" /><path d="m11 12 9-9M17 6l3 3" />
   {/if}

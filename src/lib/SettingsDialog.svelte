@@ -59,9 +59,9 @@
     hubPair,
     hubDisconnect,
     hubBlock,
+    resourceBlock,
     hubStrandedToken,
     ownsTheFleet,
-    type HubAction,
   } from './hub';
   import {
     attentionIdleMinutes,
@@ -964,7 +964,7 @@
             resources={$pagesBundle.resources}
             actions={$pagesBundle.actions}
             readonly
-            reason={res?.update ? hubBlock(res.update.command as HubAction, $hubStatus) : null}
+            reason={res ? resourceBlock(res, $hubStatus) : null}
             onnavigate={(id) => select(id)} />
         {/key}
       {:else if !pagesHere}

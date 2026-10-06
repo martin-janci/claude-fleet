@@ -5,6 +5,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AssetInspector from './AssetInspector.svelte';
 import type { AssetListing } from './assets';
+import { cardViews, type ChangesetView } from './assets_workspace';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const listing: AssetListing = {
@@ -25,10 +27,17 @@ const base = {
   listing, cards: [{ id: 7, kind: 'new' as const, summary: 'New on oci: skill/fresh → core', state: 'proposed' as const, created_at: 1, groups: { core: 1 } }],
   hosts: [], order: ['oci', 'trn'], readOnly: false, canOpen: (a: { catalog?: string }) => (a.catalog ?? 'personal') === 'personal',
   autoEditKey: '', editNonce: 0, onsync: vi.fn(), ondeleted: vi.fn(), onimport: vi.fn(),
+  oncard: { apply: vi.fn(), dismiss: vi.fn(), undo: vi.fn(), synchost: vi.fn() }, onreject: vi.fn(), cardBusy: false,
 };
 const tabLabels = () => Array.from(document.querySelectorAll('[role="tab"]')).map((t) => t.textContent);
 
+const view7: ChangesetView = { id: 7, kind: 'new', summary: 'New on oci: skill/fresh → core', state: 'proposed', created_at: 1, commits: {}, undoable: false, items: [
+  { position: 0, grp: 'core', catalog: 'personal', kind: 'skill', name: 'fresh', action: 'import', params: {}, decider: 'rule', state: 'pending' },
+] };
+
 beforeEach(() => {
+  cardViews.set({});
+  fleetSettings.set({ ...SETTING_DEFAULTS });
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string) => {
     if (cmd === 'catalog_get_asset') return { asset: { kind: 'skill', name: 'w', version: '1', description: 'Make one.', tags: [], body: '# b' }, previews: [], hosts: [] };
@@ -169,6 +178,100 @@ describe('AssetInspector', () => {
     expect(s.querySelectorAll('button')).toHaveLength(0);
   });
 
+  it('a selected card shows its items and the reject ✕', async () => {
+    cardViews.set({ 7: view7 });
+    const onreject = vi.fn();
+    render(AssetInspector, { ...base, onreject, selectedKey: 'card:7' });
+    expect(tabLabels()).toEqual(['Items']);
+    expect(screen.getByTestId('card-item-7-0')).toHaveTextContent('skill/fresh');
+    await fireEvent.click(screen.getByTestId('card-reject-7-0'));
+    expect(onreject).toHaveBeenCalledWith(7, [0]);
+  });
+
+  it('a rollout card also has a Hosts tab with what each host held back', async () => {
+    const rollout: ChangesetView = { id: 7, kind: 'rollout', summary: 'Roll out core to oci', state: 'proposed', created_at: 1, commits: {}, undoable: false, items: [
+      { position: 0, grp: 'core', kind: 'host', name: 'oci', action: 'sync', params: {}, decider: 'person', state: 'skipped', outcome: { held: [{ kind: 'skill', name: 'w', why: 'edited' }] } },
+    ] };
+    cardViews.set({ 7: rollout });
+    render(AssetInspector, { ...base, cards: [{ ...base.cards[0], kind: 'rollout' as const }], selectedKey: 'card:7' });
+    expect(tabLabels()).toEqual(['Items', 'Hosts']);
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    expect(screen.getByTestId('inspector-hosts')).toHaveTextContent('oci');
+    expect(screen.getByTestId('inspector-hosts')).toHaveTextContent('skill/w — edited on the host');
+  });
+
+  it('a rollout card’s Hosts tab offers Review plan too', async () => {
+    const rollout: ChangesetView = { id: 7, kind: 'rollout', summary: 'Roll out core to oci', state: 'proposed', created_at: 1, commits: {}, undoable: false, items: [
+      { position: 0, grp: 'core', kind: 'host', name: 'oci', action: 'sync', params: {}, decider: 'person', state: 'pending' },
+    ] };
+    cardViews.set({ 7: rollout });
+    const onreview = vi.fn();
+    render(AssetInspector, { ...base, onreview, cards: [{ ...base.cards[0], kind: 'rollout' as const }], selectedKey: 'card:7' });
+    await fireEvent.click(screen.getByTestId('card-review-7'));
+    expect(onreview).toHaveBeenCalledWith(7);
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    await fireEvent.click(screen.getByTestId('card-review-7'));
+    expect(onreview).toHaveBeenCalledTimes(2);
+  });
+
+  it('only a failed card says Failed as an alert; an applied card\'s error is a note, a withdrawn card says so', () => {
+    const at = (state: ChangesetView['state'], error: string, withdrawn = false) => {
+      cardViews.set({ 7: { ...view7, state, error, withdrawn } });
+      const r = render(AssetInspector, { ...base, cards: [{ ...base.cards[0], state }], selectedKey: 'card:7' });
+      const card = screen.getByTestId('inspector-card');
+      const out = { text: card.textContent ?? '', alert: card.querySelector('[role="alert"]')?.textContent ?? null };
+      r.unmount();
+      return out;
+    };
+    const failed = at('failed', 'oci: unreachable');
+    expect(failed.alert).toBe('Failed: oci: unreachable');
+    const applied = at('applied', 'skipped: oci — sync it yourself');
+    expect(applied.alert).toBeNull();
+    expect(applied.text).toContain('Note: skipped: oci — sync it yourself');
+    expect(applied.text).not.toContain('Failed');
+    const withdrawn = at('dismissed', 'withdrawn: layer core was renamed to base', true);
+    expect(withdrawn.alert).toBeNull();
+    expect(withdrawn.text).toContain('Withdrawn: layer core was renamed to base');
+    expect(withdrawn.text).not.toContain('Failed');
+  });
+
+  it('a card applied through the Inspector Undo runs the verb', async () => {
+    cardViews.set({ 7: { ...view7, state: 'applied', undoable: true, commits: { personal: 'abcdef12' } } });
+    const oncard = { apply: vi.fn(), dismiss: vi.fn(), undo: vi.fn(), synchost: vi.fn() };
+    render(AssetInspector, { ...base, oncard, cards: [{ ...base.cards[0], state: 'applied' as const, undoable: true }], selectedKey: 'card:7' });
+    await fireEvent.click(screen.getByRole('button', { name: 'Undo' }));
+    expect(oncard.undo).toHaveBeenCalledWith(7);
+  });
+
+  it('an applied card (not an open one) is read when selected, so its commits and Undo show', async () => {
+    const applied: ChangesetView = { ...view7, state: 'applied', undoable: true, commits: { personal: 'abcdef12' } };
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_get_changeset') return applied;
+      throw { code: 'E_TEST', message: cmd };
+    });
+    render(AssetInspector, { ...base, cards: [{ ...base.cards[0], state: 'applied' as const, undoable: true }], selectedKey: 'card:7' });
+    expect(await screen.findByTestId('card-commits-7')).toHaveTextContent('personal abcdef1');
+    expect(invoke).toHaveBeenCalledWith('catalog_get_changeset', { args: { id: 7 } });
+  });
+
+  it('after Undo the Inspector re-reads the card and no longer offers Undo', async () => {
+    const applied: ChangesetView = { ...view7, state: 'applied', undoable: true, commits: { personal: 'abcdef12' } };
+    let current: ChangesetView = applied;
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_get_changeset') return current;
+      throw { code: 'E_TEST', message: cmd };
+    });
+    const oncard = { apply: vi.fn(), dismiss: vi.fn(), undo: vi.fn(), synchost: vi.fn() };
+    const card = { ...base.cards[0], state: 'applied' as const, undoable: true, applied_at: 5 };
+    const { rerender } = render(AssetInspector, { ...base, oncard, cards: [card], selectedKey: 'card:7' });
+    await fireEvent.click(await screen.findByRole('button', { name: 'Undo' }));
+    expect(oncard.undo).toHaveBeenCalledWith(7);
+    // The workspace reloads the cards: the card is now undone.
+    current = { ...applied, state: 'undone', undoable: false };
+    await rerender({ ...base, oncard, cards: [{ ...card, state: 'undone' as const, undoable: false }], selectedKey: 'card:7' });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Undo' })).toBeNull());
+  });
+
   it('opens a just-created asset straight into Source, editing', async () => {
     render(AssetInspector, { ...base, selectedKey: 'asset:personal:skill/w', autoEditKey: 'asset:personal:skill/w' });
     expect(screen.getByTestId('inspector-tab-source').getAttribute('aria-selected')).toBe('true');
@@ -278,5 +381,80 @@ describe('AssetInspector', () => {
     await fireEvent.click(screen.getByTestId('inspector-tab-history'));
     await waitFor(() => expect(screen.getByTestId('inspector-history').textContent).toContain('unknown catalog nope'));
     expect(screen.getByTestId('inspector-history').textContent).not.toContain('update the hub');
+  });
+
+  const driftView: ChangesetView = {
+    id: 12, kind: 'drift', summary: 'skill/w was edited on oci (catalog personal)', state: 'proposed', created_at: 1, commits: {}, undoable: false, catalogs: ['personal'],
+    items: [
+      { position: 0, grp: 'drift', catalog: 'personal', kind: 'skill', name: 'w', action: 'take_host', params: { host: 'oci', harness: 'claude' }, decider: 'rule', state: 'pending' },
+      { position: 1, grp: 'drift', catalog: 'personal', kind: 'skill', name: 'w', action: 'restore', params: { host: 'oci', harness: 'claude' }, decider: 'rule', state: 'pending' },
+    ],
+  };
+  const driftCard = { id: 12, kind: 'drift' as const, summary: driftView.summary, state: 'proposed' as const, created_at: 1, groups: { drift: 2 } };
+
+  it("a drift card's Diff tab shows the DriftPanel and applies Take through oncard", async () => {
+    cardViews.set({ 12: driftView });
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'catalog_drift_diff') return { host_alias: 'oci', harness: 'claude', files: [{ path: '~/.claude/skills/w/SKILL.md', catalog: 'a\n', host: 'b\n' }] };
+      throw { code: 'E_TEST', message: cmd };
+    });
+    const oncard = { ...base.oncard, apply: vi.fn() };
+    render(AssetInspector, { ...base, oncard, cards: [driftCard], selectedKey: 'card:12' });
+    expect(tabLabels()).toEqual(['Diff', 'Items']);
+    expect(await screen.findByTestId('drift-panel')).toBeTruthy();
+    await fireEvent.click(await screen.findByTestId('drift-take'));
+    expect(oncard.apply).toHaveBeenCalledWith(12, [0]);
+    await fireEvent.click(screen.getByTestId('inspector-tab-items'));
+    expect(screen.queryByTestId('drift-panel')).toBeNull();
+    expect(screen.getByTestId('card-item-12-0')).toBeTruthy();
+  });
+
+  it('a read-only window gets the diff without Take or Restore', async () => {
+    cardViews.set({ 12: driftView });
+    invoke.mockResolvedValue({ host_alias: 'oci', harness: 'claude', files: [] });
+    render(AssetInspector, { ...base, readOnly: true, cards: [driftCard], selectedKey: 'card:12' });
+    await screen.findByTestId('drift-panel');
+    expect(screen.queryByTestId('drift-take')).toBeNull();
+  });
+
+  it('a host copy edited on the host links to its drift card', async () => {
+    cardViews.set({ 12: driftView });
+    const onselect = vi.fn();
+    render(AssetInspector, { ...base, onselect, cards: [driftCard], selectedKey: 'asset:personal:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    await fireEvent.click(await screen.findByTestId('inspector-drift-link-oci'));
+    expect(onselect).toHaveBeenCalledWith('card:12');
+  });
+
+  it('the link shows on the summary path too, and only while a drift card is open', async () => {
+    const onselect = vi.fn();
+    const org = { ...listing, assets: [{ ...listing.assets[0], catalog: 'papayapos' }] };
+    cardViews.set({ 12: { ...driftView, items: driftView.items.map((i) => ({ ...i, catalog: 'papayapos' })) } });
+    const r = render(AssetInspector, { ...base, onselect, listing: org, cards: [driftCard], selectedKey: 'asset:papayapos:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    await fireEvent.click(screen.getByTestId('inspector-drift-link-oci'));
+    expect(onselect).toHaveBeenCalledWith('card:12');
+    cardViews.set({ 12: { ...driftView, state: 'applied' } });
+    await waitFor(() => expect(screen.queryByTestId('inspector-drift-link-oci')).toBeNull());
+    r.unmount();
+  });
+
+  it('a copy behind the catalog says what happens next, by the catalog.auto setting', async () => {
+    const behind = { ...listing, assets: [{ ...listing.assets[0], hosts: [{ host_alias: 'oci', harness: 'claude', state: 'drifted' as const, drift_side: 'catalog' as const }] }] };
+    const r = render(AssetInspector, { ...base, listing: behind, readOnly: true, selectedKey: 'asset:personal:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    expect(screen.getByTestId('inspector-behind-oci')).toHaveTextContent('Behind the catalog — fleet updates it automatically');
+    r.unmount();
+    fleetSettings.set({ ...SETTING_DEFAULTS, 'catalog.auto': 'false' });
+    render(AssetInspector, { ...base, listing: behind, readOnly: true, selectedKey: 'asset:personal:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    expect(screen.getByTestId('inspector-behind-oci')).toHaveTextContent('Behind the catalog — your next Sync updates it');
+  });
+
+  it('the same sentence shows under the full Hosts section', async () => {
+    const behind = { ...listing, assets: [{ ...listing.assets[0], hosts: [{ host_alias: 'oci', harness: 'claude', state: 'drifted' as const, drift_side: 'catalog' as const }] }] };
+    render(AssetInspector, { ...base, listing: behind, selectedKey: 'asset:personal:skill/w' });
+    await fireEvent.click(screen.getByTestId('inspector-tab-hosts'));
+    expect(await screen.findByTestId('inspector-behind-oci')).toHaveTextContent('Behind the catalog');
   });
 });

@@ -1,0 +1,49 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.catalogs",
+  "title": "Catalogs",
+  "parent": "settings",
+  "layout": "master_detail",
+  "resource": "catalog",
+  "intro": "Git repos of assets fleet syncs to hosts. A GitHub org with SSO must allow a catalog's deploy key; an org admin does that once in the org's settings. Grants are given on the hub: fleet-hub client grant CLIENT assets --catalog NAME.",
+  "sections": [
+    {
+      "title": "Where it lives",
+      "items": [
+        {
+          "type": "field",
+          "key": "name"
+        },
+        {
+          "type": "field",
+          "key": "state"
+        },
+        {
+          "type": "field",
+          "key": "repo_path"
+        },
+        {
+          "type": "field",
+          "key": "remote_url"
+        },
+        {
+          "type": "field",
+          "key": "org"
+        }
+      ]
+    },
+    {
+      "title": "Who receives and changes it",
+      "items": [
+        {
+          "type": "field",
+          "key": "admitted"
+        },
+        {
+          "type": "field",
+          "key": "granted"
+        }
+      ]
+    }
+  ]
+}

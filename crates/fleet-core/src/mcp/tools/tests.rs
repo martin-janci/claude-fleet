@@ -3764,7 +3764,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// bytes). Measured at 72,701 on 2026-10-04 after Assets M5 Task 4
     /// (`asset_history` in `CatalogAdminParams::action`, +14 bytes).
     /// Measured at 72,827 on 2026-10-05 after its fix round 1
-    /// (`list_assets` takes `all_catalogs`, +126 bytes).
+    /// (`list_assets` takes `all_catalogs`, +126 bytes). M6 Task 3:
+    /// changesets propose_layer + change (measured 74,163; the typed
+    /// `LayerChange` schema, three variants, +1,236 bytes). M6 Task 4:
+    /// catalog_admin drift_diff (measured 74,174; the action named in
+    /// `CatalogAdminParams::action`, +11 bytes).
     /// **Measured at 75,369 on 2026-10-05**, merging multi-user M1 T12 on
     /// top of that: the five sharing definitions `session_share`,
     /// `session_unshare`, `session_narrow`, `session_access` and `my_grants`,
@@ -3775,7 +3779,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// master surface this constant measures; `NOT_FOR_HOST_TOKENS` keeps
     /// the other five off a per-host token's. The constant is that
     /// measurement plus the customary 100 bytes of headroom.
-    const BUDGET_BYTES: usize = 75_469;
+    /// Measured at 76,716 on 2026-10-05 after merging `main` (multi-user
+    /// M1's sharing tools, 75,369) into Assets M6 (the changesets
+    /// propose_layer / change / `LayerChange` and drift_diff growth,
+    /// +1,347 bytes over `main`): exactly the two sides' sum.
+    const BUDGET_BYTES: usize = 76_816;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10853,6 +10861,13 @@ const CATALOG_ADMIN_SESSION_LESS_ACTIONS: &[&str] = &[
     // row, and returns an asset's own history, so `catalog_admin` keeps its
     // place in REVIEWED_WITHOUT_A_SESSION.
     "asset_history",
+    // Assets M6, reviewed on the merge of `main` (multi-user M1) into M6:
+    // `DriftDiff(DriftDiffArgs { host_alias, kind, name, harness })` is
+    // answered by `drift_diff::drift_diff(target, a, store, ssh)` — a host
+    // alias and an asset reference. It reads the host's effective layers and
+    // the rendered files on that host over SSH; it names no session and
+    // reads no session row, so `catalog_admin` keeps its place.
+    "drift_diff",
 ];
 
 /// `catalog_admin`'s row in [`REVIEWED_WITHOUT_A_SESSION`] made real
@@ -10868,7 +10883,7 @@ const CATALOG_ADMIN_SESSION_LESS_ACTIONS: &[&str] = &[
 ///
 /// Clause 2 is the substantive one and clause 1 is what keeps it honest: the
 /// file is the whole surface, so "it mentions no session" is a statement
-/// about all 36 actions and not about the ones a reader happened to check.
+/// about all 38 actions and not about the ones a reader happened to check.
 #[test]
 fn catalog_admins_actions_are_the_reviewed_set() {
     use crate::service::catalog::admin::AdminCall;

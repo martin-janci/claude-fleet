@@ -483,3 +483,25 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
     expect(screen.queryByTestId('setting-row-playbooks.press_enter')).toBeNull();
   });
 });
+
+// Assets M6 (R11): Settings → Catalogs on a paired desktop is the hub's
+// catalogs, read-only, with the refusal — add and remove are the master's.
+describe('Settings → Catalogs on a paired desktop', () => {
+  it('lists the hub’s catalogs with no controls, and says to use the hub', async () => {
+    hubStatus.set(remote);
+    route({
+      catalog_list_catalogs: [
+        { id: 2, name: 'acme', org_id: 1, org: 'Acme', repo_path: '/r/acme', remote_url: null, head_commit: 'abc',
+          last_loaded_at: 1, state: 'loaded', asset_count: 3, admitted: ['mefistos'], granted: ['laptop'] },
+      ],
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-settings.catalogs'));
+    const reason = await screen.findByTestId('resource-readonly');
+    expect(reason.textContent).toContain('fleet-hub catalog add');
+    expect(reason.textContent).toContain('https://fleet.example.com');
+    await screen.findByRole('option', { name: /acme/ });
+    expect(screen.queryByTestId('resource-add')).toBeNull();
+    expect(screen.queryByTestId('item-remove-admitted')).toBeNull();
+  });
+});

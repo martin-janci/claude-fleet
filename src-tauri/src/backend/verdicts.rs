@@ -1316,11 +1316,92 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "catalog_admin",
         },
     ),
-    // The Inbox's cards, read only until M6: `changesets { list }`, the
-    // master's or an unbound full client's.
+    // The Inbox's cards: `changesets { list }`, the master's or an unbound
+    // full client's. The card verbs follow below.
     (
         "catalog_list_changesets",
         Verdict::Routed { tool: "changesets" },
+    ),
+    // Assets M6 (R8): the card verbs — `changesets { list(id) | apply |
+    // undo | dismiss | reject_item | propose | propose_layer }`. The hub
+    // checks the caller's grant per catalog the card touches and runs its
+    // confirm gate for a rollout or restore apply; the desktop never sends
+    // a nonce (as `catalog_apply_sync`). A hub before M6 refuses
+    // `propose_layer` with E_INVALID (R13 precedent) — no contract bump.
+    (
+        "catalog_get_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_apply_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_undo_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_dismiss_changeset",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_reject_changeset_items",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_propose_changesets",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    (
+        "catalog_propose_layer_change",
+        Verdict::Routed { tool: "changesets" },
+    ),
+    // Assets M6 (R9): the catalog set (add / remove: the master only on a
+    // hub; admit / unadmit: a grant on that catalog), one catalog's layers,
+    // one host's provenance (the MCP resolve_preview projection) and a
+    // drifted asset's two texts (catalog_admin drift_diff — a hub before M6
+    // refuses the action with E_INVALID; no contract bump).
+    (
+        "catalog_add_catalog",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_remove_catalog",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_admit_catalog",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_unadmit_catalog",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_list_layers_in",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
+    ),
+    (
+        "catalog_host_provenance",
+        Verdict::Routed {
+            tool: "resolve_preview",
+        },
+    ),
+    (
+        "catalog_drift_diff",
+        Verdict::Routed {
+            tool: "catalog_admin",
+        },
     ),
     // One catalog's repo status by name: `catalog_admin { repo_status }`
     // with the tool's `catalog` parameter; needs a grant on that catalog.

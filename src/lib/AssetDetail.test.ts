@@ -107,5 +107,8 @@ describe('AssetDetail sections (Assets M5)', () => {
     expect(local.className).toContain('state-drifted');
     expect(screen.getByTestId('matrix-cell-oci-claude').textContent).toContain('drifted — behind the catalog');
     expect(screen.getByTestId('matrix-cell-gpu-claude').textContent).not.toContain('—');
+    // Hover: a copy behind the catalog says what happens to it; one edited on the host says so.
+    expect(screen.getByTestId('matrix-cell-oci-claude').getAttribute('title')).toBe('Behind the catalog — fleet updates it automatically');
+    expect(local.getAttribute('title')).toBe('edited on host');
   });
 });

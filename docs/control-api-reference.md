@@ -55,9 +55,9 @@ Parameters: `action`, `args`, `catalog`, `confirm_nonce`
 
 ### `changesets`
 
-Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
+Changeset cards that adopt, sync and fix assets: list (one in full with id), propose (rebuild from the last scan), propose_layer (a layer change as a card), apply (positions picks items; a drift card takes one), undo (the latest applied card per catalog), dismiss, reject_item. Mutating actions need a grant on every catalog the card names.
 
-Parameters: `action`, `confirm_nonce`, `id`, `positions`
+Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
 
 ### `decide_setting_proposals`
 
@@ -893,6 +893,20 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::assets::catalog_repo_status_in`
 - `commands::assets::catalog_list_catalogs`
 - `commands::assets::catalog_list_changesets`
+- `commands::assets::catalog_get_changeset`
+- `commands::assets::catalog_apply_changeset`
+- `commands::assets::catalog_undo_changeset`
+- `commands::assets::catalog_dismiss_changeset`
+- `commands::assets::catalog_reject_changeset_items`
+- `commands::assets::catalog_propose_changesets`
+- `commands::assets::catalog_propose_layer_change`
+- `commands::assets::catalog_add_catalog`
+- `commands::assets::catalog_remove_catalog`
+- `commands::assets::catalog_admit_catalog`
+- `commands::assets::catalog_unadmit_catalog`
+- `commands::assets::catalog_list_layers_in`
+- `commands::assets::catalog_host_provenance`
+- `commands::assets::catalog_drift_diff`
 - `commands::assets::catalog_asset_history`
 - `commands::assets::catalog_template`
 - `commands::assets::catalog_spawn_author_session`

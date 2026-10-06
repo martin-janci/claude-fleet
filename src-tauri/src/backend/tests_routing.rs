@@ -4847,13 +4847,15 @@ fn payload_of<T: serde::Serialize>(value: &T) -> &'static str {
 fn catalog_admin_cases() -> Vec<Case> {
     use commands::assets::routed as r;
     use fleet_core::service::catalog::admin::{
-        CatalogNameArgs, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs, LoadArgs,
-        ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs, WriteLayerArgs,
+        AdmitArgs, CatalogNameArgs, DeleteSecretArgs, GetAssetArgs, LayerRef, LayerTemplateArgs,
+        LoadArgs, ResolvePreviewArgs, SetHostHarnessesArgs, SetHostLayersArgs, SetSecretArgs,
+        WriteLayerArgs,
     };
     use fleet_core::service::catalog::author::{
         self, AddResourceArgs, AssetRef, CommitPendingArgs, CreateArgs, RemoveResourceArgs,
         UpdateArgs,
     };
+    use fleet_core::service::catalog::catalogs::AddCatalogArgs;
     use fleet_core::service::catalog::layer::Axis;
     use fleet_core::service::catalog::model::Kind;
     use fleet_core::service::catalog::sync::{ApplyArgs, PlanArgs};
@@ -4862,6 +4864,9 @@ fn catalog_admin_cases() -> Vec<Case> {
     const CONFIG: &str =
         r#"{"repo_path":"/srv/assets","remote_url":null,"head_commit":"abc","last_loaded_at":1}"#;
     const WRITE: &str = r#"{"commit":"abc","lint":{"errors":[],"warnings":[]}}"#;
+    // A minimal card, answering every `changesets` verb that returns one.
+    const VIEW: &str =
+        r#"{"id":3,"kind":"new","summary":"s","state":"applied","created_at":1,"items":[]}"#;
     const STATUS: &str =
         r#"{"head":"abc","dirty":0,"ahead":null,"behind":null,"has_upstream":false}"#;
     const SYNC_RUN: &str = r#"{"plan_id":"p1","started_at":1,"finished_at":2,"hosts":[]}"#;
@@ -5312,6 +5317,111 @@ fn catalog_admin_cases() -> Vec<Case> {
             r#"[{"id":3,"kind":"new","summary":"New on oci: skill/w → core","state":"proposed","created_at":1,"groups":{"core":1},"pending":1,"undoable":false}]"#,
             Box::new(|b, s, _| block_on(r::catalog_list_changesets(b, s)).map(|_| ())),
         ),
+        // Assets M6 (R8): the card verbs — all `changesets`.
+        (
+            "catalog_get_changeset",
+            "changesets",
+            json!({ "action": "list", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_get_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_apply_changeset",
+            "changesets",
+            json!({ "action": "apply", "id": 3, "positions": [0, 2] }),
+            VIEW,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_apply_changeset(
+                    b,
+                    commands::assets::ApplyChangesetArgs { id: 3, positions: Some(vec![0, 2]) },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_apply_changeset",
+            "changesets",
+            json!({ "action": "apply", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_apply_changeset(
+                    b,
+                    commands::assets::ApplyChangesetArgs { id: 3, positions: None },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_undo_changeset",
+            "changesets",
+            json!({ "action": "undo", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_undo_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_dismiss_changeset",
+            "changesets",
+            json!({ "action": "dismiss", "id": 3 }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_dismiss_changeset(b, commands::assets::ChangesetIdArgs { id: 3 }, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_reject_changeset_items",
+            "changesets",
+            json!({ "action": "reject_item", "id": 3, "positions": [1] }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_reject_changeset_items(
+                    b,
+                    commands::assets::RejectItemsArgs { id: 3, positions: vec![1] },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_propose_changesets",
+            "changesets",
+            json!({ "action": "propose" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_propose_changesets(b, s))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_propose_layer_change",
+            "changesets",
+            json!({ "action": "propose_layer", "change": { "op": "rename", "layer": "core", "to": "base" } }),
+            VIEW,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_propose_layer_change(
+                    b,
+                    commands::assets::LayerChangeArgs {
+                        change: fleet_core::service::catalog::changesets::LayerChange::Rename {
+                            catalog: None,
+                            layer: "core".into(),
+                            to: "base".into(),
+                        },
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "catalog_repo_status_in",
             "catalog_admin",
@@ -5363,6 +5473,178 @@ fn catalog_admin_cases() -> Vec<Case> {
                         catalog: Some("personal".into()),
                     },
                     s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Assets M6 (R9): the catalog set. The name travels in `args`, never
+        // as the tool's top-level `catalog` (the hub's `touches` reads it
+        // there).
+        (
+            "catalog_add_catalog",
+            "catalog_admin",
+            json!({ "action": "add_catalog",
+                    "args": { "name": "acme", "repo_path": "/r", "remote_url": null, "org": "Acme" } }),
+            r#"{"id":2,"name":"acme","org_id":1,"org":"Acme","repo_path":"/r","remote_url":null,"head_commit":null,"last_loaded_at":null,"state":"not_loaded","asset_count":0}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_add_catalog(
+                    b,
+                    AddCatalogArgs {
+                        name: "acme".into(),
+                        repo_path: "/r".into(),
+                        remote_url: None,
+                        org: Some("Acme".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_remove_catalog",
+            "catalog_admin",
+            json!({ "action": "remove_catalog", "args": { "name": "acme" } }),
+            r#"{"id":2,"name":"acme","layer_rows":0,"admissions":1,"grants":0,"cards":0}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_remove_catalog(
+                    b,
+                    CatalogNameArgs {
+                        name: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_admit_catalog",
+            "catalog_admin",
+            json!({ "action": "admit_catalog", "args": { "host_alias": "mefistos", "catalog": "acme" } }),
+            r#"["acme"]"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_admit_catalog(
+                    b,
+                    AdmitArgs {
+                        host_alias: "mefistos".into(),
+                        catalog: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_unadmit_catalog",
+            "catalog_admin",
+            json!({ "action": "unadmit_catalog", "args": { "host_alias": "mefistos", "catalog": "acme" } }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(r::catalog_unadmit_catalog(
+                    b,
+                    AdmitArgs {
+                        host_alias: "mefistos".into(),
+                        catalog: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // One catalog's layers: a named catalog is the tool's top-level
+        // `catalog`; personal sends none, exactly `catalog_list_layers`.
+        (
+            "catalog_list_layers_in",
+            "catalog_admin",
+            json!({ "action": "list_layers", "catalog": "acme" }),
+            r#"{"layers":[],"hosts":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_list_layers_in(
+                    b,
+                    CatalogNameArgs {
+                        name: "acme".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_list_layers_in",
+            "catalog_admin",
+            json!({ "action": "list_layers" }),
+            r#"{"layers":[],"hosts":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_list_layers_in(
+                    b,
+                    CatalogNameArgs {
+                        name: "personal".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // One host's provenance is the MCP `resolve_preview` tool, and its
+        // answer is the summary view: `withheld` a list of `[kind, name]`
+        // pairs, `refused` a list of objects, `held_back` a map.
+        (
+            "catalog_host_provenance",
+            "resolve_preview",
+            json!({ "host_alias": "oci" }),
+            r#"{"provenance":{"skill/w":{"introduced_by":"core","overridden_by":[],"catalog":"personal"}},"excluded":{},"refused":[{"kind":"skill","name":"x","reason":"private","catalog":"personal"}],"withheld":[["skill","p"]],"held_back":{"acme":"not loaded"},"assets":[{"kind":"skill","name":"w","version":"1"}]}"#,
+            Box::new(|b, s, _| {
+                block_on(r::catalog_host_provenance(
+                    b,
+                    ResolvePreviewArgs {
+                        host_alias: "oci".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "catalog_drift_diff",
+            "catalog_admin",
+            json!({ "action": "drift_diff",
+                    "args": { "host_alias": "oci", "kind": "skill", "name": "w" },
+                    "catalog": "acme" }),
+            r#"{"host_alias":"oci","harness":"claude","files":[]}"#,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_drift_diff(
+                    b,
+                    commands::assets::DriftDiffCmdArgs {
+                        host_alias: "oci".into(),
+                        kind: Kind::Skill,
+                        name: "w".into(),
+                        harness: None,
+                        catalog: Some("acme".into()),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Personal (named or not) sends no `catalog`.
+        (
+            "catalog_drift_diff",
+            "catalog_admin",
+            json!({ "action": "drift_diff",
+                    "args": { "host_alias": "oci", "kind": "skill", "name": "w", "harness": "codex" } }),
+            r#"{"host_alias":"oci","harness":"codex","files":[{"path":"~/.codex/skills/w/SKILL.md","catalog":"a","host":"b"}]}"#,
+            Box::new(|b, s, h| {
+                block_on(r::catalog_drift_diff(
+                    b,
+                    commands::assets::DriftDiffCmdArgs {
+                        host_alias: "oci".into(),
+                        kind: Kind::Skill,
+                        name: "w".into(),
+                        harness: Some("codex".into()),
+                        catalog: Some("personal".into()),
+                    },
+                    s,
+                    h,
                 ))
                 .map(|_| ())
             }),

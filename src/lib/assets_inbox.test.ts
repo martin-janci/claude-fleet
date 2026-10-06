@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildInbox, hostOrderOf, lastScanOf, sentence } from './assets_inbox';
+import { buildInbox, hostOrderOf, keepCard, lastScanOf, sentence } from './assets_inbox';
+import { parseQuery } from './assets_query';
 import type { AssetListing } from './assets';
 import type { ChangesetSummary } from './assets_workspace';
 
@@ -36,6 +37,7 @@ describe('buildInbox', () => {
 
   it('puts every row in the section that says what to do next', () => {
     expect(names('cards')).toEqual(['Adopt 3 as 1 layers']);
+    expect(names('applied')).toEqual([]);
     expect(names('needs')).toEqual(['jira', 'ghost']);
     expect(names('drifted')).toEqual(['edited', 'unknown']);
     expect(names('behind')).toEqual(['behind']);
@@ -116,6 +118,26 @@ describe('rows beyond the brief', () => {
     expect(inbox.sections.cards.map((r) => [r.key, r.why])).toEqual([['card:1', 'git push rejected']]);
     expect(buildInbox({ listing, cards: null, order, stale: new Set() }).sections.cards).toEqual([]);
   });
+  it('lists an applied, undoable card under applied, and counts it as nothing that needs you', () => {
+    const c: ChangesetSummary[] = [
+      { id: 5, kind: 'new', summary: 'New on oci', state: 'applied', undoable: true, created_at: 1, applied_at: 2 },
+      { id: 6, kind: 'new', summary: 'older', state: 'applied', undoable: false, created_at: 1, applied_at: 2 },
+      { id: 7, kind: 'rollout', summary: 'Roll out', state: 'proposed', created_at: 1 },
+    ];
+    const inbox = buildInbox({ listing: { ...listing, assets: [], unmanaged: [], identities: [] }, cards: c, order, stale: new Set() });
+    expect(inbox.sections.applied.map((r) => r.key)).toEqual(['card:5']);
+    expect(inbox.sections.cards.map((r) => r.key)).toEqual(['card:7']);
+    expect(inbox.needCount).toBe(1);
+  });
+  it('keeps an applied card that held hosts back under applied, so its held lines and Sync buttons show', () => {
+    const c: ChangesetSummary[] = [
+      { id: 8, kind: 'rollout', summary: 'Roll out core to oci', state: 'applied', undoable: false, created_at: 1, applied_at: 2, held_hosts: ['oci'] },
+      { id: 9, kind: 'rollout', summary: 'Roll out core to trn', state: 'applied', undoable: false, created_at: 1, applied_at: 2, held_hosts: [] },
+    ];
+    const inbox = buildInbox({ listing: { ...listing, assets: [], unmanaged: [], identities: [] }, cards: c, order, stale: new Set() });
+    expect(inbox.sections.applied.map((r) => r.key)).toEqual(['card:8']);
+    expect(inbox.needCount).toBe(0);
+  });
   it('gives each row the query row the shared search reads, with the layers of its asset', () => {
     const inbox = buildInbox({ listing, cards: [], order, stale: new Set(), layersOf: (a) => (a.name === 'fine' ? ['core'] : []) });
     expect(inbox.sections.insync[0].query).toMatchObject({ kind: 'skill', name: 'fine', catalog: 'personal', layers: ['core'] });
@@ -127,5 +149,23 @@ describe('rows beyond the brief', () => {
   it('words a never-scanned fleet and a lone need in the singular', () => {
     const one = buildInbox({ listing: { ...listing, assets: [], unmanaged: [], identities: [listing.identities![1]] }, cards: [], order, stale: new Set() });
     expect(sentence(one, { reachable: 1, total: 1, lastScan: null, now: 1 })).toEqual({ text: '1 needs you', sub: '1/1 hosts · never scanned' });
+  });
+});
+
+describe('keepCard', () => {
+  const c = (o: Partial<ChangesetSummary> = {}): ChangesetSummary => ({ id: 1, kind: 'new', summary: 'New on oci: skill/w', state: 'proposed', created_at: 1, catalogs: ['personal'], ...o });
+  it('a catalog: token keeps a card of that catalog and hides one of another (R2)', () => {
+    expect(keepCard(parseQuery('catalog:personal'), c())).toBe(true);
+    expect(keepCard(parseQuery('catalog:acme'), c())).toBe(false);
+    expect(keepCard(parseQuery('catalog:acme,personal'), c({ catalogs: ['personal', 'x'] }))).toBe(true);
+  });
+  it('a card that names no catalog cannot be excluded by one', () => {
+    expect(keepCard(parseQuery('catalog:acme'), c({ catalogs: undefined }))).toBe(true);
+    expect(keepCard(parseQuery('catalog:acme'), c({ catalogs: [] }))).toBe(true);
+  });
+  it('free words still match the sentence, and the other tokens never hide a card', () => {
+    expect(keepCard(parseQuery('host:nowhere kind:hook state:orphan layer:x scope:org'), c())).toBe(true);
+    expect(keepCard(parseQuery('ONCI'), c())).toBe(false);
+    expect(keepCard(parseQuery('SKILL/W'), c())).toBe(true);
   });
 });

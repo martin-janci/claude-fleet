@@ -16,6 +16,7 @@ import type { ProjectTreeRow } from './projects';
 import { readPref, writePref } from './prefs';
 import type { SessionRow } from './sessions';
 import type { HostRow } from './hosts';
+import { catalogOf, type AssetListing } from './assets';
 import { displayKey, keyFamily, type TicketRow } from './trackers';
 import { rowMatches, sessionFilterRow, type FilterRow } from './sidebar_index';
 
@@ -32,9 +33,10 @@ export const TICKET_SECTIONS = ['My work', 'Current sprint', 'Recent'] as const;
 export interface SwitcherEntry {
   /** `ticket`: a cached tracker ticket (work graph M3); `lookup`: resolve
    *  the pasted URL / typed key through the tracker. */
-  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup';
-  /** `session:<id>`, `project:<id>`, `host:<alias>`, `ticket:<KEY>` or
-   *  `lookup:<query>`. */
+  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup' | 'asset' | 'command';
+  /** `session:<id>`, `project:<id>`, `host:<alias>`, `ticket:<KEY>`,
+   *  `lookup:<query>`, `asset:<catalog>:<kind>/<name>` (the Assets
+   *  workspace's own selection key) or `command:<rescan|sync|propose>`. */
   key: string;
   label: string;
   description: string;
@@ -44,6 +46,10 @@ export interface SwitcherEntry {
   session?: SessionRow;
   project?: ProjectTreeRow;
   host?: HostRow;
+  /** Assets: the workspace selection key to open. */
+  asset?: { key: string };
+  /** Commands: which Assets command to run. */
+  command?: AssetsCommand;
   ticket?: TicketRow;
   /** Tickets: the section heading. */
   section?: string;
@@ -52,6 +58,9 @@ export interface SwitcherEntry {
   /** Tickets: the tracker's provider badge (work graph M6). */
   badge?: { icon: string; title: string };
 }
+
+/** What a command row asks the Assets panel to run (`app_views.ts`). */
+export type AssetsCommand = 'rescan' | 'sync' | 'propose';
 
 const TICKET_KEY_RE = /^[A-Za-z][A-Za-z0-9_]{1,9}-\d{1,7}$/;
 
@@ -85,6 +94,43 @@ export function ticketEntries(
     });
   }
   return out;
+}
+
+/** One row per catalog asset (Assets M6, R19); Enter opens it in the Assets
+ *  workspace. The key is the workspace's own selection key. */
+export function assetEntries(listing: AssetListing | null): SwitcherEntry[] {
+  return (listing?.assets ?? []).map((a) => {
+    const catalog = catalogOf(a);
+    const label = `${a.kind}/${a.name}`;
+    return {
+      kind: 'asset',
+      key: `asset:${catalog}:${label}`,
+      label,
+      description: a.description ? `${catalog} · ${a.description}` : catalog,
+      meta: 'Assets',
+      fields: [label, a.description, catalog].filter(Boolean),
+      asset: { key: `asset:${catalog}:${label}` },
+    };
+  });
+}
+
+const COMMANDS: { command: AssetsCommand; label: string; synonyms: string[] }[] = [
+  { command: 'rescan', label: 'Rescan assets', synonyms: ['scan'] },
+  { command: 'sync', label: 'Sync fleet', synonyms: ['sync', 'rollout'] },
+  { command: 'propose', label: 'Propose cards', synonyms: ['propose', 'cards', 'layers'] },
+];
+
+/** The Assets workspace's three commands (R19). */
+export function commandEntries(): SwitcherEntry[] {
+  return COMMANDS.map((c) => ({
+    kind: 'command',
+    key: `command:${c.command}`,
+    label: c.label,
+    description: 'Assets',
+    meta: 'Commands',
+    fields: [c.label, 'assets', ...c.synonyms],
+    command: c.command,
+  }));
 }
 
 /** A `lookup` row for a pasted ticket URL or an exact key the cache does
@@ -211,6 +257,31 @@ export function buildEntries(
  * by fuzzy score, ties broken by the same recency order.
  */
 export function rankEntries(
+  entries: readonly SwitcherEntry[],
+  query: string,
+  recent: readonly string[],
+): SwitcherEntry[] {
+  // Assets and commands never displace a session, project, host or ticket:
+  // they merge after all of them, assets first.
+  const isTail = (e: SwitcherEntry) => e.kind === 'asset' || e.kind === 'command';
+  const head = rankHead(
+    entries.filter((e) => !isTail(e)),
+    query,
+    recent,
+  );
+  const q0 = query.trim();
+  const tailRows = (kind: SwitcherEntry['kind']) =>
+    entries
+      .filter((e) => e.kind === kind)
+      .map((e) => ({ e, score: q0 ? fuzzyMatchFields(q0, e.fields) : 0 }))
+      .filter((x): x is { e: SwitcherEntry; score: number } => x.score !== null)
+      .sort((a, b) => b.score - a.score)
+      .map((x) => x.e);
+  const tail = [...tailRows('asset'), ...tailRows('command')];
+  return [...head, ...tail];
+}
+
+function rankHead(
   entries: readonly SwitcherEntry[],
   query: string,
   recent: readonly string[],

@@ -1,15 +1,20 @@
 <script lang="ts">
   import Badge from './Badge.svelte';
   import HostStrip from './HostStrip.svelte';
+  import ChangesetCard from './ChangesetCard.svelte';
   import IdentityRow from './IdentityRow.svelte';
   import RowName from './RowName.svelte';
   import type { AssetIdentity } from './assets';
-  import { SECTION_LABEL, type Inbox, type InboxRow, type InboxSection } from './assets_inbox';
+  import { keepCard, SECTION_LABEL, type Inbox, type InboxRow, type InboxSection } from './assets_inbox';
   import { keep, type ParsedQuery } from './assets_query';
-  import { scopeBadge } from './assets_workspace';
+  import { scopeBadge, type ChangesetSummary, type ChangesetView } from './assets_workspace';
+  import type { CardVerbs } from './card_actions';
+
+  const NO_CARD_VERBS: CardVerbs = { apply: () => {}, dismiss: () => {}, undo: () => {}, synchost: () => {} };
 
   /** The Inbox (spec, Workspace shell; Rulings R14, R16): open cards first,
-   *  read-only until M6; then Needs you, Drifted, Behind the catalog, New on
+   *  each a `ChangesetCard` with its verbs; recently applied, undoable ones
+   *  as a banner with Undo; then Needs you, Drifted, Behind the catalog, New on
    *  hosts; In sync folds to one line. Every row is one asset identity — or
    *  one card — never one host copy. An unmanaged identity is S1a's own row
    *  (`IdentityRow`), Import included. */
@@ -21,6 +26,11 @@
     onselect,
     onimport = () => {},
     readonly = false,
+    views = {},
+    busy = false,
+    primaryId = null,
+    canActOn = () => true,
+    oncard = NO_CARD_VERBS,
   }: {
     inbox: Inbox;
     order: string[];
@@ -31,17 +41,25 @@
     onimport?: (identity: AssetIdentity) => void;
     /** A hub client without the grant: the same rows, nothing to import. */
     readonly?: boolean;
+    /** Every open card in full, by id (the `cardViews` store). */
+    views?: Record<number, ChangesetView>;
+    /** A card verb is running: the cards' verbs are disabled. */
+    busy?: boolean;
+    /** The card whose verb is the main column's one `.btn--primary`, if any. */
+    primaryId?: number | null;
+    /** Whether this window may act on a card (a grant on every catalog it names). */
+    canActOn?: (c: ChangesetSummary) => boolean;
+    /** What the cards' verbs do. */
+    oncard?: CardVerbs;
   } = $props();
 
   const OPEN: InboxSection[] = ['needs', 'drifted', 'behind', 'fresh'];
   let insyncOpen = $state(false);
 
-  /** A card has no host, scope, layer or state of its own, and the summary
-   *  does not yet name its catalogs (rollout and drift cards are built per
-   *  org catalog too): no token can say it does not match, so only free
-   *  words, against its sentence, hide a card (T7 ruling; catalogs: M6). */
-  const keepCard = (r: InboxRow) => !query.text || query.text.split(' ').every((w) => r.name.toLowerCase().includes(w));
-  const keepRow = (r: InboxRow) => (r.card ? keepCard(r) : keep(query, r.query));
+  /** A card has no host, scope, layer or state of its own: only free words
+   *  (its sentence) and `catalog:` (the catalogs its apply commits to) hide
+   *  it (T7 ruling; R2). */
+  const keepRow = (r: InboxRow) => (r.card ? keepCard(query, r.card) : keep(query, r.query));
 
   const shown = $derived(
     Object.fromEntries(
@@ -90,21 +108,19 @@
 {#snippet cardRow(r: InboxRow)}
   {@const c = r.card}
   {#if c}
-    <button
-      type="button"
-      class="row card"
-      class:selected={selectedKey === r.key}
-      aria-current={selectedKey === r.key ? 'true' : undefined}
-      data-row-key={r.key}
-      data-testid={`inbox-row-${r.key}`}
-      onclick={() => onselect(r.key)}
-    >
-      <Badge tone={c.state === 'failed' ? 'crit' : 'accent'} glyph={c.state === 'failed' ? '✗' : undefined} label={c.state === 'failed' ? `${c.kind} · failed` : c.kind} />
-      <RowName name={c.summary} strong why={c.error ?? ''} whyTitle={c.error ?? undefined} />
-      <span class="groups">
-        {#each Object.entries(c.groups ?? {}).slice(0, 3) as [g, n] (g)}<Badge label={`${g} ${n}`} />{/each}
-      </span>
-    </button>
+    <ChangesetCard
+      card={c}
+      view={views[c.id] ?? null}
+      selected={selectedKey === r.key}
+      readOnly={readonly || !canActOn(c)}
+      {busy}
+      primary={primaryId === c.id}
+      onselect={() => onselect(r.key)}
+      onapply={(p) => oncard.apply(c.id, p)}
+      ondismiss={() => oncard.dismiss(c.id)}
+      onundo={() => oncard.undo(c.id)}
+      onsynchost={oncard.synchost}
+    />
   {/if}
 {/snippet}
 
@@ -112,6 +128,10 @@
   {#if shown.cards.length}
     <h3 class="grp" data-testid="inbox-section-cards">{SECTION_LABEL.cards} <span class="n">{shown.cards.length}</span></h3>
     {#each shown.cards as r (r.key)}{@render cardRow(r)}{/each}
+  {/if}
+  {#if shown.applied.length}
+    <h3 class="grp" data-testid="inbox-section-applied">{SECTION_LABEL.applied} <span class="n">{shown.applied.length}</span></h3>
+    {#each shown.applied as r (r.key)}{@render cardRow(r)}{/each}
   {/if}
   {#each OPEN as s (s)}
     {#if shown[s].length}
@@ -152,9 +172,7 @@
     width: 100%; min-height: 34px; padding: 0 14px; border: 0; border-bottom: 1px solid var(--border);
     background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer;
   }
-  .row.card { grid-template-columns: auto minmax(0, 1fr) auto; }
   .row:hover { background: var(--bg-pane); }
   .row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
-  .groups { display: flex; gap: 4px; }
   .quiet, .note { margin: 0; padding: 10px 14px; color: var(--fg-muted); font-size: 12px; }
 </style>

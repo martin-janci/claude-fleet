@@ -6,7 +6,7 @@
 //! master's or an unbound full client's, as M3's `list_catalogs` (PF15).
 
 use super::tests_catalog_admin::{
-    client, code_of, host, message_of, tools, tools_notifying, two_catalog_store,
+    client, code_of, host, json_of, message_of, tools, tools_notifying, two_catalog_store,
 };
 use super::*;
 use crate::store::NewChangesetItem;
@@ -28,6 +28,7 @@ async fn call(
             id,
             positions,
             confirm_nonce: None,
+            change: None,
         }),
     )
     .await
@@ -411,6 +412,7 @@ async fn a_drift_restore_applied_without_positions_needs_personal_and_confirmati
                 id: Some(drift.id),
                 positions: None,
                 confirm_nonce: Some(nonce),
+                change: None,
             }),
         )
         .await
@@ -475,4 +477,140 @@ async fn an_unbound_clients_refusals_share_a_code_for_unknown_and_ungranted_card
         known, unknown,
         "a grantless client is refused before the card"
     );
+}
+
+/// One `changesets { propose_layer }` call through the gates `call_tool`
+/// runs first.
+async fn propose_layer(
+    t: &FleetTools,
+    caller: &Caller,
+    change: Option<crate::service::catalog::changesets::LayerChange>,
+) -> Result<CallToolResult, McpError> {
+    enforce_mode(caller, "changesets")?;
+    enforce_admin(caller, "changesets")?;
+    t.changesets(
+        Extension(caller.clone()),
+        Parameters(ChangesetsParams {
+            action: "propose_layer".into(),
+            id: None,
+            positions: None,
+            confirm_nonce: None,
+            change,
+        }),
+    )
+    .await
+}
+
+/// A create of layer `servers` in `catalog` (`None`: personal).
+fn create_servers(catalog: Option<&str>) -> crate::service::catalog::changesets::LayerChange {
+    crate::service::catalog::changesets::LayerChange::Create {
+        catalog: catalog.map(String::from),
+        layer: "servers".into(),
+        axis: None,
+        description: None,
+        members: vec![],
+    }
+}
+
+/// [`two_catalog_store`] with personal loaded (no layers), so a layer
+/// change can be validated against it.
+fn with_personal_loaded(s: &Store) {
+    let p = s.personal_catalog().unwrap().unwrap().id;
+    crate::service::catalog::registry::install_personal(crate::service::catalog::repo::Catalog {
+        id: p,
+        name: "personal".into(),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+fn layer_cards(t: &FleetTools) -> usize {
+    t.store
+        .lock()
+        .unwrap()
+        .list_changesets()
+        .unwrap()
+        .iter()
+        .filter(|c| c.kind == "layer")
+        .count()
+}
+
+/// Assets M6 (R5): the master, and a client granted the catalog, propose a
+/// layer card.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn propose_layer_makes_a_card_for_a_granted_caller() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, desk, _ops, _plain, _acme) = two_catalog_store();
+    with_personal_loaded(&s);
+    let t = tools(s);
+    let r = propose_layer(&t, &Caller::master(), Some(create_servers(None))).await;
+    assert_eq!(code_of(&r), "OK", "{:?}", r.err());
+    let card = json_of(r);
+    assert_eq!(card["kind"], "layer");
+    assert_eq!(card["summary"], "New layer servers in personal");
+    assert_eq!(card["items"][0]["decider"], "person");
+    // desk holds the personal grant. The first card is only proposed, so
+    // the catalog has no `servers` yet and the same change is still valid.
+    let r = propose_layer(
+        &t,
+        &client(desk, TokenMode::Full, None),
+        Some(create_servers(Some("personal"))),
+    )
+    .await;
+    assert_eq!(code_of(&r), "OK", "{:?}", r.err());
+    assert_eq!(layer_cards(&t), 2);
+}
+
+/// R25: a layer change needs a grant on the catalog it names — the grant on
+/// another catalog says nothing about it — and nothing is recorded.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn propose_layer_in_a_catalog_the_client_has_no_grant_for_is_forbidden() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, desk, ops, plain, _acme) = two_catalog_store();
+    with_personal_loaded(&s);
+    let t = tools(s);
+    let r = propose_layer(
+        &t,
+        &client(desk, TokenMode::Full, None),
+        Some(create_servers(Some("acme"))),
+    )
+    .await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN");
+    assert!(message_of(r).contains("--catalog acme"), "names the remedy");
+    let r = propose_layer(
+        &t,
+        &client(ops, TokenMode::Full, None),
+        Some(create_servers(None)),
+    )
+    .await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN");
+    assert!(message_of(r).contains("catalog personal"));
+    let r = propose_layer(
+        &t,
+        &client(plain, TokenMode::Full, None),
+        Some(create_servers(Some("nosuch"))),
+    )
+    .await;
+    assert_eq!(
+        code_of(&r),
+        "E_FORBIDDEN",
+        "an unknown catalog reads as ungranted"
+    );
+    let r = propose_layer(&t, &host("h1"), Some(create_servers(None))).await;
+    assert_eq!(code_of(&r), "E_FORBIDDEN", "never a per-host token's");
+    assert_eq!(layer_cards(&t), 0, "no card was inserted");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn propose_layer_without_a_change_is_invalid() {
+    let _g = crate::service::catalog::lock_registry_for_test();
+    let (s, _desk, _ops, _plain, _acme) = two_catalog_store();
+    let t = tools(s);
+    let r = propose_layer(&t, &Caller::master(), None).await;
+    assert_eq!(code_of(&r), "E_INVALID");
+    assert!(message_of(r).contains("propose_layer needs a change"));
+    assert_eq!(layer_cards(&t), 0);
 }

@@ -55,6 +55,10 @@
         },
         {
           "type": "link",
+          "page": "settings.catalogs"
+        },
+        {
+          "type": "link",
           "page": "settings.decisions"
         }
       ]
