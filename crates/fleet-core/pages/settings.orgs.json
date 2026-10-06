@@ -70,7 +70,7 @@
         {
           "type": "notice",
           "tone": "info",
-          "text": "Pair a phone, a browser or a desktop to this org on the hub with fleet-hub pair --org and the org's name. Unbind one with fleet-hub client unbind, or revoke it with fleet-hub client revoke."
+          "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here."
         }
       ]
     },

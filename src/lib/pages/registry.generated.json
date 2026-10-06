@@ -2024,15 +2024,28 @@
         {
           "items": [
             {
+              "page": "settings.orgs",
+              "type": "link"
+            },
+            {
+              "page": "settings.devices",
+              "type": "link"
+            },
+            {
+              "page": "settings.people",
+              "type": "link"
+            }
+          ],
+          "title": "Company"
+        },
+        {
+          "items": [
+            {
               "page": "settings.trackers",
               "type": "link"
             },
             {
               "page": "settings.work",
-              "type": "link"
-            },
-            {
-              "page": "settings.orgs",
               "type": "link"
             },
             {
@@ -2947,7 +2960,7 @@
               "type": "field"
             },
             {
-              "text": "Pair a phone, a browser or a desktop to this org on the hub with fleet-hub pair --org and the org's name. Unbind one with fleet-hub client unbind, or revoke it with fleet-hub client revoke.",
+              "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here.",
               "tone": "info",
               "type": "notice"
             }
@@ -2991,7 +3004,7 @@
     },
     {
       "id": "settings.catalogs",
-      "intro": "Git repos of assets fleet syncs to hosts. A GitHub org with SSO must allow a catalog's deploy key; an org admin does that once in the org's settings. Grants are given on the hub: fleet-hub client grant CLIENT assets --catalog NAME.",
+      "intro": "Git repos of assets fleet syncs to hosts. A GitHub org with SSO must allow a catalog's deploy key; an org admin does that once in the org's settings. Which device may change a catalog is set in Settings → Devices.",
       "layout": "master_detail",
       "parent": "settings",
       "resource": "catalog",
@@ -3037,6 +3050,108 @@
       ],
       "spec": "fleet.page/1",
       "title": "Catalogs"
+    },
+    {
+      "id": "settings.devices",
+      "intro": "Every phone, browser and desktop paired to the hub: pair a new one, trust it, bind it to an org, hand it to a person, let it change a catalog, or revoke it. Changes need this device to be trusted.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "device",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "mode",
+              "type": "field"
+            },
+            {
+              "key": "this_device",
+              "type": "field"
+            },
+            {
+              "key": "last_seen_at",
+              "type": "field"
+            },
+            {
+              "key": "created_at",
+              "type": "field"
+            }
+          ],
+          "title": "Device"
+        },
+        {
+          "items": [
+            {
+              "key": "trusted",
+              "type": "field"
+            },
+            {
+              "key": "org",
+              "type": "field"
+            },
+            {
+              "key": "person",
+              "type": "field"
+            },
+            {
+              "key": "catalogs",
+              "type": "field"
+            }
+          ],
+          "title": "What it may do"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Devices"
+    },
+    {
+      "id": "settings.people",
+      "intro": "The people this hub knows. A person is added when a device is paired to them or handed to them. Disabling someone revokes their devices and the shares made to them.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "person",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "name",
+              "type": "field"
+            },
+            {
+              "key": "display_name",
+              "type": "field"
+            },
+            {
+              "key": "owner",
+              "type": "field"
+            }
+          ],
+          "title": "Person"
+        },
+        {
+          "items": [
+            {
+              "key": "devices",
+              "type": "field"
+            },
+            {
+              "key": "created_at",
+              "type": "field"
+            },
+            {
+              "key": "disabled_at",
+              "type": "field"
+            }
+          ],
+          "title": "Access"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "People"
     },
     {
       "id": "settings.updates",
@@ -3676,13 +3791,63 @@
           "type": "items"
         },
         {
-          "add": [],
-          "help": "Phones, browsers and desktops paired to this org. They see only its work (and unassigned work, if allowed below). Shown to the hub's operator only.",
+          "add": [
+            {
+              "bind": [
+                [
+                  "device",
+                  {
+                    "from": "param",
+                    "name": "device"
+                  }
+                ],
+                [
+                  "org_id",
+                  {
+                    "from": "record",
+                    "name": "id"
+                  }
+                ]
+              ],
+              "command": "bind_device_org",
+              "envelope": "args",
+              "id": "org.bind_device",
+              "label": "Bind a device",
+              "params": [
+                {
+                  "label": "Device",
+                  "name": "device",
+                  "required": true,
+                  "source": "devices",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Phones, browsers and desktops bound to this org: they see only its work (and unassigned work, if allowed below). Pair a new one in Settings → Devices. Shown to the hub's operator only.",
           "id": "devices",
           "item_label": {
             "type": "device"
           },
           "label": "Devices",
+          "remove": {
+            "bind": [
+              [
+                "device",
+                {
+                  "from": "item_field",
+                  "name": "name"
+                }
+              ]
+            ],
+            "command": "bind_device_org",
+            "envelope": "args",
+            "id": "org.unbind_device",
+            "label": "Unbind the device",
+            "params": [],
+            "report": false
+          },
           "type": "items"
         },
         {
@@ -4255,7 +4420,7 @@
         },
         {
           "add": [],
-          "help": "Paired desktops that may change this catalog. Granted on the hub (see above).",
+          "help": "Paired desktops that may change this catalog. Granted in Settings → Devices.",
           "id": "granted",
           "item_label": {
             "type": "plain"
@@ -4264,13 +4429,479 @@
           "type": "items"
         }
       ],
-      "help": "Git repos of assets fleet syncs to hosts. `personal` is yours; an org's catalog reaches that org's hosts and the org-less hosts that admit it. A GitHub org with SSO must allow the catalog's deploy key — an org admin does that once in the org's settings. Grants are given on the hub: `fleet-hub client grant <client> assets --catalog <name>`.",
+      "help": "Git repos of assets fleet syncs to hosts. `personal` is yours; an org's catalog reaches that org's hosts and the org-less hosts that admit it. A GitHub org with SSO must allow the catalog's deploy key — an org admin does that once in the org's settings. Which device may change a catalog is set in Settings → Devices.",
       "id": "catalog",
       "id_field": "name",
       "label": "Catalog",
       "list": "catalog_list_catalogs",
       "plural": "Catalogs",
       "title_field": "name"
+    },
+    {
+      "actions": [
+        {
+          "bind": [
+            [
+              "device",
+              {
+                "from": "record",
+                "name": "name"
+              }
+            ],
+            [
+              "org",
+              {
+                "from": "param",
+                "name": "org"
+              }
+            ]
+          ],
+          "command": "bind_device_org",
+          "confirm": "From its next request it sees only that org's work and sessions.",
+          "envelope": "args",
+          "id": "device.bind",
+          "label": "Bind to an org",
+          "params": [
+            {
+              "label": "Org",
+              "name": "org",
+              "required": true,
+              "source": "orgs",
+              "type": "options"
+            }
+          ],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "device",
+              {
+                "from": "record",
+                "name": "name"
+              }
+            ]
+          ],
+          "command": "bind_device_org",
+          "confirm": "From its next request it sees every org again.",
+          "envelope": "args",
+          "id": "device.unbind",
+          "label": "Unbind from its org",
+          "params": [],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "device",
+              {
+                "from": "record",
+                "name": "name"
+              }
+            ],
+            [
+              "person",
+              {
+                "from": "param",
+                "name": "person"
+              }
+            ]
+          ],
+          "command": "set_device_person",
+          "confirm": "From its next request it sees that person's sessions and the ones shared with them, and no others.",
+          "envelope": "args",
+          "id": "device.hand_over",
+          "label": "Hand to a person",
+          "params": [
+            {
+              "label": "Person",
+              "max": 64,
+              "name": "person",
+              "placeholder": "ada",
+              "required": true,
+              "type": "text"
+            }
+          ],
+          "report": false
+        }
+      ],
+      "create": {
+        "bind": [
+          [
+            "device",
+            {
+              "from": "param",
+              "name": "device"
+            }
+          ],
+          [
+            "mode",
+            {
+              "from": "param",
+              "name": "mode"
+            }
+          ],
+          [
+            "org",
+            {
+              "from": "param",
+              "name": "org"
+            }
+          ],
+          [
+            "person",
+            {
+              "from": "param",
+              "name": "person"
+            }
+          ]
+        ],
+        "command": "pair_device",
+        "envelope": "args",
+        "id": "device.pair",
+        "label": "Pair a device",
+        "params": [
+          {
+            "label": "Name",
+            "max": 64,
+            "name": "device",
+            "placeholder": "ada-phone",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Mode",
+            "name": "mode",
+            "options": [
+              [
+                "full",
+                "Full"
+              ],
+              [
+                "readonly",
+                "Read-only"
+              ]
+            ],
+            "required": true,
+            "type": "choice"
+          },
+          {
+            "label": "Bind to org (optional)",
+            "name": "org",
+            "required": false,
+            "source": "orgs",
+            "type": "options"
+          },
+          {
+            "label": "Belongs to (optional; you when empty)",
+            "max": 64,
+            "name": "person",
+            "placeholder": "ada",
+            "required": false,
+            "type": "text"
+          }
+        ],
+        "report": false,
+        "result": "pairing"
+      },
+      "delete": {
+        "bind": [
+          [
+            "device",
+            {
+              "from": "record",
+              "name": "name"
+            }
+          ]
+        ],
+        "command": "revoke_device",
+        "confirm": "Its next request is refused and the name is free again. Pair it again to bring it back.",
+        "envelope": "args",
+        "id": "device.revoke",
+        "label": "Revoke",
+        "params": [],
+        "report": false
+      },
+      "empty": "No paired devices. Pair a phone or a browser with Pair a device.",
+      "fields": [
+        {
+          "help": "What it was paired as; fixed once paired.",
+          "id": "name",
+          "label": "Name",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Full drives sessions; read-only watches.",
+          "id": "mode",
+          "label": "Mode",
+          "options": [
+            [
+              "full",
+              "Full"
+            ],
+            [
+              "readonly",
+              "Read-only"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "badge": {
+            "text": "this device",
+            "when": "true"
+          },
+          "default": false,
+          "help": "The device you are using now. It cannot revoke, untrust, bind or hand over itself.",
+          "id": "this_device",
+          "label": "This device",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "badge": {
+            "text": "trusted",
+            "when": "true"
+          },
+          "confirm": "Its prompts will reach agents unmarked, and it will be able to change the company's orgs, devices and settings.",
+          "default": false,
+          "edit": "trusted",
+          "help": "Its prompts and messages reach agents unmarked, and it may change the company's orgs, devices and settings. Trust a device you type on, never an agent's.",
+          "id": "trusted",
+          "label": "Trusted",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "help": "The org it is bound to; none sees every org.",
+          "id": "org",
+          "label": "Org",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "help": "Whose device it is: it sees their sessions and the ones shared with them.",
+          "id": "person",
+          "label": "Belongs to",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "add": [
+            {
+              "bind": [
+                [
+                  "device",
+                  {
+                    "from": "record",
+                    "name": "name"
+                  }
+                ],
+                [
+                  "catalog",
+                  {
+                    "from": "param",
+                    "name": "catalog"
+                  }
+                ],
+                [
+                  "on",
+                  {
+                    "from": "true"
+                  }
+                ]
+              ],
+              "command": "grant_device_catalog",
+              "envelope": "args",
+              "id": "device.grant_catalog",
+              "label": "Grant a catalog",
+              "params": [
+                {
+                  "label": "Catalog",
+                  "name": "catalog",
+                  "required": true,
+                  "source": "catalogs",
+                  "type": "options"
+                }
+              ],
+              "report": false
+            }
+          ],
+          "help": "Asset catalogs it may edit and sync. Only a full device bound to no org can hold one.",
+          "id": "catalogs",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "May change catalogs",
+          "remove": {
+            "bind": [
+              [
+                "device",
+                {
+                  "from": "record",
+                  "name": "name"
+                }
+              ],
+              [
+                "catalog",
+                {
+                  "from": "item"
+                }
+              ],
+              [
+                "on",
+                {
+                  "from": "false"
+                }
+              ]
+            ],
+            "command": "grant_device_catalog",
+            "envelope": "args",
+            "id": "device.ungrant_catalog",
+            "label": "Take the catalog back",
+            "params": [],
+            "report": false
+          },
+          "type": "items"
+        },
+        {
+          "help": "Its last request to the hub.",
+          "id": "last_seen_at",
+          "label": "Last seen",
+          "type": "time"
+        },
+        {
+          "help": "When it was paired.",
+          "id": "created_at",
+          "label": "Paired",
+          "type": "time"
+        }
+      ],
+      "help": "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Peer hub links and updater tokens are managed on the hub.",
+      "id": "device",
+      "id_field": "name",
+      "label": "Device",
+      "list": "list_devices",
+      "plural": "Devices",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "device",
+            {
+              "from": "record",
+              "name": "name"
+            }
+          ]
+        ],
+        "command": "set_device_trust",
+        "envelope": "args",
+        "id": "device.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      }
+    },
+    {
+      "delete": {
+        "bind": [
+          [
+            "person_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "disable_person",
+        "confirm": "Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. There is no re-enable.",
+        "envelope": "args",
+        "id": "person.disable",
+        "label": "Disable",
+        "params": [],
+        "report": false
+      },
+      "empty": "Nobody yet. A person is added when a device is paired to them.",
+      "fields": [
+        {
+          "edit": "name",
+          "help": "What grants and devices are addressed to.",
+          "id": "name",
+          "label": "Name",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "edit": "display_name",
+          "help": "How the apps show them; empty shows the name.",
+          "id": "display_name",
+          "label": "Shown as",
+          "max": 80,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "text": "owner",
+            "when": "true"
+          },
+          "default": false,
+          "help": "This hub's own owner.",
+          "id": "owner",
+          "label": "Owner",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "add": [],
+          "help": "Their live paired devices. Manage them in Settings → Devices.",
+          "id": "devices",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Devices",
+          "type": "items"
+        },
+        {
+          "help": "When the hub first heard of them.",
+          "id": "created_at",
+          "label": "Added",
+          "type": "time"
+        },
+        {
+          "help": "When their devices and the shares made to them were revoked.",
+          "id": "disabled_at",
+          "label": "Disabled",
+          "type": "time"
+        }
+      ],
+      "help": "The people this hub knows. A session belongs to the person whose device started it and is private to them unless they share it. The hub's owner cannot be disabled.",
+      "id": "person",
+      "id_field": "id",
+      "label": "Person",
+      "list": "list_people",
+      "plural": "People",
+      "title_field": "name",
+      "update": {
+        "bind": [
+          [
+            "person_id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "rename_person",
+        "envelope": "args",
+        "id": "person.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      }
     }
   ],
   "sources": [

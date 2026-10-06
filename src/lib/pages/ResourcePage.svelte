@@ -10,6 +10,9 @@
   import ActionForm from './ActionForm.svelte';
   import FlowView from './FlowView.svelte';
   import OrgSuggestions from '../OrgSuggestions.svelte';
+  import PairingResult from './PairingResult.svelte';
+  import { catalogStatuses } from '../assets_workspace';
+  import { devices, type Pairing } from '../devices';
   import { hosts } from '../hosts';
   import { orgs } from '../orgs';
   import { trackers } from '../trackers';
@@ -54,6 +57,8 @@
   let version = $state(0);
   let adding = $state(false);
   let busy = $state(false);
+  /** A create whose answer is shown (`result: pairing`), until dismissed. */
+  let pairing = $state<Pairing | null>(null);
 
   const current = $derived(records.find((r) => idOf(resource, r) === selected) ?? null);
 
@@ -85,6 +90,7 @@
     const r = await runAction(action, args);
     busy = false;
     if (!r.ok) pushError(r.error, `${action.label} failed`);
+    else if (action.result === 'pairing') pairing = r.value as Pairing;
     else if (action.report) {
       // `{ ok, error? }`: a test that ran and failed is not a failed call.
       const rep = r.value as { ok?: boolean; error?: string | null } | null;
@@ -112,6 +118,8 @@
   function sourceOptions(source: OptionSource): { value: string; label: string }[] {
     if (source === 'hosts') return get(hosts).map((h) => ({ value: h.alias, label: h.alias }));
     if (source === 'orgs') return get(orgs).map((o) => ({ value: o.name, label: o.name }));
+    if (source === 'devices') return get(devices).map((d) => ({ value: d.name, label: d.name }));
+    if (source === 'catalogs') return (get(catalogStatuses) ?? []).map((c) => ({ value: c.name, label: c.name }));
     return get(trackers).map((t) => ({ value: String(t.id), label: t.name }));
   }
 
@@ -125,11 +133,13 @@
     return sourceOptions(spec.source).filter((o) => !have.has(o.value));
   }
 
-  /** The create form's choices: the source's values, nothing to leave out. */
-  function createOptions(param: string): { value: string; label: string }[] {
-    const spec = resource.create?.params.find((p) => p.name === param);
+  /** A create or record action form's choices: the source's values,
+   *  nothing to leave out. */
+  function actionOptions(action: ActionSpec | undefined, param: string): { value: string; label: string }[] {
+    const spec = action?.params.find((p) => p.name === param);
     return spec?.type === 'options' ? sourceOptions(spec.source) : [];
   }
+  const createOptions = (param: string) => actionOptions(resource.create, param);
 </script>
 
 <div class="resource-page" data-testid={`resource-${resource.id}`}>
@@ -183,6 +193,9 @@
     </div>
 
     <div class="detail">
+      {#if pairing}
+        <PairingResult {pairing} onclose={() => (pairing = null)} />
+      {/if}
       {#if adding && resource.create_flow}
         <FlowView
           flow={resource.create_flow}
@@ -203,6 +216,7 @@
             record={current}
             {readonly}
             {options}
+            {actionOptions}
             {run}
             reload={() => void reload()} />
         {/key}

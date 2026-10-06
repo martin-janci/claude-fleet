@@ -7,22 +7,29 @@ import { invokeCmd, type Result } from '../result';
 import { loadOrgs, ruleChip, type OrgRuleRow } from '../orgs';
 import { loadTrackers } from '../trackers';
 import { loadCatalogStatuses } from '../assets_workspace';
+import { loadDevices } from '../devices';
 
 export type Bind =
   | { from: 'record'; name: string }
   | { from: 'item' }
   | { from: 'item_field'; name: string }
   | { from: 'param'; name: string }
-  | { from: 'null' };
+  | { from: 'null' }
+  | { from: 'true' }
+  | { from: 'false' };
 
-export type OptionSource = 'hosts' | 'trackers' | 'orgs';
+export type OptionSource = 'hosts' | 'trackers' | 'orgs' | 'devices' | 'catalogs';
 
 export type ParamSpec = { name: string; label: string; required: boolean } & (
   | { type: 'text'; max: number; placeholder: string }
   | { type: 'color' }
   | { type: 'secret' }
   | { type: 'options'; source: OptionSource }
+  | { type: 'choice'; options: [string, string][] }
 );
+
+/** How an action's answer is shown (`ResultView`). */
+export type ResultView = 'pairing';
 
 export interface ActionSpec {
   id: string;
@@ -36,6 +43,8 @@ export interface ActionSpec {
   variants?: string[];
   /** The command answers `{ ok, error? }`. */
   report: boolean;
+  /** Its answer is shown by this formatter. */
+  result?: ResultView;
 }
 
 export type ItemLabel =
@@ -279,14 +288,31 @@ export function buildArgs(
       case 'null':
         out[arg] = null;
         break;
+      case 'true':
+        out[arg] = true;
+        break;
+      case 'false':
+        out[arg] = false;
+        break;
     }
   }
   return out;
 }
 
+/** A param's value as the form holds it: what was typed or picked, else
+ *  a choice's first option (preselected). */
+export function paramValue(p: ParamSpec, params: Record<string, string>): string {
+  return params[p.name] ?? (p.type === 'choice' ? (p.options[0]?.[0] ?? '') : '');
+}
+
 /** The form can be sent: every required param has a value. */
 export function formReady(action: ActionSpec, params: Record<string, string>): boolean {
-  return action.params.every((p) => !p.required || (params[p.name] ?? '').trim() !== '');
+  return action.params.every((p) => !p.required || paramValue(p, params).trim() !== '');
+}
+
+/** What the form sends: its values, with each choice's preselected option. */
+export function formValues(action: ActionSpec, params: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(action.params.map((p) => [p.name, paramValue(p, params)]));
 }
 
 export function runAction(action: ActionSpec, args: Record<string, unknown>): Promise<Result<unknown>> {
@@ -303,9 +329,11 @@ export function listRecords(r: ResourceType): Promise<Result<ResourceRecord[]>> 
  * like the custom components.
  */
 export const RESOURCE_RELOADERS: Record<string, (() => Promise<unknown>)[]> = {
-  org: [loadOrgs, loadTrackers],
+  org: [loadOrgs, loadTrackers, loadDevices],
   tracker: [loadTrackers, loadOrgs],
   catalog: [loadCatalogStatuses, loadOrgs],
+  device: [loadDevices, loadOrgs, loadCatalogStatuses],
+  person: [loadDevices],
 };
 
 export async function afterChange(r: ResourceType): Promise<void> {

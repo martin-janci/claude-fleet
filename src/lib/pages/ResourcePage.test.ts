@@ -89,13 +89,14 @@ describe('Organisations (master_detail over the org resource)', () => {
     await waitFor(() => expect(screen.getByTestId('value-session_count').textContent).toBe('3'));
     expect(screen.getByTestId('value-needs_you').textContent).toBe('1');
     expect(screen.getByTestId('item-catalogs').textContent).toContain('acme-assets');
-    expect(screen.getAllByTestId('item-devices').map((c) => c.textContent?.trim())).toEqual([
+    expect(screen.getAllByTestId('item-devices').map((c) => c.textContent?.replace('×', '').trim())).toEqual([
       'phone · read-only, trusted',
       'laptop',
     ]);
-    // Shown, never changed here: no remove button on a device or a catalog.
-    expect(screen.queryByTestId('item-remove-devices')).toBeNull();
+    // A catalog is shown, never changed here; a device is unbound from it
+    // (org administration phase B).
     expect(screen.queryByTestId('item-remove-catalogs')).toBeNull();
+    expect(screen.getAllByTestId('item-remove-devices')).toHaveLength(2);
   });
 
   it('reads an older hub as zero, and leaves out the lists it does not carry', async () => {

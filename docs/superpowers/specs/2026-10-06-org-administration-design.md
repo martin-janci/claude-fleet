@@ -2,8 +2,8 @@
 
 Status: design. Scope was chosen by the owner in conversation on 2026-10-06:
 all four parts below, built into **Settings → Organisations**, not as a
-separate screen. Phase A is built with this spec. B–D are specified here
-and each waits for its own plan.
+separate screen. Phases A and B are built (2026-10-06). C and D are
+specified here and each waits for its own plan.
 
 ## Problem
 
@@ -65,29 +65,47 @@ with how to pair one (`fleet-hub pair --org <name>`) until phase B.
 Old hubs: every new field is `#[serde(default)]`, so a paired desktop on an
 older hub shows zeros and empty lists — no contract bump.
 
-## Phase B — devices and people from the desktop
+## Phase B — devices and people from the desktop (built)
 
-The hub's CLI-only administration becomes hub tools a desktop routes to.
+The hub's CLI-only administration became one hub tool a desktop routes to.
 
-- **Who:** the master, or the hub's personal owner on a trusted `full`
-  device bound to no org — the same person `settings_writer` lets write the
-  fleet's settings (declarative pages P6). One gate, `admin_writer`, next to
-  it in `mcp/tools/fleet.rs`. A readonly or untrusted owner device reads.
-- **Org writes route.** `add_org` … `assign_tracker_org` change from
-  `LocalOnly` (`ORGS_ARE_ADMIN`) to routed calls of `work_admin`, whose
-  access widens from `Master` to "master or `admin_writer`". The verdict
-  rows, `REGEN_HUB_VERDICTS`, and the isolation matrix change with it.
-- **Tool `client_admin`** `{ list | pair | revoke | trust | untrust | bind
-  | unbind | grant | ungrant | bind_person }`: the `fleet-hub client` and
-  `pair` verbs. `pair` answers the single-use code and its QR payload,
-  never a token; `revoke` and `untrust` of the caller's own device are
-  refused (no lock-out by accident).
-- **Tool `person_admin`** `{ list | rename | disable }`.
-- **Pages:** the org's `devices` field gets *Pair a device* (mode, trusted)
-  and per-chip *Revoke* / *Unbind*; a new resource `client` backs
-  **Settings → Devices** (every device, its org, person, mode, trust,
-  catalog grants) and `person` backs **Settings → People**. The Catalogs
-  page's read-only *Granted to* gets *Grant* / *Ungrant*.
+- **One tool, `org_admin`** (`service/org_admin.rs`, the tool in
+  `mcp/tools/fleet.rs`), rather than the `client_admin` / `person_admin`
+  pair first sketched: one gate, one routing family, one place for the
+  lock-out rule. Actions: the org actions of `work_admin` under the same
+  names (an org named by `org_id` or `org`), `list_devices`,
+  `pair_device`, `revoke_device`, `set_device_trust`, `bind_device`,
+  `set_device_person`, `grant_catalog`, `list_people`, `rename_person`,
+  `disable_person`.
+- **Who:** `Access::PersonDevice` — the hub owner's own device bound to no
+  org. Not the master (it has `fleet-hub org|client|person` and
+  `work_admin`), not a host, an org-bound device or a colleague's. The tool
+  is not readonly, so a readonly device is refused it whole. Lists for any
+  such full device; a change needs it **trusted** (`org_admin_writer`, the
+  same person `settings_writer` lets change the fleet's settings).
+- **No lock-out:** the device a call comes through cannot revoke, untrust,
+  bind, hand over or lose a catalog grant through it; the owner cannot be
+  disabled (`Store::disable_person`). A peer link or updater token is not
+  a device: never listed, refused by every device action, and never paired
+  here (`pair_device` takes `full` / `readonly` only).
+- **Pairing:** `pair_device` shares `pair_client`'s mint (`mint_pairing`)
+  and answers the URL's QR as rows of `1` / `0` (the `qrcode` crate
+  fleet-hub already used), drawn by the desktop as an SVG
+  (`PairingResult.svelte`, result view `pairing`).
+- **Org writes route.** The seven org commands changed from `LocalOnly`
+  (`ORGS_ARE_ADMIN`, removed) to `Routed { tool: "org_admin" }`; standalone
+  they run `service::org_admin` on the desktop's store. Ten new desktop
+  commands (`src-tauri/src/commands/org_devices.rs`) route the device and
+  people actions; standalone, `pair_device` refuses (a code is a hub's).
+- **Pages:** Settings gains a **Company** section — Organisations, Devices
+  (resource `device`: pair, trust, bind / unbind, hand to a person, grant /
+  take back a catalog, revoke) and People (resource `person`: rename,
+  display name, disable). The org page's *Devices* list binds and unbinds a
+  device. Resources gained option sources `devices` / `catalogs`, a
+  `choice` param, constant `true` / `false` arguments and record-action
+  option selects.
+- **Older hub:** a hub without `org_admin` answers an unknown tool, which
+  the desktop shows as the hub's error; nothing else changes on it.
 
 ## Phase C — settings, spend and budgets per org
 

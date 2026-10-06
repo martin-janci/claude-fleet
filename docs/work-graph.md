@@ -879,9 +879,8 @@ only its own: the other org's task, its title, evidence, conversation and
 summary never reach a device bound to the first org, and a device bound to
 the other org sees the task without the first org's session.
 
-Orgs are managed in Settings → Organisations on a standalone
-desktop (read-only on a paired desktop), or with `fleet-hub org …` on a
-hub. **Assign every host of a company before
+Orgs are managed in Settings → Organisations — on a paired desktop too,
+when the hub trusts it — or with `fleet-hub org …` on a hub. **Assign every host of a company before
 connecting a second company's tracker.** The details and commands are in
 [hub.md → Organisations and isolation](hub.md#organisations-and-isolation).
 
@@ -889,11 +888,19 @@ Each org's page opens with an **Overview**: how many of its live sessions
 you can see, and how many of them need you. Under *What belongs to it* it
 lists the org's asset catalogs next to its rules, hosts and trackers.
 **Devices** lists the phones, browsers and desktops bound to it, with
-read-only and trusted marked. Only the hub's operator sees that list: the
-master, or the owner's own device bound to no org. Devices are paired and
-unbound on the hub for now (`fleet-hub pair --org`, `fleet-hub client
-unbind|revoke`). The later phases of org administration (devices from the
-desktop, per-org settings and budgets, members and roles) are in
+read-only and trusted marked, and binds or unbinds one. Only the hub's
+operator sees that list: the master, or the owner's own device bound to no
+org.
+
+Settings → **Company** holds the rest of the company's administration:
+**Organisations**, **Devices** (pair a phone or a browser — the page shows
+the one-time code, its link and a QR to scan — trust it, bind it to an org,
+hand it to a person, let it change a catalog, or revoke it) and **People**
+(rename, or disable someone, which revokes their devices and the shares
+made to them). On a desktop paired with a hub these change the hub's orgs,
+devices and people, and need this desktop to be trusted (`fleet-hub client
+trust <name>`); none of them can lock out the device you are using. The
+later phases (per-org settings and budgets, members and roles) are in
 `docs/superpowers/specs/2026-10-06-org-administration-design.md`.
 
 ## Trackers in fleet health

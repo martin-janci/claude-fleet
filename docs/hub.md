@@ -1772,6 +1772,15 @@ fleet-hub tracker test 3
 
 ## Organisations and isolation
 
+**From a paired desktop.** Settings → Company (Organisations, Devices,
+People) changes this hub's orgs, paired devices and people through the
+`org_admin` tool: the owner's own device bound to no org reads them, and a
+**trusted** `full` one changes them (`fleet-hub client trust <name>`). It
+pairs a phone with a one-time code and QR (`pair_device`, a person's device
+only — peer links and updater tokens stay `fleet-hub pair --mode`), and
+never revokes, untrusts, binds or hands over the device it is used from.
+`fleet-hub org|client|person` stay the operator's side on this machine.
+
 Organisations are optional. With none, the desktop's scope selector offers
 the GitHub owners of the live sessions (only when there are two or more) and
 nothing is fenced. Name an org to merge or split owners, to attach a

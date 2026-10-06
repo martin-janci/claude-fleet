@@ -37,6 +37,7 @@
     record,
     readonly = false,
     options,
+    actionOptions = () => [],
     run,
     reload,
     now = () => Math.floor(Date.now() / 1000),
@@ -46,6 +47,8 @@
     record: ResourceRecord;
     readonly?: boolean;
     options: (field: FieldSpec, param: string) => { value: string; label: string }[];
+    /** A record action's choices for one of its `options` params. */
+    actionOptions?: (action: ActionSpec, param: string) => { value: string; label: string }[];
     /** Run an action with its arguments; resolves once the list is re-read. */
     run: (action: ActionSpec, args: Record<string, unknown>) => Promise<boolean>;
     /** Re-read the list (a custom item changed something). */
@@ -166,6 +169,7 @@
       <ActionForm
         action={a}
         {busy}
+        options={(p) => actionOptions(a, p)}
         onrun={(params) => {
           openAction = null;
           runItem(a, null, params);
