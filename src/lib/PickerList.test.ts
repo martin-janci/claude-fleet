@@ -9,13 +9,14 @@ describe('PickerList extensions', () => {
   it('renders chip, kbd, dim, a group subtitle, and mouse-only actions', async () => {
     const ongroupclick = vi.fn();
     const oncontext = vi.fn();
+    const onpick = vi.fn();
     render(PickerList, {
       props: {
         items: [
           { key: 'a', label: 'alpha', group: 'Pinned', groupKey: 'pinned', groupSub: 'yours', chip: 'current session', kbd: '⌘1', actionable: true },
           { key: 'b', label: 'beta', group: 'Pinned', groupKey: 'pinned', dim: true },
         ],
-        onpick: () => {},
+        onpick,
         rowActions: acts,
         ongroupclick,
         oncontext,
@@ -28,6 +29,12 @@ describe('PickerList extensions', () => {
     expect(document.querySelector('[data-key="b"]')?.classList.contains('dim')).toBe(true);
     expect(screen.getByTestId('act').closest('[aria-hidden="true"]')).not.toBeNull();
     expect(screen.getAllByTestId('act')).toHaveLength(1); // only the actionable row
+    expect(document.querySelector('[data-key="a"]')?.classList.contains('actionable')).toBe(true);
+    expect(document.querySelector('[data-key="b"]')?.classList.contains('actionable')).toBe(false);
+    await fireEvent.click(screen.getByTestId('act'));
+    expect(onpick).not.toHaveBeenCalled();
+    await fireEvent.keyDown(screen.getByTestId('act'), { key: 'Enter' });
+    expect(onpick).not.toHaveBeenCalled();
     await fireEvent.click(screen.getByText('Pinned'));
     expect(ongroupclick).toHaveBeenCalledWith('pinned');
     await fireEvent.contextMenu(document.querySelector('[data-key="a"]')!);

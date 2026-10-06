@@ -119,6 +119,7 @@
       class="row"
       class:active={item.key === activeKey}
       class:dim={item.dim}
+      class:actionable={item.actionable && !!rowActions}
       role="option"
       id={listId ? optionId(listId, item.key) : undefined}
       aria-selected={item.key === activeKey}
@@ -154,7 +155,13 @@
         <span class="meta">{item.meta ?? ''}{#if item.kbd}<kbd class="kbd">{item.kbd}</kbd>{/if}</span>
       {/if}
       {#if item.actionable && rowActions}
-        <span class="acts" aria-hidden="true">{@render rowActions(item)}</span>
+        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+        <span
+          class="acts"
+          aria-hidden="true"
+          onclick={(e) => e.stopPropagation()}
+          onkeydown={(e) => e.stopPropagation()}>{@render rowActions(item)}</span
+        >
       {/if}
     </div>
   {/each}
@@ -261,10 +268,10 @@
     background: var(--bg-pane);
     border: 1px solid var(--border);
   }
-  .row:hover .acts {
+  .row.actionable:hover .acts {
     display: flex;
   }
-  .row:hover .meta {
+  .row.actionable:hover .meta {
     visibility: hidden;
   }
   .badge {
