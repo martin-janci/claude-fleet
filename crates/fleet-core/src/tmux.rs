@@ -335,13 +335,14 @@ pub struct HostHealthSample {
 /// vm.loadavg` on macOS — `{ 1.62 1.80 1.91 }`), available memory in kB
 /// (`MemAvailable` on Linux; empty on macOS, whose `vm_stat` has no single
 /// equivalent), and the uptime in seconds (`/proc/uptime`, else derived
-/// from `kern.boottime`). Every command is `2>/dev/null` with an empty
+/// from `kern.boottime`, `{ sec = N, usec = M } <date>`; the sed anchors on
+/// `{ sec = ` because `usec = ` also contains `sec = `). Every command is `2>/dev/null` with an empty
 /// value on failure, so a missing tool degrades one field, never the probe.
 pub const HOST_HEALTH_SCRIPT: &str = "printf 'dfhome=%s\\n' \"$(df -Pk \"$HOME\" 2>/dev/null | tail -n 1)\"; \
 printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; \
 printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
 printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)\"; \
-printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed 's/.*sec = \\([0-9]*\\).*/\\1/'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"";
+printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"";
 
 /// Second field of a `df -Pk` data line is total kB, fourth is available kB.
 fn df_kb(line: &str) -> (Option<i64>, Option<i64>) {
@@ -2399,6 +2400,48 @@ mod tests {
         assert_eq!(h.load_1m, Some(1.62));
         assert_eq!(h.mem_avail_kb, None);
         assert_eq!(parse_host_health(""), HostHealthSample::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_macos_uptime_fallback_reads_the_seconds_not_the_microseconds() {
+        // Run the real script with the Linux path forced off (`cut` fails,
+        // as it does when /proc/uptime is absent) and a `sysctl` printing
+        // macOS's actual `kern.boottime` shape. Its `usec = ` also contains
+        // `sec = `, so a greedy match took the microseconds as the boot
+        // epoch and reported ~56 years of uptime. `date` is pinned so the
+        // uptime is exact.
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        for (tool, body) in [
+            (
+                "sysctl",
+                "#!/bin/sh\n[ \"$2\" = kern.boottime ] || exit 1\n\
+                 echo '{ sec = 1790420987, usec = 963287 } Sat Sep 26 13:09:47 2026'\n",
+            ),
+            ("cut", "#!/bin/sh\nexit 1\n"),
+            ("date", "#!/bin/sh\necho 1790421987\n"),
+        ] {
+            let p = bin.path().join(tool);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!(
+            "{}:{}",
+            bin.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let out = std::process::Command::new("sh")
+            .args(["-c", HOST_HEALTH_SCRIPT])
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert_eq!(
+            parse_host_health(&stdout).uptime_secs,
+            Some(1000),
+            "{stdout}"
+        );
     }
 
     #[test]
