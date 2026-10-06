@@ -5,7 +5,7 @@
   "parent": "settings",
   "layout": "master_detail",
   "resource": "org",
-  "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary for its hosts.",
+  "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker or a catalog, or to make it a boundary for its hosts and devices. Each org's page shows what belongs to it.",
   "list_items": [
     {
       "type": "custom",
@@ -27,6 +27,19 @@
       ]
     },
     {
+      "title": "Overview",
+      "items": [
+        {
+          "type": "field",
+          "key": "session_count"
+        },
+        {
+          "type": "field",
+          "key": "needs_you"
+        }
+      ]
+    },
+    {
       "title": "What belongs to it",
       "items": [
         {
@@ -40,6 +53,24 @@
         {
           "type": "field",
           "key": "trackers"
+        },
+        {
+          "type": "field",
+          "key": "catalogs"
+        }
+      ]
+    },
+    {
+      "title": "Devices",
+      "items": [
+        {
+          "type": "field",
+          "key": "devices"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Pair a phone, a browser or a desktop to this org on the hub with fleet-hub pair --org and the org's name. Unbind one with fleet-hub client unbind, or revoke it with fleet-hub client revoke."
         }
       ]
     },

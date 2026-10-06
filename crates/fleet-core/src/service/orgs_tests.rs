@@ -253,9 +253,11 @@ fn scopes_list_orgs_then_uncovered_owners_then_the_rest() {
         .iter()
         .all(|e| e.id != Some(a.id)));
     // Details carry the rules; out-of-scope orgs are not listed.
-    let d = org_details(&st, &OrgScope::All).unwrap();
+    let d = org_details(&st, &vs(&OrgScope::All), DeviceView::Hidden).unwrap();
     assert_eq!(d[0].rules.len(), 1);
-    assert!(org_details(&st, &outsider).unwrap().is_empty());
+    assert!(org_details(&st, &vs(&outsider), DeviceView::Hidden)
+        .unwrap()
+        .is_empty());
     let _ = WorkTarget::Key("unused");
 }
 
@@ -648,4 +650,83 @@ fn a_single_person_hub_still_sees_an_ended_link_with_nothing_recorded() {
         link_person_visible(&s, &view, &link).unwrap(),
         "the hub's only person could see it yesterday"
     );
+}
+
+/// Org administration phase A: an org's overview carries its catalogs, its
+/// session counts (as `scopes` counts them) and — for the administrator
+/// only — its bound devices.
+#[test]
+fn org_details_carry_the_overview_and_devices_only_for_the_administrator() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let (a, b) = {
+        let s = st.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        let acme = s.upsert_project("acme", "api", "/src/api").unwrap();
+        s.upsert_session("a1", "h", Some(acme), None, 1, 1, "running", None)
+            .unwrap();
+        let blocked = s
+            .upsert_session("a2", "h", Some(acme), None, 1, 1, "running", None)
+            .unwrap();
+        s.set_session_claude_status_for_test(blocked, "blocked");
+        let a = s.add_org("Company A", None, false).unwrap();
+        let b = s.add_org("Company B", None, false).unwrap();
+        s.add_org_rule(OrgRuleRow {
+            org_id: a.id,
+            owner: Some("acme".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        s.upsert_catalog("acme-assets", "/c/acme", None, Some(a.id))
+            .unwrap();
+        s.insert_client_token("acme-phone", "digest-1", "readonly")
+            .unwrap();
+        s.set_client_org("acme-phone", Some(a.id)).unwrap();
+        s.set_client_trust("acme-phone", true).unwrap();
+        s.insert_client_token("loose", "digest-2", "full").unwrap();
+        (a, b)
+    };
+    let d = org_details(&st, &vs(&OrgScope::All), DeviceView::Shown).unwrap();
+    let (da, db) = (&d[0], &d[1]);
+    assert_eq!((da.org.id, db.org.id), (a.id, b.id));
+    assert_eq!(da.catalogs, vec!["acme-assets".to_string()]);
+    assert!(db.catalogs.is_empty());
+    assert_eq!((da.session_count, da.needs_you), (2, 1));
+    assert_eq!((db.session_count, db.needs_you), (0, 0));
+    assert_eq!(
+        da.devices.as_deref(),
+        Some(
+            &[OrgDevice {
+                name: "acme-phone".into(),
+                mode: "readonly".into(),
+                trusted: true,
+                last_seen_at: None,
+            }][..]
+        )
+    );
+    // An unbound device belongs to no org's list.
+    assert_eq!(db.devices.as_deref(), Some(&[][..]));
+
+    // Anyone else: the same orgs and counts, and no `devices` key at all.
+    let hidden = org_details(&st, &vs(&OrgScope::All), DeviceView::Hidden).unwrap();
+    assert!(hidden.iter().all(|o| o.devices.is_none()));
+    let json = serde_json::to_value(&hidden[0]).unwrap();
+    assert!(json.get("devices").is_none(), "{json}");
+    assert_eq!(json["session_count"], 2);
+
+    // A host in no org counts none of Company A's sessions.
+    assert!(org_details(&st, &vs(&host(None, &[])), DeviceView::Hidden)
+        .unwrap()
+        .is_empty());
+}
+
+/// An older hub answers `orgs` without the overview fields: they read empty.
+#[test]
+fn an_org_detail_from_an_older_hub_reads_an_empty_overview() {
+    let old = serde_json::json!({
+        "id": 1, "name": "A", "isolate_sessions": false, "created_at": 1,
+        "rules": [], "hosts": ["h"], "trackers": []
+    });
+    let d: OrgDetail = serde_json::from_value(old).unwrap();
+    assert!(d.catalogs.is_empty() && d.devices.is_none());
+    assert_eq!((d.session_count, d.needs_you), (0, 0));
 }

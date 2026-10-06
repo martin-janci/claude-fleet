@@ -53,11 +53,19 @@ export interface OrgRuleRow {
   host_alias?: string | null;
 }
 
-/** `list_orgs`: an org with its rules, hosts and trackers. */
+/** `list_orgs`: an org with its rules, hosts and trackers, and its overview
+ *  (org administration phase A; absent from an older hub). */
 export interface OrgDetail extends OrgRow {
   rules: OrgRuleRow[];
   hosts: string[];
   trackers: { id: number; name: string }[];
+  /** The asset catalogs it owns, by name. */
+  catalogs?: string[];
+  /** Its live sessions the caller may count, and those waiting on a person. */
+  session_count?: number;
+  needs_you?: number;
+  /** Its bound paired devices — present only for the fleet's administrator. */
+  devices?: { name: string; mode: string; trusted: boolean; last_seen_at?: number }[];
 }
 
 /** `org_suggestions`: create org `name` from `owner/*` and/or for a tracker. */

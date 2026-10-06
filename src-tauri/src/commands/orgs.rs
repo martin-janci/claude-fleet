@@ -274,7 +274,7 @@ pub async fn org_suggestions(
 
 pub(crate) mod routed {
     use super::*;
-    use fleet_core::service::orgs::{self, OrgScope};
+    use fleet_core::service::orgs;
     use fleet_core::service::view_scope::ViewScope;
     use fleet_core::service::work::WorkArgs;
 
@@ -301,7 +301,7 @@ pub(crate) mod routed {
     ) -> Result<Vec<OrgDetail>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("list_orgs", &read("orgs")).await,
-            None => orgs::org_details(store, &OrgScope::All),
+            None => orgs::org_details(store, &ViewScope::internal(), orgs::DeviceView::Shown),
         }
     }
 

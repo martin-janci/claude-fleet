@@ -861,7 +861,12 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             ),
             WorkAction::Orgs => ok_json_compact(
-                &crate::service::orgs::org_details(&self.store, &scope).map_err(to_mcp_err)?,
+                &crate::service::orgs::org_details(
+                    &self.store,
+                    &view_scope,
+                    crate::service::orgs::DeviceView::for_caller(&caller),
+                )
+                .map_err(to_mcp_err)?,
             ),
             WorkAction::Card => ok_json(
                 &w::card::card(

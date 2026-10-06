@@ -38,7 +38,11 @@ export interface ActionSpec {
   report: boolean;
 }
 
-export type ItemLabel = { type: 'plain' } | { type: 'field'; field: string } | { type: 'org_rule' };
+export type ItemLabel =
+  | { type: 'plain' }
+  | { type: 'field'; field: string }
+  | { type: 'org_rule' }
+  | { type: 'device' };
 
 export type Badge =
   | { when: 'true'; text: string }
@@ -53,6 +57,7 @@ export type FieldKind =
   | { type: 'inherit' }
   | { type: 'choice'; options: [string, string][] }
   | { type: 'time' }
+  | { type: 'count' }
   | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[] };
 
 export type FieldSpec = {
@@ -186,13 +191,29 @@ export function itemsOf(f: FieldSpec, record: ResourceRecord): unknown[] {
 export function itemLabel(label: ItemLabel, item: unknown): string {
   if (label.type === 'plain') return String(item);
   if (label.type === 'org_rule') return ruleChip(item as OrgRuleRow);
+  if (label.type === 'device') return deviceChip(item as DeviceItem);
   const v = (item as Record<string, unknown> | null)?.[label.field];
   return v === undefined || v === null ? '' : String(v);
 }
 
-/** A stable key for a sub-item: its `id`, else the item itself. */
+/** A paired device in an org's `devices` (`OrgDevice`). */
+export interface DeviceItem {
+  name: string;
+  mode: string;
+  trusted: boolean;
+  last_seen_at?: number;
+}
+
+function deviceChip(d: DeviceItem): string {
+  const tags = [d.mode === 'readonly' ? 'read-only' : null, d.trusted ? 'trusted' : null].filter(Boolean);
+  return tags.length ? `${d.name} · ${tags.join(', ')}` : d.name;
+}
+
+/** A stable key for a sub-item: its `id`, else its `name`, else the item
+ *  itself. */
 export function itemKey(item: unknown): string {
   if (item && typeof item === 'object' && 'id' in item) return String((item as { id: unknown }).id);
+  if (item && typeof item === 'object' && 'name' in item) return String((item as { name: unknown }).name);
   return String(item);
 }
 

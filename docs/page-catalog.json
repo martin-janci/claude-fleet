@@ -175,6 +175,18 @@
           "type": "color"
         },
         {
+          "help": "Its live sessions that you can see.",
+          "id": "session_count",
+          "label": "Sessions",
+          "type": "count"
+        },
+        {
+          "help": "Of those, the ones waiting on a person: a question, a permission, a stop.",
+          "id": "needs_you",
+          "label": "Need you",
+          "type": "count"
+        },
+        {
           "add": [
             {
               "bind": [
@@ -446,6 +458,26 @@
             "params": [],
             "report": false
           },
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
+          "id": "catalogs",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Catalogs",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Phones, browsers and desktops paired to this org. They see only its work (and unassigned work, if allowed below). Shown to the hub's operator only.",
+          "id": "devices",
+          "item_label": {
+            "type": "device"
+          },
+          "label": "Devices",
           "type": "items"
         },
         {

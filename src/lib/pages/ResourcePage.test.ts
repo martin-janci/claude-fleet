@@ -73,6 +73,42 @@ beforeEach(() => {
 });
 
 describe('Organisations (master_detail over the org resource)', () => {
+  it('shows the overview: counts, catalogs and the devices bound to it', async () => {
+    const overview: OrgDetail = {
+      ...acme,
+      session_count: 3,
+      needs_you: 1,
+      catalogs: ['acme-assets'],
+      devices: [
+        { name: 'phone', mode: 'readonly', trusted: true },
+        { name: 'laptop', mode: 'full', trusted: false },
+      ],
+    };
+    route({ list_orgs: [overview] });
+    show();
+    await waitFor(() => expect(screen.getByTestId('value-session_count').textContent).toBe('3'));
+    expect(screen.getByTestId('value-needs_you').textContent).toBe('1');
+    expect(screen.getByTestId('item-catalogs').textContent).toContain('acme-assets');
+    expect(screen.getAllByTestId('item-devices').map((c) => c.textContent?.trim())).toEqual([
+      'phone · read-only, trusted',
+      'laptop',
+    ]);
+    // Shown, never changed here: no remove button on a device or a catalog.
+    expect(screen.queryByTestId('item-remove-devices')).toBeNull();
+    expect(screen.queryByTestId('item-remove-catalogs')).toBeNull();
+  });
+
+  it('reads an older hub as zero, and leaves out the lists it does not carry', async () => {
+    route();
+    show();
+    await waitFor(() => expect(screen.getByTestId('value-session_count').textContent).toBe('0'));
+    // `devices` is absent for anyone but the operator, and an older hub has
+    // no `catalogs`: neither is shown as an empty list.
+    expect(screen.queryByTestId('record-field-devices')).toBeNull();
+    expect(screen.queryByTestId('record-field-catalogs')).toBeNull();
+    expect(screen.getByTestId('record-field-hosts')).toBeTruthy();
+  });
+
   it('lists orgs, and shows one with its rules, hosts and trackers as chips', async () => {
     route({ list_orgs: [acme, { ...acme, id: 2, name: 'Company B', isolate_sessions: true, auto_tidy: false }] });
     show();

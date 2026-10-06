@@ -62,6 +62,7 @@
   function shown(f: FieldSpec): string {
     const raw = rawOf(f, record);
     if (f.type === 'time') return ago(raw, now());
+    if (f.type === 'count') return String(typeof raw === 'number' ? raw : 0);
     if (f.type === 'bool') return saved[f.id] ? 'On' : 'Off';
     if (f.type === 'inherit') return String(saved[f.id]);
     if (raw === null || raw === undefined || raw === '') return '—';
@@ -182,7 +183,10 @@
           <TrackerExtras tracker={record as unknown as TrackerRow} onchanged={reload} />
         {:else if item.type === 'field' && evalCondition(item.when, values)}
           {@const f = fieldOf(item.key)}
-          {#if f}
+          <!-- A list the record does not carry at all is not known here (a
+               hub too old for it, or a list only the operator is shown):
+               left out, rather than shown as empty. -->
+          {#if f && !(f.type === 'items' && record[f.id] === undefined)}
             <div class="field" class:changed={changed.includes(f)} data-testid={`record-field-${f.id}`}>
               <span class="label" id={`rf-${f.id}`}>{f.label}</span>
               <div class="control">

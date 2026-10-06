@@ -1257,6 +1257,13 @@ async fn run_matrix(isolate: bool) {
                 Who::HostNone => assert!(v.is_empty()),
                 _ => assert!(!v.is_empty()),
             }
+            // Org administration phase A: a device's name is the fleet
+            // administrator's to see — the master or the owner's unbound
+            // device. A host or an org-bound device gets no `devices` key.
+            let shown = matches!(who, Who::Master | Who::ClientFull | Who::ClientReadonly);
+            for o in &v {
+                assert_eq!(o.get("devices").is_some(), shown, "{who:?}: {o}");
+            }
         },
     )
     .await;

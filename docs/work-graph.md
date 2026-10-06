@@ -885,6 +885,17 @@ hub. **Assign every host of a company before
 connecting a second company's tracker.** The details and commands are in
 [hub.md → Organisations and isolation](hub.md#organisations-and-isolation).
 
+Each org's page opens with an **Overview**: how many of its live sessions
+you can see, and how many of them need you. Under *What belongs to it* it
+lists the org's asset catalogs next to its rules, hosts and trackers.
+**Devices** lists the phones, browsers and desktops bound to it, with
+read-only and trusted marked. Only the hub's operator sees that list: the
+master, or the owner's own device bound to no org. Devices are paired and
+unbound on the hub for now (`fleet-hub pair --org`, `fleet-hub client
+unbind|revoke`). The later phases of org administration (devices from the
+desktop, per-org settings and budgets, members and roles) are in
+`docs/superpowers/specs/2026-10-06-org-administration-design.md`.
+
 ## Trackers in fleet health
 
 `fleet_health` carries a `trackers` roll-up, read from the cached sync

@@ -2882,7 +2882,7 @@
     },
     {
       "id": "settings.orgs",
-      "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary for its hosts.",
+      "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker or a catalog, or to make it a boundary for its hosts and devices. Each org's page shows what belongs to it.",
       "layout": "master_detail",
       "list_items": [
         {
@@ -2909,6 +2909,19 @@
         {
           "items": [
             {
+              "key": "session_count",
+              "type": "field"
+            },
+            {
+              "key": "needs_you",
+              "type": "field"
+            }
+          ],
+          "title": "Overview"
+        },
+        {
+          "items": [
+            {
               "key": "rules",
               "type": "field"
             },
@@ -2919,9 +2932,27 @@
             {
               "key": "trackers",
               "type": "field"
+            },
+            {
+              "key": "catalogs",
+              "type": "field"
             }
           ],
           "title": "What belongs to it"
+        },
+        {
+          "items": [
+            {
+              "key": "devices",
+              "type": "field"
+            },
+            {
+              "text": "Pair a phone, a browser or a desktop to this org on the hub with fleet-hub pair --org and the org's name. Unbind one with fleet-hub client unbind, or revoke it with fleet-hub client revoke.",
+              "tone": "info",
+              "type": "notice"
+            }
+          ],
+          "title": "Devices"
         },
         {
           "items": [
@@ -3349,6 +3380,18 @@
           "type": "color"
         },
         {
+          "help": "Its live sessions that you can see.",
+          "id": "session_count",
+          "label": "Sessions",
+          "type": "count"
+        },
+        {
+          "help": "Of those, the ones waiting on a person: a question, a permission, a stop.",
+          "id": "needs_you",
+          "label": "Need you",
+          "type": "count"
+        },
+        {
           "add": [
             {
               "bind": [
@@ -3620,6 +3663,26 @@
             "params": [],
             "report": false
           },
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
+          "id": "catalogs",
+          "item_label": {
+            "type": "plain"
+          },
+          "label": "Catalogs",
+          "type": "items"
+        },
+        {
+          "add": [],
+          "help": "Phones, browsers and desktops paired to this org. They see only its work (and unassigned work, if allowed below). Shown to the hub's operator only.",
+          "id": "devices",
+          "item_label": {
+            "type": "device"
+          },
+          "label": "Devices",
           "type": "items"
         },
         {

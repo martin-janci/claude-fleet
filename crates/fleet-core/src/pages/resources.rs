@@ -176,6 +176,9 @@ pub enum FieldKind {
     },
     /// Unix seconds, shown as how long ago ("5 min ago", "never").
     Time,
+    /// A whole number the backend counts (an org's live sessions); shown,
+    /// never edited. An absent value reads `0`.
+    Count,
     /// A list of sub-items, each shown with `label` and changed through
     /// `remove` / `add` actions rather than the record's Apply.
     Items {
@@ -197,6 +200,8 @@ pub enum ItemLabel {
     Field(&'static str),
     /// An org rule: `owner/repo` (or `owner/*`), `path: …`, `host: …`.
     OrgRule,
+    /// A paired device: its name, then `read-only` / `trusted` when so.
+    Device,
 }
 
 /// A badge in the list and the detail header while a field has a value.
@@ -396,6 +401,8 @@ const ORG: ResourceType = ResourceType {
     fields: &[
         FieldSpec::new("name", "Name", "What the scope selector and the Work view call it.", FieldKind::Text { max: 80 }).edit("name"),
         FieldSpec::new("color", "Colour", "Marks its sessions in the sidebar.", FieldKind::Color).edit("color"),
+        FieldSpec::new("session_count", "Sessions", "Its live sessions that you can see.", FieldKind::Count),
+        FieldSpec::new("needs_you", "Need you", "Of those, the ones waiting on a person: a question, a permission, a stop.", FieldKind::Count),
         FieldSpec::new(
             "rules",
             "Rules",
@@ -437,6 +444,18 @@ const ORG: ResourceType = ResourceType {
                 add: &[ActionSpec::new("org.assign_tracker", "Add tracker", "assign_tracker_org", &[("tracker_id", Bind::Param("tracker")), ORG_ID])
                     .params(&[param("tracker", "Tracker", ParamKind::Options { source: OptionSource::Trackers }, true)])],
             },
+        ),
+        FieldSpec::new(
+            "catalogs",
+            "Catalogs",
+            "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
+            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+        ),
+        FieldSpec::new(
+            "devices",
+            "Devices",
+            "Phones, browsers and desktops paired to this org. They see only its work (and unassigned work, if allowed below). Shown to the hub's operator only.",
+            FieldKind::Items { item_label: ItemLabel::Device, remove: None, add: &[] },
         ),
         FieldSpec::new(
             "isolate_sessions",
@@ -793,8 +812,15 @@ mod tests {
             "a new flow: name the commands of its resource here"
         );
         for f in org.fields {
-            if let FieldKind::Items { remove, .. } = &f.kind {
-                let rm = remove.expect("every org list can be shortened");
+            if let FieldKind::Items { remove, add, .. } = &f.kind {
+                // The overview's lists are shown, never changed here (org
+                // administration phase A): catalogs on Settings → Catalogs,
+                // devices on the hub.
+                if ["catalogs", "devices"].contains(&f.id) {
+                    assert!(remove.is_none() && add.is_empty(), "{}", f.id);
+                    continue;
+                }
+                let rm = remove.expect("every other org list can be shortened");
                 assert!(
                     rm.bind
                         .iter()
