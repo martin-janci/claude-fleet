@@ -1279,6 +1279,10 @@ pub fn check_live_elsewhere(
         let Some(row) = s.get_session_by_id(id)? else {
             continue;
         };
+        // The org half alone decides whether the session COUNTS: a task's
+        // other live session in the caller's org is worth a warning even
+        // when the caller may not see it. The person half,
+        // `sees_session_row`, decides only whether it is NAMED.
         if !view.org.sees_row_org_only(&row) {
             continue;
         }
