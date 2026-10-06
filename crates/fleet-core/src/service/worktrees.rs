@@ -126,7 +126,8 @@ fn split_scan_output(stdout: &str) -> Option<(String, &str)> {
 /// worktree is the entry whose path equals `root`; if none matches exactly
 /// (a normalization difference), the FIRST remaining entry is treated as
 /// main, since `git worktree list` always lists it first. Every other entry
-/// is named by its last path component. Two entries that would collide on
+/// is named by `projects::worktree_name_for_path` (its directory name; the
+/// path below the worktree marker joined with `-` for a nested one). Two entries that would collide on
 /// name (two worktrees named e.g. `feat` under different parent dirs) keep
 /// only the first; the rest are dropped with a `tracing::warn!` — the
 /// returned list never has two entries with the same name.
@@ -153,10 +154,10 @@ pub fn rows_from_porcelain(root: &str, porcelain: &str) -> Vec<(String, String, 
         let name = if Some(&path) == main_path.as_ref() {
             "main".to_string()
         } else {
-            let Some(basename) = path.rsplit('/').next().filter(|s| !s.is_empty()) else {
+            let Some(name) = crate::projects::worktree_name_for_path(&path) else {
                 continue;
             };
-            basename.to_string()
+            name
         };
         if !seen.insert(name.clone()) {
             tracing::warn!(
@@ -610,6 +611,18 @@ mod tests {
         assert_eq!(names, vec!["main", "feat"], "the later `feat` is dropped");
         assert_eq!(rows[1].1, "/r/.worktrees/feat", "first occurrence wins");
         assert_eq!(rows[1].2.as_deref(), Some("a"));
+    }
+
+    /// A checkout nested below the marker (`.worktrees/feat/imports`, as a
+    /// `feat/imports` worktree was once created) is named `feat-imports`,
+    /// the name its row carries, not its last component.
+    #[test]
+    fn rows_from_porcelain_names_a_nested_checkout_by_its_path_below_the_marker() {
+        let porcelain = "worktree /r\nHEAD 1\nbranch refs/heads/main\n\nworktree /r/.worktrees/feat/imports\nHEAD 2\nbranch refs/heads/feat/imports\n\n";
+        let rows = rows_from_porcelain("/r", porcelain);
+        assert_eq!(rows[1].0, "feat-imports");
+        assert_eq!(rows[1].1, "/r/.worktrees/feat/imports");
+        assert_eq!(rows[1].2.as_deref(), Some("feat/imports"));
     }
 
     #[tokio::test]

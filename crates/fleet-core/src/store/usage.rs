@@ -349,7 +349,7 @@ impl Store {
         Ok(changed)
     }
 
-    /// Add `t` to one `usage_daily_org` row (migration 104), keyed `(day,
+    /// Add `t` to one `usage_daily_org` row (migration 106), keyed `(day,
     /// org_id, backfill)`.
     fn add_usage_daily_org(
         &self,

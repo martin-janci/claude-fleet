@@ -280,6 +280,8 @@ Index by area (names only; see the reference for details):
   `create_remote` — publishing on GitHub — needs a person's approval from
   any caller but a paired client, refused outright on a hub with no
   approver), `list_github_repos` (what `gh` on a host can see),
+  `project_picks` / `set_project_pick` (a person's New session picker
+  choices per project — pinned, hide or keep, group; a paired device only),
   `list_worktrees`, `list_host_worktrees` (one host scanned over SSH, for the
   worktrees fleet's own rows do not cover), `delete_worktree`.
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,

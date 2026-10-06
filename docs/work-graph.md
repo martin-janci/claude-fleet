@@ -76,7 +76,8 @@ and *Clear all*; an empty list names the filters that hide it.
 The Work tab opens in **List** layout; the header, filters and saved views are unchanged, and **List | Grouped** switches to the organisation → group tree described below.
 
 - **List** sorts every task the filters match into **To do**, **Doing** (a live session, or in progress) and **Done** (the last 7 days, collapsed). A ticket keeps its tracker's own status name in its row; its section follows fleet's effective status and live sessions.
-- **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ adds a project and notes. **Start** opens a session in that project with the title and notes as its first prompt.
+- **+ New task** writes a task in fleet itself (`TASK-<id>`); ▾ adds a project and notes. Its **Work** button (below) opens a session in that project with the title and notes as its first prompt.
+- **The Work button** (2026-10-06) is on every task row. Its main half reads **Open** (a live session: select it), **Continue** (no live session but a past one: resume its last conversation) or **Start**. Start asks fleet first where it would land; when everything is known and nothing is in the way it starts at once, with the brief on — for a Jira, Asana, Linear or GitHub ticket too. Otherwise it opens the *start popover*: pick the **Repo**, the **Host** (an offline one says so), edit the **Branch**, turn the **Brief** off or preview it as text, and see what is in the way: a live session on the task (Start then makes a *parallel* session in a checkout of its own, `<branch>-2`, never the same tree; *Open it* jumps there), a task that is done, a proposal (*Accept & start*), another organisation (tick *Start across organisations* if it is meant). ▾ offers *Start new…* (always the popover), *Continue* one of the last past sessions, and *Copy key*; Alt-click on Start opens the popover as well. In the list, `j` / `k` move the selection, `s` runs the selected task's Work button and ⇧S opens its popover. The task page's **Start new** asks the same way.
 - **The task page** adds *Brief*, *Subtasks* (+ Add subtask, Start), *Proposals* (an agent's suggested subtasks — Accept / Reject; rejected ones behind a toggle), *Delegated jobs* with their result, and *Agent steps* — the agent's own `TaskCreate` / `TaskUpdate` todos per session, labelled "per the agent", never a status. Placement and rules sit under *Placement & rules*.
 - A subtask started from the list gets the parent ticket's brief (only when you may see that ticket) followed by its own title and notes.
 - Every `dispatch_task` job appears as an agent subtask under the requester's task and follows the job's state. The ☑ Tasks popover is gone; a session's jobs are still in its details.
@@ -645,7 +646,11 @@ dialog. The brief is editable before you start.
 
 If a live session is already on that key, the dialog says so ("ABC-123
 already running on X") and offers **Jump** instead of starting a second
-one. While another device is still starting or resuming the same key (a
+one. The Work tab's start popover offers a **parallel** start instead: a
+second session on the key in a checkout of its own (`work_link { start,
+parallel: true }`); `work_link { preview_start }` is the preview it
+reads, which makes nothing. A hub older than the preview has no such
+action, and the Work button then starts as it did before. While another device is still starting or resuming the same key (a
 multi-repo start holds it until its last repository), a second start or
 resume is refused: "ABC-123 is being started or resumed already; wait for
 that session, then jump to it".

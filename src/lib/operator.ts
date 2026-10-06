@@ -6,7 +6,13 @@ import { invokeCmd } from './result';
 import { restartSession, sessions, type SessionRow } from './sessions';
 import { sessionActionBlocked } from './share';
 
-export type OperatorBlocked = 'absent' | 'lost' | 'no_mcp' | 'token_revoked' | 'no_host';
+export type OperatorBlocked =
+  | 'absent'
+  | 'lost'
+  | 'no_mcp'
+  | 'token_revoked'
+  | 'no_host'
+  | 'host_down';
 
 export interface OperatorStatus {
   ready: boolean;
@@ -17,6 +23,14 @@ export interface OperatorStatus {
    * than the field, which only ever homed the operator on `local`.
    */
   host?: string;
+  /**
+   * Where `ensure_operator` would start the agent instead, when its home
+   * cannot be used (`pick_operator_home`): set with `host_down` for a live
+   * agent stranded on an unreachable host, and with `absent` when the
+   * configured home is down or missing. Absent from a hub older than the
+   * field, which never moved the agent.
+   */
+  fallback?: string | null;
 }
 
 export const agentPanelOpen: Writable<boolean> = writable(false);
@@ -33,6 +47,13 @@ export const operatorSession: Writable<SessionRow | null> = writable(null);
  * `no_host` copy reads it: which host is missing decides what the fix is.
  */
 export const operatorHost: Writable<string> = writable('local');
+/**
+ * Where the agent would be started instead of `operatorHost`, as the last
+ * status call said; null when its home is usable or nothing else qualifies.
+ * The `host_down` copy reads it, and so does `openAgent`, which moves a
+ * stranded agent without asking.
+ */
+export const operatorFallback: Writable<string | null> = writable(null);
 
 /**
  * The operator's row as the app currently knows it.
@@ -82,6 +103,7 @@ export const operatorRow: Readable<SessionRow | null> = derived(
 export function blockedCopy(
   b: OperatorBlocked,
   host = 'local',
+  fallback: string | null = null,
 ): { title: string; action: string | null } {
   switch (b) {
     case 'absent':
@@ -114,9 +136,23 @@ export function blockedCopy(
         title:
           host === 'local'
             ? 'The agent runs on the local host, and this fleet has none (a hub started with hub.local_host=false). Start the hub with --operator-host <alias> to run it on a fleet host.'
-            : `The agent is set to run on ${host}, which is not in this fleet. Add that host, or point the agent elsewhere with --operator-host <alias>.`,
+            : `The agent is set to run on ${host}, which is not in this fleet, and no other host can run it. Add that host, or point the agent elsewhere with --operator-host <alias>.`,
         action: null,
       };
+    case 'host_down':
+      // The agent's host stopped answering. With somewhere else to go,
+      // `openAgent` moves it there without asking — this copy is what shows
+      // if that move failed, and its button tries again. With nowhere, the
+      // copy says what a host needs to qualify (`pick_operator_home`).
+      return fallback
+        ? {
+            title: `${host} is unreachable, so the agent is moving to ${fallback}. Its conversation so far stays on ${host}.`,
+            action: `Start the agent on ${fallback}`,
+          }
+        : {
+            title: `The agent's host ${host} is unreachable, and no other host can run it (one needs to be reachable, in no org, with claude installed). It is back when ${host} is.`,
+            action: null,
+          };
   }
 }
 
@@ -129,6 +165,7 @@ export async function refreshOperator(): Promise<void> {
   }
   operatorSession.set(r.value.session);
   operatorHost.set(r.value.host ?? 'local');
+  operatorFallback.set(r.value.fallback ?? null);
   operatorState.set(r.value.ready ? 'ready' : (r.value.blocked ?? 'absent'));
 }
 
@@ -176,13 +213,19 @@ export function openAgent(): Promise<void> {
 
 async function openAgentOnce(): Promise<void> {
   await refreshOperator();
-  if (get(operatorState) !== 'absent') return;
+  // `host_down` with a fallback is acted on too: the agent is stranded on a
+  // host that stopped answering, nothing in this panel could reach it, and
+  // `ensure_operator` starts it on the fallback (the backend picks the same
+  // host the status named). Without a fallback there is nowhere to go.
+  const before = get(operatorState);
+  if (before !== 'absent' && !(before === 'host_down' && get(operatorFallback))) return;
   operatorState.set('waking');
   const r = await invokeCmd<SessionRow>('ensure_operator');
   if (!r.ok) {
-    operatorState.set('absent');
+    operatorState.set(before);
     return;
   }
+  operatorFallback.set(null);
   operatorSession.set(r.value);
   operatorState.set('ready');
 }

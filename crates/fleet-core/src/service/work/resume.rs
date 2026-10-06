@@ -2235,6 +2235,7 @@ mod tests {
             worktree_id: None,
             name: "ABC-1".into(),
             per_project: false,
+            parallel: false,
             decider: crate::store::Decider::Person,
         };
         let start = async {

@@ -8,6 +8,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.4.12] - 2026-10-06
+
+### Added
+- **operator:** start the UX agent on another host when its home is down
+- **picker:** + New session and Hosts n open the switcher; the sidebar popover is gone
+- **picker:** the switcher's New session mode — tickets, pins, suggestions, groups, keys, undo
+- **picker:** NewSessionDialog autostart — ⌘↵ starts with the last settings
+- **picker:** the project actions menu — pin, group combobox, hide
+- **picker:** PickerList — chip, kbd, dim rows, group subtitle, mouse-only row actions
+- **picker:** the ranking — hidden, dormant, clusters, Suggested, search
+- **picker:** local frecency of the person's own picks
+- **picker:** the project picks store, optimistic, loaded at startup
+- **picker:** project_picks / set_project_pick commands, routed on a hub
+- **picker:** project_picks / set_project_pick tools, a person's device only
+- **picker:** project_picks — pinned, visibility and group per owner/repo
+- **switcher:** assets and the Rescan / Sync fleet / Propose commands in the QuickSwitcher
+- **assets:** the Hosts view — org, role per catalog, catalog admissions as toggles, and per-host provenance
+- **assets:** the Layers view — layers by catalog with footprints, why-is-it-here, and layer changes as cards
+- **assets:** the sync plan becomes a view in the workspace; Rollout review per host; a persistent footer live region
+- **assets:** DiffView on tokens; Drift panel with Take and a confirmed Restore
+- **assets:** ChangesetCard — apply, dismiss, reject items, undo from the Inbox and the Inspector; i and ⌘↵ on cards
+- **assets:** M6 data layer — card views and verbs, layer changes, provenance, drift diff; line diff and layer helpers
+- **settings:** Settings → Catalogs — add, remove, admit hosts; grants shown with the hub command
+- **assets:** desktop commands for the catalog set, per-catalog layers, host provenance and the drift diff
+- **assets:** desktop commands for the card verbs, routed to the hub's changesets tool
+- **assets:** catalog_admin drift_diff — the catalog's and the host's text of a drifted asset
+- **assets:** layer cards — create, rename, move a member (changesets propose_layer)
+- **assets:** prune withdrawn cards a week after withdrawal; New-card slug collisions need a look
+- **assets:** held lines as card item outcomes, catalogs on cards, hold pre-M5 overwrites
+
+### Changed
+- **hub:** pin ProjectPickRow's wire keys in the hub contract golden
+- fix three known flakes
+- **hooks:** make the pre-commit pnpm audit warn instead of block
+- **ci:** check migration numbers against origin/main before a push
+- **assets:** M6 carries — tokens in the remaining dialogs, wider colour guard, secrets keyed by catalog, scoped keys, narrow layout; CLAUDE.md
+
+### Fixed
+- **transcript:** a SendMessage's tool row names its addressee
+- **host-health:** read kern.boottime's sec, not usec, for macOS uptime
+- **picker:** an older hub or a refused token says so once per session; Add project's keep write is quiet; drop the unused .pad rule
+- **picker:** ⌘Z and ⌘⌫ are the picker's only on an empty query; undo resets per open and says what it undid; Hide keeps the place
+- **picker:** a person's group named like an owner's automatic group joins it; person's groups keyed lower-case
+- **picker:** Add project expands a collapsed sidebar; Hosts n no longer needs it; add-blocked is an alert
+- **picker:** ⌘P pins in New session mode instead of closing it; a stale toast Undo is a no-op
+- **deps:** bump source-map-js to 1.2.2 (GHSA-68fv-2mgg-jv7q)
+- **voice:** silence shellcheck 0.11's SC2329 on the trap handler
+- **scripts:** isolate check-migration-numbers-test from a hook's git env
+- **picker:** autostart gives up for good, never on a failed scan or a ticket
+- **picker:** actions menu — Enter never applies a stray row, arrows reach the input, exact name ranked
+- **picker:** scope row-action hover to actionable rows; actions don't pick
+- **deps:** source-map-js 1.2.2 (GHSA-68fv-2mgg-jv7q)
+- **assets:** M6 final-review minors
+- **hosts:** re-read the selected host's provenance after an admission toggle
+- **cards:** a Rollout that held hosts back says so and stays in the Inbox
+- **layers:** a renamed layer re-derives its open cards and stays rolled out
+- **drift:** never read a file on the host whose rendered bytes hold any ${
+- **switcher:** hold commands while a card verb runs, mark Propose busy, share one propose helper
+- **assets:** keep Esc and focus in the plan view; a review counts what it shows; neutral live-region finish
+- **assets:** card primary follows what is on screen; per-catalog grants gate card verbs; Inspector re-reads a card after Undo; selected card is aria-current
+- **assets:** overlapping card-view loads cannot overwrite a newer one, and a failed fetch keeps the old view
+- **assets:** layer footprint and why-chain follow extends from a context too
+- **settings:** Catalogs shows its state as a badge, and a hub client sees the page read-only with the hub's refusal
+- **assets:** standalone add_catalog and remove_catalog take the authoring lock (PF7)
+- **assets:** a retried card item clears its previous outcome
+
+### Documentation
+- **picker:** Phase 1 spec matches what ships — empty-query ⌘Z/⌘⌫, normal ⌘K only drops hidden, groups join same-named clusters
+- move Architecture and Status out of CLAUDE.md
+- **picker:** migration 104 after main took 102/103; the repo's validation ladder
+- **picker:** v2 after four UX reviews — one picker in ⌘K, tickets first, nothing hidden for lack of history
+- **picker:** phase 1 implementation plan; spec amended to what the code allows
+- **picker:** the New session project picker — context, recent, popular, groups, noise folded, Jev proposes
+- Assets M6 implementation plan — cards you can act on, Layers and Hosts, DiffView, Settings → Catalogs, QuickSwitcher
 ## [0.4.11] - 2026-10-06
 
 ### Fixed
@@ -2698,6 +2772,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.4.12]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.12
 [0.4.11]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.11
 [0.4.10]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.10
 [0.4.9]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.9

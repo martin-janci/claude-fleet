@@ -25,6 +25,7 @@ mod orgs;
 mod participants;
 mod peer_links;
 mod people;
+mod project_picks;
 mod projects;
 mod read_cursors;
 mod read_pool;
@@ -99,6 +100,7 @@ pub use peer_links::{
 pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
 };
+pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};

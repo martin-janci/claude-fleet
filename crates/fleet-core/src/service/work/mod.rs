@@ -165,6 +165,9 @@ pub struct WorkLinkArgs {
     /// Link across orgs anyway.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub force_cross_org: Option<bool>,
+    /// Start: beside a live one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel: Option<bool>,
     /// Snooze (7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<u32>,
@@ -381,6 +384,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "trust_project",
     "resume",
     "start",
+    "preview_start",
     "handover",
     "archive",
     "unarchive",
@@ -428,6 +432,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_project_trust", "work_link", "trust_project"),
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
+    ("preview_start_work", "work_link", "preview_start"),
     ("request_work_handover", "work_link", "handover"),
     ("start_work_multi", "work_link", "start"),
     ("work_tidy", "work", "tidy"),
@@ -680,6 +685,7 @@ pub fn start_args_as(
         worktree: args.worktree.clone(),
         force_cross_org: args.force_cross_org.unwrap_or(false),
         per_project: false,
+        parallel: args.parallel.unwrap_or(false),
     }
 }
 

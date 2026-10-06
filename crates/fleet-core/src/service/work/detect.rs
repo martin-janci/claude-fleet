@@ -574,10 +574,30 @@ pub fn set_project_trust(s: &Store, project_id: i64, on: bool) -> Result<BTreeSe
     Ok(set)
 }
 
+/// The detection state of `session_id`, or `None` for a session that is
+/// never a detection subject: the operator (the UX agent). It coordinates
+/// every task, so the keys it reads and names are the fleet's, not a sign of
+/// what it works on — detecting them would hang a suggestion of every task on
+/// it. Its conversations are tied to tasks by threads instead (task → session
+/// spec §3.3).
+fn subject_state(s: &Store, session_id: i64) -> Result<Option<DetectionState>, IpcError> {
+    if crate::service::operator::operator_ref(s).is_some() {
+        // `operator_ref` swallows its settings read, as `trusted_projects`
+        // does in `run`.
+        s.ensure_in_tx()?;
+        if let Some(row) = s.get_session_by_id(session_id)? {
+            if crate::service::operator::is_operator_session(s, &row.host_alias, &row.tmux_name) {
+                return Ok(None);
+            }
+        }
+    }
+    s.detection_state(session_id)
+}
+
 /// Resolve `session_id` from its stored state plus `events`, and apply the
 /// changes. `true` when a link changed (the row was emitted).
 pub fn resolve_with(s: &Store, session_id: i64, events: Vec<Candidate>) -> Result<bool, IpcError> {
-    let Some(st) = s.detection_state(session_id)? else {
+    let Some(st) = subject_state(s, session_id)? else {
         return Ok(false);
     };
     let tv = tracker_view(s, st.repo.clone())?;
@@ -793,7 +813,7 @@ pub fn on_prompt(
 ) -> Result<bool, IpcError> {
     let person = crate::service::prompt_origin::human_part(prompt);
     let prompt: &str = person.as_deref().unwrap_or(prompt);
-    let Some(st) = s.detection_state(session_id)? else {
+    let Some(st) = subject_state(s, session_id)? else {
         return Ok(false);
     };
     let handovers = s.recent_handover_bodies(st.participant, 5)?;
@@ -829,7 +849,7 @@ pub fn on_agent_inference(
     target: &str,
     tracker_id: Option<i64>,
 ) -> Result<bool, IpcError> {
-    let Some(st) = s.detection_state(session_id)? else {
+    let Some(st) = subject_state(s, session_id)? else {
         return Ok(false);
     };
     let tv = tracker_view(s, st.repo.clone())?;

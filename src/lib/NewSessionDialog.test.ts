@@ -501,7 +501,19 @@ describe('NewSessionDialog — generated names', () => {
     expect(screen.getByTestId('path-preview').textContent).toContain(`/r/cf/.worktrees/${slug}`);
   });
 
-  it('a second session on the same worktree gets a name-suffixed tmux name instead of a collision', async () => {
+  it('previews a branch-shaped worktree name in a flat directory', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('new-worktree-chip'));
+    await tick();
+    const input = screen.getByTestId('new-worktree-name') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: 'feat/imports' } });
+    await tick();
+    expect(input.value).toBe('feat/imports');
+    expect(screen.getByTestId('path-preview').textContent).toContain('/r/cf/.worktrees/feat-imports');
+  });
+
+    it('a second session on the same worktree gets a name-suffixed tmux name instead of a collision', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'list_host_worktrees') return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain] };
       return null;
@@ -970,6 +982,122 @@ describe('NewSessionDialog: Enter is gated the same as the Create button', () =>
     await tick();
     expect(spy).toHaveBeenCalledOnce();
     spy.mockRestore();
+  });
+});
+
+// The picker's ⌘↵ (project picker spec v2): `autostart` submits once with the
+// remembered choices, and leaves the dialog open when something needs a person.
+describe('NewSessionDialog autostart', () => {
+  const newSessionCalls = () =>
+    (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'new_session');
+
+  function answerNewSession() {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'new_session') return okRow();
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  }
+
+  it('submits once, on the remembered host and worktree', async () => {
+    localStorage.setItem(
+      'cf:pref:newsession.project.1',
+      JSON.stringify({ host: 'mefistos', worktrees: { mefistos: 502 }, kind: 'work' }),
+    );
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_host_worktrees')
+        return { host_alias: 'mefistos', project_id: 1, cloned: true, worktrees: [remoteMain, remoteFeat] };
+      if (cmd === 'new_session') return okRow();
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(newSessionCalls()).toHaveLength(1));
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(1);
+    const args = (newSessionCalls()[0][1] as any).args;
+    expect(args.host_alias).toBe('mefistos');
+    expect(args.worktree_id).toBe(502);
+  });
+
+  it('does nothing when the remote scan fails, and leaves the dialog open', async () => {
+    localStorage.setItem(
+      'cf:pref:newsession.project.1',
+      JSON.stringify({ host: 'mefistos', worktrees: { mefistos: 502 }, kind: 'work' }),
+    );
+    mockHostWorktrees(new Error('ssh down'), (cmd) => (cmd === 'new_session' ? okRow() : null));
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() =>
+      expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.some((c) => c[0] === 'list_host_worktrees')).toBe(true),
+    );
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    expect(screen.getByRole('dialog', { name: 'New session' })).toBeTruthy();
+  });
+
+  it('does nothing when a ticket is set', async () => {
+    answerNewSession();
+    const ticket = { key: 'ABC-1', title: 't' } as any;
+    render(NewSessionDialog, { props: { project, ticket, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    expect(
+      (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'start_work'),
+    ).toHaveLength(0);
+  });
+
+  it('does nothing while a hub blocks new_session', async () => {
+    answerNewSession();
+    hubStatus.set({
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+      client_mode: null,
+      configured_url: 'https://fleet.example.com',
+      configured_client_name: 'laptop',
+      allow_plaintext: false,
+      warning: null,
+      restart_required: false,
+      unavailable: null,
+    });
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    expect(screen.getByRole('dialog', { name: 'New session' })).toBeTruthy();
+  });
+
+  it('gives up for good: a hub that comes back later does not fire a submit', async () => {
+    answerNewSession();
+    hubStatus.set({
+      remote: true,
+      url: 'https://fleet.example.com',
+      client_name: 'laptop',
+      client_mode: null,
+      configured_url: 'https://fleet.example.com',
+      configured_client_name: 'laptop',
+      allow_plaintext: false,
+      warning: null,
+      restart_required: false,
+      unavailable: null,
+    });
+    hubConnection.set({ state: 'reconnecting', attempt: 1, retry_in_secs: 3, reason: 'closed' });
+    render(NewSessionDialog, { props: { project, autostart: true, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
+    hubConnection.set({ state: 'connected' } as any);
+    await tick();
+    await tick();
+    await tick();
+    expect(newSessionCalls()).toHaveLength(0);
   });
 });
 

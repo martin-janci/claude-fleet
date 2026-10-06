@@ -28,4 +28,4 @@ CREATE TABLE IF NOT EXISTS usage_daily_org (
     PRIMARY KEY (day, org_id, backfill)
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (104);
+INSERT OR IGNORE INTO schema_version (version) VALUES (106);

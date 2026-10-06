@@ -26,7 +26,7 @@ fn the_owner_and_a_person_in_no_org_keep_their_binding() {
                 readonly: false
             }
         );
-        // A colleague with no membership row: as before migration 105.
+        // A colleague with no membership row: as before migration 107.
         assert_eq!(
             effective_device(Some(2), stored, OWNER, &any),
             DeviceOrg {

@@ -1570,11 +1570,8 @@ fn apply_worktree_hook(
                 format!("worktree_path {path} is not under a known project on host {host}"),
             ));
         };
-        let name = Path::new(&path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unnamed")
-            .to_string();
+        let name =
+            crate::projects::worktree_name_for_path(&path).unwrap_or_else(|| "unnamed".to_string());
         s.upsert_worktree_on(host, project_id, &name, &path, branch)?;
         return Ok(());
     }
@@ -1585,11 +1582,8 @@ fn apply_worktree_hook(
     crate::service::hub::ensure_local_allowed(host)?;
     let path = canonical_str(&path);
     validate_worktree_path(&path)?;
-    let name = Path::new(&path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unnamed")
-        .to_string();
+    let name =
+        crate::projects::worktree_name_for_path(&path).unwrap_or_else(|| "unnamed".to_string());
     let projects = {
         let s = lock(store)?;
         s.list_projects()?
@@ -4217,6 +4211,34 @@ mod tests {
         );
         let s = store.lock().unwrap();
         assert!(s.conversation_nudged(b, "conv-b").unwrap());
+    }
+
+    /// The operator coordinates every task and is never asked to classify its
+    /// own conversation: the same ready state that nudges beta stays silent
+    /// once beta is the recorded operator.
+    #[test]
+    fn the_operator_is_never_nudged_to_classify() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        let (_, b, payload) = nudge_ready(&store);
+        crate::service::operator::set_operator_ref(
+            &store.lock().unwrap(),
+            &crate::service::operator::OperatorRef {
+                host_alias: "local".into(),
+                tmux_name: "beta".into(),
+            },
+        )
+        .unwrap();
+        let ctx = HookContext {
+            caller: &Caller::master(),
+            pane_id: None,
+            sync_start: false,
+        };
+        assert_eq!(prompt_submit_context(&store, &payload, &ctx), None);
+        assert!(!store
+            .lock()
+            .unwrap()
+            .conversation_nudged(b, "conv-b")
+            .unwrap());
     }
 
     /// A nudge never displaces mail: when the mail fills the budget it waits,

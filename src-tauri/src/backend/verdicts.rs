@@ -156,6 +156,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "list_github_repos",
         },
     ),
+    (
+        "project_picks",
+        Verdict::Routed {
+            tool: "project_picks",
+        },
+    ),
+    (
+        "set_project_pick",
+        Verdict::Routed {
+            tool: "set_project_pick",
+        },
+    ),
     // ── sessions ────────────────────────────────────────────────────────────
     (
         "list_sessions",
@@ -421,6 +433,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_tickets", Verdict::Routed { tool: "work" }),
     ("work_lookup", Verdict::Routed { tool: "work" }),
     ("start_work", Verdict::Routed { tool: "work_link" }),
+    // Task → session spec P-1: the start's dry run, the Work button's
+    // popover. Nothing is made, so it routes exactly as the start does.
+    ("preview_start_work", Verdict::Routed { tool: "work_link" }),
     // Work graph M5: orgs are the per-host tokens' security boundary. Since
     // org administration phase B the hub's `org_admin` lets its owner's own
     // trusted `full` device change them (and refuses anyone else), so they

@@ -15,9 +15,9 @@ use fleet_core::service::work::resume::{LiveWork, ResumeCandidate, ResumeMode, R
 use fleet_core::service::work::PurgeImpact;
 use fleet_core::service::worktrees::{HostWorktrees, WorktreeOccupancy, WorktreeOccupant};
 use fleet_core::store::{
-    AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectRow, SessionContext,
-    SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorkLinkRow, WorkSummary,
-    WorktreeRow,
+    AccountRow, ConversationRow, HostRow, PendingInput, PendingOption, ProjectPickRow, ProjectRow,
+    SessionContext, SessionEvent, SessionRow, SessionUsage, TaskRow, UsageTotals, WorkLinkRow,
+    WorkSummary, WorktreeRow,
 };
 use std::collections::BTreeMap;
 
@@ -248,6 +248,17 @@ fn sample_project_tree() -> ProjectTreeRow {
     ProjectTreeRow {
         project: sample_project_row(),
         worktrees: vec![sample_worktree_row()],
+    }
+}
+
+/// `vis` / `grp` are `Option`s: filled, so a renamed key shows.
+fn sample_project_pick() -> ProjectPickRow {
+    ProjectPickRow {
+        owner: "martin-janci".into(),
+        repo: "claude-fleet".into(),
+        pinned: true,
+        vis: Some("keep".into()),
+        grp: Some("tools".into()),
     }
 }
 
@@ -624,6 +635,8 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     put("TaskRow", wire_keys(&sample_task()));
     put("ProjectTreeRow", wire_keys(&sample_project_tree()));
     put("ProjectRow", wire_keys(&sample_project_row()));
+    // The New session picker's choices (`project_picks` / `set_project_pick`).
+    put("ProjectPickRow", wire_keys(&sample_project_pick()));
     put("WorktreeRow", wire_keys(&sample_worktree_row()));
     put("WorktreeOccupancy", wire_keys(&sample_occupancy()));
     put("HostWorktrees", wire_keys(&sample_host_worktrees()));

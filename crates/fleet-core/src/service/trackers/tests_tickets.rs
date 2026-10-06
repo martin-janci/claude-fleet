@@ -2662,3 +2662,233 @@ fn a_subtask_start_never_carries_a_parent_the_caller_cannot_see() {
     assert!(!brief.contains("Other org"), "{brief}");
     assert_eq!(brief, "Mine");
 }
+
+// --- start preview and parallel start (task → session spec P-1, P-8) --------
+
+async fn preview(
+    fx: &Fx,
+    args: &StartArgs,
+) -> Result<crate::service::trackers::tickets::StartPreview, IpcError> {
+    crate::service::trackers::tickets::preview_start(
+        &fx.store,
+        args,
+        &vs(&fx.store, &OrgScope::All),
+        &fx.net(),
+    )
+    .await
+}
+
+/// A spawn that names its session after the checkout it was asked for, so
+/// two starts of one key are two rows.
+fn spawn_named(
+    store: &Arc<Mutex<Store>>,
+) -> impl FnOnce(
+    crate::service::sessions::NewSessionArgs,
+) -> std::future::Ready<Result<SessionRow, IpcError>>
+       + '_ {
+    move |a| {
+        let s = store.lock().unwrap();
+        let name = a.new_worktree.clone().unwrap_or_else(|| "reused".into());
+        let id = s
+            .upsert_session(&name, &a.host_alias, None, None, 1, 1, "running", None)
+            .unwrap();
+        std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+    }
+}
+
+/// With nothing to go on, a preview says what to pick and offers it, where
+/// a start would answer `E_AMBIGUOUS`; and it makes nothing.
+#[tokio::test]
+async fn a_preview_names_what_to_pick_and_makes_nothing() {
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-1".into()),
+        ..Default::default()
+    };
+    let p = preview(&fx, &args).await.unwrap();
+    assert_eq!(p.missing.as_deref(), Some("project"));
+    assert_eq!(p.plan, None);
+    assert!(p.projects.iter().any(|c| c.id == fx.pid));
+    let hosts: Vec<&str> = p.hosts.iter().map(|h| h.alias.as_str()).collect();
+    assert!(
+        hosts.contains(&"hosta") && hosts.contains(&"hostb"),
+        "{hosts:?}"
+    );
+
+    let with_project = StartArgs {
+        project_id: Some(fx.pid),
+        ..args.clone()
+    };
+    let p = preview(&fx, &with_project).await.unwrap();
+    assert_eq!(p.missing.as_deref(), Some("host"));
+
+    let full = StartArgs {
+        host_alias: Some("hosta".into()),
+        ..with_project
+    };
+    let p = preview(&fx, &full).await.unwrap();
+    let plan = p.plan.expect("everything resolved");
+    assert_eq!(
+        (
+            plan.host_alias.as_str(),
+            plan.branch.as_str(),
+            plan.parallel
+        ),
+        ("hosta", "abc-1-abc-1-title", false)
+    );
+    assert!(p.conflicts.is_empty(), "{:?}", p.conflicts);
+    assert_eq!(p.checkout.map(|c| c.exists), Some(false));
+    assert!(fx
+        .store
+        .lock()
+        .unwrap()
+        .list_sessions_for_host("hosta")
+        .unwrap()
+        .is_empty());
+}
+
+/// The brief a start would queue is what the preview shows; a done ticket
+/// is flagged, not refused.
+#[tokio::test]
+async fn a_preview_shows_the_brief_and_flags_a_done_ticket() {
+    let fx = Fx::new();
+    let p = preview(
+        &fx,
+        &StartArgs {
+            reference: Some("ABC-2".into()),
+            project_id: Some(fx.pid),
+            host_alias: Some("hosta".into()),
+            with_brief: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(p.brief.as_deref().is_some_and(|b| b.contains("Do ABC-2.")));
+    assert_eq!(
+        p.conflicts
+            .iter()
+            .map(|c| c.kind.as_str())
+            .collect::<Vec<_>>(),
+        vec!["done"]
+    );
+}
+
+/// A key with a live session previews as a conflict naming it, planned as a
+/// parallel start in a checkout of its own; that start then goes through,
+/// where a plain one is `E_EXISTS`.
+#[tokio::test]
+async fn a_live_key_previews_and_starts_in_parallel_in_its_own_checkout() {
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-1".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    let first = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let (row, _) = start_with(
+        &fx.store,
+        &first,
+        None,
+        &OrgScope::All,
+        spawn_named(&fx.store),
+    )
+    .await
+    .unwrap();
+    // The first start's checkout exists now.
+    fx.store
+        .lock()
+        .unwrap()
+        .upsert_worktree_on(
+            "hosta",
+            fx.pid,
+            &first.branch,
+            "/p/acme/app-wt",
+            Some(&first.branch),
+        )
+        .unwrap();
+
+    let p = preview(&fx, &args).await.unwrap();
+    let live = p
+        .conflicts
+        .iter()
+        .find(|c| c.kind == "live_session")
+        .expect("the live session is a conflict");
+    assert_eq!(live.session_id, Some(row.id));
+    let plan = p.plan.expect("planned beside it");
+    assert!(plan.parallel);
+    assert_eq!(plan.branch, format!("{}-2", first.branch));
+    assert_eq!(plan.worktree_id, None, "never the live session's checkout");
+
+    let e = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_EXISTS);
+    let parallel = StartArgs {
+        parallel: true,
+        ..args.clone()
+    };
+    let second = plan_start(&fx.store, &parallel, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    let (other, _) = start_with(
+        &fx.store,
+        &second,
+        None,
+        &OrgScope::All,
+        spawn_named(&fx.store),
+    )
+    .await
+    .unwrap();
+    assert_ne!(other.id, row.id);
+    assert_eq!(other.work.and_then(|w| w.key).as_deref(), Some("ABC-1"));
+}
+
+/// An unaccepted proposal previews with a conflict instead of the start's
+/// refusal, so the button can offer Accept & start.
+#[tokio::test]
+async fn a_proposal_previews_as_a_conflict() {
+    let fx = Fx::new();
+    let item = {
+        let s = fx.store.lock().unwrap();
+        let parent = s
+            .create_native_item(&crate::store::NativeItem {
+                title: "Ship v1",
+                project_id: Some(fx.pid),
+                ..Default::default()
+            })
+            .unwrap();
+        s.propose_subtask(&crate::store::Proposal {
+            parent_id: parent.id,
+            title: "an idea",
+            notes: None,
+            why: None,
+            proposed_by: "dev",
+        })
+        .unwrap()
+    };
+    let args = StartArgs {
+        item_id: Some(item.id),
+        host_alias: Some("hosta".into()),
+        ..Default::default()
+    };
+    let p = preview(&fx, &args).await.unwrap();
+    assert!(
+        p.conflicts.iter().any(|c| c.kind == "proposal"),
+        "{:?}",
+        p.conflicts
+    );
+    assert_eq!(p.plan.map(|pl| pl.project_id), Some(fx.pid));
+    let e = plan_start(
+        &fx.store,
+        &with_native_defaults(&fx.store, &args, &OrgScope::All).unwrap(),
+        &OrgScope::All,
+        &fx.net(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.message, "accept the proposal first");
+}

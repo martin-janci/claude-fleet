@@ -58,8 +58,14 @@ concurrency:
 #   windows-bundle     (new: the bundle, split out of rust-windows)   60
 #   clippy             (new: macOS/Windows lint, split out of the test jobs)   30
 #   hub-headless            16:39         60
+#   hub-image          (new: the hub Dockerfile, built before a tag)   30
 #
 # Raise one when the work in it legitimately grows; do not remove it.
+
+# work::scale_tests' wall-clock budgets are enforced only with this set; a
+# developer's loaded box prints an over-budget call instead of failing it.
+env:
+  FLEET_SCALE_BUDGETS: "1"
 
 jobs:
   # SKIP THE BUILD WHEN A PR TOUCHES ONLY PROSE THAT NOTHING READS. A PR that
@@ -105,6 +111,7 @@ jobs:
             case "$f" in
               docs/superpowers/*|docs/plans/*|docs/specs/*|docs/adr/*|docs/ux/*|docs/images/*) ;;
               README.md|CLAUDE.md|RUST-BUILD-PERFORMANCE-AUDIT.md) ;;
+              docs/architecture.md|docs/status.md) ;;
               *) echo "runs the build: $f"; code=true; break ;;
             esac
           done < <(git diff --name-only "$BASE...$HEAD")
@@ -176,6 +183,40 @@ jobs:
       # (fleet-mobile 0.4.8 shipped at 7 beside a revision-8 hub). A second.
       - name: release-mobile contract guard
         run: bash scripts/release-mobile-test.sh
+      # The same rule against this tree, so a contract bump meets the phone on
+      # its own PR instead of at release time: fleet-mobile main's
+      # MIN/MAX_HUB_CONTRACT must cover this checkout's CONTRACT_REVISION.
+      # It FAILS only the PR that moves CONTRACT_REVISION (merge the
+      # fleet-mobile bump first — a phone that accepts a newer hub is
+      # harmless). Every other PR and every push to main only warns, so an
+      # unrelated PR is never held hostage by the other repo, and an
+      # unreachable GitHub API never fails anything but that bump.
+      - name: fleet-mobile accepts this hub contract
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -uo pipefail
+          if bash scripts/check-mobile-contract.sh; then exit 0; fi
+          if [ "$EVENT" = pull_request ]; then
+            head_rev="$(bash scripts/check-mobile-contract.sh --print-hub-rev)"
+            base_rev="$(bash scripts/check-mobile-contract.sh --print-hub-rev --hub-ref "$BASE" || true)"
+            if [ "$head_rev" != "$base_rev" ]; then
+              echo "::error::this PR moves CONTRACT_REVISION ${base_rev:-?} -> $head_rev, and fleet-mobile main does not accept it (above): merge the fleet-mobile HubContract.kt bump first"
+              exit 1
+            fi
+          fi
+          echo "::warning::fleet-mobile main does not accept this tree's hub contract (above); a release would refuse to pair them"
+      # Migration numbers: on a PR's merge commit a number main took shows up
+      # as two files sharing it; with origin/main fetched, an added file at
+      # or below main's highest fails too. The pre-push hook runs the same
+      # check earlier. A second.
+      - name: Migration numbers
+        run: |
+          git fetch --quiet --depth=1 origin main:refs/remotes/origin/main || true
+          bash scripts/check-migration-numbers-test.sh
+          scripts/check-migration-numbers.sh
 
   # tools/ag (the agent launcher) against fake claude/codex binaries. macOS
   # runs it under the stock /bin/bash 3.2 — the whole point of ag's
@@ -456,6 +497,44 @@ jobs:
           path: hub-e2e-logs.tar.gz
           if-no-files-found: ignore
           retention-days: 7
+
+  # THE HUB IMAGE, BUILT BEFORE A TAG NEEDS IT. hub-image.yml builds
+  # crates/fleet-hub/Dockerfile only for a pushed v* tag, so a Dockerfile the
+  # tree has outgrown failed only after the release was out: v0.4.10 published
+  # its desktop bundles and APK with no fleet-hub image at all, because the
+  # build context lacked tools/voice (fixed in #450). hub-headless above
+  # compiles fleet-hub from the full checkout and cannot see that. This builds
+  # the same Dockerfile from the same context, amd64 only, pushes nothing, and
+  # runs the image once: `fleet-hub --version` through the real ENTRYPOINT.
+  # It reads the release builds' amd64 layer cache and writes none, so a PR
+  # never evicts what the next tag build reuses.
+  hub-image:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build crates/fleet-hub/Dockerfile
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/fleet-hub/Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            FLEET_GIT_SHA=${{ github.sha }}
+            FLEET_BUILD_ID=ci-${{ github.run_id }}
+          load: true
+          push: false
+          tags: fleet-hub:ci
+          cache-from: type=gha,scope=linux/amd64
+      - name: Run the image
+        run: |
+          set -euo pipefail
+          out="$(docker run --rm fleet-hub:ci --version)"
+          echo "$out"
+          case "$out" in "fleet-hub "*) ;; *) echo "unexpected --version output"; exit 1 ;; esac
 
   frontend:
     needs: changes

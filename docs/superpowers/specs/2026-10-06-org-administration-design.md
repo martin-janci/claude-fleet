@@ -108,7 +108,7 @@ The hub's CLI-only administration became one hub tool a desktop routes to.
 
 ## Phase C — settings, spend and budgets per org (built)
 
-- **Overrides as data.** Migration 104 adds `org_settings(org_id, key,
+- **Overrides as data.** Migration 106 adds `org_settings(org_id, key,
   value, set_at)`. A `SPECS` row opts in with `.per_org()` (shown as
   `per_org` in `describe`). `settings::get_string_for` / `get_bool_for`
   read the org's own valid value, else the fleet's; `org_values` gives a
@@ -162,7 +162,7 @@ narrow the grants a departing member was given (downward only); and whether
 an org admin sees the unclaimed count on the org's hosts is **an option**,
 the hub owner's, off by default.
 
-- Migration 105: `org_members(org_id, person_id, role, added_at, added_by,
+- Migration 107: `org_members(org_id, person_id, role, added_at, added_by,
   shares_since, removed_at)`, `role` ∈ `admin | member | viewer`; a removed
   member keeps the row (`removed_at`). `orgs.owns_hub` (at most one) and
   `orgs.admins_see_unclaimed`. Every membership write moves the auth epoch.

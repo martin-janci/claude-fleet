@@ -31,6 +31,8 @@ case "\$args" in
     cat "$t/wire_contract.rs" ;;
   *"repos/martin-janci/fleet-mobile/contents/shared/src/commonMain/kotlin/dev/claudefleet/mobile/net/HubContract.kt?ref=$HEAD"*)
     cat "$t/HubContract.kt" ;;
+  *"repos/martin-janci/fleet-mobile/contents/shared/src/commonMain/kotlin/dev/claudefleet/mobile/net/HubContract.kt?ref=main"*)
+    cat "$t/HubContract.kt" ;;
   *) echo "fake gh: unexpected: \$args" >&2; exit 1 ;;
 esac
 EOF
@@ -86,6 +88,40 @@ if [[ $rc == 0 && ! -s "$t/posted" && "$out" == *"Dry run"* && "$out" == *"hub c
 else
   FAIL=$((FAIL + 1)); printf 'FAIL: dry run (rc=%s)\n%s\n' "$rc" "$out" >&2
 fi
+
+# check-mobile-contract.sh on its own, the way ci.yml runs it: the hub
+# revision from THIS checkout's wire_contract.rs (a copy of the script in a
+# throwaway tree, so the tree's file is the one read), the phone at main.
+tree="$t/tree"
+mkdir -p "$tree/scripts" "$tree/crates/fleet-core/src"
+cp "$REPO/scripts/check-mobile-contract.sh" "$tree/scripts/"
+C="$tree/scripts/check-mobile-contract.sh"
+local_rev() { printf 'pub const CONTRACT_REVISION: u32 = %s;\n' "$1" >"$tree/crates/fleet-core/src/wire_contract.rs"; }
+
+# expect_c <name> <want exit: 0|nonzero> <output must contain> -- <args...>
+expect_c() {
+  local name=$1 want_rc=$2 want_out=$3 out rc ok=1; shift 4
+  out="$(PATH="$t/bin:$PATH" bash "$C" "$@" 2>&1)"; rc=$?
+  if [[ $want_rc == 0 ]]; then [[ $rc == 0 ]] || ok=0; else [[ $rc != 0 ]] || ok=0; fi
+  [[ "$out" == *"$want_out"* ]] || ok=0
+  if [[ $ok == 1 ]]; then
+    PASS=$((PASS + 1)); echo "PASS: $name"
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL: %s (rc=%s)\n--- want output containing\n%s\n--- got\n%s\n' "$name" "$rc" "$want_out" "$out" >&2
+  fi
+}
+
+local_rev 8; mobile_range 0 8
+expect_c "ci: this checkout's revision inside the phone's range passes" 0 \
+  "martin-janci/fleet-mobile main: accepts hub contract 8 (0..8)" --
+local_rev 9; mobile_range 0 8
+expect_c "ci: a checkout that bumps past the phone's MAX fails" nonzero \
+  "accepts hub contracts 0..8, but this checkout ships hub contract 9" --
+local_rev 9
+expect_c "ci: --print-hub-rev reads this checkout" 0 "9" -- --print-hub-rev
+hub_rev 7
+expect_c "ci: --print-hub-rev --hub-ref reads GitHub at that ref" 0 "7" -- --print-hub-rev --hub-ref v1.2.3
 
 echo "release-mobile-test: $PASS passed, $FAIL failed"
 [[ $FAIL == 0 ]]

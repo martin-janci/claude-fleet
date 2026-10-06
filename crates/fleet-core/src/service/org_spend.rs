@@ -1,7 +1,7 @@
 //! Org administration phase C: each org's estimated spend, and its budget
 //! (`docs/superpowers/specs/2026-10-06-org-administration-design.md`).
 //!
-//! Spend is `usage_daily_org` (migration 104): the live rows only — a
+//! Spend is `usage_daily_org` (migration 106): the live rows only — a
 //! backfill row is history a first read of a transcript booked, not spend in
 //! the window. A budget is `budget.org_daily_usd` / `budget.org_monthly_usd`,
 //! each org's own value else the fleet's (`settings::get_string_for`); `0`

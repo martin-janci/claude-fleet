@@ -99,7 +99,7 @@ pub struct OrgRow {
     /// hub, which has no bound client.
     #[serde(default = "bound_sees_unassigned_default")]
     pub bound_sees_unassigned: bool,
-    /// Org administration phase D (migration 105): this company owns the
+    /// Org administration phase D (migration 107): this company owns the
     /// hub, so its admins administer hosts. At most one org.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owns_hub: bool,
@@ -475,7 +475,7 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// One org's own value of setting `key` (migration 104), or `None` when
+    /// One org's own value of setting `key` (migration 106), or `None` when
     /// it inherits the fleet's.
     pub fn org_setting(&self, org_id: i64, key: &str) -> Result<Option<String>, IpcError> {
         Ok(self
@@ -563,7 +563,7 @@ impl Store {
             "DELETE FROM org_rules WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
-        // Org administration phase C (migration 104): its own settings and
+        // Org administration phase C (migration 106): its own settings and
         // its spend roll-up go with it.
         tx.execute(
             "DELETE FROM org_settings WHERE org_id = ?1",
@@ -573,7 +573,7 @@ impl Store {
             "DELETE FROM usage_daily_org WHERE org_id = ?1",
             rusqlite::params![id],
         )?;
-        // Phase D (migration 105): its members become FORMER members — the
+        // Phase D (migration 107): its members become FORMER members — the
         // row stays, so a person whose last company this was reads nothing
         // of any org rather than every org's work — and what was shared with
         // the org reaches nobody.

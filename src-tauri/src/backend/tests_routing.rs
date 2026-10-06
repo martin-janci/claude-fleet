@@ -428,6 +428,18 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "project_picks",
+            "project_picks",
+            json!({}),
+            r#"[{"owner":"o","repo":"r","pinned":true,"vis":"keep","grp":"tools"}]"#,
+            Box::new(|b, s, _| {
+                let v = block_on(commands::projects::routed::project_picks(b, s))?;
+                assert!(v[0].pinned, "the hub's answer");
+                assert_eq!(v[0].grp.as_deref(), Some("tools"));
+                Ok(())
+            }),
+        ),
+        (
             "refresh_projects",
             "refresh_projects",
             json!({}),
@@ -2124,6 +2136,30 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "preview_start_work",
+            "work_link",
+            // The start's own fields, under its own action.
+            json!({ "session_id": null, "action": "preview_start", "key": "ABC-1", "item_id": null,
+                    "link_id": null, "source": null, "project_id": 3, "host_alias": "h",
+                    "with_brief": true, "parallel": true }),
+            r#"{"key":"ABC-1","title":"","item_id":null,"plan":null,"missing":"host","projects":[],"hosts":[],"conflicts":[],"brief":null,"checkout":null}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::trackers::routed::preview_start_work(
+                    b,
+                    commands::trackers::StartWorkArgs {
+                        reference: Some("ABC-1".into()),
+                        project_id: Some(3),
+                        host_alias: Some("h".into()),
+                        with_brief: true,
+                        parallel: true,
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "start_work_multi",
             "work_link",
             json!({ "session_id": null, "action": "start", "key": "ABC-1", "item_id": null,
@@ -2865,6 +2901,27 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     h,
                     &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            // Every field non-default, so the whole struct is proven to cross the wire.
+            "set_project_pick",
+            "set_project_pick",
+            json!({ "owner": "o", "repo": "r", "pinned": true, "vis": "hide", "grp": "tools" }),
+            r#"{"owner":"o","repo":"r","pinned":true,"vis":"hide","grp":"tools"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::projects::routed::set_project_pick(
+                    b,
+                    s,
+                    fleet_core::service::project_picks::SetProjectPickArgs {
+                        owner: "o".into(),
+                        repo: "r".into(),
+                        pinned: true,
+                        vis: Some("hide".into()),
+                        grp: Some("tools".into()),
+                    },
                 ))
                 .map(|_| ())
             }),

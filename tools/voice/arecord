@@ -43,7 +43,7 @@ if [ -r "$ENV_FILE" ] && [ -r "$HEADERS" ]; then
     # its stdout to close. curl runs in the background so that the signal
     # ends it too: a curl left streaming would hold stdout (and the
     # microphone) open. `jobs -p` also covers a signal before `pid` is set.
-    # shellcheck disable=SC2317,SC2046  # called by the trap; job ids are numbers
+    # shellcheck disable=SC2317,SC2329,SC2046  # called by the trap (SC2329 is shellcheck >= 0.11's name for it); job ids are numbers
     stop() {
       kill $(jobs -p) 2>/dev/null
       wait

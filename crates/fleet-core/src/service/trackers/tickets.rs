@@ -561,6 +561,11 @@ pub struct StartArgs {
     /// A multi-repo start (work graph M9.6): the duplicate guard counts only
     /// live sessions on the key in THIS start's project.
     pub per_project: bool,
+    /// A second session on a key that already has a live one (task → session
+    /// spec P-8): the key's duplicate guard is skipped, never the branch's,
+    /// and an unnamed worktree is a fresh `<slug>-N`, so two Claudes never
+    /// share a checkout.
+    pub parallel: bool,
     /// Who starts (D34): a person's start links `started`, an agent's
     /// (a per-host token, the operator) `agent_started`. The desktop's is
     /// always a person's (the default).
@@ -596,6 +601,10 @@ pub struct StartPlan {
     /// sessions on the key in this plan's project.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub per_project: bool,
+    /// A parallel start ([`StartArgs::parallel`]): the key's duplicate guard
+    /// is not this plan's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parallel: bool,
     /// Who starts ([`StartArgs::decider`]): decides the link's source.
     /// Never on the wire: a plan read back is a person's.
     #[serde(skip)]
@@ -693,6 +702,18 @@ pub async fn resolve_start(
     reader: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<StartTicket, IpcError> {
+    resolve_ticket(store, args, reader, net, false).await
+}
+
+/// [`resolve_start`]; `allow_proposal` lets an unaccepted proposal through
+/// for a preview, which reports it as a conflict instead.
+async fn resolve_ticket(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    reader: &crate::service::view_scope::ViewScope,
+    net: &TrackerNet,
+    allow_proposal: bool,
+) -> Result<StartTicket, IpcError> {
     let scope = &reader.org;
     let (key, title, item_id) = match (args.item_id, args.reference.as_deref()) {
         (Some(id), None) => {
@@ -702,7 +723,8 @@ pub async fn resolve_start(
                 Some(item) if item_visible(scope, &s, &item)? => item,
                 _ => return Err(orgs::not_found("work item", id)),
             };
-            if item.origin.as_deref() == Some("proposed")
+            if !allow_proposal
+                && item.origin.as_deref() == Some("proposed")
                 && item.proposal_state.as_deref() != Some("accepted")
             {
                 return Err(IpcError::new(codes::E_INVALID, "accept the proposal first"));
@@ -816,7 +838,11 @@ pub fn plan_resolved(
     }
     let s = lock(store)?;
     let item_org = item_id.map(|id| s.item_org(id)).transpose()?.flatten();
-    let live = live_work_on(&s, &key, item_org)?;
+    let live = if args.parallel {
+        Vec::new()
+    } else {
+        live_work_on(&s, &key, item_org)?
+    };
     if let Some((_, row)) = live
         .iter()
         .find(|(_, r)| !args.per_project || r.project_id == args.project_id)
@@ -869,7 +895,7 @@ pub fn plan_resolved(
                 codes::E_AMBIGUOUS,
                 format!("no project has worked on {prefix_label} yet; pick one (project_id)"),
             )
-            .with_details(serde_json::json!({ "candidates": candidates })));
+            .with_details(serde_json::json!({ "missing": "project", "candidates": candidates })));
         }
     };
     let host_alias = match (&args.host_alias, scope.host()) {
@@ -892,7 +918,7 @@ pub fn plan_resolved(
                     codes::E_AMBIGUOUS,
                     "no host has run this project yet; pick one (host_alias)",
                 )
-                .with_details(serde_json::json!({ "candidates": hosts })));
+                .with_details(serde_json::json!({ "missing": "host", "candidates": hosts })));
             }
         },
     };
@@ -937,11 +963,17 @@ pub fn plan_resolved(
         }
         None => branch_slug(&key, &title),
     };
-    let worktree_id = s
+    let checkouts: Vec<_> = s
         .list_worktrees_on_host(&host_alias)?
         .into_iter()
-        .find(|w| w.project_id == project_id && w.name == branch)
-        .map(|w| w.id);
+        .filter(|w| w.project_id == project_id)
+        .collect();
+    let branch = if args.parallel && args.worktree.is_none() {
+        free_branch(&branch, |b| checkouts.iter().any(|w| w.name == b))
+    } else {
+        branch
+    };
+    let worktree_id = checkouts.iter().find(|w| w.name == branch).map(|w| w.id);
     // A start whose branch slug matches an EXISTING checkout lands its pane
     // in that checkout — so `work_link { start }` acts on an existing row
     // after all, and takes the same landing gate `new_session` /
@@ -993,9 +1025,22 @@ pub fn plan_resolved(
         branch,
         worktree_id,
         per_project: args.per_project,
+        parallel: args.parallel,
         decider: args.decider,
         owner: args.owner,
     })
+}
+
+/// `base`, else the first `base-N` (N ≥ 2) that `taken` does not hold: a
+/// parallel start's own checkout.
+fn free_branch(base: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(base) {
+        return base.to_string();
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|b| !taken(b))
+        .expect("an unbounded range has a free name")
 }
 
 /// Most characters of a key fleet's own lines carry.
@@ -1284,6 +1329,9 @@ where
 /// A live session of `plan`'s key other than `except` (in `plan`'s project
 /// for a multi-repo sibling): the start that would make a second one.
 fn rival(s: &Store, plan: &StartPlan, except: Option<i64>) -> Result<Option<SessionRow>, IpcError> {
+    if plan.parallel {
+        return Ok(None);
+    }
     let item_org = plan.item_id.map(|id| s.item_org(id)).transpose()?.flatten();
     Ok(live_work_on(s, &plan.key, item_org)?
         .into_iter()
@@ -1459,6 +1507,267 @@ pub async fn start_work(
         );
     }
     Ok(row)
+}
+
+// --- start preview (task → session spec P-1) ---------------------------------
+
+/// What would stop or change a start, as data rather than an error: the
+/// Work button's popover shows each with its choices before anything is
+/// made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartConflict {
+    /// `live_session` | `proposal` | `cross_org` | `worktree_busy` | `done`.
+    pub kind: String,
+    /// One plain sentence for the person.
+    pub message: String,
+    /// The session in the way, only when the caller may see it (D7, T9b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+}
+
+/// A project a start could land in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectChoice {
+    pub id: i64,
+    pub owner: String,
+    pub repo: String,
+}
+
+/// A host a start could land on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostChoice {
+    pub alias: String,
+    pub reachable: bool,
+}
+
+/// The checkout a planned start would use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckoutPreview {
+    /// The planned worktree already exists and is reused.
+    pub exists: bool,
+    /// A live session is working in it, when the caller may see it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy_by: Option<i64>,
+}
+
+/// `work_link { action: start, dry_run: true }`: where a start would land,
+/// what it would send, and what is in the way — nothing is made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartPreview {
+    pub key: String,
+    pub title: String,
+    #[serde(default)]
+    pub item_id: Option<i64>,
+    /// The resolved start; `None` while `missing` names what to pick.
+    #[serde(default)]
+    pub plan: Option<StartPlan>,
+    /// `project` | `host`: what the person must pick before a start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missing: Option<String>,
+    pub projects: Vec<ProjectChoice>,
+    pub hosts: Vec<HostChoice>,
+    pub conflicts: Vec<StartConflict>,
+    /// The brief the start would queue, as it stands.
+    #[serde(default)]
+    pub brief: Option<String>,
+    #[serde(default)]
+    pub checkout: Option<CheckoutPreview>,
+}
+
+/// Most projects a preview offers to pick from.
+const PREVIEW_PROJECTS_MAX: usize = 8;
+
+/// Preview a start: [`start_work`]'s path up to the spawn, with every
+/// conflict collected instead of returned. A key that already has a live
+/// session is planned as a parallel start (its own `-N` checkout), so the
+/// popover can offer one; a cross-org start is planned as if forced, so the
+/// person sees where it would land before they choose to. Refusals that are
+/// not choices — a host fence, an org a bound client may not start in, a
+/// checkout the caller may not land in — stay errors.
+pub async fn preview_start(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    view: &crate::service::view_scope::ViewScope,
+    net: &TrackerNet,
+) -> Result<StartPreview, IpcError> {
+    let args = with_native_defaults(store, args, &view.org)?;
+    let mut conflicts = Vec::new();
+    let ticket = resolve_ticket(store, &args, view, net, true).await?;
+    let (projects, hosts, live, done) = {
+        let s = lock(store)?;
+        let mut projects = s.list_projects()?;
+        projects.retain(|p| !p.system);
+        projects.sort_by_key(|p| std::cmp::Reverse(p.last_session_at.unwrap_or(0)));
+        let projects: Vec<ProjectChoice> = projects
+            .into_iter()
+            .take(PREVIEW_PROJECTS_MAX)
+            .map(|p| ProjectChoice {
+                id: p.id,
+                owner: p.owner,
+                repo: p.repo,
+            })
+            .collect();
+        let local = crate::service::hub::local_host_enabled();
+        let hosts: Vec<HostChoice> = s
+            .list_hosts()?
+            .into_iter()
+            .filter(|h| crate::service::hosts::is_active(h, local))
+            .filter(|h| view.org.host().is_none_or(|own| own == h.alias))
+            .map(|h| HostChoice {
+                alias: h.alias,
+                reachable: h.reachable,
+            })
+            .collect();
+        let item_org = ticket
+            .item_id
+            .map(|id| s.item_org(id))
+            .transpose()?
+            .flatten();
+        let live: Vec<SessionRow> = live_work_on(&s, &ticket.key, item_org)?
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
+        let item = ticket
+            .item_id
+            .map(|id| s.get_work_item(id))
+            .transpose()?
+            .flatten();
+        if let Some(item) = &item {
+            if item.origin.as_deref() == Some("proposed")
+                && item.proposal_state.as_deref() != Some("accepted")
+            {
+                conflicts.push(StartConflict {
+                    kind: "proposal".into(),
+                    message: "This is a proposal: accept it to start.".into(),
+                    session_id: None,
+                });
+            }
+        }
+        let done = item.as_ref().is_some_and(|i| i.status_category == "done");
+        (projects, hosts, live, done)
+    };
+    if let Some(row) = live.first() {
+        let visible = view.sees_session_row(row).is_visible();
+        conflicts.push(StartConflict {
+            kind: "live_session".into(),
+            message: if visible {
+                format!(
+                    "{} is already open in {} on {}.",
+                    ticket.key,
+                    row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
+                    row.host_alias
+                )
+            } else {
+                "Someone is already working on this.".into()
+            },
+            session_id: visible.then_some(row.id),
+        });
+    }
+    if done {
+        conflicts.push(StartConflict {
+            kind: "done".into(),
+            message: "This task is done.".into(),
+            session_id: None,
+        });
+    }
+    let planned = StartArgs {
+        parallel: args.parallel || !live.is_empty(),
+        ..args.clone()
+    };
+    let mut preview = StartPreview {
+        key: ticket.key.clone(),
+        title: ticket.title.clone(),
+        item_id: ticket.item_id,
+        plan: None,
+        missing: None,
+        projects,
+        hosts,
+        conflicts,
+        brief: None,
+        checkout: None,
+    };
+    let plan = match plan_resolved(store, &planned, view, &ticket) {
+        Ok(p) => p,
+        Err(e) if e.code == codes::E_AMBIGUOUS => {
+            preview.missing = e
+                .details
+                .as_ref()
+                .and_then(|d| d.get("missing"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string);
+            return Ok(preview);
+        }
+        Err(e)
+            if e.code == codes::E_FORBIDDEN
+                && e.details
+                    .as_ref()
+                    .and_then(|d| d.get("cross_org"))
+                    .and_then(|v| v.as_bool())
+                    == Some(true) =>
+        {
+            preview.conflicts.push(StartConflict {
+                kind: "cross_org".into(),
+                message: e.message.clone(),
+                session_id: None,
+            });
+            let forced = StartArgs {
+                force_cross_org: true,
+                ..planned.clone()
+            };
+            plan_resolved(store, &forced, view, &ticket)?
+        }
+        Err(e) if e.code == codes::E_EXISTS => {
+            // A multi-repo sibling's branch already has a live session.
+            preview.conflicts.push(StartConflict {
+                kind: "worktree_busy".into(),
+                message: e.message.clone(),
+                session_id: e
+                    .details
+                    .as_ref()
+                    .and_then(|d| d.get("session_id"))
+                    .and_then(|v| v.as_i64()),
+            });
+            return Ok(preview);
+        }
+        Err(e) => return Err(e),
+    };
+    preview.brief = match (&args.brief, args.with_brief) {
+        (Some(b), _) => Some(b.clone()),
+        (None, true) if brief_visible_on(store, &plan)? => Some(ticket_brief(store, &plan)?),
+        (None, _) => None,
+    };
+    if let Some(wid) = plan.worktree_id {
+        let s = lock(store)?;
+        let busy = s
+            .list_sessions_for_host(&plan.host_alias)?
+            .into_iter()
+            .find(|r| r.worktree_id == Some(wid) && r.status == "running" && r.lost_at.is_none());
+        let busy_by = busy
+            .as_ref()
+            .filter(|r| view.sees_session_row(r).is_visible())
+            .map(|r| r.id);
+        if let Some(r) = &busy {
+            preview.conflicts.push(StartConflict {
+                kind: "worktree_busy".into(),
+                message: format!(
+                    "The checkout {} is in use by a live session; a parallel start takes its own.",
+                    plan.branch
+                ),
+                session_id: busy_by.filter(|id| *id == r.id),
+            });
+        }
+        preview.checkout = Some(CheckoutPreview {
+            exists: true,
+            busy_by,
+        });
+    } else {
+        preview.checkout = Some(CheckoutPreview {
+            exists: false,
+            busy_by: None,
+        });
+    }
+    preview.plan = Some(plan);
+    Ok(preview)
 }
 
 // --- multi-repo start (work graph M9.6) ---------------------------------------

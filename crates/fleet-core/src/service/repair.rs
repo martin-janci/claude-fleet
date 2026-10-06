@@ -2187,7 +2187,8 @@ struct SpecSeed {
     /// the lock for `resolve_remote_paths`.
     projects_root: String,
     layout: crate::projects::Layout,
-    /// `(name, path-from-row, branch)` for a linked worktree.
+    /// `(name, path-from-row, branch)` for a linked worktree. For a remote
+    /// session the path is only ever a row of the session's own host.
     worktree: Option<(String, Option<String>, Option<String>)>,
     siblings: Vec<i64>,
 }
@@ -2212,7 +2213,15 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
     let base_path = s
         .project_base_path(pid)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("project {pid} not found")))?;
-    let rows = s.list_worktrees_for_project(pid)?;
+    let is_local = row.host_alias == crate::service::projects::LOCAL_HOST;
+    let rows = if is_local {
+        s.list_worktrees_for_project(pid)?
+    } else {
+        s.list_worktrees_on_host(&row.host_alias)?
+            .into_iter()
+            .filter(|w| w.project_id == pid)
+            .collect()
+    };
     // The FK wins; otherwise the portable key (set by reconcile).
     let wt_row = match row.worktree_id {
         Some(wid) => s.get_worktree_row(wid)?,
@@ -2238,11 +2247,14 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
             let by_key = wt_row
                 .clone()
                 .or_else(|| rows.iter().find(|w| w.name == n).cloned());
-            Some((
-                n,
-                by_key.as_ref().map(|w| w.path.clone()),
-                by_key.and_then(|w| w.branch),
-            ))
+            // A remote host's checkout is where that host recorded it, which
+            // the name alone cannot rebuild (`.worktrees/feat/imports`); a
+            // row of another host says nothing about this one.
+            let path = by_key
+                .as_ref()
+                .filter(|w| is_local || w.host_alias == row.host_alias)
+                .map(|w| w.path.clone());
+            Some((n, path, by_key.and_then(|w| w.branch)))
         }
         _ => None,
     };
@@ -2273,7 +2285,8 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
 /// Build the [`WorkspaceSpec`] for an existing session row: paths from the
 /// local `projects` / `worktrees` tables for `local`, from the
 /// host's `projects.*` root and layout (plus the remote `$HOME`)
-/// for any other host. Returns the spec and the ids of alive sibling
+/// for any other host, whose linked worktree is at the path its own
+/// `worktrees` row records when there is one. Returns the spec and the ids of alive sibling
 /// sessions sharing the workspace.
 ///
 /// Errors: `E_NOREPO` (orphan session), `E_BG_SESSION`, `E_INVALID_STATE`
@@ -2281,6 +2294,15 @@ fn seed_for_session(s: &Store, row: &SessionRow) -> Result<SpecSeed, IpcError> {
 pub async fn spec_for_session(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
+    session_id: i64,
+) -> Result<(WorkspaceSpec, Vec<i64>), IpcError> {
+    spec_for_session_with(store, &**ssh, session_id).await
+}
+
+/// [`spec_for_session`] over any [`SshExec`] (the remote `$HOME` lookup).
+async fn spec_for_session_with(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
     session_id: i64,
 ) -> Result<(WorkspaceSpec, Vec<i64>), IpcError> {
     let seed = {
@@ -2328,9 +2350,20 @@ pub async fn spec_for_session(
         });
         (root, wt)
     } else {
-        let wt_name = seed.worktree.as_ref().map(|(n, _, _)| n.as_str());
+        // The host's own row is trusted, as `spec_for_new_session` does:
+        // the probe's guess resolver only knows `<root>/.worktrees/<name>`
+        // and `<root>/.claude/worktrees/<name>`. Without one, the name is
+        // rebuilt into the conventional path (and validated as a component).
+        let recorded = seed.worktree.as_ref().and_then(|(_, p, _)| p.clone());
+        if let Some(p) = &recorded {
+            crate::validate::remote_worktree_path("worktree path", p)?;
+        }
+        let wt_name = match &recorded {
+            Some(_) => None,
+            None => seed.worktree.as_ref().map(|(n, _, _)| n.as_str()),
+        };
         let (root, cwd) = resolve_remote_paths(
-            &**ssh,
+            ssh,
             &row.host_alias,
             &seed.projects_root,
             seed.layout,
@@ -2344,9 +2377,9 @@ pub async fn spec_for_session(
             .as_ref()
             .map(|(name, _, branch)| WorktreeSpec {
                 name: name.clone(),
-                path: cwd.clone(),
+                path: recorded.clone().unwrap_or_else(|| cwd.clone()),
                 branch: branch.clone().unwrap_or_else(|| name.clone()),
-                path_is_guess: true,
+                path_is_guess: recorded.is_none(),
                 row_is_local: false,
             });
         (root, wt)
@@ -4028,6 +4061,43 @@ mod tests {
             .unwrap();
         let (spec, _) = spec_for_session(&store, &ssh, sid).await.unwrap();
         assert!(spec.worktree.is_none());
+    }
+
+    /// A worktree created for a branch-shaped name (`new_session {
+    /// new_worktree: "feat/imports" }`) lives at `.worktrees/feat/imports`.
+    /// Recreating its session must open that recorded checkout on its host,
+    /// not refuse it with "worktree name must not contain a path separator".
+    #[tokio::test]
+    async fn spec_for_remote_session_in_a_nested_worktree_uses_the_recorded_path() {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("trn").unwrap();
+        let pid = s.upsert_project("o", "r", "/repo").unwrap();
+        let wt = "/home/dev/projects/github.com/o/r/.worktrees/feat/imports";
+        let wid = s
+            .upsert_worktree_on("trn", pid, "feat/imports", wt, Some("feat/imports"))
+            .unwrap();
+        let sid = s
+            .upsert_session(
+                "dev-r--feat/imports",
+                "trn",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "lost",
+                None,
+            )
+            .unwrap();
+        s.set_worktree_key(sid, Some("feat")).unwrap();
+        let store = Mutex::new(s);
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.with_home("/home/dev");
+        let (spec, _) = spec_for_session_with(&store, &fake, sid).await.unwrap();
+        assert_eq!(spec.project_root, "/home/dev/projects/github.com/o/r");
+        let w = spec.worktree.unwrap();
+        assert_eq!(w.path, wt);
+        assert_eq!(w.branch, "feat/imports");
+        assert!(!w.path_is_guess, "the host's own row is trusted");
     }
 
     /// The UX agent's operator dir is a system project: not a checkout, on

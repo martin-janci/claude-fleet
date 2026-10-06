@@ -95,7 +95,7 @@ Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_i
 
 ### `ensure_operator`
 
-Ensure the UX agent's operator session exists; returns its row.
+Ensure the UX agent's operator session exists on a reachable host; returns its row.
 
 ### `fleet_health`
 
@@ -259,7 +259,7 @@ Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`
 
 ### `operator_status`
 
-Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host.
+Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host|host_down; fallback: where ensure_operator moves it.
 
 ### `org_admin`
 
@@ -296,6 +296,10 @@ Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
 Re-probe a host's reachability and versions. Returns the host row.
 
 Parameters: `alias`
+
+### `project_picks`
+
+The New session picker's choices per project: pinned, vis (hide|keep), group.
 
 ### `propose_layers`
 
@@ -575,6 +579,12 @@ Replace a host's layer assignment: one optional role plus context layers. Edits 
 
 Parameters: `contexts`, `host_alias`, `role`
 
+### `set_project_pick`
+
+Replace one project's picker choices: pinned, vis hide|keep|null, group or null. The empty state clears.
+
+Parameters: `grp`, `owner`, `pinned`, `repo`, `vis`
+
 ### `set_secret`
 
 Store a value for a catalog ${NAME} placeholder (global, or per host with host_alias). Master token only. The value is never returned or logged.
@@ -665,9 +675,9 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `color`
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo). handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `notes`, `on`, `org_id`, `parent`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `status`, `task_id`, `title`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `action`, `brief`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `notes`, `on`, `org_id`, `parallel`, `parent`, `primary`, `project_id`, `project_ids`, `rule`, `rule_id`, `session_id`, `source`, `status`, `task_id`, `title`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -680,6 +690,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::projects::refresh_projects`
 - `commands::projects::add_project`
 - `commands::projects::list_github_repos`
+- `commands::projects::project_picks`
+- `commands::projects::set_project_pick`
 - `commands::sessions::list_sessions`
 - `commands::sessions::related_sessions`
 - `commands::sessions::new_session`
@@ -753,6 +765,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::trackers::work_lookup`
 - `commands::trackers::start_work_multi`
 - `commands::trackers::start_work`
+- `commands::trackers::preview_start_work`
 - `commands::orgs::add_org`
 - `commands::orgs::update_org`
 - `commands::orgs::remove_org`

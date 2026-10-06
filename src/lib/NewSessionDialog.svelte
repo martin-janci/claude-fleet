@@ -38,6 +38,7 @@
     initialName,
     initialHost,
     ticket,
+    autostart = false,
     clock = () => Math.floor(Date.now() / 1000),
     locale,
     timeZone,
@@ -54,6 +55,9 @@
      *  Claude with the ticket" with an editable preview, and creating goes
      *  through `start_work`, which links the session `started`. */
     ticket?: TicketRow;
+    /** Start at once with the remembered choices (the picker's ⌘↵); the
+     *  dialog stays open only if something needs a person. */
+    autostart?: boolean;
     /** Unix seconds for the host chips' usage wording; injectable for tests. */
     clock?: () => number;
     locale?: string;
@@ -503,7 +507,9 @@
       chosenHost === 'local' ? project.project.base_path : projectDir(remoteRoot, projectsLayout, owner, repo);
     if (inNewMode) {
       const slug = finalizeBranchSlug(newWorktreeName);
-      return slug ? `${root}/${worktreeDir}/${slug}` : root;
+      // The branch keeps its `/`; the directory is flat (`feat/x` →
+      // `feat-x`), as `projects::worktree_dir_name` creates it.
+      return slug ? `${root}/${worktreeDir}/${slug.replaceAll('/', '-')}` : root;
     }
     const wt = chosenWorktree;
     if (!wt || wt.name === 'main') return root;
@@ -874,6 +880,26 @@
     remember(submittedHost, submittedWorktreeId);
     onCreate(r.value);
   }
+
+  // The picker's ⌘↵ (project picker spec v2): once this host's worktree
+  // list has settled, look ONCE and, if nothing needs a person, submit with
+  // what the dialog remembered. The first look is final: a blocked hub, a
+  // new worktree without a name, or a scan that failed (`error` /
+  // `unlistable` — its empty list would otherwise silently create a
+  // generated worktree) leaves the dialog open as if the person had not
+  // pressed ⌘↵, and a later reconnect or edit never fires a submit.
+  // A ticket start has its own path (`submitTicket`, with a preview the
+  // person confirms); the picker never passes a ticket.
+  let autostarted = false;
+  $effect(() => {
+    if (!autostart || autostarted || busy) return;
+    if (hostWorktrees.status === 'loading') return;
+    autostarted = true;
+    if (ticket) return;
+    if (hostWorktrees.status !== 'ready') return;
+    if (newSessionBlocked || (inNewMode && !newWorktreeName.trim())) return;
+    void submit();
+  });
 
   function cancelCreate() {
     createController?.abort();

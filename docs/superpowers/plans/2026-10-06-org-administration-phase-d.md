@@ -74,7 +74,7 @@ Spec: `docs/superpowers/specs/2026-10-06-org-administration-design.md`
 
 ## Tasks
 
-- **D1 — store.** Migration 105 (`org_members`, `orgs.owns_hub` with its
+- **D1 — store.** Migration 107 (`org_members`, `orgs.owns_hub` with its
   unique index, `orgs.admins_see_unclaimed`, auth-epoch triggers);
   `store/org_members.rs` (add/upsert, set role, remove, list, memberships of
   a person, effective device org); the derivation applied in

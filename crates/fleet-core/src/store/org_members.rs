@@ -1,4 +1,4 @@
-//! Org memberships (org administration phase D, migration 105): who is in
+//! Org memberships (org administration phase D, migration 107): who is in
 //! which company, with which role, and what that makes of a person's device.
 //!
 //! Plan `docs/superpowers/plans/2026-10-06-org-administration-phase-d.md`.
@@ -9,7 +9,7 @@
 //! ([`Store::client_token_binding`]):
 //!
 //! * the hub's owner, or a person with no membership row: the device's own
-//!   binding, exactly as before migration 105 — an upgraded hub changes
+//!   binding, exactly as before migration 107 — an upgraded hub changes
 //!   nothing;
 //! * a person with live memberships: the device's binding when it is one of
 //!   them, else their first one. Never an org they are not in;
@@ -20,7 +20,7 @@
 //! A viewer's device, and a former member's, is `readonly` whatever its
 //! token says.
 //!
-//! **Every write moves the auth epoch** (migration 105's triggers), because a
+//! **Every write moves the auth epoch** (migration 107's triggers), because a
 //! membership changes what a cached caller resolves to, and the grant
 //! generation, because it changes which org grants reach whom.
 
@@ -76,7 +76,7 @@ pub struct OrgMemberRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub added_by: Option<i64>,
     /// When they last became able to receive org shares; `None` for a
-    /// viewer. See migration 105.
+    /// viewer. See migration 107.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shares_since: Option<i64>,
     /// They left the company; the row stays.

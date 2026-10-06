@@ -275,7 +275,9 @@ pub(super) fn git_setup_error(
 
 /// Build a bash script (run via `bash -lc`) that creates a new worktree for a
 /// NEW branch `name` off the repo's default branch, under `.worktrees/` or
-/// `.claude/worktrees/` (auto-detected, fallback `.worktrees/`). Idempotent:
+/// `.claude/worktrees/` (auto-detected, fallback `.worktrees/`), in the
+/// directory [`crate::projects::worktree_dir_name`] gives (`feat/imports` →
+/// `feat-imports`; the branch keeps its `/`). Idempotent:
 /// if the worktree dir already exists it's reused. Git's chatter goes to
 /// stderr; the ONLY stdout is the absolute PHYSICAL path of the worktree
 /// (`pwd -P`, last line), which the caller uses as the tmux cwd. The logical
@@ -299,9 +301,10 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
         "set -e\n\
          cd {root}\n\
          name={name}\n\
+         dir={dir}\n\
          basebr={basebr}\n\
          {WORKTREE_BASE_SNIPPET}\
-         wt=\"$base/$name\"\n\
+         wt=\"$base/$dir\"\n\
          if [ ! -e \"$wt\" ]; then\n\
          def=\"$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')\"\n\
          [ -z \"$def\" ] && def=\"$(git rev-parse --abbrev-ref HEAD 2>/dev/null)\"\n\
@@ -318,6 +321,7 @@ pub(super) fn worktree_add_script(root: &str, name: &str, base: Option<&str>) ->
          ( cd \"$wt\" && pwd -P )\n",
         root = quote(root),
         name = quote(name),
+        dir = quote(&crate::projects::worktree_dir_name(name)),
     )
 }
 
@@ -1068,9 +1072,13 @@ pub(super) fn link_new_session_worktree(
             Some(row) if row.name == "main" => return Ok(None),
             _ => w,
         },
-        (None, Some(name)) => {
-            s.upsert_worktree_on(&args.host_alias, args.project_id, name, cwd, Some(name))?
-        }
+        (None, Some(name)) => s.upsert_worktree_on(
+            &args.host_alias,
+            args.project_id,
+            &crate::projects::worktree_dir_name(name),
+            cwd,
+            Some(name),
+        )?,
         (None, None) => return Ok(None),
     };
     s.link_session_worktree(row_id, wid)?;

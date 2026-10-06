@@ -73,4 +73,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_orgs_owns_hub
 -- the org's hosts only when the hub's owner turns this on. Off by default.
 ALTER TABLE orgs ADD COLUMN admins_see_unclaimed INTEGER NOT NULL DEFAULT 0;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (105);
+INSERT OR IGNORE INTO schema_version (version) VALUES (107);

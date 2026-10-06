@@ -349,7 +349,7 @@ fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 105 (org administration phase D):
+/// `already_applied` guard of migration 107 (org administration phase D):
 /// `orgs` already has `admins_see_unclaimed`, the last of its two
 /// `ADD COLUMN`s; everything else in the script is `IF NOT EXISTS`.
 fn orgs_has_admins_see_unclaimed(conn: &Connection) -> rusqlite::Result<bool> {
@@ -503,6 +503,19 @@ fn changesets_has_withdrawn_at(conn: &Connection) -> rusqlite::Result<bool> {
         |r| r.get(0),
     )?;
     Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 105: no worktree row is named with
+/// a `/`. A data rewrite with nothing left to rewrite is skipped rather than
+/// run, and it must be: its `UPDATE sessions` compiles every `sessions`
+/// trigger, which on a database whose skipped branch migrations are not yet
+/// repaired names columns that do not exist yet.
+fn no_slash_named_worktrees(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT NOT EXISTS (SELECT 1 FROM worktrees WHERE instr(name, '/') > 0)",
+        [],
+        |r| r.get(0),
+    )
 }
 
 /// `already_applied` guard of migration 087 (`secret_like` / `fleet_owned`
@@ -1207,16 +1220,27 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/103_changeset_withdrawn_at.sql"),
         already_applied: Some(changesets_has_withdrawn_at),
     },
+    // The New session picker: a person's pin / visibility / group per
+    // project, keyed by owner/repo TEXT. A new table only, so plain.
+    Migration::plain(104, include_str!("../../migrations/104_project_picks.sql")),
+    // Worktree rows named after a branch with a `/` (`feat/imports`) take a
+    // flat name (`feat-imports`), and so do their sessions' keys. Rewrites
+    // rows only; guarded so it runs only while such a row exists.
+    Migration {
+        version: 105,
+        sql: include_str!("../../migrations/105_worktree_slash_names.sql"),
+        already_applied: Some(no_slash_named_worktrees),
+    },
     Migration::plain(
-        104,
-        include_str!("../../migrations/104_org_settings_and_spend.sql"),
+        106,
+        include_str!("../../migrations/106_org_settings_and_spend.sql"),
     ),
     // Org administration phase D: memberships, the company that owns the
     // hub, and the unclaimed-count switch. ADD COLUMN is not idempotent:
     // guarded on the last one.
     Migration {
-        version: 105,
-        sql: include_str!("../../migrations/105_org_members.sql"),
+        version: 107,
+        sql: include_str!("../../migrations/107_org_members.sql"),
         already_applied: Some(orgs_has_admins_see_unclaimed),
     },
 ];
@@ -5275,6 +5299,82 @@ mod tests {
             .execute_batch("DELETE FROM schema_version WHERE version >= 103;")
             .unwrap();
         s.migrate().unwrap();
+        assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    }
+
+    /// 105: worktree rows named after a branch with a `/` (the live
+    /// `feat/imports` on claude-fleet-trn, `feat/abc` on mefistos) take a
+    /// flat name; the path, the branch and the session's link stay, and the
+    /// session's key follows the row. A name already taken gets the row id.
+    #[test]
+    fn migration_105_flattens_slash_named_worktrees_and_their_session_keys() {
+        let s = store_at_version(104);
+        s.upsert_host("trn").unwrap();
+        s.upsert_host("mefistos").unwrap();
+        let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
+        let nested = "/home/dev/projects/r/.worktrees/feat/imports";
+        let wid = s
+            .upsert_worktree_on("trn", pid, "feat/imports", nested, Some("feat/imports"))
+            .unwrap();
+        let abc = s
+            .upsert_worktree_on(
+                "mefistos",
+                pid,
+                "feat/abc",
+                "/m/r/.worktrees/feat/abc",
+                None,
+            )
+            .unwrap();
+        let taken = s
+            .upsert_worktree_on(
+                "trn",
+                pid,
+                "x-y",
+                "/home/dev/projects/r/.worktrees/x-y",
+                None,
+            )
+            .unwrap();
+        let clash = s
+            .upsert_worktree_on(
+                "trn",
+                pid,
+                "x/y",
+                "/home/dev/projects/r/.worktrees/x/y",
+                None,
+            )
+            .unwrap();
+        let sid = s
+            .upsert_session(
+                "dev-r--feat/imports",
+                "trn",
+                Some(pid),
+                Some(wid),
+                1,
+                1,
+                "lost",
+                None,
+            )
+            .unwrap();
+        s.set_worktree_key(sid, Some("feat")).unwrap();
+
+        s.migrate().unwrap();
+        let row = |id| s.get_worktree_row(id).unwrap().unwrap();
+        let w = row(wid);
+        assert_eq!(w.name, "feat-imports");
+        assert_eq!(w.path, nested, "the checkout stays where it is");
+        assert_eq!(w.branch.as_deref(), Some("feat/imports"));
+        assert_eq!(row(abc).name, "feat-abc");
+        assert_eq!(row(taken).name, "x-y", "an existing flat name is kept");
+        assert_eq!(row(clash).name, format!("x-y-{clash}"));
+        let sess = s.get_session_by_id(sid).unwrap().unwrap();
+        assert_eq!(sess.worktree_id, Some(wid));
+        assert_eq!(sess.worktree_key.as_deref(), Some("feat-imports"));
+
+        s.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 105;")
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(row(wid).name, "feat-imports", "a re-run changes nothing");
         assert_eq!(s.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
     }
 
