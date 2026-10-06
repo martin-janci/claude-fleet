@@ -119,6 +119,35 @@ pub fn refuse_if_operator(
     Ok(())
 }
 
+/// Refuse to record the operator as the fleet controller (`register_self`).
+///
+/// The controller record makes kill / recreate / RESTART refuse that session
+/// without `force`, and the agent panel's `lost` recovery is a plain
+/// `restart_session` with no `force` (`restartOperator()` in
+/// `src/lib/operator.ts`). The operator reads the same control skill every
+/// session does, which says to `register_self` before lifecycle work — so
+/// left alone it registered itself, and after its host rebooted the panel's
+/// one button answered `E_SELF_TARGET` (2026-10-06, `fleet-operator` on
+/// mefistos). The operator is never the controller: it drives sessions on
+/// the person's behalf from a panel, and the guard it would earn protects
+/// nothing the panel needs protecting from.
+pub fn refuse_operator_as_controller(
+    store: &Store,
+    host_alias: &str,
+    tmux_name: &str,
+) -> Result<(), IpcError> {
+    if is_operator_session(store, host_alias, tmux_name) {
+        return Err(IpcError::new(
+            codes::E_FORBIDDEN,
+            format!(
+                "register_self refused: {tmux_name} on {host_alias} is the UX agent's own \
+                 session, which is never the fleet controller. Nothing to register; carry on."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Owner/repo of the operator's own project row. Not a real repository —
 /// `upsert_system_project` flags it so the picker hides it and the sweep
 /// leaves it be.
@@ -251,6 +280,9 @@ pub fn claude_md() -> &'static str {
      2. **This directory is not a repository and you do not write code in\n\
      it.** When work needs doing in a project, start a session on the right\n\
      host and brief it. You are the operator, not the worker.\n\
+     \n\
+     You are not the fleet controller: skip `register_self`, whatever the\n\
+     control skill says. The panel restarts you through it.\n\
      \n\
      **Tidying up done tickets.** `work` action `tidy` lists what fleet\n\
      suggests cleaning up, each with a reason (`done_idle`, `pr_merged_idle`,\n\
@@ -420,14 +452,7 @@ struct LiveHost {
 #[async_trait::async_trait]
 impl OperatorHost for LiveHost {
     async fn resolve_dir(&self, host: &str) -> Result<String, IpcError> {
-        if host == OPERATOR_HOST {
-            return crate::service::provision::expand_home_local(OPERATOR_DIR);
-        }
-        // `OPERATOR_DIR` is `~/…`; on a remote host `~` is that host's home,
-        // which `remote_home` resolves (and caches) over SSH or the agent.
-        let home = self.ssh.remote_home(host).await?;
-        let rest = OPERATOR_DIR.strip_prefix("~/").unwrap_or(OPERATOR_DIR);
-        Ok(format!("{home}/{rest}"))
+        operator_dir_on(host, self.ssh.as_ref()).await
     }
 
     async fn write_files(
@@ -515,6 +540,24 @@ impl OperatorHost for LiveHost {
         )
         .await
     }
+}
+
+/// [`OPERATOR_DIR`] as an ABSOLUTE path on `host` — see
+/// [`OperatorHost::resolve_dir`] for why `~` must not reach tmux. Shared by
+/// the birth and by `restart_session`, which re-creates the operator's tmux
+/// session in this directory when a reboot took the tmux server with it.
+pub(crate) async fn operator_dir_on(
+    host: &str,
+    ssh: &dyn crate::ssh::SshExec,
+) -> Result<String, IpcError> {
+    if host == OPERATOR_HOST {
+        return crate::service::provision::expand_home_local(OPERATOR_DIR);
+    }
+    // `OPERATOR_DIR` is `~/…`; on a remote host `~` is that host's home,
+    // which `remote_home` resolves (and caches) over SSH or the agent.
+    let home = ssh.remote_home(host).await?;
+    let rest = OPERATOR_DIR.strip_prefix("~/").unwrap_or(OPERATOR_DIR);
+    Ok(format!("{home}/{rest}"))
 }
 
 /// What the FAB needs to know before it opens a panel.
@@ -2256,6 +2299,32 @@ mod tests {
             body.contains("EXEMPT"),
             "the exemption must be argued at the site, not only here"
         );
+    }
+
+    /// The operator is never the fleet controller. It registered itself once
+    /// (the control skill says to), and the panel's `lost` restart answered
+    /// `E_SELF_TARGET` from then on. Any other session still registers.
+    #[test]
+    fn the_operator_is_refused_as_the_fleet_controller() {
+        let s = Store::open_in_memory().unwrap();
+        set_operator_ref(
+            &s,
+            &OperatorRef {
+                host_alias: "mefistos".into(),
+                tmux_name: OPERATOR_TMUX_NAME.into(),
+            },
+        )
+        .unwrap();
+        let err = refuse_operator_as_controller(&s, "mefistos", OPERATOR_TMUX_NAME).unwrap_err();
+        assert_eq!(err.code, codes::E_FORBIDDEN, "{}", err.message);
+        refuse_operator_as_controller(&s, "mac", OPERATOR_TMUX_NAME)
+            .expect("the same name on another host is not the operator");
+        refuse_operator_as_controller(&s, "mefistos", "dev-fleet").unwrap();
+    }
+
+    #[test]
+    fn the_operating_instructions_say_not_to_register_as_controller() {
+        assert!(claude_md().contains("skip `register_self`"));
     }
 
     // ------------------------------------------- the guard, driven for real

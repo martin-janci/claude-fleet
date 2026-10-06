@@ -509,6 +509,51 @@ fn keys_test_tools() -> (FleetTools, Arc<Mutex<Store>>, i64) {
 /// Validation happens before any tmux/ssh delivery is attempted, so this
 /// needs no real backend: an unknown key name, and text alongside `keys`,
 /// are both refused up front.
+/// `register_self` from the UX agent's own session is refused and records
+/// nothing: a controller record on the operator made the panel's `lost`
+/// restart fail `E_SELF_TARGET` (2026-10-06).
+#[tokio::test]
+async fn register_self_refuses_the_operator_session() {
+    let (t, store, sid) = keys_test_tools();
+    crate::service::operator::set_operator_ref(
+        &store.lock().unwrap(),
+        &crate::service::operator::OperatorRef {
+            host_alias: "local".into(),
+            tmux_name: "dev-keys".into(),
+        },
+    )
+    .unwrap();
+    let params = || {
+        Parameters(RegisterSelfParams {
+            session_id: Some(sid),
+            host_alias: None,
+            tmux_name: None,
+        })
+    };
+    let err = t
+        .register_self(Extension(Caller::master()), params())
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("E_FORBIDDEN"), "{}", err.message);
+    assert_eq!(store.lock().unwrap().get_controller().unwrap(), None);
+
+    crate::service::operator::set_operator_ref(
+        &store.lock().unwrap(),
+        &crate::service::operator::OperatorRef {
+            host_alias: "local".into(),
+            tmux_name: "fleet-operator".into(),
+        },
+    )
+    .unwrap();
+    t.register_self(Extension(Caller::master()), params())
+        .await
+        .expect("any other session still registers");
+    assert_eq!(
+        store.lock().unwrap().get_controller().unwrap(),
+        Some(("local".to_string(), "dev-keys".to_string()))
+    );
+}
+
 /// Host identity & health, task 7: `forget_project` over the tool surface.
 #[tokio::test]
 async fn forget_project_refuses_a_live_project_then_drops_it() {
