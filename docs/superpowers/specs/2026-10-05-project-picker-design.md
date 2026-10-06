@@ -1,264 +1,236 @@
-# The New session project picker: context, recent, popular, groups, and the noise folded away
+# New session: one picker in ⌘K — tickets, pins, suggestions, groups, hidden noise
 
-Status: design, approved in conversation 2026-10-05. Two phases; phase 1
-ships alone.
+Status: design v2, 2026-10-06. v1 (a new sidebar popover with Recent /
+Popular / Context sections) was reviewed by four competing UX reviews
+(keyboard power user, information architecture, accessibility, a rival
+designer) and replaced by this. Two phases; phase 1 ships alone.
+
+Mockup (interactive, real data): https://claude.ai/artifact/KzEbmrQvhhBiQq54fDs5Rj
 
 ## The problem
 
-"+ New session" (and *New session on host* from the Hosts view) opens a
-popover in the sidebar footer (`Sidebar.svelte`, `showProjectPicker`) that
-lists **every** project, alphabetically by `owner/repo`, in a 240px box with
-no search. On the author's fleet that is 81 rows (2026-10-05):
+"+ New session" opens a sidebar popover listing **every** project
+alphabetically by `owner/repo`, in a 240px box, with no search. On the
+author's fleet that is 81 rows (2026-10-06); `claude-fleet`, the most-used
+project, is row 20. About ten projects are in use; most of the rest have no
+session fleet knows of (`last_session_at` null — often because they predate
+fleet's tracking, not because they are dead); some are throwaway
+(`ppt-epic-145…150`, `test-*`, `tmp-*`, `*-analysis`).
 
-- about ten are in use (a session in the last few days);
-- ~55 never had a session at all (`last_session_at` null);
-- many are noise: `ppt-epic-145…150` (0 worktrees), `test-*`, `tmp-*`,
-  `example-*`, `*-analysis`, `stw-fix2/3`, forks of other people's repos.
+A second surface already exists: the ⌘K quick switcher offers "New session
+in <project>" rows, ranked differently (after every session, by
+`last_session_at` alone).
 
-The one you want is found by scrolling and reading. The picker does not know
-what you are doing, what you used last, or what you use most.
+## Decisions (from the review)
 
-## Goals
+- **D1 One surface.** The popover is removed. "+ New session", a new ⌘N
+  (Ctrl+Shift+N off macOS) and the Hosts view's `n` open the ⌘K switcher in
+  a **New session mode**. One ranking, one set of keys.
+- **D2 No session record is "unknown", not noise.** Only an explicit Hide or
+  a throwaway name unused for 30 days hides a project. Unknown and stale
+  projects stay in their group, dimmed and last.
+- **D3 Frecency from the person's own picks**, kept locally, plus
+  `last_session_at`. No server-side start counting.
+- **D4 Recent + Popular + filter-context collapse into one "Suggested"**
+  (≤ 7), led by the true context signals: the selected session's project
+  and the preferred host.
+- **D5 Groups list every member.** Only Pinned/Suggested de-duplicate among
+  themselves; a group is never "the leftovers".
+- **D6 Start from work.** Up to 3 *My work* tickets with no live session
+  head the list — what you are about to do, not just where.
+- **D7 Manual groups** in phase 1, chosen from existing groups (or a new
+  one) through a combobox; grouping a project implies it is not noise.
+- **D8 Pinned and visibility are separate fields**; unpinning never hides.
 
-1. Open the picker and the project you want is in the first screen, most of
-   the time without typing.
-2. Typing finds any project, the hidden ones included.
-3. Projects that are noise are folded away, never deleted, and a person can
-   always override the classification.
-4. Jev (the decision model, `service/decide`) proposes groups and noise for
-   what the rules cannot classify; a person confirms. Never automatic.
+## Phase 1
 
-Non-goals: changing `NewSessionDialog` itself; changing orgs or `org_rules`
-(the work graph's security boundary); deleting or un-registering projects.
+### Entry points
 
-## Phase 1: the picker
+| Trigger | Opens |
+|---|---|
+| Sidebar "+ New session" button | switcher, New session mode |
+| ⌘N (macOS) / Ctrl+Shift+N | same |
+| Hosts view `n` on a host | same, preferred host = that host |
+| ⌘K / ⌘P | switcher, normal mode (unchanged), whose project rows now use the same ranking |
 
-### Layout
+In New session mode the input carries a leading chip **New session in**
+and the placeholder `project or ticket…`. Backspace on an empty query
+leaves the mode (normal ⌘K). Sessions and hosts are not listed in this mode.
 
-The popover gains a search field at the top (autofocused; ↑/↓ move, ↵ opens
-`NewSessionDialog` on the highlighted project, Esc closes). `＋ Add project…`
-stays as the first row. With an empty query the picker shows sections, in
-this order; **a project appears once**, in the highest section that claims
-it:
+### The list, empty query
 
-| # | Section | Contents | Cap |
-|---|---------|----------|-----|
-| 1 | Pinned | `pick = pin` | none |
-| 2 | For this context | projects the current context points at (below), each with a one-line reason | 5 |
-| 3 | Recent | by `last_session_at` desc | 5 |
-| 4 | Popular | by `starts_30d` desc, `starts_30d ≥ 2` | 5 |
-| 5 | Groups | one heading per group (below), alphabetical inside; a group over 8 rows starts folded | none |
-| 6 | Other (N) | noise (below); folded by default | none |
+1. **Start from work** — up to 3 tickets from *My work* whose
+   `live_session_ids` is empty; each row: key chip, title, and
+   `→ <project> · <host>` from the existing `placeForTicket`. Only when a
+   tracker is configured and tickets loaded.
+2. **Pinned** — every pinned project, A→Z.
+3. **Suggested** — up to 7, excluding pinned and hidden: first the selected
+   session's project (chip `current session`), then projects with a session
+   on the preferred host (chip `on <host>`), then by frecency score.
+   Pinned + Suggested rows carry ⌘1…⌘9 in order.
+4. **Groups** — every non-hidden project, in its group (below). Inside a
+   group: active members A→Z, then dormant ones (no session record, or none
+   for 90 days), dimmed, with `no sessions yet` / `4mo`. A group starts
+   open when any member had a session in the last 30 days, else folded
+   (its header shows `N projects`). Headers show a subtitle: the rule
+   (`openmarket-* · papayapos`) or `your group`.
+5. **Hidden (N)** — folded; each row says why (`hidden by you`,
+   `throwaway name`).
+6. **Add project…** — always last.
 
-An empty section is not rendered. "For this context" is not rendered when the
-context says nothing.
+A folded section is a single option row (`Show 14 in Hidden`), so it is
+reachable from the keyboard; Enter/→ unfolds, ← folds.
 
-With a query, sections disappear: one list ranked by `fuzzy.ts` over
-`owner/repo` and the group name, with a small additive boost for context,
-recency and popularity, and a penalty (not a filter) for noise — a hidden
-project is still found, only lower.
+### The list, with a query
 
-Each row has Pin / Hide (hover buttons, and the context menu). On an `Other`
-row, Hide becomes **Keep** ("this is not noise").
+Sections disappear except **Tickets** (the existing ticket ranking) first.
+Then one ranked list of projects: `fuzzyMatchFields` over
+`[owner/repo, repo, group]`, plus boosts **on the fuzzy scale** (fuzzy
+substring scores run in the hundreds): pinned +40, frecency up to +60,
+current-session +80; hidden −400 and tagged `hidden · <reason>`. Last row:
+**Add project “<query>”…** (clone URL prefilled when the query looks like
+`owner/repo` or a URL).
 
-### Context
-
-A pure function over what the app already holds; strongest signal first:
-
-1. **Preferred host** (*New session on host*): projects with a session on
-   that host (fleet's local worktree rows cover only the `local` host, so
-   sessions are the signal that works for every host). Reason: `on <host>`.
-2. **Selected session** (`selectedSession`): its project. Reason:
-   `current session`. (Expanding to "same group as" is left out of phase 1.)
-3. **Active sidebar filters** (`SessionFacetInput`: scope, host, search,
-   work/tracker filters): projects of the sessions the filtered list shows.
-   Reason: `from filter: <facet label>`.
-
-The filters are read through a small adapter (`pickerContextFromFilters`) so
-the picker does not depend on the shape of the session filter model; a
-rewrite of that model (`2026-09-25-session-filter-model`) only changes the
-adapter.
-
-### Groups (phase 1, rules only)
+### Groups
 
 A project's group, first match wins:
 
 1. the person's group (`project_picks.grp`);
-2. *(phase 2)* a confirmed Jev proposal (also stored in `project_picks.grp`);
-3. **prefix cluster**: among one owner's non-noise repos, a leading or
-   trailing dash/underscore token shared by at least two multi-token repos
-   forms a cluster (`openmarket-*`, `*-mcp`, `sales-twins-*`); a repo
-   matching exactly one cluster joins it (a single-token repo joins the
-   leading cluster of its own name: `openmarket` → "openmarket"); a repo
-   matching two is ambiguous (left to the owner, and to Jev in phase 2). The
-   cluster's name is its token;
-4. the owner.
+2. **prefix cluster**: per owner, over **all** that owner's projects (so a
+   hide never moves a neighbour), the longest dash-separated prefix shared
+   by ≥ 3 repos (`sales-twins-app`, `-mobile`, `-revonaut-fixes` →
+   `sales-twins`); a single-token repo equal to a cluster's prefix joins it
+   (`openmarket`). Leading prefixes only. Name = the prefix, subtitle =
+   `<prefix>-* · <owner>`;
+3. `More from <owner>` for an owner with ≥ 3 projects;
+4. `Forks & others` for owners with fewer.
 
-The project's org is not a phase-1 rule: the frontend's project rows carry
-no org (only sessions do), and resolving `org_rules` for projects is work
-graph territory.
+Group order: owners by their most recent `last_session_at`; within an
+owner, clusters and person's groups A→Z, then `More from <owner>`;
+`Forks & others` last. Groups are display only — never orgs, never
+`org_rules`.
 
-Groups are **display only**. They are not orgs, carry no permission, and are
-never written into `org_rules`.
+### Hidden
 
-### Noise (phase 1, rules only)
+Hidden when `vis = 'hide'`, or all of: `vis` is not `keep`, not pinned, no
+person's group, no session in 30 days, and the repo matches
+`^(test|tmp|example)-`, `-analysis$` or `-epic-\d+$`. `system` projects
+(`fleet/operator`) are excluded from the picker entirely, as today. A
+project added through *Add project* is marked `vis = 'keep'`.
 
-A project is noise when `pick` is not `keep` or `pin`, and any of:
+### Frecency
 
-- `pick = hide`;
-- `last_session_at` is null (no session ever);
-- `starts_30d = 0` and the repo name matches `^(test|tmp|example)-`,
-  `-analysis$` or `-epic-\d+$`.
+A local preference `newsession.frecency`:
+`{ "<owner>/<repo>": { "score": number, "at": unix } }`. Picking a project
+(Enter, ⌘↵, click, ⌘1…9) adds 1 after decaying the stored score with a
+7-day half-life. The ranking score is that decayed score ×10 plus a
+recency term from `last_session_at` (`20 · 2^(−days/7)`). At most 200 keys
+are kept (lowest dropped). Per device by design (like Raycast / Alfred).
 
-`system` projects (`fleet/operator`) are excluded outright, as today.
+### Keyboard and accessibility
 
-Two rules from the first draft are dropped: "0 worktrees" (the joined
-worktree rows are the `local` host's only, so on a hub without a local host
-every project would read as noise), and "registered over 30 days ago"
-(projects have no registration time). In their place: a project added
-through *Add project* is marked `keep` at once — adding it is the person
-saying it matters.
+The existing switcher pattern: `input[role=combobox][aria-activedescendant]`
+over `PickerList`'s `role=listbox`. The highlight is tracked **by key**,
+never by index. The ranking is **snapshotted when the switcher opens** and
+recomputed only when the query changes or the person acts (pin, hide,
+group, fold) — data arriving mid-open never moves the highlight.
 
-Forks of other owners are **not** noise by rule (some are used); they are left
-to Jev.
+| Key | Action |
+|---|---|
+| ↑ / ↓ | move, wrapping; fold rows and Add are reachable |
+| Enter | open the dialog for the project / ticket; on a fold row, unfold |
+| ⌘↵ | start with the last settings (dialog autostarts) / start the ticket |
+| ⌘1…⌘9 | open the numbered Pinned/Suggested row |
+| ⌘P | pin / unpin the highlighted project |
+| ⌘⌫ | hide / unhide, with an Undo toast |
+| ⌘G | the group menu for the highlighted project |
+| ⇧F10, context-menu key, right-click | the actions menu (`role=menu`) |
+| ⌘Z | undo the last pin / hide / group change |
+| Esc | close a menu; else clear a non-empty query; else close |
 
-### The ranking module
-
-All of the above is one pure module, `src/lib/project_rank.ts`:
-
-```ts
-rankProjects(input: {
-  projects: ProjectTreeRow[];
-  picks: Map<string, ProjectPick>;      // keyed `owner/repo`
-  context: PickerContext;
-  query: string;
-  now: number;
-}): PickerView   // sections, or one ranked list when query is non-empty
-```
-
-`Sidebar.svelte`'s popover renders a `PickerView` (through a new
-`ProjectPicker.svelte`); `quick_switcher.ts`'s project rows (`New session in
-<project>`) drop noise from the empty-query list with the same `isNoise`, so
-both surfaces agree on what is noise. Typing still finds a noise project
-there too.
+Hover shows icon buttons (pin, group, hide) on a project row; they are
+`tabindex=-1` and `aria-hidden`, a mouse convenience only — every action
+is on the keys and in the menu. Visuals use the app tokens: the active row
+is `PickerList`'s accent wash plus 2px accent bar; secondary text is
+`--fg-muted` (5.3:1), never a lighter grey; the modal stays 560px wide;
+the list's max height is `min(70vh, 34rem)`.
 
 ### Data
 
-Project rows are deleted and re-created, and `project_id` is re-derived on
-every pass (review C22, `050_orgs.sql`). Everything this feature stores is
-therefore keyed by **text** (`owner`, `repo`), like `org_rules`.
+Everything stored is keyed by `owner` + `repo` TEXT, never `project_id`
+(project rows are deleted and re-created; review C22, `050_orgs.sql`).
 
-Migration `102_project_picker.sql`:
+Migration `102_project_picks.sql` (next free number when implementing):
 
 ```sql
 CREATE TABLE project_picks (
-  owner TEXT NOT NULL,
-  repo  TEXT NOT NULL,
-  pick  TEXT CHECK (pick IS NULL OR pick IN ('pin','hide','keep')),
-  grp   TEXT,
+  owner      TEXT    NOT NULL,
+  repo       TEXT    NOT NULL,
+  pinned     INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+  vis        TEXT    CHECK (vis IS NULL OR vis IN ('hide', 'keep')),
+  grp        TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (owner, repo)
 );
-CREATE TABLE project_starts (
-  owner      TEXT NOT NULL,
-  repo       TEXT NOT NULL,
-  host_alias TEXT NOT NULL,
-  tmux_name  TEXT NOT NULL,
-  at         INTEGER NOT NULL,
-  UNIQUE (host_alias, tmux_name, at)
-);
-CREATE INDEX idx_project_starts_project ON project_starts(owner, repo, at);
 ```
 
-(The number is the next free one at the time of writing; take the next free
-one when implementing.)
+- The picker state is **not** on `ProjectRow` (`list_projects_joined` reads
+  worktree columns at fixed offsets, and reconcile's `project:updated`
+  swaps the frontend row whole).
+- **`project_picks`** → `[{ owner, repo, pinned, vis, grp }]`, one per
+  non-system project. **`set_project_pick { owner, repo, pinned, vis, grp }`**
+  (full replace; all default deletes the row) → the row.
+- Both are hub tools with `Access::PersonDevice` (a person's own paired
+  devices; never a host token; not served to the master) and `Routed`
+  commands. `CONTRACT_REVISION` does not move; an older hub answers with
+  an error and the picker runs on rules alone.
+- The frontend loads picks at startup (and when the hub connection
+  changes) and again in the background each time the switcher opens; a
+  write patches the store optimistically and rolls back with an error
+  toast on failure.
 
-- **`project_starts`**: reconcile runs `INSERT OR IGNORE` for every live
-  session with a project on every pass, next to where `last_session_at`
-  moves; `at` is the tmux session's `created_at`. The UNIQUE key makes the
-  repeat a no-op, so no "first insert" detection is needed, and sessions
-  started outside fleet count too. The GC sweep deletes rows older than 90
-  days.
-- **The picker state is NOT on `ProjectRow`.** `list_projects_joined` reads
-  the worktree columns at fixed offsets after the project columns, and
-  reconcile emits `project:updated` with a bare `ProjectRow` that the
-  frontend swaps in whole — a pick carried there would be wiped by every
-  pass. Instead, two commands of their own:
-  - **`project_picks`** → `[{ owner, repo, pick, grp, starts_30d }]`, one
-    per non-system project;
-  - **`set_project_pick { owner, repo, pick, grp }`** (full replace; both
-    null deletes the row) → the updated row.
+### Starting with the last settings
 
-  Both are hub tools with `Access::PersonDevice` (a person's preference:
-  their paired devices only, never a host's token, not served to the master
-  — which keeps the master's description budget untouched), and both
-  commands are `Routed` in `verdicts.rs` (`REGEN_HUB_VERDICTS=1`,
-  `REGEN_DOCS=1`). No event: the picker reloads `project_picks` each time it
-  opens and patches its store from `set_project_pick`'s answer. A hub older
-  than this feature answers with an error, and the picker works from the
-  rules alone. `CONTRACT_REVISION` does not move.
+`NewSessionDialog` gains `autostart`: once its host's worktree list is
+ready, it submits once with the remembered per-project choices
+(`newsession.project.<id>`). Anything that would need a person (a new
+worktree with no name, a blocked hub action, an error) leaves the dialog
+open as today.
 
 ### Phase 1 tests
 
-- `project_rank.test.ts`: section membership and order, one-row-once,
-  caps, each context signal and its reason, prefix clusters (incl. the
-  ambiguous case), every noise rule and the `keep`/`pin` overrides, query
-  ranking with noise penalised but present.
-- Store: `project_starts` written once per session however many passes see
-  it, survives a project row being re-created, `starts_30d` window,
-  retention.
-- `project_picks` / `set_project_pick`: round trip, validation, access rows,
-  hub routing cases.
-- Component: search + keyboard flow, Pin/Hide/Keep, `Other` folded.
+- `project_rank.test.ts`: hidden rules and reasons, dormant, clusters
+  (≥ 3, longest prefix, single-token join, stability under hide), group
+  order and folding, Suggested order and chips, ⌘ numbering, search boosts
+  and hidden penalty, ticket block filtering.
+- `frecency.test.ts`: decay, record, cap.
+- Store / tools / routing: round trip, validation, access rows, cases.
+- `QuickSwitcher` new mode: entry, chip, Backspace exits, keys, snapshot
+  stability, undo, Add row, fold rows.
+- `PickerList`: dim, chip, kbd, group subtitle, row actions are not
+  focusable.
+- `NewSessionDialog`: autostart submits once / stays open when blocked.
 
-## Phase 2: Jev `project_group`
+## Phase 2: Jev places what the rules cannot
 
-Built on the decision envelope exactly as `status_map`
+Built on the decision envelope as `status_map`
 (`service/decide/status_map.rs`): gate, redact, one bounded call, a
-`decision_runs` row in every case.
+`decision_runs` row in every case; `Feature::ProjectGroup`, setting
+`decide.jev.project_group` (`off | shadow | assist`), off by default.
 
-- `Feature::ProjectGroup`, setting `decide.jev.project_group`
-  (`off | shadow | assist`), **off** by default; behind the kill switch, org
-  consent (`orgs.jev_allowed`, `decide.jev.unassigned`), key, breaker, budget.
-- **Subject**: `project` `<owner/repo>` fingerprinted with the local key, as
-  `status_map` does for section names.
-- **Two Choice questions per project**:
-  - *group*: one of a closed set = the person's groups ∪ orgs ∪ prefix
-    clusters ∪ `none` ∪ `unsure`. Jev never invents a name (the envelope is
-    closed-set); a person creates a group in one click and the next run
-    offers it.
-  - *noise*: `keep | noise | unsure`.
-- **Sent**: `owner/repo` (redacted), worktree count, days since the last
-  session, `starts_30d`, adopted, whether the owner is one of the person's
-  owners (owns ≥ 1 project with a session in 30 days), and the group
-  candidates. Nothing from the repository's contents.
-- **Shadow**: also asks about projects the rules classified, to measure
-  agreement (`decide status`, Settings → Decisions).
-- **Assist**: asks only where the rules are silent or ambiguous and the
-  person has set nothing (`pick` null, `grp` null). An answer at confidence
-  ≥ 0.5 other than `unsure`/`none` is a **proposal**. The picker shows one
-  line above the sections — *Jev suggests: 9 projects into groups, 7 into
-  Other · Review* — opening a batch review: confirm (writes `grp` or
-  `pick = hide`), correct (writes the person's choice), reject (`pick = keep`
-  for noise; a rejected group is not proposed again on the same input).
-  Follow-ups `confirmed / corrected / rejected / ignored` are recorded as in
-  `status_map::record_followups`.
-- **When**: from the background tick at most once a day, at most 40
-  questions a run, a project not re-asked for 14 days on the same input,
-  question version, mode and model. Never on the picker's open path.
-- **Isolation**: the proposals action gets a row in
-  `mcp/tools/tests_isolation.rs`; a per-host token sees only its org's
-  projects' proposals.
-
-### Phase 2 tests
-
-The `status_map` test set, mirrored: gate refusals per fallback, shadow asks
-classified projects and records a baseline, assist asks only unclassified
-ones, closed-set validation rejects an invented group, re-ask window,
-follow-ups, the isolation matrix row.
-
-## Rollout
-
-Phase 1 is one PR (frontend module + popover, migration, `ProjectRow`
-fields, `set_project_pick`). Phase 2 is a second PR, shipped `off`; turned to
-`shadow` on the hub, read agreement after a week, then `assist`.
+- **Group question** (Choice), only for projects in `More from <owner>` or
+  `Forks & others` with no person's group: one of the closed set = the
+  person's groups ∪ prefix clusters ∪ `none` ∪ `unsure`. Jev never invents
+  a group. Example: `stw-fix2` → `sales-twins`, `pos-frontend` →
+  `papayapos`.
+- **Hide question** (Choice `keep | hide | unsure`), only for dormant
+  projects (no session in 90 days) that are not pinned, kept or grouped by
+  the person.
+- **Sent**: `owner/repo` (redacted), days since the last session, worktree
+  count, adopted, and the candidate groups. Nothing from the repository.
+- **Shadow** measures agreement on projects the rules did place; **assist**
+  turns confident answers into proposals, shown as one line at the top of
+  the switcher (*Jev has 8 suggestions…* · Review) and decided in a batch
+  dialog (Accept / Other group… / No; Hide / Keep). A rejection is final on
+  the same input. Background tick, at most once a day, ≤ 40 questions, never
+  on the open path; isolation-matrix row for the proposals action.
