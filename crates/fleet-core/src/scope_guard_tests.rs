@@ -456,7 +456,11 @@ const SCOPE_GUARDS: &[Guard] = &[
               `an_unlinked_local_item_is_nobodys_to_rename_or_set`. A FOURTH \
               caller arrived with shared work context: `visible_parent`, which \
               asks it about the PARENT a `create` / `propose` names — an item \
-              question again, and its own rows below say so",
+              question again, and its own rows below say so. A FIFTH arrived \
+              with sprints and releases: `buckets::item_visible`, which asks \
+              whether a bucket's member ITEM is the caller's to see or plan \
+              (the planning write carries `require_drive_on_item_sessions` at \
+              the tool layer, as `set_status` does)",
     },
     Guard {
         file: "crates/fleet-core/src/service/work/local.rs",

@@ -57,6 +57,7 @@
           "key": "JIRAUSER10100",
           "displayName": "Dana Dev"
         },
+        "fixVersions": [ { "id": "20100", "name": "2026.10", "released": false }, { "id": "20101", "name": "2026.11", "released": false } ],
         "updated": "2026-09-21T10:15:30.000+0200",
         "project": {
           "key": "PLAT"

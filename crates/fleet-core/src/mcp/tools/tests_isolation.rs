@@ -2520,6 +2520,110 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Sprints and releases (design 2026-09-28 §7, §8): fenced by the
+    // bucket's own org; a member by its item's; membership is a person's
+    // plan, never a session's.
+    let (bucket_a, bucket_b) = {
+        let s = fx.t.store.lock().unwrap();
+        let make = |name: &str, org: i64| {
+            s.create_bucket(&crate::store::NewBucket {
+                kind: "sprint",
+                name,
+                org_id: Some(org),
+                ..Default::default()
+            })
+            .unwrap()
+            .id
+        };
+        let a = make("Alpha sprint", ORG_A);
+        let b = make("Bravo sprint", fx.org_b);
+        s.add_bucket_item(b, fx.item_b).unwrap();
+        (a, b)
+    };
+    m.row(
+        "work",
+        "buckets",
+        |_, _| json!({ "action": "buckets" }),
+        move |_, who, a| {
+            is_ok(who, a, "buckets");
+            let t = text(a);
+            let sees = |id: i64| t.contains(&format!("\"id\":{id},"));
+            match who {
+                Who::HostA | Who::BoundA => {
+                    assert!(sees(bucket_a) && !sees(bucket_b), "{who:?}: {t}")
+                }
+                Who::HostB | Who::BoundB => {
+                    assert!(sees(bucket_b) && !sees(bucket_a), "{who:?}: {t}")
+                }
+                Who::HostNone => assert!(!sees(bucket_a) && !sees(bucket_b), "{t}"),
+                _ => assert!(sees(bucket_a) && sees(bucket_b), "{who:?}: {t}"),
+            }
+        },
+    )
+    .await;
+    let unknown_bucket = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "bucket", "bucket_id": 999_999 }),
+    )
+    .await;
+    m.row(
+        "work",
+        "bucket",
+        move |_, _| json!({ "action": "bucket", "bucket_id": bucket_b }),
+        move |fx, who, a| match who {
+            Who::HostA | Who::HostNone | Who::BoundA => {
+                same_as_unknown(a, &unknown_bucket, &bucket_b.to_string(), "999999")
+            }
+            _ => {
+                is_ok(who, a, "B's sprint");
+                assert!(
+                    text(a).contains(&format!("\"id\":{},", fx.item_b)),
+                    "{who:?}: the member is listed: {a:?}"
+                );
+            }
+        },
+    )
+    .await;
+    for action in ["bucket_add", "bucket_remove"] {
+        m.row(
+            "work_link",
+            action,
+            move |fx, _| json!({ "action": action, "bucket_id": bucket_b, "item_id": fx.item_b }),
+            move |_, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                match who {
+                    w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                    Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's sprint"),
+                    Who::Master => is_ok(who, a, action),
+                    _ => {}
+                }
+            },
+        )
+        .await;
+    }
+    // An A bucket with B's ticket: B's bound client cannot reach the
+    // bucket, A's cannot reach the ticket — each as unknown.
+    m.row(
+        "work_link",
+        "bucket_add",
+        move |fx, _| json!({ "action": "bucket_add", "bucket_id": bucket_a, "item_id": fx.item_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::BoundA | Who::BoundB => is_code(who, a, "E_NOTFOUND", "outside the org"),
+                // Visible to both: the store refuses the cross-org plan.
+                Who::Master => is_code(who, a, "E_FORBIDDEN", "cross-org"),
+                _ => {}
+            }
+        },
+    )
+    .await;
     m.row(
         "work",
         "local_items",

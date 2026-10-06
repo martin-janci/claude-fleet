@@ -430,7 +430,10 @@ fn org_admin_crud_refusals_and_row_announcements() {
         let a = AdminAction::parse(name).unwrap();
         assert_eq!(
             a.is_removal(),
-            matches!(*name, "remove" | "remove_org" | "remove_rule"),
+            matches!(
+                *name,
+                "remove" | "remove_org" | "remove_rule" | "bucket_delete"
+            ),
             "{name}"
         );
     }

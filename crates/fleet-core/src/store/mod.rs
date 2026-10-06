@@ -49,6 +49,7 @@ mod trackers;
 mod update;
 mod usage;
 mod work;
+mod work_buckets;
 mod work_describe;
 mod work_detect;
 mod work_journal;
@@ -130,6 +131,10 @@ pub use update::{
 pub use work::{
     canonical_key, github_ref, normalize_work_ref, primary_conflict, split_github_repo, Decider,
     WorkItemRow, WorkLinkRow, WorkSummary, WorkTarget, PERSON_SOURCES, WORK_LINK_SOURCES,
+};
+pub use work_buckets::{
+    bucket_states, BucketMemberRow, BucketPatch, BucketRefRow, BucketRow, ItemBucketRow, NewBucket,
+    SprintClosed, BUCKET_KINDS,
 };
 pub use work_detect::{
     DetectionState, WITHDRAWN_CARRIED, WITHDRAWN_DECAY, WITHDRAWN_REASONS, WITHDRAWN_WITHDRAW,

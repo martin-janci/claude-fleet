@@ -187,6 +187,9 @@ impl Harness for GitHubHarness {
     fn describe_ref(&self) -> &'static str {
         "acme/api#1"
     }
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        Some(("I_kwDOAcme0001", "v0.3"))
+    }
 }
 
 crate::conformance_suite!(GitHubHarness);
@@ -1077,6 +1080,9 @@ mod ghes {
 
         fn describe_ref(&self) -> &'static str {
             "ghe.corp.example/acme/api#1"
+        }
+        fn version(&self) -> Option<(&'static str, &'static str)> {
+            Some(("I_kwDOAcme0001", "v0.3"))
         }
     }
 

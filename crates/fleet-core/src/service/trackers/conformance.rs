@@ -130,6 +130,13 @@ pub trait Harness: Send + Sync {
     fn describe_ref(&self) -> &'static str {
         "NONE-0"
     }
+    /// Scenario 13: `(external_id, version)` — an item of the listing and
+    /// one version it must report (design 2026-09-28 §4). `None`, the
+    /// default, is right only for an adapter whose `caps.versions` is
+    /// false: it must report no version on any item.
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        None
+    }
 }
 
 fn fixture_dir(name: &str) -> String {
@@ -167,6 +174,7 @@ pub fn snapshot_json(s: &WorkItemSnapshot) -> Value {
         "assignee_id": s.assignee_id,
         "iteration": s.iteration,
         "iteration_active": s.iteration_active,
+        "versions": s.versions,
         "updated": s.updated,
         "description": s.description,
     })
@@ -670,6 +678,47 @@ pub async fn write<H: Harness>(h: &H) {
     );
 }
 
+/// Scenario 13 (design 2026-09-28 §4): a provider with `caps.versions`
+/// reports the release-like containers an item is planned into, and
+/// declares one through [`Harness::version`]; a provider without it reports
+/// none, so a native release simply has nothing to adopt from it.
+pub async fn versions<H: Harness>(h: &H) {
+    let items = listing(h).await;
+    let p = h.provider(&FakeTransport::new());
+    match (p.caps().versions, h.version()) {
+        (true, Some((id, version))) => {
+            let item = items
+                .iter()
+                .find(|i| i.external_id == id)
+                .unwrap_or_else(|| panic!("{}: {id} is not in the listing", h.name()));
+            assert!(
+                item.versions.iter().any(|v| v == version),
+                "{}: {id} reports {:?}, not {version:?}",
+                h.name(),
+                item.versions
+            );
+        }
+        (true, None) => panic!(
+            "{}: caps.versions is set, so the harness declares an item's version",
+            h.name()
+        ),
+        (false, Some(_)) => panic!(
+            "{}: a version is declared but caps.versions is not set",
+            h.name()
+        ),
+        (false, None) => {
+            for i in &items {
+                assert!(
+                    i.versions.is_empty(),
+                    "{}: {} reports versions without the capability",
+                    h.name(),
+                    i.external_id
+                );
+            }
+        }
+    }
+}
+
 /// Scenario 12 (work graph M6.0's describe capability): the REAL adapter's
 /// `caps.describe` is what [`Expect::describe`] declares. A describe adapter
 /// answers the full text — cut nowhere near [`DESCRIPTION_MAX_CHARS`],
@@ -778,6 +827,10 @@ macro_rules! conformance_suite {
             #[tokio::test]
             async fn c12_describe() {
                 c::describe(&$harness).await
+            }
+            #[tokio::test]
+            async fn c13_versions() {
+                c::versions(&$harness).await
             }
         }
     };

@@ -982,6 +982,9 @@ impl crate::service::trackers::conformance::Harness for JiraHarness {
     fn describe_ref(&self) -> &'static str {
         "ABC-101"
     }
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        Some(("10101", "0.3.0"))
+    }
 }
 
 crate::conformance_suite!(JiraHarness);

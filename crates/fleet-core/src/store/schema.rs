@@ -1219,6 +1219,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/105_worktree_slash_names.sql"),
         already_applied: Some(no_slash_named_worktrees),
     },
+    // Sprints and releases (design 2026-09-28 §1): three new tables, so
+    // plain.
+    Migration::plain(106, include_str!("../../migrations/106_work_buckets.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

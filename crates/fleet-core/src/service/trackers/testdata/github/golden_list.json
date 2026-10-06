@@ -25,7 +25,10 @@
     },
     "title": "Login fails after token refresh",
     "updated": 1789983000,
-    "url": "https://github.com/Acme/api/issues/42"
+    "url": "https://github.com/Acme/api/issues/42",
+    "versions": [
+      "v0.3"
+    ]
   },
   {
     "aliases": [],
@@ -52,7 +55,8 @@
     },
     "title": "Rate-limit the export endpoint",
     "updated": 1789977600,
-    "url": "https://github.com/acme/api/issues/43"
+    "url": "https://github.com/acme/api/issues/43",
+    "versions": []
   },
   {
     "aliases": [],
@@ -79,7 +83,8 @@
     },
     "title": "Add a regression test for #42",
     "updated": 1789905600,
-    "url": "https://github.com/acme/api/issues/44"
+    "url": "https://github.com/acme/api/issues/44",
+    "versions": []
   },
   {
     "aliases": [],
@@ -106,7 +111,8 @@
     },
     "title": "Dark mode toggle",
     "updated": 1789812000,
-    "url": "https://github.com/acme/web/issues/7"
+    "url": "https://github.com/acme/web/issues/7",
+    "versions": []
   },
   {
     "aliases": [],
@@ -131,7 +137,8 @@
     },
     "title": "IE11 support",
     "updated": 1789725600,
-    "url": "https://github.com/acme/web/issues/8"
+    "url": "https://github.com/acme/web/issues/8",
+    "versions": []
   },
   {
     "aliases": [],
@@ -158,6 +165,7 @@
     },
     "title": "Dark theme",
     "updated": 1789722000,
-    "url": "https://github.com/acme/web/issues/9"
+    "url": "https://github.com/acme/web/issues/9",
+    "versions": []
   }
 ]

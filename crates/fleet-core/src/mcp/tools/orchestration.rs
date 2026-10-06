@@ -764,7 +764,8 @@ impl FleetTools {
         describe {key} (the tracker's whole description, cached); \
         tidy; reopened. Work view: tree {filters, cursor} (archived: false hides \
         archived tasks); task {task_id}; \
-        session_tasks; review; rules; rule_preview {rule}; views; org_impact.")]
+        session_tasks; review; rules; rule_preview {rule}; views; org_impact. \
+        buckets {kind?}: sprints, releases; bucket {bucket_id}.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -969,6 +970,18 @@ impl FleetTools {
             WorkAction::Views => {
                 ok_json_compact(&w::structure::views(self.reader(), &scope).map_err(to_mcp_err)?)
             }
+            // Sprints and releases (design 2026-09-28 §7): org-fenced by
+            // the bucket's own org, members by each item's.
+            WorkAction::Buckets => ok_json_compact(
+                &w::buckets::buckets(&self.store, &scope, args.kind.as_deref())
+                    .map_err(to_mcp_err)?,
+            ),
+            WorkAction::Bucket => {
+                let id = args
+                    .bucket_id
+                    .ok_or_else(|| mcp_err("E_INVALID", "bucket needs bucket_id", None))?;
+                ok_json_compact(&w::buckets::bucket(&self.store, &scope, id).map_err(to_mcp_err)?)
+            }
             WorkAction::OrgImpact => {
                 let task_id = args
                     .task_id
@@ -998,8 +1011,9 @@ impl FleetTools {
         kill when dirty). set_status {item_id, status}: a person's status for \
         work with no ticket. create {title, parent?, notes?}: a task or \
         subtask. propose {parent, title, why?}: a subtask a person accepts \
-        or rejects {item_id, no session_id}. Work view: primary:false links \
-        a secondary; expected_* guard (E_CONFLICT).")]
+        or rejects {item_id, no session_id}. bucket_add|bucket_remove \
+        {bucket_id, item_id}: sprint/release. Work view: \
+        primary:false links a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1381,6 +1395,27 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             );
         }
+        // Sprint and release membership (design 2026-09-28 §7): the team's
+        // plan, which a session does not decide — so never a per-host token
+        // (`planned_item`). The org fence (bucket and item, each answering as
+        // unknown outside the scope) is inside, and the person fence is
+        // `set_status`'s: planning someone's live work is theirs to drive.
+        if args.action == "bucket_add" {
+            let item_id = planned_item(&caller, &args)?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            return ok_json(
+                &crate::service::work::buckets::bucket_add(&args, &self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "bucket_remove" {
+            let item_id = planned_item(&caller, &args)?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            return ok_json(
+                &crate::service::work::buckets::bucket_remove(&args, &self.store, &scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
         if args.action == "tidy_apply" {
             let mut items = args.items.clone().unwrap_or_default();
             // The batch's size is the size the CALLER asked for, judged
@@ -1709,8 +1744,8 @@ impl FleetTools {
         ok_json(&row)
     }
 
-    #[tool(description = "Trackers, orgs, retention and usage counts; see \
-        action. Never returns a secret.")]
+    #[tool(description = "Trackers, orgs, retention, usage counts, sprints \
+        and releases; see action. Never returns a secret.")]
     pub(super) async fn work_admin(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1893,4 +1928,22 @@ fn ipc_of_mcp(e: McpError) -> IpcError {
         message,
         details: None,
     }
+}
+
+/// The item a `work_link { bucket_add | bucket_remove }` plans, refusing a
+/// per-host token first: a session does not decide the team's plan
+/// (design 2026-09-28 §7).
+fn planned_item(
+    caller: &Caller,
+    args: &crate::service::work::WorkLinkArgs,
+) -> Result<i64, McpError> {
+    if caller.host_alias.is_some() {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            "a session does not plan sprints or releases; a person does",
+            None,
+        ));
+    }
+    args.item_id
+        .ok_or_else(|| mcp_err("E_INVALID", format!("{} needs item_id", args.action), None))
 }

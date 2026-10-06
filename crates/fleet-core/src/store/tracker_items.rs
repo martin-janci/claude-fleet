@@ -51,6 +51,9 @@ pub struct TrackerItemWrite {
     pub assignee_id: Option<String>,
     pub iteration: Option<String>,
     pub iteration_active: bool,
+    /// Release-like containers the item is planned into (Jira
+    /// `fixVersions`, a GitHub milestone, a Linear project milestone).
+    pub versions: Vec<String>,
     pub updated_ext: Option<i64>,
     pub description: Option<String>,
     pub description_chars: Option<i64>,
@@ -93,6 +96,10 @@ pub struct ItemMeta {
     pub assignee_id: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub iteration_active: bool,
+    /// The tracker's versions this item is planned into (design 2026-09-28
+    /// §4): what bucket adoption matches a release's ref against.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub versions: Vec<String>,
     /// Favourite-filter views this item was last seen in (`filter:<id>`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub views: Vec<String>,
@@ -480,6 +487,7 @@ impl Store {
         meta.description_chars = w.description_chars;
         meta.assignee_id = w.assignee_id.clone();
         meta.iteration_active = w.iteration_active;
+        meta.versions = w.versions.clone();
         let meta_json = serde_json::to_string(&meta).ok();
         let after = Visible {
             key: key.clone(),
@@ -642,6 +650,10 @@ impl Store {
             }
         };
         if changed {
+            // Sprints and releases linked to what the item now reports
+            // (design 2026-09-28 §5). Only on a change: the sprint and the
+            // versions are part of what `changed` compares.
+            self.adopt_tracker_item(tracker_id, id, after.iteration.as_deref(), &meta.versions)?;
             self.emit_work_item(id, session_change)?;
         }
         Ok(UpsertOutcome {

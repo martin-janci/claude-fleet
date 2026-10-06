@@ -101,6 +101,21 @@ pub fn normalize_resolution(name: &str) -> String {
     }
 }
 
+/// The `fixVersions` field → the version names, in the tracker's order.
+/// Cloud and Data Center send the same shape (`[{ id, name, released, … }]`).
+pub(crate) fn fix_versions(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|vs| {
+            vs.iter()
+                .filter_map(|v| v["name"].as_str())
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The sprint field's value → (the current sprint's name, it is active). An
 /// active sprint wins; else the newest future one; closed ones are history.
 pub(crate) fn current_sprint(v: &Value) -> (Option<String>, bool) {

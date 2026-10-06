@@ -13,6 +13,7 @@
           "url": "https://github.com/Acme/api/issues/42",
           "state": "OPEN",
           "stateReason": null,
+          "milestone": { "title": "v0.3" },
           "updatedAt": "2026-09-21T09:30:00Z",
           "body": "Login fails after the token refresh.\r\n\r\nSteps: \u2026",
           "repository": {

@@ -3790,7 +3790,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// bytes). Measured at 76,964 on 2026-10-06 after merging `main`
     /// (76,788: the operator's other-host start and the project picker,
     /// +72 bytes over 76,716) into it: exactly the two sides' sum.
-    const BUDGET_BYTES: usize = 77_064;
+    /// Measured at 78,244 on 2026-10-06 after sprints and releases (`work
+    /// { buckets | bucket }`, `work_link { bucket_add | bucket_remove }` and
+    /// six `work_admin` bucket actions with their parameters, +1,280 bytes).
+    const BUDGET_BYTES: usize = 78_344;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10618,6 +10621,10 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `require_drive_on_item_sessions`, the same gate and level as `name`'s
     // rename half.
     ("work_link", "set_status", &["Drive"]),
+    // Sprint and release membership: `set_status`'s person gate, on the
+    // item planned.
+    ("work_link", "bucket_add", &["Drive"]),
+    ("work_link", "bucket_remove", &["Drive"]),
     // The two conversation-addressed arms of the `own` tier: a resume
     // replays the whole transcript into a new session, a summary stores a
     // durable précis that outlives a grant (§4.3 invariant 5 names
@@ -10843,6 +10850,17 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "what a drafted rule would move: tasks, not sessions",
     ),
     ("work", "views", "saved views"),
+    (
+        "work",
+        "buckets",
+        "sprints and releases, each fenced by its own org",
+    ),
+    (
+        "work",
+        "bucket",
+        "one sprint or release and its member ITEMS, each fenced by its org; \
+         no session is named or answered",
+    ),
     (
         "work_link",
         "trust_project",

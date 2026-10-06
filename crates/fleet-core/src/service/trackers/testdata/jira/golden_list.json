@@ -24,7 +24,8 @@
     },
     "title": "Billing migration",
     "updated": 1789887600,
-    "url": "https://acme.atlassian.net/browse/ABC-100"
+    "url": "https://acme.atlassian.net/browse/ABC-100",
+    "versions": []
   },
   {
     "aliases": [],
@@ -51,7 +52,10 @@
     },
     "title": "Move invoices to the new ledger",
     "updated": 1789892130,
-    "url": "https://acme.atlassian.net/browse/ABC-101"
+    "url": "https://acme.atlassian.net/browse/ABC-101",
+    "versions": [
+      "0.3.0"
+    ]
   },
   {
     "aliases": [],
@@ -78,7 +82,8 @@
     },
     "title": "Fix rounding in totals",
     "updated": 1789826400,
-    "url": "https://acme.atlassian.net/browse/ABC-102"
+    "url": "https://acme.atlassian.net/browse/ABC-102",
+    "versions": []
   },
   {
     "aliases": [],
@@ -103,7 +108,8 @@
     },
     "title": "Export to CSV v1",
     "updated": 1789718400,
-    "url": "https://acme.atlassian.net/browse/ABC-103"
+    "url": "https://acme.atlassian.net/browse/ABC-103",
+    "versions": []
   },
   {
     "aliases": [],
@@ -128,7 +134,8 @@
     },
     "title": "Rounding again",
     "updated": 1789722000,
-    "url": "https://acme.atlassian.net/browse/ABC-104"
+    "url": "https://acme.atlassian.net/browse/ABC-104",
+    "versions": []
   },
   {
     "aliases": [],
@@ -155,7 +162,8 @@
     },
     "title": "Onboarding checklist",
     "updated": 1789889400,
-    "url": "https://acme.atlassian.net/browse/TEAM-7"
+    "url": "https://acme.atlassian.net/browse/TEAM-7",
+    "versions": []
   },
   {
     "aliases": [],
@@ -180,6 +188,7 @@
     },
     "title": "Status with no category yet",
     "updated": 1789890300,
-    "url": "https://acme.atlassian.net/browse/TEAM-8"
+    "url": "https://acme.atlassian.net/browse/TEAM-8",
+    "versions": []
   }
 ]

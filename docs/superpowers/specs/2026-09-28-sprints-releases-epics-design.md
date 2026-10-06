@@ -1,7 +1,10 @@
 # Sprints, releases and epics in the native work graph — design
 
 **Date:** 2026-09-28
-**Status:** design, nothing implemented.
+**Status:** phase 1 (status of native items) landed; the backend of phases 2–3
+(`work_buckets`, sprints, releases, provider mapping, adoption, the MCP
+actions) landed with migration 106. The Work view axis, bulk assignment, the
+sprint board (phase 5) and epics (phase 4) are not built.
 **Builds on:** `2026-09-24-work-graph-design.md` (§0 is authoritative) and the
 work-graph roadmap's decisions D1–D36. This document is a delta against §0: it
 adds planning structure to the native side of the work graph and does not

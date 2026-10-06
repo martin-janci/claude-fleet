@@ -27,6 +27,7 @@
         "assignee": { "accountId": "557058:00000000-aaaa-bbbb-cccc-000000000001", "displayName": "Dana Dev" },
         "updated": "2026-09-20T10:15:30.123+0200",
         "project": { "id": "10000", "key": "ABC" },
+        "fixVersions": [ { "id": "10200", "name": "0.3.0", "released": false } ],
         "customfield_10020": [
           { "id": 7, "name": "ABC Sprint 6", "state": "closed", "boardId": 2 },
           { "id": 8, "name": "ABC Sprint 7", "state": "active", "boardId": 2 }
