@@ -44,6 +44,7 @@ pub mod outcome;
 pub mod pane_intel;
 pub mod peer;
 pub mod playbooks;
+pub mod project_picks;
 pub mod projects;
 pub mod prompt_origin;
 pub mod provision;

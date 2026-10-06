@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::ipc_error::lock;
-use crate::service::{add_project, repo, repo_read};
+use crate::service::{add_project, project_picks, repo, repo_read};
 
 /// `repo_diff`'s snapshot cursor key: one file in one session's worktree.
 /// Two different files (or the same file across two sessions) never share a
@@ -89,6 +89,29 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         audit("forget_project", &format!("project_id={}", p.project_id));
         ok_json(&projects::forget_project(&self.store, p.project_id).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "The New session picker's choices per project: \
+        pinned, vis (hide|keep), group.")]
+    pub(super) async fn project_picks(&self) -> Result<CallToolResult, McpError> {
+        audit("project_picks", "");
+        ok_json_compact(&project_picks::list(&self.store).map_err(to_mcp_err)?)
+    }
+
+    #[tool(description = "Replace one project's picker choices: pinned, \
+        vis hide|keep|null, group or null. The empty state clears.")]
+    pub(super) async fn set_project_pick(
+        &self,
+        Parameters(args): Parameters<project_picks::SetProjectPickArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "set_project_pick",
+            &format!(
+                "project={:?}/{:?} pinned={} vis={:?} grp={:?}",
+                args.owner, args.repo, args.pinned, args.vis, args.grp
+            ),
+        );
+        ok_json_compact(&project_picks::set(&self.store, &args).map_err(to_mcp_err)?)
     }
 
     #[tool(description = "Add a project on a host: clone a GitHub URL, adopt a \

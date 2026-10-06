@@ -291,6 +291,10 @@ Re-probe a host's reachability and versions. Returns the host row.
 
 Parameters: `alias`
 
+### `project_picks`
+
+The New session picker's choices per project: pinned, vis (hide|keep), group.
+
 ### `propose_layers`
 
 Propose a layer split from the last scan, grouping assets by the exact set of hosts they are on: the largest group becomes 'core'; single-host assets come back separately for triage. Read-only.
@@ -569,6 +573,12 @@ Replace a host's layer assignment: one optional role plus context layers. Edits 
 
 Parameters: `contexts`, `host_alias`, `role`
 
+### `set_project_pick`
+
+Replace one project's picker choices: pinned, vis hide|keep|null, group or null. The empty state clears.
+
+Parameters: `grp`, `owner`, `pinned`, `repo`, `vis`
+
 ### `set_secret`
 
 Store a value for a catalog ${NAME} placeholder (global, or per host with host_alias). Master token only. The value is never returned or logged.
@@ -674,6 +684,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::projects::refresh_projects`
 - `commands::projects::add_project`
 - `commands::projects::list_github_repos`
+- `commands::projects::project_picks`
+- `commands::projects::set_project_pick`
 - `commands::sessions::list_sessions`
 - `commands::sessions::related_sessions`
 - `commands::sessions::new_session`

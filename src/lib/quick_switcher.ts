@@ -440,6 +440,24 @@ export function chordLabel(isMac: boolean): string {
   return isMac ? '⌘K' : 'Ctrl+Shift+K';
 }
 
+/** The New session picker's chord (project picker spec v2): ⌘N on macOS,
+ *  Ctrl+Shift+N elsewhere — plain Ctrl+N stays readline's next-history. */
+export function isNewSessionChord(
+  e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean },
+  isMac: boolean,
+): boolean {
+  if (e.key.toLowerCase() !== 'n' || e.altKey) return false;
+  if (isMac) return e.metaKey && !e.ctrlKey && !e.shiftKey;
+  return e.ctrlKey && e.shiftKey && !e.metaKey;
+}
+
+/** "Start from work": My work tickets nobody has a session on, at most `cap`. */
+export function workBlock(tickets: readonly SwitcherTicket[], cap = 3): SwitcherTicket[] {
+  return tickets
+    .filter((t) => t.section === 'My work' && (t.ticket.live_session_ids ?? []).length === 0)
+    .slice(0, cap);
+}
+
 /**
  * Where a ticket's new session most likely belongs: the project and host of
  * the most recently active session working on a key of the same family

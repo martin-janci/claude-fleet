@@ -100,6 +100,23 @@ describe('AddProjectDialog', () => {
     }
   });
 
+  it('initialCloneUrl prefills the Clone URL field', async () => {
+    route({});
+    render(AddProjectDialog, { props: { onCreated: vi.fn(), onCancel: vi.fn(), initialCloneUrl: 'acme/widgets' } });
+    await tick();
+    expect((screen.getByTestId('clone-url') as HTMLInputElement).value).toBe('acme/widgets');
+  });
+
+  it('a blocked reason disables Create and is shown', async () => {
+    route({});
+    render(AddProjectDialog, {
+      props: { onCreated: vi.fn(), onCancel: vi.fn(), initialCloneUrl: 'acme/widgets', blocked: 'The hub is unreachable' },
+    });
+    await tick();
+    expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('add-blocked').textContent).toContain('The hub is unreachable');
+  });
+
   describe('clone', () => {
     it('a valid URL enables Create and sends {kind:clone, url} with the chosen host', async () => {
       route({ add_project: () => row });
