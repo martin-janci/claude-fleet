@@ -67,11 +67,9 @@ pub async fn discover_hosts_fresh() -> Result<Vec<SshHost>, IpcError> {
 /// admins on its own hosts when the hub's owner switched that on.
 ///
 /// The master is resolved to the hub's personal owner for this read like
-/// any other (`Caller::view_scope`), and that is safe only because the test
-/// is `is_sole_person`: on a hub with two people the master's person is one
-/// of several, so the count is withheld from it too. "The operator" and
-/// "the master token" are different callers, and the count belongs to
-/// neither — it belongs to the one person whose fleet this still is.
+/// any other (`Caller::view_scope`), so on a hub with two people it is
+/// served the count as that owner, a host administrator — not because it
+/// is the master token.
 ///
 /// [`ViewScope::internal`]: crate::service::view_scope::ViewScope::internal
 pub fn list_hosts(

@@ -486,10 +486,14 @@ check "two devices pair as two different people the hub now knows by name" '[ ${
 # `None`, not `Some(0)`: `0` is a claim about the host and a caller who may
 # not know is not entitled to it, so the assertion is that no NUMBER is
 # served -- the key itself is always on the wire, as `null` (store/rows.rs).
+# Org administration phase D: the hub's owner administers its hosts, so the
+# master (resolved to that owner) is still served the count; Ada and Bo,
+# neither the owner nor an admin, are not (`org_admin::unclaimed_reach`).
 lh_a=$(tool "$PA" "$PUB" "${TKADA:-x}" list_hosts '{}')
 lh_b=$(tool "$PA" "$PUB" "${TKBO:-x}" list_hosts '{}')
 lh_m2=$(tool "$PA" "$PUB" "$TOKA" list_hosts '{}')
-check "with two people on the hub the unclaimed count is absent from list_hosts for both of them, and for the master" '! echo "$lh_a" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && ! echo "$lh_b" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && ! echo "$lh_m2" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && echo "$lh_a" | grep -qE "\\\\\"alias\\\\\": ?\\\\\"local\\\\\""' "${lh_a:0:300} | ${lh_b:0:300} | ${lh_m2:0:300}"
+check "with two people on the hub the unclaimed count is absent from list_hosts for both of them" '! echo "$lh_a" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && ! echo "$lh_b" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+" && echo "$lh_a" | grep -qE "\\\\\"alias\\\\\": ?\\\\\"local\\\\\""' "${lh_a:0:300} | ${lh_b:0:300}"
+check "but the hub's owner, through the master, still administers its hosts and is served it" 'echo "$lh_m2" | grep -qE "\\\\\"unclaimed_sessions\\\\\": ?[0-9]+"' "${lh_m2:0:300}"
 unc2=$("$BIN" session unclaimed --data-dir "$ROOT/a" --port "$PA" 2>&1)
 check "and fleet-hub session unclaimed prints the count to the operator instead" 'echo "$unc2" | grep -qE "^local: [0-9]+$"' "$unc2"
 
