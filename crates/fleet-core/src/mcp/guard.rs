@@ -820,6 +820,23 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // The New session picker (phase 1): a person's preference, so a person's
+    // own device only, under the desktop commands' own names. Not served to
+    // the master — nothing an agent needs, and its surface is budgeted.
+    ToolPolicy {
+        name: "project_picks",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "set_project_pick",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Clones or creates a repository on a host: a write, and a long one — a
     // clone's wall clock is 600 s (`service::add_project::CLONE_WALL_CLOCK`),
     // which the lifecycle cap (300 s) would cut in half, so it takes the

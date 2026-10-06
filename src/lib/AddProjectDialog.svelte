@@ -25,12 +25,20 @@
   let {
     onCreated,
     onCancel,
+    initialCloneUrl,
+    blocked = null,
   }: {
     /** `host` is the host the project was actually added on (folder mode
      *  forces `local` whatever chip was chosen), so the follow-up session
      *  can open there. */
     onCreated: (row: ProjectTreeRow, host: string) => void;
     onCancel: () => void;
+    /** Prefills the Clone URL field and starts in that mode (the switcher's
+     *  Add row passes what was typed). */
+    initialCloneUrl?: string;
+    /** Why Add project cannot work from this window right now (a hub client
+     *  whose link is down); disables Create and says why. */
+    blocked?: string | null;
   } = $props();
 
   // ── Modes ────────────────────────────────────────────────────────────
@@ -44,7 +52,7 @@
   // On a hub client `local` is the hub's machine, and the folder picker is
   // this machine's — so an existing folder cannot be offered there.
   const MODES = $derived($hubStatus.remote ? ALL_MODES.filter((m) => m.id !== 'folder') : ALL_MODES);
-  let mode = $state<Mode>('clone');
+  let mode = $state<Mode>('clone'); // 'clone' also when `initialCloneUrl` is set
   /** The mode was chosen by click/Enter (the GitHub browser takes focus)
    *  rather than arrowed onto (focus stays on the control). */
   let focusMode = $state(false);
@@ -70,7 +78,7 @@
   const hostIsRemote = (h: string) => h !== 'local' || $hubStatus.remote;
 
   // ── Fields ───────────────────────────────────────────────────────────
-  let url = $state('');
+  let url = $state(untrack(() => initialCloneUrl ?? ''));
   let folderPath = $state<string | null>(null);
   let owner = $state('');
   let repo = $state('');
@@ -99,7 +107,7 @@
     if (mode === 'new') return ownerOk && repoOk ? { kind: 'new', owner, repo, create_remote: createRemote } : null;
     return null; // github: pick a repository first
   }
-  const canCreate = $derived(source() !== null);
+  const canCreate = $derived(source() !== null && !blocked);
 
   // ── Destination preview ──────────────────────────────────────────────
   // The preview needs the backend's per-host roots, and on a hub client
@@ -169,7 +177,7 @@
   });
 
   async function submit() {
-    if (busy || pendingConfirm) return;
+    if (busy || pendingConfirm || blocked) return;
     const s = source();
     if (s) await run(host, s);
   }
@@ -326,6 +334,9 @@
       <p class="preview" data-testid="add-path-preview" title={pathPreview}>
         <span class="k">{mode === 'folder' ? 'folder' : 'into'}</span> <code>{pathPreview}</code>
       </p>
+    {/if}
+    {#if blocked}
+      <p class="err" role="alert" data-testid="add-blocked">{blocked}</p>
     {/if}
     {#if error}
       <p class="err" role="alert" data-testid="add-error">{error}</p>

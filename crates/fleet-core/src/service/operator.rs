@@ -160,6 +160,64 @@ pub fn read_operator_host(store: &Store) -> String {
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| OPERATOR_HOST.to_string())
 }
+/// PURE: whether the operator could be started on (or keep running on)
+/// `alias` right now. `row` is the fleet's row for it, if any.
+///
+/// `local` keeps its old reading — there whenever this process has a local
+/// host ([`crate::service::hub::check_local_allowed`]), with or without a
+/// row — and is unusable only once a probe has said it is unreachable or
+/// someone hid it. Any other alias needs a row that is active
+/// ([`crate::service::hosts::is_active`]) and whose last probe succeeded.
+pub fn home_usable(row: Option<&crate::store::HostRow>, alias: &str, local_enabled: bool) -> bool {
+    if alias == OPERATOR_HOST {
+        return crate::service::hub::check_local_allowed(alias, local_enabled).is_ok()
+            && row.is_none_or(|h| !h.hidden && h.reachable);
+    }
+    row.is_some_and(|h| crate::service::hosts::is_active(h, local_enabled) && h.reachable)
+}
+
+/// PURE: where the operator should be born, given every host row.
+///
+/// The configured home ([`read_operator_host`]) first, while it is usable;
+/// then `local`; then any other reachable host this process can use, the
+/// provisioned ones first, by alias so the choice does not wander between
+/// presses. `avoid` is the host a live operator is stranded on — it is
+/// unreachable by definition, but it is named so a probe that flips back
+/// mid-call cannot hand the birth the same dead machine.
+///
+/// A fallback is held to more than the configured home is, because nobody
+/// chose it: it must belong to no org (the operator's token is fleet-wide
+/// and does not belong on a machine an org's people may own), and a probe
+/// must have seen `claude` on it, or the session would start into a shell
+/// with nothing in it. `None` when no host qualifies.
+pub fn pick_operator_home(
+    hosts: &[crate::store::HostRow],
+    preferred: &str,
+    local_enabled: bool,
+    avoid: Option<&str>,
+) -> Option<String> {
+    let row = |alias: &str| hosts.iter().find(|h| h.alias == alias);
+    let ok = |alias: &str| Some(alias) != avoid && home_usable(row(alias), alias, local_enabled);
+    if ok(preferred) {
+        return Some(preferred.to_string());
+    }
+    if ok(OPERATOR_HOST) {
+        return Some(OPERATOR_HOST.to_string());
+    }
+    let mut rest: Vec<&crate::store::HostRow> = hosts
+        .iter()
+        .filter(|h| {
+            h.alias != preferred
+                && h.alias != OPERATOR_HOST
+                && h.org_id.is_none()
+                && h.claude_version.is_some()
+                && ok(&h.alias)
+        })
+        .collect();
+    rest.sort_by(|a, b| (!a.provisioned, &a.alias).cmp(&(!b.provisioned, &b.alias)));
+    rest.first().map(|h| h.alias.clone())
+}
+
 /// Name of the operator's client-token row. A client token in mode `full`,
 /// never the master token: the agent is a paired client like any other, and
 /// revoking it by name is how the operator is disarmed.
@@ -470,7 +528,10 @@ pub struct OperatorStatus {
     pub ready: bool,
     pub session: Option<SessionRow>,
     /// `null`, or one of `"absent"`, `"lost"`, `"no_mcp"`, `"token_revoked"`,
-    /// `"no_host"` (the operator's host does not exist on this fleet).
+    /// `"no_host"` (the operator's host does not exist on this fleet and no
+    /// other host can take it), `"host_down"` (the host the operator lives
+    /// on — or, never born, would be born on — is unreachable; `fallback`
+    /// says whether `ensure_operator` can move it).
     pub blocked: Option<String>,
     /// The host the operator runs (or would run) on — [`read_operator_host`].
     /// The panel names it under `"no_host"`. Defaulted on read so a desktop
@@ -478,6 +539,12 @@ pub struct OperatorStatus {
     /// answer: such a hub only ever homed the operator on `local`.
     #[serde(default = "default_operator_host")]
     pub host: String,
+    /// Where `ensure_operator` would start the agent instead, when its home
+    /// cannot be used ([`pick_operator_home`]); `null` when it can, or when
+    /// no host qualifies. Defaulted on read: a hub from before the field
+    /// never moved the operator.
+    #[serde(default)]
+    pub fallback: Option<String>,
 }
 
 fn default_operator_host() -> String {
@@ -523,29 +590,49 @@ pub(crate) fn operator_status_with(
 ) -> Result<OperatorStatus, IpcError> {
     let s = lock(store)?;
     let host = read_operator_host(&s);
-    let blocked = |why: &str, session: Option<SessionRow>| OperatorStatus {
-        ready: false,
-        session,
-        blocked: Some(why.to_string()),
-        host: host.clone(),
+    let hosts = s
+        .list_hosts()
+        .map_err(|e| IpcError::new(codes::E_SQLITE, format!("list hosts: {e}")))?;
+    let usable = |alias: &str| {
+        home_usable(
+            hosts.iter().find(|h| h.alias == alias),
+            alias,
+            local_enabled,
+        )
     };
-    // Where "it is not there" is the answer, say WHY it is not there: the
-    // operator runs on `host`, and if this fleet has no such host —
-    // `local` on a hub with `hub.local_host=false`, or a configured alias
-    // nobody added — `ensure_operator` cannot succeed however many times
-    // the button is pressed. Checked here rather than up front so an
-    // operator that is somehow already running still reports `ready` — only
-    // the absent answer changes.
+    let blocked =
+        |why: &str, session: Option<SessionRow>, fallback: Option<String>| OperatorStatus {
+            ready: false,
+            session,
+            blocked: Some(why.to_string()),
+            host: host.clone(),
+            fallback,
+        };
+    // Where "it is not there" is the answer, say WHY it is not there, and
+    // whether a press can help. The operator is born on `host` while that is
+    // usable, and on the first usable fallback otherwise
+    // ([`pick_operator_home`]) — so `absent` (a press will work) holds
+    // whenever ANY host qualifies, and only a fleet with none left says
+    // which obstacle it hit: `no_host` when the configured home is not in
+    // this fleet at all (`local` on a hub with `hub.local_host=false`, or an
+    // alias nobody added), `host_down` when it is there and unreachable.
+    // Checked here rather than up front so an operator that is somehow
+    // already running still reports `ready` — only the absent answer
+    // changes.
     let absent = |session: Option<SessionRow>| {
-        if operator_host_missing(&s, &host, local_enabled) {
-            blocked("no_host", session)
+        let fallback =
+            pick_operator_home(&hosts, &host, local_enabled, None).filter(|h| *h != host);
+        if usable(&host) || fallback.is_some() {
+            blocked("absent", session, fallback)
+        } else if operator_host_missing(&s, &host, local_enabled) {
+            blocked("no_host", session, None)
         } else {
-            blocked("absent", session)
+            blocked("host_down", session, None)
         }
     };
 
     if !crate::mcp::settings::McpSettings::read(&s)?.enabled {
-        return Ok(blocked("no_mcp", None));
+        return Ok(blocked("no_mcp", None, None));
     }
     let Some(r) = operator_ref(&s) else {
         return Ok(absent(None));
@@ -556,8 +643,18 @@ pub(crate) fn operator_status_with(
     let Some(row) = row else {
         return Ok(absent(None));
     };
+    // The host it lives on is gone or unreachable: the session may well be
+    // fine, but nothing can reach it — a prompt goes nowhere, and a restart
+    // (the `lost` button) would try the same dead machine. So this is asked
+    // before `lost`, and answered with where `ensure_operator` would move
+    // it; the panel moves it without asking, because an agent stuck on a
+    // machine that is down is exactly what the person cannot fix from it.
+    if !usable(&r.host_alias) {
+        let fallback = pick_operator_home(&hosts, &host, local_enabled, Some(&r.host_alias));
+        return Ok(blocked("host_down", Some(row), fallback));
+    }
     if row.lost_at.is_some() {
-        return Ok(blocked("lost", Some(row)));
+        return Ok(blocked("lost", Some(row), None));
     }
     // A revoked token is a deliberate act, so nothing re-mints itself — the
     // panel offers a button and the person presses it.
@@ -567,13 +664,14 @@ pub(crate) fn operator_status_with(
         .map(|rows| rows.iter().any(|t| Some(&t.token_sha256) == sha.as_ref()))
         .unwrap_or(false);
     if !live {
-        return Ok(blocked("token_revoked", Some(row)));
+        return Ok(blocked("token_revoked", Some(row), None));
     }
     Ok(OperatorStatus {
         ready: true,
         session: Some(row),
         blocked: None,
         host,
+        fallback: None,
     })
 }
 
@@ -669,20 +767,34 @@ pub(crate) async fn ensure_operator_on(
     let birth = operator_birth_lock(store)?;
     let _birth = birth.lock().await;
 
-    // 1. Already alive? Then there is nothing to do. (guard #1)
-    {
+    // 1. Already alive, on a host that can be reached? Then there is
+    //    nothing to do. (guard #1) Alive on a host that cannot — down,
+    //    removed, hidden — is "stranded": the agent is born again elsewhere
+    //    and the stranded host is kept out of the choice below. The old
+    //    session is left exactly where it is (its host cannot be reached to
+    //    end it); step 5 revokes its token, and once its host is back it is
+    //    an ordinary `fleet-operator` session the person can kill.
+    let local_enabled = crate::service::hub::local_host_enabled();
+    let stranded = {
         let s = lock(store)?;
+        let mut stranded = None;
         if let Some(r) = operator_ref(&s) {
             if let Some(row) = s
                 .get_session(&r.tmux_name, &r.host_alias)
                 .map_err(|e| IpcError::new(codes::E_SQLITE, format!("find operator: {e}")))?
             {
-                if row.lost_at.is_none() {
+                let host_row = s
+                    .get_host_row(&r.host_alias)
+                    .map_err(|e| IpcError::new(codes::E_SQLITE, format!("operator's host: {e}")))?;
+                if !home_usable(host_row.as_ref(), &r.host_alias, local_enabled) {
+                    stranded = Some(r.host_alias);
+                } else if row.lost_at.is_none() {
                     return Ok(row);
                 }
             }
         }
-    }
+        stranded
+    };
 
     // 2. The home and the endpoint, BEFORE anything is mutated anywhere.
     //    (guard #2) `configured_port` refuses when the control API has never
@@ -700,18 +812,56 @@ pub(crate) async fn ensure_operator_on(
     //    (`HubBase::read`): the hub's public URL, or on a desktop the reverse
     //    tunnel's loopback end, which is the same `127.0.0.1:<port>` seen
     //    from that host.
+    //
+    //    The home is the configured one while it is usable, and otherwise the
+    //    first host that can take the agent ([`pick_operator_home`]) — a
+    //    fleet whose configured home is down keeps its agent. Only when no
+    //    host qualifies is the birth refused, naming the obstacle.
     let (home, endpoint) = {
         let s = lock(store)?;
-        let home = read_operator_host(&s);
-        if operator_host_missing(&s, &home, crate::service::hub::local_host_enabled()) {
-            return Err(IpcError::new(
-                codes::E_NOTFOUND,
-                format!(
-                    "the operator's host {home} is not in this fleet \
-                     ({SETTING_OPERATOR_HOST}); add it, or point the operator at \
-                     another host with `fleet-hub serve --operator-host <alias>`"
-                ),
-            ));
+        let preferred = read_operator_host(&s);
+        let hosts = s
+            .list_hosts()
+            .map_err(|e| IpcError::new(codes::E_SQLITE, format!("list hosts: {e}")))?;
+        let Some(home) = pick_operator_home(&hosts, &preferred, local_enabled, stranded.as_deref())
+        else {
+            return Err(if let Some(down) = &stranded {
+                IpcError::new(
+                    codes::E_HOST_OFFLINE,
+                    format!(
+                        "the operator's host {down} is unreachable and no other host can \
+                         run it (one needs to be reachable, in no org, with claude \
+                         installed); it comes back when {down} does"
+                    ),
+                )
+            } else if operator_host_missing(&s, &preferred, local_enabled) {
+                IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!(
+                        "the operator's host {preferred} is not in this fleet \
+                         ({SETTING_OPERATOR_HOST}) and no other host can run it; add \
+                         it, or point the operator at another host with \
+                         `fleet-hub serve --operator-host <alias>`"
+                    ),
+                )
+            } else {
+                IpcError::new(
+                    codes::E_HOST_OFFLINE,
+                    format!(
+                        "the operator's host {preferred} is unreachable and no other \
+                         host can run it (one needs to be reachable, in no org, with \
+                         claude installed)"
+                    ),
+                )
+            });
+        };
+        if home != preferred || stranded.is_some() {
+            tracing::warn!(
+                preferred = %preferred,
+                stranded = stranded.as_deref().unwrap_or(""),
+                home = %home,
+                "the UX agent's operator is being started away from its usual host"
+            );
         }
         let endpoint = if home == OPERATOR_HOST {
             format!(
@@ -1167,16 +1317,18 @@ mod tests {
         );
     }
 
-    /// A configured host the fleet does not have refuses BEFORE anything is
-    /// minted: no token, no project row, no reference, no session.
+    /// A configured host the fleet does not have, on a fleet where no other
+    /// host can take the agent either, refuses BEFORE anything is minted: no
+    /// token, no project row, no reference, no session.
     #[tokio::test]
     async fn a_missing_configured_host_refuses_before_minting_anything() {
         let (store, _ssh, _reg) = fixture();
-        store
-            .lock()
-            .unwrap()
-            .set_setting(SETTING_OPERATOR_HOST, "ghost")
-            .unwrap();
+        {
+            let s = store.lock().unwrap();
+            s.set_setting(SETTING_OPERATOR_HOST, "ghost").unwrap();
+            // `local` would otherwise be the fallback.
+            s.set_host_hidden(OPERATOR_HOST, true).unwrap();
+        }
         let host = FakeHost::new(&store);
         let err = ensure_operator_on(&store, &host)
             .await
@@ -1188,6 +1340,218 @@ mod tests {
         let s = store.lock().unwrap();
         assert!(tokens_named_ux_agent(&s).is_empty(), "nothing minted");
         assert_eq!(operator_ref(&s), None);
+    }
+
+    // ------------------------------------------------------------ failover
+
+    /// A host row as a probe leaves it: `reachable`, and `claude` seen on
+    /// it (`claude_version`) when it answered.
+    fn probed(s: &Store, alias: &str, reachable: bool) {
+        s.upsert_host(alias).unwrap();
+        s.update_host_probe(alias, reachable, reachable.then_some("2.1.0"), None, 1)
+            .unwrap();
+    }
+
+    #[test]
+    fn the_home_is_the_configured_host_then_local_then_any_qualifying_host() {
+        let s = Store::open_in_memory().unwrap();
+        probed(&s, OPERATOR_HOST, true);
+        probed(&s, "mefistos", true);
+        probed(&s, "zeta", true);
+        probed(&s, "alpha", true);
+        let pick = |s: &Store, local: bool, avoid: Option<&str>| {
+            pick_operator_home(&s.list_hosts().unwrap(), "mefistos", local, avoid)
+        };
+
+        assert_eq!(pick(&s, true, None).as_deref(), Some("mefistos"));
+        probed(&s, "mefistos", false);
+        assert_eq!(
+            pick(&s, true, None).as_deref(),
+            Some(OPERATOR_HOST),
+            "the configured home is down: local, where the API is loopback"
+        );
+        assert_eq!(
+            pick(&s, false, None).as_deref(),
+            Some("alpha"),
+            "no local host: the first qualifying host by alias"
+        );
+        s.set_host_provisioned("zeta", true).unwrap();
+        assert_eq!(
+            pick(&s, false, None).as_deref(),
+            Some("zeta"),
+            "a provisioned host before one that is not"
+        );
+        assert_eq!(pick(&s, false, Some("zeta")).as_deref(), Some("alpha"));
+
+        // What a fallback is held to: reachable, visible, no org, claude.
+        let org = s.add_org("acme", None, false).unwrap();
+        s.set_host_org("zeta", Some(org.id)).unwrap();
+        s.set_host_hidden("alpha", true).unwrap();
+        probed(&s, "beta", false);
+        s.upsert_host("gamma").unwrap(); // never probed: no claude seen
+        assert_eq!(pick(&s, false, None), None, "nothing qualifies");
+
+        // The configured home itself is not held to the fallback rules: it
+        // was chosen. Back up (in an org, even), it is the home again.
+        s.set_host_org("mefistos", Some(org.id)).unwrap();
+        probed(&s, "mefistos", true);
+        assert_eq!(pick(&s, false, None).as_deref(), Some("mefistos"));
+    }
+
+    /// The operator recorded on `mefistos`, alive, with a live token —
+    /// `ready` until `mefistos` stops answering.
+    fn store_with_an_operator_on(alias: &str) -> Arc<Mutex<Store>> {
+        let (store, _ssh, _reg) = fixture();
+        {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::mcp::SETTING_ENABLED, "true").unwrap();
+            s.set_setting(SETTING_OPERATOR_HOST, alias).unwrap();
+            probed(&s, alias, true);
+            s.upsert_session(OPERATOR_TMUX_NAME, alias, None, None, 1, 1, "running", None)
+                .unwrap();
+            set_operator_ref(
+                &s,
+                &OperatorRef {
+                    host_alias: alias.into(),
+                    tmux_name: OPERATOR_TMUX_NAME.into(),
+                },
+            )
+            .unwrap();
+            s.insert_client_token(OPERATOR_CLIENT_NAME, "the-old-sha", "full")
+                .unwrap();
+            s.set_setting(SETTING_OPERATOR_TOKEN_SHA, "the-old-sha")
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn an_operator_on_a_host_that_went_down_is_host_down_naming_the_fallback() {
+        let store = store_with_an_operator_on("mefistos");
+        assert!(operator_status_with(&store, true).unwrap().ready);
+
+        probed(&store.lock().unwrap(), "mefistos", false);
+        let st = operator_status_with(&store, true).unwrap();
+        assert!(!st.ready);
+        assert_eq!(st.blocked.as_deref(), Some("host_down"));
+        assert_eq!(st.host, "mefistos");
+        assert_eq!(st.fallback.as_deref(), Some(OPERATOR_HOST));
+        assert!(st.session.is_some(), "the stranded row comes back");
+
+        // Lost too (the reboot that took the host down): still host_down,
+        // since the `lost` button would restart it on the same dead host.
+        store
+            .lock()
+            .unwrap()
+            .mark_host_sessions_lost("mefistos", "test_lost", &[], 100, 0)
+            .unwrap();
+        let st = operator_status_with(&store, true).unwrap();
+        assert_eq!(st.blocked.as_deref(), Some("host_down"));
+
+        // Nowhere else to go: still host_down, with no fallback to offer.
+        store
+            .lock()
+            .unwrap()
+            .set_host_hidden(OPERATOR_HOST, true)
+            .unwrap();
+        let st = operator_status_with(&store, true).unwrap();
+        assert_eq!(st.blocked.as_deref(), Some("host_down"));
+        assert_eq!(st.fallback, None);
+    }
+
+    #[test]
+    fn a_never_born_operator_whose_home_is_down_is_absent_while_a_fallback_exists() {
+        let (store, _ssh, _reg) = fixture();
+        {
+            let s = store.lock().unwrap();
+            s.set_setting(crate::mcp::SETTING_ENABLED, "true").unwrap();
+            s.set_setting(SETTING_OPERATOR_HOST, "mefistos").unwrap();
+            probed(&s, "mefistos", false);
+        }
+        let st = operator_status_with(&store, true).unwrap();
+        assert_eq!(st.blocked.as_deref(), Some("absent"), "a press will work");
+        assert_eq!(st.fallback.as_deref(), Some(OPERATOR_HOST));
+
+        let st = operator_status_with(&store, false).unwrap();
+        assert_eq!(
+            st.blocked.as_deref(),
+            Some("host_down"),
+            "no local host and nothing else: the home is there but down"
+        );
+        assert_eq!(st.fallback, None);
+    }
+
+    /// The case this exists for: the operator lives on `mefistos`, which goes
+    /// down. The next press starts it on a host that answers, records it
+    /// there, and revokes the stranded session's token — one live token, the
+    /// new one.
+    #[tokio::test]
+    async fn a_stranded_operator_is_born_again_on_a_reachable_host() {
+        let store = store_with_an_operator_on("mefistos");
+        let host = FakeHost::new(&store);
+        let row = ensure_operator_on(&store, &host).await.expect("alive");
+        assert_eq!(row.host_alias, "mefistos", "reachable: nothing to do");
+        assert_eq!(host.starts.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        probed(&store.lock().unwrap(), "mefistos", false);
+        let row = ensure_operator_on(&store, &host).await.expect("moved");
+        assert_eq!(row.host_alias, OPERATOR_HOST);
+        assert_eq!(host.starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        {
+            let files = host.files.lock().unwrap();
+            assert!(
+                files.iter().all(|(p, _)| p.starts_with("local:")),
+                "nothing is sent to the dead host: {files:?}"
+            );
+        }
+        {
+            let s = store.lock().unwrap();
+            assert_eq!(
+                operator_ref(&s),
+                Some(OperatorRef {
+                    host_alias: OPERATOR_HOST.into(),
+                    tmux_name: OPERATOR_TMUX_NAME.into(),
+                })
+            );
+            let live = tokens_named_ux_agent(&s)
+                .into_iter()
+                .filter(|t| t.revoked_at.is_none())
+                .collect::<Vec<_>>();
+            assert_eq!(live.len(), 1);
+            assert_ne!(
+                live[0].token_sha256, "the-old-sha",
+                "the stranded token is revoked"
+            );
+        }
+        assert!(operator_status_with(&store, true).unwrap().ready);
+
+        // And it stays put when `mefistos` comes back: no churn.
+        probed(&store.lock().unwrap(), "mefistos", true);
+        let row = ensure_operator_on(&store, &host).await.unwrap();
+        assert_eq!(row.host_alias, OPERATOR_HOST);
+        assert_eq!(host.starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// Stranded with nowhere to go: refused before anything is minted, so the
+    /// stranded session keeps its token for when its host comes back.
+    #[tokio::test]
+    async fn a_stranded_operator_with_nowhere_to_go_is_refused_and_keeps_its_token() {
+        let store = store_with_an_operator_on("mefistos");
+        {
+            let s = store.lock().unwrap();
+            probed(&s, "mefistos", false);
+            s.set_host_hidden(OPERATOR_HOST, true).unwrap();
+        }
+        let host = FakeHost::new(&store);
+        let err = ensure_operator_on(&store, &host)
+            .await
+            .expect_err("nowhere to go");
+        assert_eq!(err.code, codes::E_HOST_OFFLINE, "{}", err.message);
+        assert!(err.message.contains("mefistos"), "{}", err.message);
+        assert_eq!(host.starts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let s = store.lock().unwrap();
+        assert_eq!(tokens_named_ux_agent(&s)[0].token_sha256, "the-old-sha");
+        assert_eq!(operator_ref(&s).unwrap().host_alias, "mefistos");
     }
 
     /// Every LIVE client-token row the operator owns. A helper because both

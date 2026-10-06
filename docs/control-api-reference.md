@@ -95,7 +95,7 @@ Parameters: `confirm_nonce`, `new_worker`, `prompt`, `raw`, `requester_session_i
 
 ### `ensure_operator`
 
-Ensure the UX agent's operator session exists; returns its row.
+Ensure the UX agent's operator session exists on a reachable host; returns its row.
 
 ### `fleet_health`
 
@@ -259,7 +259,7 @@ Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`
 
 ### `operator_status`
 
-Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host.
+Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host|host_down; fallback: where ensure_operator moves it.
 
 ### `pair_client`
 
@@ -290,6 +290,10 @@ Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
 Re-probe a host's reachability and versions. Returns the host row.
 
 Parameters: `alias`
+
+### `project_picks`
+
+The New session picker's choices per project: pinned, vis (hide|keep), group.
 
 ### `propose_layers`
 
@@ -569,6 +573,12 @@ Replace a host's layer assignment: one optional role plus context layers. Edits 
 
 Parameters: `contexts`, `host_alias`, `role`
 
+### `set_project_pick`
+
+Replace one project's picker choices: pinned, vis hide|keep|null, group or null. The empty state clears.
+
+Parameters: `grp`, `owner`, `pinned`, `repo`, `vis`
+
 ### `set_secret`
 
 Store a value for a catalog ${NAME} placeholder (global, or per host with host_alias). Master token only. The value is never returned or logged.
@@ -674,6 +684,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::projects::refresh_projects`
 - `commands::projects::add_project`
 - `commands::projects::list_github_repos`
+- `commands::projects::project_picks`
+- `commands::projects::set_project_pick`
 - `commands::sessions::list_sessions`
 - `commands::sessions::related_sessions`
 - `commands::sessions::new_session`

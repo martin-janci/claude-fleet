@@ -2711,11 +2711,28 @@ and the next press of the agent button creates the session there — its
 `~/.claude-fleet/operator/.mcp.json` is handed the hub's public URL, the
 same address every provisioned host uses. Only the alias's syntax is checked
 at startup; whether the fleet has that host is answered live, since hosts
-come and go while the hub runs, and a configured host that is missing is
-reported as `no_host` naming the alias. The setting is saved like the
-others, so a later bare `serve` keeps it. Changing it does not move a
-running operator: kill the old `fleet-operator` session first, then press
-the button again.
+come and go while the hub runs. The setting is saved like the others, so a
+later bare `serve` keeps it. Changing it does not move a running operator:
+kill the old `fleet-operator` session first, then press the button again.
+
+The configured host is the operator's *home*, not its only place. When the
+home is missing or its last probe failed, `ensure_operator` starts the agent
+on the first host that can take it (`pick_operator_home`): `local`, then any
+other reachable, visible host in no org with `claude` seen on it, the
+provisioned ones first, by alias. A fallback is held to more than the home
+is because nobody chose it — the operator's token is fleet-wide and does not
+belong on an org's machine. When the agent already runs and its host stops
+answering (or is removed or hidden), `operator_status` answers `host_down`
+with the session and a `fallback`; the desktop panel and the phone's
+**Agent** button then start it on that fallback without asking, record it
+there, and revoke the stranded session's token. Its conversation so far stays
+on the dead host, and once that host is back the old `fleet-operator` there
+is an ordinary session to kill. The agent does not move home again on its
+own when the home recovers — that would end a conversation that is working;
+kill it and press the button to bring it back. Only a fleet with no host
+left to take it answers `no_host` (the home is not in the fleet) or
+`host_down` with no fallback (it is there, and down), and `ensure_operator`
+refuses with `E_NOTFOUND` / `E_HOST_OFFLINE` before minting anything.
 
 The birth also answers Claude Code's workspace trust dialog for the operator
 directory. On a fresh host Claude Code stops at "Is this a project you
@@ -3126,7 +3143,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 252 commands, 172 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 24 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 254 commands, 174 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 24 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

@@ -482,3 +482,33 @@ describe('asset and command entries', () => {
     expect(kinds).toEqual(['host', 'asset']);
   });
 });
+
+// ---- the New session picker (project picker spec v2) -------------------------
+
+import { isNewSessionChord, workBlock } from './quick_switcher';
+
+describe('isNewSessionChord', () => {
+  const k = (o: Partial<KeyboardEvent>) => ({ key: 'n', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...o });
+  it('⌘N on macOS, Ctrl+Shift+N elsewhere; nothing else', () => {
+    expect(isNewSessionChord(k({ metaKey: true }), true)).toBe(true);
+    expect(isNewSessionChord(k({ metaKey: true, shiftKey: true }), true)).toBe(false);
+    expect(isNewSessionChord(k({ metaKey: true, altKey: true }), true)).toBe(false);
+    expect(isNewSessionChord(k({ ctrlKey: true }), true)).toBe(false);
+    expect(isNewSessionChord(k({ ctrlKey: true, shiftKey: true, key: 'N' }), false)).toBe(true);
+    expect(isNewSessionChord(k({ ctrlKey: true }), false)).toBe(false); // readline's Ctrl+N stays the terminal's
+    expect(isNewSessionChord(k({ metaKey: true }), false)).toBe(false);
+    expect(isNewSessionChord(k({ ctrlKey: true, shiftKey: true, key: 'm' }), false)).toBe(false);
+  });
+});
+
+describe('workBlock', () => {
+  const t = (key: string, section: string, live: number[] = []) => ({ ticket: { key, live_session_ids: live } as never, section });
+  it('My work tickets with no live session, at most 3', () => {
+    const out = workBlock([t('A-1', 'My work'), t('A-2', 'My work', [5]), t('A-3', 'Recent'), t('A-4', 'My work'), t('A-5', 'My work'), t('A-6', 'My work')]);
+    expect(out.map((x) => (x.ticket as { key: string }).key)).toEqual(['A-1', 'A-4', 'A-5']);
+  });
+  it('a ticket with no live_session_ids field counts as free; the cap is a parameter', () => {
+    const free = { ticket: { key: 'B-1' } as never, section: 'My work' };
+    expect(workBlock([free, t('B-2', 'My work')], 1).map((x) => (x.ticket as { key: string }).key)).toEqual(['B-1']);
+  });
+});

@@ -38,6 +38,7 @@ import {
 import { hosts } from './hosts';
 import { catalog, catalogConfig } from './assets';
 import { projects, type ProjectTreeRow } from './projects';
+import { addProjectRequest } from './app_views';
 import { sessions as sessionsStore, type SessionRow } from './sessions';
 import { resetAccessForTests, setMyGrants } from './access';
 
@@ -71,6 +72,7 @@ const inv = () => mockedInvoke as ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   inv().mockReset();
+  addProjectRequest.set(null);
   // `null` for everything except the one list the setup checklist iterates
   // unguarded: a standalone OnboardingCard (also mounted inside Sidebar) does
   // `tunnels.some(...)`, and the real command never answers null.
@@ -607,10 +609,10 @@ describe('add and purge project on a hub client', () => {
     projects.set([project]);
     sessionsStore.set([projectSession]);
     render(Sidebar, { props: {} as never });
-    await fireEvent.click(await screen.findByTestId('new-session-footer'));
-    const btn = await screen.findByTestId('add-project-row');
+    addProjectRequest.set({ cloneUrl: 'acme/widgets' });
+    const btn = await screen.findByTestId('add-create');
     expect(btn).not.toBeDisabled();
-    expect((btn as HTMLButtonElement).title).toBe('');
+    expect(screen.queryByTestId('add-blocked')).toBeNull();
   });
 
   it('+ Add project… is disabled with the offline sentence while the link is down', async () => {
@@ -619,19 +621,20 @@ describe('add and purge project on a hub client', () => {
     projects.set([project]);
     sessionsStore.set([projectSession]);
     render(Sidebar, { props: {} as never });
-    await fireEvent.click(await screen.findByTestId('new-session-footer'));
-    const btn = await screen.findByTestId('add-project-row');
+    addProjectRequest.set({ cloneUrl: 'acme/widgets' });
+    const btn = await screen.findByTestId('add-create');
     expect(btn).toBeDisabled();
-    expect((btn as HTMLButtonElement).title).toContain('unreachable');
-    expect((btn as HTMLButtonElement).title).toContain('fleet.example.com');
+    const why = await screen.findByTestId('add-blocked');
+    expect(why.textContent).toContain('unreachable');
+    expect(why.textContent).toContain('fleet.example.com');
   });
 
   it('standalone is untouched: + Add project… still opens the dialog', async () => {
     projects.set([project]);
     sessionsStore.set([projectSession]);
     render(Sidebar, { props: {} as never });
-    await fireEvent.click(await screen.findByTestId('new-session-footer'));
-    expect(await screen.findByTestId('add-project-row')).not.toBeDisabled();
+    addProjectRequest.set({ cloneUrl: 'acme/widgets' });
+    expect(await screen.findByTestId('add-create')).not.toBeDisabled();
   });
 
   it('Purge project is disabled with the reason', async () => {

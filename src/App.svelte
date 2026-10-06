@@ -57,6 +57,7 @@
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession, restoreLastSession, selectSessionExplicitly, onSessionOpened } from './lib/selection';
   import {
+    addProjectRequest,
     appChord,
     assetsViewRequest,
     hostsChordLabel,
@@ -84,7 +85,8 @@
   import { loadComposerPresets, refreshComposerPresetsIfIdle } from './lib/composer_presets';
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
-  import { startHubConnection, setGapHandler } from './lib/hub_connection';
+  import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
+  import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
 
@@ -324,6 +326,10 @@
       // into a startup error would report a problem that changes nothing.
       loadMyGrants(),
     ]);
+    // The picker's pins and groups. Outside the `Promise.all` on purpose: a
+    // hub older than the feature has no answer, and that is not a startup
+    // failure (the picker then runs on its rules alone).
+    void loadProjectPicks();
     const failures = [
       healthFailure,
       reportBootstrap('projects', pr),
@@ -528,6 +534,14 @@
   // TerminalView is never mounted for it at all.
   const selOwned = $derived(selAccess === 'own');
   const selWatchOnly = $derived(!!$selectedSession && !selNoPane && !selOwned);
+  // The picker's choices live on the hub when paired: re-read them when the
+  // connection comes (back).
+  let lastHubState: string | null = null;
+  $effect(() => {
+    const st = $hubConnection.state;
+    if (lastHubState !== null && st !== lastHubState) void loadProjectPicks();
+    lastHubState = st;
+  });
   $effect(() => {
     if (selId === null || selNoPane) filesMode = false;
   });
@@ -711,7 +725,6 @@
     viewHostSessions(alias);
   }
   function onHostsNewSession(alias: string) {
-    sidebarCollapsed = false;
     requestNewSessionOnHost(alias);
   }
 
@@ -719,6 +732,13 @@
   // view's Stale section) brings a collapsed sidebar back so it can open.
   $effect(() => {
     if ($tidyRequest) sidebarCollapsed = false;
+  });
+
+  // The Add project dialog is mounted by the Sidebar, which is unmounted while
+  // the rail is collapsed: a request from the switcher's Add row brings it
+  // back, and the mounted Sidebar then consumes the request.
+  $effect(() => {
+    if ($addProjectRequest) sidebarCollapsed = false;
   });
 
   // "Insert into composer" (work graph M9.2) shows where the text went: the
@@ -826,9 +846,11 @@
 <McpConfirmDialog />
 <AgentFab />
 <AgentPanel contextInput={agentContextInput} />
-<!-- Cmd/Ctrl+K / Cmd/Ctrl+P. Its "new session" rows publish a request that
-     mounts the dialog here (the Sidebar keeps its own instance for its
-     footer button until it adopts the store post-#46). -->
+<!-- Cmd/Ctrl+K / Cmd/Ctrl+P, and the one place a project is picked for a new
+     session (the sidebar's "+ New session" and the Hosts view's `n` open it
+     in New session mode). Its rows publish a request that mounts the dialog
+     here; the Sidebar's own dialog mount remains for a project row's `+` and
+     for Add project. -->
 <QuickSwitcher />
 {#if $newSessionRequest}
   <NewSessionDialog
@@ -836,6 +858,7 @@
     initialName={$newSessionRequest.initialName}
     initialHost={$newSessionRequest.initialHost}
     ticket={$newSessionRequest.ticket}
+    autostart={$newSessionRequest.autostart}
     onCreate={(s) => {
       clearNewSessionRequest();
       selectSessionExplicitly(s);

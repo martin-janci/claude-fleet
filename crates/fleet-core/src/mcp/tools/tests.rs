@@ -2301,8 +2301,9 @@ fn router_sum_serves_every_tool() {
         "a router block is missing from tool_router()"
     );
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
-    // claim tools (T12).
-    assert_eq!(served, 114);
+    // claim tools (T12) + the New session picker's `project_picks` /
+    // `set_project_pick`.
+    assert_eq!(served, 116);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3786,8 +3787,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 76,892 on 2026-10-06 after the task → session spec's A1
     /// (`work_link { start }` takes `parallel`, and a `preview_start` action
     /// sits beside it, named in the description and the action enum, +176
-    /// bytes).
-    const BUDGET_BYTES: usize = 76_992;
+    /// bytes). Measured at 76,964 on 2026-10-06 after merging `main`
+    /// (76,788: the operator's other-host start and the project picker,
+    /// +72 bytes over 76,716) into it: exactly the two sides' sum.
+    const BUDGET_BYTES: usize = 77_064;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -8758,6 +8761,61 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
     ownerless.is_personal_owner = false;
     assert!(!can(&ownerless, "get_settings"));
     assert!(!can(&ownerless, "set_setting"));
+}
+
+// ---- the New session picker (phase 1) ----
+
+/// A person's preference: their paired device reads (any mode) and writes
+/// (full); never a host's token; not served to the master.
+#[test]
+fn project_picks_reach_a_persons_device_only() {
+    let master = Caller::master();
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let phone_ro = client_caller("phone", TokenMode::Readonly);
+    let host = host_caller("hosta", TokenMode::Full);
+    let can = |c: &Caller, t: &str| {
+        enforce_mode(c, t)
+            .and_then(|()| enforce_admin(c, t))
+            .is_ok()
+            && present::visible_to(c, t)
+    };
+    assert!(can(&laptop, "project_picks") && can(&phone_ro, "project_picks"));
+    assert!(can(&laptop, "set_project_pick"));
+    assert!(!can(&phone_ro, "set_project_pick"), "a write");
+    for t in ["project_picks", "set_project_pick"] {
+        assert!(!can(&host, t), "{t}: never a host's token");
+        assert!(!can(&master, t), "{t}: not served to the master");
+    }
+    assert!(guard::is_readonly_tool("project_picks"));
+    assert!(!guard::is_readonly_tool("set_project_pick"));
+}
+
+#[tokio::test]
+async fn set_project_pick_round_trips_through_the_tools() {
+    let (tools, _guards, store) = client_tools();
+    store
+        .lock()
+        .unwrap()
+        .upsert_project("o", "r", "/p/o/r")
+        .unwrap();
+    let set = tools
+        .set_project_pick(Parameters(
+            crate::service::project_picks::SetProjectPickArgs {
+                owner: "o".into(),
+                repo: "r".into(),
+                pinned: true,
+                vis: None,
+                grp: Some("tools".into()),
+            },
+        ))
+        .await
+        .unwrap();
+    let v = result_json(&set);
+    assert_eq!(v["pinned"], true);
+    assert_eq!(v["grp"], "tools");
+    let list = result_json(&tools.project_picks().await.unwrap());
+    assert_eq!(list[0]["repo"], "r");
+    assert_eq!(list[0]["pinned"], true);
 }
 
 /// R6-l, pinned as a source scan: `access_allows` is shared with

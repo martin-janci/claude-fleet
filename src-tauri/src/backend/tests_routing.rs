@@ -422,6 +422,18 @@ fn routed_read_cases() -> Vec<Case> {
             }),
         ),
         (
+            "project_picks",
+            "project_picks",
+            json!({}),
+            r#"[{"owner":"o","repo":"r","pinned":true,"vis":"keep","grp":"tools"}]"#,
+            Box::new(|b, s, _| {
+                let v = block_on(commands::projects::routed::project_picks(b, s))?;
+                assert!(v[0].pinned, "the hub's answer");
+                assert_eq!(v[0].grp.as_deref(), Some("tools"));
+                Ok(())
+            }),
+        ),
+        (
             "refresh_projects",
             "refresh_projects",
             json!({}),
@@ -2513,6 +2525,27 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     h,
                     &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            // Every field non-default, so the whole struct is proven to cross the wire.
+            "set_project_pick",
+            "set_project_pick",
+            json!({ "owner": "o", "repo": "r", "pinned": true, "vis": "hide", "grp": "tools" }),
+            r#"{"owner":"o","repo":"r","pinned":true,"vis":"hide","grp":"tools"}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::projects::routed::set_project_pick(
+                    b,
+                    s,
+                    fleet_core::service::project_picks::SetProjectPickArgs {
+                        owner: "o".into(),
+                        repo: "r".into(),
+                        pinned: true,
+                        vis: Some("hide".into()),
+                        grp: Some("tools".into()),
+                    },
                 ))
                 .map(|_| ())
             }),
