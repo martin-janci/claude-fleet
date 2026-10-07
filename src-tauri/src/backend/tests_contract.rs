@@ -91,6 +91,8 @@ pub(crate) fn sample_session() -> SessionRow {
         // means "anybody may look".
         owner_person_id: Some(9),
         visibility: fleet_core::store::VISIBILITY_PRIVATE.into(),
+        // Some, so the golden pins the name the sidebar reads.
+        claude_profile: Some("work".into()),
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -990,10 +992,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 /// here, not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty_three() {
+fn a_session_rows_wire_names_are_these_exact_sixty_four() {
     let expected = [
         "account_uuid",
         "ci_status",
+        "claude_profile",
         "claude_session_id",
         "claude_status",
         "context_at",
@@ -1057,7 +1060,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_three() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 63, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 64, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

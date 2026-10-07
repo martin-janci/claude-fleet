@@ -1262,6 +1262,18 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// `--effort`), so the chain below is identical whichever one runs.
 pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then if [ -x "$HOME/.local/share/ag/ag" ]; then cl() { "$HOME/.local/share/ag/ag" claude --yolo "$@"; }; else cl() { claude --dangerously-skip-permissions "$@"; }; fi; fi;"#;
 
+/// Makes `$CLAUDE_CONFIG_DIR` a credential profile that shares everything
+/// with `~/.claude` except the login (docs/accounts.md). Each visible entry
+/// of `~/.claude` (`projects/`, `settings.json` with fleet's hooks, skills,
+/// …) is symlinked in unless the profile already has its own; the dotfiles
+/// are not, so `.credentials.json` and the profile's `.claude.json` (its
+/// `/login` account) stay the profile's own. Fleet reads transcripts from
+/// `~/.claude/projects` and a resumed session must find its transcript
+/// under any profile, so `projects/` is created first. Idempotent: run on
+/// every launch, it also links an entry `~/.claude` gained since. Run by
+/// `/bin/sh`, so a zsh pane shell's no-match glob error cannot abort it.
+pub const PROFILE_LINKS: &str = r#"umask 077; mkdir -p "$HOME/.claude/projects" "$CLAUDE_CONFIG_DIR" || exit 0; for f in "$HOME"/.claude/*; do [ -e "$f" ] || continue; b="${f##*/}"; [ -e "$CLAUDE_CONFIG_DIR/$b" ] || [ -L "$CLAUDE_CONFIG_DIR/$b" ] || ln -s "$f" "$CLAUDE_CONFIG_DIR/$b"; done"#;
+
 /// Puts fleet's `/voice` recorder ahead of any real `arecord` (docs/voice.md).
 pub(crate) const VOICE_PATH_PREFIX: &str = "PATH=\"$HOME/.claude-fleet/voice/bin:$PATH\"; ";
 
@@ -1294,16 +1306,36 @@ pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> Str
 pub struct ClaudeLaunch {
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The credential profile the session runs under: `CLAUDE_CONFIG_DIR`
+    /// is `~/.claude-profiles/<profile>` ([`PROFILE_LINKS`]). `None` = the
+    /// host's own login. Must have passed `validate::claude_profile`.
+    pub profile: Option<String>,
 }
 
 impl ClaudeLaunch {
     /// Stored launch options, each kept only when it still validates: a
     /// value read back from the DB never reaches the shell unchecked (an
     /// invalid one degrades to the host's default, like a bad claude id).
-    pub fn checked(model: Option<String>, effort: Option<String>) -> Self {
+    pub fn checked(model: Option<String>, effort: Option<String>, profile: Option<String>) -> Self {
         Self {
             model: model.filter(|m| crate::validate::claude_model(m).is_ok()),
             effort: effort.filter(|e| crate::validate::effort_level(e).is_ok()),
+            profile: profile.filter(|p| crate::validate::claude_profile(p).is_ok()),
+        }
+    }
+
+    /// `export CLAUDE_CONFIG_DIR=…; <PROFILE_LINKS>` for a session with a
+    /// profile; empty otherwise. Exported, not `-e` on the tmux session, so
+    /// a restart (`respawn-pane`, which takes no environment), a repair or
+    /// a move rebuilds it from the stored profile like `--model`.
+    fn profile_prefix(&self) -> String {
+        match self.profile.as_deref() {
+            Some(p) => format!(
+                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; /bin/sh -c {} 2>/dev/null; ",
+                crate::shell::quote(p),
+                crate::shell::quote(PROFILE_LINKS),
+            ),
+            None => String::new(),
         }
     }
 
@@ -1333,11 +1365,12 @@ pub fn pane_command_with(
         crate::shell::quote(tmux_name),
         launch.flags()
     );
+    let profile = launch.profile_prefix();
     match claude_session_id {
         Some(id) => format!(
-            "{VOICE_PATH_PREFIX}{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+            "{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
         ),
-        None => format!("{VOICE_PATH_PREFIX}{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
+        None => format!("{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -2168,6 +2201,7 @@ mod tests {
         let launch = ClaudeLaunch {
             model: Some("sonnet[1m]".into()),
             effort: Some("high".into()),
+            profile: None,
         };
         for shell in available_shells() {
             let argv =
@@ -2180,6 +2214,95 @@ mod tests {
                 "{shell}"
             );
         }
+    }
+
+    /// A profile session runs `cl` with `CLAUDE_CONFIG_DIR` at
+    /// `~/.claude-profiles/<name>`, which shares `~/.claude`'s visible
+    /// entries (transcripts, settings with fleet's hooks) but never its
+    /// login, and keeps whatever the profile already has of its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_session_runs_under_its_config_dir_and_shares_all_but_the_login() {
+        use super::fake_exec::{write_exec, PROBE_GUARD};
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let launch = ClaudeLaunch {
+            profile: Some("work".into()),
+            ..ClaudeLaunch::default()
+        };
+        let cmd = pane_command_with(Some(id), "dev-x", &launch);
+        for shell in available_shells() {
+            let home = tempfile::tempdir().unwrap();
+            let h = home.path();
+            let log = h.join("cl.log");
+            write_exec(
+                h,
+                "cl",
+                &format!(
+                    "#!/bin/sh\n{PROBE_GUARD}printf '%s %s\\n' \"$CLAUDE_CONFIG_DIR\" \"$*\" >> '{}'\nexit 0\n",
+                    log.display()
+                ),
+            );
+            write_exec(
+                h,
+                "fake-shell",
+                &format!("#!/bin/sh\n{PROBE_GUARD}exit 0\n"),
+            );
+            let claude = h.join(".claude");
+            std::fs::create_dir_all(claude.join("skills")).unwrap();
+            std::fs::write(claude.join("settings.json"), "{\"hooks\":{}}").unwrap();
+            std::fs::write(claude.join(".credentials.json"), "host-login").unwrap();
+            std::fs::write(claude.join("CLAUDE.md"), "shared").unwrap();
+            let profile = h.join(".claude-profiles/work");
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join("CLAUDE.md"), "the profile's own").unwrap();
+            let out = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(&cmd)
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", h.display()))
+                .env("HOME", h)
+                .env("SHELL", h.join("fake-shell"))
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let logged = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                logged.trim(),
+                format!(
+                    "{}/.claude-profiles/work --resume {id} --name dev-x",
+                    h.display()
+                ),
+                "{shell}"
+            );
+            for shared in ["projects", "settings.json", "skills"] {
+                let link = std::fs::read_link(profile.join(shared))
+                    .unwrap_or_else(|e| panic!("{shell}: {shared} not linked: {e}"));
+                assert_eq!(link, claude.join(shared), "{shell}");
+            }
+            assert!(claude.join("projects").is_dir(), "{shell}");
+            assert!(!profile.join(".credentials.json").exists(), "{shell}");
+            assert_eq!(
+                std::fs::read_to_string(profile.join("CLAUDE.md")).unwrap(),
+                "the profile's own",
+                "{shell}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_without_a_profile_leaves_the_config_dir_alone() {
+        let cmd = pane_command_with(None, "dev-x", &ClaudeLaunch::default());
+        assert!(!cmd.contains("CLAUDE_CONFIG_DIR"), "{cmd}");
+        let bad = ClaudeLaunch::checked(None, None, Some("../../etc".into()));
+        assert_eq!(
+            bad.profile, None,
+            "a stored profile that no longer validates is dropped"
+        );
     }
 
     #[cfg(unix)]

@@ -22,6 +22,17 @@ is the Transfer sheet (terminal-header chip + `moves.ts`, live steps from the
 `move:progress` event), per
 `docs/superpowers/specs/2026-09-20-transfer-sheet-design.md`.
 
+Multi-account (docs/accounts.md): Hosts shows each host's `/login` from
+`$CLAUDE_CONFIG_DIR` and flags credential variables that outrank it
+(migration 111). **Login profiles** are landed for launching: `new_session
+{ profile }` and the New session dialog run a session under
+`~/.claude-profiles/<name>` (its own `/login`, everything else shared with
+`~/.claude`), and `restart_session { profile }` resumes a session under
+another login (migration 112). Not built yet: reading each profile's
+account and usage (a profile session's account link stays empty), a
+profile picker fed by the host, a switch control in the desktop, and a hub
+vault for setup-tokens and API keys.
+
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
 (pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Their

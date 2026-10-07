@@ -151,6 +151,7 @@
     "DecidedRow": [
       "account_uuid",
       "ci_status",
+      "claude_profile",
       "claude_session_id",
       "claude_status",
       "context_at",
@@ -444,6 +445,7 @@
     "SessionRow": [
       "account_uuid",
       "ci_status",
+      "claude_profile",
       "claude_session_id",
       "claude_status",
       "context_at",

@@ -419,6 +419,7 @@ impl FleetTools {
             resume_claude_session_id: p.resume_claude_session_id,
             model: p.model,
             effort: p.effort,
+            profile: p.profile,
             // Whose the new session is (multi-user M1, T5): the person behind
             // THIS connection, resolved by `owner_for` — a paired device's own
             // person, the hub's personal owner for the master token, and
@@ -482,6 +483,7 @@ impl FleetTools {
             resume_claude_session_id: None,
             model: None,
             effort: None,
+            profile: None,
             // The caller's own person, as in `new_session` above — a shell
             // session is as private as any other (its pane sees the same
             // checkout and the same credentials).

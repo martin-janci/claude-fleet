@@ -202,6 +202,10 @@ export interface SessionRow {
    *  M1: team sharing needs memberships and arrives in M2, and a third value
    *  here would be a reader nobody defined. Absent from a hub older than M1. */
   visibility?: 'private' | 'unclaimed';
+  /** The credential profile the session runs under (`CLAUDE_CONFIG_DIR` =
+   *  `~/.claude-profiles/<name>` on its host, docs/accounts.md); absent =
+   *  the host's own login. */
+  claude_profile?: string | null;
   /** A digest of the versions and ids of the session's live (non-ended)
    *  work links (work graph M14): it moves whenever any of them changes —
    *  added, removed, primary, state — a secondary link too. Absent = 0 (no
@@ -492,9 +496,16 @@ export async function setFriendlyName(
   return r;
 }
 
-export async function restartSession(hostAlias: string, name: string): Promise<Result<SessionRow>> {
+/** Restart the session in place. With `profile`, resume its conversation
+ *  under that credential profile instead (`''` = the host's own login): a
+ *  running `claude` cannot change its login, so a switch is a restart. */
+export async function restartSession(
+  hostAlias: string,
+  name: string,
+  profile?: string,
+): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('restart_session', {
-    args: { host_alias: hostAlias, name },
+    args: profile === undefined ? { host_alias: hostAlias, name } : { host_alias: hostAlias, name, profile },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
@@ -778,6 +789,10 @@ export interface NewSessionArgs {
   /** `claude --effort` for the first launch (low … max); null = the host's
    *  default. Rejected for a shell session. */
   effort?: string | null;
+  /** Credential profile for the first launch (`~/.claude-profiles/<name>`
+   *  on the host, with its own `/login`); null = the host's login. Rejected
+   *  for a shell session. */
+  profile?: string | null;
 }
 
 export async function newSessionAbortable(

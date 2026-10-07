@@ -769,6 +769,7 @@ async fn rewind_conversation_with(
                     host_alias: sess.host_alias.clone(),
                     name: sess.tmux_name.clone(),
                     force: false,
+                    profile: None,
                 })
                 .await;
             // The rebind is committed before the restart can be attempted at
@@ -850,6 +851,7 @@ async fn rewind_conversation_with(
                     resume_claude_session_id: Some(new_id.clone()),
                     model: launch.model.clone(),
                     effort: launch.effort.clone(),
+                    profile: launch.profile.clone(),
                     // Multi-user M1 (T5, spec §4.3 invariant 6): a fork
                     // inherits the SOURCE's owner, never the forker's. The
                     // fork is a permanent verbatim copy of the source's

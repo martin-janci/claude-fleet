@@ -559,6 +559,16 @@ fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 112.
+fn sessions_has_claude_profile(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'claude_profile'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 111.
 fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1284,6 +1294,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 111,
         sql: include_str!("../../migrations/111_host_auth_overrides.sql"),
         already_applied: Some(hosts_has_auth_overrides),
+    },
+    // A session's credential profile (multi-account phase 2): one ADD
+    // COLUMN, guarded, and the row-version trigger re-issued to watch it.
+    Migration {
+        version: 112,
+        sql: include_str!("../../migrations/112_session_claude_profile.sql"),
+        already_applied: Some(sessions_has_claude_profile),
     },
 ];
 
@@ -5416,19 +5433,17 @@ mod tests {
                 None,
             )
             .unwrap();
-        let sid = s
-            .upsert_session(
-                "dev-r--feat/imports",
-                "trn",
-                Some(pid),
-                Some(wid),
-                1,
-                1,
-                "lost",
-                None,
+        // Raw too: `upsert_session` reads the row back with every current
+        // `sessions` column (112's `claude_profile` among them).
+        s.conn
+            .execute(
+                "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id, \
+                 created_at, last_activity_at, status, worktree_key) \
+                 VALUES ('dev-r--feat/imports', 'trn', ?1, ?2, 1, 1, 'lost', 'feat')",
+                rusqlite::params![pid, wid],
             )
             .unwrap();
-        s.set_worktree_key(sid, Some("feat")).unwrap();
+        let sid = s.conn.last_insert_rowid();
 
         s.migrate().unwrap();
         let row = |id| s.get_worktree_row(id).unwrap().unwrap();

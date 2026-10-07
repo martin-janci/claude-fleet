@@ -725,10 +725,15 @@ fn write_reachable_host(
         let prior_row = stored.get(&sess.name);
         // Preservation invariant: if the session already has an
         // account_uuid in the DB, keep it; only capture the host's
-        // current account for newly-discovered sessions.
-        let account_uuid = prior_row
-            .and_then(|p| p.account_uuid.clone())
-            .or_else(|| host_account.clone());
+        // current account for newly-discovered sessions. A session under a
+        // credential profile bills that profile's login, never the host's,
+        // so it never takes the host's account.
+        let account_uuid = match prior_row {
+            Some(p) if p.claude_profile.is_some() => p.account_uuid.clone(),
+            _ => prior_row
+                .and_then(|p| p.account_uuid.clone())
+                .or_else(|| host_account.clone()),
+        };
         let worktree_key = worktree_key_for_host(&sess.path.to_string_lossy(), &paths);
         // The running Claude agent this session is paired with (see
         // `pair_session_agents`) — its id lets `recreate`/`restart`

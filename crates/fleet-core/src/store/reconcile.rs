@@ -1125,6 +1125,7 @@ mod tests {
             pr_checked_at: None,
             owner_person_id: None,
             visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
+            claude_profile: None,
             parent_session_id: None,
             tags: Vec::new(),
             usage: Default::default(),

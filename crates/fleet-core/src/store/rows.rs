@@ -340,6 +340,11 @@ pub struct SessionRow {
     /// privacy-critical one.
     #[serde(default = "visibility_unclaimed")]
     pub visibility: String,
+    /// The credential profile the session runs under (migration 112,
+    /// docs/accounts.md): `CLAUDE_CONFIG_DIR` is
+    /// `~/.claude-profiles/<name>` on its host. `None` = the host's own login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_profile: Option<String>,
 }
 
 /// `sessions.visibility` (migration 100): private to its owner, and to the
@@ -493,7 +498,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
        WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
-     pr_evidence, pr_checked_at, owner_person_id, visibility"
+     pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -602,6 +607,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         pr_checked_at: row.get(63)?,
         owner_person_id: row.get(64)?,
         visibility: row.get(65)?,
+        claude_profile: row.get(66)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
