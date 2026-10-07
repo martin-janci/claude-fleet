@@ -1572,6 +1572,30 @@ pub async fn start_work(
     view: &crate::service::view_scope::ViewScope,
     net: &TrackerNet,
 ) -> Result<SessionRow, IpcError> {
+    let (row, plan, queued) = start_work_unprompted(store, ssh, reg, args, view, net).await?;
+    if queued {
+        crate::service::work::resume::spawn_start_prompt(
+            Arc::clone(store),
+            Arc::clone(ssh),
+            &row,
+            start_prompt(&plan.key),
+        );
+    }
+    Ok(row)
+}
+
+/// [`start_work`] without its first prompt: the session, linked, with its
+/// brief queued (`true` when one was), and the plan it was started on. The
+/// caller types its own prompt, as `work_link { run }` does to append its
+/// task's done-marker instruction.
+pub async fn start_work_unprompted(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<crate::ssh::SshClient>,
+    reg: &Arc<crate::cancel::CancellationRegistry>,
+    args: &StartArgs,
+    view: &crate::service::view_scope::ViewScope,
+    net: &TrackerNet,
+) -> Result<(SessionRow, StartPlan, bool), IpcError> {
     // Main's native-subtask defaults, under M1's `ViewScope`: the step needs
     // only the org half, which is what `with_native_defaults` takes.
     let args = &with_native_defaults(store, args, &view.org)?;
@@ -1587,15 +1611,7 @@ pub async fn start_work(
         crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
     })
     .await?;
-    if queued {
-        crate::service::work::resume::spawn_start_prompt(
-            Arc::clone(store),
-            Arc::clone(ssh),
-            &row,
-            start_prompt(&plan.key),
-        );
-    }
-    Ok(row)
+    Ok((row, plan, queued))
 }
 
 // --- start preview (task → session spec P-1) ---------------------------------

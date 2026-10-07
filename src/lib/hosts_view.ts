@@ -169,6 +169,7 @@ export type AttentionKind =
   | 'hooks_stale'
   | 'provision_warning'
   | 'provision_stale'
+  | 'auth_override'
   | 'disk_low'
   | 'agent_old'
   | 'claude_old';
@@ -182,8 +183,8 @@ export interface HostAttention {
 
 /**
  * At most ONE attention mark per host, strongest first: no control-API token
- * (so no hooks either), hooks installed but silent, a home filesystem almost
- * full, a fleet-agent behind the hub, then a Claude Code older than the
+ * (so no hooks either), hooks installed but silent, a credential variable
+ * outranking the host's /login, a home filesystem almost full, a fleet-agent behind the hub, then a Claude Code older than the
  * newest in the fleet. Token-derived marks wait for `tokensLoaded` so a slow
  * token fetch never flashes a false alarm.
  */
@@ -244,6 +245,17 @@ export function hostAttention(args: {
       kind: 'provision_stale',
       glyph: '↻',
       title: `${host.alias} was provisioned with an older fleet (content differs from this build): re-provision it — fleet-hub provision --host ${host.alias} --content-only.`,
+    };
+  }
+  // Multi-account groundwork: a credential variable in the host's shell or tmux
+  // environment outranks its /login, so sessions there bill that credential
+  // while the Hosts view shows the logged-in account.
+  const overrides = host.auth_overrides ?? [];
+  if (overrides.length > 0) {
+    return {
+      kind: 'auth_override',
+      glyph: '⚿',
+      title: `${host.alias}: ${overrides.join(', ')} ${overrides.length === 1 ? 'is' : 'are'} set in its shell or tmux environment and outrank${overrides.length === 1 ? 's' : ''} the /login account, so new Claude sessions there use that credential instead. Unset it (and restart tmux) to use the login.`,
     };
   }
   // hosts F4 / ux F-14: two hosts sat at 98 % disk with no signal anywhere.

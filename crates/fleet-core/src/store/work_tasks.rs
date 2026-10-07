@@ -282,7 +282,7 @@ impl Store {
             "SELECT {}, w.id FROM work_items w JOIN tasks t ON t.id = w.task_id",
             super::rows::task_columns_t()
         ))?;
-        const ITEM_ID: usize = 13;
+        const ITEM_ID: usize = 16;
         let rows = stmt.query_map([], |r| {
             Ok((r.get::<_, i64>(ITEM_ID)?, super::rows::map_task_row(r)?))
         })?;

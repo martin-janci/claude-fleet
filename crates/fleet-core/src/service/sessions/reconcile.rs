@@ -270,7 +270,8 @@ pub(crate) struct ReconcileDeps {
     /// (`fake`/`fake_with_shell`) so the huge majority of reconcile tests
     /// never read a REAL `~/.claude.json` — only `fake_with_local_home` sets
     /// it, for tests that specifically exercise this behaviour. `real()`
-    /// always sets it to the process's actual `$HOME`.
+    /// always sets it to the directory holding the real `.claude.json`
+    /// (`CLAUDE_CONFIG_DIR`, else `$HOME`: `hosts::local_claude_json_dir`).
     pub(super) local_home: Option<std::path::PathBuf>,
     /// Whether this hub's own machine is a fleet host. False on a
     /// `fleet-hub` daemon (`hub.local_host = false`): no `local` row is
@@ -313,7 +314,7 @@ impl ReconcileDeps {
             probe_timeout: HOST_PROBE_TIMEOUT,
             shell,
             pr_cache: crate::service::outcome::pr_probe_cache(),
-            local_home: local_host.then(crate::service::hosts::local_home_dir),
+            local_home: local_host.then(crate::service::hosts::local_claude_json_dir),
             local_host,
             agents_every: AGENTS_CADENCE,
             last_agents: last_agents_map(),

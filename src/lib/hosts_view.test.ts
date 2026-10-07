@@ -228,6 +228,32 @@ describe('host health helpers', () => {
     expect(hostAttention({ ...base, host: host('ok', {}) })).toBeNull();
   });
 
+  it('auth_override names the variables that outrank the login and outranks disk_low', () => {
+    const base = {
+      hasToken: true,
+      tokensLoaded: true,
+      hook: { state: 'seen' as const, lastAt: NOW },
+      sessionCount: 1,
+      newestClaude: null,
+      now: NOW,
+      versionMaxAgeSecs: 86400,
+      diskLowPct: 90,
+      hubVersion: null,
+    };
+    const keyed = host('mef', {
+      auth_overrides: ['ANTHROPIC_API_KEY'],
+      disk_home_free_kb: 3_600_000,
+      disk_home_total_kb: 150_000_000,
+      health_at: NOW,
+    });
+    const a = hostAttention({ ...base, host: keyed });
+    expect(a?.kind).toBe('auth_override');
+    expect(a?.title).toContain('ANTHROPIC_API_KEY is set');
+    // none set, or unknown (older hub), earns no mark
+    expect(hostAttention({ ...base, host: host('ok', { auth_overrides: [] }) })).toBeNull();
+    expect(hostAttention({ ...base, host: host('old', { auth_overrides: null }) })).toBeNull();
+  });
+
   it('disk_low outranks claude_old; agent_old fires when the agent is older than the hub version', () => {
     const base = {
       hasToken: true,

@@ -1746,6 +1746,27 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Orchestration O0: a run is a person's or the operator's — every
+    // per-host token is refused before any lookup, so it answers alike for
+    // its own org's item and another's; a client bound to A never finds B's.
+    m.row(
+        "work_link",
+        "run",
+        |fx, _| json!({ "action": "run", "item_id": fx.item_b, "project_id": 1 }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostB | Who::HostNone => {
+                    is_code(who, a, "E_FORBIDDEN", "a per-host token runs nothing")
+                }
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "run another org's item"),
+                _ => assert_ne!(code(a), "E_FORBIDDEN", "{who:?}: {a:?}"),
+            }
+        },
+    )
+    .await;
     let guessed = call(
         &fx,
         Who::HostA,

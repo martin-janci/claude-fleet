@@ -3846,7 +3846,7 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 78,504 on 2026-10-07 after merging sprints and releases
     /// (`work { buckets | bucket }`, `work_link { bucket_add | bucket_remove }`
     /// and six `work_admin` bucket actions, +1,280 bytes) with it.
-    const BUDGET_BYTES: usize = 78_604;
+    const BUDGET_BYTES: usize = 78_902;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10755,6 +10755,10 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // The start's preview (task → session spec P-1) plans exactly as `start`
     // does, through `plan_resolved`, so it threads the same whole scope.
     ("work_link", "preview_start", &["ViewScope"]),
+    // A run (orchestration O0) is a start through the same `plan_resolved`,
+    // plus one more row it reaches: the item's open attempt, whose task
+    // (prompt, worker) it answers only when the caller may see that task.
+    ("work_link", "run", &["ViewScope"]),
 ];
 
 /// **Every `ViewScope` row's PROOF: the behavioural test that shows the fence
@@ -10921,6 +10925,14 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
         "preview_start",
         "a_start_preview_names_no_session_another_person_cannot_see",
         "a_start_preview_does_not_plan_into_another_persons_worktree",
+    ),
+    // A run's two fences: the open attempt it would answer, and the landing
+    // its start makes (the start's own gate, reached through the run).
+    (
+        "work_link",
+        "run",
+        "a_run_answers_no_open_attempt_another_person_cannot_see",
+        "a_run_does_not_land_in_another_persons_worktree",
     ),
 ];
 
@@ -15434,6 +15446,153 @@ async fn a_start_refusal_names_no_session_another_person_cannot_see() {
     assert!(
         adas.contains("Ada on payments") && adas.contains("jump to it"),
         "her own session is hers to be told about: {adas}"
+    );
+}
+
+/// `work_link { run }` is idempotent per (item, role): while an attempt is
+/// open it answers that task — its prompt and its worker — instead of
+/// starting another. Only to a caller who may see that task; anybody else is
+/// told the item is busy and nothing more.
+#[tokio::test]
+async fn a_run_answers_no_open_attempt_another_person_cannot_see() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let a_row = s
+        .upsert_session("dev-ada-task", "h", Some(pid), None, 1, 1, "running", None)
+        .unwrap();
+    assert!(s.claim_if_unclaimed(a_row, Some(ada)).unwrap());
+    let item = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Queue schema",
+            parent_id: None,
+            project_id: Some(pid),
+            notes: None,
+        })
+        .unwrap()
+        .id;
+    let task = crate::service::work::run::record_run(
+        &s,
+        a_row,
+        "Ada's secret prompt",
+        item,
+        1,
+        "implement",
+    )
+    .unwrap();
+    let t = test_tools(s);
+    let run = |caller: Caller| {
+        let t = t.clone();
+        async move {
+            t.work_link(
+                Extension(caller),
+                Parameters(
+                    serde_json::from_value(serde_json::json!({
+                        "action": "run", "item_id": item,
+                        "project_id": pid, "host_alias": "h",
+                    }))
+                    .unwrap(),
+                ),
+            )
+            .await
+        }
+    };
+
+    let bobs = format!(
+        "{:?}",
+        run(device_of(bob, ada))
+            .await
+            .expect_err("the item has an open attempt Bob may not see")
+    );
+    assert!(bobs.contains("E_EXISTS"), "busy, and that is all: {bobs}");
+    for secret in ["Ada's secret prompt", "dev-ada-task"] {
+        assert!(
+            !bobs.contains(secret),
+            "the refusal handed Bob {secret}: {bobs}"
+        );
+    }
+    let adas = run(device_of(ada, ada))
+        .await
+        .expect("her own open attempt answers her");
+    let v: serde_json::Value = serde_json::from_str(text_of(&adas.content[0])).unwrap();
+    assert_eq!(v["existing"], true, "{v}");
+    assert_eq!(v["task"]["id"], task.id, "{v}");
+    assert_eq!(v["session_id"], a_row, "{v}");
+}
+
+/// A run plans through the start path, so it lands in an existing checkout
+/// by branch name exactly as a start does — and is refused exactly as a
+/// start is when that checkout is another person's (the LOST row a reboot
+/// left in it).
+#[tokio::test]
+async fn a_run_does_not_land_in_another_persons_worktree() {
+    let s = Store::open_in_memory().unwrap();
+    let host = crate::service::projects::LOCAL_HOST;
+    s.upsert_host(host).unwrap();
+    let ada = s.personal_owner_id().unwrap().expect("096 mints one");
+    let bob = s.create_person("bob", None).unwrap().id;
+    let pid = s.upsert_project("o", "r", "/p").unwrap();
+    let item = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Queue schema",
+            parent_id: None,
+            project_id: Some(pid),
+            notes: None,
+        })
+        .unwrap()
+        .id;
+    let wt = s
+        .upsert_worktree(pid, "queue-wt", "/p/.worktrees/queue-wt", Some("queue-wt"))
+        .unwrap();
+    let a_row = s
+        .upsert_session(
+            "dev-ada-queue",
+            host,
+            Some(pid),
+            Some(wt),
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    assert!(s.claim_if_unclaimed(a_row, Some(ada)).unwrap());
+    s.conn_ref()
+        .execute(
+            "UPDATE sessions SET status='ghost', lost_at=10, lost_reason='reboot' WHERE id=?1",
+            rusqlite::params![a_row],
+        )
+        .unwrap();
+    let t = test_tools(s);
+    let e = format!(
+        "{:?}",
+        t.work_link(
+            Extension(device_of(bob, ada)),
+            Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "run", "item_id": item,
+                    "project_id": pid, "host_alias": host, "worktree": "queue-wt",
+                }))
+                .unwrap(),
+            ),
+        )
+        .await
+        .expect_err("Bob must not run in Ada's checkout")
+    );
+    assert!(
+        e.contains("E_FORBIDDEN"),
+        "refused before anything is spawned: {e}"
+    );
+    assert!(
+        !e.contains("dev-ada-queue"),
+        "and the refusal names no session: {e}"
+    );
+    let s = t.store.lock().unwrap();
+    assert!(
+        s.tasks_for_item(item).unwrap().is_empty(),
+        "no attempt was recorded"
     );
 }
 

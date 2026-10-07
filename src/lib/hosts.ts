@@ -59,6 +59,10 @@ export interface HostRow {
    *  degraded part way (the ag launcher did not install, say). Cleared by the
    *  next clean run; absent from an older hub. */
   provision_warning?: string | null;
+  /** Credential variables set on the host that outrank its /login, by name only
+   *  (ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK, …), in Claude Code's precedence
+   *  order. null or absent = unknown (never sampled, or an older hub); [] = none. */
+  auth_overrides?: string[] | null;
 }
 
 /** The volatile half of a host row, as `host:pinged` carries it. */
@@ -70,6 +74,8 @@ export interface HostHealth {
   mem_avail_kb: number | null;
   uptime_secs: number | null;
   health_at: number | null;
+  /** Absent from an older hub's ping (the row keeps what it had). */
+  auth_overrides?: string[] | null;
 }
 
 export interface SshHost {

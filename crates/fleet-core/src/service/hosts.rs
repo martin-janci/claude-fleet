@@ -486,17 +486,22 @@ async fn probe(
 }
 
 /// The `oauthAccount` section of the probe on its own: prints
-/// `~/.claude.json`'s `oauthAccount` as one line of compact JSON (via `jq`,
+/// `.claude.json`'s `oauthAccount` as one line of compact JSON (via `jq`,
 /// falling back to `python3`), or nothing when the file/tools are missing.
 /// Also run by itself every reconcile pass for each remote host
 /// (`RemoteTmux::read_oauth_account`) so an account switch on a remote host
 /// is picked up without a manual Re-probe. A macro rather than a `const` so
 /// `PROBE_SCRIPT` can `concat!` it. MUST be `quote`'d before it is handed to
 /// `bash -lc` over ssh.
+///
+/// The file is `$CLAUDE_CONFIG_DIR/.claude.json` when that variable is set
+/// (Claude Code keeps its whole config there, login included), else
+/// `$HOME/.claude.json` — the same rule `account_usage`'s script uses for
+/// `.credentials.json`, so the account and its usage come from one login.
 macro_rules! oauth_account_script {
     () => {
-        r#"( cat "$HOME/.claude.json" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
-  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$HOME/.claude.json" 2>/dev/null \
+        r#"( cj="${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"; cat "$cj" 2>/dev/null | jq -c .oauthAccount 2>/dev/null \
+  || python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d.get("oauthAccount") or {}))' "$cj" 2>/dev/null \
   || true )"#
     };
 }
@@ -595,12 +600,32 @@ pub(crate) fn local_home_dir() -> std::path::PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// Thin wrapper around [`probe_local_in`] that resolves the real `$HOME`.
+/// The directory holding this machine's `.claude.json`: `CLAUDE_CONFIG_DIR`
+/// when this process has it (non-empty), else [`local_home_dir`]. The same
+/// rule as the remote [`OAUTH_ACCOUNT_SCRIPT`], so `local` reads the login a
+/// `claude` started from this environment would use.
+pub(crate) fn local_claude_json_dir() -> std::path::PathBuf {
+    claude_json_dir(&local_home_dir(), std::env::var_os("CLAUDE_CONFIG_DIR"))
+}
+
+/// Pure half of [`local_claude_json_dir`], for tests.
+fn claude_json_dir(
+    home: &std::path::Path,
+    config_dir: Option<std::ffi::OsString>,
+) -> std::path::PathBuf {
+    match config_dir {
+        Some(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => home.to_path_buf(),
+    }
+}
+
+/// Thin wrapper around [`probe_local_in`] that resolves the real directory
+/// holding `.claude.json` ([`local_claude_json_dir`]).
 /// Kept zero-arg so `tokio::task::spawn_blocking(probe_local)` (blocking
 /// std::process + fs I/O, off the async runtime worker thread) needs no
 /// closure allocation at its one production call site.
 fn probe_local() -> (bool, Option<String>, Option<String>, Option<OauthAccount>) {
-    probe_local_in(&local_home_dir())
+    probe_local_in(&local_claude_json_dir())
 }
 
 /// Probe the local machine's tmux/claude versions and `oauthAccount`, reading
@@ -878,6 +903,7 @@ mod tests {
             provision_stale: false,
             unclaimed_sessions: None,
             provision_warning: None,
+            auth_overrides: None,
             harnesses: None,
         }
     }
@@ -1162,6 +1188,46 @@ mod tests {
             Some("mj-janci@users.noreply.github.com")
         );
         assert!(account.seat_tier.is_none());
+    }
+
+    #[test]
+    fn claude_json_dir_prefers_a_non_empty_config_dir() {
+        let home = std::path::Path::new("/home/u");
+        assert_eq!(claude_json_dir(home, None), home);
+        assert_eq!(claude_json_dir(home, Some("".into())), home);
+        assert_eq!(
+            claude_json_dir(home, Some("/home/u/.claude-work".into())),
+            std::path::Path::new("/home/u/.claude-work")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_oauth_account_script_reads_the_config_dir_login_when_set() {
+        // Two logins on one host: the default one under $HOME and a second
+        // under CLAUDE_CONFIG_DIR. The script must follow the variable.
+        let home = tempfile::tempdir().unwrap();
+        let work = home.path().join(".claude-work");
+        std::fs::create_dir(&work).unwrap();
+        write_claude_json(home.path(), r#"{"accountUuid":"personal"}"#);
+        write_claude_json(&work, r#"{"accountUuid":"work"}"#);
+        let run = |config_dir: Option<&std::path::Path>| {
+            let mut cmd = std::process::Command::new("bash");
+            cmd.args(["-c", OAUTH_ACCOUNT_SCRIPT])
+                .env("HOME", home.path())
+                .env_remove("CLAUDE_CONFIG_DIR");
+            if let Some(d) = config_dir {
+                cmd.env("CLAUDE_CONFIG_DIR", d);
+            }
+            let out = cmd.output().unwrap();
+            parse_oauth_account(&String::from_utf8_lossy(&out.stdout)).and_then(|a| a.uuid)
+        };
+        if run(None).is_none() {
+            // Neither jq nor python3 on this machine: nothing to compare.
+            return;
+        }
+        assert_eq!(run(None).as_deref(), Some("personal"));
+        assert_eq!(run(Some(&work)).as_deref(), Some("work"));
     }
 
     #[test]

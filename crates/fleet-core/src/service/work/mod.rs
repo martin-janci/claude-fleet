@@ -16,6 +16,7 @@ pub mod recognize;
 pub mod resolve;
 pub mod resume;
 pub mod retention;
+pub mod run;
 #[cfg(test)]
 mod scale_tests;
 pub mod status;
@@ -178,6 +179,9 @@ pub struct WorkLinkArgs {
     /// Start: beside a live one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel: Option<bool>,
+    /// run: implement|review|test|research|integrate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// link/switch: false refuses when live elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ack_live: Option<bool>,
@@ -408,6 +412,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "resume",
     "start",
     "preview_start",
+    "run",
     "handover",
     "archive",
     "unarchive",
@@ -869,6 +874,7 @@ fn work_link_locked<'a>(
         args.action.as_str(),
         "resume"
             | "start"
+            | "run"
             | "trust_project"
             | "handover"
             | "dismiss"
