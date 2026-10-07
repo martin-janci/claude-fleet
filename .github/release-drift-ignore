@@ -12,3 +12,21 @@
 # from a marker ref.
 
 v0.2.0-phase2   # a milestone marker from the phase-2 rewrite, never a release
+
+# Releases deleted by hand after release.yml built them complete (runs
+# 35430601415 / 35479591153 / 35497802125 all succeeded). The tags stay as
+# history; nobody should install a 0.2.2x build now. Decided 2026-10-07 (#322).
+v0.2.22   # release deleted by hand, 2026-09; superseded, not rebuilt
+v0.2.24   # release deleted by hand, 2026-09; superseded, not rebuilt
+v0.2.25   # release deleted by hand, 2026-09; superseded, not rebuilt
+
+# Drafts that were never published: built before T10 made publication
+# automatic, then left behind. 0.2.28-0.2.31 also predate the versioned asset
+# names, so they fail today's verify-release.sh. The drafts were deleted on
+# 2026-10-07 (#322) instead of published; the tags stay as history.
+v0.2.28   # stranded draft, deleted 2026-10-07; superseded
+v0.2.29   # stranded draft, deleted 2026-10-07; superseded
+v0.2.30   # stranded draft, deleted 2026-10-07; superseded
+v0.2.31   # stranded draft, deleted 2026-10-07; superseded
+v0.2.36   # stranded draft, deleted 2026-10-07; superseded
+v0.2.37   # stranded draft, deleted 2026-10-07; superseded

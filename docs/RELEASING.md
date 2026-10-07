@@ -424,7 +424,8 @@ exist. It reports:
 1. a `vX.Y.Z` tag with no release object — a release deleted by hand, or a
    tag whose workflow never ran (both have happened here: v0.2.22, v0.2.24
    and v0.2.25 have tags and no releases; v0.2.27 was bumped and never
-   tagged);
+   tagged). Tags with no release on purpose are listed in
+   `.github/release-drift-ignore`;
 2. a draft older than six hours — since publication is automatic, a
    lingering draft means a leg failed and nobody went back to it;
 3. the newest ten releases still carrying every asset, checked by
@@ -442,13 +443,16 @@ Everything lands in **one** issue labelled `release-drift`, rewritten in
 place. The report deliberately contains no timestamps, so an unchanged
 problem produces an identical body, the edit is skipped and nobody is
 notified again; when the drift clears, the issue is closed with a comment.
-*The issue create/update/close steps have never run against GitHub* — they
-are reviewed YAML, and the step that feeds them was verified by executing its
-body under `bash -e` (the Actions default shell) against the live script.
-Expect the first scheduled run to be the real test.
+The create step first ran against GitHub on 2026-09-27 and opened #322. The
+update and close steps have not run there yet; they are reviewed YAML, and the
+step that feeds them was verified by running its body under `bash -e` (the
+Actions default shell) against the live script.
 
 A tag that is *meant* to have no release goes in `.github/release-drift-ignore`
-with the reason in a `#` comment. That is the only way to silence a line.
+with the reason in a `#` comment. That is the only way to silence a
+missing-release line. The list does not cover drafts: a stale draft is
+published, or deleted and its tag then listed there (v0.2.28–v0.2.31,
+v0.2.36 and v0.2.37 went that way).
 
 Run it yourself any time — it writes nothing:
 
