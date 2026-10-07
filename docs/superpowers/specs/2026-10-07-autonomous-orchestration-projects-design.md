@@ -1,7 +1,7 @@
 # Autonómne orchestračné projekty — návrh a zosúladenie s kódom
 
 **Dátum:** 2026-10-07
-**Stav:** brainstorming. Nič z toho nie je schválené ani postavené. Rozhodnutia vlastníka sú otvorené (§11).
+**Stav:** odporúčania O1–O12 (§11) vlastník prijal 2026-10-07 („go on"). O0 je rozpracované: `work_link { run }` a migrácia 109 (§10).
 **Vstup:** handover „Cloud Fleet — Autonomous Orchestration Projects" (vlastník, 2026-10-07; ďalej *handover*).
 **Nadväzuje na:**
 - `2026-09-29-ai-task-system-brainstorming.md` — vízia a roadmapa častí 1–5.
@@ -355,7 +355,7 @@ Mapované na Mode C, aby sa nestaval rovnaký kus dvakrát.
 
 | # | Fáza | Obsah | Mode C | Autonómia |
 |---|---|---|---|---|
-| **O0** | Pripravenosť | `dispatch` logiku z MCP handlera do service (`service::tasks::dispatch`), aby ju volal aj loop. `work_link { run }` cez start path + nonce. `tasks.work_item_id/attempt/role`. | časť C4 | žiadna |
+| **O0** | Pripravenosť | `work_link { run, item_id, role? }` cez start path + nonce (`service/work/run.rs`), `tasks.work_item_id/attempt/role` (migrácia 109). **Zmenené pri implementácii:** presun `dispatch_task` zo MCP handlera do service sa odkladá do O4. `run` ho nepotrebuje a loop bude spúšťať cez `run`, nie cez dispatch do existujúcej session. | časť C4 | žiadna |
 | **O1** | Kontajner | `orchestration_projects`, `_repos`, `work_items.orchestration_project_id`, `orchestration_events` (len zápis). CRUD, desktop stránka, verdikty, izolácia, telefón len čítanie. | nahrádza C1 `work_plans` | žiadna |
 | **O2** | Graf | `work_item_deps`, READY/BLOCKED, vlny, `propose_tree`, `accept_many`, Undo | C2 | L0 |
 | **O3** | Evidencia | `result_json`, git-zistené commity a súbory, typované `done_when`, `verify`, Verified/Unverified. **Pred akoukoľvek autonómiou.** | C3 | L0 |

@@ -241,6 +241,17 @@ desktop's attach picker (`AttachPicker.svelte`, `attach.ts`) and Work on
 task… (`SessionTasks.svelte`) read them. Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
 
+Orchestration projects (spec
+`docs/superpowers/specs/2026-10-07-autonomous-orchestration-projects-design.md`,
+recommendations O1–O12 accepted 2026-10-07): O0 is built.
+`work_link { run, item_id, role? }` (`service/work/run.rs`) starts an
+attempt at an existing item through the start path (its own worktree, the
+brief) and tracks it as a `tasks` row naming the item, attempt and role
+(migration 109); its first prompt carries the done marker, and no mirror
+item is made. One open attempt per (item, role): a second run answers it.
+Per-host tokens are refused; the operator's run is confirmed like a start.
+No project container, graph or loop yet (O1–O8).
+
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
 `rewind_conversation` (`service/rewind.rs`), which copies the transcript up

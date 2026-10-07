@@ -218,6 +218,9 @@ pub(crate) fn sample_task() -> TaskRow {
         nonce: "secret-nonce".into(),
         worker_claude_session_id: Some("claude-uuid".into()),
         detached_at: None,
+        work_item_id: None,
+        attempt: None,
+        role: None,
     }
 }
 

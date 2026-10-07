@@ -99,6 +99,72 @@ impl Store {
         Ok(())
     }
 
+    /// Mark a task as an attempt at a work item (`work_link { run }`,
+    /// migration 109): its item, attempt number and role. Emits
+    /// `task_updated`.
+    pub fn set_task_run(
+        &self,
+        id: i64,
+        work_item_id: i64,
+        attempt: i64,
+        role: &str,
+    ) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE tasks SET work_item_id = ?1, attempt = ?2, role = ?3 WHERE id = ?4",
+            rusqlite::params![work_item_id, attempt, role, id],
+        )?;
+        self.emit_task(id)
+    }
+
+    /// The open (`queued` / `running`) attempt at `work_item_id` in `role`,
+    /// newest first: a second `run` returns it instead of starting another.
+    pub fn open_task_for_item(
+        &self,
+        work_item_id: i64,
+        role: &str,
+    ) -> Result<Option<TaskRow>, crate::ipc_error::IpcError> {
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT {TASK_COLUMNS} FROM tasks \
+                     WHERE work_item_id = ?1 AND role = ?2 AND state IN ('queued','running') \
+                     ORDER BY created_at DESC, id DESC LIMIT 1"
+                ),
+                rusqlite::params![work_item_id, role],
+                map_task_row,
+            )
+            .optional()
+            .map_err(crate::ipc_error::IpcError::from)
+    }
+
+    /// The number the next attempt at `work_item_id` in `role` takes: one
+    /// past the highest so far, `1` for the first.
+    pub fn next_task_attempt(
+        &self,
+        work_item_id: i64,
+        role: &str,
+    ) -> Result<i64, crate::ipc_error::IpcError> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(attempt), 0) + 1 FROM tasks \
+             WHERE work_item_id = ?1 AND role = ?2",
+            rusqlite::params![work_item_id, role],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Every attempt at `work_item_id`, newest first.
+    pub fn tasks_for_item(
+        &self,
+        work_item_id: i64,
+    ) -> Result<Vec<TaskRow>, crate::ipc_error::IpcError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE work_item_id = ?1 \
+                 ORDER BY created_at DESC, id DESC"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params![work_item_id], map_task_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// The `queued` / `running` tasks a worker session is executing (oldest
     /// first — the marker scan resolves them in dispatch order).
     ///
