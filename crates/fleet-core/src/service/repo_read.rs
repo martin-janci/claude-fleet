@@ -150,7 +150,9 @@ pub(crate) fn parse_status_z(raw: &[u8]) -> Vec<ChangedFile> {
             continue;
         }
         let (status, staged) = classify(x, y);
-        let orig_path = if (x == 'R' || x == 'C') && i < tokens.len() {
+        // Either column: `git add -N` of a moved file reports a WORK-TREE
+        // rename (` R new\0old`), whose original path is a token too.
+        let orig_path = if (matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C')) && i < tokens.len() {
             let orig = tokens[i].to_string();
             i += 1;
             Some(orig)
@@ -698,6 +700,15 @@ mod tests {
         assert!(!files[0].staged);
         assert_eq!(files[1].path, "new.txt");
         assert_eq!(files[1].status, "untracked");
+    }
+
+    #[test]
+    fn parse_status_z_worktree_rename_consumes_orig_path() {
+        let files = parse_status_z(b" R b.txt\0a.txt\0 M c.ts\0");
+        assert_eq!(files.len(), 2, "{files:?}");
+        assert_eq!(files[0].path, "b.txt");
+        assert_eq!(files[0].orig_path.as_deref(), Some("a.txt"));
+        assert_eq!(files[1].path, "c.ts");
     }
 
     #[test]

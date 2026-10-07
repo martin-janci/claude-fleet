@@ -170,7 +170,21 @@ fn marker_content() -> String {
     )
 }
 
-/// Prints the git toplevel when `~/.claude/skills` (following a symlink)
+/// Prefixes the probe's answer, so a login banner (`bash -lc` runs the
+/// profile first) is never read as a git toplevel and refused as one.
+const GIT_TOP_PREFIX: &str = "fleet-git-top=";
+
+/// The toplevel [`git_tree_probe_script`] reported, or `""`.
+fn git_top_of(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|l| l.trim_end_matches('\r').strip_prefix(GIT_TOP_PREFIX))
+        .unwrap_or("")
+        .trim()
+}
+
+/// Prints the git toplevel (after [`GIT_TOP_PREFIX`]) when `~/.claude/skills` (following a symlink)
 /// sits inside a work tree AND that tree tracks a file in one of fleet's two
 /// skill dirs, else nothing. A dotfiles checkout that untracks or ignores
 /// them is fine: provisioning then overwrites nothing anyone committed.
@@ -188,7 +202,7 @@ fn git_tree_probe_script() -> String {
         .join(" ");
     format!(
         "cd {} 2>/dev/null && top=$(git rev-parse --show-toplevel 2>/dev/null) \
-         && [ -n \"$(git ls-files -- {dirs} 2>/dev/null)\" ] && echo \"$top\"; true",
+         && [ -n \"$(git ls-files -- {dirs} 2>/dev/null)\" ] && echo \"{GIT_TOP_PREFIX}$top\"; true",
         remote_path(SKILLS_ROOT)
     )
 }
@@ -340,7 +354,7 @@ async fn provision_skills(
         let out = ssh
             .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
             .await?;
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        git_top_of(&String::from_utf8_lossy(&out.stdout)).to_string()
     };
     if !toplevel.is_empty() && !force_git_tree {
         return Err(IpcError::new(
@@ -1067,7 +1081,17 @@ pub async fn read_host_file(ssh: &dyn SshExec, host: &str, path: &str) -> Result
     let out = ssh
         .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
         .await?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(String::from_utf8_lossy(read_payload(&out.stdout)).into_owned())
+}
+
+/// The file's bytes from [`remote_read_script`]'s stdout: what follows the
+/// marker line. `bash -lc` runs the login profile first, and whatever it
+/// prints (a banner, an MOTD) lands ahead of the file; taken whole, it was
+/// written back into `~/.tmux.conf` / `~/.claude/CLAUDE.md` and broke the
+/// JSON parse of `~/.claude.json`. Without a marker (a host that answered
+/// some other way) the stdout is taken as it is.
+fn read_payload(stdout: &[u8]) -> &[u8] {
+    crate::service::move_session::carry::payload(stdout).unwrap_or(stdout)
 }
 
 /// Write a file to a host (creating parent dirs). `local` → fs; remote → a
@@ -1291,7 +1315,11 @@ fn remote_path(path: &str) -> String {
 
 /// Remote `bash -lc` script body that reads `path` (missing file → empty stdout).
 fn remote_read_script(path: &str) -> String {
-    format!("cat {} 2>/dev/null || true", remote_path(path))
+    format!(
+        "printf '\\n%s\\n' {}; cat {} 2>/dev/null || true",
+        crate::service::move_session::carry::OUT_MARKER,
+        remote_path(path)
+    )
 }
 
 /// Remote `bash -lc` script body that creates `dir` then writes `content` to `path`.
@@ -1585,8 +1613,34 @@ mod tests {
     fn remote_read_script_targets_home() {
         assert_eq!(
             remote_read_script("~/.claude.json"),
-            "cat \"$HOME\"/'.claude.json' 2>/dev/null || true"
+            "printf '\\n%s\\n' __CF_OUT__; cat \"$HOME\"/'.claude.json' 2>/dev/null || true"
         );
+    }
+
+    #[test]
+    fn a_login_banner_is_not_part_of_a_read_file() {
+        assert_eq!(
+            read_payload(b"Welcome\n\n__CF_OUT__\n{\"a\":1}"),
+            b"{\"a\":1}"
+        );
+        assert_eq!(read_payload(b"\n__CF_OUT__\n"), b"");
+        assert_eq!(read_payload(b"{\"a\":1}"), b"{\"a\":1}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_read_script_prints_the_marker_then_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("f");
+        std::fs::write(&f, "x\ny\n").unwrap();
+        let out = std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!("echo banner; {}", remote_read_script(&f.to_string_lossy())),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(read_payload(&out.stdout), b"x\ny\n");
     }
 
     #[test]
@@ -2551,6 +2605,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_login_banner_is_not_a_git_toplevel() {
+        assert_eq!(git_top_of("Welcome\n"), "");
+        assert_eq!(git_top_of("Welcome\nfleet-git-top=/home/u\n"), "/home/u");
+        assert_eq!(git_top_of(""), "");
+    }
+
     /// hosts F2, decision B-2: a dotfiles checkout that tracks fleet's skill
     /// dirs is refused unless `provision.force_git_tree`.
     #[tokio::test]
@@ -2558,7 +2619,7 @@ mod tests {
         let fake = fresh_host();
         fake.on(
             Match::script(&git_tree_probe_script()),
-            Reply::ok("/home/fake/dotfiles\n"),
+            Reply::ok("Welcome to h1\nfleet-git-top=/home/fake/dotfiles\n"),
         );
         let err = provision_one(&fake, "h1", &base(), TOKEN)
             .await
@@ -2578,7 +2639,7 @@ mod tests {
         let forced = fresh_host();
         forced.on(
             Match::script(&git_tree_probe_script()),
-            Reply::ok("/home/fake/dotfiles\n"),
+            Reply::ok("Welcome to h1\nfleet-git-top=/home/fake/dotfiles\n"),
         );
         provision_one_with(&forced, "h1", &base(), TOKEN, true)
             .await
@@ -2603,7 +2664,7 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(out.status.success(), "the probe always exits 0");
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
+            git_top_of(&String::from_utf8(out.stdout).unwrap()).to_string()
         };
         let git = |args: &[&str]| {
             let st = crate::proc::std_command("git")
