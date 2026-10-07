@@ -1562,7 +1562,9 @@ impl Store {
             ("hosts", "tmux_server_pid", "INTEGER"),
             ("sessions", "lost_reason", "TEXT"),
         ];
-        let tx = self.conn.unchecked_transaction()?;
+        // Reads, then writes (035's `INSERT OR IGNORE`): IMMEDIATE, or a
+        // CLI opening this file beside the running hub fails on its write lock.
+        let tx = self.immediate_transaction()?;
         for (table, column, def) in COLUMNS {
             let n: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
@@ -1626,7 +1628,7 @@ impl Store {
             already_applied,
         } in pending
         {
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = self.immediate_transaction()?;
             if already_applied
                 .map(|applied| applied(&tx))
                 .transpose()?
