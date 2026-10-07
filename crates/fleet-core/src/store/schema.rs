@@ -349,6 +349,18 @@ fn orgs_has_jev_allowed(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 107 (org administration phase D):
+/// `orgs` already has `admins_see_unclaimed`, the last of its two
+/// `ADD COLUMN`s; everything else in the script is `IF NOT EXISTS`.
+fn orgs_has_admins_see_unclaimed(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orgs') WHERE name = 'admins_see_unclaimed'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 066 (work graph M14.1b): its last
 /// ADD COLUMN (`client_tokens.org_id`) present means the whole migration is.
 fn client_tokens_has_org(conn: &Connection) -> rusqlite::Result<bool> {
@@ -1219,9 +1231,21 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/105_worktree_slash_names.sql"),
         already_applied: Some(no_slash_named_worktrees),
     },
+    Migration::plain(
+        106,
+        include_str!("../../migrations/106_org_settings_and_spend.sql"),
+    ),
+    // Org administration phase D: memberships, the company that owns the
+    // hub, and the unclaimed-count switch. ADD COLUMN is not idempotent:
+    // guarded on the last one.
+    Migration {
+        version: 107,
+        sql: include_str!("../../migrations/107_org_members.sql"),
+        already_applied: Some(orgs_has_admins_see_unclaimed),
+    },
     // Sprints and releases (design 2026-09-28 §1): three new tables, so
     // plain.
-    Migration::plain(106, include_str!("../../migrations/106_work_buckets.sql")),
+    Migration::plain(108, include_str!("../../migrations/108_work_buckets.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

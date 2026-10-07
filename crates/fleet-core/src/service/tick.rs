@@ -7,6 +7,8 @@ use crate::service::account_usage_poll::{self, AccountUsagePoller};
 use crate::ssh::SshExec;
 use crate::store::{HostRow, Store};
 use crate::{service, ssh};
+use futures_util::FutureExt as _;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -131,6 +133,11 @@ fn unix_now() -> i64 {
 /// before the loop ever runs means `on_tick` is never called at all. Shared
 /// by [`spawn_reconcile_tick`] and [`spawn_account_usage_tick`] so this
 /// behaviour — and its test coverage below — lives in one place.
+///
+/// A pass that panics is caught and logged, and the loop goes on to the next
+/// tick: uncaught, the panic ended the spawned task, whose `JoinHandle` is
+/// read only at shutdown, so reconcile stopped for good while the process
+/// (and its readiness heartbeat) stayed up.
 async fn run_cancellable_tick<F, Fut>(
     mut ticker: tokio::time::Interval,
     token: CancellationToken,
@@ -148,7 +155,9 @@ async fn run_cancellable_tick<F, Fut>(
             }
             _ = ticker.tick() => {}
         }
-        on_tick().await;
+        if AssertUnwindSafe(on_tick()).catch_unwind().await.is_err() {
+            tracing::error!("tick pass panicked; continuing with the next tick");
+        }
     }
 }
 
@@ -360,6 +369,32 @@ mod tests {
             ran.load(Ordering::SeqCst),
             0,
             "a pre-cancelled token must not let a pass start"
+        );
+    }
+
+    /// A pass that panics must not end the loop: the next tick runs another.
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_pass_does_not_stop_the_loop() {
+        let token = CancellationToken::new();
+        let ticker = tokio::time::interval(Duration::from_millis(1));
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran2 = Arc::clone(&ran);
+        let token2 = token.clone();
+        run_cancellable_tick(ticker, token, move || {
+            let ran = Arc::clone(&ran2);
+            let token = token2.clone();
+            async move {
+                if ran.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("first pass fails");
+                }
+                token.cancel();
+            }
+        })
+        .await;
+        assert_eq!(
+            ran.load(Ordering::SeqCst),
+            2,
+            "the pass after the panicking one must still run"
         );
     }
 

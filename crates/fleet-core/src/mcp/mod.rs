@@ -244,7 +244,7 @@ async fn authorize(
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
             (
                 Arc::new(s.list_host_tokens().unwrap_or_default()),
-                Arc::new(s.active_client_tokens().unwrap_or_default()),
+                Arc::new(s.auth_client_tokens().unwrap_or_default()),
                 s.personal_owner_id().unwrap_or_default(),
             )
         }

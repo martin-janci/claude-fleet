@@ -1,0 +1,57 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.devices",
+  "title": "Devices",
+  "parent": "settings",
+  "layout": "master_detail",
+  "resource": "device",
+  "intro": "Every phone, browser and desktop paired to the hub: pair a new one, trust it, bind it to an org, hand it to a person, let it change a catalog, or revoke it. Changes need this device to be trusted.",
+  "sections": [
+    {
+      "title": "Device",
+      "items": [
+        {
+          "type": "field",
+          "key": "name"
+        },
+        {
+          "type": "field",
+          "key": "mode"
+        },
+        {
+          "type": "field",
+          "key": "this_device"
+        },
+        {
+          "type": "field",
+          "key": "last_seen_at"
+        },
+        {
+          "type": "field",
+          "key": "created_at"
+        }
+      ]
+    },
+    {
+      "title": "What it may do",
+      "items": [
+        {
+          "type": "field",
+          "key": "trusted"
+        },
+        {
+          "type": "field",
+          "key": "org"
+        },
+        {
+          "type": "field",
+          "key": "person"
+        },
+        {
+          "type": "field",
+          "key": "catalogs"
+        }
+      ]
+    }
+  ]
+}

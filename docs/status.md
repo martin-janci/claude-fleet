@@ -164,7 +164,7 @@ numbers, so write "M14-D3x" / "Jev-D3x").
 
 Sprints and releases (design
 `docs/superpowers/specs/2026-09-28-sprints-releases-epics-design.md`): the
-backend is landed — migration 106 (`work_buckets`, `work_bucket_items`,
+backend is landed — migration 108 (`work_buckets`, `work_bucket_items`,
 `work_bucket_refs`), `store::work_buckets` (one current sprint per item,
 history kept on removal and close, adoption from a tracker's sprint or
 version and its withdrawal), `Caps.versions` with Jira `fixVersions`,
@@ -277,6 +277,23 @@ first read booked as `backfill` apart from the day's live cost (migration
 `deploy/hub/backup.sh` / `upgrade.sh` and the `behind-proxy` compose; see
 `docs/hub.md` → *Backups* / *Upgrade with the script*, plan
 `docs/superpowers/plans/2026-09-27-hub-ops-accounting.md`.
+
+Org administration (spec
+`docs/superpowers/specs/2026-10-06-org-administration-design.md`) is landed
+in four phases: A, the org overview in Settings → Organisations; B, the hub
+tool `org_admin` (`service/org_admin.rs`) for devices and people; C,
+per-org settings (`Spec::per_org`, migration 106 `org_settings`) and spend
+and budgets (`usage_daily_org`, `service/org_spend.rs`,
+`fleet_health.org_budgets`); D, members and roles (multi-user M2, migration
+107 `org_members`). In D a device's org follows its person's memberships —
+`store::effective_device`, applied to the auth rows
+(`Store::auth_client_tokens`) and the `/events` re-check, never to listings
+— and `org_admin` is `Access::Device`, deciding the caller's authority
+itself (`org_admin::Authority`: the hub owner's device for the fleet, an
+org admin's for that org; `check` refuses the rest). Team sharing is a grant
+to an org (`session_grants.org_id`), reaching only members whose
+`shares_since` is not after the grant. No admin reads a member's private
+session.
 
 Host identity and health (#354) is landed, per
 `docs/superpowers/plans/2026-09-27-host-identity-health.md`: migrations

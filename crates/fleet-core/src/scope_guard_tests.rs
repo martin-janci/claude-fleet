@@ -1786,12 +1786,13 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
     },
     OrgHalf {
         file: "crates/fleet-core/src/service/orgs.rs",
-        func: "scopes",
+        func: "counted_rows",
         nth: 0,
         code: ".filter(|r| r.status != \"ghost\" && scope.sees_row_org_only(r) && scope.sees_org(r.org_id))",
         person_half: "`view.sees_session_row` on the next filter. `sees_org` \
                       beside it is a THIRD question neither asks: another \
-                      org's row on a per-host token's own host",
+                      org's row on a per-host token's own host. Shared by \
+                      `scopes` and the org overview (`org_details`)",
     },
     OrgHalf {
         file: "crates/fleet-core/src/service/usage.rs",

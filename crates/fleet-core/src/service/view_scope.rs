@@ -140,6 +140,18 @@ impl GrantSet {
     }
 }
 
+/// Whose hosts' unclaimed counts a caller is served
+/// ([`ViewScope::sees_unclaimed_count`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UnclaimedReach {
+    #[default]
+    None,
+    /// A host administrator: every host.
+    Every,
+    /// The hosts of these orgs.
+    Orgs(std::collections::BTreeSet<i64>),
+}
+
 /// Who is asking, for every session read and write.
 ///
 /// Built once per request, off the same store handle the rows come from —
@@ -192,6 +204,11 @@ pub struct ViewScope {
     /// upgrade widens nothing), and `HostRow.unclaimed_sessions` is served
     /// to them (R5-d).
     sole_person: bool,
+    /// Whose hosts' unclaimed COUNTS this caller is served, beyond the
+    /// one-person rule (org administration phase D, the owner's answers 1 and
+    /// 3). Private for the reason `sole_person` is: a fact read at
+    /// construction, never asserted by a call site.
+    unclaimed: UnclaimedReach,
     /// This is the hub's own reader, not a caller.
     ///
     /// Private, and the reason the struct has no public literal form: "the
@@ -217,6 +234,7 @@ impl ViewScope {
             host: None,
             proven_session: None,
             sole_person: false,
+            unclaimed: UnclaimedReach::None,
             internal: true,
         }
     }
@@ -233,6 +251,7 @@ impl ViewScope {
         host: Option<String>,
         proven_session: Option<i64>,
         sole_person: bool,
+        unclaimed: UnclaimedReach,
     ) -> Self {
         ViewScope {
             org,
@@ -241,6 +260,7 @@ impl ViewScope {
             host,
             proven_session,
             sole_person,
+            unclaimed,
             internal: false,
         }
     }
@@ -300,6 +320,24 @@ impl ViewScope {
     /// See [`Self::sole_person`].
     pub fn is_sole_person(&self) -> bool {
         self.sole_person
+    }
+
+    /// Is this scope served the count of unclaimed sessions on a host in
+    /// `host_org`? The hub's own reader and the one person of a one-person
+    /// hub always (M1, R5-d); a host administrator — the hub's owner, or an
+    /// admin of the company that owns the hub (owner's answer 1) — on every
+    /// host; an org's admins on that org's hosts when the hub's owner turned
+    /// `orgs.admins_see_unclaimed` on (answer 3). Nobody else: a count is
+    /// still a claim about other people's sessions.
+    pub fn sees_unclaimed_count(&self, host_org: Option<i64>) -> bool {
+        if self.internal || self.sole_person {
+            return true;
+        }
+        match &self.unclaimed {
+            UnclaimedReach::None => false,
+            UnclaimedReach::Every => true,
+            UnclaimedReach::Orgs(orgs) => host_org.is_some_and(|o| orgs.contains(&o)),
+        }
     }
 
     /// Does this scope's person OWN `row`?

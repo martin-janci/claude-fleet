@@ -380,6 +380,7 @@ fn every_path_that_creates_a_tmux_session_forgets_the_kill_first() {
                 "tmux.new_session(&args.name, std::path::Path::new(&rep.cwd)",
                 "tmux.respawn_pane_in(&args.name",
                 "tmux.restart_session(&args.name, &pane_cmd)",
+                "restart_unrepaired(&*tmux, &args.name, &pane_cmd",
             ],
             registers: "reconcile_one_host(",
         },
@@ -1474,4 +1475,236 @@ fn repair_never_creates_a_session_row_and_so_never_an_ownerless_one() {
              its own (multi-user M1, T5)"
         );
     }
+}
+
+// ── restart after a host reboot, and the operator's controller exemption ──
+// (2026-10-06: the agent panel's `lost` button on `fleet-operator@mefistos`
+// failed twice over — `E_SELF_TARGET`, then `E_TMUX` from a respawn on a host
+// whose reboot took the tmux server with it.)
+
+/// Records which of `restart_session`'s two tmux calls ran.
+struct RebootedTmux {
+    live: Vec<String>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl RebootedTmux {
+    fn listing(live: &[&str]) -> Self {
+        Self {
+            live: live.iter().map(|n| n.to_string()).collect(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tmux::TmuxExec for RebootedTmux {
+    async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
+        Ok(self
+            .live
+            .iter()
+            .map(|name| crate::tmux::TmuxSession {
+                name: name.clone(),
+                created: 1,
+                last_activity: 1,
+                attached: false,
+                path: std::path::PathBuf::from("/"),
+                pane_id: None,
+            })
+            .collect())
+    }
+    async fn new_session(
+        &self,
+        name: &str,
+        cwd: &std::path::Path,
+        cmd: &str,
+    ) -> Result<(), IpcError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("new {name} in {} running {cmd}", cwd.display()));
+        Ok(())
+    }
+    async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
+        Ok(())
+    }
+    async fn restart_session(&self, name: &str, cmd: &str) -> Result<(), IpcError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("respawn {name} running {cmd}"));
+        Ok(())
+    }
+    async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn capture_pane_scrollback(&self, _: &str, _: u32) -> Result<String, IpcError> {
+        Ok(String::new())
+    }
+    async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
+        None
+    }
+}
+
+/// The host rebooted: tmux lists nothing (`no server running` parses as an
+/// empty list), so a respawn would fail. The session is created instead, in
+/// the directory the caller resolves, with the same pane command.
+#[tokio::test]
+async fn a_restart_with_no_tmux_session_creates_one_instead_of_respawning() {
+    let tmux = RebootedTmux::listing(&[]);
+    super::lifecycle::restart_unrepaired(&tmux, "fleet-operator", "cl --resume x", || async {
+        Ok("/home/u/.claude-fleet/operator".to_string())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tmux.calls(),
+        vec!["new fleet-operator in /home/u/.claude-fleet/operator running cl --resume x"]
+    );
+}
+
+/// A tmux session that is still there keeps the plain respawn, and the cwd
+/// (which may cost an SSH round trip) is never resolved.
+#[tokio::test]
+async fn a_restart_of_a_live_tmux_session_still_respawns_it() {
+    let tmux = RebootedTmux::listing(&["other", "fleet-operator"]);
+    super::lifecycle::restart_unrepaired(&tmux, "fleet-operator", "cl --resume x", || async {
+        panic!("the cwd is only resolved for a session that has to be created")
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        tmux.calls(),
+        vec!["respawn fleet-operator running cl --resume x"]
+    );
+}
+
+fn record_operator(s: &crate::store::Store, host: &str) {
+    crate::service::operator::set_operator_ref(
+        s,
+        &crate::service::operator::OperatorRef {
+            host_alias: host.into(),
+            tmux_name: crate::service::operator::OPERATOR_TMUX_NAME.into(),
+        },
+    )
+    .unwrap();
+}
+
+/// Which directory a gone session is re-created in: a system project's own
+/// path, else the operator's directory for the recorded operator (the live
+/// row had lost its project), else the host's home.
+#[test]
+fn a_gone_pane_is_recreated_in_its_system_dir_the_operator_dir_or_home() {
+    use super::lifecycle::{gone_pane_cwd, GonePaneCwd};
+    let s = crate::store::Store::open_in_memory().unwrap();
+    s.upsert_host("mefistos").unwrap();
+    record_operator(&s, "mefistos");
+    let op = crate::service::operator::OPERATOR_TMUX_NAME;
+    let pid = s
+        .upsert_system_project("fleet", "operator", "/home/u/.claude-fleet/operator")
+        .unwrap();
+
+    s.upsert_session(op, "mefistos", None, None, 1, 1, "running", None)
+        .unwrap();
+    let row = s.get_session(op, "mefistos").unwrap();
+    assert_eq!(
+        gone_pane_cwd(&s, row.as_ref(), "mefistos", op).unwrap(),
+        GonePaneCwd::Operator,
+        "the project-less operator row (as found on mefistos) goes back to its own dir"
+    );
+
+    s.upsert_session(
+        "dev-sys",
+        "mefistos",
+        Some(pid),
+        None,
+        1,
+        1,
+        "running",
+        None,
+    )
+    .unwrap();
+    let row = s.get_session("dev-sys", "mefistos").unwrap();
+    assert_eq!(
+        gone_pane_cwd(&s, row.as_ref(), "mefistos", "dev-sys").unwrap(),
+        GonePaneCwd::Fixed("/home/u/.claude-fleet/operator".into())
+    );
+
+    s.upsert_session("orphan", "mefistos", None, None, 1, 1, "running", None)
+        .unwrap();
+    let row = s.get_session("orphan", "mefistos").unwrap();
+    assert_eq!(
+        gone_pane_cwd(&s, row.as_ref(), "mefistos", "orphan").unwrap(),
+        GonePaneCwd::Home
+    );
+    assert_eq!(
+        gone_pane_cwd(&s, None, "mefistos", "never-seen").unwrap(),
+        GonePaneCwd::Home
+    );
+}
+
+/// The operator's directory and home on a remote host are absolute: a `~`
+/// handed to `tmux new-session -c` is taken as a directory named `~`.
+#[tokio::test]
+async fn a_gone_pane_cwd_resolves_to_an_absolute_path_on_the_host() {
+    use super::lifecycle::{resolve_gone_pane_cwd, GonePaneCwd};
+    let ssh = crate::ssh_fake::FakeSsh::new();
+    ssh.with_home("/home/u");
+    assert_eq!(
+        resolve_gone_pane_cwd(GonePaneCwd::Operator, "mefistos", &ssh)
+            .await
+            .unwrap(),
+        "/home/u/.claude-fleet/operator"
+    );
+    assert_eq!(
+        resolve_gone_pane_cwd(GonePaneCwd::Home, "mefistos", &ssh)
+            .await
+            .unwrap(),
+        "/home/u"
+    );
+    assert_eq!(
+        resolve_gone_pane_cwd(GonePaneCwd::Fixed("/srv/op".into()), "mefistos", &ssh)
+            .await
+            .unwrap(),
+        "/srv/op"
+    );
+}
+
+/// The operator registered itself as the fleet controller (it reads the same
+/// control skill every session does), and the panel's restart — no `force` —
+/// answered `E_SELF_TARGET`. The operator is exempt; any other controller
+/// still needs `force`.
+#[test]
+fn restart_needs_no_force_for_the_operator_even_when_it_is_the_controller() {
+    use super::lifecycle::restart_guard;
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let op = crate::service::operator::OPERATOR_TMUX_NAME;
+    record_operator(&s, "mefistos");
+    s.set_controller("mefistos", op).unwrap();
+    restart_guard(&s, "mefistos", op, false).expect("the panel's restart must not need force");
+
+    s.set_controller("mac", "dev-fleet").unwrap();
+    let err = restart_guard(&s, "mac", "dev-fleet", false).unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_SELF_TARGET);
+    restart_guard(&s, "mac", "dev-fleet", true).unwrap();
+}
+
+#[test]
+fn restart_session_asks_its_guard_and_creates_a_gone_session() {
+    const LIFECYCLE: &str = include_str!("lifecycle.rs");
+    let body = item_source(LIFECYCLE, "pub async fn restart_session(");
+    assert!(
+        body.contains("restart_guard(&s, &args.host_alias, &args.name, args.force)"),
+        "restart_session must refuse the controller through restart_guard"
+    );
+    assert!(
+        body.contains("restart_unrepaired("),
+        "restart_session must create a tmux session a reboot took, not only respawn"
+    );
 }

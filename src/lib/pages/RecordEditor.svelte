@@ -8,11 +8,14 @@
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import ActionForm from './ActionForm.svelte';
   import TrackerExtras from '../TrackerExtras.svelte';
+  import OrgSettingsList from './OrgSettingsList.svelte';
+  import type { OrgSettingRow } from '../orgs';
   import type { TrackerRow } from '../trackers';
   import { evalCondition, type Section } from './pages';
   import {
     ago,
     applies,
+    dollars,
     buildArgs,
     choiceLabel,
     fieldValue,
@@ -37,6 +40,7 @@
     record,
     readonly = false,
     options,
+    actionOptions = () => [],
     run,
     reload,
     now = () => Math.floor(Date.now() / 1000),
@@ -46,6 +50,8 @@
     record: ResourceRecord;
     readonly?: boolean;
     options: (field: FieldSpec, param: string) => { value: string; label: string }[];
+    /** A record action's choices for one of its `options` params. */
+    actionOptions?: (action: ActionSpec, param: string) => { value: string; label: string }[];
     /** Run an action with its arguments; resolves once the list is re-read. */
     run: (action: ActionSpec, args: Record<string, unknown>) => Promise<boolean>;
     /** Re-read the list (a custom item changed something). */
@@ -62,6 +68,8 @@
   function shown(f: FieldSpec): string {
     const raw = rawOf(f, record);
     if (f.type === 'time') return ago(raw, now());
+    if (f.type === 'count') return String(typeof raw === 'number' ? raw : 0);
+    if (f.type === 'money') return dollars(raw);
     if (f.type === 'bool') return saved[f.id] ? 'On' : 'Off';
     if (f.type === 'inherit') return String(saved[f.id]);
     if (raw === null || raw === undefined || raw === '') return '—';
@@ -71,7 +79,9 @@
 
   const fieldOf = (id: string) => resource.fields.find((f) => f.id === id);
   const saved = $derived(
-    Object.fromEntries(resource.fields.filter((f) => f.type !== 'items').map((f) => [f.id, fieldValue(f, record)])),
+    Object.fromEntries(
+      resource.fields.filter((f) => f.type !== 'items' && f.type !== 'settings').map((f) => [f.id, fieldValue(f, record)]),
+    ),
   ) as Record<string, FieldValue>;
 
   // svelte-ignore state_referenced_locally
@@ -130,6 +140,16 @@
   }
 
   const set = (id: string, v: FieldValue) => (draft = { ...draft, [id]: v });
+
+  /** A `settings` row's write: the field's `set` action with the row's key
+   *  and the chosen value (`null`: inherit). The list is re-read after. */
+  async function setting(f: FieldSpec, key: string, value: string | null) {
+    if (f.type !== 'settings') return { ok: false as const, error: { code: 'E_INVALID', message: 'not a settings field' } };
+    busy = true;
+    const ok = await run(f.set, buildArgs(f.set, record, null, { key, value: value ?? '' }));
+    busy = false;
+    return ok ? { ok: true as const, value: null } : { ok: false as const, error: { code: 'E_INVALID', message: `${f.label}: not saved` } };
+  }
 </script>
 
 <div class="record" data-testid={`record-${resource.id}-${idOf(resource, record)}`}>
@@ -165,6 +185,7 @@
       <ActionForm
         action={a}
         {busy}
+        options={(p) => actionOptions(a, p)}
         onrun={(params) => {
           openAction = null;
           runItem(a, null, params);
@@ -182,7 +203,10 @@
           <TrackerExtras tracker={record as unknown as TrackerRow} onchanged={reload} />
         {:else if item.type === 'field' && evalCondition(item.when, values)}
           {@const f = fieldOf(item.key)}
-          {#if f}
+          <!-- A list the record does not carry at all is not known here (a
+               hub too old for it, or a list only the operator is shown):
+               left out, rather than shown as empty. -->
+          {#if f && !(['items', 'money', 'settings'].includes(f.type) && record[f.id] === undefined)}
             <div class="field" class:changed={changed.includes(f)} data-testid={`record-field-${f.id}`}>
               <span class="label" id={`rf-${f.id}`}>{f.label}</span>
               <div class="control">
@@ -208,6 +232,12 @@
                       <ActionForm action={a} {busy} options={(p) => options(f, p)} onrun={(params) => runItem(a, null, params)} />
                     {/each}
                   {/if}
+                {:else if f.type === 'settings'}
+                  <OrgSettingsList
+                    rows={(record[f.id] as OrgSettingRow[]) ?? []}
+                    {readonly}
+                    {busy}
+                    onset={(key, value) => setting(f, key, value)} />
                 {:else if readonly || !f.edit || f.type === 'choice' || f.type === 'time'}
                   <span class="value" data-testid={`value-${f.id}`}>{shown(f)}</span>
                 {:else if f.type === 'text'}

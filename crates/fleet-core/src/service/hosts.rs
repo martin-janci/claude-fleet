@@ -61,16 +61,15 @@ pub async fn discover_hosts_fresh() -> Result<Vec<SshHost>, IpcError> {
 /// may not know is not entitled to it. On a hub with more than one person
 /// the count reaches a human only through `fleet-hub session unclaimed` —
 /// shell access on the hub machine — and through no API surface at all.
-/// There is deliberately no host-administration concept here to widen it
-/// with; M2 defines who administers a host, and the count follows that
-/// definition when it does.
+/// Org administration phase D defined who administers a host, and the
+/// count follows it ([`ViewScope::sees_unclaimed_count`]): the hub's owner
+/// and the admins of the company that owns the hub on every host, an org's
+/// admins on its own hosts when the hub's owner switched that on.
 ///
 /// The master is resolved to the hub's personal owner for this read like
-/// any other (`Caller::view_scope`), and that is safe only because the test
-/// is `is_sole_person`: on a hub with two people the master's person is one
-/// of several, so the count is withheld from it too. "The operator" and
-/// "the master token" are different callers, and the count belongs to
-/// neither — it belongs to the one person whose fleet this still is.
+/// any other (`Caller::view_scope`), so on a hub with two people it is
+/// served the count as that owner, a host administrator — not because it
+/// is the master token.
 ///
 /// [`ViewScope::internal`]: crate::service::view_scope::ViewScope::internal
 pub fn list_hosts(
@@ -79,9 +78,12 @@ pub fn list_hosts(
 ) -> Result<Vec<HostRow>, IpcError> {
     let s = lock(store)?;
     let mut rows = s.list_hosts().map_err(IpcError::from)?;
-    if scope.is_internal() || scope.is_sole_person() {
+    if rows.iter().any(|h| scope.sees_unclaimed_count(h.org_id)) {
         let counts = s.unclaimed_counts_by_host()?;
         for h in &mut rows {
+            if !scope.sees_unclaimed_count(h.org_id) {
+                continue;
+            }
             // Absent from the map is a real zero for a caller entitled to
             // the answer — and stays `None` for everyone else, which is
             // what the two values mean apart.

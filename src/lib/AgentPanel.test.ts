@@ -7,7 +7,7 @@ vi.mock('./ConversationPanel.svelte', () => ({ default: () => ({}) }));
 
 import { get } from 'svelte/store';
 import AgentPanel from './AgentPanel.svelte';
-import { agentPanelOpen, operatorState, operatorSession } from './operator';
+import { agentPanelOpen, operatorError, operatorState, operatorSession } from './operator';
 import { sessions } from './sessions';
 import { agentPanelSize, agentPanelMaximized, AGENT_PANEL_MIN_W } from './agent_panel_size';
 
@@ -25,6 +25,7 @@ const row = (over = {}) =>
 
 beforeEach(() => {
   invoke.mockReset();
+  operatorError.set(null);
   agentPanelOpen.set(true);
   operatorState.set('ready');
   operatorSession.set(row());
@@ -44,6 +45,19 @@ describe('AgentPanel', () => {
     render(AgentPanel);
     expect(screen.getByRole('button', { name: /restart/i })).toBeTruthy();
     expect(invoke).not.toHaveBeenCalledWith('ensure_operator', expect.anything());
+  });
+
+  it('shows why a restart of the lost agent failed, under the button', async () => {
+    operatorState.set('lost');
+    invoke.mockRejectedValueOnce({
+      code: 'E_TMUX',
+      message: 'error connecting to /tmp/tmux-1000/default (No such file or directory)',
+    });
+    render(AgentPanel);
+    await fireEvent.click(screen.getByRole('button', { name: /restart/i }));
+    const note = await screen.findByTestId('agent-panel-error');
+    expect(note.textContent).toContain('Restart failed: error connecting to');
+    expect(invoke).toHaveBeenCalledWith('restart_session', expect.anything());
   });
 
   it('shows the context chip and drops it when removed', async () => {

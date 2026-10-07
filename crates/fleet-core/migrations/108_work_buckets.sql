@@ -59,4 +59,4 @@ CREATE TABLE IF NOT EXISTS work_bucket_refs (
 CREATE INDEX IF NOT EXISTS idx_work_bucket_refs_tracker
   ON work_bucket_refs(tracker_id, external_id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (106);
+INSERT OR IGNORE INTO schema_version (version) VALUES (108);

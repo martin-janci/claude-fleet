@@ -11,6 +11,7 @@
 // with one owner sees no new chrome — and a persisted scope that no longer
 // exists (or a single-scope fleet) reads as "all", never as a filter nobody
 // can see.
+import type { Descriptor } from './pages/pages';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { readPref, writePref } from './prefs';
@@ -53,11 +54,43 @@ export interface OrgRuleRow {
   host_alias?: string | null;
 }
 
-/** `list_orgs`: an org with its rules, hosts and trackers. */
+/** `list_orgs`: an org with its rules, hosts and trackers, and its overview
+ *  (org administration phase A; absent from an older hub). */
 export interface OrgDetail extends OrgRow {
   rules: OrgRuleRow[];
   hosts: string[];
   trackers: { id: number; name: string }[];
+  /** The asset catalogs it owns, by name. */
+  catalogs?: string[];
+  /** Its live sessions the caller may count, and those waiting on a person. */
+  session_count?: number;
+  needs_you?: number;
+  /** Its bound paired devices — present only for the fleet's administrator. */
+  devices?: { name: string; mode: string; trusted: boolean; last_seen_at?: number }[];
+  /** Phase C, administrator only: its per-org settings. */
+  settings?: OrgSettingRow[];
+  /** Phase C, administrator only, when the caller sees every session. */
+  spent_today_micros?: number;
+  spent_week_micros?: number;
+  spent_month_micros?: number;
+  budget_daily_usd?: number;
+  budget_monthly_usd?: number;
+  over_budget?: ('daily' | 'monthly')[];
+  /** Phase D: who is in the company, for its people and the hub's owner. */
+  members?: { person_id: number; name: string; display_name?: string; role: string }[];
+  /** Phase D: the caller's own role in it. */
+  my_role?: 'admin' | 'member' | 'viewer';
+  /** Phase D: this company owns the hub. */
+  owns_hub?: boolean;
+  /** Phase D: its admins see the unclaimed count on its hosts. */
+  admins_see_unclaimed?: boolean;
+}
+
+/** One per-org setting on an org's page: the setting described with the
+ *  fleet's value, and the org's own when it set one. */
+export interface OrgSettingRow {
+  setting: Descriptor;
+  own?: string;
 }
 
 /** `org_suggestions`: create org `name` from `owner/*` and/or for a tracker. */

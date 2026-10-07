@@ -37,6 +37,10 @@ pub enum Bind {
     Param(&'static str),
     /// JSON `null`.
     Null,
+    /// JSON `true` (a grant).
+    True,
+    /// JSON `false` (taking a grant back).
+    False,
 }
 
 /// Where a select's options come from: a frontend list the renderer already
@@ -50,6 +54,10 @@ pub enum OptionSource {
     Trackers,
     /// Orgs, by name (what `list_orgs` answers).
     Orgs,
+    /// Paired devices, by name (what `list_devices` answers).
+    Devices,
+    /// Asset catalogs, by name.
+    Catalogs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,6 +72,10 @@ pub enum ParamKind {
     Secret,
     Options {
         source: OptionSource,
+    },
+    /// One of a fixed set (`(value, label)`); the first is preselected.
+    Choice {
+        options: &'static [(&'static str, &'static str)],
     },
 }
 
@@ -98,6 +110,19 @@ pub struct ActionSpec {
     /// The command answers `{ ok, error? }`: say which, rather than just
     /// "done" (a tracker's Test).
     pub report: bool,
+    /// The command's answer is shown to the person, by this closed
+    /// formatter, instead of only re-reading the list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<ResultView>,
+}
+
+/// How an action's answer is shown: a closed set the renderer implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultView {
+    /// `pair_device`'s `{ url, code, expires_in_s, qr }`: the one-time
+    /// code, its URL to open and the QR to scan, until it expires.
+    Pairing,
 }
 
 impl ActionSpec {
@@ -117,6 +142,7 @@ impl ActionSpec {
             confirm: None,
             variants: &[],
             report: false,
+            result: None,
         }
     }
     pub const fn params(self, params: &'static [ParamSpec]) -> Self {
@@ -134,6 +160,12 @@ impl ActionSpec {
     pub const fn report(self) -> Self {
         ActionSpec {
             report: true,
+            ..self
+        }
+    }
+    pub const fn result(self, view: ResultView) -> Self {
+        ActionSpec {
+            result: Some(view),
             ..self
         }
     }
@@ -176,6 +208,21 @@ pub enum FieldKind {
     },
     /// Unix seconds, shown as how long ago ("5 min ago", "never").
     Time,
+    /// A whole number the backend counts (an org's live sessions); shown,
+    /// never edited. An absent value reads `0`.
+    Count,
+    /// An estimated cost in micro-USD, shown as dollars ("$12.34"); never
+    /// edited. An absent value leaves the field out (the caller may not see
+    /// spend).
+    Money,
+    /// The record's per-org settings (`OrgSetting` rows: the setting
+    /// described with the fleet's value, and the record's own): each one
+    /// shown as a settings row that inherits the fleet's value or takes its
+    /// own, written through `set` with `key` and `value` (absent: inherit).
+    /// An absent list leaves the field out.
+    Settings {
+        set: ActionSpec,
+    },
     /// A list of sub-items, each shown with `label` and changed through
     /// `remove` / `add` actions rather than the record's Apply.
     Items {
@@ -197,6 +244,10 @@ pub enum ItemLabel {
     Field(&'static str),
     /// An org rule: `owner/repo` (or `owner/*`), `path: …`, `host: …`.
     OrgRule,
+    /// A paired device: its name, then `read-only` / `trusted` when so.
+    Device,
+    /// An org's member (phase D): their name, then their role.
+    Member,
 }
 
 /// A badge in the list and the detail header while a field has a value.
@@ -334,6 +385,9 @@ impl ResourceType {
                 out.extend(remove.iter());
                 out.extend(add.iter());
             }
+            if let FieldKind::Settings { set } = &f.kind {
+                out.push(set);
+            }
         }
         out
     }
@@ -383,6 +437,16 @@ const ORG_RULE_ADDS: &[ActionSpec] = &[
     .params(&[param("host_alias", "Host", text(100, "hetzner-a"), true)]),
 ];
 
+/// The roles of an org member (`store::ORG_ROLES`), as a form offers them.
+pub const ORG_ROLE_CHOICES: &[(&str, &str)] = &[
+    (
+        "member",
+        "Member — sees its work and what is shared with it",
+    ),
+    ("admin", "Admin — administers the org"),
+    ("viewer", "Viewer — reads only"),
+];
+
 const ORG: ResourceType = ResourceType {
     id: "org",
     label: "Organisation",
@@ -396,6 +460,34 @@ const ORG: ResourceType = ResourceType {
     fields: &[
         FieldSpec::new("name", "Name", "What the scope selector and the Work view call it.", FieldKind::Text { max: 80 }).edit("name"),
         FieldSpec::new("color", "Colour", "Marks its sessions in the sidebar.", FieldKind::Color).edit("color"),
+        FieldSpec::new("session_count", "Sessions", "Its live sessions that you can see.", FieldKind::Count),
+        FieldSpec::new("needs_you", "Need you", "Of those, the ones waiting on a person: a question, a permission, a stop.", FieldKind::Count),
+        FieldSpec::new("spent_today_micros", "Spent today", "Estimated cost of its sessions today (UTC). Shown when you can see every session.", FieldKind::Money),
+        FieldSpec::new("spent_week_micros", "Last 7 days", "Estimated cost of its sessions over the last 7 days.", FieldKind::Money),
+        FieldSpec::new("spent_month_micros", "This month", "Estimated cost of its sessions this calendar month (UTC).", FieldKind::Money),
+        FieldSpec::new(
+            "over_budget",
+            "Over budget",
+            "The budgets it has reached. Fleet only warns; it never stops a session.",
+            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+        ),
+        FieldSpec::new(
+            "settings",
+            "Its own settings",
+            "Settings this org may set for itself; the rest of the fleet keeps its value. Inherit takes the fleet's again.",
+            FieldKind::Settings {
+                set: ActionSpec::new(
+                    "org.set_setting",
+                    "Set",
+                    "set_org_setting",
+                    &[ORG_ID, ("key", Bind::Param("key")), ("value", Bind::Param("value"))],
+                )
+                // Filled by the settings row, never shown as a form: the key
+                // is the row's, the value what the person chose (empty:
+                // inherit).
+                .params(&[param("key", "Setting", text(128, ""), true), param("value", "Value", text(4096, ""), false)]),
+            },
+        ),
         FieldSpec::new(
             "rules",
             "Rules",
@@ -438,6 +530,66 @@ const ORG: ResourceType = ResourceType {
                     .params(&[param("tracker", "Tracker", ParamKind::Options { source: OptionSource::Trackers }, true)])],
             },
         ),
+        FieldSpec::new(
+            "catalogs",
+            "Catalogs",
+            "Asset catalogs this org owns; its hosts receive them. Add or remove one in Settings → Catalogs.",
+            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+        ),
+        FieldSpec::new(
+            "devices",
+            "Devices",
+            "Phones, browsers and desktops bound to this org: they see only its work (and unassigned work, if allowed below). Pair a new one in Settings → Devices. Shown to the hub's operator only.",
+            FieldKind::Items {
+                item_label: ItemLabel::Device,
+                remove: Some(ActionSpec::new("org.unbind_device", "Unbind the device", "bind_device_org", &[("device", Bind::ItemField("name"))])),
+                add: &[ActionSpec::new("org.bind_device", "Bind a device", "bind_device_org", &[("device", Bind::Param("device")), ORG_ID])
+                    .params(&[param("device", "Device", ParamKind::Options { source: OptionSource::Devices }, true)])],
+            },
+        ),
+        FieldSpec::new(
+            "members",
+            "Members",
+            "Who is in the company. An admin administers it (its settings, members and their devices); a member sees its work and what is shared with it; a viewer only reads. Nobody sees another person's private sessions.",
+            FieldKind::Items {
+                item_label: ItemLabel::Member,
+                remove: Some(
+                    ActionSpec::new(
+                        "org.remove_member",
+                        "Remove from the org",
+                        "remove_org_member",
+                        &[ORG_ID, ("person_id", Bind::ItemField("person_id"))],
+                    )
+                    .confirm("What was shared with them on this org's sessions is taken back too. Their own sessions stay theirs; if this was their last org, their devices see nothing of any org."),
+                ),
+                add: &[ActionSpec::new(
+                    "org.set_member",
+                    "Add or change a member",
+                    "set_org_member",
+                    &[ORG_ID, ("person", Bind::Param("person")), ("role", Bind::Param("role"))],
+                )
+                .params(&[
+                    param("person", "Person", text(64, "jane"), true),
+                    param("role", "Role", ParamKind::Choice { options: ORG_ROLE_CHOICES }, true),
+                ])],
+            },
+        ),
+        FieldSpec::new(
+            "owns_hub",
+            "Owns this hub",
+            "This company owns the hub: its admins administer hosts — route them into orgs and see how many sessions on them nobody has claimed. One org at most. Only the hub's owner changes it.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .edit("owns_hub")
+        .badge(Badge::True { text: "owns the hub" })
+        .confirm("This org's admins will administer every host on the hub."),
+        FieldSpec::new(
+            "admins_see_unclaimed",
+            "Admins see unclaimed sessions",
+            "Its admins see how many sessions on its hosts nobody has claimed — a count, never the sessions. Off by default; only the hub's owner changes it.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .edit("admins_see_unclaimed"),
         FieldSpec::new(
             "isolate_sessions",
             "Isolate sessions",
@@ -574,7 +726,7 @@ const CATALOG: ResourceType = ResourceType {
     id: "catalog",
     label: "Catalog",
     plural: "Catalogs",
-    help: "Git repos of assets fleet syncs to hosts. `personal` is yours; an org's catalog reaches that org's hosts and the org-less hosts that admit it. A GitHub org with SSO must allow the catalog's deploy key — an org admin does that once in the org's settings. Grants are given on the hub: `fleet-hub client grant <client> assets --catalog <name>`.",
+    help: "Git repos of assets fleet syncs to hosts. `personal` is yours; an org's catalog reaches that org's hosts and the org-less hosts that admit it. A GitHub org with SSO must allow the catalog's deploy key — an org admin does that once in the org's settings. Which device may change a catalog is set in Settings → Devices.",
     list: "catalog_list_catalogs",
     id_field: "name",
     title_field: "name",
@@ -610,7 +762,7 @@ const CATALOG: ResourceType = ResourceType {
         FieldSpec::new(
             "granted",
             "Granted to",
-            "Paired desktops that may change this catalog. Granted on the hub (see above).",
+            "Paired desktops that may change this catalog. Granted in Settings → Devices.",
             FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
         ),
     ],
@@ -643,8 +795,126 @@ const CATALOG: ResourceType = ResourceType {
     variant_by: None,
 };
 
+const DEVICE: (&str, Bind) = ("device", Bind::Record("name"));
+
+/// A device's modes as `DeviceSummary.mode` says them.
+const DEVICE_MODES: &[(&str, &str)] = &[("full", "Full"), ("readonly", "Read-only")];
+
+const DEVICE_RESOURCE: ResourceType = ResourceType {
+    id: "device",
+    label: "Device",
+    plural: "Devices",
+    help: "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Peer hub links and updater tokens are managed on the hub.",
+    list: "list_devices",
+    id_field: "name",
+    title_field: "name",
+    color_field: None,
+    empty: "No paired devices. Pair a phone or a browser with Pair a device.",
+    fields: &[
+        FieldSpec::new("name", "Name", "What it was paired as; fixed once paired.", FieldKind::Text { max: 64 }),
+        FieldSpec::new("mode", "Mode", "Full drives sessions; read-only watches.", FieldKind::Choice { options: DEVICE_MODES }).badge(Badge::Label),
+        FieldSpec::new("this_device", "This device", "The device you are using now. It cannot revoke, untrust, bind or hand over itself.", FieldKind::Bool { on_off: false, default: false })
+            .badge(Badge::True { text: "this device" }),
+        FieldSpec::new(
+            "trusted",
+            "Trusted",
+            "Its prompts and messages reach agents unmarked, and it may change the company's orgs, devices and settings. Trust a device you type on, never an agent's.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .edit("trusted")
+        .badge(Badge::True { text: "trusted" })
+        .confirm("Its prompts will reach agents unmarked, and it will be able to change the company's orgs, devices and settings."),
+        FieldSpec::new("org", "Org", "The org it is bound to; none sees every org.", FieldKind::Text { max: 80 }),
+        FieldSpec::new("person", "Belongs to", "Whose device it is: it sees their sessions and the ones shared with them.", FieldKind::Text { max: 64 }),
+        FieldSpec::new(
+            "catalogs",
+            "May change catalogs",
+            "Asset catalogs it may edit and sync. Only a full device bound to no org can hold one.",
+            FieldKind::Items {
+                item_label: ItemLabel::Plain,
+                remove: Some(ActionSpec::new(
+                    "device.ungrant_catalog",
+                    "Take the catalog back",
+                    "grant_device_catalog",
+                    &[DEVICE, ("catalog", Bind::Item), ("on", Bind::False)],
+                )),
+                add: &[ActionSpec::new("device.grant_catalog", "Grant a catalog", "grant_device_catalog", &[DEVICE, ("catalog", Bind::Param("catalog")), ("on", Bind::True)])
+                    .params(&[param("catalog", "Catalog", ParamKind::Options { source: OptionSource::Catalogs }, true)])],
+            },
+        ),
+        FieldSpec::new("last_seen_at", "Last seen", "Its last request to the hub.", FieldKind::Time),
+        FieldSpec::new("created_at", "Paired", "When it was paired.", FieldKind::Time),
+    ],
+    create: Some(
+        ActionSpec::new(
+            "device.pair",
+            "Pair a device",
+            "pair_device",
+            &[
+                ("device", Bind::Param("device")),
+                ("mode", Bind::Param("mode")),
+                ("org", Bind::Param("org")),
+                ("person", Bind::Param("person")),
+            ],
+        )
+        .params(&[
+            param("device", "Name", text(64, "ada-phone"), true),
+            param("mode", "Mode", ParamKind::Choice { options: DEVICE_MODES }, true),
+            param("org", "Bind to org (optional)", ParamKind::Options { source: OptionSource::Orgs }, false),
+            param("person", "Belongs to (optional; you when empty)", text(64, "ada"), false),
+        ])
+        .result(ResultView::Pairing),
+    ),
+    update: Some(ActionSpec::new("device.update", "Apply", "set_device_trust", &[DEVICE])),
+    delete: Some(
+        ActionSpec::new("device.revoke", "Revoke", "revoke_device", &[DEVICE])
+            .confirm("Its next request is refused and the name is free again. Pair it again to bring it back."),
+    ),
+    actions: &[
+        ActionSpec::new("device.bind", "Bind to an org", "bind_device_org", &[DEVICE, ("org", Bind::Param("org"))])
+            .params(&[param("org", "Org", ParamKind::Options { source: OptionSource::Orgs }, true)])
+            .confirm("From its next request it sees only that org's work and sessions."),
+        ActionSpec::new("device.unbind", "Unbind from its org", "bind_device_org", &[DEVICE])
+            .confirm("From its next request it sees every org again."),
+        ActionSpec::new("device.hand_over", "Hand to a person", "set_device_person", &[DEVICE, ("person", Bind::Param("person"))])
+            .params(&[param("person", "Person", text(64, "ada"), true)])
+            .confirm("From its next request it sees that person's sessions and the ones shared with them, and no others."),
+    ],
+    create_flow: None,
+    variant_by: None,
+};
+
+const PERSON_RESOURCE: ResourceType = ResourceType {
+    id: "person",
+    label: "Person",
+    plural: "People",
+    help: "The people this hub knows. A session belongs to the person whose device started it and is private to them unless they share it. The hub's owner cannot be disabled.",
+    list: "list_people",
+    id_field: "id",
+    title_field: "name",
+    color_field: None,
+    empty: "Nobody yet. A person is added when a device is paired to them.",
+    fields: &[
+        FieldSpec::new("name", "Name", "What grants and devices are addressed to.", FieldKind::Text { max: 64 }).edit("name"),
+        FieldSpec::new("display_name", "Shown as", "How the apps show them; empty shows the name.", FieldKind::Text { max: 80 }).edit("display_name"),
+        FieldSpec::new("owner", "Owner", "This hub's own owner.", FieldKind::Bool { on_off: false, default: false }).badge(Badge::True { text: "owner" }),
+        FieldSpec::new("devices", "Devices", "Their live paired devices. Manage them in Settings → Devices.", FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] }),
+        FieldSpec::new("created_at", "Added", "When the hub first heard of them.", FieldKind::Time),
+        FieldSpec::new("disabled_at", "Disabled", "When their devices and the shares made to them were revoked.", FieldKind::Time),
+    ],
+    create: None,
+    update: Some(ActionSpec::new("person.update", "Apply", "rename_person", &[("person_id", Bind::Record("id"))])),
+    delete: Some(
+        ActionSpec::new("person.disable", "Disable", "disable_person", &[("person_id", Bind::Record("id"))])
+            .confirm("Revokes every device of theirs and every share made to them, at once. Their own sessions stay private and theirs. There is no re-enable."),
+    ),
+    actions: &[],
+    create_flow: None,
+    variant_by: None,
+};
+
 /// Every resource type.
-pub const RESOURCES: &[ResourceType] = &[ORG, TRACKER, CATALOG];
+pub const RESOURCES: &[ResourceType] = &[ORG, TRACKER, CATALOG, DEVICE_RESOURCE, PERSON_RESOURCE];
 
 pub fn resource(id: &str) -> Option<&'static ResourceType> {
     RESOURCES.iter().find(|r| r.id == id)
@@ -793,8 +1063,14 @@ mod tests {
             "a new flow: name the commands of its resource here"
         );
         for f in org.fields {
-            if let FieldKind::Items { remove, .. } = &f.kind {
-                let rm = remove.expect("every org list can be shortened");
+            if let FieldKind::Items { remove, add, .. } = &f.kind {
+                // The org's catalogs are shown, never changed here: they are
+                // added and removed on Settings → Catalogs.
+                if ["catalogs", "over_budget"].contains(&f.id) {
+                    assert!(remove.is_none() && add.is_empty(), "{}", f.id);
+                    continue;
+                }
+                let rm = remove.expect("every other org list can be shortened");
                 assert!(
                     rm.bind
                         .iter()
@@ -811,20 +1087,33 @@ mod tests {
                 "add_org_rule",
                 "assign_host_org",
                 "assign_tracker_org",
+                "bind_device_org",
                 "catalog_add_catalog",
                 "catalog_admit_catalog",
                 "catalog_list_catalogs",
                 "catalog_remove_catalog",
                 "catalog_unadmit_catalog",
+                "disable_person",
                 "flow_back",
                 "flow_cancel",
                 "flow_start",
                 "flow_submit",
+                "grant_device_catalog",
+                "list_devices",
                 "list_orgs",
+                "list_people",
                 "list_trackers",
+                "pair_device",
                 "remove_org",
+                "remove_org_member",
                 "remove_org_rule",
                 "remove_tracker",
+                "rename_person",
+                "revoke_device",
+                "set_device_person",
+                "set_device_trust",
+                "set_org_member",
+                "set_org_setting",
                 "set_tracker_credential",
                 "test_tracker",
                 "update_org",

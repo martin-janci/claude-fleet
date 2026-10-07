@@ -1643,19 +1643,16 @@ pub async fn restart_session(
     // Respawn the pane with the command matching the session's kind so a
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
-    // unless forced.
-    let (kind, claude_id, session_id, launch) = {
+    // unless forced ([`restart_guard`], which exempts the operator).
+    let (kind, claude_id, session_id, launch, gone_cwd) = {
         let s = lock(store)?;
-        guard_not_controller(
-            s.get_controller()?.as_ref(),
-            &args.host_alias,
-            &args.name,
-            args.force,
-        )?;
-        match s.get_session(&args.name, &args.host_alias)? {
+        restart_guard(&s, &args.host_alias, &args.name, args.force)?;
+        let row = s.get_session(&args.name, &args.host_alias)?;
+        let gone_cwd = gone_pane_cwd(&s, row.as_ref(), &args.host_alias, &args.name)?;
+        match row {
             Some(r) => {
                 let launch = stored_launch(&s, r.id);
-                (r.kind, r.claude_session_id, Some(r.id), launch)
+                (r.kind, r.claude_session_id, Some(r.id), launch, gone_cwd)
             }
             // No row under that name: a restart is about to create a live
             // tmux session fleet has no record of. It lands `unclaimed`
@@ -1664,7 +1661,7 @@ pub async fn restart_session(
             // person; attributing the session to whoever pressed the button
             // would be a guess, and `unclaimed` is the defined answer for a
             // row nobody can speak for (spec §4.3).
-            None => ("work".to_string(), None, None, Default::default()),
+            None => ("work".to_string(), None, None, Default::default(), gone_cwd),
         }
     };
     let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref(), &args.name, &launch);
@@ -1699,9 +1696,17 @@ pub async fn restart_session(
             tmux.respawn_pane_in(&args.name, std::path::Path::new(&rep.cwd), &pane_cmd)
                 .await?
         }
-        None => tmux.restart_session(&args.name, &pane_cmd).await?,
+        None if crate::store::has_no_pane(&kind) => {
+            tmux.restart_session(&args.name, &pane_cmd).await?
+        }
+        None => {
+            restart_unrepaired(&*tmux, &args.name, &pane_cmd, || {
+                resolve_gone_pane_cwd(gone_cwd, &args.host_alias, ssh.as_ref())
+            })
+            .await?
+        }
     }
-    // Any of the three branches leaves a live tmux session under this name,
+    // Any of the branches leaves a live tmux session under this name,
     // and the create branch may even have rebuilt it from nothing.
     record_tmux_created(store, &args.host_alias, &args.name);
     reconcile_one_host(store, ssh, &args.host_alias).await?;
@@ -1715,6 +1720,108 @@ pub async fn restart_session(
             ),
         )
     })
+}
+
+/// `restart_session`'s controller guard: refuse to restart the registered
+/// fleet controller unless forced — except the operator.
+///
+/// The operator is exempt for the reason it is exempt from
+/// `refuse_if_operator`: the agent panel's `lost` button calls
+/// `restart_session` without `force`. It is never the controller now
+/// (`operator::refuse_operator_as_controller`), but a hub where it once
+/// registered itself keeps the record, and there the button answered
+/// `E_SELF_TARGET` (2026-10-06, `fleet-operator` on mefistos).
+pub(super) fn restart_guard(
+    s: &Store,
+    host_alias: &str,
+    name: &str,
+    force: bool,
+) -> Result<(), IpcError> {
+    if crate::service::operator::is_operator_session(s, host_alias, name) {
+        return Ok(());
+    }
+    guard_not_controller(s.get_controller()?.as_ref(), host_alias, name, force)
+}
+
+/// Where [`restart_session`] starts a NEW tmux session for a row repair
+/// declines (no project, a system project, no row at all) once its tmux
+/// session is gone. Decided under the store lock, resolved after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum GonePaneCwd {
+    /// A system project's `base_path`: stored absolute, the cwd verbatim on
+    /// any host (`fetch_system_base_path`).
+    Fixed(String),
+    /// The UX agent's directory, [`crate::service::operator::OPERATOR_DIR`],
+    /// for a recorded operator row that lost its project.
+    Operator,
+    /// The host's home directory: an orphan has no directory of its own.
+    Home,
+}
+
+/// PURE (given the store): see [`GonePaneCwd`]. A system project wins over
+/// the operator check because it is the exact path the operator was born in.
+pub(super) fn gone_pane_cwd(
+    s: &Store,
+    row: Option<&SessionRow>,
+    host_alias: &str,
+    name: &str,
+) -> Result<GonePaneCwd, IpcError> {
+    if let Some(pid) = row.and_then(|r| r.project_id) {
+        if let Some(fixed) = fetch_system_base_path(s, pid)? {
+            return Ok(GonePaneCwd::Fixed(fixed));
+        }
+    }
+    if crate::service::operator::is_operator_session(s, host_alias, name) {
+        return Ok(GonePaneCwd::Operator);
+    }
+    Ok(GonePaneCwd::Home)
+}
+
+/// [`GonePaneCwd`] as an absolute path on `host_alias`; a `~` must not reach
+/// `tmux new-session -c`, which takes it literally.
+pub(super) async fn resolve_gone_pane_cwd(
+    cwd: GonePaneCwd,
+    host_alias: &str,
+    ssh: &dyn SshExec,
+) -> Result<String, IpcError> {
+    match cwd {
+        GonePaneCwd::Fixed(p) => Ok(p),
+        GonePaneCwd::Operator => crate::service::operator::operator_dir_on(host_alias, ssh).await,
+        GonePaneCwd::Home if host_alias == "local" => {
+            crate::service::provision::expand_home_local("~")
+        }
+        GonePaneCwd::Home => ssh.remote_home(host_alias).await,
+    }
+}
+
+/// The restart of a row with nothing to repair. `respawn-pane` needs the
+/// tmux session to exist, and after a host reboot there is no tmux server at
+/// all: the respawn failed `error connecting to /tmp/tmux-1000/default`, and
+/// the agent panel's `lost` button with it (2026-10-06, `fleet-operator` on
+/// mefistos). A session tmux does not list is created instead, in `cwd()` —
+/// resolved only then, since it may cost an SSH round trip. A host whose
+/// sessions cannot be listed keeps the plain respawn, which reports that
+/// host's own error.
+pub(super) async fn restart_unrepaired<F, Fut>(
+    tmux: &dyn TmuxExec,
+    name: &str,
+    pane_cmd: &str,
+    cwd: F,
+) -> Result<(), IpcError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<String, IpcError>>,
+{
+    let alive = match tmux.list_sessions().await {
+        Ok(live) => live.iter().any(|t| t.name == name),
+        Err(_) => true,
+    };
+    if alive {
+        return tmux.restart_session(name, pane_cmd).await;
+    }
+    let cwd = cwd().await?;
+    tmux.new_session(name, std::path::Path::new(&cwd), pane_cmd)
+        .await
 }
 
 /// Poll the tmux pane until `cl`'s REPL prompt appears, up to ~6s. Returns

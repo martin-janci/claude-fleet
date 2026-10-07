@@ -1,6 +1,7 @@
 import { invokeCmd, type Result } from './result';
 import type { DecideHealth } from './decide_health';
 import type { TrackersHealth } from './tracker_health';
+import type { OrgBudgetAlert } from './org_budget';
 
 export interface Health {
   version: string;
@@ -13,6 +14,10 @@ export interface Health {
   /** The Jev decision envelope's last hour; absent when it is off, from an
    *  older hub, and for a scoped caller. */
   decide?: DecideHealth;
+  /** Org administration phase C: the orgs at or over a budget; absent when
+   *  none are, from an older hub, and for a caller that does not see every
+   *  session. */
+  org_budgets?: OrgBudgetAlert[];
 }
 
 /**

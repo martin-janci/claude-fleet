@@ -110,6 +110,10 @@ pub fn tidy_config(s: &Store) -> TidyConfig {
         auto: settings::get_bool(s, settings::WORK_AUTO_TIDY),
         auto_reasons: reasons.split(',').filter_map(TidyReason::parse).collect(),
         org_auto: s.org_auto_tidy_overrides().unwrap_or_default(),
+        org_unlinked_idle_secs: settings::org_values(s, settings::WORK_TIDY_IDLE_UNLINKED_DAYS)
+            .into_iter()
+            .filter_map(|(org, v)| v.parse::<i64>().ok().map(|d| (org, d * 86_400)))
+            .collect(),
     }
 }
 
