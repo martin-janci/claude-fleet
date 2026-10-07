@@ -2,8 +2,8 @@
   // Local workspace sync (Phase 1): the session's worktree, kept in step with
   // a folder on this machine. Off: a folder field and Enable. On: state,
   // both paths, when it last synced, open conflicts with Keep local / Keep
-  // remote, and Sync now / Pause / Resume / Disconnect. A paired desktop shows
-  // a note instead: the sync runs over this machine's own SSH.
+  // remote, and Sync now / Pause / Resume / Disconnect. A desktop paired with
+  // a hub syncs too: the folder and the SSH are this machine's.
   // Phases 2 and 3 add Open in…, what each side changed with Review changes,
   // who drives the worktree (Take over / Hand back to AI), Compare / Keep
   // both / Ask AI to resolve on a conflict, and the overview of every link.
@@ -33,7 +33,6 @@
     type FileDiff,
   } from './local_workspaces';
   import { projectById } from './projects';
-  import { hubStatus, ownsTheFleet } from './hub';
   import { timeAgo } from './session_status';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import Modal from './Modal.svelte';
@@ -43,12 +42,11 @@
 
   let { session }: { session: SessionRow } = $props();
 
-  const link = $derived(linkFor($localWorkspaces, session));
-  const badge = $derived(badgeFor(link));
-  const owns = $derived(ownsTheFleet($hubStatus));
   const project = $derived(
     session.project_id != null ? $projectById.get(session.project_id)?.project : undefined,
   );
+  const link = $derived(linkFor($localWorkspaces, session, project));
+  const badge = $derived(badgeFor(link));
 
   let folder = $state('');
   let excludesText = $state('');
@@ -121,12 +119,7 @@
 
 <section class="block lw" data-testid="local-workspace">
   <h3>Local workspace</h3>
-  {#if !owns}
-    <p class="muted" data-testid="lw-remote-note">
-      Local sync runs over this machine’s own SSH connection, so it is not available while this
-      desktop is paired with a hub.
-    </p>
-  {:else if session.project_id == null}
+  {#if session.project_id == null}
     <p class="muted">This session is not in a project, so it has no worktree to sync.</p>
   {:else if !link}
     <p class="hint">

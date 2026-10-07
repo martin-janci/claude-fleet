@@ -64,12 +64,13 @@ fn a_hub_client_starts_none_of_the_three() {
     start_background_tasks(&remote(), &recorder);
     assert_eq!(
         recorder.started(),
-        vec!["event_bridge", "report_flusher"],
+        vec!["event_bridge", "local_sync_tick", "report_flusher"],
         "a desktop pointed at a hub started a fleet-owning background task. \
          Two processes reconciling one fleet is the failure this whole mode \
          exists to prevent — and unlike most bugs it is silent, because both \
-         halves appear to work. The event bridge is the one task a client DOES \
-         run: it only reads the hub's stream."
+         halves appear to work. A client runs the event bridge, which only reads \
+         the hub's stream, and the local workspace sync, which is this \
+         machine's own folders over its own SSH."
     );
 }
 
@@ -118,13 +119,14 @@ fn a_paired_desktop_never_scans_the_catalog() {
     assert!(standalone.started().contains(&"catalog_scan_tick"));
 }
 
-/// Local workspace sync reaches hosts over this process's own SSH: only a
-/// standalone desktop runs its tick.
+/// Local workspace sync reaches hosts over this process's own SSH and binds
+/// this machine's folders: a paired desktop runs its tick too, one the hub
+/// cannot use does not.
 #[test]
-fn only_a_standalone_desktop_runs_local_workspace_sync() {
+fn a_paired_desktop_runs_local_workspace_sync_too() {
     let recorder = Recorder::default();
     start_background_tasks(&remote(), &recorder);
-    assert!(!recorder.started().contains(&"local_sync_tick"));
+    assert!(recorder.started().contains(&"local_sync_tick"));
     let standalone = Recorder::default();
     start_background_tasks(&Backend::Local, &standalone);
     assert!(standalone.started().contains(&"local_sync_tick"));

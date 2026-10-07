@@ -201,28 +201,6 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
   // AddHostPicker.svelte only mounts inside the Add-host dialog, whose
   // opener (`+ Add host`) is disabled via `hubBlock('add_host', …)`.
   gatedByAddHostDialog: ['probe_ssh_alias'],
-  // LocalWorkspaceCard.svelte shows a note instead of its controls unless
-  // `ownsTheFleet` (a standalone desktop): the sync runs over this
-  // machine's own SSH, so there is nothing to "do on the hub".
-  gatedByLocalWorkspaceCard: [
-    'enable_local_workspace',
-    'pause_local_workspace',
-    'resume_local_workspace',
-    'sync_local_workspace_now',
-    'disconnect_local_workspace',
-    'set_local_workspace_excludes',
-    'resolve_local_workspace_conflict',
-    'open_local_workspace',
-    'local_workspace_changes',
-    'local_workspace_diff',
-    'commit_local_workspace',
-    'discard_local_workspace_changes',
-    'dismiss_local_workspace_activity',
-    'compare_local_conflict',
-    'keep_both_local_conflict',
-    'ask_ai_about_local_changes',
-    'set_local_workspace_driver',
-  ],
 } as const;
 
 const ALLOWLISTED_LOCAL_ONLY_COMMANDS: readonly string[] = Object.values(

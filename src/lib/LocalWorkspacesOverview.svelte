@@ -7,6 +7,7 @@
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import { sessions } from './sessions';
+  import { projectById } from './projects';
   import {
     localWorkspaces,
     badgeFor,
@@ -28,7 +29,8 @@
   let confirmDisconnect = $state<LocalWorkspace | null>(null);
 
   const rows = $derived(
-    $localWorkspaces.map((w) => ({ w, badge: badgeFor(w), stale: staleReason(w, $sessions) })),
+    $localWorkspaces.map((w) => ({ w, badge: badgeFor(w), stale: staleReason(w, $sessions, (pid) => $projectById.get(pid)?.project),
+    })),
   );
   const stale = $derived(rows.filter((r) => r.stale).map((r) => r.w));
 

@@ -135,8 +135,17 @@ branch into the base branch and reports). The overview links each.
 
 ## Hub-client mode
 
-Every new command is `LocalOnly`, as in Phase 1: the folder is on this
-desktop.
+A desktop paired with a hub syncs too: the folder and the SSH are this
+machine's, so every command is `SameInBoth` and the tick starts in both
+modes. What the sync needs from the fleet comes from the hub there. Enable
+reads the session and its project from the hub's `list_sessions` /
+`list_projects`, and finds the worktree's path from the session's own pane on
+the host (`git rev-parse --show-toplevel`, over this machine's SSH). Ask AI and
+the handoff pick the session among the hub's and deliver through its
+`send_prompt`. The link stores no session id (the hub's ids are not this
+database's) and is matched to sessions by owner/repo. The host must be one this
+machine reaches over SSH; a session on the hub's own machine (`local`) is
+refused.
 
 ## Not here
 

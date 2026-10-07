@@ -16,8 +16,17 @@ struct Bash {
 
 #[async_trait::async_trait]
 impl SshExec for Bash {
-    async fn run(&self, _: &str, _: &[&str], _: Duration) -> Result<Output, IpcError> {
-        unreachable!("local sync pipes stdin")
+    /// `run_shell` (the paired desktop's pane lookup) lands here.
+    async fn run(&self, _: &str, args: &[&str], _: Duration) -> Result<Output, IpcError> {
+        Ok(crate::proc::command("bash")
+            .arg("-c")
+            .arg(args.join(" "))
+            .env("HOME", &self.home)
+            .env("TMUX_TMPDIR", self.home.join("tmux"))
+            .env_remove("TMUX")
+            .output()
+            .await
+            .unwrap())
     }
     async fn run_bounded(
         &self,
@@ -944,6 +953,7 @@ async fn ask_ai_targets_the_worktrees_session_and_resolve_stages_the_local_copy(
             question: None,
             paths: Some(vec!["README.md".into()]),
         },
+        None,
     )
     .await
     .unwrap();
@@ -973,6 +983,7 @@ async fn ask_ai_targets_the_worktrees_session_and_resolve_stages_the_local_copy(
             question: None,
             paths: None,
         },
+        None,
     )
     .await
     .unwrap();
@@ -998,6 +1009,7 @@ async fn ask_ai_without_a_live_session_says_to_start_one() {
             question: None,
             paths: None,
         },
+        None,
     )
     .await
     .unwrap_err();
@@ -1007,7 +1019,9 @@ async fn ask_ai_without_a_live_session_says_to_start_one() {
         id: row.id,
         driver: "developer".into(),
     };
-    let plan = handoff::prepare_driver(&f.engine, &args).await.unwrap();
+    let plan = handoff::prepare_driver(&f.engine, &args, None)
+        .await
+        .unwrap();
     assert!(plan.is_none());
     let r = handoff::finish_driver(&f.engine, &args, None).unwrap();
     assert_eq!(r.driver, "developer");
@@ -1022,7 +1036,7 @@ async fn handing_back_gives_the_agent_the_developers_changes() {
         id: row.id,
         driver: "developer".into(),
     };
-    let plan = handoff::prepare_driver(&f.engine, &take)
+    let plan = handoff::prepare_driver(&f.engine, &take, None)
         .await
         .unwrap()
         .unwrap();
@@ -1037,7 +1051,7 @@ async fn handing_back_gives_the_agent_the_developers_changes() {
         id: row.id,
         driver: "agent".into(),
     };
-    let plan = handoff::prepare_driver(&f.engine, &back)
+    let plan = handoff::prepare_driver(&f.engine, &back, None)
         .await
         .unwrap()
         .unwrap();
@@ -1056,10 +1070,137 @@ async fn handing_back_gives_the_agent_the_developers_changes() {
         driver: "robot".into(),
     };
     assert_eq!(
-        handoff::prepare_driver(&f.engine, &bad)
+        handoff::prepare_driver(&f.engine, &bad, None)
             .await
             .unwrap_err()
             .code,
         codes::E_INVALID
     );
+}
+
+// ---------------------------------------------------------------------------
+// A desktop paired with a hub.
+// ---------------------------------------------------------------------------
+
+fn hub_worktree(tmux_name: &str) -> HubSessionWorktree {
+    HubSessionWorktree {
+        host_alias: "devbox".into(),
+        owner: "acme".into(),
+        repo: "app".into(),
+        worktree_key: "main".into(),
+        tmux_name: tmux_name.into(),
+    }
+}
+
+#[tokio::test]
+async fn a_paired_desktop_finds_the_worktree_through_the_sessions_pane() {
+    let has_tmux = std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !has_tmux {
+        return;
+    }
+    let f = fixture();
+    let sock = f._home.path().join("tmux");
+    std::fs::create_dir_all(&sock).unwrap();
+    let tmux = |args: &[&str]| {
+        std::process::Command::new("tmux")
+            .args(args)
+            .env("TMUX_TMPDIR", &sock)
+            .env_remove("TMUX")
+            .status()
+            .unwrap()
+    };
+    let remote = f.remote.to_string_lossy().into_owned();
+    assert!(tmux(&["new-session", "-d", "-s", "hub-app", "-c", &remote]).success());
+    let r = enable_on_hub_session(
+        &f.engine,
+        hub_worktree("hub-app"),
+        &f.local.to_string_lossy(),
+        vec![],
+    )
+    .await;
+    let missing = enable_on_hub_session(
+        &f.engine,
+        hub_worktree("no-such-session"),
+        &f.local.to_string_lossy(),
+        vec![],
+    )
+    .await;
+    tmux(&["kill-server"]);
+    let row = r.unwrap();
+    assert_eq!(
+        Path::new(&row.remote_path),
+        std::fs::canonicalize(&f.remote).unwrap()
+    );
+    // The hub's session id is not this database's.
+    assert_eq!(row.session_id, None);
+    let row = f.pass(row.id).await;
+    assert_eq!(row.state, "synced", "{row:?}");
+    assert_eq!(read(&f.local, "README.md").as_deref(), Some("hello\n"));
+    assert!(missing.is_err());
+}
+
+#[tokio::test]
+async fn a_paired_desktop_does_not_link_the_hubs_own_machine() {
+    let f = fixture();
+    let mut w = hub_worktree("dev-app");
+    w.host_alias = crate::service::projects::LOCAL_HOST.into();
+    let e = enable_on_hub_session(&f.engine, w, &f.local.to_string_lossy(), vec![])
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+}
+
+#[tokio::test]
+async fn a_paired_desktop_asks_the_hubs_session() {
+    let f = fixture();
+    let row = f.enable().await;
+    let mut theirs = lock(&f.engine.store)
+        .unwrap()
+        .get_session_by_id(f.session_id)
+        .unwrap()
+        .unwrap();
+    // The hub numbers its rows its own way.
+    theirs.id = 7001;
+    theirs.project_id = Some(55);
+    theirs.tmux_name = "hub-app".into();
+    let hub = handoff::HubSessions {
+        sessions: vec![theirs],
+        project_id: Some(55),
+    };
+    let plan = handoff::prepare_ask(
+        &f.engine,
+        AskAiArgs {
+            id: row.id,
+            intent: "review".into(),
+            question: None,
+            paths: None,
+        },
+        Some(&hub),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (plan.session_id, plan.tmux_name.as_str()),
+        (7001, "hub-app")
+    );
+    let other = handoff::HubSessions {
+        project_id: Some(56),
+        ..hub
+    };
+    let e = handoff::prepare_ask(
+        &f.engine,
+        AskAiArgs {
+            id: row.id,
+            intent: "review".into(),
+            question: None,
+            paths: None,
+        },
+        Some(&other),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND);
 }

@@ -148,13 +148,33 @@ export interface WorktreeOf {
   worktree_key: string | null;
 }
 
+/** A project's name, which a link stores. */
+export interface RepoName {
+  owner: string;
+  repo: string;
+}
+
+/** Whether link `w` is on the project `s` is in. By name when the project
+ *  is known: on a desktop paired with a hub the session's project id is the
+ *  hub's, and this machine's database (which joins `w.project_id`) may not
+ *  have the project at all. */
+function sameProject(w: LocalWorkspace, s: WorktreeOf, project?: RepoName): boolean {
+  if (s.project_id == null) return false;
+  if (project) return w.owner === project.owner && w.repo === project.repo;
+  return w.project_id === s.project_id;
+}
+
 /** The link on `s`'s worktree, if there is one. A session with no
- *  `worktree_key` works in the project root, which links key as `main`. */
-export function linkFor(rows: LocalWorkspace[], s: WorktreeOf): LocalWorkspace | undefined {
-  if (s.project_id == null) return undefined;
+ *  `worktree_key` works in the project root, which links key as `main`.
+ *  `project` is `s`'s project, when the caller knows it. */
+export function linkFor(
+  rows: LocalWorkspace[],
+  s: WorktreeOf,
+  project?: RepoName,
+): LocalWorkspace | undefined {
   const key = s.worktree_key || 'main';
   return rows.find(
-    (w) => w.host_alias === s.host_alias && w.project_id === s.project_id && w.worktree_key === key,
+    (w) => w.host_alias === s.host_alias && w.worktree_key === key && sameProject(w, s, project),
   );
 }
 
@@ -342,6 +362,7 @@ export const DRIVER_LABEL: Record<string, string> = {
 export function staleReason(
   w: LocalWorkspace,
   liveSessions: (WorktreeOf & { status?: string })[],
+  projectOf: (projectId: number) => RepoName | undefined = () => undefined,
 ): string | null {
   const err = w.last_error ?? '';
   // The sync's own words (local_sync::local / ::remote).
@@ -351,9 +372,8 @@ export function staleReason(
     (s) =>
       s.status !== 'ghost' &&
       s.host_alias === w.host_alias &&
-      s.project_id != null &&
-      s.project_id === w.project_id &&
-      (s.worktree_key || 'main') === w.worktree_key,
+      (s.worktree_key || 'main') === w.worktree_key &&
+      sameProject(w, s, s.project_id != null ? projectOf(s.project_id) : undefined),
   );
   return used ? null : 'No session uses this worktree';
 }

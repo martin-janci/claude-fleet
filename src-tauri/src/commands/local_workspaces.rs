@@ -1,20 +1,22 @@
 //! Local workspace sync (`fleet_core::service::local_sync`): bind a session's
-//! worktree to a folder on this machine and keep the two in step. Every
-//! mutation is `LocalOnly`: the folder is on this disk and the sync runs
-//! over this machine's own SSH, so a desktop paired with a hub refuses them.
+//! worktree to a folder on this machine and keep the two in step. The same in
+//! both modes: the folder is on this disk and the sync runs over this
+//! machine's own SSH, so a desktop paired with a hub runs it too. What it
+//! needs from the fleet (the session, its project, delivering a prompt)
+//! comes from the hub there.
 
-use fleet_core::ipc_error::IpcError;
+use fleet_core::ipc_error::{codes, IpcError};
 use fleet_core::service::local_sync::handoff::{
-    self, AskAiArgs, AskPlan, CommitLocalWorkspaceArgs, DismissLocalActivityArgs, LocalChanges,
-    LocalCommit, LocalWorkspacePathArgs, LocalWorkspacePathsArgs, SetLocalDriverArgs,
+    self, AskAiArgs, AskPlan, CommitLocalWorkspaceArgs, DismissLocalActivityArgs, HubSessions,
+    LocalChanges, LocalCommit, LocalWorkspacePathArgs, LocalWorkspacePathsArgs, SetLocalDriverArgs,
 };
 use fleet_core::service::local_sync::open::OpenApp;
 use fleet_core::service::local_sync::{
-    self, EnableLocalWorkspaceArgs, LocalSync, LocalWorkspaceIdArgs, ResolveLocalConflictArgs,
-    SetLocalWorkspaceExcludesArgs,
+    self, EnableLocalWorkspaceArgs, HubSessionWorktree, LocalSync, LocalWorkspaceIdArgs,
+    ResolveLocalConflictArgs, SetLocalWorkspaceExcludesArgs,
 };
 use fleet_core::service::repo_read::FileDiff;
-use fleet_core::service::sessions::{self, SendPromptArgs};
+use fleet_core::service::sessions::SendPromptArgs;
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{LocalWorkspaceRow, Store};
 use serde::Deserialize;
@@ -22,6 +24,56 @@ use std::sync::{Arc, Mutex};
 use tauri::State;
 
 use crate::backend::FleetBackend;
+
+/// On a desktop paired with a hub, the hub's sessions and its id of the
+/// link's project; `None` standalone, where this machine's database has both.
+async fn hub_sessions(
+    backend: &FleetBackend,
+    store: &Mutex<Store>,
+    id: i64,
+) -> Result<Option<HubSessions>, IpcError> {
+    let Some(hub) = backend.hub() else {
+        return Ok(None);
+    };
+    let link = fleet_core::ipc_error::lock(store)?
+        .local_workspace(id)?
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no local workspace {id}")))?;
+    let project_id = hub
+        .list_projects()
+        .await?
+        .into_iter()
+        .map(|t| t.project)
+        .filter(|p| p.owner == link.owner && p.repo == link.repo)
+        .min_by_key(|p| (p.system, p.id))
+        .map(|p| p.id);
+    Ok(Some(HubSessions {
+        sessions: hub.list_sessions(false).await?,
+        project_id,
+    }))
+}
+
+/// Send the plan's prompt to its session: over this machine's SSH
+/// standalone, through the hub's `send_prompt` when paired.
+async fn deliver(
+    backend: &FleetBackend,
+    plan: &AskPlan,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<(), IpcError> {
+    crate::commands::sessions::routed::send_prompt(
+        backend,
+        SendPromptArgs {
+            host_alias: plan.host_alias.clone(),
+            tmux_name: plan.tmux_name.clone(),
+            prompt: plan.prompt.clone(),
+            submit: true,
+            keys: None,
+        },
+        store,
+        ssh,
+    )
+    .await
+}
 
 /// Every link on this machine, with its state and open conflicts.
 #[tauri::command]
@@ -38,27 +90,56 @@ pub async fn enable_local_workspace(
     backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("enable_local_workspace")?;
-    local_sync::enable(&engine, args).await
+    let Some(hub) = backend.hub() else {
+        return local_sync::enable(&engine, args).await;
+    };
+    let session = hub
+        .list_sessions(false)
+        .await?
+        .into_iter()
+        .find(|s| s.id == args.session_id)
+        .ok_or_else(|| {
+            IpcError::new(codes::E_NOTFOUND, format!("no session {}", args.session_id))
+        })?;
+    let pid = session.project_id.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOREPO,
+            "this session is not in a project, so it has no worktree to sync",
+        )
+    })?;
+    let project = hub
+        .list_projects()
+        .await?
+        .into_iter()
+        .map(|t| t.project)
+        .find(|p| p.id == pid)
+        .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("no project {pid}")))?;
+    let worktree = HubSessionWorktree {
+        host_alias: session.host_alias,
+        owner: project.owner,
+        repo: project.repo,
+        worktree_key: session
+            .worktree_key
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| "main".into()),
+        tmux_name: session.tmux_name,
+    };
+    local_sync::enable_on_hub_session(&engine, worktree, &args.local_path, args.excludes).await
 }
 
 #[tauri::command]
 pub async fn pause_local_workspace(
     args: LocalWorkspaceIdArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("pause_local_workspace")?;
     local_sync::pause(&engine, args.id)
 }
 
 #[tauri::command]
 pub async fn resume_local_workspace(
     args: LocalWorkspaceIdArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("resume_local_workspace")?;
     local_sync::resume(&engine, args.id)
 }
 
@@ -66,10 +147,8 @@ pub async fn resume_local_workspace(
 #[tauri::command]
 pub async fn sync_local_workspace_now(
     args: LocalWorkspaceIdArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("sync_local_workspace_now")?;
     engine.sync_now(args.id).await
 }
 
@@ -77,20 +156,16 @@ pub async fn sync_local_workspace_now(
 #[tauri::command]
 pub async fn disconnect_local_workspace(
     args: LocalWorkspaceIdArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<(), IpcError> {
-    backend.refuse_local_only("disconnect_local_workspace")?;
     local_sync::disconnect(&engine, args.id).await
 }
 
 #[tauri::command]
 pub async fn set_local_workspace_excludes(
     args: SetLocalWorkspaceExcludesArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("set_local_workspace_excludes")?;
     local_sync::set_excludes(&engine, args)
 }
 
@@ -98,10 +173,8 @@ pub async fn set_local_workspace_excludes(
 #[tauri::command]
 pub async fn resolve_local_workspace_conflict(
     args: ResolveLocalConflictArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("resolve_local_workspace_conflict")?;
     local_sync::resolve_conflict(&engine, args).await
 }
 
@@ -120,10 +193,8 @@ pub struct OpenLocalWorkspaceArgs {
 #[tauri::command]
 pub async fn open_local_workspace(
     args: OpenLocalWorkspaceArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
-    backend.refuse_local_only("open_local_workspace")?;
     let path = fleet_core::ipc_error::lock(&store)?
         .local_workspace(args.id)?
         .ok_or_else(|| {
@@ -148,10 +219,8 @@ pub async fn open_local_workspace(
 #[tauri::command]
 pub async fn local_workspace_changes(
     args: LocalWorkspaceIdArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalChanges, IpcError> {
-    backend.refuse_local_only("local_workspace_changes")?;
     handoff::changes(&engine, args.id).await
 }
 
@@ -159,10 +228,8 @@ pub async fn local_workspace_changes(
 #[tauri::command]
 pub async fn local_workspace_diff(
     args: LocalWorkspacePathArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<FileDiff, IpcError> {
-    backend.refuse_local_only("local_workspace_diff")?;
     handoff::diff(&engine, args).await
 }
 
@@ -170,10 +237,8 @@ pub async fn local_workspace_diff(
 #[tauri::command]
 pub async fn commit_local_workspace(
     args: CommitLocalWorkspaceArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalCommit, IpcError> {
-    backend.refuse_local_only("commit_local_workspace")?;
     handoff::commit(&engine, args).await
 }
 
@@ -182,10 +247,8 @@ pub async fn commit_local_workspace(
 #[tauri::command]
 pub async fn discard_local_workspace_changes(
     args: LocalWorkspacePathsArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("discard_local_workspace_changes")?;
     handoff::discard(&engine, args).await
 }
 
@@ -193,10 +256,8 @@ pub async fn discard_local_workspace_changes(
 #[tauri::command]
 pub async fn dismiss_local_workspace_activity(
     args: DismissLocalActivityArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("dismiss_local_workspace_activity")?;
     handoff::dismiss(&engine, args)
 }
 
@@ -204,10 +265,8 @@ pub async fn dismiss_local_workspace_activity(
 #[tauri::command]
 pub async fn compare_local_conflict(
     args: LocalWorkspacePathArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<FileDiff, IpcError> {
-    backend.refuse_local_only("compare_local_conflict")?;
     handoff::compare_conflict(&engine, args).await
 }
 
@@ -215,30 +274,9 @@ pub async fn compare_local_conflict(
 #[tauri::command]
 pub async fn keep_both_local_conflict(
     args: LocalWorkspacePathArgs,
-    backend: State<'_, Arc<FleetBackend>>,
     engine: State<'_, Arc<LocalSync>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("keep_both_local_conflict")?;
     handoff::keep_both(&engine, args).await
-}
-
-async fn deliver(
-    plan: &AskPlan,
-    store: &Mutex<Store>,
-    ssh: &Arc<SshClient>,
-) -> Result<(), IpcError> {
-    sessions::send_prompt(
-        SendPromptArgs {
-            host_alias: plan.host_alias.clone(),
-            tmux_name: plan.tmux_name.clone(),
-            prompt: plan.prompt.clone(),
-            submit: true,
-            keys: None,
-        },
-        store,
-        ssh,
-    )
-    .await
 }
 
 /// Ask the agent on the worktree about the developer's changes (explain,
@@ -252,10 +290,10 @@ pub async fn ask_ai_about_local_changes(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("ask_ai_about_local_changes")?;
     let id = args.id;
-    let plan = handoff::prepare_ask(&engine, args).await?;
-    deliver(&plan, &store, &ssh).await?;
+    let hub = hub_sessions(&backend, &store, id).await?;
+    let plan = handoff::prepare_ask(&engine, args, hub.as_ref()).await?;
+    deliver(&backend, &plan, &store, &ssh).await?;
     handoff::finish_ask(&engine, id, &plan.clear)
 }
 
@@ -269,10 +307,10 @@ pub async fn set_local_workspace_driver(
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<LocalWorkspaceRow, IpcError> {
-    backend.refuse_local_only("set_local_workspace_driver")?;
-    let plan = handoff::prepare_driver(&engine, &args).await?;
+    let hub = hub_sessions(&backend, &store, args.id).await?;
+    let plan = handoff::prepare_driver(&engine, &args, hub.as_ref()).await?;
     if let Some(p) = &plan {
-        deliver(p, &store, &ssh).await?;
+        deliver(&backend, p, &store, &ssh).await?;
     }
     handoff::finish_driver(&engine, &args, plan.as_ref())
 }

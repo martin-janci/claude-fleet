@@ -59,6 +59,7 @@
   import { orgs } from './orgs';
   import SpiralLoader from './SpiralLoader.svelte';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
+  import { projectById } from './projects';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -283,7 +284,13 @@
    * either way would be worse than saying nothing.
    */
   // Local workspace sync: the link on this row's worktree, if any.
-  const localLink = $derived(linkFor($localWorkspaces, sess));
+  const localLink = $derived(
+    linkFor(
+      $localWorkspaces,
+      sess,
+      sess.project_id != null ? $projectById.get(sess.project_id)?.project : undefined,
+    ),
+  );
   const localBadge = $derived(badgeFor(localLink));
   const privacyBadge = $derived.by((): { text: string; title: string } | null => {
     if (sess.visibility === 'unclaimed') {

@@ -404,9 +404,10 @@ bullet for the area you are about to change.
   overwritten. The host side is three bash scripts over
   `SshExec::run_with_stdin` (GNU and BSD userlands); `.gitignore` is git's own
   answer there and the `ignore` crate's here, plus `excludes::DEFAULT_EXCLUDES`
-  and the link's patterns. The tick (`spawn_local_sync_tick`) is fleet-owning,
-  started by `bootstrap::tasks`; every mutation is `LocalOnly` on a paired
-  desktop. Row event `local_workspace:changed` carries the id only.
+  and the link's patterns. The tick (`spawn_local_sync_tick`) is started by
+  `bootstrap::tasks` in both modes: the folders and the SSH are this
+  machine's, so every command is `SameInBoth`, and a paired desktop reads the
+  session and project from the hub (`commands/local_workspaces.rs`). Row event `local_workspace:changed` carries the id only.
   Phases 2 and 3 (migration 112; spec
   `docs/superpowers/specs/2026-10-07-local-workspace-handoff-design.md`):
   each pass records which side carried each path

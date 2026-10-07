@@ -924,6 +924,111 @@ pub async fn enable(
     } else {
         remote_guess
     };
+    bind(
+        engine,
+        NewLink {
+            host,
+            owner,
+            repo,
+            key,
+            remote_path,
+            local_path,
+            session_id: Some(args.session_id),
+            excludes: args.excludes,
+        },
+    )
+    .await
+}
+
+/// A session's worktree as a desktop paired with a hub knows it: from the
+/// hub's rows, because this machine's database holds none of them.
+#[derive(Debug, Clone)]
+pub struct HubSessionWorktree {
+    pub host_alias: String,
+    pub owner: String,
+    pub repo: String,
+    /// `main` for the project root.
+    pub worktree_key: String,
+    pub tmux_name: String,
+}
+
+const ROOT_MARK: &str = "@@FLEET-ROOT@@";
+
+/// The paired desktop's `enable`: the session and its project come from the
+/// hub, and the worktree's path from the session's own pane on the host
+/// (`git rev-parse --show-toplevel` there), asked over this machine's SSH,
+/// which then carries the sync. The link remembers no session: the hub's
+/// session ids are not this database's.
+pub async fn enable_on_hub_session(
+    engine: &Arc<LocalSync>,
+    w: HubSessionWorktree,
+    local_path: &str,
+    excludes: Vec<String>,
+) -> Result<LocalWorkspaceRow, IpcError> {
+    let local_path = normalize_local_path(local_path)?;
+    Excludes::new(&excludes)?;
+    if w.host_alias == crate::service::projects::LOCAL_HOST {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "this session runs on the hub's own machine, which this desktop does not reach              over SSH; local sync needs a host this machine can reach",
+        ));
+    }
+    let script = crate::service::repo::repo_script(
+        &w.tmux_name,
+        &format!("printf '{ROOT_MARK}%s' \"$root\""),
+    );
+    let out = crate::ssh::run_shell(
+        engine.ssh.as_ref(),
+        &w.host_alias,
+        &script,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let remote_path = match stdout.rsplit_once(ROOT_MARK) {
+        Some((_, root)) if out.status.success() && root.starts_with('/') => root.to_string(),
+        _ => return Err(crate::service::repo::repo_err(&out)),
+    };
+    bind(
+        engine,
+        NewLink {
+            host: w.host_alias,
+            owner: w.owner,
+            repo: w.repo,
+            key: w.worktree_key,
+            remote_path,
+            local_path,
+            session_id: None,
+            excludes,
+        },
+    )
+    .await
+}
+
+struct NewLink {
+    host: String,
+    owner: String,
+    repo: String,
+    key: String,
+    remote_path: String,
+    local_path: String,
+    session_id: Option<i64>,
+    excludes: Vec<String>,
+}
+
+/// Reach the worktree, make the folder, store the link and start its first
+/// pass.
+async fn bind(engine: &Arc<LocalSync>, l: NewLink) -> Result<LocalWorkspaceRow, IpcError> {
+    let NewLink {
+        host,
+        owner,
+        repo,
+        key,
+        remote_path,
+        local_path,
+        session_id,
+        excludes,
+    } = l;
     if host == crate::service::projects::LOCAL_HOST
         && crate::store::paths_overlap(&remote_path, &local_path)
     {
@@ -945,8 +1050,8 @@ pub async fn enable(
             worktree_key: &key,
             remote_path: &remote_path,
             local_path: &local_path,
-            session_id: Some(args.session_id),
-            excludes: &args.excludes,
+            session_id,
+            excludes: &excludes,
         },
         now_secs(),
     )?;

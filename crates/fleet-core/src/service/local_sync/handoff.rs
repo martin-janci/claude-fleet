@@ -360,16 +360,37 @@ pub const ASK_INTENTS: [&str; 8] = [
     "explain", "review", "continue", "tests", "commit", "merge", "resolve", "custom",
 ];
 
+/// The sessions a desktop paired with a hub asks about: the hub's rows, and
+/// the hub's id of the link's project (owner/repo), since neither is in this
+/// machine's database.
+#[derive(Debug, Clone, Default)]
+pub struct HubSessions {
+    pub sessions: Vec<SessionRow>,
+    pub project_id: Option<i64>,
+}
+
 /// The live work session on the link's worktree: the one that made the link
 /// when it is still there, else the most recently active one.
 pub fn target_session(store: &Store, link: &LocalWorkspaceRow) -> Result<SessionRow, IpcError> {
-    let pid = link.project_id;
-    let alive: Vec<SessionRow> = store
-        .list_sessions_for_host(&link.host_alias)?
+    pick_target(
+        store.list_sessions_for_host(&link.host_alias)?,
+        link,
+        link.project_id,
+    )
+}
+
+/// [`target_session`] among `sessions`, with `pid` the project's id there.
+pub fn pick_target(
+    sessions: Vec<SessionRow>,
+    link: &LocalWorkspaceRow,
+    pid: Option<i64>,
+) -> Result<SessionRow, IpcError> {
+    let alive: Vec<SessionRow> = sessions
         .into_iter()
         .filter(|s| {
             s.status != "ghost"
                 && s.kind == "work"
+                && s.host_alias == link.host_alias
                 && pid.is_some()
                 && s.project_id == pid
                 && s.worktree_key
@@ -394,6 +415,17 @@ pub fn target_session(store: &Store, link: &LocalWorkspaceRow) -> Result<Session
             ),
         )
     })
+}
+
+fn find_target(
+    store: &Store,
+    link: &LocalWorkspaceRow,
+    hub: Option<&HubSessions>,
+) -> Result<SessionRow, IpcError> {
+    match hub {
+        Some(h) => pick_target(h.sessions.clone(), link, h.project_id),
+        None => target_session(store, link),
+    }
 }
 
 fn change_letter(change: &str) -> &'static str {
@@ -539,7 +571,11 @@ fn local_files(
 /// prompt, and which local activity rows the agent is handed. For
 /// `resolve`, the local version of the file is first put next to the
 /// host's as `<path>.fleet-local`.
-pub async fn prepare_ask(engine: &Arc<LocalSync>, args: AskAiArgs) -> Result<AskPlan, IpcError> {
+pub async fn prepare_ask(
+    engine: &Arc<LocalSync>,
+    args: AskAiArgs,
+    hub: Option<&HubSessions>,
+) -> Result<AskPlan, IpcError> {
     if !ASK_INTENTS.contains(&args.intent.as_str()) {
         return Err(IpcError::new(
             codes::E_INVALID,
@@ -558,7 +594,7 @@ pub async fn prepare_ask(engine: &Arc<LocalSync>, args: AskAiArgs) -> Result<Ask
     }
     let (session, files) = {
         let s = lock(&engine.store)?;
-        let session = target_session(&s, &link)?;
+        let session = find_target(&s, &link, hub)?;
         let paths = args.paths.as_deref().filter(|p| !p.is_empty());
         (session, local_files(&s, args.id, paths)?)
     };
@@ -627,6 +663,7 @@ pub fn finish_ask(
 pub async fn prepare_driver(
     engine: &Arc<LocalSync>,
     args: &SetLocalDriverArgs,
+    hub: Option<&HubSessions>,
 ) -> Result<Option<AskPlan>, IpcError> {
     if !crate::store::LOCAL_WORKSPACE_DRIVERS.contains(&args.driver.as_str()) {
         return Err(IpcError::new(
@@ -642,7 +679,7 @@ pub async fn prepare_driver(
         "developer" => {
             let found = {
                 let s = lock(&engine.store)?;
-                target_session(&s, &link)
+                find_target(&s, &link, hub)
             };
             let session = match found {
                 Ok(s) => s,
@@ -672,6 +709,7 @@ pub async fn prepare_driver(
                     question: None,
                     paths: None,
                 },
+                hub,
             )
             .await?;
             Ok(Some(AskPlan {

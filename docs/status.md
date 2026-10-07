@@ -278,9 +278,9 @@ details and a dot on the session row). A link belongs to the worktree
 (host, owner/repo, worktree key), not the session. Writes are guarded on
 both sides, two sides that changed differently become a conflict (Keep local
 / Keep remote, or by hand), and a folder that lost most of its files pauses
-the link instead of deleting the other side. Standalone desktop only: every
-mutation is `LocalOnly` on a paired desktop, and hosts reached through
-`fleet-agent` are refused (no stdin). Phases 2 and 3 are built too (spec
+the link instead of deleting the other side. A desktop paired with a hub
+syncs too, over its own SSH, with the session and project read from the hub;
+hosts reached through `fleet-agent` are refused (no stdin). Phases 2 and 3 are built too (spec
 `docs/superpowers/specs/2026-10-07-local-workspace-handoff-design.md`,
 migration 112): Open in VS Code / IntelliJ / a terminal / the file manager,
 a per-path log of which side changed what ("7 local changes"), Review

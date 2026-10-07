@@ -155,3 +155,14 @@ describe('Phases 2 and 3', () => {
     ).toBe('The worktree is gone on the host');
   });
 });
+
+it('finds a link by the project’s name when the session’s id is the hub’s', () => {
+  const rows = [ws({ project_id: null })];
+  const hubSession = { host_alias: 'devbox', project_id: 412, worktree_key: null };
+  expect(linkFor(rows, hubSession)).toBeUndefined();
+  expect(linkFor(rows, hubSession, { owner: 'acme', repo: 'app' })?.id).toBe(1);
+  expect(linkFor(rows, hubSession, { owner: 'acme', repo: 'web' })).toBeUndefined();
+  expect(
+    staleReason(rows[0], [{ ...hubSession, status: 'idle' }], () => ({ owner: 'acme', repo: 'app' })),
+  ).toBeNull();
+});

@@ -95,11 +95,10 @@ describe('LocalWorkspaceCard', () => {
     expect(await screen.findByTestId('lw-resume')).toBeInTheDocument();
   });
 
-  it('says why there are no controls on a paired desktop', () => {
+  it('works on a desktop paired with a hub too', () => {
     hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
     render(LocalWorkspaceCard, { session: row() });
-    expect(screen.getByTestId('lw-remote-note')).toBeInTheDocument();
-    expect(screen.queryByTestId('lw-enable')).toBeNull();
+    expect(screen.getByTestId('lw-enable')).toBeInTheDocument();
   });
 
   it('opens the folder in an IDE and hands the worktree over', async () => {
