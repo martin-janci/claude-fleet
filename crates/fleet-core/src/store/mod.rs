@@ -20,6 +20,7 @@ mod guides;
 mod hosts_accounts;
 mod layers;
 mod nl_census;
+mod org_members;
 mod orgs;
 mod participants;
 mod peer_links;
@@ -81,6 +82,10 @@ pub use layers::HostLayerRow;
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
     NL_CENSUS_MIN_SCHEMA,
+};
+pub use org_members::{
+    effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
+    ORG_ROLES, ROLE_ADMIN, ROLE_MEMBER, ROLE_VIEWER,
 };
 pub use orgs::{
     normalize_rule, org_of_session, validate_org_color, validate_org_name, OrgRow, OrgRuleRow,

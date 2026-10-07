@@ -14,6 +14,7 @@ import {
   toggleAgent,
   restartOperator,
   refreshOperator,
+  operatorError,
   operatorHost,
   operatorFallback,
   blockedCopy,
@@ -34,6 +35,7 @@ const row = (over = {}) =>
 
 beforeEach(() => {
   invoke.mockReset();
+  operatorError.set(null);
   agentPanelOpen.set(false);
   operatorState.set('unknown');
   operatorSession.set(null);
@@ -190,10 +192,41 @@ describe('operatorHost', () => {
 });
 
 describe('restartOperator', () => {
-  it('does nothing when there is no operator session in the store', async () => {
+  it('calls nothing when there is no operator session in the store, and says so', async () => {
     operatorSession.set(null);
     await restartOperator();
     expect(invoke).not.toHaveBeenCalled();
+    expect(get(operatorError)).toMatch(/not known yet/);
+  });
+
+  // 2026-10-06: after mefistos rebooted the `lost` button answered
+  // E_SELF_TARGET, and the panel looked exactly as it did before the click.
+  it('a failed restart says why under the button and leaves the state lost', async () => {
+    operatorState.set('lost');
+    operatorSession.set(row({ host_alias: 'mefistos' }));
+    invoke.mockRejectedValueOnce({
+      code: 'E_SELF_TARGET',
+      message: 'fleet-operator on mefistos is the registered fleet controller',
+    });
+    await restartOperator();
+    const cmds = invoke.mock.calls.map((c) => c[0]);
+    expect(cmds[0]).toBe('restart_session');
+    // No status refresh after a failure: the state stays what the panel shows.
+    expect(cmds).not.toContain('operator_status');
+    expect(get(operatorState)).toBe('lost');
+    expect(get(operatorError)).toBe(
+      'Restart failed: fleet-operator on mefistos is the registered fleet controller',
+    );
+  });
+
+  it('a successful restart clears the previous failure', async () => {
+    operatorError.set('Restart failed: earlier');
+    operatorSession.set(row());
+    invoke.mockResolvedValueOnce(row()); // restart_session
+    invoke.mockResolvedValueOnce({ ready: true, session: row(), blocked: null }); // operator_status
+    await restartOperator();
+    expect(get(operatorError)).toBeNull();
+    expect(get(operatorState)).toBe('ready');
   });
 
   it('restarts the operator session and refreshes status', async () => {

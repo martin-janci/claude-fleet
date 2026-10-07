@@ -87,6 +87,8 @@ export const SETTING_KEYS = {
   updateDesktopMode: 'update.desktop.mode',
   updateMobileMode: 'update.mobile.mode',
   updateCheckIntervalSecs: 'update.check_interval_secs',
+  budgetOrgDailyUsd: 'budget.org_daily_usd',
+  budgetOrgMonthlyUsd: 'budget.org_monthly_usd',
 } as const;
 
 /** Mirror of `settings::DECIDE_MODES`: what a decision feature's mode may be
@@ -250,6 +252,8 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'update.desktop.mode': 'notify',
   'update.mobile.mode': 'notify',
   'update.check_interval_secs': '21600',
+  'budget.org_daily_usd': '0',
+  'budget.org_monthly_usd': '0',
 };
 
 export type FleetSettings = Record<string, string>;

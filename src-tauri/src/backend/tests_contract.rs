@@ -362,6 +362,15 @@ fn sample_health() -> Health {
         peer_links_total: 2,
         updates: None,
         decide: Some(sample_decide_health()),
+        // Org administration phase C: an org over its daily budget, which the
+        // desktop raises as an Attention item.
+        org_budgets: vec![fleet_core::service::org_spend::OrgBudgetAlert {
+            org_id: 1,
+            org: "Acme".into(),
+            period: fleet_core::service::org_spend::Period::Daily,
+            spent_micros: 31_000_000,
+            budget_micros: 30_000_000,
+        }],
     }
 }
 
@@ -644,6 +653,9 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             person_id: Some(3),
             person_name: Some("jane".into()),
             person_display_name: Some("Jane Q".into()),
+            // Org administration phase D: an org recipient (additive).
+            org_id: Some(2),
+            org_name: Some("acme".into()),
             level: "watch".into(),
             granted_by: 1,
             granted_at: 1_700_000_000,

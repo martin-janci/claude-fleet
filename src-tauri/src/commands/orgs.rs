@@ -4,16 +4,16 @@
 //! `fleet_core::service::orgs::admin` the hub's master-only `work_admin`
 //! runs).
 //!
-//! The admin commands are `LocalOnly`: an org and a host's place in it are
-//! the per-host tokens' security boundary, fleet administration that a
-//! paired desktop — a client, never the master — cannot change. It says
-//! "configure on the hub" and names `fleet-hub org …`. The reads route, so a
-//! paired desktop shows the hub's orgs read-only.
+//! The admin commands route to the hub's `org_admin` (org administration
+//! phase B): an org and a host's place in it are the per-host tokens'
+//! security boundary, so the hub lets only its owner's own trusted `full`
+//! device change them — never a host, an org-bound device or a colleague's.
+//! Standalone, they run `service::org_admin` on this desktop's store.
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::org_admin::OrgAdminArgs;
 use fleet_core::service::orgs::{OrgDetail, OrgSuggestion};
-use fleet_core::service::trackers::admin::{self, WorkAdminArgs};
 use fleet_core::store::{OrgRow, OrgRuleRow, Store, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -49,6 +49,12 @@ pub struct UpdateOrgArgs {
     /// work and sessions.
     #[serde(default)]
     pub bound_sees_unassigned: Option<bool>,
+    /// Org administration phase D: this company owns the hub.
+    #[serde(default)]
+    pub owns_hub: Option<bool>,
+    /// Phase D: its admins see the unclaimed count on its hosts.
+    #[serde(default)]
+    pub admins_see_unclaimed: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -95,11 +101,7 @@ fn decode<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Result<T, Ipc
         .map_err(|e| IpcError::new(fleet_core::ipc_error::codes::E_SERIALIZE, e.to_string()))
 }
 
-fn run(args: WorkAdminArgs, store: &Mutex<Store>) -> Result<serde_json::Value, IpcError> {
-    admin::admin_sync(&args, store)
-}
-
-// --- administration (LocalOnly) ------------------------------------------------
+// --- administration (routed to `org_admin`) -------------------------------------
 //
 // `async` so the transactional store work runs on the async runtime and not
 // on the macOS main thread, where a sync command would run it (CLAUDE.md: no
@@ -111,17 +113,19 @@ pub async fn add_org(
     args: AddOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<OrgRow, IpcError> {
-    backend.refuse_local_only("add_org")?;
-    decode(run(
-        WorkAdminArgs {
-            action: "add_org".into(),
-            name: Some(args.name),
-            color: args.color,
-            isolate_sessions: Some(args.isolate_sessions),
-            ..Default::default()
-        },
-        &store,
-    )?)
+    decode(
+        routed::add_org(
+            &backend,
+            &store,
+            OrgAdminArgs {
+                name: Some(args.name),
+                color: args.color,
+                isolate_sessions: Some(args.isolate_sessions),
+                ..OrgAdminArgs::new("add_org")
+            },
+        )
+        .await?,
+    )
 }
 
 #[tauri::command]
@@ -130,21 +134,25 @@ pub async fn update_org(
     args: UpdateOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<OrgRow, IpcError> {
-    backend.refuse_local_only("update_org")?;
-    decode(run(
-        WorkAdminArgs {
-            action: "update_org".into(),
-            org_id: Some(args.org_id),
-            name: args.name,
-            color: args.color,
-            isolate_sessions: args.isolate_sessions,
-            auto_tidy: args.auto_tidy,
-            jev: args.jev,
-            bound_sees_unassigned: args.bound_sees_unassigned,
-            ..Default::default()
-        },
-        &store,
-    )?)
+    decode(
+        routed::update_org(
+            &backend,
+            &store,
+            OrgAdminArgs {
+                org_id: Some(args.org_id),
+                name: args.name,
+                color: args.color,
+                isolate_sessions: args.isolate_sessions,
+                auto_tidy: args.auto_tidy,
+                jev: args.jev,
+                bound_sees_unassigned: args.bound_sees_unassigned,
+                owns_hub: args.owns_hub,
+                admins_see_unclaimed: args.admins_see_unclaimed,
+                ..OrgAdminArgs::new("update_org")
+            },
+        )
+        .await?,
+    )
 }
 
 #[tauri::command]
@@ -153,15 +161,15 @@ pub async fn remove_org(
     args: OrgIdArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
-    backend.refuse_local_only("remove_org")?;
-    run(
-        WorkAdminArgs {
-            action: "remove_org".into(),
-            org_id: Some(args.org_id),
-            ..Default::default()
-        },
+    routed::remove_org(
+        &backend,
         &store,
-    )?;
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            ..OrgAdminArgs::new("remove_org")
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -171,19 +179,21 @@ pub async fn add_org_rule(
     args: AddOrgRuleArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<OrgRuleRow, IpcError> {
-    backend.refuse_local_only("add_org_rule")?;
-    decode(run(
-        WorkAdminArgs {
-            action: "add_rule".into(),
-            org_id: Some(args.org_id),
-            owner: args.owner,
-            repo: args.repo,
-            path_prefix: args.path_prefix,
-            host_alias: args.host_alias,
-            ..Default::default()
-        },
-        &store,
-    )?)
+    decode(
+        routed::add_org_rule(
+            &backend,
+            &store,
+            OrgAdminArgs {
+                org_id: Some(args.org_id),
+                owner: args.owner,
+                repo: args.repo,
+                path_prefix: args.path_prefix,
+                host_alias: args.host_alias,
+                ..OrgAdminArgs::new("add_rule")
+            },
+        )
+        .await?,
+    )
 }
 
 #[tauri::command]
@@ -192,15 +202,15 @@ pub async fn remove_org_rule(
     args: RuleIdArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
-    backend.refuse_local_only("remove_org_rule")?;
-    run(
-        WorkAdminArgs {
-            action: "remove_rule".into(),
-            rule_id: Some(args.rule_id),
-            ..Default::default()
-        },
+    routed::remove_org_rule(
+        &backend,
         &store,
-    )?;
+        OrgAdminArgs {
+            rule_id: Some(args.rule_id),
+            ..OrgAdminArgs::new("remove_rule")
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -210,21 +220,21 @@ pub async fn assign_host_org(
     args: AssignHostOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
-    backend.refuse_local_only("assign_host_org")?;
     let action = if args.org_id.is_some() {
         "assign_host"
     } else {
         "unassign_host"
     };
-    run(
-        WorkAdminArgs {
-            action: action.into(),
+    routed::assign_host_org(
+        &backend,
+        &store,
+        OrgAdminArgs {
             host_alias: Some(args.host_alias),
             org_id: args.org_id,
-            ..Default::default()
+            ..OrgAdminArgs::new(action)
         },
-        &store,
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
@@ -234,16 +244,108 @@ pub async fn assign_tracker_org(
     args: AssignTrackerOrgArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<TrackerRow, IpcError> {
-    backend.refuse_local_only("assign_tracker_org")?;
-    decode(run(
-        WorkAdminArgs {
-            action: "assign_tracker".into(),
-            tracker_id: Some(args.tracker_id),
-            org_id: args.org_id,
-            ..Default::default()
-        },
+    decode(
+        routed::assign_tracker_org(
+            &backend,
+            &store,
+            OrgAdminArgs {
+                tracker_id: Some(args.tracker_id),
+                org_id: args.org_id,
+                ..OrgAdminArgs::new("assign_tracker")
+            },
+        )
+        .await?,
+    )
+}
+
+/// Org administration phase C: an org's own value of a per-org setting;
+/// `value: None` inherits the fleet's again.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetOrgSettingArgs {
+    pub org_id: i64,
+    pub key: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+#[tauri::command]
+pub async fn set_org_setting(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: SetOrgSettingArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::set_org_setting(
+        &backend,
         &store,
-    )?)
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            key: Some(args.key),
+            value: args.value,
+            ..OrgAdminArgs::new("set_org_setting")
+        },
+    )
+    .await
+}
+
+/// Org administration phase D: add a person to an org (a new name becomes
+/// a person), or change their role.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetOrgMemberArgs {
+    pub org_id: i64,
+    #[serde(default)]
+    pub person: Option<String>,
+    #[serde(default)]
+    pub person_id: Option<i64>,
+    pub role: String,
+}
+
+#[tauri::command]
+pub async fn set_org_member(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: SetOrgMemberArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::set_org_member(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            person: args.person,
+            person_id: args.person_id,
+            role: Some(args.role),
+            ..OrgAdminArgs::new("set_member")
+        },
+    )
+    .await
+}
+
+/// Phase D: take a person out of an org; what was shared with them on its
+/// sessions goes too unless `keep_grants`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoveOrgMemberArgs {
+    pub org_id: i64,
+    pub person_id: i64,
+    #[serde(default)]
+    pub keep_grants: Option<bool>,
+}
+
+#[tauri::command]
+pub async fn remove_org_member(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: RemoveOrgMemberArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::remove_org_member(
+        &backend,
+        &store,
+        OrgAdminArgs {
+            org_id: Some(args.org_id),
+            person_id: Some(args.person_id),
+            keep_grants: args.keep_grants,
+            ..OrgAdminArgs::new("remove_member")
+        },
+    )
+    .await
 }
 
 // --- reads (routed) ------------------------------------------------------------
@@ -266,7 +368,7 @@ pub async fn org_suggestions(
 
 pub(crate) mod routed {
     use super::*;
-    use fleet_core::service::orgs::{self, OrgScope};
+    use fleet_core::service::orgs;
     use fleet_core::service::view_scope::ViewScope;
     use fleet_core::service::work::WorkArgs;
 
@@ -283,7 +385,126 @@ pub(crate) mod routed {
     ) -> Result<Vec<OrgDetail>, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("list_orgs", &read("orgs")).await,
-            None => orgs::org_details(store, &OrgScope::All),
+            None => orgs::org_details(store, &ViewScope::internal(), orgs::AdminView::Admin),
+        }
+    }
+
+    /// This desktop's own store, standalone: `service::org_admin`, as the
+    /// hub's `org_admin` tool runs it.
+    pub(crate) fn local(
+        args: &OrgAdminArgs,
+        store: &Mutex<Store>,
+    ) -> Result<serde_json::Value, IpcError> {
+        fleet_core::service::org_admin::run(args, store, fleet_core::service::org_admin::Me::LOCAL)
+    }
+
+    pub async fn set_org_setting(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_org_setting", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn set_org_member(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("set_org_member", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn remove_org_member(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("remove_org_member", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn add_org(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("add_org", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn update_org(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("update_org", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn remove_org(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("remove_org", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn add_org_rule(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("add_org_rule", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn remove_org_rule(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("remove_org_rule", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn assign_host_org(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("assign_host_org", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    pub async fn assign_tracker_org(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("assign_tracker_org", &args).await,
+            None => local(&args, store),
         }
     }
 

@@ -14,6 +14,7 @@
 // Pure helpers plus one store; `TrackerAttention.svelte` polls and renders.
 import { setContextRedPct } from './attention';
 import { decideHealth } from './decide_health';
+import { orgBudgets } from './org_budget';
 import { writable } from 'svelte/store';
 import { healthCheck } from './ipc';
 
@@ -70,6 +71,7 @@ export async function refreshTrackersHealth(): Promise<void> {
   if (r.ok) {
     trackersHealth.set(r.value.trackers ?? null);
     decideHealth.set(r.value.decide ?? null);
+    orgBudgets.set(r.value.org_budgets ?? []);
     setContextRedPct(r.value.context_red_pct);
   }
 }

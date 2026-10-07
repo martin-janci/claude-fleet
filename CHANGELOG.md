@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.5.0] - 2026-10-06
+
+**Upgrade note:** this release carries migrations 105–107 (worktree names with
+slashes, org settings and spend, org members). Back up `state.db` before
+upgrading the desktop or the hub; an older build refuses a migrated database.
+
+### Added
+- **work:** start a session from a task — the **Work** button and its start
+  popover, a start preview (`preview_start`, routed through the hub on a
+  desktop client) that shows the plan, branch and conflicts before anything
+  runs, and **parallel start** of a second session on the same task
+- **orgs:** organisation administration — the org overview, Settings → Company
+  with Devices and People pages (pairing by QR), and `org_admin` for the
+  company's orgs, devices and people from the owner's device; desktop org
+  writes route to the hub
+- **orgs:** per-org settings, spend and budgets — on the overview and the org
+  page, with budget Attention items and budget alerts in `fleet_health`
+- **orgs:** memberships and roles — members on the org page, sharing with an
+  org, an org admin administering their own org, operator commands, and who
+  sees the unclaimed counts
+
+### Fixed
+- **worktrees:** a branch-shaped worktree name (`feat/x`) no longer breaks recreate
+- **work:** the Work button checks the resume gate at the moment it writes
+- **operator:** the operator is never a detection subject and never accepts or
+  rejects a proposal
+- **operator:** the agent panel's lost-state restart works after a host reboot
+
+### Changed
+- **ci:** the hub image is built on every PR, not only on a tag
+- **ci:** fleet-mobile's acceptance of the hub contract is checked on the PR, not at release
+- **tests:** hub-e2e covers the owner's unclaimed count with two people; the
+  scope guard's session filter now lives in `counted_rows`
+
+### Documentation
+- **spec:** task → session flow, operator threads, brainstorm → plan → agents,
+  with the adversarial review folded in
+- **orgs:** phase D — members and roles, the owner's answers, the operator guide
+- **control-api:** reference regenerated for the new desktop and phase D commands
+
 ## [0.4.12] - 2026-10-06
 
 ### Added
@@ -2772,6 +2812,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.5.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.0
 [0.4.12]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.12
 [0.4.11]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.11
 [0.4.10]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.10

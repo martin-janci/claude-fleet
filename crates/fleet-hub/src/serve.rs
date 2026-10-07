@@ -831,6 +831,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
             tracing::warn!(error = %e, "file logging unavailable; logging to stderr only");
         }
     }
+    fleet_core::logging::install_panic_hook();
     if let Some(warning) = crate::config::plaintext_exposure_warning(&r) {
         tracing::warn!("{warning}");
     }
@@ -1090,8 +1091,34 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         ticks_cancel.clone(),
     );
 
-    wait_for_signal().await?;
-    tracing::info!("fleet-hub stopping");
+    // Stop on a signal, but also when the hub can no longer serve: the
+    // control API task ended on its own (a listener that failed to start, a
+    // server error, a panic), or the store's writer lock is poisoned (a panic
+    // held it, and every write now fails). Either used to leave a process
+    // that looked alive and did nothing; exiting non-zero lets the
+    // supervisor (systemd `Restart=on-failure`, Docker's restart policy)
+    // start a working one.
+    let mut serve_task = serve_task;
+    let mut failure: Option<String> = None;
+    tokio::select! {
+        r = wait_for_signal() => {
+            let sig = r?;
+            tracing::info!(signal = sig, "fleet-hub stopping");
+        }
+        r = &mut serve_task => {
+            let why = match r {
+                Ok(()) => "the control API stopped unexpectedly".to_string(),
+                Err(e) => format!("the control API task failed: {e}"),
+            };
+            tracing::error!("{why}; fleet-hub stopping");
+            failure = Some(why);
+        }
+        () = watch_store_poison(&store, STORE_POISON_CHECK) => {
+            let why = "the store lock is poisoned (a panic held it); every write would fail".to_string();
+            tracing::error!("{why}; fleet-hub stopping");
+            failure = Some(why);
+        }
+    }
     // Cancel the ticks BEFORE tearing down the MCP server below: cancellation
     // is only observed between passes, so cancelling here is strictly safe
     // (it does not abort a pass already in flight) and it stops a new pass
@@ -1104,13 +1131,15 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     ticks_cancel.cancel();
     shutdown.cancel();
     // Let in-flight requests drain before tearing down what they use.
-    match tokio::time::timeout(DRAIN_TIMEOUT, serve_task).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!(error = %e, "control API task ended abnormally"),
-        Err(_) => tracing::warn!(
-            timeout_secs = DRAIN_TIMEOUT.as_secs(),
-            "in-flight requests did not drain in time; exiting anyway"
-        ),
+    if !serve_task.is_finished() {
+        match tokio::time::timeout(DRAIN_TIMEOUT, serve_task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "control API task ended abnormally"),
+            Err(_) => tracing::warn!(
+                timeout_secs = DRAIN_TIMEOUT.as_secs(),
+                "in-flight requests did not drain in time; exiting anyway"
+            ),
+        }
     }
     // The hub-daemon spec's SIGTERM promise (docs/superpowers/specs/2026-09-17-hub-daemon-design.md):
     // the current reconcile pass finishes, then the loop exits. Await the
@@ -1136,7 +1165,10 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     reprovision.abort();
     tunnels.stop_all();
     ssh.shutdown_all();
-    Ok(ExitCode::SUCCESS)
+    match failure {
+        None => Ok(ExitCode::SUCCESS),
+        Some(why) => Err(why),
+    }
 }
 
 /// How long `serve` waits for in-flight requests after a stop signal.
@@ -1187,27 +1219,78 @@ fn warn_if_confirm_destructive(store: &Mutex<Store>) {
     }
 }
 
-async fn wait_for_signal() -> Result<(), String> {
+/// How often `serve` checks whether the store's lock is poisoned.
+const STORE_POISON_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Resolves once `store`'s lock is poisoned, checking every `every`.
+async fn watch_store_poison<T>(store: &Mutex<T>, every: std::time::Duration) {
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if store.is_poisoned() {
+            return;
+        }
+    }
+}
+
+/// Waits for a stop signal and names it. SIGHUP is logged and ignored: a hub
+/// started from a terminal or a tmux pane used to die of it silently (the
+/// default action), and a daemon has no use for a hangup.
+async fn wait_for_signal() -> Result<&'static str, String> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
         let mut term =
             signal(SignalKind::terminate()).map_err(|e| format!("install SIGTERM handler: {e}"))?;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
+        let mut hup =
+            signal(SignalKind::hangup()).map_err(|e| format!("install SIGHUP handler: {e}"))?;
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return Ok("SIGINT"),
+                _ = term.recv() => return Ok("SIGTERM"),
+                _ = hup.recv() => tracing::warn!("SIGHUP received; ignored (stop the hub with SIGTERM)"),
+            }
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+        Ok("Ctrl-C")
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The watchdog resolves once a panic has poisoned the store's lock,
+    /// and not before. (A `Mutex<()>` stands in for the store: poisoning is
+    /// the lock's, whatever it guards.)
+    #[tokio::test(start_paused = true)]
+    async fn the_store_watchdog_fires_once_the_lock_is_poisoned() {
+        let store = Arc::new(Mutex::new(()));
+        let every = std::time::Duration::from_secs(5);
+        let early = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            watch_store_poison(&store, every),
+        )
+        .await;
+        assert!(early.is_err(), "a healthy store must not trip the watchdog");
+        let s2 = Arc::clone(&store);
+        let _ = std::thread::spawn(move || {
+            let _g = s2.lock().unwrap();
+            panic!("poison the store");
+        })
+        .join();
+        assert!(store.is_poisoned());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            watch_store_poison(&store, every),
+        )
+        .await
+        .expect("a poisoned store must trip the watchdog");
+    }
 
     #[test]
     fn backup_names_match_backup_sh() {

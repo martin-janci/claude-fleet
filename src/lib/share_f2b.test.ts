@@ -39,7 +39,7 @@ import {
   type MoveRun,
 } from './moves';
 import { requestPreflight, resetPreflightsForTest } from './preflight';
-import { operatorSession, restartOperator } from './operator';
+import { operatorError, operatorSession, restartOperator } from './operator';
 import { MOVE_STEPS } from './moveProgress';
 import HostDetail from './HostDetail.svelte';
 import BulkPromptDialog from './BulkPromptDialog.svelte';
@@ -219,6 +219,8 @@ describe('the agent’s restart is restart_session (operator.ts)', () => {
     setMyGrants(ME, [{ session_id: 3, level: 'drive' }]);
     await restartOperator();
     expect(calls('restart_session')).toEqual([]);
+    // …and says why, rather than leaving the button looking dead.
+    expect(get(operatorError)).toMatch(/Only the session’s owner/);
   });
 
   it('…and restarts the one this client owns', async () => {

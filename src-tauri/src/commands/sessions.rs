@@ -482,9 +482,13 @@ pub async fn capture_session(
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SessionShareArgs {
     pub session_id: i64,
-    /// The recipient, by person name. There is no `org` recipient in M1 and
-    /// the store refuses one, so there is no field for it here.
+    /// The recipient, by person name …
+    #[serde(default)]
     pub person: String,
+    /// … or an org, by name (org administration phase D): its members and
+    /// admins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
     /// `watch` or `drive`. Passed through as the string the user chose: the
     /// store is the one validator, so a level this build has never heard of
     /// is refused there rather than silently coerced here.
@@ -496,7 +500,10 @@ pub struct SessionShareArgs {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct SessionGrantArgs {
     pub session_id: i64,
+    #[serde(default)]
     pub person: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org: Option<String>,
 }
 
 /// `session_access`'s arguments — `SessionAccessParams` field for field.
@@ -994,7 +1001,8 @@ pub(crate) mod routed {
                 // takes it itself.
                 let granter = sessions::hub_personal_owner(store);
                 let s = lock(store)?;
-                sessions::share_session(&s, args.session_id, &args.person, &args.level, granter)
+                let to = sessions::ShareTo::from_fields(&args.person, args.org.as_deref())?;
+                sessions::share_session_to(&s, args.session_id, to, &args.level, granter)
             }
         }
     }
@@ -1009,7 +1017,8 @@ pub(crate) mod routed {
             None => {
                 let granter = sessions::hub_personal_owner(store);
                 let s = lock(store)?;
-                sessions::unshare_session(&s, args.session_id, &args.person, granter)
+                let to = sessions::ShareTo::from_fields(&args.person, args.org.as_deref())?;
+                sessions::unshare_session_to(&s, args.session_id, to, granter)
             }
         }
     }
@@ -1024,7 +1033,8 @@ pub(crate) mod routed {
             None => {
                 let granter = sessions::hub_personal_owner(store);
                 let s = lock(store)?;
-                sessions::narrow_session_share(&s, args.session_id, &args.person, granter)
+                let to = sessions::ShareTo::from_fields(&args.person, args.org.as_deref())?;
+                sessions::narrow_session_share_to(&s, args.session_id, to, granter)
             }
         }
     }

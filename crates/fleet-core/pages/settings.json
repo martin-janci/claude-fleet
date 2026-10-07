@@ -39,6 +39,23 @@
       ]
     },
     {
+      "title": "Company",
+      "items": [
+        {
+          "type": "link",
+          "page": "settings.orgs"
+        },
+        {
+          "type": "link",
+          "page": "settings.devices"
+        },
+        {
+          "type": "link",
+          "page": "settings.people"
+        }
+      ]
+    },
+    {
       "title": "Work",
       "items": [
         {
@@ -48,10 +65,6 @@
         {
           "type": "link",
           "page": "settings.work"
-        },
-        {
-          "type": "link",
-          "page": "settings.orgs"
         },
         {
           "type": "link",
