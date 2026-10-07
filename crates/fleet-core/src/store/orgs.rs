@@ -586,6 +586,18 @@ impl Store {
             "UPDATE session_grants SET revoked_at = ?2 WHERE org_id = ?1 AND revoked_at IS NULL",
             rusqlite::params![id, now],
         )?;
+        // Its sprints and releases become unassigned like its hosts. One
+        // whose name an unassigned bucket of the same kind already has keeps
+        // its id as a suffix: the FK's SET NULL alone would hit the name
+        // index and refuse the whole delete.
+        tx.execute(
+            "UPDATE work_buckets SET org_id = NULL, \
+               name = CASE WHEN EXISTS(SELECT 1 FROM work_buckets u \
+                 WHERE u.org_id IS NULL AND u.kind = work_buckets.kind AND u.name = work_buckets.name) \
+               THEN name || ' (#' || id || ')' ELSE name END \
+             WHERE org_id = ?1",
+            rusqlite::params![id],
+        )?;
         let removed = tx.execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])? > 0;
         tx.commit()?;
         if revoked > 0 {
