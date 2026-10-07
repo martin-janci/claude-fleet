@@ -1028,7 +1028,9 @@ impl FleetTools {
         the primary. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
         ticket (project_ids: one per repo; parallel: beside a live one); \
-        preview_start: where it would land, nothing made. handover {session_id}: ask it to \
+        preview_start: where it would land, nothing made. run {item_id, role?}: an \
+        attempt at the item in its own session and worktree, tracked as a task. \
+        handover {session_id}: ask it to \
         write its hand-off. summarize {key, link_id}: \
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
@@ -1079,7 +1081,7 @@ impl FleetTools {
             ),
             _ => None,
         };
-        if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start") {
+        if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start" | "run") {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
             // start or resume is never gated.)
@@ -1618,6 +1620,40 @@ impl FleetTools {
             .await
             .map_err(to_mcp_err)?;
             return ok_json(&row);
+        }
+        if args.action == "run" {
+            if caller.host_alias.is_some() || caller.mode == crate::mcp::auth::TokenMode::Peer {
+                // Orchestration O0: a run is a person's or the operator's. A
+                // worker's own Claude proposes work; it never starts another
+                // worker on it (task → session spec §6, isolation). Refused
+                // before any lookup, so it answers the same for every item.
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "run is for a person or the operator; a per-host agent may propose instead",
+                    None,
+                ));
+            }
+            // Orchestration O0: one attempt at an existing item, through the
+            // start path (its project, host and worktree, the brief), tracked
+            // as a task whose first prompt carries the done marker. The
+            // fences are the start's own, under the whole scope.
+            let owner = {
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
+                super::fleet::owner_for(&caller, &s)
+            };
+            let view_scope = self.view_scope(&caller)?;
+            let out = crate::service::work::run::run_item(
+                &self.store,
+                &self.ssh,
+                &self.reg,
+                &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
+                args.role.as_deref().unwrap_or("implement"),
+                &view_scope,
+                &crate::service::trackers::default_net(),
+            )
+            .await
+            .map_err(to_mcp_err)?;
+            return ok_json(&out);
         }
         // Work graph M14.1c: the Work view's structure and batch decisions.
         // Who may write what is inside (`structure`): never a per-host

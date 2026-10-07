@@ -400,6 +400,15 @@ fn client_tokens_has_person(conn: &Connection) -> rusqlite::Result<bool> {
 /// `already_applied` guard of migration 101 (multi-user M1, T9d): the one
 /// `ADD COLUMN` in the script. The trigger is `IF NOT EXISTS` and the
 /// backfill `UPDATE`s are idempotent, so only the column needs the guard.
+fn tasks_has_role(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'role'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'detached_at'",
@@ -550,7 +559,7 @@ fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 110.
+/// `already_applied` guard of migration 111.
 fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'auth_overrides'",
@@ -1261,11 +1270,19 @@ const MIGRATIONS: &[Migration] = &[
         109,
         include_str!("../../migrations/109_local_workspaces.sql"),
     ),
+    // Orchestration O0: a task names the work item it is an attempt at, with
+    // its attempt number and role. ADD COLUMN is not idempotent: guarded on
+    // the last one.
+    Migration {
+        version: 110,
+        sql: include_str!("../../migrations/110_task_runs.sql"),
+        already_applied: Some(tasks_has_role),
+    },
     // Auth-override names per host (multi-account groundwork): one ADD
     // COLUMN, guarded.
     Migration {
-        version: 110,
-        sql: include_str!("../../migrations/110_host_auth_overrides.sql"),
+        version: 111,
+        sql: include_str!("../../migrations/111_host_auth_overrides.sql"),
         already_applied: Some(hosts_has_auth_overrides),
     },
 ];
@@ -5361,7 +5378,7 @@ mod tests {
     fn migration_105_flattens_slash_named_worktrees_and_their_session_keys() {
         let s = store_at_version(104);
         // Raw rows: `upsert_host` reads back every current `hosts` column,
-        // and a 104 store predates the later ones (110's `auth_overrides`).
+        // and a 104 store predates the later ones (111's `auth_overrides`).
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias, reachable) VALUES ('trn', 1), ('mefistos', 1);",
