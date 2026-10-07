@@ -375,7 +375,28 @@ pub(super) async fn create_worktree_local(
             String::from_utf8_lossy(&out.stderr).trim().to_string(),
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    worktree_path_from_stdout(&out.stdout)
+}
+
+/// The worktree path [`worktree_add_script`] printed: its LAST non-empty
+/// line. The script runs under `bash -lc`, so a login banner (`/etc/profile`,
+/// `~/.bash_profile`) prints ahead of it; taken whole, the banner became the
+/// pane's cwd and the stored `worktrees.path`. Anything but an absolute path
+/// is refused.
+pub(super) fn worktree_path_from_stdout(stdout: &[u8]) -> Result<String, IpcError> {
+    let text = String::from_utf8_lossy(stdout);
+    let path = text
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default();
+    if !path.starts_with('/') {
+        return Err(IpcError::new(
+            codes::E_GIT_SETUP,
+            format!("git worktree add did not report a worktree path: {path:?}"),
+        ));
+    }
+    Ok(path.to_string())
 }
 
 pub async fn new_session(
@@ -908,7 +929,7 @@ pub(super) async fn new_session_inner(
                     String::from_utf8_lossy(&out.stderr).trim().to_string(),
                 ));
             }
-            PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            PathBuf::from(worktree_path_from_stdout(&out.stdout)?)
         } else {
             let (owner, repo, wt_info) = {
                 let s = lock(store)?;
