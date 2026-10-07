@@ -80,3 +80,86 @@ async fn a_repeated_bad_bearer_is_still_401() {
         "the bucket refills after the interval"
     );
 }
+
+/// The status line of the response to `head` + `body` written as-is to `/mcp`.
+///
+/// The body is written while the response is read, not before: the hub
+/// answers 413 and closes with the rest of an oversized body unread, and a
+/// client still blocked in its write would miss an answer that is followed
+/// by a reset.
+async fn raw_status(addr: std::net::SocketAddr, head: &str, body: &[u8]) -> String {
+    let s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut rd, mut wr) = s.into_split();
+    let mut out = head.as_bytes().to_vec();
+    out.extend_from_slice(body);
+    // The hub may answer and close before the whole body is written.
+    let writer = tokio::spawn(async move {
+        let _ = wr.write_all(&out).await;
+        wr
+    });
+    let mut buf = Vec::new();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut chunk = [0u8; 1024];
+        while !buf.windows(2).any(|w| w == b"\r\n") {
+            match rd.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+    })
+    .await;
+    writer.abort();
+    String::from_utf8_lossy(&buf)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// `/mcp` refuses a body over `MCP_BODY_MAX` with 413, whether it declares
+/// its length or streams it chunked, and still serves one under the cap.
+#[tokio::test]
+async fn an_oversized_mcp_body_is_413() {
+    let addr = serve_test_app().await;
+    let head = |len: usize| {
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer s3cret\r\n\
+             Content-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+        )
+    };
+    let declared = raw_status(addr, &head(MCP_BODY_MAX + 1), b"").await;
+    assert!(
+        declared.contains("413"),
+        "declared length over the cap: {declared}"
+    );
+
+    let chunk = vec![b'x'; 1024 * 1024];
+    let mut chunked = Vec::new();
+    for _ in 0..(MCP_BODY_MAX / chunk.len() + 1) {
+        chunked.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
+        chunked.extend_from_slice(&chunk);
+        chunked.extend_from_slice(b"\r\n");
+    }
+    chunked.extend_from_slice(b"0\r\n\r\n");
+    let streamed = raw_status(
+        addr,
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer s3cret\r\n\
+         Content-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        &chunked,
+    )
+    .await;
+    // On Windows, closing a socket with unread data in its receive buffer is
+    // an abortive close that discards the 413 still in the send buffer, so a
+    // client streaming past the cap sees the connection reset instead. Either
+    // way the body was refused; what must never come back is a 2xx.
+    assert!(
+        streamed.contains("413") || (cfg!(windows) && streamed.is_empty()),
+        "chunked body over the cap: {streamed}"
+    );
+
+    let ok = raw_status(addr, &head(2), b"{}").await;
+    assert!(
+        ok.contains("200"),
+        "a body under the cap still reaches /mcp: {ok}"
+    );
+}

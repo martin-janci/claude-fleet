@@ -8,6 +8,7 @@
 // `pub(crate)` for `agent::ws`'s tests, which mint a client token the way the
 // pairing flow does; the public surface stays the `pub use`s below.
 pub(crate) mod auth;
+mod conn;
 #[cfg(test)]
 mod doc_gen;
 pub mod downloads_route;
@@ -406,6 +407,45 @@ async fn healthz() -> impl axum::response::IntoResponse {
     )
 }
 
+/// The largest `/mcp` request body the hub reads. Far above any real tool
+/// call (prompts and clipboard text cap at 64 KiB, a repo file at 512 KiB,
+/// JSON escaping at most doubles them).
+pub(crate) const MCP_BODY_MAX: usize = 8 * 1024 * 1024;
+
+/// Buffers an `/mcp` request body up to [`MCP_BODY_MAX`] and answers 413
+/// past it, before the MCP service sees the request. A declared
+/// `Content-Length` over the cap is refused without reading a byte.
+async fn limit_mcp_body(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let too_large = || {
+        (
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            format!("request body over {MCP_BODY_MAX} bytes\n"),
+        )
+            .into_response()
+    };
+    let declared = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|n| n > MCP_BODY_MAX as u64) {
+        return too_large();
+    }
+    let (parts, body) = req.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MCP_BODY_MAX).await else {
+        return too_large();
+    };
+    next.run(axum::extract::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
 /// Build the axum app: `/mcp` and `/mcp/json` (rmcp services), `/hook`,
 /// `/report` and `/reports` behind [`authorize`], plus the unauthenticated
 /// `/healthz` liveness and `/pair` exchange routes. Shared by `start` and the
@@ -442,6 +482,11 @@ fn build_app(
     if let Some(json_service) = mcp_json_service {
         mcp_routes = mcp_routes.route("/mcp/json", json_service);
     }
+    // rmcp reads a request body whole, with no limit, and axum's
+    // `DefaultBodyLimit` binds only its own extractors, never a mounted
+    // service; so without this cap one huge POST from any valid token
+    // buffered until the hub ran out of memory.
+    let mcp_routes = mcp_routes.layer(axum::middleware::from_fn(limit_mcp_body));
     let authorized = mcp_routes
         .route("/hook", axum::routing::post(hooks::handle_hook))
         .with_state(hook_state)
@@ -900,43 +945,20 @@ pub async fn start_with_listener<A: TlsAcceptor>(
 
         let scheme = if tls.is_some() { "https" } else { "http" };
         tracing::info!("[mcp] control API listening on {scheme}://{addr}/mcp");
-        // `into_make_service_with_connect_info` is what puts the peer address
-        // in the request extensions, which is what `/pair` keys its
-        // per-address attempt budget on.
-        let shutdown_signal = async move {
-            serve_shutdown.cancelled().await;
-        };
-        let result = match tls {
-            // Unchanged: the `TcpListener` goes straight to axum.
-            None => {
-                axum::serve(
-                    listener,
-                    app.into_make_service_with_connect_info::<SocketAddr>(),
-                )
-                .with_graceful_shutdown(shutdown_signal)
-                .await
-            }
+        // `conn::serve` puts the peer address in each request's extensions
+        // (`ConnectInfo`), which is what `/pair` keys its per-address attempt
+        // budget on, and bounds slow and surplus connections.
+        match tls {
+            None => conn::serve(listener, app, serve_shutdown, conn::Limits::default()).await,
             Some(acceptor) => match listener::TlsListener::spawn(listener, acceptor) {
                 Err(e) => {
                     tracing::error!(error = %e, "[mcp] could not take over the listener");
                     return;
                 }
-                // `tap_io` is a no-op here; it is how axum lets a custom
-                // listener keep `SocketAddr` as its connect info (the
-                // `Connected` impl is written against `TapIo`).
                 Ok(tls_listener) => {
-                    use axum::serve::ListenerExt as _;
-                    axum::serve(
-                        tls_listener.tap_io(|_| {}),
-                        app.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(shutdown_signal)
-                    .await
+                    conn::serve(tls_listener, app, serve_shutdown, conn::Limits::default()).await
                 }
             },
-        };
-        if let Err(e) = result {
-            tracing::error!(error = %e, "[mcp] server error");
         }
         tracing::info!("[mcp] control API stopped");
     });
@@ -1027,6 +1049,7 @@ mod tests {
         // one-attempt-per-6s budget would refuse the second one. The budget
         // gets its own app at the end of this test.
         pair_state.attempt_interval = std::time::Duration::ZERO;
+        pair_state.global_limit = usize::MAX;
         let app = build_app(
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
@@ -1549,12 +1572,19 @@ mod tests {
             None,
             hook_state3,
             auth_state3,
-            pairing::PairState::new(
-                store,
-                Arc::clone(&limited_pairings),
-                Arc::new(RateLimiter::new()),
-                "https://fleet.example.com".to_string(),
-            ),
+            {
+                // The production per-address budget; a hub-wide one of two
+                // attempts a second, so the test can spend it.
+                let mut s = pairing::PairState::new(
+                    store,
+                    Arc::clone(&limited_pairings),
+                    Arc::new(RateLimiter::new()),
+                    "https://fleet.example.com".to_string(),
+                );
+                s.global_limit = 2;
+                s.global_window = std::time::Duration::from_secs(1);
+                s
+            },
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
             report_state3,
@@ -1577,6 +1607,37 @@ mod tests {
         assert!(
             first.contains("404"),
             "the first guess is answered, not throttled:\n{first}"
+        );
+        // Guesses from other addresses — fresh forwarded hops behind the
+        // believed loopback front end — each get their own per-address
+        // budget, but share the hub-wide one: minting addresses buys no
+        // extra guesses once it is spent.
+        let forwarded = |xff: &str| {
+            let body = r#"{"code":"YYYYYYYY"}"#;
+            format!(
+                "POST /pair HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Forwarded-For: {xff}\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\
+                 Connection: close\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let second = round_trip(addr3, &forwarded("203.0.113.50")).await;
+        assert!(
+            second.contains("404"),
+            "a burst inside the hub-wide budget is answered:\n{second}"
+        );
+        let minted_addr = round_trip(addr3, &forwarded("203.0.113.51")).await;
+        assert!(
+            minted_addr.contains("429"),
+            "a new address past the hub-wide budget must be throttled:\n{minted_addr}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        // The refused attempt spent neither budget: once the window rolls,
+        // the same address is answered at once.
+        let later = round_trip(addr3, &forwarded("203.0.113.51")).await;
+        assert!(
+            later.contains("404"),
+            "past the hub-wide window a new address is answered:\n{later}"
         );
         // Even a GOOD code is refused inside the window: the budget is spent
         // before the code is looked at.

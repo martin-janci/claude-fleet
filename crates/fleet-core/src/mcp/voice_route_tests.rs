@@ -733,6 +733,25 @@ async fn a_source_socket_is_pinged_so_proxies_keep_an_idle_claim() {
     assert!(ping.is_ok(), "no ping in {PATIENCE:?}");
 }
 
+/// A device that goes silent (never reads, so never answers a ping) loses
+/// its claim after a few pings instead of holding it for good.
+#[tokio::test]
+async fn a_silent_source_socket_loses_its_claim() {
+    let h = hub(true).await;
+    let ws = dial(&h, PHONE).await.expect("the upgrade");
+    let sid = h.session_id;
+    eventually(PATIENCE, "the socket never claimed the session", || {
+        registry().owner(sid).as_deref() == Some("client:phone")
+    })
+    .await;
+    // Never poll `ws`: no pong goes back.
+    eventually(PATIENCE, "a silent socket kept its claim", || {
+        registry().owner(sid).is_none()
+    })
+    .await;
+    drop(ws);
+}
+
 #[test]
 fn the_production_ping_is_inside_common_proxy_idle_timeouts() {
     // nginx's proxy_read_timeout and most load balancers default to 60 s.

@@ -130,6 +130,19 @@ pub async fn send_message_scoped(
             "message body must be non-empty",
         ));
     }
+    // Checked before the row is written: the paste path caps a body here
+    // too, but only after the inbox row exists, so an oversized one was
+    // stored in full (and served whole by every inbox read) anyway.
+    if args.body.len() > sessions::MAX_PROMPT_BYTES {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            format!(
+                "message body is {} bytes; the limit is {} bytes",
+                args.body.len(),
+                sessions::MAX_PROMPT_BYTES
+            ),
+        ));
+    }
     // Resolved BEFORE the self-target check and every downstream lookup: a
     // session addressing ITSELF by `to_addr` must not sail past
     // `E_SELF_TARGET` just because `args.to_session_id` (unused in the
@@ -692,7 +705,9 @@ pub fn list_inbox(
             .map(|m| m.id)
             .collect();
         if !ids.is_empty() {
-            let _ = s.mark_messages_read(&ids, session_id);
+            if let Err(e) = s.mark_messages_read(&ids, session_id) {
+                tracing::warn!(session_id, error = %e.message, "could not mark the inbox read");
+            }
         }
     }
     Ok(msgs)
@@ -1094,6 +1109,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(zero, 0);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_local_body_is_refused_before_it_is_stored() {
+        let (store, ssh, a, b) = fixture();
+        let big = args(a, b, &"x".repeat(sessions::MAX_PROMPT_BYTES + 1));
+        assert_eq!(
+            send_message(big, &store, &ssh).await.unwrap_err().code,
+            codes::E_VALIDATE
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .list_inbox(b, false, -1)
+                .unwrap()
+                .is_empty(),
+            "nothing was stored"
+        );
+        let at_cap = args(a, b, &"x".repeat(sessions::MAX_PROMPT_BYTES));
+        send_message(at_cap, &store, &ssh).await.unwrap();
     }
 
     #[tokio::test]

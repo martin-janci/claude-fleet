@@ -165,7 +165,8 @@ allowlist too, since a phone may reach the hub by a name nobody listed. What
 stands in for the token is the code: single-use (a replay answers `404`),
 minutes-long (`ttl_s`, clamped 30 s…1 h, default 10 min), compared in constant
 time, voided wholesale by a restart, and rate-limited to **one attempt per
-source address every six seconds** (`429` with `Retry-After` otherwise). The
+source address every six seconds**, an IPv6 address counting as its /64, and
+to **thirty attempts a minute hub-wide** (`429` with `Retry-After` otherwise). The
 address is the request's peer, or the last parseable `X-Forwarded-For` hop
 when the peer is a loopback/private address — i.e. plausibly the reverse proxy
 in front.

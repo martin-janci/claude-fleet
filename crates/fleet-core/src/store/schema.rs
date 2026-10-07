@@ -1297,17 +1297,43 @@ pub(super) fn migrations_through(version: i64) -> impl Iterator<Item = (i64, &'s
         .map(|m| (m.version, m.sql))
 }
 
+/// How [`newer_schema_error`]'s message starts; [`is_newer_schema_error`]
+/// recognises the refusal by it.
+const NEWER_SCHEMA_PREFIX: &str = "this database is at schema version ";
+
 /// The downgrade guard's refusal: `recorded` came from a newer build.
 fn newer_schema_error(recorded: i64) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
         Some(format!(
-            "this database is at schema version {recorded}, but this build of claude-fleet \
+            "{NEWER_SCHEMA_PREFIX}{recorded}, but this build of claude-fleet \
              only knows up to {KNOWN_SCHEMA_VERSION}: it was last opened by a newer release. \
              It is not corrupt; do not delete it. Run that release (or a newer one) again, \
              or restore the copy of state.db you backed up before upgrading."
         )),
     )
+}
+
+/// Whether `e` is the downgrade guard's refusal (a database a newer release
+/// migrated). An opener's own "if the file is corrupt, delete it" advice must
+/// not follow it: that database is intact, and deleting it loses every
+/// token, pairing and work item a rollback was meant to keep.
+pub fn is_newer_schema_error(e: &rusqlite::Error) -> bool {
+    matches!(
+        e,
+        rusqlite::Error::SqliteFailure(f, Some(msg))
+            if f.code == rusqlite::ErrorCode::CannotOpen && msg.starts_with(NEWER_SCHEMA_PREFIX)
+    )
+}
+
+/// The advice an opener adds to a failure to open `state.db`: none for the
+/// downgrade refusal (its message already says what to do), else `corrupt`.
+pub fn open_failure_advice<'a>(e: &rusqlite::Error, corrupt: &'a str) -> &'a str {
+    if is_newer_schema_error(e) {
+        ""
+    } else {
+        corrupt
+    }
 }
 
 impl Store {

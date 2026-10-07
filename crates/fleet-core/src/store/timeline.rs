@@ -13,6 +13,10 @@ enum Announce {
 /// episode re-detected (the `oom` playbook's spacing is the same hour).
 const STUCK_EVENT_WINDOW_SECS: i64 = 3600;
 
+/// Ids per `UPDATE` in [`Store::mark_messages_read`], well under SQLite's
+/// 32766 bound parameters.
+const MARK_READ_CHUNK: usize = 10_000;
+
 impl Store {
     /// Append one row to the per-session event timeline (migration 013). The
     /// timeline is append-only; callers must treat a write failure as
@@ -595,14 +599,20 @@ impl Store {
             return Ok(0);
         }
         let at = now_unix();
-        let sql = format!(
-            "UPDATE session_messages SET read_at = ?1 \
-             WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?2) \
-               AND read_at IS NULL AND id IN ({phs})",
-            phs = in_clause(ids.len())
-        );
-        let params = params_then(rusqlite::params![at, recipient], ids);
-        Ok(self.conn.execute(&sql, params.as_slice())?)
+        // Chunked: one `?` per id, and SQLite binds at most 32766 per
+        // statement, so a long enough unread inbox failed to mark at all.
+        let mut marked = 0;
+        for chunk in ids.chunks(MARK_READ_CHUNK) {
+            let sql = format!(
+                "UPDATE session_messages SET read_at = ?1 \
+                 WHERE to_participant_id = (SELECT id FROM participants WHERE session_id = ?2) \
+                   AND read_at IS NULL AND id IN ({phs})",
+                phs = in_clause(chunk.len())
+            );
+            let params = params_then(rusqlite::params![at, recipient], chunk);
+            marked += self.conn.execute(&sql, params.as_slice())?;
+        }
+        Ok(marked)
     }
 
     /// Messages waiting to be handed to `session_id`'s next hook response,
@@ -998,6 +1008,19 @@ mod tests {
         assert!(again.is_empty(), "all unread were marked");
         let foreign = s.mark_messages_read(&[m1], 9).unwrap();
         assert_eq!(foreign, 0, "wrong recipient cannot mark");
+    }
+
+    /// More unread ids than SQLite binds in one statement still all mark.
+    #[test]
+    fn marking_more_ids_than_sqlite_binds_marks_them_all() {
+        let s = Store::open_in_memory().expect("open");
+        seed(&s, "s1");
+        seed(&s, "s2");
+        let ids: Vec<i64> = (0..32_800)
+            .map(|_| s.insert_message(1, 2, "m", "message", None).unwrap())
+            .collect();
+        assert_eq!(s.mark_messages_read(&ids, 2).unwrap(), ids.len());
+        assert!(s.list_inbox(2, true, 1).unwrap().is_empty());
     }
 
     #[test]
