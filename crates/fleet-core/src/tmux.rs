@@ -957,10 +957,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                 "new session name must not be empty",
             ));
         }
-        if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
+        if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':' || c == '#') {
             return Err(IpcError::new(
                 codes::E_TMUX,
-                "tmux session name must not contain whitespace, `.`, or `:`",
+                "tmux session name must not contain whitespace, `.`, `:` or `#`",
             ));
         }
         if trimmed == old {
@@ -1557,10 +1557,10 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
             "new session name must not be empty",
         ));
     }
-    if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
+    if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':' || c == '#') {
         return Err(IpcError::new(
             codes::E_TMUX,
-            "tmux session name must not contain whitespace, `.`, or `:`",
+            "tmux session name must not contain whitespace, `.`, `:` or `#`",
         ));
     }
     if trimmed == old {
