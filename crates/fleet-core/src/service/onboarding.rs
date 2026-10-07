@@ -186,6 +186,7 @@ mod tests {
             provision_stale: false,
             unclaimed_sessions: None,
             provision_warning: None,
+            auth_overrides: None,
             harnesses: None,
         }
     }

@@ -232,7 +232,7 @@ impl Store {
         self.conn.execute(
             "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
              disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
-             health_at = ?7 WHERE alias = ?8",
+             health_at = ?7, auth_overrides = ?8 WHERE alias = ?9",
             rusqlite::params![
                 h.disk_home_free_kb,
                 h.disk_home_total_kb,
@@ -241,6 +241,9 @@ impl Store {
                 h.mem_avail_kb,
                 h.uptime_secs,
                 at,
+                h.auth_overrides
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())),
                 alias
             ],
         )?;
@@ -1036,6 +1039,7 @@ mod tests {
             load_1m: Some(5.25),
             mem_avail_kb: Some(1_234_567),
             uptime_secs: Some(144 * 86400),
+            auth_overrides: Some(vec!["CLAUDE_CODE_USE_BEDROCK".into()]),
         };
         s.set_host_health("h", &sample, 1_700_000_000).unwrap();
         let row = s.get_host_row("h").unwrap().unwrap();
@@ -1045,6 +1049,18 @@ mod tests {
         assert_eq!(row.load_1m, Some(5.25));
         assert_eq!(row.mem_avail_kb, Some(1_234_567));
         assert_eq!(row.uptime_secs, Some(144 * 86400));
+        assert_eq!(
+            row.auth_overrides,
+            Some(vec!["CLAUDE_CODE_USE_BEDROCK".to_string()])
+        );
+        // A sample that could not tell clears the column to "unknown".
+        s.set_host_health(
+            "h",
+            &crate::tmux::HostHealthSample::default(),
+            1_700_000_001,
+        )
+        .unwrap();
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().auth_overrides, None);
         assert_eq!(row.health_at, Some(1_700_000_000));
         s.set_host_last_hook_at("h", 1_700_000_100).unwrap();
         s.set_host_agent_version("h", "0.2.26").unwrap();

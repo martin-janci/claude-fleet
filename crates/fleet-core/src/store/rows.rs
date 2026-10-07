@@ -965,6 +965,12 @@ pub struct HostRow {
     /// looks. Per-field default: an older hub omits it.
     #[serde(default)]
     pub provision_warning: Option<String>,
+    /// Credential variables set on the host that outrank its `/login`, by
+    /// name only (migration 109, [`crate::tmux::AUTH_OVERRIDE_VARS`]).
+    /// `None`: never sampled, or the host could not tell. Per-field default:
+    /// an older hub omits it.
+    #[serde(default)]
+    pub auth_overrides: Option<Vec<String>>,
 }
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
@@ -980,6 +986,10 @@ pub struct HostHealth {
     pub mem_avail_kb: Option<i64>,
     pub uptime_secs: Option<i64>,
     pub health_at: Option<i64>,
+    /// Sampled with the rest (migration 109). Per-field default: an older
+    /// hub's ping omits it.
+    #[serde(default)]
+    pub auth_overrides: Option<Vec<String>>,
 }
 
 impl HostHealth {
@@ -992,6 +1002,7 @@ impl HostHealth {
             mem_avail_kb: row.mem_avail_kb,
             uptime_secs: row.uptime_secs,
             health_at: row.health_at,
+            auth_overrides: row.auth_overrides.clone(),
         }
     }
 }
@@ -1019,7 +1030,7 @@ pub(super) const HOST_COLUMNS: &str =
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
-     harnesses, provision_warning";
+     harnesses, provision_warning, auth_overrides";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1064,6 +1075,10 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         // Migration 091: what the last provisioning warned about, if it
         // degraded. Cleared by the next clean run.
         provision_warning: row.get(24)?,
+        // Migration 109. Same lenient read as `harnesses`.
+        auth_overrides: row
+            .get::<_, Option<String>>(25)?
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
     })
 }
 

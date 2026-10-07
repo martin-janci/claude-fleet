@@ -187,6 +187,12 @@ pub struct HostHealthRow {
     /// a degraded host indefinitely with nothing saying why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provision_warning: Option<String>,
+    /// Credential variables on the host that outrank its `/login`, by name
+    /// (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_USE_BEDROCK`, …): sessions there
+    /// bill that credential, not the account fleet shows. Empty when none
+    /// are set or the host could not tell.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auth_overrides: Vec<String>,
 }
 
 /// The `health.*` thresholds [`hosts_health`] judges against.
@@ -288,6 +294,7 @@ pub fn hosts_health(
                     && h.last_hook_at
                         .is_none_or(|at| now - at > t.hooks_silent_secs),
                 provision_warning: h.provision_warning.clone(),
+                auth_overrides: h.auth_overrides.clone().unwrap_or_default(),
             }
         })
         .collect()
@@ -1195,6 +1202,7 @@ mod tests {
             provision_stale: false,
             unclaimed_sessions: None,
             provision_warning: None,
+            auth_overrides: None,
             harnesses: None,
         }
     }
