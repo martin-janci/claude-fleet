@@ -24,7 +24,9 @@ is the Transfer sheet (terminal-header chip + `moves.ts`, live steps from the
 
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
-(pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Since contract revision 5 a hub client adds
+(pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Their
+live acceptance (#156) is recorded in `docs/hub-acceptance.md`: the desktop
+half is partly observed, the TLS, phone and agent-host steps wait on the owner. Since contract revision 5 a hub client adds
 projects through the hub (`add_project` / `list_github_repos` tools), per
 `docs/superpowers/specs/2026-09-27-hub-add-project-design.md`. Host
 reboot handling is landed in both halves, per

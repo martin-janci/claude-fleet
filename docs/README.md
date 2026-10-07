@@ -12,6 +12,7 @@ A Tauri 2 desktop app for managing long-lived Claude Code sessions in tmux acros
 - **[Control API](control-api.md)** — enable the MCP control server; **[reference](control-api-reference.md)** (generated).
 - **[Voice relay](voice.md)** — talk to a remote session with `/voice` through the app's microphone.
 - **[fleet-hub](hub.md)** — run the fleet headless as a daemon, without the desktop app.
+- **[Hub acceptance](hub-acceptance.md)** — the live acceptance record for the hub, paired clients, the agent and hub-client mode.
 - **[Releasing](RELEASING.md)** — versioning & changelog automation.
 - **[Buildkite builder](buildkite.md)** — the persistent builder that runs an agent's full verification (`scripts/verify.sh remote`), and how to set it up.
 
