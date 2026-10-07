@@ -2709,6 +2709,7 @@ async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
         load_1m: Some(5.9),
         mem_avail_kb: Some(2_000_000),
         uptime_secs: Some(57 * 86400),
+        auth_overrides: Some(vec!["ANTHROPIC_API_KEY".into()]),
     };
     reconcile_sessions_with(&store, &versions_health_deps(None, Some(sample.clone())))
         .await
@@ -2718,6 +2719,10 @@ async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
     assert_eq!(row.disk_home_total_kb, Some(480_000_000));
     assert_eq!(row.load_1m, Some(5.9));
     assert_eq!(row.uptime_secs, Some(57 * 86400));
+    assert_eq!(
+        row.auth_overrides,
+        Some(vec!["ANTHROPIC_API_KEY".to_string()])
+    );
     assert!(row.health_at.is_some());
 
     // A second identical pass changes only the stamps and the sample,

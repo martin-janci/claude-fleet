@@ -328,7 +328,27 @@ pub struct HostHealthSample {
     pub load_1m: Option<f64>,
     pub mem_avail_kb: Option<i64>,
     pub uptime_secs: Option<i64>,
+    /// Which [`AUTH_OVERRIDE_VARS`] are set, by NAME only, in the probing
+    /// shell or the tmux server's global environment (which every new pane
+    /// inherits). Any of them outranks the host's `/login`, so a session
+    /// started there bills that credential rather than the account fleet
+    /// shows. `None`: the host could not tell (an older agent, a failed
+    /// line); `Some(empty)`: none set.
+    pub auth_overrides: Option<Vec<String>>,
 }
+
+/// The variables that outrank a Claude Code `/login` subscription
+/// credential (code.claude.com/docs/en/authentication, "Authentication
+/// precedence"), in that order. Only their names ever leave the host.
+pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_PROFILE",
+];
 
 /// `df -Pk` of `$HOME` and `${TMPDIR:-/tmp}` (POSIX output, one line each,
 /// header dropped), the load average (`/proc/loadavg` on Linux, `sysctl -n
@@ -338,11 +358,15 @@ pub struct HostHealthSample {
 /// from `kern.boottime`, `{ sec = N, usec = M } <date>`; the sed anchors on
 /// `{ sec = ` because `usec = ` also contains `sec = `). Every command is `2>/dev/null` with an empty
 /// value on failure, so a missing tool degrades one field, never the probe.
+/// `authenv=` lists which [`AUTH_OVERRIDE_VARS`] hold a non-empty value in
+/// this shell or in `tmux show-environment -g`: `grep` matches whole lines
+/// inside the pipe and `cut` keeps only the name, so no value is printed.
 pub const HOST_HEALTH_SCRIPT: &str = "printf 'dfhome=%s\\n' \"$(df -Pk \"$HOME\" 2>/dev/null | tail -n 1)\"; \
 printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; \
 printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
 printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)\"; \
-printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"";
+printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"; \
+printf 'authenv=%s\\n' \"$({ env; tmux show-environment -g 2>/dev/null; } | grep -E '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_PROFILE)=.' | cut -d= -f1 | sort -u | tr '\\n' ' ')\"";
 
 /// Second field of a `df -Pk` data line is total kB, fourth is available kB.
 fn df_kb(line: &str) -> (Option<i64>, Option<i64>) {
@@ -371,6 +395,16 @@ pub fn parse_host_health(stdout: &str) -> HostHealthSample {
             h.mem_avail_kb = v.trim().parse().ok();
         } else if let Some(v) = line.strip_prefix("uptime=") {
             h.uptime_secs = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("authenv=") {
+            // In precedence order, and only names fleet asked about.
+            let set: Vec<&str> = v.split_whitespace().collect();
+            h.auth_overrides = Some(
+                AUTH_OVERRIDE_VARS
+                    .iter()
+                    .filter(|n| set.contains(n))
+                    .map(|n| n.to_string())
+                    .collect(),
+            );
         }
     }
     h
@@ -2440,6 +2474,65 @@ mod tests {
         assert_eq!(
             parse_host_health(&stdout).uptime_secs,
             Some(1000),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    fn parse_host_health_reads_auth_overrides_in_precedence_order() {
+        let h = parse_host_health(
+            "authenv=ANTHROPIC_API_KEY CLAUDE_CODE_USE_BEDROCK SOMETHING_ELSE \n",
+        );
+        assert_eq!(
+            h.auth_overrides,
+            Some(vec![
+                "CLAUDE_CODE_USE_BEDROCK".to_string(),
+                "ANTHROPIC_API_KEY".to_string()
+            ])
+        );
+        assert_eq!(parse_host_health("authenv=\n").auth_overrides, Some(vec![]));
+        // An older agent's sample has no line at all: unknown, not clean.
+        assert_eq!(parse_host_health("uptime=5\n").auth_overrides, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_health_script_names_auth_overrides_without_printing_their_values() {
+        // `tmux` is replaced so the machine's own server cannot add names;
+        // its global environment carries one more override.
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        let tmux = bin.path().join("tmux");
+        std::fs::write(
+            &tmux,
+            "#!/bin/sh\nprintf 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-from-tmux\\n-ANTHROPIC_PROFILE\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            bin.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", HOST_HEALTH_SCRIPT]).env("PATH", path);
+        for v in AUTH_OVERRIDE_VARS {
+            cmd.env_remove(v);
+        }
+        let out = cmd
+            .env("ANTHROPIC_API_KEY", "sk-ant-api-secret-value")
+            .env("ANTHROPIC_AUTH_TOKEN", "")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(!stdout.contains("secret-value"), "{stdout}");
+        assert!(!stdout.contains("from-tmux"), "{stdout}");
+        assert_eq!(
+            parse_host_health(&stdout).auth_overrides,
+            Some(vec![
+                "ANTHROPIC_API_KEY".to_string(),
+                "CLAUDE_CODE_OAUTH_TOKEN".to_string()
+            ]),
             "{stdout}"
         );
     }

@@ -175,6 +175,8 @@ pub(crate) fn sample_host() -> HostRow {
         // pin every name the desktop reads, and the field is
         // `skip_serializing_if = "Option::is_none"`.
         provision_warning: Some("ag launcher not installed".into()),
+        // Some, so the golden pins the name the Hosts view reads.
+        auth_overrides: Some(vec!["ANTHROPIC_API_KEY".into()]),
     }
 }
 
@@ -359,6 +361,7 @@ fn sample_health() -> Health {
             // `hub_contract.golden.json` — the golden tracks `HostRow` only —
             // so nothing here pins the name.
             provision_warning: Some("ag launcher not installed".into()),
+            auth_overrides: vec!["ANTHROPIC_API_KEY".into()],
         }],
         hub: Some(sample_hub_health()),
         tunnels_mode: Some("none".into()),

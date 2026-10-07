@@ -559,6 +559,16 @@ fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 111.
+fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'auth_overrides'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1267,6 +1277,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 110,
         sql: include_str!("../../migrations/110_task_runs.sql"),
         already_applied: Some(tasks_has_role),
+    },
+    // Auth-override names per host (multi-account groundwork): one ADD
+    // COLUMN, guarded.
+    Migration {
+        version: 111,
+        sql: include_str!("../../migrations/111_host_auth_overrides.sql"),
+        already_applied: Some(hosts_has_auth_overrides),
     },
 ];
 
@@ -5360,8 +5377,13 @@ mod tests {
     #[test]
     fn migration_105_flattens_slash_named_worktrees_and_their_session_keys() {
         let s = store_at_version(104);
-        s.upsert_host("trn").unwrap();
-        s.upsert_host("mefistos").unwrap();
+        // Raw rows: `upsert_host` reads back every current `hosts` column,
+        // and a 104 store predates the later ones (111's `auth_overrides`).
+        s.conn
+            .execute_batch(
+                "INSERT INTO hosts (alias, reachable) VALUES ('trn', 1), ('mefistos', 1);",
+            )
+            .unwrap();
         let pid = s.upsert_project("o", "r", "/p/o/r").unwrap();
         let nested = "/home/dev/projects/r/.worktrees/feat/imports";
         let wid = s
