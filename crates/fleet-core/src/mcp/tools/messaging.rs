@@ -590,7 +590,9 @@ impl FleetTools {
             Reach::Read,
             "the inbox's session",
         )?;
-        let mark_read = p.mark_read && {
+        // A readonly token reads the inbox (`inbox` is a readonly tool) but
+        // stamping `read_at` is a write, so it is served as a watcher is.
+        let mark_read = p.mark_read && caller.mode != TokenMode::Readonly && {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             super::support::reaches_row(&s, &caller, &row, Reach::Drive)?
         };

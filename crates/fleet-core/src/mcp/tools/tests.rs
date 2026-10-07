@@ -13046,6 +13046,16 @@ async fn the_inbox_gate_binds_the_master_and_mark_read_needs_drive() {
         before,
         "and the owner's unread view is untouched by the watcher's read"
     );
+    // A readonly token of the owner's reads too, and also leaves it alone:
+    // `inbox` is a readonly tool, the mark is a write.
+    let readonly = Caller {
+        mode: TokenMode::Readonly,
+        ..device_of(ada, ada)
+    };
+    read(readonly, a_row, true)
+        .await
+        .expect("a readonly token reads the inbox");
+    assert_eq!(unread(&t), before, "a readonly token marks nothing read");
     // The OWNER's same default call does advance it.
     read(device_of(ada, ada), a_row, true).await.unwrap();
     assert_eq!(unread(&t), 0, "the owner's read marks read");
@@ -17704,4 +17714,17 @@ async fn org_admin_lists_for_a_device_and_changes_only_for_a_trusted_one() {
         store.lock().unwrap().active_client_tokens().unwrap().len(),
         1
     );
+}
+
+/// `since_turn` is bounded before the subtraction: `i64::MIN` overflowed it.
+#[test]
+fn transcript_turns_bounds_the_client_s_since_turn() {
+    use super::support::transcript_turns;
+    assert_eq!(transcript_turns(5, Some(i64::MIN)), 1);
+    assert_eq!(transcript_turns(5, Some(-1)), 1);
+    assert_eq!(transcript_turns(5, Some(-1_000_000_000_000_000_000)), 1);
+    assert_eq!(transcript_turns(5, Some(99)), 1);
+    assert_eq!(transcript_turns(5, Some(5)), 1);
+    assert_eq!(transcript_turns(5, Some(2)), 3);
+    assert_eq!(transcript_turns(5, None), 1);
 }

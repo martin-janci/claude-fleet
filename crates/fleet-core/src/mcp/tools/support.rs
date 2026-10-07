@@ -2304,10 +2304,7 @@ impl FleetTools {
         since_turn: Option<i64>,
         max_chars: Option<usize>,
     ) -> Result<String, McpError> {
-        let turns = match since_turn {
-            Some(t) => usize::try_from(row.turn_seq - t).unwrap_or(0).max(1),
-            None => 1,
-        };
+        let turns = transcript_turns(row.turn_seq, since_turn);
         let max_chars = max_chars
             .unwrap_or(transcript::DEFAULT_MAX_CHARS)
             .clamp(1, transcript::MAX_MAX_CHARS);
@@ -2675,5 +2672,17 @@ where
             );
             Ok(timeout_result(tool, limit))
         }
+    }
+}
+
+/// How many turns a `since_turn` read asks for. `since_turn` is the client's
+/// own number, so it is bounded to `0..=turn_seq` before the subtraction, as
+/// `transcript::conv_turns_for` does: `i64::MIN` used to overflow it (a panic
+/// in a debug build) and a very negative one asked for ~1e18 turns. Anything
+/// out of range reads the last turn.
+pub(super) fn transcript_turns(turn_seq: i64, since_turn: Option<i64>) -> usize {
+    match since_turn {
+        Some(t) if (0..=turn_seq).contains(&t) => usize::try_from(turn_seq - t).unwrap_or(0).max(1),
+        _ => 1,
     }
 }
