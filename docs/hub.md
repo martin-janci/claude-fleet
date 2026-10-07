@@ -3227,19 +3227,24 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 268 commands, 187 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 25 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 278 commands, 187 route to a hub tool, 1 routes except for one argument shape, 65 refuse, and 25 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
+| `ask_ai_about_local_changes` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
+| `commit_local_workspace` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
+| `compare_local_conflict` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
+| `discard_local_workspace_changes` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
 | `disconnect_local_workspace` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
+| `dismiss_local_workspace_activity` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
 | `enable_local_workspace` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `fetch_page_source` | a page's data sources read this fleet's store, which the hub owns; read the same numbers on the hub with usage_report |
 | `flow_back` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
@@ -3249,11 +3254,15 @@ Of the 268 commands, 187 route to a hub tool, 1 routes except for one argument s
 | `hide_host` | hiding a host is fleet administration, which the hub reserves for its own operator — hide it there with `fleet-hub` |
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
+| `keep_both_local_conflict` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
 | `list_account_usage` | this app does not poll account usage while a hub owns the fleet, so the cache is empty; read usage on the hub |
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
+| `local_workspace_changes` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
+| `local_workspace_diff` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
 | `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
+| `open_local_workspace` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
 | `pause_local_workspace` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
@@ -3277,6 +3286,7 @@ Of the 268 commands, 187 route to a hub tool, 1 routes except for one argument s
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
+| `set_local_workspace_driver` | it works on a local workspace link, which binds a folder on this machine and reaches the host over this machine's own SSH connection; the hub exposes no tool for it; use a standalone desktop |
 | `set_local_workspace_excludes` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |

@@ -11,11 +11,18 @@
 //! become a conflict that writes nothing until someone picks. Nothing here
 //! is a git operation.
 //!
+//! Phases 2 and 3 ([`handoff`], [`open`]) build on the pass: the activity
+//! log it writes says which side made each change, and the worktree's own
+//! git answers what is uncommitted.
+//!
 //! Desktop-only: the directory is on this machine, so a hub never runs it
 //! (every command is `LocalOnly` in hub-client mode).
 
 pub mod excludes;
+mod git;
+pub mod handoff;
 mod local;
+pub mod open;
 mod plan;
 mod remote;
 // Unix only: the fixture plays the host with this machine's own `bash`, and
@@ -528,6 +535,9 @@ impl LocalSync {
                     local,
                     remote,
                 } => {
+                    write
+                        .activity
+                        .push((path.clone(), "remote", change_kind(&base, &path)));
                     write.upsert.push((
                         path.clone(),
                         BaseEntry {
@@ -541,6 +551,7 @@ impl LocalSync {
                     }
                 }
                 LocalApplied::Deleted(path) => {
+                    write.activity.push((path.clone(), "remote", "deleted"));
                     write.remove.push(path.clone());
                     if conflicts.contains_key(&path) {
                         cleared.insert(path);
@@ -598,6 +609,9 @@ impl LocalSync {
                 let path = op.path().to_string();
                 match (results.get(&path), local_side) {
                     (Some(PushResult::Done(rst)), Some((sha, lst))) => {
+                        write
+                            .activity
+                            .push((path.clone(), "local", change_kind(&base, &path)));
                         write.upsert.push((
                             path.clone(),
                             BaseEntry {
@@ -611,6 +625,7 @@ impl LocalSync {
                         }
                     }
                     (Some(PushResult::Done(_)), None) => {
+                        write.activity.push((path.clone(), "local", "deleted"));
                         write.remove.push(path.clone());
                         if conflicts.contains_key(&path) {
                             cleared.insert(path);
@@ -621,7 +636,11 @@ impl LocalSync {
             }
         }
 
-        // 7. Record.
+        // 7. Record. The first pass (an empty BASE) is the initial copy, not
+        // anyone's change: it leaves the activity log alone.
+        if base.is_empty() {
+            write.activity.clear();
+        }
         write.clear_conflicts = cleared.iter().cloned().collect();
         out.conflicts = conflicts
             .keys()
@@ -760,6 +779,15 @@ fn resolve(side: &Side, looked: Option<(String, FileStat)>) -> Option<Now> {
             stat: *stat,
         }),
         Side::Changed(_) => looked.map(|(sha, stat)| Now::Has { sha, stat }),
+    }
+}
+
+/// `added` for a path the BASE did not have, else `modified`.
+fn change_kind(base: &HashMap<String, BaseEntry>, path: &str) -> &'static str {
+    if base.contains_key(path) {
+        "modified"
+    } else {
+        "added"
     }
 }
 

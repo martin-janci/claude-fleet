@@ -700,6 +700,16 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::local_workspaces::disconnect_local_workspace`
 - `commands::local_workspaces::set_local_workspace_excludes`
 - `commands::local_workspaces::resolve_local_workspace_conflict`
+- `commands::local_workspaces::open_local_workspace`
+- `commands::local_workspaces::local_workspace_changes`
+- `commands::local_workspaces::local_workspace_diff`
+- `commands::local_workspaces::commit_local_workspace`
+- `commands::local_workspaces::discard_local_workspace_changes`
+- `commands::local_workspaces::dismiss_local_workspace_activity`
+- `commands::local_workspaces::compare_local_conflict`
+- `commands::local_workspaces::keep_both_local_conflict`
+- `commands::local_workspaces::ask_ai_about_local_changes`
+- `commands::local_workspaces::set_local_workspace_driver`
 - `commands::sessions::list_sessions`
 - `commands::sessions::new_session`
 - `commands::sessions::kill_session`

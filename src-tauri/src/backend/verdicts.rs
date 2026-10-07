@@ -1514,6 +1514,86 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "open_local_workspace",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "local_workspace_changes",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "local_workspace_diff",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "commit_local_workspace",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "discard_local_workspace_changes",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "dismiss_local_workspace_activity",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "compare_local_conflict",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "keep_both_local_conflict",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "ask_ai_about_local_changes",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "set_local_workspace_driver",
+        Verdict::LocalOnly {
+            instead: "it works on a local workspace link, which binds a folder on this machine \
+                      and reaches the host over this machine's own SSH connection; the hub \
+                      exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
         "cancel_command",
         Verdict::SameInBoth {
             why: "the cancellation registry is this process's, and the call it cancels is \

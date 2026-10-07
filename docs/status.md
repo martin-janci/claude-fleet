@@ -280,9 +280,14 @@ both sides, two sides that changed differently become a conflict (Keep local
 / Keep remote, or by hand), and a folder that lost most of its files pauses
 the link instead of deleting the other side. Standalone desktop only: every
 mutation is `LocalOnly` on a paired desktop, and hosts reached through
-`fleet-agent` are refused (no stdin). Not yet (Phases 2–3): Open in IDE,
-diff / compare, "local changes detected" with Ask AI, agent handoff,
-worktree lifecycle from the card, symlinks.
+`fleet-agent` are refused (no stdin). Phases 2 and 3 are built too (spec
+`docs/superpowers/specs/2026-10-07-local-workspace-handoff-design.md`,
+migration 112): Open in VS Code / IntelliJ / a terminal / the file manager,
+a per-path log of which side changed what ("7 local changes"), Review
+changes (git status and diff on the host, Commit, Discard), Ask AI about the
+changes, Take over / Hand back to AI, Compare / Keep both / Ask AI to
+resolve on a conflict, and an overview of every link with Clean up stale.
+Not yet: symlinks, a filesystem watcher, a three-way merge editor.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

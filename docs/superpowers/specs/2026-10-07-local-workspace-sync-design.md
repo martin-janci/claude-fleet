@@ -122,7 +122,8 @@ host did not answer; retried with backoff), `error` (anything else, with
 A conflicting path is left alone on both sides and listed. Resolution
 (Phase 1): **Keep local** (push over the remote), **Keep remote** (pull over
 the local), or resolve by hand — once both sides have the same content the
-next pass clears it. Compare (a diff view) is Phase 2.
+next pass clears it. Compare, Keep both and Ask AI to resolve came in Phase 2
+(`2026-10-07-local-workspace-handoff-design.md`).
 
 ## Engine and commands
 

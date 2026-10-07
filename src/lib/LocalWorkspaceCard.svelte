@@ -4,6 +4,9 @@
   // both paths, when it last synced, open conflicts with Keep local / Keep
   // remote, and Sync now / Pause / Resume / Disconnect. A paired desktop shows
   // a note instead: the sync runs over this machine's own SSH.
+  // Phases 2 and 3 add Open in…, what each side changed with Review changes,
+  // who drives the worktree (Take over / Hand back to AI), Compare / Keep
+  // both / Ask AI to resolve on a conflict, and the overview of every link.
   import { onDestroy, untrack } from 'svelte';
   import type { SessionRow } from './sessions';
   import {
@@ -19,11 +22,24 @@
     resolveLocalConflict,
     setLocalWorkspaceExcludes,
     suggestedFolder,
+    OPEN_APPS,
+    DRIVER_LABEL,
+    openLocalWorkspace,
+    setLocalWorkspaceDriver,
+    dismissLocalActivity,
+    compareLocalConflict,
+    keepBothLocalConflict,
+    askAiAboutLocalChanges,
+    type FileDiff,
   } from './local_workspaces';
   import { projectById } from './projects';
   import { hubStatus, ownsTheFleet } from './hub';
   import { timeAgo } from './session_status';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import Modal from './Modal.svelte';
+  import DiffView from './DiffView.svelte';
+  import LocalChangesDialog from './LocalChangesDialog.svelte';
+  import LocalWorkspacesOverview from './LocalWorkspacesOverview.svelte';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -39,6 +55,13 @@
   let editingExcludes = $state(false);
   let busy = $state(false);
   let confirmDisconnect = $state(false);
+  let reviewing = $state(false);
+  let overview = $state(false);
+  let comparing = $state<FileDiff | null>(null);
+
+  const driver = $derived(link?.driver ?? 'shared');
+  const localN = $derived(link?.local_activity ?? 0);
+  const remoteN = $derived(link?.remote_activity ?? 0);
 
   // "Synced 3 s ago" keeps moving without a row event.
   let nowMs = $state(Date.now());
@@ -59,6 +82,8 @@
       excludesText = '';
       editingExcludes = false;
       confirmDisconnect = false;
+      reviewing = false;
+      comparing = null;
     }
     if (seededFor !== id && project) {
       seededFor = id;
@@ -142,6 +167,80 @@
       <dt>Remote</dt>
       <dd><code title={link.remote_path}>{link.host_alias}:{link.remote_path}</code></dd>
     </dl>
+    <div class="row" data-testid="lw-open">
+      <span class="muted small">Open in</span>
+      {#each OPEN_APPS as o (o.app)}
+        <button
+          class="ghost small"
+          disabled={busy}
+          data-testid="lw-open-{o.app}"
+          onclick={() => run(() => openLocalWorkspace(link.id, o.app))}
+        >{o.label}</button>
+      {/each}
+    </div>
+    <div class="driver" data-testid="lw-driver">
+      <span class="chip driver-{driver}">{DRIVER_LABEL[driver] ?? driver}</span>
+      {#if driver !== 'developer'}
+        <button
+          class="ghost small"
+          disabled={busy}
+          data-testid="lw-take-over"
+          title="Tell the agent to leave the files alone while you edit them"
+          onclick={() => run(() => setLocalWorkspaceDriver(link.id, 'developer'))}
+        >Take over</button>
+      {/if}
+      {#if driver !== 'agent'}
+        <button
+          class="ghost small"
+          disabled={busy}
+          data-testid="lw-hand-back"
+          title="Send the agent the files you changed and let it continue"
+          onclick={() => run(() => setLocalWorkspaceDriver(link.id, 'agent'))}
+        >Hand back to AI</button>
+      {/if}
+      {#if driver !== 'shared'}
+        <button
+          class="ghost small"
+          disabled={busy}
+          onclick={() => run(() => setLocalWorkspaceDriver(link.id, 'shared'))}
+        >Shared</button>
+      {/if}
+    </div>
+    {#if localN > 0 || remoteN > 0}
+      <div class="activity" data-testid="lw-activity">
+        <span>
+          {#if localN > 0}{localN} local change{localN === 1 ? '' : 's'}{/if}{#if localN > 0 && remoteN > 0}
+            ·
+          {/if}{#if remoteN > 0}{remoteN} agent change{remoteN === 1 ? '' : 's'}{/if}
+        </span>
+        <button
+          class="ghost small"
+          disabled={busy}
+          data-testid="lw-review"
+          onclick={() => (reviewing = true)}
+        >Review changes</button>
+        {#if localN > 0}
+          <button
+            class="ghost small"
+            disabled={busy}
+            data-testid="lw-ask-continue"
+            onclick={() => run(() => askAiAboutLocalChanges(link.id, 'continue'))}
+          >Ask AI to continue</button>
+        {/if}
+        <button
+          class="ghost small"
+          disabled={busy}
+          title="Mark them as looked at; the files stay as they are"
+          onclick={() => run(() => dismissLocalActivity(link.id))}
+        >Dismiss</button>
+      </div>
+    {:else}
+      <div class="row">
+        <button class="ghost small" disabled={busy} data-testid="lw-review" onclick={() => (reviewing = true)}
+          >Review changes</button
+        >
+      </div>
+    {/if}
     {#if link.last_error}
       <p class="error" data-testid="lw-error">{link.last_error}</p>
     {/if}
@@ -165,6 +264,15 @@
                   <button
                     class="ghost small"
                     disabled={busy}
+                    data-testid="lw-compare"
+                    onclick={() =>
+                      run(async () => {
+                        comparing = await compareLocalConflict(link.id, c.path);
+                      })}
+                  >Compare</button>
+                  <button
+                    class="ghost small"
+                    disabled={busy}
                     onclick={() => run(() => resolveLocalConflict(link.id, c.path, 'local'))}
                   >Keep local</button>
                   <button
@@ -172,6 +280,21 @@
                     disabled={busy}
                     onclick={() => run(() => resolveLocalConflict(link.id, c.path, 'remote'))}
                   >Keep remote</button>
+                  <button
+                    class="ghost small"
+                    disabled={busy}
+                    data-testid="lw-keep-both"
+                    title="Keep the remote file and save yours next to it as .local-copy"
+                    onclick={() => run(() => keepBothLocalConflict(link.id, c.path))}
+                  >Keep both</button>
+                  <button
+                    class="ghost small"
+                    disabled={busy}
+                    data-testid="lw-ask-resolve"
+                    title="Put your version next to the remote one and ask the agent to merge them"
+                    onclick={() =>
+                      run(() => askAiAboutLocalChanges(link.id, 'resolve', { paths: [c.path] }))}
+                  >Ask AI to resolve</button>
                 </span>
               {/if}
             </li>
@@ -218,6 +341,9 @@
         data-testid="lw-disconnect"
         onclick={() => (confirmDisconnect = true)}
       >Disconnect</button>
+      <button class="ghost" data-testid="lw-overview-open" onclick={() => (overview = true)}
+        >All local workspaces…</button
+      >
     </div>
     {#if editingExcludes}
       <div class="excludes">
@@ -243,6 +369,26 @@
     {/if}
   {/if}
 </section>
+
+{#if reviewing && link}
+  <LocalChangesDialog {link} onclose={() => (reviewing = false)} />
+{/if}
+
+{#if comparing}
+  <Modal title="Local → remote: {comparing.path}" onclose={() => (comparing = null)} width="760px" testid="lw-compare-dialog">
+    {#if comparing.binary}
+      <p class="muted">Binary file: the two versions differ.</p>
+    {:else if !comparing.diff.trim()}
+      <p class="muted">The two versions are the same.</p>
+    {:else}
+      <DiffView diff={comparing.diff} testid="lw-compare-diff" />
+    {/if}
+  </Modal>
+{/if}
+
+{#if overview}
+  <LocalWorkspacesOverview onclose={() => (overview = false)} />
+{/if}
 
 {#if confirmDisconnect && link}
   <ConfirmDialog
@@ -323,6 +469,11 @@
   .conflicts li { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; font-size: 0.82rem; }
   .kind { color: var(--fg-muted); }
   .cbtns { display: inline-flex; gap: 0.3rem; margin-left: auto; }
+  .driver, .activity { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; font-size: 0.85rem; }
+  .activity span { color: var(--usage-warn); }
+  .chip { font-size: 0.75rem; border: 1px solid var(--border); border-radius: 3px; padding: 0.05rem 0.4rem; }
+  .driver-developer { border-color: var(--usage-warn); color: var(--usage-warn); }
+  .driver-agent { border-color: var(--accent); color: var(--accent); }
   .excludes textarea {
     width: 100%;
     box-sizing: border-box;

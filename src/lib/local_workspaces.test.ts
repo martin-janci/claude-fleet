@@ -12,6 +12,10 @@ import {
   loadLocalWorkspaces,
   enableLocalWorkspace,
   disconnectLocalWorkspace,
+  askAiAboutLocalChanges,
+  setLocalWorkspaceDriver,
+  openLocalWorkspace,
+  staleReason,
   _resetLocalWorkspacesForTests,
   type LocalWorkspace,
 } from './local_workspaces';
@@ -95,4 +99,59 @@ it('suggests a folder per repo and worktree', () => {
   expect(suggestedFolder('app', null)).toBe('~/fleet/app');
   expect(suggestedFolder('app', 'main')).toBe('~/fleet/app');
   expect(suggestedFolder('app', 'feat-x')).toBe('~/fleet/app-feat-x');
+});
+
+describe('Phases 2 and 3', () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    _resetLocalWorkspacesForTests();
+  });
+
+  it('counts unreviewed local changes on a synced link', () => {
+    expect(badgeFor(ws({ local_activity: 7 }))).toEqual({ tone: 'pending', label: '7 local changes' });
+    expect(badgeFor(ws({ local_activity: 1 })).label).toBe('1 local change');
+    expect(badgeFor(ws({ remote_activity: 3 }))).toEqual({ tone: 'ok', label: 'Synced' });
+  });
+
+  it('sends Ask AI, the driver and Open with their arguments', async () => {
+    invoke.mockResolvedValue(ws({ driver: 'agent' }));
+    await askAiAboutLocalChanges(1, 'custom', { question: 'why?', paths: ['a.rs'] });
+    expect(invoke).toHaveBeenLastCalledWith('ask_ai_about_local_changes', {
+      args: { id: 1, intent: 'custom', question: 'why?', paths: ['a.rs'] },
+    });
+    await askAiAboutLocalChanges(1, 'continue');
+    expect(invoke).toHaveBeenLastCalledWith('ask_ai_about_local_changes', {
+      args: { id: 1, intent: 'continue', question: null, paths: null },
+    });
+    await setLocalWorkspaceDriver(1, 'agent');
+    expect(invoke).toHaveBeenLastCalledWith('set_local_workspace_driver', {
+      args: { id: 1, driver: 'agent' },
+    });
+    expect(get(localWorkspaces)[0].driver).toBe('agent');
+    invoke.mockResolvedValueOnce(null);
+    expect(await openLocalWorkspace(1, 'vscode')).toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith('open_local_workspace', {
+      args: { id: 1, app: 'vscode' },
+    });
+  });
+
+  it('says why a link is stale', () => {
+    const live = { host_alias: 'devbox', project_id: 7, worktree_key: null, status: 'active' };
+    expect(staleReason(ws(), [live])).toBeNull();
+    expect(staleReason(ws(), [{ ...live, status: 'ghost' }])).toBe('No session uses this worktree');
+    expect(staleReason(ws(), [{ ...live, worktree_key: 'feat' }])).toBe(
+      'No session uses this worktree',
+    );
+    expect(
+      staleReason(
+        ws({ state: 'error', last_error: 'the local folder /Users/me/fleet/app is missing' }),
+        [live],
+      ),
+    ).toBe('The local folder is gone');
+    expect(
+      staleReason(ws({ state: 'error', last_error: 'the worktree folder is missing on devbox' }), [
+        live,
+      ]),
+    ).toBe('The worktree is gone on the host');
+  });
 });

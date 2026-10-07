@@ -83,8 +83,9 @@ pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use layers::HostLayerRow;
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
-    BaseEntry, FileStat, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow, LocalWorkspaceStatus,
-    NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS, LOCAL_WORKSPACE_STATES,
+    BaseEntry, FileStat, LocalActivityRow, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow,
+    LocalWorkspaceStatus, NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS,
+    LOCAL_WORKSPACE_DRIVERS, LOCAL_WORKSPACE_STATES,
 };
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,

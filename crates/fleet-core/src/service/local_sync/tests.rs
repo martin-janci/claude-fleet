@@ -70,6 +70,10 @@ impl SshExec for Bash {
             .arg("-c")
             .arg(args.join(" "))
             .env("HOME", &self.home)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -651,4 +655,411 @@ fn only_a_link_blocks_what_lies_below_it() {
     assert!(!is_blocked(&blocked, &links, "config/app.toml"));
     assert!(is_blocked(&blocked, &links, "docs/a/b.md"));
     assert!(!is_blocked(&blocked, &links, "docsx/a.md"));
+}
+
+// ---------------------------------------------------------------------------
+// Phases 2 and 3: activity log, git on the worktree, conflicts, prompts.
+// ---------------------------------------------------------------------------
+
+use handoff::{
+    AskAiArgs, CommitLocalWorkspaceArgs, DismissLocalActivityArgs, LocalWorkspacePathArgs,
+    LocalWorkspacePathsArgs, SetLocalDriverArgs,
+};
+
+fn activity(f: &Fixture, id: i64) -> Vec<(String, String, String)> {
+    let mut v: Vec<_> = lock(&f.engine.store)
+        .unwrap()
+        .local_workspace_activity(id)
+        .unwrap()
+        .into_iter()
+        .map(|a| (a.path, a.origin, a.change))
+        .collect();
+    v.sort();
+    v
+}
+
+fn t(p: &str, o: &str, c: &str) -> (String, String, String) {
+    (p.into(), o.into(), c.into())
+}
+
+#[tokio::test]
+async fn the_activity_log_says_which_side_changed_what_but_not_the_first_copy() {
+    let f = fixture();
+    let row = f.enable().await;
+    assert!(
+        activity(&f, row.id).is_empty(),
+        "the initial copy is nobody's change"
+    );
+    write(&f.local, "src/main.rs", "fn main() { /* mine */ }\n");
+    write(&f.local, "src/new.rs", "// new\n");
+    std::fs::remove_file(f.local.join("README.md")).unwrap();
+    write(&f.remote, "notes.txt", "the agent wrote this\n");
+    let r = f.pass(row.id).await;
+    assert_eq!((r.local_activity, r.remote_activity), (3, 1), "{r:?}");
+    assert_eq!(
+        activity(&f, row.id),
+        vec![
+            t("README.md", "local", "deleted"),
+            t("notes.txt", "remote", "modified"),
+            t("src/main.rs", "local", "modified"),
+            t("src/new.rs", "local", "added"),
+        ]
+    );
+    // The latest carry wins: the agent then edits a file the developer did.
+    write(&f.remote, "src/new.rs", "// agent took it over\n");
+    f.pass(row.id).await;
+    assert!(activity(&f, row.id).contains(&t("src/new.rs", "remote", "modified")));
+    // Dismissing one side leaves the other.
+    let r = handoff::dismiss(
+        &f.engine,
+        DismissLocalActivityArgs {
+            id: row.id,
+            origin: Some("remote".into()),
+        },
+    )
+    .unwrap();
+    assert_eq!((r.local_activity, r.remote_activity), (2, 0));
+}
+
+#[tokio::test]
+async fn changes_and_diff_read_the_worktree_with_each_sides_origin() {
+    let f = fixture();
+    let row = f.enable().await;
+    write(&f.local, "src/main.rs", "fn main() { /* mine */ }\n");
+    write(&f.local, "brand/new.txt", "fresh\n");
+    // Not yet carried: `changes` runs a pass first.
+    let c = handoff::changes(&f.engine, row.id).await.unwrap();
+    let mut got: Vec<(String, String, Option<String>)> = c
+        .files
+        .iter()
+        .map(|x| (x.file.path.clone(), x.file.status.clone(), x.origin.clone()))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            (
+                "brand/new.txt".into(),
+                "untracked".into(),
+                Some("local".into())
+            ),
+            // Untracked before the link: git knows it, the log does not.
+            ("notes.txt".into(), "untracked".into(), None),
+            (
+                "src/main.rs".into(),
+                "modified".into(),
+                Some("local".into())
+            ),
+        ]
+    );
+    assert!(!c.branch.is_empty());
+    let d = handoff::diff(
+        &f.engine,
+        LocalWorkspacePathArgs {
+            id: row.id,
+            path: "src/main.rs".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(d.diff.contains("-fn main() {}"), "{}", d.diff);
+    assert!(d.diff.contains("+fn main() { /* mine */ }"), "{}", d.diff);
+    let d = handoff::diff(
+        &f.engine,
+        LocalWorkspacePathArgs {
+            id: row.id,
+            path: "brand/new.txt".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        d.diff.contains("+fresh"),
+        "an untracked file is all added: {}",
+        d.diff
+    );
+    let bad = handoff::diff(
+        &f.engine,
+        LocalWorkspacePathArgs {
+            id: row.id,
+            path: "../etc/passwd".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(bad.code, codes::E_INVALID);
+}
+
+#[tokio::test]
+async fn commit_takes_exactly_the_chosen_files_and_discard_comes_back_to_the_folder() {
+    let f = fixture();
+    let row = f.enable().await;
+    write(&f.local, "src/main.rs", "fn main() { /* mine */ }\n");
+    write(&f.local, "keep.txt", "commit me\n");
+    write(&f.local, "README.md", "not this one\n");
+    let c = handoff::commit(
+        &f.engine,
+        CommitLocalWorkspaceArgs {
+            id: row.id,
+            message: "Local edits".into(),
+            paths: vec!["src/main.rs".into(), "keep.txt".into()],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.commit.len(), 40, "{c:?}");
+    let out = std::process::Command::new("git")
+        .args(["show", "--stat", "--format=%s", "HEAD"])
+        .current_dir(&f.remote)
+        .output()
+        .unwrap();
+    let show = String::from_utf8_lossy(&out.stdout);
+    assert!(show.starts_with("Local edits"), "{show}");
+    assert!(
+        show.contains("src/main.rs") && show.contains("keep.txt"),
+        "{show}"
+    );
+    assert!(!show.contains("README.md"), "{show}");
+    // What was committed left the log; the rest stays.
+    assert_eq!(
+        activity(&f, row.id),
+        vec![t("README.md", "local", "modified")]
+    );
+
+    // Discard: back to HEAD on the host, then carried to the folder.
+    write(&f.local, "scratch.txt", "throw away\n");
+    let r = handoff::discard(
+        &f.engine,
+        LocalWorkspacePathsArgs {
+            id: row.id,
+            paths: vec!["README.md".into(), "scratch.txt".into()],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.state, "synced", "{r:?}");
+    assert_eq!(read(&f.remote, "README.md").as_deref(), Some("hello\n"));
+    assert_eq!(read(&f.local, "README.md").as_deref(), Some("hello\n"));
+    assert!(read(&f.remote, "scratch.txt").is_none());
+    assert!(read(&f.local, "scratch.txt").is_none());
+    assert!(
+        activity(&f, row.id).is_empty(),
+        "{:?}",
+        activity(&f, row.id)
+    );
+    // Nothing else moved.
+    assert_eq!(
+        read(&f.local, "src/main.rs").as_deref(),
+        Some("fn main() { /* mine */ }\n")
+    );
+
+    // A paused link refuses a discard: the folder would bring it back.
+    pause(&f.engine, row.id).unwrap();
+    let e = handoff::discard(
+        &f.engine,
+        LocalWorkspacePathsArgs {
+            id: row.id,
+            paths: vec!["src/main.rs".into()],
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+}
+
+async fn conflicted(f: &Fixture) -> LocalWorkspaceRow {
+    let row = f.enable().await;
+    write(&f.local, "README.md", "local version\n");
+    write(&f.remote, "README.md", "remote version\n");
+    let r = f.pass(row.id).await;
+    assert_eq!(r.conflicts.len(), 1, "{r:?}");
+    r
+}
+
+#[tokio::test]
+async fn compare_shows_a_conflict_from_local_to_remote() {
+    let f = fixture();
+    let row = conflicted(&f).await;
+    let d = handoff::compare_conflict(
+        &f.engine,
+        LocalWorkspacePathArgs {
+            id: row.id,
+            path: "README.md".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(d.diff.contains("-local version"), "{}", d.diff);
+    assert!(d.diff.contains("+remote version"), "{}", d.diff);
+    let e = handoff::compare_conflict(
+        &f.engine,
+        LocalWorkspacePathArgs {
+            id: row.id,
+            path: "src/main.rs".into(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND, "not in conflict");
+}
+
+#[tokio::test]
+async fn keep_both_saves_the_local_version_aside_and_takes_the_remote() {
+    let f = fixture();
+    let row = conflicted(&f).await;
+    let r = handoff::keep_both(
+        &f.engine,
+        LocalWorkspacePathArgs {
+            id: row.id,
+            path: "README.md".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(r.conflicts.is_empty(), "{r:?}");
+    assert_eq!(
+        read(&f.local, "README.md").as_deref(),
+        Some("remote version\n")
+    );
+    assert_eq!(
+        read(&f.local, "README.md.local-copy").as_deref(),
+        Some("local version\n")
+    );
+    assert_eq!(
+        read(&f.remote, "README.md.local-copy").as_deref(),
+        Some("local version\n"),
+        "the copy syncs like any new file"
+    );
+}
+
+#[tokio::test]
+async fn ask_ai_targets_the_worktrees_session_and_resolve_stages_the_local_copy() {
+    let f = fixture();
+    let row = conflicted(&f).await;
+    let plan = handoff::prepare_ask(
+        &f.engine,
+        AskAiArgs {
+            id: row.id,
+            intent: "resolve".into(),
+            question: None,
+            paths: Some(vec!["README.md".into()]),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(plan.session_id, f.session_id);
+    assert_eq!(plan.tmux_name, "dev-app");
+    assert!(
+        plan.prompt.contains("README.md.fleet-local"),
+        "{}",
+        plan.prompt
+    );
+    assert_eq!(
+        read(&f.remote, "README.md.fleet-local").as_deref(),
+        Some("local version\n")
+    );
+    // The staged copy never comes back to the folder.
+    f.pass(row.id).await;
+    assert!(read(&f.local, "README.md.fleet-local").is_none());
+
+    // `continue` hands over the local changes and clears them once sent.
+    write(&f.local, "src/main.rs", "fn main() { /* mine */ }\n");
+    f.pass(row.id).await;
+    let plan = handoff::prepare_ask(
+        &f.engine,
+        AskAiArgs {
+            id: row.id,
+            intent: "continue".into(),
+            question: None,
+            paths: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(plan.prompt.contains("- M src/main.rs"), "{}", plan.prompt);
+    assert_eq!(plan.clear, vec!["src/main.rs".to_string()]);
+    let r = handoff::finish_ask(&f.engine, row.id, &plan.clear).unwrap();
+    assert_eq!(r.local_activity, 0);
+}
+
+#[tokio::test]
+async fn ask_ai_without_a_live_session_says_to_start_one() {
+    let f = fixture();
+    let row = f.enable().await;
+    lock(&f.engine.store)
+        .unwrap()
+        .mark_host_sessions_lost("devbox", "host_rebooted", &[], 10, 0)
+        .unwrap();
+    let e = handoff::prepare_ask(
+        &f.engine,
+        AskAiArgs {
+            id: row.id,
+            intent: "review".into(),
+            question: None,
+            paths: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND);
+    // Taking over with nobody there sets the driver and says nothing.
+    let args = SetLocalDriverArgs {
+        id: row.id,
+        driver: "developer".into(),
+    };
+    let plan = handoff::prepare_driver(&f.engine, &args).await.unwrap();
+    assert!(plan.is_none());
+    let r = handoff::finish_driver(&f.engine, &args, None).unwrap();
+    assert_eq!(r.driver, "developer");
+    assert!(r.driver_since.is_some());
+}
+
+#[tokio::test]
+async fn handing_back_gives_the_agent_the_developers_changes() {
+    let f = fixture();
+    let row = f.enable().await;
+    let take = SetLocalDriverArgs {
+        id: row.id,
+        driver: "developer".into(),
+    };
+    let plan = handoff::prepare_driver(&f.engine, &take)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        plan.prompt.contains("Do not change files here"),
+        "{}",
+        plan.prompt
+    );
+    handoff::finish_driver(&f.engine, &take, Some(&plan)).unwrap();
+    write(&f.local, "src/main.rs", "fn main() { /* mine */ }\n");
+    let back = SetLocalDriverArgs {
+        id: row.id,
+        driver: "agent".into(),
+    };
+    let plan = handoff::prepare_driver(&f.engine, &back)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        plan.prompt
+            .starts_with("The developer hands this worktree back"),
+        "{}",
+        plan.prompt
+    );
+    assert!(plan.prompt.contains("- M src/main.rs"), "{}", plan.prompt);
+    let r = handoff::finish_driver(&f.engine, &back, Some(&plan)).unwrap();
+    assert_eq!(r.driver, "agent");
+    assert_eq!(r.local_activity, 0);
+    let bad = SetLocalDriverArgs {
+        id: row.id,
+        driver: "robot".into(),
+    };
+    assert_eq!(
+        handoff::prepare_driver(&f.engine, &bad)
+            .await
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
 }

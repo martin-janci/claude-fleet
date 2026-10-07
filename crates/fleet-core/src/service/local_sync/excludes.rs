@@ -7,9 +7,10 @@
 use crate::ipc_error::{codes, IpcError};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// Always left out, whatever a link's own patterns say: VCS metadata and
-/// the sync's own temp files.
-pub const FIXED_EXCLUDES: &[&str] = &[".git", ".fleet-sync-*"];
+/// Always left out, whatever a link's own patterns say: VCS metadata, the
+/// sync's own temp files, and the local version of a conflicting file that
+/// "Ask AI to resolve" puts next to it on the host (`<path>.fleet-local`).
+pub const FIXED_EXCLUDES: &[&str] = &[".git", ".fleet-sync-*", "*.fleet-local"];
 
 /// Left out by default. A link's own patterns come after these, so
 /// `!build/` brings a default back.
