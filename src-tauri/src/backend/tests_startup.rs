@@ -39,6 +39,9 @@ impl FleetTasks for Recorder {
     fn start_catalog_scan_tick(&self) {
         self.0.lock().unwrap().push("catalog_scan_tick");
     }
+    fn start_local_sync_tick(&self) {
+        self.0.lock().unwrap().push("local_sync_tick");
+    }
 }
 
 fn remote() -> Backend {
@@ -115,6 +118,18 @@ fn a_paired_desktop_never_scans_the_catalog() {
     assert!(standalone.started().contains(&"catalog_scan_tick"));
 }
 
+/// Local workspace sync reaches hosts over this process's own SSH: only a
+/// standalone desktop runs its tick.
+#[test]
+fn only_a_standalone_desktop_runs_local_workspace_sync() {
+    let recorder = Recorder::default();
+    start_background_tasks(&remote(), &recorder);
+    assert!(!recorder.started().contains(&"local_sync_tick"));
+    let standalone = Recorder::default();
+    start_background_tasks(&Backend::Local, &standalone);
+    assert!(standalone.started().contains(&"local_sync_tick"));
+}
+
 #[test]
 fn the_report_flusher_is_off_with_the_env_var() {
     assert!(report_flusher_wanted(None));
@@ -138,7 +153,8 @@ fn a_standalone_app_starts_all_three() {
             "reconcile_tick",
             "account_usage_tick",
             "tracker_sync",
-            "catalog_scan_tick"
+            "catalog_scan_tick",
+            "local_sync_tick"
         ],
         "standalone must keep its control API, its reconcile tick and its \
          usage poll — and must NOT start the hub event bridge, because there \
@@ -170,6 +186,7 @@ fn lib_rs_cannot_start_a_background_task_behind_this_modules_back() {
         "spawn_report_flusher(",
         "spawn_tracker_sync(",
         "spawn_catalog_scan_tick(",
+        "spawn_local_sync_tick(",
     ] {
         assert!(
             !lib.contains(forbidden),
@@ -204,6 +221,7 @@ fn the_real_tasks_module_spawns_each_of_the_three_exactly_once() {
         ("spawn_report_flusher(", "the error-report flusher"),
         ("spawn_tracker_sync(", "the tracker sync"),
         ("spawn_catalog_scan_tick(", "the catalog scan tick"),
+        ("spawn_local_sync_tick(", "the local workspace sync tick"),
     ] {
         assert_eq!(
             tasks.matches(call).count(),
@@ -368,7 +386,8 @@ fn with_no_hub_configured_the_resolved_app_still_starts_all_three() {
                     "reconcile_tick",
                     "account_usage_tick",
                     "tracker_sync",
-                    "catalog_scan_tick"
+                    "catalog_scan_tick",
+                    "local_sync_tick"
                 ],
                 "standalone behaviour must not change: settings {settings:?}"
             );

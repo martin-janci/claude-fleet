@@ -23,6 +23,7 @@ use crate::bootstrap::mcp::maybe_start_mcp;
 use fleet_core::events::EventBus;
 use fleet_core::service::account_usage::UsageCache;
 use fleet_core::service::catalog::scan_tick::spawn_catalog_scan_tick;
+use fleet_core::service::local_sync::{spawn_local_sync_tick, LocalSync};
 use fleet_core::service::tick::{spawn_account_usage_tick, spawn_reconcile_tick};
 use fleet_core::service::trackers::sync::spawn_tracker_sync;
 use fleet_core::service::tunnel::TunnelSupervisor;
@@ -38,6 +39,7 @@ pub(crate) struct RealFleetTasks {
     pub tunnels: Arc<TunnelSupervisor>,
     pub guards: mcp::McpGuards,
     pub usage_cache: Arc<Mutex<UsageCache>>,
+    pub local_sync: Arc<LocalSync>,
     pub bus: Arc<dyn EventBus>,
     /// The same bus, concretely. The hub event bridge hands it
     /// `(&'static str, Value)` pairs directly — the trait object above only
@@ -159,6 +161,11 @@ impl FleetTasks for RealFleetTasks {
             Arc::clone(&self.ssh),
             tokio_util::sync::CancellationToken::new(),
         ));
+    }
+
+    /// Local workspace sync's pass tick, until the app quits.
+    fn start_local_sync_tick(&self) {
+        spawn_local_sync_tick(&self.local_sync, self.shutdown.clone());
     }
 
     /// Follow the hub's `GET /events` and re-emit every frame as the

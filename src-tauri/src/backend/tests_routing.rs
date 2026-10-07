@@ -5065,6 +5065,10 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("commands/hosts.rs", include_str!("../commands/hosts.rs")),
     ("commands/hub.rs", include_str!("../commands/hub.rs")),
+    (
+        "commands/local_workspaces.rs",
+        include_str!("../commands/local_workspaces.rs"),
+    ),
     ("commands/mcp.rs", include_str!("../commands/mcp.rs")),
     (
         "commands/move_session.rs",

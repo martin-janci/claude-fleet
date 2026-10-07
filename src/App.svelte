@@ -53,6 +53,7 @@
   import { push, pushError } from './lib/toasts';
   import DownloadsSheet from './lib/DownloadsSheet.svelte';
   import { downloads, unseen, loadDownloads, noteDownloadsChanged } from './lib/downloads';
+  import { loadLocalWorkspaces, noteLocalWorkspacesChanged } from './lib/local_workspaces';
   import type { Result } from './lib/result';
   import type { UnlistenFn } from '@tauri-apps/api/event';
   import { selectedSession, restoreLastSession, selectSessionExplicitly, onSessionOpened } from './lib/selection';
@@ -302,6 +303,8 @@
       onWorkChanged: noteWorkChanged,
       // File downloads: ids only, so the list is re-read.
       onDownloadsChanged: noteDownloadsChanged,
+      // Local workspace sync: ids only, so the list is re-read.
+      onLocalWorkspacesChanged: noteLocalWorkspacesChanged,
       // `grant:changed` (M1): a share or a revoke moves no column on any row,
       // so this is the only thing that tells a client its own grant set
       // changed. It patches `access.ts`, and everything derived from it — the
@@ -368,6 +371,9 @@
     // File downloads: the footer's count (a hub older than revision 7 is
     // refused before this, so a failure is just an empty list).
     void loadDownloads();
+    // Local workspace links live in this machine's database (empty when
+    // paired with a hub), so no gap can make them stale.
+    void loadLocalWorkspaces();
     setGapHandler(() => {
       void loadDownloads();
       void loadProjects();

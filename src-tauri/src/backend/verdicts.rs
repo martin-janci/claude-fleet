@@ -1456,6 +1456,63 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "releases whichever claim voice_claim made on this machine",
         },
     ),
+    // ── local workspace sync ────────────────────────────────────────────────
+    (
+        "list_local_workspaces",
+        Verdict::SameInBoth {
+            why: "links bind a folder on THIS machine, so they live in this machine's \
+                  database; a paired desktop has none and answers an empty list",
+        },
+    ),
+    (
+        "enable_local_workspace",
+        Verdict::LocalOnly {
+            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
+                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "pause_local_workspace",
+        Verdict::LocalOnly {
+            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
+                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "resume_local_workspace",
+        Verdict::LocalOnly {
+            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
+                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "sync_local_workspace_now",
+        Verdict::LocalOnly {
+            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
+                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "disconnect_local_workspace",
+        Verdict::LocalOnly {
+            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
+                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "set_local_workspace_excludes",
+        Verdict::LocalOnly {
+            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
+                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        },
+    ),
+    (
+        "resolve_local_workspace_conflict",
+        Verdict::LocalOnly {
+            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
+                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        },
+    ),
     (
         "cancel_command",
         Verdict::SameInBoth {

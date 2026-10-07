@@ -365,7 +365,14 @@ fn accepted_list(kinds: Option<&Vec<String>>) -> Vec<String> {
 /// token has no person and holds no grants, and an org-bound client derives
 /// nothing from somebody else's share. `download` frames name files of every
 /// host; a scoped caller re-reads its own through `list_downloads`.
-pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &["work", "settings", "update", "grant", "download"];
+pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &[
+    "work",
+    "settings",
+    "update",
+    "grant",
+    "download",
+    "local_workspace",
+];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
 /// what they asked for.
@@ -512,6 +519,15 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
         "download",
         KindFence::NoSessionContent(
             "a file download's row id and nothing else (`RowChange::DownloadChanged(i64)`),             the same ids-only shape as `settings` and `update`, and host-bound hidden             besides. NOT `PerFrame`: the frame names no session to fence it BY — the             download id would have to be resolved to one first — and it does not have to,             because what the id unlocks is already fenced at the `own` tier. A person who             is not the session's owner reads `list_downloads` after this frame and gets             nothing, `GET /downloads/<id>` answers 404, and `remove_download` is a no-op             (`service::downloads::visible`, through `ViewScope::may_own`). The residue is             that a bare integer tells another person's device that SOME download changed;             it names no host, no session, no path and no person, and it buys nothing a             poll of `list_downloads` would not already answer",
+        ),
+    ),
+    (
+        "local_workspace",
+        KindFence::NoSessionContent(
+            "a local workspace link's row id and nothing else \
+            (`RowChange::LocalWorkspaceChanged(i64)`). Links live on the desktop that made \
+            them and are never served by a hub, so a hub's stream never carries one; \
+            host-bound hidden besides",
         ),
     ),
 ];

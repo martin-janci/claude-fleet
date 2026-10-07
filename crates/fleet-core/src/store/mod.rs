@@ -19,6 +19,7 @@ mod downloads;
 mod guides;
 mod hosts_accounts;
 mod layers;
+mod local_workspaces;
 mod nl_census;
 mod org_members;
 mod orgs;
@@ -80,6 +81,11 @@ pub use decisions::{
 pub use downloads::{DownloadRow, NewDownload};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use layers::HostLayerRow;
+pub(crate) use local_workspaces::paths_overlap;
+pub use local_workspaces::{
+    BaseEntry, FileStat, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow, LocalWorkspaceStatus,
+    NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS, LOCAL_WORKSPACE_STATES,
+};
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
     NL_CENSUS_MIN_SCHEMA,
