@@ -354,6 +354,11 @@ pp_c=$(tool "$PA" "$PUB" "$CTOK" setting_proposals '{}')
 check "the device proposes instead, and sees its proposal with can_write false" 'echo "$sp_c" | grep -q "\"isError\":false" && echo "$pp_c" | grep -q "can_write.*false" && echo "$pp_c" | grep -q "work.recent_days"' "${sp_c:0:300} / ${pp_c:0:300}"
 pp_m=$(tool "$PA" "$PUB" "$TOKA" setting_proposals '{}')
 check "the review tools are the device's: the master uses fleet-hub settings" 'echo "$pp_m" | grep -q E_FORBIDDEN' "${pp_m:0:300}"
+# Once the operator vouches for it, the same device writes.
+tr_c=$("$BIN" client trust "e2e phone" --data-dir "$ROOT/a" --port "$PA" 2>&1); rc=$?
+ss_t=$(tool "$PA" "$PUB" "$CTOK" set_setting '{"key":"work.recent_days","value":11}')
+gs_t=$(tool "$PA" "$PUB" "$CTOK" get_settings '{}')
+check "a device the operator trusts writes a setting, and reads it back" '[ $rc -eq 0 ] && echo "$ss_t" | grep -q "\"isError\":false" && echo "$gs_t" | grep -qE "work\.recent_days[^0-9a-z]+11[^0-9]"' "${tr_c:0:200} / ${ss_t:0:300} / ${gs_t:0:300}"
 
 # --- GET /events -------------------------------------------------------------
 # One request, captured once: a second one inside AUTH_FAIL_INTERVAL would be
@@ -736,6 +741,61 @@ out=$("$BIN" guides approve "$GID" --data-dir "$ROOT/c" 2>&1)
 check "fleet-hub guides approve puts it on the pages" 'echo "$out" | grep -q "approved #$GID"' "$out"
 gl=$(tool "$PC" "$PUB" "$ATOK" guide '{"action":"list"}')
 check "the host's session sees the live guide, and may not decide" '[ "$(gtext "$gl" | jq -r ".guides[0].id")" = guide.e2e ] && [ "$(gtext "$gl" | jq -r .can_write)" = false ]' "${gl:0:300}"
+gv2=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"validate\",\"spec\":$GSPEC}")
+check "guide validate passes a good spec" '[ "$(gtext "$gv2" | jq -r .ok)" = true ]' "${gv2:0:300}"
+
+# The person's half, the path the desktop's Guides page takes: a paired
+# device decides and removes once the operator trusts it; a readonly one is
+# refused the tool outright (`guide` is not a readonly tool in mcp/guard.rs).
+# Each device redeems from its own X-Forwarded-For address, so the /pair
+# limiter needs no PAIR_INTERVAL between them (see `redeem`, hub A).
+pair_on_c() { # name mode address -> that device's token
+  local code_
+  code_=$(pair_code "$(tool "$PC" "$PUB" "$TOKC" pair_client "{\"name\":\"$1\",\"mode\":\"$2\"}")")
+  [ ${#code_} -eq 8 ] || return 1
+  pair_token "$(curl -s -m 10 -X POST "http://127.0.0.1:$PC/pair" -H "Host: $PUB" -H "X-Forwarded-For: $3" \
+    -H 'Content-Type: application/json' -d "{\"code\":\"$code_\"}")"
+}
+gcli() { "$BIN" guides "$@" --data-dir "$ROOT/c" 2>&1; }
+live_ids() { "$BIN" guides list --json --data-dir "$ROOT/c" | jq -r '[.guides[].id] | join(",")'; }
+GDESK=$(pair_on_c e2e-guide-desk full 10.77.0.1)
+GKIOSK=$(pair_on_c e2e-guide-kiosk readonly 10.77.0.2)
+check "a full and a readonly device pair on hub C" '[ ${#GDESK} -eq 64 ] && [ ${#GKIOSK} -eq 64 ]' "desk=${GDESK:0:8} kiosk=${GKIOSK:0:8}"
+GDESK=${GDESK:-x}; GKIOSK=${GKIOSK:-x}
+gp2=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"propose\",\"spec\":${GSPEC/guide.e2e/guide.e2e2},\"why\":\"e2e\"}")
+GID2=$(gtext "$gp2" | jq -r .id)
+gd_u=$(tool "$PC" "$PUB" "$GDESK" guide "{\"action\":\"decide\",\"id\":${GID2:-0},\"approve\":true}")
+gl_u=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"list"}')
+check "an untrusted device may not decide, is told to be trusted, and lists with can_write false" 'echo "$gd_u" | grep -q E_FORBIDDEN && echo "$gd_u" | grep -q "client trust e2e-guide-desk" && [ "$(gtext "$gl_u" | jq -r .can_write)" = false ]' "${gd_u:0:300} / ${gl_u:0:300}"
+out=$("$BIN" client trust e2e-guide-desk --data-dir "$ROOT/c" --port "$PC" 2>&1); rc=$?
+check "fleet-hub client trust vouches for the device" '[ $rc -eq 0 ] && echo "$out" | grep -q "trusted e2e-guide-desk"' "$out"
+gl_t=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"list"}')
+check "the trusted device lists with can_write true and sees the proposal" '[ "$(gtext "$gl_t" | jq -r .can_write)" = true ] && [ "$(gtext "$gl_t" | jq "[.proposals[] | select(.id == ${GID2:-0})] | length")" = 1 ]' "${gl_t:0:300}"
+gi_s=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"validate"}')
+gi_i=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"decide","approve":true}')
+gi_a=$(tool "$PC" "$PUB" "$GDESK" guide "{\"action\":\"decide\",\"id\":${GID2:-0}}")
+gi_p=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"remove"}')
+check "a missing spec, id, approve or page_id is E_INVALID, naming the field" 'echo "$gi_s" | grep -q "E_INVALID.*spec is required" && echo "$gi_i" | grep -q "E_INVALID.*id is required" && echo "$gi_a" | grep -q "E_INVALID.*approve is required" && echo "$gi_p" | grep -q "E_INVALID.*page_id is required"' "${gi_s:0:200} / ${gi_i:0:200} / ${gi_a:0:200} / ${gi_p:0:200}"
+check "and none of them decided anything" '[ "$(live_ids)" = guide.e2e ]' "live: $(live_ids)"
+gd_t=$(tool "$PC" "$PUB" "$GDESK" guide "{\"action\":\"decide\",\"id\":${GID2:-0},\"approve\":true}")
+check "the trusted device approves over the wire: the guide goes live" '[ "$(gtext "$gd_t" | jq "[.guides[] | select(.id == \"guide.e2e2\")] | length")" = 1 ] && live_ids | grep -q "guide.e2e2"' "${gd_t:0:300} / live: $(live_ids)"
+gk_l=$(tool "$PC" "$PUB" "$GKIOSK" guide '{"action":"list"}')
+gk_d=$(tool "$PC" "$PUB" "$GKIOSK" guide "{\"action\":\"decide\",\"id\":${GID2:-0},\"approve\":false}")
+gk_r=$(tool "$PC" "$PUB" "$GKIOSK" guide '{"action":"remove","page_id":"guide.e2e2"}')
+check "a readonly device is refused the guide tool, list included" '[ "$(printf "%s\n" "$gk_l" "$gk_d" "$gk_r" | grep -c "E_FORBIDDEN.*readonly token")" = 3 ]' "${gk_l:0:200} / ${gk_d:0:200} / ${gk_r:0:200}"
+check "and the guide it tried to remove is still live" 'live_ids | grep -q "guide.e2e2"' "live: $(live_ids)"
+gr_t=$(tool "$PC" "$PUB" "$GDESK" guide '{"action":"remove","page_id":"guide.e2e2"}')
+check "the trusted device removes it over the wire" '[ "$(gtext "$gr_t" | jq "[.guides[] | select(.id == \"guide.e2e2\")] | length")" = 0 ] && [ "$(live_ids)" = guide.e2e ]' "${gr_t:0:300} / live: $(live_ids)"
+
+# The operator's other verbs: show and reject a proposal, remove a live guide.
+gp3=$(tool "$PC" "$PUB" "$ATOK" guide "{\"action\":\"propose\",\"spec\":${GSPEC/guide.e2e/guide.e2e3},\"why\":\"e2e\"}")
+GID3=$(gtext "$gp3" | jq -r .id)
+out=$(gcli show "${GID3:-0}")
+check "fleet-hub guides show prints the proposal's steps and the settings it touches" 'echo "$out" | grep -q "(guide.e2e3)" && echo "$out" | grep -q "^1. Why" && echo "$out" | grep -q "change: gc.enabled"' "$out"
+out=$(gcli reject "${GID3:-0}")
+check "fleet-hub guides reject drops it: not live, no longer waiting" 'echo "$out" | grep -q "rejected #$GID3" && ! live_ids | grep -q guide.e2e3 && "$BIN" guides list --json --data-dir "$ROOT/c" | jq -e ".proposals == []" >/dev/null' "$out"
+out=$(gcli remove guide.e2e)
+check "fleet-hub guides remove takes the live guide off the pages" 'echo "$out" | grep -q "removed guide.e2e" && [ -z "$(live_ids)" ]' "$out / live: $(live_ids)"
 
 start_agent agent1 "$ATOK"
 until_ok 50 connected
@@ -757,7 +817,12 @@ check "probe_host over the agent: reachable, tmux version read" 'echo "$pr" | gr
 # the agent: the reconcile that finds it, send-keys, capture-pane, kill-session.
 aenv tmux new-session -d -s agt1 -c "$AHOME" "echo agent-e2e-marker; exec bash --noprofile --norc"
 aenv tmux new-session -d -s agt2 -c "$AHOME" "exec bash --noprofile --norc"
-ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
+# `force` does not duplicate a reconcile pass already in flight: it answers
+# that pass's rows, which predate these sessions when the background tick
+# started first (reconcile.rs::refresh_sessions). So poll until a pass has
+# seen them; one call flaked whenever the tick lined up with it.
+list_agent() { ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}"); }
+until_ok 50 'list_agent; echo "$ls_a" | grep -q agt1 && echo "$ls_a" | grep -q agt2'
 check "list_sessions finds the host's tmux sessions over the agent" 'echo "$ls_a" | grep -q agt1 && echo "$ls_a" | grep -q agt2' "${ls_a:0:400}"
 sid_of() { echo "$ls_a" | grep -oE "\\\\\"id\\\\\":[0-9]+,[^}]*\\\\\"tmux_name\\\\\":\\\\\"$1\\\\\"" | grep -oE '^\\"id\\":[0-9]+' | grep -oE '[0-9]+'; }
 S1=$(sid_of agt1); S2=$(sid_of agt2)
@@ -813,7 +878,7 @@ bindcode=$(curl -s -o /dev/null -w '%{http_code}' -m 10 -X POST "http://127.0.0.
   -d "{\"hook_event_name\":\"SessionStart\",\"source\":\"startup\",\"session_id\":\"$CONV\"}")
 check "a real SessionStart hook over the agent binds the pane's session id" '[ "$bindcode" = 204 ]' "http $bindcode pane=$PANE2"
 aenv tmux new-session -d -s agt3 -c "$AHOME" "exec bash --noprofile --norc"
-ls_a=$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"force\":true}")
+until_ok 50 'list_agent; echo "$ls_a" | grep -q agt3'
 S3=$(sid_of agt3)
 check "a sender session id was parsed for the delivery check" '[ -n "$S3" ]' "${ls_a:0:400}"
 
