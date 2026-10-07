@@ -1044,8 +1044,13 @@ pl=$("$BIN" peer list --data-dir "$ROOT/d")
 check "the re-paired link is one connected row" '[ "$(echo "$pl" | grep -c dialer)" = 1 ] && echo "$pl" | grep dialer | grep -q connected' "$(redact "$pl")"
 
 # A peer token reaches peer_exchange only.
+# Redeemed from its own X-Forwarded-For address (see `redeem`, hub A): the
+# re-pair's `peer add` above redeemed from loopback seconds ago, and a second
+# loopback attempt inside the /pair limiter's interval is refused, leaving
+# PTOK empty and both checks below failing on timing alone.
 CODE2=$("$BIN" pair --data-dir "$ROOT/e" --name probe --mode peer 2>&1 | grep -oE 'pair#[0-9A-Za-z]{8}' | head -1 | sed 's/^pair#//')
-PTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PE/pair" -H "Host: $PUB" -H 'Content-Type: application/json' -d "{\"code\":\"$CODE2\"}" | grep -oE '"token": ?"[0-9a-f]+' | grep -oE '[0-9a-f]{64}')
+PTOK=$(curl -s -m 10 -X POST "http://127.0.0.1:$PE/pair" -H "Host: $PUB" -H "X-Forwarded-For: 10.66.0.1" -H 'Content-Type: application/json' -d "{\"code\":\"$CODE2\"}" | grep -oE '"token": ?"[0-9a-f]+' | grep -oE '[0-9a-f]{64}')
+check "the probe peer pairs on hub E" '[ ${#PTOK} -eq 64 ]' "PTOK='${PTOK:0:16}'"
 ls_p=$(tool "$PE" "$PUB" "$PTOK" list_sessions '{}')
 check "a peer token is refused list_sessions" 'echo "$ls_p" | grep -q E_FORBIDDEN' "${ls_p:0:300}"
 check "and /events" '[ "$(code -H "Host: $PUB" -H "Authorization: Bearer $PTOK" "http://127.0.0.1:$PE/events")" = 403 ]' "not 403"
