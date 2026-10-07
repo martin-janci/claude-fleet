@@ -782,7 +782,8 @@ impl FleetTools {
         tidy; reopened. Work view: tree {filters, cursor} (archived: false hides \
         archived tasks); task {task_id}; \
         session_tasks; review; rules; rule_preview {rule}; views; org_impact. \
-        buckets {kind?}: sprints, releases; bucket {bucket_id}.")]
+        buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; \
+        mission {mission_id, before_event?}.")]
     pub(super) async fn work(
         &self,
         Extension(caller): Extension<Caller>,
@@ -1006,6 +1007,21 @@ impl FleetTools {
                     .ok_or_else(|| mcp_err("E_INVALID", "bucket needs bucket_id", None))?;
                 ok_json_compact(&w::buckets::bucket(&self.store, &scope, id).map_err(to_mcp_err)?)
             }
+            // Missions (orchestration O1): a mission is a PERSON's, so the
+            // whole `view_scope` — its owner, its org's members, the org
+            // boundary first (`missions::sees_mission`).
+            WorkAction::Missions => ok_json_compact(
+                &w::missions::missions(&self.store, &view_scope).map_err(to_mcp_err)?,
+            ),
+            WorkAction::Mission => {
+                let id = args
+                    .mission_id
+                    .ok_or_else(|| mcp_err("E_INVALID", "mission needs mission_id", None))?;
+                ok_json_compact(
+                    &w::missions::mission(&self.store, &view_scope, id, args.before_event)
+                        .map_err(to_mcp_err)?,
+                )
+            }
             WorkAction::OrgImpact => {
                 let task_id = args
                     .task_id
@@ -1039,7 +1055,10 @@ impl FleetTools {
         work with no ticket. create {title, parent?, notes?}: a task or \
         subtask. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
-        {bucket_id, item_id}: sprint/release. Work view: \
+        {bucket_id, item_id}: sprint/release. mission_save {mission, \
+        mission_id?, item_id?: root}; mission_state {mission_id, status}; \
+        mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
+        mission_delete. Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
         &self,
@@ -1442,6 +1461,42 @@ impl FleetTools {
                 &crate::service::work::buckets::bucket_remove(&args, &self.store, &scope)
                     .map_err(to_mcp_err)?,
             );
+        }
+        // Missions (orchestration O1): a person's plan, which a session does
+        // not run — so never a per-host or peer token (`mission_caller`).
+        // The org and person fences are inside (`missions::changeable`), on
+        // the whole `view_scope`; adding an item also passes the item's own
+        // sessions' person gate, as a sprint does.
+        if args.action.starts_with("mission_") {
+            mission_caller(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            use crate::service::work::missions as ms;
+            return match args.action.as_str() {
+                "mission_save" => {
+                    ok_json(&ms::save(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
+                }
+                "mission_state" => {
+                    ok_json(&ms::set_state(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
+                }
+                "mission_repo" => {
+                    ok_json(&ms::repo(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
+                }
+                "mission_item" => {
+                    let item_id = args
+                        .item_id
+                        .ok_or_else(|| mcp_err("E_INVALID", "mission_item needs item_id", None))?;
+                    self.require_drive_on_item_sessions(&caller, item_id)?;
+                    ok_json(&ms::item(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
+                }
+                "mission_delete" => {
+                    ok_json(&ms::delete(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
+                }
+                other => Err(mcp_err(
+                    "E_INVALID",
+                    format!("unknown work_link action {other:?}"),
+                    None,
+                )),
+            };
         }
         if args.action == "tidy_apply" {
             let mut items = args.items.clone().unwrap_or_default();
@@ -1993,6 +2048,20 @@ fn ipc_of_mcp(e: McpError) -> IpcError {
         message,
         details: None,
     }
+}
+
+/// Refuse a `work_link { mission_* }` from a per-host or peer token: a
+/// mission is a person's plan, and a session or another hub does not run
+/// one (orchestration O1).
+fn mission_caller(caller: &Caller) -> Result<(), McpError> {
+    if caller.host_alias.is_some() || caller.mode == crate::mcp::auth::TokenMode::Peer {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            "a session does not run missions; a person does",
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// The item a `work_link { bucket_add | bucket_remove }` plans, refusing a
