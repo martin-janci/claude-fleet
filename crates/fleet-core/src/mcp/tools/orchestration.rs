@@ -1081,19 +1081,6 @@ impl FleetTools {
             ),
             _ => None,
         };
-        if args.action == "run"
-            && (caller.host_alias.is_some() || caller.mode == crate::mcp::auth::TokenMode::Peer)
-        {
-            // Orchestration O0: a run is a person's or the operator's. A
-            // worker's own Claude proposes work; it never starts another
-            // worker on it (task → session spec §6, isolation). Refused
-            // before any lookup, so it answers the same for every item.
-            return Err(mcp_err(
-                "E_FORBIDDEN",
-                "run is for a person or the operator; a per-host agent may propose instead",
-                None,
-            ));
-        }
         if caller.is_operator() && matches!(args.action.as_str(), "resume" | "start" | "run") {
             // Only ever gates the operator (D12): a session is about to exist.
             // (`work_link` is `confirm: true` for M7's tidy kills; a person's
@@ -1635,6 +1622,17 @@ impl FleetTools {
             return ok_json(&row);
         }
         if args.action == "run" {
+            if caller.host_alias.is_some() || caller.mode == crate::mcp::auth::TokenMode::Peer {
+                // Orchestration O0: a run is a person's or the operator's. A
+                // worker's own Claude proposes work; it never starts another
+                // worker on it (task → session spec §6, isolation). Refused
+                // before any lookup, so it answers the same for every item.
+                return Err(mcp_err(
+                    "E_FORBIDDEN",
+                    "run is for a person or the operator; a per-host agent may propose instead",
+                    None,
+                ));
+            }
             // Orchestration O0: one attempt at an existing item, through the
             // start path (its project, host and worktree, the brief), tracked
             // as a task whose first prompt carries the done marker. The

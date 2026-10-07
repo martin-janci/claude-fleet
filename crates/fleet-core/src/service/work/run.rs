@@ -22,9 +22,10 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::ipc_error::{codes, lock, IpcError};
-use crate::service::orgs::{self, OrgScope};
+use crate::service::orgs;
 use crate::service::tasks;
 use crate::service::trackers::tickets::{self, StartArgs};
+use crate::service::view_scope::ViewScope;
 use crate::store::{Store, TaskRow};
 
 /// The roles a run may take. `implement` is the default.
@@ -47,16 +48,18 @@ pub struct RunOutcome {
 /// one takes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Precheck {
-    Existing(TaskRow),
+    Existing(Box<TaskRow>),
     Fresh { attempt: i64 },
 }
 
-/// PURE over the store: may `item_id` be run in `role` by `scope`, and is an
-/// attempt already open? An item the scope may not see answers exactly as
-/// one that does not exist.
+/// PURE over the store: may `item_id` be run in `role` by `view`, and is an
+/// attempt already open? An item the org half may not see answers exactly as
+/// one that does not exist; an open attempt is answered only to a caller who
+/// may see that task (its prompt and its worker), and to anybody else is a
+/// bare `E_EXISTS` that names nobody.
 pub fn precheck(
     s: &Store,
-    scope: &OrgScope,
+    view: &ViewScope,
     item_id: i64,
     role: &str,
 ) -> Result<Precheck, IpcError> {
@@ -67,11 +70,17 @@ pub fn precheck(
         ));
     }
     let item = match s.get_work_item(item_id)? {
-        Some(i) if tickets::item_visible(scope, s, &i)? => i,
+        Some(i) if tickets::item_visible(&view.org, s, &i)? => i,
         _ => return Err(orgs::not_found("work item", item_id)),
     };
     if let Some(open) = s.open_task_for_item(item_id, role)? {
-        return Ok(Precheck::Existing(open));
+        if tasks::task_visible_in_scope(s, &open, view)? {
+            return Ok(Precheck::Existing(Box::new(open)));
+        }
+        return Err(IpcError::new(
+            codes::E_EXISTS,
+            format!("work item {item_id} already has a {role} run in progress"),
+        ));
     }
     match item.proposal_state.as_deref() {
         Some("proposed") => {
@@ -143,18 +152,18 @@ pub async fn run_item(
     reg: &Arc<crate::cancel::CancellationRegistry>,
     start: &StartArgs,
     role: &str,
-    view: &crate::service::view_scope::ViewScope,
+    view: &ViewScope,
     net: &crate::service::trackers::TrackerNet,
 ) -> Result<RunOutcome, IpcError> {
     let item_id = start
         .item_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "run needs item_id"))?;
-    let checked = precheck(&*lock(store.as_ref())?, &view.org, item_id, role)?;
+    let checked = precheck(&*lock(store.as_ref())?, view, item_id, role)?;
     let attempt = match checked {
         Precheck::Existing(task) => {
             return Ok(RunOutcome {
                 session_id: task.worker_session_id,
-                task,
+                task: *task,
                 existing: true,
             })
         }
@@ -215,7 +224,7 @@ mod tests {
     fn a_first_run_is_attempt_one_and_a_second_is_the_open_one() {
         let (s, worker, item) = store_with_item();
         assert_eq!(
-            precheck(&s, &OrgScope::All, item, "implement").unwrap(),
+            precheck(&s, &ViewScope::internal(), item, "implement").unwrap(),
             Precheck::Fresh { attempt: 1 }
         );
         let t = record_run(&s, worker, "do it", item, 1, "implement").unwrap();
@@ -226,18 +235,18 @@ mod tests {
         );
         // Idempotent while open.
         assert_eq!(
-            precheck(&s, &OrgScope::All, item, "implement").unwrap(),
-            Precheck::Existing(t.clone())
+            precheck(&s, &ViewScope::internal(), item, "implement").unwrap(),
+            Precheck::Existing(Box::new(t.clone()))
         );
         // Another role is its own lane.
         assert_eq!(
-            precheck(&s, &OrgScope::All, item, "review").unwrap(),
+            precheck(&s, &ViewScope::internal(), item, "review").unwrap(),
             Precheck::Fresh { attempt: 1 }
         );
         // Once it ended, the next attempt is number two.
         tasks::fail_task(&s, t.id, "boom").unwrap();
         assert_eq!(
-            precheck(&s, &OrgScope::All, item, "implement").unwrap(),
+            precheck(&s, &ViewScope::internal(), item, "implement").unwrap(),
             Precheck::Fresh { attempt: 2 }
         );
         assert_eq!(s.tasks_for_item(item).unwrap().len(), 1);
@@ -264,11 +273,11 @@ mod tests {
         let (s, _, item) = store_with_item();
         let code = |r: Result<Precheck, IpcError>| r.unwrap_err().code;
         assert_eq!(
-            code(precheck(&s, &OrgScope::All, item, "deploy")),
+            code(precheck(&s, &ViewScope::internal(), item, "deploy")),
             codes::E_INVALID
         );
         assert_eq!(
-            code(precheck(&s, &OrgScope::All, 999_999, "implement")),
+            code(precheck(&s, &ViewScope::internal(), 999_999, "implement")),
             codes::E_NOTFOUND
         );
         s.conn_ref()
@@ -278,7 +287,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            code(precheck(&s, &OrgScope::All, item, "implement")),
+            code(precheck(&s, &ViewScope::internal(), item, "implement")),
             codes::E_INVALID_STATE
         );
         s.conn_ref()
@@ -289,7 +298,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            code(precheck(&s, &OrgScope::All, item, "implement")),
+            code(precheck(&s, &ViewScope::internal(), item, "implement")),
             codes::E_INVALID_STATE
         );
     }
