@@ -1049,7 +1049,7 @@ mod tests {
         // one-attempt-per-6s budget would refuse the second one. The budget
         // gets its own app at the end of this test.
         pair_state.attempt_interval = std::time::Duration::ZERO;
-        pair_state.global_interval = std::time::Duration::ZERO;
+        pair_state.global_limit = usize::MAX;
         let app = build_app(
             metrics::MetricsState {
                 metrics: Arc::new(metrics::Metrics::new()),
@@ -1572,12 +1572,19 @@ mod tests {
             None,
             hook_state3,
             auth_state3,
-            pairing::PairState::new(
-                store,
-                Arc::clone(&limited_pairings),
-                Arc::new(RateLimiter::new()),
-                "https://fleet.example.com".to_string(),
-            ),
+            {
+                // The production per-address budget; a hub-wide one of two
+                // attempts a second, so the test can spend it.
+                let mut s = pairing::PairState::new(
+                    store,
+                    Arc::clone(&limited_pairings),
+                    Arc::new(RateLimiter::new()),
+                    "https://fleet.example.com".to_string(),
+                );
+                s.global_limit = 2;
+                s.global_window = std::time::Duration::from_secs(1);
+                s
+            },
             EventsState::disabled(),
             crate::agent::ws::AgentWsState::disabled(),
             report_state3,
@@ -1601,9 +1608,10 @@ mod tests {
             first.contains("404"),
             "the first guess is answered, not throttled:\n{first}"
         );
-        // A guess from another address — a fresh forwarded hop behind the
-        // believed loopback front end — inside the same second is refused
-        // by the hub-wide budget: minting addresses buys no extra guesses.
+        // Guesses from other addresses — fresh forwarded hops behind the
+        // believed loopback front end — each get their own per-address
+        // budget, but share the hub-wide one: minting addresses buys no
+        // extra guesses once it is spent.
         let forwarded = |xff: &str| {
             let body = r#"{"code":"YYYYYYYY"}"#;
             format!(
@@ -1613,19 +1621,23 @@ mod tests {
                 body.len()
             )
         };
-        let minted_addr = round_trip(addr3, &forwarded("203.0.113.50")).await;
+        let second = round_trip(addr3, &forwarded("203.0.113.50")).await;
+        assert!(
+            second.contains("404"),
+            "a burst inside the hub-wide budget is answered:\n{second}"
+        );
+        let minted_addr = round_trip(addr3, &forwarded("203.0.113.51")).await;
         assert!(
             minted_addr.contains("429"),
-            "a second address inside the hub-wide second must be throttled:\n{minted_addr}"
+            "a new address past the hub-wide budget must be throttled:\n{minted_addr}"
         );
-        tokio::time::sleep(
-            pairing::GLOBAL_ATTEMPT_INTERVAL + std::time::Duration::from_millis(100),
-        )
-        .await;
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        // The refused attempt spent neither budget: once the window rolls,
+        // the same address is answered at once.
         let later = round_trip(addr3, &forwarded("203.0.113.51")).await;
         assert!(
             later.contains("404"),
-            "past the hub-wide second a new address is answered:\n{later}"
+            "past the hub-wide window a new address is answered:\n{later}"
         );
         // Even a GOOD code is refused inside the window: the budget is spent
         // before the code is looked at.

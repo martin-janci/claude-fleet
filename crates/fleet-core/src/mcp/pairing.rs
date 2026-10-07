@@ -43,17 +43,61 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
 /// every 6 s, i.e. the ten-a-minute budget the design asks for.
 pub const ATTEMPT_INTERVAL: Duration = Duration::from_secs(6);
 
-/// Minimum spacing between two `POST /pair` attempts across the whole hub,
-/// whatever address they come from. The per-address budget alone is only as
-/// good as the address: a peer behind a believed front end can name a fresh
-/// `X-Forwarded-For` address per request, and an IPv6 host owns a /64 of
-/// them. Pairing is a rare, human-paced event, so one attempt a second
-/// hub-wide costs nobody anything and caps guessing at 60 a minute however
-/// the addresses are minted.
-pub const GLOBAL_ATTEMPT_INTERVAL: Duration = Duration::from_secs(1);
+/// `POST /pair` attempts allowed across the whole hub, whatever address they
+/// come from, in any rolling [`GLOBAL_WINDOW`]. The per-address budget alone
+/// is only as good as the address: a peer behind a believed front end can
+/// name a fresh `X-Forwarded-For` address per request, and an IPv6 host owns
+/// a /64 of them. A window rather than a fixed spacing because pairing comes
+/// in bursts (an operator pairing a phone, a tablet and a laptop in a row)
+/// that a one-a-second spacing would refuse; thirty a minute caps guessing
+/// however the addresses are minted and costs no real pairing anything.
+pub const GLOBAL_ATTEMPTS: usize = 30;
 
-/// The bucket key every `POST /pair` attempt is also counted against.
-const GLOBAL_BUCKET: &str = "pair:*";
+/// The window [`GLOBAL_ATTEMPTS`] is counted over.
+pub const GLOBAL_WINDOW: Duration = Duration::from_secs(60);
+
+/// The hub-wide attempt budget: the times of the attempts it let through in
+/// the current window. Holds at most the limit's worth of instants.
+#[derive(Default)]
+pub struct GlobalBudget {
+    recent: Mutex<std::collections::VecDeque<Instant>>,
+}
+
+impl GlobalBudget {
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::VecDeque<Instant>> {
+        self.recent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `Err(time until a slot frees)` when `limit` attempts already landed in
+    /// the `window` ending at `now`. Records nothing: [`Self::record`] does,
+    /// once the per-address budget has let the attempt through too, so one
+    /// address hammering its own bucket cannot spend the hub's.
+    fn peek(&self, now: Instant, limit: usize, window: Duration) -> Result<(), Duration> {
+        let mut recent = self.lock();
+        while recent
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= window)
+        {
+            recent.pop_front();
+        }
+        match recent.front() {
+            Some(oldest) if recent.len() >= limit => {
+                Err(window.saturating_sub(now.saturating_duration_since(*oldest)))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn record(&self, now: Instant, limit: usize) {
+        let mut recent = self.lock();
+        recent.push_back(now);
+        while recent.len() > limit {
+            recent.pop_front();
+        }
+    }
+}
 
 /// Largest `POST /pair` body accepted. The real one is a few dozen bytes.
 const MAX_BODY: usize = 4 * 1024;
@@ -382,10 +426,13 @@ pub struct PairState {
     /// so only this crate's tests can weaken the budget — an embedder must
     /// not be able to switch it off.
     pub(crate) attempt_interval: Duration,
-    /// Minimum spacing between two attempts hub-wide.
-    /// [`GLOBAL_ATTEMPT_INTERVAL`] in production; `pub(crate)` for the same
-    /// reason as `attempt_interval`.
-    pub(crate) global_interval: Duration,
+    /// The hub-wide attempt budget, shared by every clone.
+    pub global: Arc<GlobalBudget>,
+    /// Attempts allowed hub-wide per `global_window`: [`GLOBAL_ATTEMPTS`]
+    /// and [`GLOBAL_WINDOW`] in production; `pub(crate)` for the same reason
+    /// as `attempt_interval`.
+    pub(crate) global_limit: usize,
+    pub(crate) global_window: Duration,
 }
 
 impl PairState {
@@ -401,7 +448,9 @@ impl PairState {
             rate,
             base_url: Arc::new(base_url),
             attempt_interval: ATTEMPT_INTERVAL,
-            global_interval: GLOBAL_ATTEMPT_INTERVAL,
+            global: Arc::new(GlobalBudget::default()),
+            global_limit: GLOBAL_ATTEMPTS,
+            global_window: GLOBAL_WINDOW,
         }
     }
 }
@@ -486,17 +535,20 @@ pub async fn handle_pair(
     );
     // Spend the attempt budget before parsing anything: a flood of guesses
     // must cost the hub a hash-map probe, not a body read. The hub-wide
-    // budget first, so a flood of minted addresses is cut off before each
-    // one gets a bucket of its own.
+    // budget is asked first, so a flood of minted addresses is cut off
+    // before each one gets a bucket of its own, and charged last, so an
+    // attempt its own address's budget refuses costs the hub nothing.
+    let now = Instant::now();
     let budget = state
-        .rate
-        .check(GLOBAL_BUCKET, state.global_interval)
+        .global
+        .peek(now, state.global_limit, state.global_window)
         .and_then(|()| {
             state.rate.check(
                 &format!("pair:{}", address_bucket(&peer)),
                 state.attempt_interval,
             )
-        });
+        })
+        .map(|()| state.global.record(now, state.global_limit));
     if let Err(left) = budget {
         let retry = left.as_secs().max(1).to_string();
         return (

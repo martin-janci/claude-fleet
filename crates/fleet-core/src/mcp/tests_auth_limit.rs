@@ -81,14 +81,35 @@ async fn a_repeated_bad_bearer_is_still_401() {
     );
 }
 
-/// The raw response head to `head` + `body` written as-is to `/mcp`.
+/// The status line of the response to `head` + `body` written as-is to `/mcp`.
+///
+/// The body is written while the response is read, not before: the hub
+/// answers 413 and closes with the rest of an oversized body unread, and on
+/// Windows that close is a reset which discards the answer from a client
+/// still blocked in its write. Reading from the start catches the status
+/// line before the reset lands.
 async fn raw_status(addr: std::net::SocketAddr, head: &str, body: &[u8]) -> String {
-    let mut s = tokio::net::TcpStream::connect(addr).await.unwrap();
-    s.write_all(head.as_bytes()).await.unwrap();
+    let s = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (mut rd, mut wr) = s.into_split();
+    let mut out = head.as_bytes().to_vec();
+    out.extend_from_slice(body);
     // The hub may answer and close before the whole body is written.
-    let _ = s.write_all(body).await;
+    let writer = tokio::spawn(async move {
+        let _ = wr.write_all(&out).await;
+        wr
+    });
     let mut buf = Vec::new();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), s.read_to_end(&mut buf)).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut chunk = [0u8; 1024];
+        while !buf.windows(2).any(|w| w == b"\r\n") {
+            match rd.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+    })
+    .await;
+    writer.abort();
     String::from_utf8_lossy(&buf)
         .lines()
         .next()
