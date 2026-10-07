@@ -565,10 +565,14 @@ id={id}
 br={br}
 {id_guard}
 fail() {{ printf '{FAILED} %s\n' "$1" >&2; exit 5; }}
-git -C "$r" bundle verify "$b" >/dev/null 2>&1 || fail verify
-git -C "$r" fetch -q "$b" "+refs/fleet/transfer/$id/*:refs/fleet/transfer/$id/*" >/dev/null 2>&1 || fail fetch
+# git's own reason rides on the sentinel line, flattened and cut short: a bare
+# step name cannot tell a branch name that collides with an existing ref
+# (`a` vs `a/b`) from a stale lock file or a corrupt bundle.
+run() {{ s=$1; shift; e=$("$@" 2>&1 >/dev/null) || fail "$s: $(printf '%s' "$e" | tr '\n' ' ' | cut -c1-400)"; }}
+run verify git -C "$r" bundle verify "$b"
+run fetch git -C "$r" fetch -q "$b" "+refs/fleet/transfer/$id/*:refs/fleet/transfer/$id/*"
 if ! git -C "$r" show-ref --verify --quiet "refs/heads/$br"; then
-  git -C "$r" branch -- "$br" "refs/fleet/transfer/$id/head" >/dev/null 2>&1 || fail branch
+  run branch git -C "$r" branch -- "$br" "refs/fleet/transfer/$id/head"
   if git -C "$r" config --get remote.origin.url >/dev/null 2>&1 \
      && git -C "$r" show-ref --verify --quiet "refs/remotes/origin/$br"; then
     git -C "$r" branch --set-upstream-to="origin/$br" -- "$br" >/dev/null 2>&1
@@ -3075,6 +3079,58 @@ pub(crate) mod tests {
             let archive_mode = std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777;
             assert_eq!(archive_mode, 0o600, "umask 077 keeps the archive private");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_branch_carries_gits_reason_on_the_sentinel_line() {
+        if !require(&["git", "bash"]) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let (home_a, home_b) = (tmp.path().join("home-a"), tmp.path().join("home-b"));
+        std::fs::create_dir_all(&home_a).unwrap();
+        std::fs::create_dir_all(&home_b).unwrap();
+        let (src, _base) = dirty_source(tmp.path());
+
+        // The target already has a branch `feat`, so `feat/x` cannot exist
+        // beside it: git refuses, and the move must say why.
+        let root = tmp.path().join("tgt");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(
+            &root,
+            &[
+                "fetch",
+                "-q",
+                src.to_str().unwrap(),
+                "pushed:refs/heads/feat",
+            ],
+        );
+
+        let out = bash(
+            &snapshot_script(src.to_str().unwrap(), ID, &[], u64::MAX),
+            &home_a,
+        );
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let info = parse_snapshot(&String::from_utf8_lossy(&out.stdout)).unwrap();
+
+        let out = bash(
+            &fetch_script(root.to_str().unwrap(), &info.path, ID, "feat/x"),
+            &home_b,
+        );
+        assert!(!out.status.success());
+        let err = String::from_utf8_lossy(&out.stderr);
+        let line = err
+            .lines()
+            .find(|l| l.starts_with(FAILED))
+            .unwrap_or_else(|| panic!("no sentinel in {err:?}"));
+        assert!(line.starts_with(&format!("{FAILED} branch: ")), "{line}");
+        assert!(line.contains("refs/heads/feat"), "git's reason: {line}");
     }
 
     #[cfg(unix)]
