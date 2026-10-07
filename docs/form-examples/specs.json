@@ -70,6 +70,41 @@
       "spec": { "spec": "fleet.form/1", "title": "T", "steps": [
         { "title": "A", "fields": [ { "name": "n", "type": "number", "label": "N", "min": 1, "max": 5, "value": 9 } ] } ] },
       "problems": ["step 1 › field 1 (n): the default must be at most 5"]
+    },
+    {
+      "name": "thirteen steps",
+      "spec": {"spec": "fleet.form/1", "title": "T", "steps": [{"title": "S1", "fields": [{"name": "f1", "type": "bool", "label": "F1"}]}, {"title": "S2", "fields": [{"name": "f2", "type": "bool", "label": "F2"}]}, {"title": "S3", "fields": [{"name": "f3", "type": "bool", "label": "F3"}]}, {"title": "S4", "fields": [{"name": "f4", "type": "bool", "label": "F4"}]}, {"title": "S5", "fields": [{"name": "f5", "type": "bool", "label": "F5"}]}, {"title": "S6", "fields": [{"name": "f6", "type": "bool", "label": "F6"}]}, {"title": "S7", "fields": [{"name": "f7", "type": "bool", "label": "F7"}]}, {"title": "S8", "fields": [{"name": "f8", "type": "bool", "label": "F8"}]}, {"title": "S9", "fields": [{"name": "f9", "type": "bool", "label": "F9"}]}, {"title": "S10", "fields": [{"name": "f10", "type": "bool", "label": "F10"}]}, {"title": "S11", "fields": [{"name": "f11", "type": "bool", "label": "F11"}]}, {"title": "S12", "fields": [{"name": "f12", "type": "bool", "label": "F12"}]}, {"title": "S13", "fields": [{"name": "f13", "type": "bool", "label": "F13"}]}]},
+      "problems": ["a form has 1 to 12 steps"]
+    },
+    {
+      "name": "forty-one fields",
+      "spec": {"spec": "fleet.form/1", "title": "T", "steps": [{"title": "A", "fields": [{"name": "f1", "type": "bool", "label": "F1"}, {"name": "f2", "type": "bool", "label": "F2"}, {"name": "f3", "type": "bool", "label": "F3"}, {"name": "f4", "type": "bool", "label": "F4"}, {"name": "f5", "type": "bool", "label": "F5"}, {"name": "f6", "type": "bool", "label": "F6"}, {"name": "f7", "type": "bool", "label": "F7"}, {"name": "f8", "type": "bool", "label": "F8"}, {"name": "f9", "type": "bool", "label": "F9"}, {"name": "f10", "type": "bool", "label": "F10"}, {"name": "f11", "type": "bool", "label": "F11"}, {"name": "f12", "type": "bool", "label": "F12"}, {"name": "f13", "type": "bool", "label": "F13"}, {"name": "f14", "type": "bool", "label": "F14"}, {"name": "f15", "type": "bool", "label": "F15"}, {"name": "f16", "type": "bool", "label": "F16"}, {"name": "f17", "type": "bool", "label": "F17"}, {"name": "f18", "type": "bool", "label": "F18"}, {"name": "f19", "type": "bool", "label": "F19"}, {"name": "f20", "type": "bool", "label": "F20"}, {"name": "f21", "type": "bool", "label": "F21"}, {"name": "f22", "type": "bool", "label": "F22"}, {"name": "f23", "type": "bool", "label": "F23"}, {"name": "f24", "type": "bool", "label": "F24"}, {"name": "f25", "type": "bool", "label": "F25"}, {"name": "f26", "type": "bool", "label": "F26"}, {"name": "f27", "type": "bool", "label": "F27"}, {"name": "f28", "type": "bool", "label": "F28"}, {"name": "f29", "type": "bool", "label": "F29"}, {"name": "f30", "type": "bool", "label": "F30"}, {"name": "f31", "type": "bool", "label": "F31"}, {"name": "f32", "type": "bool", "label": "F32"}, {"name": "f33", "type": "bool", "label": "F33"}, {"name": "f34", "type": "bool", "label": "F34"}, {"name": "f35", "type": "bool", "label": "F35"}, {"name": "f36", "type": "bool", "label": "F36"}, {"name": "f37", "type": "bool", "label": "F37"}, {"name": "f38", "type": "bool", "label": "F38"}, {"name": "f39", "type": "bool", "label": "F39"}, {"name": "f40", "type": "bool", "label": "F40"}, {"name": "f41", "type": "bool", "label": "F41"}]}]},
+      "problems": ["41 fields, over the 40 a form may have"]
+    },
+    {
+      "name": "fifty-one options",
+      "spec": {"spec": "fleet.form/1", "title": "T", "steps": [{"title": "A", "fields": [{"name": "s", "type": "select", "label": "S", "options": [["o1", "Option 1"], ["o2", "Option 2"], ["o3", "Option 3"], ["o4", "Option 4"], ["o5", "Option 5"], ["o6", "Option 6"], ["o7", "Option 7"], ["o8", "Option 8"], ["o9", "Option 9"], ["o10", "Option 10"], ["o11", "Option 11"], ["o12", "Option 12"], ["o13", "Option 13"], ["o14", "Option 14"], ["o15", "Option 15"], ["o16", "Option 16"], ["o17", "Option 17"], ["o18", "Option 18"], ["o19", "Option 19"], ["o20", "Option 20"], ["o21", "Option 21"], ["o22", "Option 22"], ["o23", "Option 23"], ["o24", "Option 24"], ["o25", "Option 25"], ["o26", "Option 26"], ["o27", "Option 27"], ["o28", "Option 28"], ["o29", "Option 29"], ["o30", "Option 30"], ["o31", "Option 31"], ["o32", "Option 32"], ["o33", "Option 33"], ["o34", "Option 34"], ["o35", "Option 35"], ["o36", "Option 36"], ["o37", "Option 37"], ["o38", "Option 38"], ["o39", "Option 39"], ["o40", "Option 40"], ["o41", "Option 41"], ["o42", "Option 42"], ["o43", "Option 43"], ["o44", "Option 44"], ["o45", "Option 45"], ["o46", "Option 46"], ["o47", "Option 47"], ["o48", "Option 48"], ["o49", "Option 49"], ["o50", "Option 50"], ["o51", "Option 51"]]}]}]},
+      "problems": ["step 1 › field 1 (s): a select field needs 1 to 50 options"]
+    },
+    {
+      "name": "max_len out of range",
+      "spec": {"spec": "fleet.form/1", "title": "T", "steps": [{"title": "A", "fields": [{"name": "a", "type": "text", "label": "A", "max_len": 0}, {"name": "b", "type": "text", "label": "B", "max_len": 2001}, {"name": "c", "type": "textarea", "label": "C", "max_len": 20001}, {"name": "d", "type": "number", "label": "D", "max_len": 5}]}]},
+      "problems": ["step 1 › field 1 (a): max_len is 1 to 2000", "step 1 › field 2 (b): max_len is 1 to 2000", "step 1 › field 3 (c): max_len is 1 to 20000", "step 1 › field 4 (d): `max_len` is not for a number field"]
+    },
+    {
+      "name": "min above max, and a placeholder on a number",
+      "spec": {"spec": "fleet.form/1", "title": "T", "steps": [{"title": "A", "fields": [{"name": "n", "type": "number", "label": "N", "min": 5, "max": 1, "placeholder": "3"}]}]},
+      "problems": ["step 1 › field 1 (n): `placeholder` is not for a number field", "step 1 › field 1 (n): min is above max"]
+    },
+    {
+      "name": "a duplicate option value",
+      "spec": {"spec": "fleet.form/1", "title": "T", "steps": [{"title": "A", "fields": [{"name": "s", "type": "select", "label": "S", "options": [["x", "X"], ["x", "Y"]]}]}]},
+      "problems": ["step 1 › field 1 (s): option value \"x\" appears twice"]
+    },
+    {
+      "name": "empty in, empty all, and a problem inside not",
+      "spec": {"spec": "fleet.form/1", "title": "T", "steps": [{"title": "A", "fields": [{"name": "b", "type": "bool", "label": "B"}, {"name": "c", "type": "text", "label": "C", "when": {"field": "b", "in": []}}, {"name": "d", "type": "text", "label": "D", "when": {"all": []}}, {"name": "e", "type": "text", "label": "E", "when": {"not": {"field": "zz", "truthy": true}}}]}]},
+      "problems": ["step 1 › field 2 (c) › when: `b`: `in` needs at least one value", "step 1 › field 3 (d) › when: all / any need at least one condition", "step 1 › field 4 (e) › when › not: `zz` is not an earlier field"]
     }
   ]
 }

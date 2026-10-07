@@ -61,6 +61,15 @@ fn a_secrets_value_is_kept_apart_from_the_answers() {
 }
 
 #[test]
+fn debug_names_a_secret_but_never_prints_its_value() {
+    let mut a = Answers::default();
+    a.secrets.insert("pw".into(), "hunter2".into());
+    let shown = format!("{a:?}");
+    assert!(shown.contains("pw"), "{shown}");
+    assert!(!shown.contains("hunter2"), "{shown}");
+}
+
+#[test]
 fn an_oversized_spec_is_refused_before_parsing() {
     let big = "x".repeat(MAX_SPEC_BYTES);
     let err = parse(&json!({ "spec": "fleet.form/1", "title": big, "steps": [] })).unwrap_err();

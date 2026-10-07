@@ -12,7 +12,16 @@
         { "name": "agree", "type": "bool", "label": "I agree", "required": true } ] },
       { "title": "Database", "when": { "field": "db", "truthy": true }, "fields": [
         { "name": "engine", "type": "select", "label": "Engine", "required": true, "options": [["pg", "Postgres"], ["sqlite", "SQLite"]] },
-        { "name": "db_pass", "type": "secret", "label": "Password", "when": { "field": "engine", "eq": "pg" } } ] }
+        { "name": "db_pass", "type": "secret", "label": "Password", "when": { "field": "engine", "eq": "pg" } } ] },
+      { "title": "Features", "when": { "field": "tags", "eq": "b" }, "fields": [
+        { "name": "features", "type": "multiselect", "label": "Features", "required": true, "options": [["x", "X"], ["y", "Y"]] } ] },
+      { "title": "Notes", "fields": [
+        { "name": "web_note", "type": "text", "label": "Web note", "when": { "field": "kind", "in": ["web"] } },
+        { "name": "no_db_note", "type": "text", "label": "No-database note", "when": { "field": "db", "truthy": false } },
+        { "name": "both_note", "type": "text", "label": "Both note", "when": { "all": [ { "field": "kind", "eq": "web" }, { "field": "db", "truthy": true } ] } },
+        { "name": "either_note", "type": "text", "label": "Either note", "when": { "any": [ { "field": "kind", "eq": "cli" }, { "field": "port", "eq": 8080 } ] } },
+        { "name": "not_note", "type": "text", "label": "Not-web note", "when": { "not": { "field": "kind", "eq": "web" } } },
+        { "name": "tag_note", "type": "text", "label": "Tag note", "when": { "field": "tags", "in": ["a", "c"] } } ] }
     ]
   },
   "cases": [
@@ -53,6 +62,35 @@
       "name": "the database step shown but its required select empty",
       "values": { "name": "x", "db": true, "agree": true },
       "problems": [ { "field": "engine", "problem": "is required" } ]
+    },
+    {
+      "name": "in, truthy false and a hidden note: web, no database",
+      "values": { "name": "x", "kind": "web", "db": false, "agree": true, "web_note": "w", "no_db_note": "n", "both_note": "b", "either_note": "e", "not_note": "nn" },
+      "answers": { "name": "x", "kind": "web", "db": false, "agree": true, "web_note": "w", "no_db_note": "n" },
+      "secrets": []
+    },
+    {
+      "name": "any, not and a hidden field inside a shown step: cli, sqlite drops the password",
+      "values": { "name": "x", "kind": "cli", "port": 8080, "db": true, "agree": true, "engine": "sqlite", "db_pass": "s3cret", "web_note": "w", "no_db_note": "n", "both_note": "b", "either_note": "e", "not_note": "nn" },
+      "answers": { "name": "x", "kind": "cli", "port": 8080, "db": true, "agree": true, "engine": "sqlite", "either_note": "e", "not_note": "nn" },
+      "secrets": []
+    },
+    {
+      "name": "all and a multiselect read by in: web with a database, tag a",
+      "values": { "name": "x", "kind": "web", "tags": ["a"], "db": true, "agree": true, "engine": "pg", "both_note": "b", "tag_note": "t", "either_note": "e", "not_note": "nn" },
+      "answers": { "name": "x", "kind": "web", "tags": ["a"], "db": true, "agree": true, "engine": "pg", "both_note": "b", "tag_note": "t" },
+      "secrets": []
+    },
+    {
+      "name": "a multiselect read by eq shows its step, and is normalised; in does not match tag b",
+      "values": { "name": "x", "tags": ["b"], "agree": true, "features": ["y", "x"], "tag_note": "t" },
+      "answers": { "name": "x", "tags": ["b"], "agree": true, "features": ["x", "y"] },
+      "secrets": []
+    },
+    {
+      "name": "a required multiselect left empty",
+      "values": { "name": "x", "tags": ["b"], "agree": true, "features": [] },
+      "problems": [ { "field": "features", "problem": "is required" } ]
     }
   ]
 }

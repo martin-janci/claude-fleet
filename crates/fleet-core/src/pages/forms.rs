@@ -146,13 +146,23 @@ pub struct FieldCondition {
     pub not: Option<Box<FieldCondition>>,
 }
 
-/// What a person answered: the visible, non-secret values (typed, in form
-/// order), and each visible secret's value, kept apart so it is never
-/// stored or returned.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// What a person answered: the visible, non-secret values (typed; their
+/// order is unspecified, key-sorted without serde_json's `preserve_order`),
+/// and each visible secret's value, kept apart so it is never stored or
+/// returned. `Debug` prints the secrets' names only.
+#[derive(Clone, Default, PartialEq)]
 pub struct Answers {
     pub values: Map<String, Value>,
     pub secrets: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for Answers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Answers")
+            .field("values", &self.values)
+            .field("secrets", &self.secrets.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// One field's problem with an answer, in the words the card shows.
