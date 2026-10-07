@@ -8,6 +8,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.5.1] - 2026-10-07
+
+**Upgrade note:** this release carries migration 108 (sprints and releases in
+the work graph). Back up `state.db` before upgrading the desktop or the hub; an
+older build refuses a migrated database.
+
+### Added
+- **work:** sprints and releases in the native work graph — org-scoped
+  sprints (planned → active → closed) and releases (planned → released), one
+  current sprint per item, any number of releases, sprint close carrying the
+  unfinished items over, and buckets linked to a tracker's sprint or version
+- **work:** switch a session between tasks (`work_link` switch,
+  `switch_session_work` on the desktop) in one transaction, with a warning
+  when the task is already live elsewhere or in another organisation
+- **work:** attach a running session to a task — *Attach running session…*
+  under the Work button, with Switch / Add, an Undo for ten seconds, and a
+  *Work on task…* picker that finds your own tasks first
+
+### Fixed
+- **work:** the start prompt reaches Claude through a trust dialog, a lost
+  Enter and a swallowed paste; review, author and dispatch sessions now seed
+  their first prompt the same way and wait for a settled REPL
+- **work:** the attach picker never offers a lost session or the operator
+- **hub:** never dies or wedges silently — panics are logged with a
+  backtrace, a panicking tick pass is caught, and `serve` exits non-zero when
+  the control API ends so the restart policy recovers it
+- **mcp:** `/mcp` request bodies are capped at 8 MiB; slow and surplus
+  connections are bounded (30 s header timeout, at most 512 connections);
+  voice sockets time out
+- **pair / auth:** a hub-wide pairing budget that still takes a burst, and
+  IPv6 addresses budgeted per /64 for both pairing and failed bearer tokens
+- **store:** a database a newer release migrated is no longer described as
+  "corrupt — delete it"; message and task bodies over 64 KiB are refused
+  before they are stored; a long unread inbox can be marked read again
+
+### Removed
+- **desktop:** eight Tauri commands nothing in the UI called
+
 ## [0.5.0] - 2026-10-06
 
 **Upgrade note:** this release carries migrations 105–107 (worktree names with
@@ -2812,6 +2850,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.5.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.1
 [0.5.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.0
 [0.4.12]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.12
 [0.4.11]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.11
