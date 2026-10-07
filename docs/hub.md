@@ -187,6 +187,16 @@ never names a version, a host, a session or a setting — the fixed body only
 means "this process is accepting HTTP". Every other route stays behind the
 token. Probes therefore leave no rejected-request lines in the log.
 
+A hub that can no longer serve exits rather than lingering as a process that
+answers nothing: when the control API stops on its own (its listener failed,
+or the server task ended or panicked), or when a panic leaves the store's lock
+poisoned so every write would fail, `serve` logs why, shuts down as it does on
+SIGTERM, and exits with status 1, so the restart policy (systemd
+`Restart=on-failure`, compose `restart: unless-stopped`) starts a fresh one.
+Panics are written to the file log and the error reports with their location
+and a backtrace, not only to stderr. SIGHUP is logged and ignored; stop the hub
+with SIGTERM (or Ctrl-C), and the stop line names the signal.
+
 The check does not open `state.db` and does not read the stored `mcp.port`:
 if you run the hub on another port, set it with `FLEET_HUB_PORT`, not only
 `--port`.
