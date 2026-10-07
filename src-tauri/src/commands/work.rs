@@ -52,6 +52,11 @@ pub struct LinkSessionWorkArgs {
     /// graph M14); absent: no check.
     #[serde(default)]
     pub expected_version: Option<i64>,
+    /// `false`: refuse with `E_EXISTS` when the task has another live
+    /// session (task → session P-3); `true`: the person saw that and goes
+    /// ahead. Absent: no check.
+    #[serde(default)]
+    pub ack_live: Option<bool>,
 }
 
 /// Say a session does NOT work on a key or item (sticky) — or, with
@@ -670,11 +675,19 @@ pub(crate) mod routed {
             force_cross_org: args.force_cross_org.then_some(true),
             primary: args.primary,
             expected_version: args.expected_version,
+            ack_live: args.ack_live,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("link_session_work", &args).await,
-            None => work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All),
+            None => {
+                work::check_live_elsewhere(
+                    &args,
+                    store,
+                    &fleet_core::service::view_scope::ViewScope::internal(),
+                )?;
+                work::work_link(&args, store, &fleet_core::service::orgs::OrgScope::All)
+            }
         }
     }
 

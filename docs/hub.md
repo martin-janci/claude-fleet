@@ -3220,7 +3220,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 259 commands, 186 route to a hub tool, 1 routes except for one argument shape, 48 refuse, and 24 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 260 commands, 187 route to a hub tool, 1 routes except for one argument shape, 48 refuse, and 24 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -3418,17 +3418,15 @@ deliberately.
   to a token an agent holds. What crosses the room in the QR is a
   single-use, minutes-long pairing *code* in a URL fragment — not a token —
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
-  rate-limited to one attempt per address (an IPv6 address by its /64)
-  every six seconds. See *Pair a phone* and *Clients* above.
+  rate-limited to one attempt per address every six seconds. See *Pair a
+  phone* and *Clients* above.
 - **Failed bearers are logged once per address.** A bad or missing token on
   any authenticated route is answered `401`, every time — a client reads
   `401` as "pair again", never as a busy hub. The `[mcp] rejected request`
   warn line, which names the address, is written once per second per source
   address (the peer, or the last `X-Forwarded-For` hop when the peer is a
-  private or loopback proxy — the same rule `/pair` uses; an IPv6 address
-  counts by its /64) and at most ten times a second in all; the rest are
-  logged at debug. At most 4096 addresses are tracked at once, so a forged
-  forwarding header cannot grow the table. Successes do not touch it.
+  private or loopback proxy — the same rule `/pair` uses); repeats inside
+  that second are logged at debug. Successes do not touch the bucket.
 - **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
   reaches the `peer_exchange` tool only — every other tool answers
   `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there

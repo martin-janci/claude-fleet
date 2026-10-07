@@ -160,6 +160,9 @@ export interface TicketsQuery {
   view?: string;
   query?: string;
   limit?: number;
+  /** Own tasks too, after the tickets (task → session P-4). An older hub
+   *  ignores it and lists tickets only. */
+  include_local?: boolean;
 }
 
 export function workTickets(q: TicketsQuery = {}): Promise<Result<TicketRow[]>> {

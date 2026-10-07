@@ -9,6 +9,8 @@ import { invoke } from '@tauri-apps/api/core';
 import TaskList from './TaskList.svelte';
 import { task } from './work_view_fixture';
 import { workViewFilters, type WorkTreePage } from './work_view';
+import { sessions } from './sessions';
+import { session } from './hosts_fixture';
 
 const NOW = Math.floor(Date.now() / 1000);
 const page: WorkTreePage = {
@@ -163,6 +165,45 @@ describe('TaskList', () => {
     expect(calls('preview_start_work')).toHaveLength(1);
     expect(screen.getByTestId('start-popover')).toBeTruthy();
     expect(calls('start_work')).toHaveLength(0);
+  });
+
+  it('▾ Attach running session… switches an idle session onto the task, with Undo', async () => {
+    sessions.set([
+      session('mac', 'api--other', { id: 60, project_id: 3, claude_status: 'idle', work: { link_id: 70, item_id: null, key: 'OPS-1', title: '', source: 'manual' } }),
+    ]);
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, raw?: { args: { link_id?: number } }) => {
+      if (cmd === 'work_tree') return page;
+      if (cmd === 'switch_session_work') {
+        const back = raw?.args.link_id === 71;
+        return session('mac', 'api--other', {
+          id: 60,
+          work: { link_id: back ? 72 : 71, item_id: back ? null : 1, key: back ? 'OPS-1' : 'TASK-1', title: '', source: 'manual' },
+        });
+      }
+      return null;
+    });
+    render(TaskList);
+    await flush();
+    const todo = screen.getByTestId('task-section-todo');
+    await fireEvent.click(todo.querySelector('[data-testid="work-button-menu"]') as HTMLButtonElement);
+    await fireEvent.click(screen.getByTestId('work-button-attach'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('attach-picker-row'));
+    await flush();
+    expect((screen.getByTestId('attach-picker-switch') as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(screen.getByTestId('attach-picker-go'));
+    await flush();
+    expect(calls('switch_session_work')[0][1]).toEqual({
+      args: { session_id: 60, link_id: 70, item_id: 1, expected_primary: 70, ack_live: false },
+    });
+    expect(screen.queryByTestId('attach-picker')).toBeNull();
+    expect(screen.getByTestId('work-button-undo-notice').textContent).toContain('Switched api--other from OPS-1');
+    await fireEvent.click(screen.getByTestId('work-button-undo'));
+    await flush();
+    expect(calls('switch_session_work')[1][1]).toEqual({
+      args: { session_id: 60, link_id: 71, key: 'OPS-1', expected_primary: 71, ack_live: true },
+    });
+    sessions.set([]);
   });
 
   it('▾ adds a project and notes to the new task', async () => {

@@ -205,7 +205,7 @@ Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
-a brainstorming draft with open decisions TS1–TS14): A0 and A1 are landed.
+a brainstorming draft with open decisions TS1–TS14): A0, A1 and A2 are landed.
 The operator never accepts or rejects a proposal and is never a detection
 or classification-nudge subject (`operator::is_operator_session`,
 `detect::subject_state`). `work_link { preview_start }`
@@ -216,7 +216,17 @@ checkout. The Work tab's `WorkButton` / `StartPopover` (`start_preview.ts`)
 read it. The preview is its own action, never a flag on `start`: an older
 hub answers it `E_INVALID` (the desktop then starts as before) instead of
 ignoring an unknown field and starting a session (`wire_contract.rs`'s
-`dry_run` lesson).
+`dry_run` lesson). A2: `work_link { switch }` (`switch_session_work`,
+`Store::switch_session_work`) ends one link (`end_reason = 'switched'`)
+and takes the primary in one compare-and-set; `ack_live: false` on `link`
+/ `switch` refuses `E_EXISTS` with `details.live_elsewhere[]`
+(`work::check_live_elsewhere`; absent checks nothing); `work { tickets,
+include_local }` adds own tasks. Link windows (P-7) need no migration:
+`work_journal.rs`'s `WINDOW_LO` / `WINDOW_HI` bound a link's journal by the
+switches around it, and a link no switch touched reads as before. The
+desktop's attach picker (`AttachPicker.svelte`, `attach.ts`) and Work on
+task… (`SessionTasks.svelte`) read them. Not yet: the new task's brief
+waiting for the next prompt (J3), own tasks in ⌘K.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
