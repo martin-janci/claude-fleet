@@ -316,6 +316,12 @@ impl LocalSync {
                 remote::Kind::File if st.size as u64 <= MAX_FILE_BYTES => {
                     rfiles.insert(p.clone(), *st);
                 }
+                // Carried as its target (`local::link_blob`); what lies
+                // below it is still another tree.
+                remote::Kind::Symlink if local::LINKS => {
+                    links.insert(p.clone());
+                    rfiles.insert(p.clone(), *st);
+                }
                 remote::Kind::File | remote::Kind::Symlink => {
                     skipped += 1;
                     blocked.insert(p.clone());
