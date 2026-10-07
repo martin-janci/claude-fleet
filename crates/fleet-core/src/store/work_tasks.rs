@@ -316,6 +316,9 @@ impl Store {
                 format!("\"{title}\" was already proposed here and rejected"),
             ));
         }
+        // A proposal under a mission's member joins the mission: refuse it
+        // before it is written when the mission has no room.
+        let mission = self.mission_for_new_proposal(p.parent_id)?;
         if open >= PROPOSALS_OPEN_CAP {
             return Err(IpcError::new(
                 codes::E_LIMIT,
@@ -338,7 +341,7 @@ impl Store {
             .filter(|c| !c.is_control())
             .take(120)
             .collect();
-        self.insert_native(&NativeRow {
+        let item = self.insert_native(&NativeRow {
             origin: "proposed",
             title: &title,
             parent_id: Some(p.parent_id),
@@ -350,7 +353,15 @@ impl Store {
             proposal_state: Some("proposed"),
             proposed_by: Some(&by),
             proposal_why: why.as_deref(),
-        })
+        })?;
+        match mission {
+            Some(m) => {
+                self.join_mission(m, item.id, &by)?;
+                self.get_work_item(item.id)?
+                    .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "proposal vanished"))
+            }
+            None => Ok(item),
+        }
     }
 
     /// A person decides a proposal, once.
@@ -401,6 +412,9 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
+
+mod tree;
+pub use tree::{TreeEntry, TreeRef, ACCEPT_UNDO_SECS};
 
 #[cfg(test)]
 mod tests;

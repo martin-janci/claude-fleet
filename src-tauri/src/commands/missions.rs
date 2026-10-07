@@ -6,9 +6,10 @@
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::work::graph::{self, GraphChange};
 use fleet_core::service::work::missions::{self, MissionDeleted, MissionDetail, MissionInput};
 use fleet_core::service::work::{WorkArgs, WorkLinkArgs};
-use fleet_core::store::{MissionRow, Store};
+use fleet_core::store::{MissionRow, Store, WorkItemRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -70,6 +71,27 @@ pub struct SetMissionItemArgs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeleteMissionArgs {
     pub mission_id: i64,
+}
+
+/// `set_work_dep`: `item_id` waits for `depends_on` (`on: false` erases).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkDepArgs {
+    pub item_id: i64,
+    pub depends_on: i64,
+    pub on: bool,
+}
+
+/// `set_work_hold`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkHoldArgs {
+    pub item_id: i64,
+    pub on: bool,
+}
+
+/// `accept_work_proposals` and `undo_work_accept`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkProposalsArgs {
+    pub item_ids: Vec<i64>,
 }
 
 /// The standalone desktop's reader: one person at the keyboard, as
@@ -140,6 +162,42 @@ pub async fn delete_mission(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<MissionDeleted, IpcError> {
     routed::delete_mission(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_dep(
+    args: SetWorkDepArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<GraphChange, IpcError> {
+    routed::set_work_dep(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_hold(
+    args: SetWorkHoldArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<GraphChange, IpcError> {
+    routed::set_work_hold(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn accept_work_proposals(
+    args: WorkProposalsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<WorkItemRow>, IpcError> {
+    routed::accept_work_proposals(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn undo_work_accept(
+    args: WorkProposalsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<WorkItemRow>, IpcError> {
+    routed::undo_work_accept(&backend, args, &store).await
 }
 
 pub(crate) mod routed {
@@ -260,6 +318,73 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("delete_mission", &wire).await,
             None => missions::delete(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn set_work_dep(
+        backend: &FleetBackend,
+        args: SetWorkDepArgs,
+        store: &Mutex<Store>,
+    ) -> Result<GraphChange, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "dep".into(),
+            item_id: Some(args.item_id),
+            depends_on: Some(args.depends_on),
+            on: Some(args.on),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_dep", &wire).await,
+            None => graph::dep(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn set_work_hold(
+        backend: &FleetBackend,
+        args: SetWorkHoldArgs,
+        store: &Mutex<Store>,
+    ) -> Result<GraphChange, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "hold".into(),
+            item_id: Some(args.item_id),
+            on: Some(args.on),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_hold", &wire).await,
+            None => graph::hold(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn accept_work_proposals(
+        backend: &FleetBackend,
+        args: WorkProposalsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<WorkItemRow>, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "accept_many".into(),
+            item_ids: Some(args.item_ids),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("accept_work_proposals", &wire).await,
+            None => graph::accept_many(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn undo_work_accept(
+        backend: &FleetBackend,
+        args: WorkProposalsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<WorkItemRow>, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "undo_accept".into(),
+            item_ids: Some(args.item_ids),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("undo_work_accept", &wire).await,
+            None => graph::undo_accept(&wire, store, &internal_view()),
         }
     }
 }

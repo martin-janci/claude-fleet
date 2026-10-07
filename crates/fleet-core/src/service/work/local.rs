@@ -425,6 +425,38 @@ pub fn propose(
     })
 }
 
+/// `work_link { action: propose_tree, parent, tree }` (orchestration O2):
+/// several subtasks with the edges between them, for a person to accept in
+/// one go. `proposer` is the caller's session label, as for `propose`.
+pub fn propose_tree(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+    proposer: &str,
+) -> Result<Vec<WorkItemRow>, IpcError> {
+    let tree = args
+        .tree
+        .as_deref()
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "propose_tree needs tree"))?;
+    let parent = parent_id(args)?
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "propose_tree needs parent"))?;
+    let s = lock(store)?;
+    // This is the org boundary, not a privacy fence: `propose`'s parent-ITEM
+    // question, asked of the parent and of every existing item an entry
+    // waits for; the person half is at the tool layer, as for `propose`.
+    if !scope.is_all() {
+        visible_parent(&s, scope, parent)?;
+        for e in tree {
+            for d in &e.depends_on {
+                if let crate::store::TreeRef::Item(id) = d {
+                    visible_parent(&s, scope, *id)?;
+                }
+            }
+        }
+    }
+    s.propose_tree(parent, tree, proposer)
+}
+
 /// `work_link { action: accept | reject, item_id }` (no `session_id`): a
 /// person's decision on a proposal. Refused to per-host tokens and bound
 /// clients: an agent never accepts its own (or any) proposal.

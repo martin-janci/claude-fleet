@@ -30,6 +30,15 @@
     setMissionState,
     stateLabel,
     updateMission,
+    acceptWorkProposals,
+    nodeGlyph,
+    nodeLabel,
+    openProposals,
+    setWorkDep,
+    setWorkHold,
+    undoWorkAccept,
+    wavesOf,
+    type GraphNode,
     type Mission,
     type MissionDetail,
   } from './missions';
@@ -63,6 +72,45 @@
   const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
 
   const mission = $derived(detail?.mission ?? null);
+  const waves = $derived(detail ? wavesOf(detail) : []);
+  const proposals = $derived(detail ? openProposals(detail) : []);
+  const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
+  // The last "Accept all", for Undo: the hub takes it back only while
+  // nothing has touched those tasks (`store::ACCEPT_UNDO_SECS`).
+  let lastAccepted = $state<number[]>([]);
+
+  function titleOf(id: number): string {
+    const it = itemById.get(id);
+    if (it) return it.title;
+    const o = (detail?.graph?.outside ?? []).find((x) => x.id === id);
+    return o ? (o.key ?? o.title) : `#${id}`;
+  }
+
+  /** The members `n` may start waiting for: not itself, not already. */
+  function depChoices(n: GraphNode): { id: number; title: string }[] {
+    const already = new Set(n.depends_on ?? []);
+    return (detail?.items ?? [])
+      .filter((i) => i.id !== n.item_id && !already.has(i.id) && i.proposal_state !== 'rejected')
+      .map((i) => ({ id: i.id, title: i.title }));
+  }
+
+  async function setDep(itemId: number, dependsOn: number, on: boolean) {
+    await act(setWorkDep(itemId, dependsOn, on));
+  }
+
+  async function setHold(itemId: number, on: boolean) {
+    await act(setWorkHold(itemId, on));
+  }
+
+  async function acceptAll() {
+    const ids = proposals;
+    if (await act(acceptWorkProposals(ids))) lastAccepted = ids;
+  }
+
+  async function undoAccept() {
+    const ids = lastAccepted;
+    if (await act(undoWorkAccept(ids))) lastAccepted = [];
+  }
   const mayChange = $derived(!!detail?.may_change && !!mission && !isFinal(mission.state));
   const moves = $derived(mission ? (MISSION_MOVES[mission.state] ?? []) : []);
   const repoChoices = $derived(
@@ -99,6 +147,7 @@
   }
 
   async function open(id: number) {
+    lastAccepted = [];
     selectedId = id;
     editing = false;
     confirmDelete = false;
@@ -301,26 +350,102 @@
       {/if}
 
       <h4>Tasks</h4>
-      <ul class="items" data-testid="mission-items">
-        {#each detail.items ?? [] as it (it.id)}
-          <li>
-            <span class="status s-{it.status_category}" aria-hidden="true"></span>
-            <span class="title">{it.key ? `${it.key} · ` : ''}{it.title}</span>
-            {#if it.id === mission.root_item_id}
-              <span class="muted small">root</span>
-            {:else if mayChange}
-              <button
-                class="btn btn--quiet btn--icon"
-                type="button"
-                aria-label="Take out of the mission"
-                title="Take out of the mission"
-                disabled={busy}
-                onclick={() => void removeItem(it.id)}>×</button
-              >
-            {/if}
-          </li>
-        {/each}
-      </ul>
+      {#if mayChange && proposals.length > 0}
+        <div class="row proposals" data-testid="mission-proposals">
+          <span>{proposals.length} proposed {proposals.length === 1 ? 'task waits' : 'tasks wait'} for you.</span>
+          <button class="btn btn--chip" type="button" disabled={busy} data-testid="mission-accept-all" onclick={() => void acceptAll()}
+            >Accept all</button
+          >
+        </div>
+      {/if}
+      {#if lastAccepted.length > 0}
+        <div class="row" role="status" data-testid="mission-accepted">
+          <span>Accepted {lastAccepted.length}.</span>
+          <button class="btn btn--quiet" type="button" disabled={busy} data-testid="mission-undo-accept" onclick={() => void undoAccept()}
+            >Undo</button
+          >
+        </div>
+      {/if}
+      {#each waves as w (w.wave)}
+        <div class="wave" data-testid="mission-wave">
+          {#if waves.length > 1}<span class="wave-head">W{w.wave}</span>{/if}
+          <ul class="items" data-testid="mission-items">
+            {#each w.nodes as n (n.item_id)}
+              {@const it = itemById.get(n.item_id)}
+              {#if it}
+                <li data-testid="mission-node" data-state={n.state}>
+                  <span class="glyph s-{n.state}" title={nodeLabel(n.state)} aria-label={nodeLabel(n.state)}>{nodeGlyph(n.state)}</span>
+                  <span class="main">
+                    <span class="title">{it.key ? `${it.key} · ` : ''}{it.title}</span>
+                    {#if (n.waiting_for ?? []).length > 0}
+                      <span class="muted small" data-testid="mission-waits">waits for {(n.waiting_for ?? []).map(titleOf).join(', ')}</span>
+                    {/if}
+                    {#if mayChange && (n.depends_on ?? []).length > 0}
+                      <span class="deps">
+                        {#each n.depends_on ?? [] as d (d)}
+                          <button
+                            class="btn btn--chip dep"
+                            type="button"
+                            title="Stop waiting for {titleOf(d)}"
+                            disabled={busy}
+                            data-testid="mission-dep-remove"
+                            onclick={() => void setDep(n.item_id, d, false)}>after {titleOf(d)} ×</button
+                          >
+                        {/each}
+                      </span>
+                    {/if}
+                  </span>
+                  {#if it.id === mission.root_item_id}
+                    <span class="muted small">root</span>
+                  {:else if mayChange}
+                    {@const choices = depChoices(n)}
+                    {#if choices.length > 0}
+                      <select
+                        class="dep-pick"
+                        aria-label="Waits for"
+                        disabled={busy}
+                        data-testid="mission-dep-add"
+                        onchange={(e) => {
+                          const v = Number((e.currentTarget as HTMLSelectElement).value);
+                          (e.currentTarget as HTMLSelectElement).value = '';
+                          if (v) void setDep(n.item_id, v, true);
+                        }}
+                      >
+                        <option value="">after…</option>
+                        {#each choices as c (c.id)}<option value={c.id}>{c.title}</option>{/each}
+                      </select>
+                    {/if}
+                    {#if n.state !== 'done'}
+                      <button
+                        class="btn btn--quiet btn--icon"
+                        type="button"
+                        aria-label={it.held_at ? 'Release' : 'Hold'}
+                        title={it.held_at ? 'Release' : 'Hold: never start this on its own'}
+                        disabled={busy}
+                        data-testid="mission-hold"
+                        onclick={() => void setHold(it.id, !it.held_at)}>{it.held_at ? '▶' : '⏸'}</button
+                      >
+                    {/if}
+                    <button
+                      class="btn btn--quiet btn--icon"
+                      type="button"
+                      aria-label="Take out of the mission"
+                      title="Take out of the mission"
+                      disabled={busy}
+                      onclick={() => void removeItem(it.id)}>×</button
+                    >
+                  {/if}
+                </li>
+              {/if}
+            {/each}
+          </ul>
+        </div>
+      {/each}
+      {#if (detail.graph?.outside ?? []).length > 0}
+        <p class="muted small" data-testid="mission-outside">
+          Waits on work outside the mission: {(detail.graph?.outside ?? []).map((o) => (o.key ? `${o.key} · ${o.title}` : o.title)).join(', ')}
+        </p>
+      {/if}
       {#if mayChange && mission.root_item_id}
         <form class="row" onsubmit={(e) => (e.preventDefault(), void addTask())}>
           <input placeholder="New task" bind:value={newTask} data-testid="mission-new-task" />
@@ -469,9 +594,17 @@
   h4 { margin: 0.5rem 0 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
   .done-when li { padding: 0.1rem 0; }
   .events li { padding: 0.1rem 0; }
-  .status { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--fg-muted); flex: 0 0 auto; }
-  .status.s-in_progress { background: #e0a030; }
-  .status.s-done { background: #3fae5a; }
+  .glyph { width: 1.1rem; text-align: center; flex: 0 0 auto; color: var(--fg-muted); }
+  .glyph.s-done, .glyph.s-ready { color: #3fae5a; }
+  .glyph.s-running, .glyph.s-doing { color: #e0a030; }
+  .glyph.s-failed, .glyph.s-blocked { color: #e64a4a; }
+  .main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
+  .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
+  .dep { font-size: 0.7rem; }
+  .dep-pick { max-width: 7rem; font-size: 0.75rem; }
+  .wave { display: flex; flex-direction: column; gap: 0.1rem; }
+  .wave-head { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.3rem; }
+  .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: 4px; }
   .muted { color: var(--fg-muted); margin: 0; }
   .small { font-size: 0.75rem; }
   .meta { font-size: 0.75rem; }
