@@ -1212,6 +1212,18 @@ async fn remove_remote_tmp(ssh: &dyn SshExec, host: &str, tmp_path: &str) {
 /// is truncated in place and tightened to 0600.
 pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
+    let mut f = open_private(path)?;
+    f.write_all(content.as_bytes())?;
+    f.flush()?;
+    Ok(())
+}
+
+/// Open `path` for writing, truncated, at mode 0600 BEFORE a byte is
+/// written. `mode()` only applies when the file is created, so a
+/// pre-existing 0644 file (an older build's, a restored backup) is tightened
+/// on the open descriptor first; tightening it after the write left the new
+/// secret world-readable in between.
+fn open_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -1219,12 +1231,20 @@ pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Res
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path)?;
-    f.write_all(content.as_bytes())?;
-    f.flush()?;
-    // `mode()` only applies at creation; tighten a pre-existing file too.
-    set_private_mode(path);
-    Ok(())
+    let f = opts.open(path)?;
+    #[cfg(unix)]
+    if let Err(e) = f.set_permissions(
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    ) {
+        // As `set_private_mode`: a filesystem that refuses chmod (a drvfs
+        // mount) still gets the write; say so rather than fail it.
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "[provision] chmod 600 failed; the file may be readable by other users"
+        );
+    }
+    Ok(f)
 }
 
 /// A 0600 temp file holding secret content for the duration of an upload;
@@ -1675,6 +1695,25 @@ mod tests {
         let quoted = crate::shell::quote(&s);
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         assert!(quoted.contains("\"$HOME\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_existing_loose_file_is_private_before_the_secret_is_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("token");
+        std::fs::write(&p, "old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let f = open_private(&p).unwrap();
+        assert_eq!(f.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        drop(f);
+        write_private_file(&p, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     /// The local twin of the remote fallback: when the rename fails the way
