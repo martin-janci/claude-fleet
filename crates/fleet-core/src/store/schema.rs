@@ -400,6 +400,15 @@ fn client_tokens_has_person(conn: &Connection) -> rusqlite::Result<bool> {
 /// `already_applied` guard of migration 101 (multi-user M1, T9d): the one
 /// `ADD COLUMN` in the script. The trigger is `IF NOT EXISTS` and the
 /// backfill `UPDATE`s are idempotent, so only the column needs the guard.
+fn tasks_has_role(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'role'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn tasks_has_detached_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'detached_at'",
@@ -1251,6 +1260,14 @@ const MIGRATIONS: &[Migration] = &[
         109,
         include_str!("../../migrations/109_local_workspaces.sql"),
     ),
+    // Orchestration O0: a task names the work item it is an attempt at, with
+    // its attempt number and role. ADD COLUMN is not idempotent: guarded on
+    // the last one.
+    Migration {
+        version: 110,
+        sql: include_str!("../../migrations/110_task_runs.sql"),
+        already_applied: Some(tasks_has_role),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

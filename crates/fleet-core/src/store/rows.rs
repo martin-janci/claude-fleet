@@ -1285,6 +1285,16 @@ pub struct TaskRow {
     /// from a hub — harmless, because the hub already applied the fence.
     #[serde(skip)]
     pub detached_at: Option<i64>,
+    /// The work item this task is an attempt at (`work_link { run }`,
+    /// migration 110); `None` for a plain dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item_id: Option<i64>,
+    /// 1, 2, … within (`work_item_id`, `role`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    /// implement | review | test | research | integrate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// Where the catalog repo lives and its last-loaded HEAD (migration 030).
@@ -1387,7 +1397,7 @@ pub const TASK_TERMINAL_STATES: [&str; 3] = ["done", "failed", "cancelled"];
 pub(super) const TASK_COLUMNS: &str =
     "id, requester_session_id, worker_session_id, prompt, state, result, \
      error, created_at, started_at, finished_at, nonce, worker_claude_session_id, \
-     detached_at";
+     detached_at, work_item_id, attempt, role";
 
 /// [`TASK_COLUMNS`] qualified with the `t.` alias for joined queries.
 pub(super) fn task_columns_t() -> String {
@@ -1409,6 +1419,9 @@ pub(super) fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskRow>
         nonce: row.get(10)?,
         worker_claude_session_id: row.get(11)?,
         detached_at: row.get(12)?,
+        work_item_id: row.get(13)?,
+        attempt: row.get(14)?,
+        role: row.get(15)?,
     })
 }
 
