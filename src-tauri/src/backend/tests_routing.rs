@@ -2124,6 +2124,22 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "abandon_start",
+            "work_link",
+            json!({ "session_id": 7, "action": "abandon_start", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            r#"{"session_id":7,"worktree_removed":true,"branch_deleted":true}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::trackers::routed::abandon_start(
+                    b,
+                    commands::trackers::AbandonStartArgs { session_id: 7 },
+                    s,
+                    ssh,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "start_work_multi",
             "work_link",
             json!({ "session_id": null, "action": "start", "key": "ABC-1", "item_id": null,

@@ -24,6 +24,7 @@ use fleet_core::service::decide::status_map;
 use fleet_core::service::trackers::admin::{self, TestReport, WorkAdminArgs};
 use fleet_core::service::trackers::sync::SyncMetrics;
 use fleet_core::service::trackers::tickets::{MultiStart, StartPreview, Ticket};
+use fleet_core::service::work::abandon::AbandonOutcome;
 use fleet_core::service::work::retention;
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store, TrackerRow};
@@ -413,6 +414,22 @@ pub async fn start_work(
     routed::start_work(&backend, args, &store, &ssh, &reg).await
 }
 
+/// `abandon_start` (task → session P-6): cancel a start nobody worked in.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AbandonStartArgs {
+    pub session_id: i64,
+}
+
+#[tauri::command]
+pub async fn abandon_start(
+    args: AbandonStartArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<AbandonOutcome, IpcError> {
+    routed::abandon_start(&backend, args, &store, &ssh).await
+}
+
 pub(crate) mod routed {
     use super::*;
     use fleet_core::service::trackers::{default_net, tickets};
@@ -589,6 +606,25 @@ pub(crate) mod routed {
                     &default_net(),
                 )
                 .await
+            }
+        }
+    }
+
+    pub async fn abandon_start(
+        backend: &FleetBackend,
+        args: AbandonStartArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<AbandonOutcome, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "abandon_start".into(),
+            session_id: Some(args.session_id),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("abandon_start", &wire).await,
+            None => {
+                fleet_core::service::work::abandon::abandon_start(store, ssh, args.session_id).await
             }
         }
     }

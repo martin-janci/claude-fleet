@@ -1175,6 +1175,39 @@ async fn run_matrix(isolate: bool) {
             .unwrap();
         assert!(ev.is_some(), "{who:?}: no request recorded");
     };
+    // Cancelling a start (task → session P-6) kills the session, so it is
+    // fenced as a kill. None of these sessions was made by a start, so a
+    // caller past the fences meets the service's own refusal (`E_DIRTY`,
+    // `not_a_start`) — never another host's or org's session named.
+    // `Reach::Own`: a host token that does not own the session is refused
+    // even on its own host, as a kill is.
+    let past_fences = |who: Who, a: &Answer| {
+        is_code(who, a, "E_DIRTY", "cancel a session no start made");
+        assert!(format!("{a:?}").contains("not_a_start"), "{who:?}: {a:?}");
+    };
+    m.row(
+        "work_link",
+        "abandon_start",
+        |fx, who| {
+            let sid = match who {
+                Who::HostNone => fx.s_n,
+                _ => fx.s_a,
+            };
+            json!({ "action": "abandon_start", "session_id": sid })
+        },
+        move |_fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB => is_code(who, a, "E_FORBIDDEN", "another host's session"),
+                Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's session"),
+                Who::HostA | Who::HostNone => is_code(who, a, "E_FORBIDDEN", "not its own"),
+                _ => past_fences(who, a),
+            }
+        },
+    )
+    .await;
     m.row(
         "work_link",
         "handover",

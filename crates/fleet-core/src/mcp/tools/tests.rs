@@ -10745,6 +10745,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "summarize", &["Own"]),
     // Kills are `Own`, the UI-only bookkeeping items `Drive`, per item.
     ("work_link", "tidy_apply", &["Drive", "Own"]),
+    // Cancelling a start KILLS its session (task → session P-6): the kill's
+    // tier, as `kill_session` and tidy-up's kills take.
+    ("work_link", "abandon_start", &["Own"]),
     // The WRITE is a task's group; the ANSWER is the task, and
     // `WorkTask.sessions: Vec<TaskLink>` is every link of it with its name,
     // host, branch and live `claude_status`. The row used to read "a task's

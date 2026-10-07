@@ -72,8 +72,8 @@ use crate::ipc_error::IpcError;
 
 /// Timeline kinds the work graph writes: agent handover (M9.3), the
 /// start-prompt handover of a resume (M2), the classification nudge (M4.6),
-/// tidy (M7), and the one detection event: a suggestion withdrawn, decayed
-/// or settled by a carry (D34).
+/// tidy (M7), the one detection event: a suggestion withdrawn, decayed
+/// or settled by a carry (D34), and a start's progress (task → session P-5).
 pub const WORK_EVENT_KINDS: &[&str] = &[
     "handover_requested",
     "handover_written",
@@ -87,6 +87,12 @@ pub const WORK_EVENT_KINDS: &[&str] = &[
     "tidy_kept",
     // `work_detect::WORK_SUGGESTION_WITHDRAWN`.
     "work_suggestion_withdrawn",
+    // A start's progress steps and its cancel (task → session P-5 / P-6;
+    // `handover_started` above is the spec's `brief_sent`).
+    "start_spawned",
+    "worktree_ready",
+    "repl_ready",
+    "start_abandoned",
 ];
 
 /// One retention-swept table. THE list: [`RetentionTable::ALL`] is the only

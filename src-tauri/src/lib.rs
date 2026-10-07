@@ -472,6 +472,7 @@ pub fn run() {
             commands::trackers::work_lookup,
             commands::trackers::start_work_multi,
             commands::trackers::start_work,
+            commands::trackers::abandon_start,
             commands::trackers::preview_start_work,
             commands::orgs::add_org,
             commands::orgs::update_org,

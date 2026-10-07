@@ -1089,6 +1089,14 @@ and it starts nothing: press **Work** on a subtask when you want it done.
 The skill is `skills/fleet-brainstorm/SKILL.md`, written into the
 operator's directory when it starts.
 
+**Watching a start, and cancelling it.** After **Work** starts a session,
+a strip under the button shows its steps: session, checkout, Claude ready,
+brief sent. When Claude asks you to trust the folder it says "Waiting for
+you" with an Open button that takes you to the terminal. Until the brief is
+in, **Cancel start** ends the session and removes the checkout and branch
+the start made. It refuses, and touches nothing, when the checkout was not
+made by that start or already has changes or commits of its own.
+
 Your own starts and kills from the desktop are not gated by this rule. With
 `mcp.confirm_destructive` on, a tidy-up batch that contains a kill still
 asks you to confirm, like any kill.

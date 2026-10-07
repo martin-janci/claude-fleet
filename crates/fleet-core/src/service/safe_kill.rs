@@ -454,7 +454,7 @@ pub async fn discard_kill_session(
 /// row can reach a session through `discover_lost_sessions` (a remote
 /// project root) or a repair. `None` for no row, an unknown row, or a tree
 /// that is not removable.
-fn removable_worktree(
+pub(crate) fn removable_worktree(
     s: &Store,
     worktree_id: Option<i64>,
     project_base: Option<&str>,

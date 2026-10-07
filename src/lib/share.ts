@@ -108,6 +108,8 @@ const SESSION_TIER = {
   // somebody's transcript — the same thing `rewind_conversation` is `own` for
   // — so it is judged against the SOURCE session's row, not the new one.
   resume_work: 'own',
+  // Cancel start (task → session P-6) ends the session, so it is a kill.
+  abandon_start: 'own',
   rename_session: 'own',
   set_session_tags: 'own',
   // `work_link { summarize }`: a durable précis of the transcript that

@@ -355,6 +355,7 @@ export const ROUTED_ACTIONS = [
   'set_work_project_trust',
   'start_work',
   'start_work_multi',
+  'abandon_start',
   'request_work_handover',
   'summarize_past_work',
   'tidy_apply',
