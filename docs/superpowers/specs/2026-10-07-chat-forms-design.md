@@ -168,7 +168,7 @@ the `claude-fleet-control` skill.
 | `expired` | Nobody answered within 24 h |
 
 A finished form answers `ask { wait }` with its final result at once, any
-number of times, until its row is deleted (7 days); then `E_NOT_FOUND`.
+number of times, until its row is deleted (7 days); then `E_NOTFOUND`.
 
 ### 3.3 The person's side
 
@@ -179,11 +179,12 @@ number of times, until its row is deleted (7 days); then `E_NOT_FOUND`.
 | `ask { answer: form_id, values }` | Submits; `values` keyed by field name |
 | `ask { decline: form_id, note? }` | Declines |
 
-- **Who may answer or decline:** a caller with write access to the
-  session (the same gate the AnswerPrompt card uses), that is the master
-  token or a trusted paired device. **A per-host token never may**, nor
-  the session that asked: `E_FORBIDDEN`. This keeps any agent from filling
-  its own or another session's form.
+- **Who may answer or decline:** a caller with `drive` reach on the
+  session (the same gate `send_prompt`, and so the AnswerPrompt card,
+  uses): the master token, or a person's device that owns the session or
+  holds a `drive` grant. **A per-host token never may**, nor a `readonly`
+  token: `E_FORBIDDEN`. This keeps any agent from filling its own or
+  another session's form.
 - **Who may list / get:** whoever may read the session.
 - **`answer` validates again** on the server: required, types, option
   values, min/max/integer, `max_len`, hidden fields dropped. Errors come
@@ -210,50 +211,58 @@ A new migration (number taken from `origin/main` when it is written;
 | `answers` | JSON, non-secret values and secret **paths** only |
 | `note` | the decline reason |
 | `answered_by` | the actor, in words |
+| `secrets_on_host` | 1 while a secret directory for it may exist on the host (§5) |
 | `created_at`, `decided_at` | unix seconds |
 
 - A partial index keeps "one pending per session" cheap to check.
 - The reconcile tick marks a pending form older than 24 h `expired` and
   deletes rows decided more than 7 days ago.
-- A killed or removed session's pending form becomes `cancelled`.
+- A killed session's pending form becomes `cancelled` (`record_kill`);
+  a deleted session row takes its forms with it (`ON DELETE CASCADE`).
 - An unfinished draft lives only in the UI component; nothing is stored
   until `answer`.
-- Every change goes through the store and wakes `form_notify()`, then
-  publishes `form:updated` (§6).
+- Every change goes through the store, wakes `form_notify()`, bumps the
+  session's `row_version` and emits `session:updated` (§6).
 
 ## 5. Secrets on the host
 
 On `answer`, before the row changes state:
 
-1. Each visible `secret` value is written on the session's host through
-   `SshExec` (so it works over ssh and through fleet-agent alike) by a
-   script run under `umask 077`: `mkdir -p` the directory (0700) and
-   `cat > <path>` with the value on **stdin**, never in argv or the
-   command string. Path: `~/.cache/claude-fleet/forms/<form_id>/<field>`,
-   built with `shell::quote`.
+1. Each visible `secret` value is written on the session's host with
+   `provision::write_host_file_secret`, the helper that already writes the
+   MCP token into `~/.claude.json`: a `umask 077` script creates the
+   directory and an empty 0600 temp file, the value goes over
+   `upload_file` (stdin into `cat` over ssh; an `Upload` frame keeping the
+   0600 mode through fleet-agent), and a rename puts it in place. The
+   value is never in argv or a command string. Path:
+   `~/.cache/claude-fleet/forms/<form_id>/<field>`.
 2. If any write fails, the answer is refused with that host's error
    (`E_HOST_WRITE` with the field), the form stays pending, nothing is
    stored, and the files written so far are removed best-effort.
 3. On success the row stores the path; the value is in no table, log,
    event or audit line, and is dropped from memory after the write.
 
-The directory is removed when the session is killed or safe-killed (the
-existing removal scripts get one `rm -rf` of
-`~/.cache/claude-fleet/forms/` paths for that session's forms) and,
-best-effort, when the row is deleted after 7 days. The result's `note`
-asks the agent to delete each file after use.
+The reconcile tick removes a form's directory from its host once the form
+no longer needs it: its session is gone (ghost or deleted) or it was
+decided more than 7 days ago. A row with secrets on a host carries
+`secrets_on_host = 1` until that removal succeeds, so an unreachable host
+is retried on a later tick. The result's `note` asks the agent to delete
+each file after use.
 
 ## 6. Events, rows and attention
 
-- **`form:updated`** `{form_id, session_id, state}` is a row event on the
-  bus. The desktop adds it to `EVENT_NAMES` (`backend/events.rs`); the hub
-  forwards it on `/events` with a `KIND_FENCES` fence by read access to
-  the session.
-- **The session row** gains `pending_form: {form_id, title} | null`,
-  `#[serde(default)]` on the wire. The hub contract golden is regenerated
-  (`REGEN_HUB_CONTRACT=1`), and `CONTRACT_REVISION` with its bounds moves
-  if the revision rule requires it. `list_sessions { view: "phone" }`
-  keeps the field.
+- **No new event kind.** The session row gains
+  `pending_form: {form_id, title} | null` (`#[serde(default)]`), read by a
+  subselect on `form_requests` in `SESSION_COLUMNS`. Every form change
+  bumps the session's `row_version` and emits `session:updated`, so the
+  card opens and closes on the event every client already receives and
+  fences. `list_sessions { view: "phone" }` keeps the field.
+- **Contract.** The golden is regenerated (`REGEN_HUB_CONTRACT=1`). The
+  new field alone would not move `CONTRACT_REVISION`, but the desktop now
+  routes to a hub tool that did not exist before (`ask`), which the rule
+  in `wire_contract.rs` lists as a bump: `CONTRACT_REVISION`,
+  `MIN_HUB_CONTRACT` and `MAX_HUB_CONTRACT` move from 8 to 9 together, so
+  this desktop and its hub ship in the same release.
 - **Attention.** `needs_attention_with` answers `Reason::Waiting` for a
   session with a pending form, although its `claude_status` is `working`
   while the tool call runs. The form therefore shows in the waiting
@@ -274,9 +283,9 @@ four Tauri commands:
 
 Each gets its `verdicts.rs` row (then `REGEN_HUB_VERDICTS=1`), its
 `tests_routing.rs` row with non-default args, `Serialize` on its args
-struct, and a line in `control-api-reference.md` (`REGEN_DOCS=1`). An
-untrusted paired device can list and get, not answer: the card says so
-with the hub's reason. The phone uses the same `ask` actions through its
+struct, and a line in `control-api-reference.md` (`REGEN_DOCS=1`). A
+device without `drive` on the session can list and get, not answer: the
+card says so with the reason. The phone uses the same `ask` actions through its
 hub client.
 
 ## 8. The desktop UI
@@ -301,18 +310,20 @@ Placement:
   sits (`ConversationPanel.svelte`), while the session has
   `pending_form`. The two do not compete: while `ask` waits, the pane
   shows no dialog.
-- **Transcript:** the tool turn `mcp__claude-fleet__ask` reads "Form:
-  <title>" with a state chip. Opening it shows the submitted answers
-  read-only; a secret shows as "stored on the host".
-- **Sidebar row:** a compact "Form waiting" chip that opens the
-  conversation; the session sits in the `waiting` triage bucket.
-- **No write access** (untrusted paired device, a shared view): the card
+- **Transcript:** the tool line of `mcp__claude-fleet__ask` leads with the
+  verb "Form". Its existing detail view shows the tool's result, which is
+  the status and the answers; a secret appears only as its path.
+- **Sidebar row:** a compact "Form waiting" chip (the row's own click
+  opens the conversation); the session sits in the `waiting` triage
+  bucket.
+- **No write access** (no `drive` on the session, a hub offline): the card
   is read-only with the reason, through `writeBlocked` /
   `hubActionBlocked`.
 
 Errors: per-field server errors next to their fields; a host write
 failure at the top of the secret's step; a form finished elsewhere
-switches the card to its final state on `form:updated`; a lost hub keeps
+closes the card when `session:updated` clears `pending_form`, with a line
+saying what happened (from `get_form`); a lost hub keeps
 the typed values in the component for a second submit.
 
 ## 9. The phone
@@ -351,7 +362,8 @@ Rust (`cargo fleet-test`):
 - Secrets: through a fake `SshExec`, the value arrives on stdin, never in
   argv or the script; the row, the event and the audit hold the path, not
   the value; a failed write leaves the form pending.
-- Events and attention: `form:updated` published; `needs_attention` is
+- Events and attention: a form change emits `session:updated` with the
+  new `pending_form` and a higher `row_version`; `needs_attention` is
   `Waiting`.
 - Routing and contract: `every_command_has_a_verdict`, the routing rows,
   the contract golden, the definition budget.
