@@ -342,7 +342,8 @@ pub async fn download_to(
     if expected.is_some_and(|n| n > max) {
         return Err(too_large_download(max));
     }
-    let mut chunks = http1::Dechunker::new(http1::head_is_chunked(&head));
+    let chunked = http1::head_is_chunked(&head);
+    let mut chunks = http1::Dechunker::new(chunked);
     let part = {
         let mut p = dest.as_os_str().to_owned();
         p.push(".part");
@@ -382,6 +383,14 @@ pub async fn download_to(
                     "{host}:{port} sent {got} of {n} bytes; the download is incomplete"
                 ));
             }
+        }
+        // A chunked body (a proxy in front of the hub re-chunks) carries no
+        // length: only its terminating chunk says it is whole. A connection
+        // cut before it is a partial file, not a download.
+        if chunked && !chunks.finished() {
+            return Err(format!(
+                "{host}:{port} closed mid-download before the last chunk; the download is incomplete"
+            ));
         }
         file.sync_all()
             .await

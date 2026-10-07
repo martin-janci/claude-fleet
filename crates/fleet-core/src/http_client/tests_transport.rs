@@ -522,3 +522,48 @@ fn the_transport_reaches_the_trust_store_only_through_net_tls() {
          through `net::tls::tls_connector` (blocking pool, no cached failure): {body}"
     );
 }
+
+/// Serve one canned answer to one GET, then hang up.
+async fn one_shot_server(reply: &'static [u8]) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        let mut b = [0u8; 1024];
+        while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = sock.read(&mut b).await.unwrap();
+            if n == 0 {
+                return;
+            }
+            head.extend_from_slice(&b[..n]);
+        }
+        sock.write_all(reply).await.unwrap();
+    });
+    port
+}
+
+/// A chunked body cut before its terminating chunk is a partial file: the
+/// download fails and `dest` is left untouched, as the contract promises.
+#[tokio::test]
+async fn a_chunked_download_cut_before_the_last_chunk_is_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("f");
+    let port =
+        one_shot_server(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n")
+            .await;
+    let url = format!("http://127.0.0.1:{port}/downloads/1");
+    let err = download_to(&url, "t", &dest, 1 << 20).await.unwrap_err();
+    assert!(err.contains("incomplete"), "{err}");
+    assert!(!dest.exists());
+    assert!(!dir.path().join("f.part").exists());
+
+    let port = one_shot_server(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+    )
+    .await;
+    let url = format!("http://127.0.0.1:{port}/downloads/1");
+    assert_eq!(download_to(&url, "t", &dest, 1 << 20).await, Ok(5));
+    assert_eq!(std::fs::read(&dest).unwrap(), b"hello");
+}
