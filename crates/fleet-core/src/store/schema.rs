@@ -1246,6 +1246,11 @@ const MIGRATIONS: &[Migration] = &[
     // Sprints and releases (design 2026-09-28 §1): three new tables, so
     // plain.
     Migration::plain(108, include_str!("../../migrations/108_work_buckets.sql")),
+    // Local workspace sync, Phase 1: three new tables, so plain.
+    Migration::plain(
+        109,
+        include_str!("../../migrations/109_local_workspaces.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
