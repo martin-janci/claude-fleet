@@ -220,6 +220,12 @@ fn views_of(
 }
 
 /// `work { action: tickets, tracker_id?, view?, query?, limit? }`.
+///
+/// `include_local` (task → session P-4) adds the caller's own tasks — local
+/// items a person made or accepted, never a dispatch's job mirror or a
+/// proposal still waiting — after the tickets, under the same text filter
+/// and limit, so "Work on task…" and ⌘K find them. Only for the unfiltered
+/// list: a tracker or a tracker view names tickets alone.
 pub fn tickets(
     store: &Mutex<Store>,
     tracker_id: Option<i64>,
@@ -228,8 +234,63 @@ pub fn tickets(
     limit: Option<usize>,
     reader: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<Ticket>, IpcError> {
+    tickets_and_tasks(store, tracker_id, view, query, limit, false, reader)
+}
+
+/// [`tickets`], with the caller's own tasks after them when
+/// `include_local` (task → session P-4).
+#[allow(clippy::too_many_arguments)]
+pub fn tickets_and_tasks(
+    store: &Mutex<Store>,
+    tracker_id: Option<i64>,
+    view: Option<&str>,
+    query: Option<&str>,
+    limit: Option<usize>,
+    include_local: bool,
+    reader: &crate::service::view_scope::ViewScope,
+) -> Result<Vec<Ticket>, IpcError> {
     let s = lock(store)?;
-    tickets_in(&s, tracker_id, view, query, limit, reader)
+    let mut out = tickets_in(&s, tracker_id, view, query, limit, reader)?;
+    if include_local && tracker_id.is_none() && view.is_none() {
+        let limit = limit
+            .unwrap_or(TICKETS_DEFAULT_LIMIT)
+            .clamp(1, TICKETS_MAX_LIMIT);
+        let allowed = allowed(&reader.org, &s)?;
+        let q = query
+            .map(|q| q.trim().to_lowercase())
+            .filter(|q| !q.is_empty());
+        for item in s.local_work_items()? {
+            if out.len() >= limit {
+                break;
+            }
+            if allowed.as_ref().is_some_and(|a| !a.contains(&item.id)) {
+                continue;
+            }
+            let own = match item.origin.as_deref() {
+                Some("agent") => false,
+                Some("proposed") => item.proposal_state.as_deref() == Some("accepted"),
+                _ => true,
+            };
+            if !own {
+                continue;
+            }
+            if let Some(q) = &q {
+                let hay = format!("{} {}", item.key.as_deref().unwrap_or_default(), item.title)
+                    .to_lowercase();
+                if !hay.contains(q.as_str()) {
+                    continue;
+                }
+            }
+            let live = live_ids(&s, reader, &item)?;
+            out.push(Ticket {
+                item,
+                live_session_ids: live,
+                description: None,
+                views: Vec::new(),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// [`tickets`] under a store guard the caller already holds — the hook path

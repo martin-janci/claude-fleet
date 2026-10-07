@@ -478,6 +478,46 @@ fn an_asana_ticket_is_not_offered_describe() {
         .contains("open the ticket"));
 }
 
+/// Task → session P-4: own tasks join the unfiltered list after the
+/// tickets, under the same text filter; a tracker view lists tickets only.
+#[test]
+fn own_tasks_are_listed_when_asked_for() {
+    let fx = Fx::new();
+    {
+        let s = fx.store.lock().unwrap();
+        s.create_local_work_item(None, "Release notes for the refund fix")
+            .unwrap();
+    }
+    let all = |view: Option<&str>, query: Option<&str>, local: bool| -> Vec<String> {
+        crate::service::trackers::tickets::tickets_and_tasks(
+            &fx.store,
+            None,
+            view,
+            query,
+            None,
+            local,
+            &crate::service::view_scope::org_only_view(&OrgScope::All),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|t| t.item.title)
+        .collect()
+    };
+    assert_eq!(all(None, None, false).len(), 4, "tickets only");
+    let with = all(None, None, true);
+    assert_eq!(with.len(), 5);
+    assert_eq!(with[4], "Release notes for the refund fix");
+    assert_eq!(
+        all(None, Some("release"), true),
+        vec!["Release notes for the refund fix"]
+    );
+    assert_eq!(
+        all(Some("mine"), None, true).len(),
+        2,
+        "a view names tickets alone"
+    );
+}
+
 #[test]
 fn views_are_evaluated_from_the_cache() {
     let fx = Fx::new();

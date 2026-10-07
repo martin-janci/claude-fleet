@@ -369,6 +369,7 @@ export const ROUTED_ACTIONS = [
   // The Work view (work graph M14): every write is `work_link { … }` on the
   // hub, so a paired desktop sends them while the link is up.
   'set_primary_work',
+  'switch_session_work',
   'reconsider_work_link',
   'ack_work_link',
   'decide_work_batch',

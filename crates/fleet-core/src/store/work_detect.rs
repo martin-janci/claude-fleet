@@ -572,7 +572,11 @@ impl Store {
     /// `snap_branch` is the branch the link's own `branch` evidence saw
     /// (the value that just changed), else the worktree's — never a PR
     /// closing ref's text, which is a ticket key.
-    fn end_live_link(
+    ///
+    /// A `switched` end (P-2) keeps only the conversations that ran inside
+    /// the link's journal window (P-7): one that had already ended before a
+    /// previous switch began this link is the previous task's.
+    pub(super) fn end_live_link(
         &self,
         link_id: i64,
         session_id: i64,
@@ -595,7 +599,12 @@ impl Store {
                snap_pr_url = (SELECT pr_url FROM sessions WHERE id = ?2), \
                snap_claude_ids = (SELECT json_group_array(claude_session_id) FROM \
                  (SELECT claude_session_id FROM conversations WHERE session_id = ?2 \
-                   ORDER BY started_at) HAVING COUNT(*) > 0) \
+                   AND (?4 != 'switched' OR ended_at IS NULL OR ended_at >= \
+                        COALESCE((SELECT MAX(x.ended_at) FROM work_links x \
+                          WHERE x.participant_id = work_links.participant_id \
+                            AND x.end_reason = 'switched' AND x.id != work_links.id \
+                            AND x.ended_at <= work_links.created_at), 0)) \
+                   ORDER BY started_at, id) HAVING COUNT(*) > 0) \
              WHERE id = ?1 AND ended_at IS NULL",
             rusqlite::params![link_id, session_id, now, reason],
         )?;

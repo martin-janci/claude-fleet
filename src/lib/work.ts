@@ -196,14 +196,50 @@ function guards(opts: WorkDecisionGuards): Record<string, unknown> {
 export function linkSessionWork(
   sessionId: number,
   ref: WorkRef,
-  opts: { forceCrossOrg?: boolean } & WorkDecisionGuards = {},
+  opts: { forceCrossOrg?: boolean; ackLive?: boolean } & WorkDecisionGuards = {},
 ): Promise<Result<SessionRow>> {
   return decide('link_session_work', {
     session_id: sessionId,
     ...ref,
     ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+    ...(opts.ackLive !== undefined ? { ack_live: opts.ackLive } : {}),
     ...guards(opts),
   });
+}
+
+/** Task → session P-2: move the session from the work of its live link
+ *  `fromLinkId` to `ref` in one step. The old link ends (its conversation
+ *  stays Continue-able on the old task) and `ref` becomes the primary; a
+ *  compare-and-set on the primary the person saw (`expectedPrimary`). */
+export function switchSessionWork(
+  sessionId: number,
+  fromLinkId: number,
+  ref: WorkRef,
+  opts: { expectedPrimary?: number; ackLive?: boolean; forceCrossOrg?: boolean } = {},
+): Promise<Result<SessionRow>> {
+  return decide('switch_session_work', {
+    session_id: sessionId,
+    link_id: fromLinkId,
+    ...ref,
+    ...(opts.expectedPrimary !== undefined ? { expected_primary: opts.expectedPrimary } : {}),
+    ...(opts.ackLive !== undefined ? { ack_live: opts.ackLive } : {}),
+    ...(opts.forceCrossOrg ? { force_cross_org: true } : {}),
+  });
+}
+
+/** One other live session on the task a link or switch named (P-3). Its
+ *  id only when this client may see it. */
+export interface LiveElsewhere {
+  session_id?: number;
+  message: string;
+}
+
+/** The P-3 refusal (`ack_live: false`): the task's other live sessions, or
+ *  null for any other error. */
+export function liveElsewhereOf(e: { code: string; details?: unknown }): LiveElsewhere[] | null {
+  const d = e.details as { live_elsewhere?: unknown } | undefined;
+  if (e.code !== 'E_EXISTS' || !Array.isArray(d?.live_elsewhere)) return null;
+  return (d.live_elsewhere as LiveElsewhere[]).filter((l) => typeof l?.message === 'string');
 }
 
 /** Work graph M5: the refusal to link work of one org to a session of

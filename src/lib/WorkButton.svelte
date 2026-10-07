@@ -5,7 +5,9 @@
   // preview first: a clean one starts at once, anything else (a repository
   // or host to pick, a live session, another organisation, a done task)
   // opens the start popover. ▾ always offers Start new…, the past sessions
-  // to continue, and Copy key. Alt-click on Start opens the popover too.
+  // to continue, Attach running session… (J3: the attach picker, with Undo
+  // for ten seconds after) and Copy key. Alt-click on Start opens the
+  // popover too.
   import { onDestroy, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions, type SessionRow } from './sessions';
@@ -18,6 +20,9 @@
   import { copyText } from './clipboard';
   import { startWork } from './trackers';
   import StartPopover from './StartPopover.svelte';
+  import AttachPicker from './AttachPicker.svelte';
+  import { operatorRow } from './operator';
+  import type { AttachTarget, Attached } from './attach';
   import {
     PRIMARY_LABEL,
     baseStartArgs,
@@ -57,11 +62,61 @@
   let error = $state<string | null>(null);
   let menuOpen = $state(false);
   let popover = $state<StartPreview | null>(null);
+  let attaching = $state(false);
+  /** The last attach, undoable for a while (spec §2.4). */
+  let undo = $state<{ text: string; run: Attached['undo'] } | null>(null);
+  let undoTimer: ReturnType<typeof setTimeout> | undefined;
+  const UNDO_MS = 10_000;
   let popPos = $state({ top: 0, left: 0 });
   let root: HTMLElement | undefined = $state();
   let mainBtn: HTMLButtonElement | undefined = $state();
 
   const base = $derived(baseStartArgs(task));
+  const attachTarget = $derived<AttachTarget | null>(
+    task.item_id != null || task.key
+      ? {
+          ref: task.item_id != null ? { item_id: task.item_id } : { key: task.key ?? '' },
+          key: task.key,
+          linkedSessionIds: new Set(grouped.active.map((l) => l.session_id).filter((id): id is number => id != null)),
+          operatorId: $operatorRow?.id ?? null,
+          projectIds: new Set(
+            [task.project_id, ...(task.sessions ?? []).map((l) => $sessions.find((r) => r.id === l.session_id)?.project_id)].filter(
+              (id): id is number => id != null,
+            ),
+          ),
+        }
+      : null,
+  );
+  const attachBlocked = $derived(hubActionBlocked('link_session_work', $hubStatus, $hubConnection));
+
+  async function openAttach() {
+    menuOpen = false;
+    popover = null;
+    place();
+    attaching = true;
+    await tick();
+  }
+
+  function attached(a: Attached, how: string) {
+    attaching = false;
+    error = null;
+    clearTimeout(undoTimer);
+    undo = { text: how, run: a.undo };
+    undoTimer = setTimeout(() => (undo = null), UNDO_MS);
+    mainBtn?.focus();
+  }
+
+  async function runUndo() {
+    const u = undo;
+    if (!u?.run || busy) return;
+    clearTimeout(undoTimer);
+    busy = true;
+    const r = await u.run();
+    busy = false;
+    undo = null;
+    if (!r.ok) error = `Undo: ${readErrorText(r.error)}`;
+  }
+  onDestroy(() => clearTimeout(undoTimer));
   const heading = $derived(`Start ${task.key ?? ''}${task.title ? ` · ${task.title}` : ''}`.trim());
 
   function started(row: SessionRow) {
@@ -155,13 +210,14 @@
   }
 
   $effect(() => {
-    if (!menuOpen && !popover) return;
+    if (!menuOpen && !popover && !attaching) return;
     const away = (e: MouseEvent) => {
       const t = e.target as Node;
       if (root?.contains(t)) return;
-      if ((t as Element).closest?.('[data-testid="start-popover"]')) return;
+      if ((t as Element).closest?.('[data-testid="start-popover"], [data-testid="attach-picker"]')) return;
       menuOpen = false;
       popover = null;
+      attaching = false;
     };
     document.addEventListener('mousedown', away);
     return () => document.removeEventListener('mousedown', away);
@@ -227,6 +283,16 @@
           }}>Continue {l.name ?? `session ${l.link_id}`}</button
         >
       {/each}
+      {#if attachTarget}
+        <button
+          type="button"
+          role="menuitem"
+          data-testid="work-button-attach"
+          disabled={attachBlocked !== null}
+          title={attachBlocked ?? 'Put a session that is already running on this task'}
+          onclick={() => void openAttach()}>Attach running session…</button
+        >
+      {/if}
       {#if task.key}
         <button
           type="button"
@@ -241,7 +307,27 @@
     </span>
   {/if}
   {#if error}<span class="err" role="alert" data-testid="work-button-error">{error}</span>{/if}
+  {#if undo}
+    <span class="undo" role="status" data-testid="work-button-undo-notice"
+      >{undo.text}{#if undo.run}
+        <button class="btn btn--quiet" type="button" data-testid="work-button-undo" disabled={busy} onclick={() => void runUndo()}>Undo</button>{/if}</span
+    >
+  {/if}
 </span>
+
+{#if attaching && attachTarget}
+  <div class="pop-anchor" style:top="{popPos.top}px" style:left="{popPos.left}px">
+    <AttachPicker
+      target={attachTarget}
+      heading={`Attach a running session to ${task.key ?? task.title ?? 'this task'}`}
+      onclose={(refocus) => {
+        attaching = false;
+        if (refocus) mainBtn?.focus();
+      }}
+      onattached={attached}
+    />
+  </div>
+{/if}
 
 {#if popover}
   <div class="pop-anchor" style:top="{popPos.top}px" style:left="{popPos.left}px">
@@ -312,6 +398,13 @@
     color: var(--usage-crit, #c62828);
     font-size: 11px;
     text-align: right;
+  }
+  .undo {
+    display: inline-flex;
+    gap: 4px;
+    align-items: baseline;
+    color: var(--fg-muted);
+    font-size: 11px;
   }
   .pop-anchor {
     position: fixed;

@@ -124,7 +124,7 @@ describe('SessionTasks', () => {
     expect(calls('unlink_session_work')[0]).toEqual({ session_id: 7, link_id: 43, expected_version: 1 });
   });
 
-  it('Add task… searches tickets and links one without taking the primary', async () => {
+  it('Work on task… searches tickets and own tasks and links one without taking the primary', async () => {
     handlers.work_tickets = () => [{ id: 15, key: 'ABC-15', title: 'Audit log', source: 'tracker', status_category: 'todo', created_at: 1, updated_at: 1 }];
     handlers.link_session_work = () => row;
     render(SessionTasks, { session: row });
@@ -133,10 +133,10 @@ describe('SessionTasks', () => {
     await fireEvent.input(screen.getByTestId('session-tasks-query'), { target: { value: 'audit' } });
     await new Promise((r) => setTimeout(r, 300));
     await flush();
-    expect(calls('work_tickets')[0]).toEqual({ query: 'audit', limit: 10 });
+    expect(calls('work_tickets')[0]).toEqual({ query: 'audit', limit: 10, include_local: true });
     await fireEvent.click(screen.getByTestId('session-tasks-result'));
     await flush();
-    expect(calls('link_session_work')[0]).toEqual({ session_id: 7, item_id: 15, primary: false });
+    expect(calls('link_session_work')[0]).toEqual({ session_id: 7, item_id: 15, primary: false, ack_live: false });
     expect(screen.getByTestId('session-tasks-notice').textContent).toBe('Added ABC-15');
   });
 
@@ -161,9 +161,38 @@ describe('SessionTasks', () => {
     await fireEvent.click(screen.getByTestId('session-tasks-force'));
     await flush();
     expect(calls('link_session_work')).toEqual([
-      { session_id: 7, key: 'OPS-1', primary: true },
-      { session_id: 7, key: 'OPS-1', force_cross_org: true, primary: true },
+      { session_id: 7, key: 'OPS-1', primary: true, ack_live: false },
+      { session_id: 7, key: 'OPS-1', force_cross_org: true, primary: true, ack_live: false },
     ]);
+  });
+
+  it('a task already open elsewhere is said first; Attach anyway sends it acknowledged', async () => {
+    let asked = 0;
+    handlers.link_session_work = (a) => {
+      asked++;
+      if (!a.ack_live) {
+        throw {
+          code: 'E_EXISTS',
+          message: 'live elsewhere',
+          details: { live_elsewhere: [{ session_id: 99, message: 'Already open in pay-api--x on oci.' }] },
+        };
+      }
+      return row;
+    };
+    render(SessionTasks, { session: row });
+    await flush();
+    await fireEvent.click(screen.getByTestId('session-tasks-add'));
+    await fireEvent.input(screen.getByTestId('session-tasks-query'), { target: { value: 'PAY-150' } });
+    await fireEvent.click(screen.getByTestId('session-tasks-add-key'));
+    await flush();
+    expect(screen.getByTestId('session-tasks-live-elsewhere').textContent).toContain('Already open in pay-api--x on oci.');
+    expect(screen.queryByTestId('session-tasks-notice')).toBeNull();
+    await fireEvent.click(screen.getByTestId('session-tasks-attach-anyway'));
+    await flush();
+    expect(asked).toBe(2);
+    expect(calls('link_session_work')[1]).toEqual({ session_id: 7, key: 'PAY-150', primary: false, ack_live: true });
+    expect(screen.queryByTestId('session-tasks-live-elsewhere')).toBeNull();
+    expect(screen.getByTestId('session-tasks-notice').textContent).toBe('Added PAY-150');
   });
 
   it('"Show in Work view" switches the sidebar and opens the task', async () => {

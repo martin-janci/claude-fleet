@@ -87,7 +87,7 @@ Each primitive is built once and called by the desktop, the phone, the operator 
 
 The commit is the existing `start_work`, given the chosen values explicitly. A hub older than this falls back to a direct start, and its `E_AMBIGUOUS` candidates fill the same popover.
 
-**P-2. Switch: `work_link { action: switch, session_id, from, to, expected_primary }`** (desktop: `switch_session_work`). A single compare-and-set that:
+**P-2. Switch: `work_link { action: switch, session_id, link_id, key | item_id, expected_primary }`** (desktop: `switch_session_work`; `link_id` is *from*, the key or item *to*, as `link` names a target). A single compare-and-set that:
 - ends the old link, keeping its snapshot;
 - makes the new task primary.
 
@@ -497,7 +497,7 @@ W2 d Telemetry       ⚠ Needs you: same error ×2 "pnpm: ENOSPC"  [Retry][Skip]
 
 | Migration | Contents | Phase |
 |---|---|---|
-| `NNN_link_conversation_stamps` | `work_links.began_claude_id`, `ended_claude_id` (P-7) | A2 |
+| ~~`NNN_link_conversation_stamps`~~ | Not needed (A2): `work_links.claude_session_id` is the begin stamp, the switched link's windowed snapshot ends at the end stamp (P-7) | A2 |
 | `NNN_conversation_threads` | `conversation_threads`, `thread_conversations` (§3.3); `thread_id` on handover and inbox rows | B1 |
 | `NNN_work_plans` | `work_plans` (state brainstorm\|proposed\|accepted\|running\|paused\|done\|abandoned, stage, body, version, level, author); `work_items.plan_id`, `done_when` (JSON), `size`, `host_hint`, `touches`; `work_item_deps` | C1–C2 |
 | `NNN_run_grants` | `run_grants` (plan, granted_by, level, item_ids, hosts, project_ids, budgets, `expires_at`, `suspended_at`, `revoked_at`); `task_attempts` (task, attempt, grant, reason); `orgs.max_autonomy`. **No `tasks.item_id`**: `work_items.task_id` already links them | C4–C5 |
@@ -543,7 +543,7 @@ The order follows the owner's stated pain first: *"chýba mi to hlavne na deskto
 |---|---|---|---|
 | **A0** | Fix now | **Done 2026-10-06.** The operator may not accept or reject proposals (gap 9). The operator is excluded from detection and the classification nudge (gap 12). | 1 |
 | **A1** | Start preview + Work button | **Done 2026-10-06.** P-1 (`work_link { preview_start }`, `preview_start_work`), P-8 (`parallel`), the Work split button in TaskList (Open / Continue / Start, ▾ Start new… / Continue ‹session› / Copy key, `j`/`k`/`s`/⇧S) and the start popover (repo, host, branch, brief preview, conflicts with their choices), the task page's Start new through the same preview, the brief on by default for tickets, J1/J2/J5/J6. **Left for later:** the task page keeps its own Open / Continue buttons (their share gating is pinned by `resume_gates.test.ts`); *Remember for this task* (no write path for a native item's project yet); the dirty-checkout probe (`checkout.dirty`, A3); "Accept & start" as the row's label (proposals are not listed rows; the popover offers it). | 1 |
-| **A2** | Attach and switch | P-2, P-3, P-4, **P-7 link windows**, J3/J4, the attach picker, Undo | 1 |
+| **A2** | Attach and switch | **Done 2026-10-06.** P-2 (`work_link { switch }`, `switch_session_work`), P-3 (`ack_live` on `link` / `switch`, opt-in so older clients link as before), P-4 (`work { tickets, include_local }`, used by Work on task…), P-7 link windows, J3 (▾ *Attach running session…* in the Work button: the attach picker, Switch / Add with the mid-turn and branch-named defaults, Undo for 10 s) and J4 (the session's *Work on task…* with the live-elsewhere line). **Changed at implementation:** P-7 needs no migration. `began_claude_id` is `work_links.claude_session_id`, already stamped at the decision, and `ended_claude_id` is the last id of the switched link's windowed snapshot; the journal window is derived from the `switched` ends around a link, so a link no switch touched reads exactly as before (linking a session after the work still files that work under the task). **Left for later:** the new task's brief waiting for the next prompt (J3); own tasks in ⌘K (its ⌘⏎ starts by key, gap 8); Undo after an *Add* (the primary does not move; Remove in the session's Tasks undoes it). | 1 |
 | **C0** | Brainstorm skill | `fleet-brainstorm` in the operator's directory; the plan goes to the root task's notes and journal. No new tables. **The owner asked that this not be forgotten, so it comes early.** | 3 / 4 |
 | **A3** | Polish | P-5 progress strip, P-6 Cancel start, J7 multi-repo in the popover, empty states | 1 |
 | **A4** | Phone parity | Own tasks on the phone (create, list, subtasks), the by-key start bug, the same Work menu | 1 |

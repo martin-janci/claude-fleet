@@ -4,8 +4,10 @@
   // suggested, past and rejected — each with its why. A session can work on
   // several tasks; "Make primary" moves which one groups it (a
   // compare-and-set, so two devices cannot silently overwrite each other),
-  // "Remove" unlinks one, "Add task…" links another without taking the
-  // primary, and "Show in Work view" opens the task there. A write that lost
+  // "Remove" unlinks one, "Work on task…" links another (a ticket or an own
+  // task) without taking the primary, saying first when that task is already
+  // open in another session (task → session J4), and "Show in Work view"
+  // opens the task there. A write that lost
   // a race (`E_CONFLICT`) reloads and says so.
   import { onDestroy } from 'svelte';
   import type { SessionRow } from './sessions';
@@ -13,11 +15,16 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { sessionBlocked } from './share';
   import { hubConnection } from './hub_connection';
+  import { get } from 'svelte/store';
+  import { sessions } from './sessions';
+  import { selectSessionExplicitly } from './selection';
   import {
     confirmSessionWork,
     crossOrgOf,
     crossOrgSentence,
     linkSessionWork,
+    liveElsewhereOf,
+    type LiveElsewhere,
     rejectWorkLink,
     unlinkSessionWork,
     type WorkRef,
@@ -184,11 +191,19 @@
   let results = $state<TicketRow[]>([]);
   let searching = $state(false);
   let crossOrg = $state<{ ref: WorkRef; label: string; sentence: string } | null>(null);
+  /** P-3: the task is already open elsewhere; the person decides. */
+  let liveElsewhere = $state<{ ref: WorkRef; label: string; force: boolean; live: LiveElsewhere[] } | null>(null);
+
+  function openSession(id: number) {
+    const r = get(sessions).find((x) => x.id === id);
+    if (r) selectSessionExplicitly(r);
+  }
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
   function onQuery(v: string) {
     query = v;
     crossOrg = null;
+    liveElsewhere = null;
     clearTimeout(searchTimer);
     const q = v.trim();
     if (q.length < 2) {
@@ -197,7 +212,8 @@
     }
     searchTimer = setTimeout(async () => {
       searching = true;
-      const r = await workTickets({ query: q, limit: 10 });
+      // Own tasks too (P-4): "Work on task…" finds TASK-n beside the tickets.
+      const r = await workTickets({ query: q, limit: 10, include_local: true });
       searching = false;
       if (query.trim() === q) results = r.ok && Array.isArray(r.value) ? r.value : [];
     }, 250);
@@ -209,13 +225,16 @@
 
   // A second task never takes the primary; the first one (a session with no
   // primary) does, so the session is not left with work and no primary.
-  async function add(ref: WorkRef, label: string, force = false) {
-    // The Add task… panel's entrance is gated; the panel is not, and it stays
-    // open across a narrowing. Re-asked here (multi-user M1, F2b).
+  // The first try asks to be warned when the task is already open in another
+  // session (P-3, J4); "Attach anyway" sends it again acknowledged. An older
+  // hub ignores the flag and links at once, as it always did.
+  async function add(ref: WorkRef, label: string, force = false, ackLive = false) {
+    // The Work on task… panel's entrance is gated; the panel is not, and it
+    // stays open across a narrowing. Re-asked here (multi-user M1, F2b).
     if (busy || linkBlocked !== null) return;
     busy = true;
     notice = null;
-    const r = await linkSessionWork(session.id, ref, { primary: primaryId == null, forceCrossOrg: force });
+    const r = await linkSessionWork(session.id, ref, { primary: primaryId == null, forceCrossOrg: force, ackLive });
     busy = false;
     if (!r.ok) {
       const c = crossOrgOf(r.error as IpcError);
@@ -223,9 +242,15 @@
         crossOrg = { ref, label, sentence: crossOrgSentence(label, c, orgName) };
         return;
       }
-      notice = `Add task: ${r.error.message}`;
+      const live = liveElsewhereOf(r.error as IpcError);
+      if (live && live.length > 0 && !ackLive) {
+        liveElsewhere = { ref, label, force, live };
+        return;
+      }
+      notice = `Work on task: ${r.error.message}`;
       return;
     }
+    liveElsewhere = null;
     crossOrg = null;
     adding = false;
     query = '';
@@ -293,7 +318,8 @@
         onclick={() => {
           adding = !adding;
           crossOrg = null;
-        }}>Add task…</button
+          liveElsewhere = null;
+        }}>Work on task…</button
       >
     </h3>
     {#if notice}
@@ -305,7 +331,7 @@
       <div class="add-panel" data-testid="session-tasks-add-panel">
         <input
           type="search"
-          placeholder="Search tickets, or type a key"
+          placeholder="Search tasks and tickets, or type a key"
           aria-label="Task to add"
           data-testid="session-tasks-query"
           value={query}
@@ -329,6 +355,35 @@
             disabled={busy}
             onclick={() => void add({ key: query.trim() }, query.trim())}>Link “{query.trim()}”</button
           >
+        {/if}
+        {#if liveElsewhere}
+          {@const le = liveElsewhere}
+          <div class="live-elsewhere" role="alert" data-testid="session-tasks-live-elsewhere">
+            <p class="warn">{le.label}: {le.live.map((l) => l.message).join(' ')}</p>
+            <span class="choices">
+              <button
+                class="btn"
+                type="button"
+                data-testid="session-tasks-attach-anyway"
+                disabled={busy}
+                onclick={() => void add(le.ref, le.label, le.force, true)}>Attach anyway</button
+              >
+              {#each le.live.filter((l) => l.session_id != null && $sessions.some((r) => r.id === l.session_id)).slice(0, 1) as l (l.session_id)}
+                <button
+                  class="btn btn--quiet"
+                  type="button"
+                  data-testid="session-tasks-open-other"
+                  onclick={() => l.session_id != null && openSession(l.session_id)}>Open that one</button
+                >
+              {/each}
+              <button
+                class="btn btn--quiet"
+                type="button"
+                data-testid="session-tasks-live-cancel"
+                onclick={() => (liveElsewhere = null)}>Cancel</button
+              >
+            </span>
+          </div>
         {/if}
         {#if crossOrg}
           <p class="warn" role="alert" data-testid="session-tasks-cross-org">{crossOrg.sentence}</p>
@@ -447,6 +502,14 @@
   }
   .result {
     text-align: left;
+  }
+  .live-elsewhere p {
+    margin: 0 0 0.2rem;
+  }
+  .choices {
+    display: flex;
+    gap: 0.2rem;
+    flex-wrap: wrap;
   }
   .notice {
     margin: 0 0 0.3rem;

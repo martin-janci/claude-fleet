@@ -345,6 +345,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("work_views", Verdict::Routed { tool: "work" }),
     ("work_org_impact", Verdict::Routed { tool: "work" }),
     ("set_primary_work", Verdict::Routed { tool: "work_link" }),
+    ("switch_session_work", Verdict::Routed { tool: "work_link" }),
     (
         "reconsider_work_link",
         Verdict::Routed { tool: "work_link" },

@@ -1588,6 +1588,17 @@ fn calls_org_only_session_predicate(line: &str) -> bool {
 /// not a reason to delete an org call without reading what each one guards.
 const ORG_HALF_SITES: &[OrgHalf] = &[
     OrgHalf {
+        file: "crates/fleet-core/src/service/work/mod.rs",
+        func: "check_live_elsewhere",
+        nth: 0,
+        code: "if !view.org.sees_row_org_only(&row) {",
+        person_half: "`sees_session_row`, on the next line: the org half \
+                      decides whether another live session counts (P-3 warns \
+                      even about one the caller may not see), the person half \
+                      whether it is named; an unseen one is said as \
+                      \"Someone is already working on this.\"",
+    },
+    OrgHalf {
         file: "crates/fleet-core/src/service/view_scope.rs",
         func: "sees_session_facts",
         nth: 0,
