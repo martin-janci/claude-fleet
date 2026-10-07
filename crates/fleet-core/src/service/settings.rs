@@ -292,9 +292,9 @@ pub const HEALTH_CLAUDE_MAX_BEHIND: &str = "health.claude_max_behind";
 /// Seconds without an accepted hook from a reachable host that has a live
 /// session before it reads as `hooks_silent` (hosts F9). Default 1 h.
 pub const HEALTH_HOOKS_SILENT_SECS: &str = "health.hooks_silent_secs";
-/// Write fleet's two skill dirs even when `~/.claude/skills` is inside a
-/// git work tree (a dotfiles checkout, hosts F2). Off: provisioning
-/// refuses such a host with `E_INVALID` (decision B-2).
+/// Write fleet's two skill dirs even when a git work tree (a dotfiles
+/// checkout, hosts F2) tracks files in them. Off: provisioning refuses such
+/// a host with `E_INVALID` (decision B-2); untracked or ignored dirs pass.
 pub const PROVISION_FORCE_GIT_TREE: &str = "provision.force_git_tree";
 /// Install fleet's `ag` launcher on every provisioned host (F2): the
 /// embedded tools/ag tree into ~/.local/share/ag and a `cl` command
@@ -963,7 +963,7 @@ pub const SPECS: &[Spec] = &[
         "false",
         Kind::Bool,
         "Provision into git-tracked skills",
-        "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
+        "Write fleet's skills even when a git work tree on the host, such as a dotfiles checkout, tracks files in fleet's two skill dirs. Off: provisioning refuses such a host; untracking or ignoring those two dirs is enough.",
     )
     .danger("Fleet will write its skills into a folder another git repository tracks.")
     .tags(&[Tag::Advanced]),
