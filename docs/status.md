@@ -232,7 +232,7 @@ Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
-a brainstorming draft with open decisions TS1–TS14): A0, A1 and A2 are landed.
+recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed.
 The operator never accepts or rejects a proposal and is never a detection
 or classification-nudge subject (`operator::is_operator_session`,
 `detect::subject_state`). `work_link { preview_start }`
@@ -254,6 +254,14 @@ switches around it, and a link no switch touched reads as before. The
 desktop's attach picker (`AttachPicker.svelte`, `attach.ts`) and Work on
 task… (`SessionTasks.svelte`) read them. Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
+C0: the operator is born with the `fleet-brainstorm` skill
+(`skills/fleet-brainstorm/SKILL.md`, written to its directory's
+`.claude/skills/` by `operator::operator_files`, so no catalog sync is
+needed): Diverge → Converge → Decide → Plan, each stage closed by the
+person; the plan becomes a task (`work_link create`, the plan in `notes`)
+with proposed subtasks a person accepts. An operator born before C0 gets
+it at its next birth. Not yet: plan rows, decision rows, the worker
+catalog copy (C1).
 
 Orchestration projects (spec
 `docs/superpowers/specs/2026-10-07-autonomous-orchestration-projects-design.md`,
