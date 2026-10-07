@@ -1,0 +1,58 @@
+{
+  "_about": "Shared answer cases for fleet.form/1. Rust (forms_tests.rs) and TS (form_model.test.ts) must agree exactly.",
+  "spec": {
+    "spec": "fleet.form/1", "title": "New project",
+    "steps": [
+      { "title": "Basics", "fields": [
+        { "name": "name", "type": "text", "label": "Name", "required": true, "max_len": 10 },
+        { "name": "kind", "type": "select", "label": "Kind", "options": [["web", "Web app"], ["cli", "CLI"]] },
+        { "name": "tags", "type": "multiselect", "label": "Tags", "options": [["a", "A"], ["b", "B"], ["c", "C"]] },
+        { "name": "port", "type": "number", "label": "Port", "integer": true, "min": 1, "max": 65535 },
+        { "name": "db", "type": "bool", "label": "Database" },
+        { "name": "agree", "type": "bool", "label": "I agree", "required": true } ] },
+      { "title": "Database", "when": { "field": "db", "truthy": true }, "fields": [
+        { "name": "engine", "type": "select", "label": "Engine", "required": true, "options": [["pg", "Postgres"], ["sqlite", "SQLite"]] },
+        { "name": "db_pass", "type": "secret", "label": "Password", "when": { "field": "engine", "eq": "pg" } } ] }
+    ]
+  },
+  "cases": [
+    {
+      "name": "everything filled, the database step shown",
+      "values": { "name": "my-app", "kind": "web", "tags": ["c", "a"], "port": 8080, "db": true, "agree": true, "engine": "pg", "db_pass": "s3cret" },
+      "answers": { "name": "my-app", "kind": "web", "tags": ["a", "c"], "port": 8080, "db": true, "agree": true, "engine": "pg" },
+      "secrets": ["db_pass"]
+    },
+    {
+      "name": "the database step hidden drops its values",
+      "values": { "name": "x", "db": false, "agree": true, "engine": "pg", "db_pass": "s3cret" },
+      "answers": { "name": "x", "db": false, "agree": true },
+      "secrets": []
+    },
+    {
+      "name": "a blank required text and an unticked consent",
+      "values": { "name": "   ", "agree": false },
+      "problems": [ { "field": "name", "problem": "is required" }, { "field": "agree", "problem": "is required" } ]
+    },
+    {
+      "name": "wrong shapes and bounds",
+      "values": { "name": "far too long a name", "kind": "tui", "tags": ["a", "z"], "port": 80.5, "db": "yes", "agree": true },
+      "problems": [
+        { "field": "name", "problem": "is longer than 10 characters" },
+        { "field": "kind", "problem": "must be one of the options" },
+        { "field": "tags", "problem": "must be a list of the options" },
+        { "field": "port", "problem": "must be a whole number" },
+        { "field": "db", "problem": "must be on or off" }
+      ]
+    },
+    {
+      "name": "a number under its minimum, and a field the form does not have",
+      "values": { "name": "x", "port": 0, "agree": true, "colour": "red" },
+      "problems": [ { "field": "port", "problem": "must be at least 1" }, { "field": "colour", "problem": "is not a field of this form" } ]
+    },
+    {
+      "name": "the database step shown but its required select empty",
+      "values": { "name": "x", "db": true, "agree": true },
+      "problems": [ { "field": "engine", "problem": "is required" } ]
+    }
+  ]
+}

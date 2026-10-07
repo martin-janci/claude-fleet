@@ -1,0 +1,75 @@
+{
+  "_about": "Shared fleet.form/1 cases. crates/fleet-core/src/pages/forms_tests.rs runs every case; problems are exact strings.",
+  "cases": [
+    {
+      "name": "the spec's own example",
+      "spec": {
+        "spec": "fleet.form/1", "title": "New project", "submit": "Create",
+        "steps": [
+          { "title": "Basics", "fields": [
+            { "name": "name", "type": "text", "label": "Name", "required": true, "placeholder": "my-app" },
+            { "name": "kind", "type": "select", "label": "Kind", "options": [["web", "Web app"], ["cli", "CLI"]] },
+            { "name": "db", "type": "bool", "label": "Needs a database", "value": false } ] },
+          { "title": "Database", "when": { "field": "db", "truthy": true }, "fields": [
+            { "name": "engine", "type": "select", "label": "Engine", "options": [["pg", "Postgres"], ["sqlite", "SQLite"]] },
+            { "name": "db_pass", "type": "secret", "label": "Password" } ] } ] },
+      "problems": []
+    },
+    {
+      "name": "a condition on a later field",
+      "spec": { "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "A", "when": { "field": "b", "truthy": true }, "fields": [ { "name": "a", "type": "text", "label": "A" } ] },
+        { "title": "B", "fields": [ { "name": "b", "type": "bool", "label": "B" } ] } ] },
+      "problems": ["step 1 › when: `b` is not an earlier field"]
+    },
+    {
+      "name": "a condition reading a secret",
+      "spec": { "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "A", "fields": [
+          { "name": "pw", "type": "secret", "label": "Password" },
+          { "name": "x", "type": "text", "label": "X", "when": { "field": "pw", "eq": "hunter2" } } ] } ] },
+      "problems": ["step 1 › field 2 (x) › when: `pw` is a secret; a condition cannot read it"]
+    },
+    {
+      "name": "a secret with a default",
+      "spec": { "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "A", "fields": [ { "name": "pw", "type": "secret", "label": "Password", "value": "x" } ] } ] },
+      "problems": ["step 1 › field 1 (pw): a secret has no default value"]
+    },
+    {
+      "name": "options on a text field, duplicate name, bad name",
+      "spec": { "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "A", "fields": [
+          { "name": "a", "type": "text", "label": "A", "options": [["x", "X"]] },
+          { "name": "a", "type": "bool", "label": "Again" },
+          { "name": "Bad-Name", "type": "bool", "label": "B" } ] } ] },
+      "problems": [
+        "step 1 › field 1 (a): `options` is not for a text field",
+        "step 1 › field 2 (a): another field has this name",
+        "step 1 › field 3 (Bad-Name): a name is lowercase letters, digits and _, starting with a letter, at most 40 characters"
+      ]
+    },
+    {
+      "name": "two steps with one title, a select without options, truthy on text",
+      "spec": { "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "Same", "fields": [ { "name": "a", "type": "text", "label": "A" } ] },
+        { "title": "Same", "when": { "field": "a", "truthy": true }, "fields": [ { "name": "s", "type": "select", "label": "S" } ] } ] },
+      "problems": [
+        "step 2: another step has this title",
+        "step 2 › when: `a`: truthy is for on/off fields; use eq or in",
+        "step 2 › field 1 (s): a select field needs 1 to 50 options"
+      ]
+    },
+    {
+      "name": "the wrong version and an empty form",
+      "spec": { "spec": "fleet.page/1", "title": "T", "steps": [] },
+      "problems": ["spec must be \"fleet.form/1\"", "a form has 1 to 12 steps"]
+    },
+    {
+      "name": "a default outside the bounds",
+      "spec": { "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "A", "fields": [ { "name": "n", "type": "number", "label": "N", "min": 1, "max": 5, "value": 9 } ] } ] },
+      "problems": ["step 1 › field 1 (n): the default must be at most 5"]
+    }
+  ]
+}

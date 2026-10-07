@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FormSpec",
+  "type": "object",
+  "properties": {
+    "intro": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "spec": {
+      "description": "Always \"fleet.form/1\".",
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FormStep"
+      }
+    },
+    "submit": {
+      "description": "The last step's button. Default \"Submit\".",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "spec",
+    "title",
+    "steps"
+  ],
+  "$defs": {
+    "FieldCondition": {
+      "description": "When a step or a field is asked. Exactly one form: `{field, eq}`,\n`{field, in}`, `{field, truthy}`, `{all}`, `{any}` or `{not}`. `field`\nnames an EARLIER field, never a secret.",
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/FieldCondition"
+          }
+        },
+        "any": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/FieldCondition"
+          }
+        },
+        "eq": true,
+        "field": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "in": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": true
+        },
+        "not": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truthy": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "FieldType": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "text",
+            "textarea",
+            "number",
+            "bool",
+            "select",
+            "multiselect"
+          ]
+        },
+        {
+          "description": "Written to a 0600 file on the session's host; the agent gets the path.",
+          "type": "string",
+          "const": "secret"
+        }
+      ]
+    },
+    "FormField": {
+      "description": "One field. Flat, like a page `Condition`: which keys a type may carry is\nthe validator's to say, not serde's.",
+      "type": "object",
+      "properties": {
+        "help": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "integer": {
+          "description": "number: whole numbers only.",
+          "type": "boolean"
+        },
+        "label": {
+          "type": "string"
+        },
+        "max": {
+          "description": "number.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "max_len": {
+          "description": "text (default 500, ≤ 2000), textarea (default 5000, ≤ 20000).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "min": {
+          "description": "number.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "name": {
+          "type": "string"
+        },
+        "options": {
+          "description": "select, multiselect: `[value, label]` pairs.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "array",
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "placeholder": {
+          "description": "text, textarea.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "type": {
+          "$ref": "#/$defs/FieldType"
+        },
+        "value": {
+          "description": "The default. Never on a secret."
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "type",
+        "label"
+      ]
+    },
+    "FormStep": {
+      "type": "object",
+      "properties": {
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/FormField"
+          }
+        },
+        "intro": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "when": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldCondition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "title",
+        "fields"
+      ]
+    }
+  }
+}
