@@ -587,18 +587,42 @@ impl Store {
             rusqlite::params![id, now],
         )?;
         // Its sprints and releases become unassigned like its hosts. One
-        // whose name an unassigned bucket of the same kind already has keeps
-        // its id as a suffix: the FK's SET NULL alone would hit the name
-        // index and refuse the whole delete.
-        tx.execute(
-            "UPDATE work_buckets SET org_id = NULL, \
-               name = CASE WHEN EXISTS(SELECT 1 FROM work_buckets u \
-                 WHERE u.org_id IS NULL AND u.kind = work_buckets.kind AND u.name = work_buckets.name) \
-               THEN substr(name, 1, ?2 - length(' (#' || id || ')')) || ' (#' || id || ')' \
-               ELSE name END \
-             WHERE org_id = ?1",
-            rusqlite::params![id, super::work_buckets::BUCKET_NAME_MAX_CHARS as i64],
-        )?;
+        // whose name an unassigned bucket of the same kind already has gets
+        // a free ` (#id)` / ` (#id-n)` suffix within the name cap: the FK's
+        // SET NULL alone would hit the name index and refuse the whole delete.
+        let buckets: Vec<(i64, String, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT id, kind, name FROM work_buckets WHERE org_id = ?1")?;
+            let rows = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let taken = |kind: &str, name: &str| -> rusqlite::Result<bool> {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM work_buckets \
+                 WHERE org_id IS NULL AND kind = ?1 AND name = ?2)",
+                rusqlite::params![kind, name],
+                |r| r.get(0),
+            )
+        };
+        for (bid, kind, name) in buckets {
+            let mut free = name.clone();
+            let mut n = 1;
+            while taken(&kind, &free)? {
+                let suffix = if n == 1 {
+                    format!(" (#{bid})")
+                } else {
+                    format!(" (#{bid}-{n})")
+                };
+                let keep = super::work_buckets::BUCKET_NAME_MAX_CHARS
+                    .saturating_sub(suffix.chars().count());
+                free = name.chars().take(keep).collect::<String>() + &suffix;
+                n += 1;
+            }
+            tx.execute(
+                "UPDATE work_buckets SET org_id = NULL, name = ?2 WHERE id = ?1",
+                rusqlite::params![bid, free],
+            )?;
+        }
         let removed = tx.execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])? > 0;
         tx.commit()?;
         if revoked > 0 {

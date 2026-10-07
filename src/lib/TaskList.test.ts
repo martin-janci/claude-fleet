@@ -201,7 +201,7 @@ describe('TaskList', () => {
     await fireEvent.click(screen.getByTestId('work-button-undo'));
     await flush();
     expect(calls('switch_session_work')[1][1]).toEqual({
-      args: { session_id: 60, link_id: 71, key: 'OPS-1', expected_primary: 71, ack_live: true },
+      args: { session_id: 60, link_id: 71, key: 'OPS-1', expected_primary: 71, ack_live: true, force_cross_org: true },
     });
     sessions.set([]);
   });

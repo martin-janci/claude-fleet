@@ -348,9 +348,9 @@ impl LocalSync {
                 rfiles.is_empty(),
             ),
         ] {
-            // Few files, all gone and nothing left: an unmounted volume's
+            // Every synced file gone and nothing left: an unmounted volume's
             // empty mount point, which the count alone would let through.
-            let emptied = empty && gone > 1 && gone == live_base.len();
+            let emptied = empty && gone > 0 && gone == live_base.len();
             if emptied || (gone >= MASS_DELETE_MIN && gone * 2 > live_base.len()) {
                 return Err(PassFail {
                     error: IpcError::new(

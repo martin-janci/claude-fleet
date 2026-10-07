@@ -154,6 +154,15 @@ pub fn record_run(
     tasks::start_task(s, &task)
 }
 
+/// Whether a live session is already on the item: a run then starts beside
+/// it, in its own `-N` checkout, instead of being refused with "jump to it".
+pub fn has_live_work(s: &Store, item_id: i64) -> Result<bool, IpcError> {
+    match s.get_work_item(item_id)?.and_then(|i| i.key) {
+        Some(key) => Ok(!tickets::live_work_on(s, &key, s.item_org(item_id)?)?.is_empty()),
+        None => Ok(false),
+    }
+}
+
 /// `work_link { run }` end to end over the real start path.
 pub async fn run_item(
     store: &Arc<Mutex<Store>>,
@@ -182,13 +191,7 @@ pub async fn run_item(
     // item (another role's run, a failed attempt's session that lives on,
     // a person's own) is not a reason to refuse, but a reason for this
     // attempt to get its own `-N` checkout, as a parallel start does.
-    let parallel = start.parallel || {
-        let s = lock(store.as_ref())?;
-        match s.get_work_item(item_id)?.and_then(|i| i.key) {
-            Some(key) => !tickets::live_work_on(&s, &key, s.item_org(item_id)?)?.is_empty(),
-            None => false,
-        }
-    };
+    let parallel = start.parallel || has_live_work(&*lock(store.as_ref())?, item_id)?;
     let start = StartArgs {
         item_id: Some(item_id),
         reference: None,
@@ -287,6 +290,15 @@ mod tests {
             .unwrap();
         assert_eq!(before, after);
         assert_eq!(s.get_work_item(item).unwrap().unwrap().task_id, None);
+    }
+
+    #[test]
+    fn a_run_beside_a_live_session_is_planned_parallel() {
+        let (s, worker, item) = store_with_item();
+        assert!(!has_live_work(&s, item).unwrap());
+        s.link_session_work(worker, crate::store::WorkTarget::Item(item), "manual")
+            .unwrap();
+        assert!(has_live_work(&s, item).unwrap());
     }
 
     #[test]

@@ -602,3 +602,22 @@ fn an_unassigned_name_clash_on_org_delete_stays_within_the_name_cap() {
     assert_eq!(moved.name.chars().count(), BUCKET_NAME_MAX_CHARS);
     assert!(moved.name.ends_with(&format!(" (#{})", of_a.id)));
 }
+
+#[test]
+fn an_org_delete_finds_a_free_name_when_the_suffix_is_taken_too() {
+    let s = store();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let of_a = s
+        .create_bucket(&NewBucket {
+            kind: "sprint",
+            name: "S",
+            org_id: Some(a),
+            ..Default::default()
+        })
+        .unwrap();
+    sprint(&s, "S");
+    sprint(&s, &format!("S (#{})", of_a.id));
+    assert!(s.remove_org(a).unwrap());
+    let moved = s.get_bucket(of_a.id).unwrap().unwrap();
+    assert_eq!(moved.name, format!("S (#{}-2)", of_a.id));
+}

@@ -108,6 +108,7 @@ describe('attachSession', () => {
       key: 'PAY-139',
       expected_primary: 78,
       ack_live: true,
+      force_cross_org: true,
     });
   });
 
