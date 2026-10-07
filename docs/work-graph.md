@@ -888,11 +888,45 @@ only its own: the other org's task, its title, evidence, conversation and
 summary never reach a device bound to the first org, and a device bound to
 the other org sees the task without the first org's session.
 
-Orgs are managed in Settings → Organisations on a standalone
-desktop (read-only on a paired desktop), or with `fleet-hub org …` on a
-hub. **Assign every host of a company before
+Orgs are managed in Settings → Organisations — on a paired desktop too,
+when the hub trusts it — or with `fleet-hub org …` on a hub. **Assign every host of a company before
 connecting a second company's tracker.** The details and commands are in
 [hub.md → Organisations and isolation](hub.md#organisations-and-isolation).
+
+Each org's page opens with an **Overview**: how many of its live sessions
+you can see, and how many of them need you. Under *What belongs to it* it
+lists the org's asset catalogs next to its rules, hosts and trackers.
+**Devices** lists the phones, browsers and desktops bound to it, with
+read-only and trusted marked, and binds or unbinds one. Only the hub's
+operator sees that list: the master, or the owner's own device bound to no
+org.
+
+Settings → **Company** holds the rest of the company's administration:
+**Organisations**, **Devices** (pair a phone or a browser — the page shows
+the one-time code, its link and a QR to scan — trust it, bind it to an org,
+hand it to a person, let it change a catalog, or revoke it) and **People**
+(rename, or disable someone, which revokes their devices and the shares
+made to them). On a desktop paired with a hub these change the hub's orgs,
+devices and people, and need this desktop to be trusted (`fleet-hub client
+trust <name>`); none of them can lock out the device you are using. The
+**Its own settings** on an org's page let it keep a different value of a
+few settings — the classification nudge, the summary model, how long Tidy
+up waits for an unlinked session, and its budgets — while every other
+session keeps the fleet's. The overview shows what the org's sessions cost
+today, over the last 7 days and this month (counted from the upgrade that
+added it), and a daily or monthly budget (Settings → Limits → Company
+budgets, or per org) raises an Attention item when the org reaches it;
+fleet only warns. Spend is shown only to someone who sees every session.
+**Members** puts people in the company, each as an admin (administers the
+org — its settings, members and their devices), a member (sees its work and
+what is shared with it) or a viewer (reads only). A member's devices are fenced
+to the org. An org's admin manages it from their own device; the hub's owner
+keeps the rules, the trackers, people's names and which company owns the hub.
+Share a session with your whole team from the Share sheet (*an org*): it
+reaches the people in the org now, not someone who joins later. Removing a
+member takes back what was shared with them on the org's sessions; nobody —
+no admin either — reads someone else's private session. Details:
+`docs/hub.md` → *Companies: members and roles*.
 
 ## Trackers in fleet health
 

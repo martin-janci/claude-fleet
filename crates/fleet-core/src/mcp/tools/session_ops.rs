@@ -290,6 +290,8 @@ impl FleetTools {
         )?;
         {
             let s = lock(&self.store).map_err(to_mcp_err)?;
+            crate::service::operator::refuse_operator_as_controller(&s, &host_alias, &tmux_name)
+                .map_err(to_mcp_err)?;
             s.set_controller(&host_alias, &tmux_name)
                 .map_err(|e| to_mcp_err(IpcError::from(e)))?;
         }

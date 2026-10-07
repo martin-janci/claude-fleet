@@ -187,6 +187,16 @@ never names a version, a host, a session or a setting — the fixed body only
 means "this process is accepting HTTP". Every other route stays behind the
 token. Probes therefore leave no rejected-request lines in the log.
 
+A hub that can no longer serve exits rather than lingering as a process that
+answers nothing: when the control API stops on its own (its listener failed,
+or the server task ended or panicked), or when a panic leaves the store's lock
+poisoned so every write would fail, `serve` logs why, shuts down as it does on
+SIGTERM, and exits with status 1, so the restart policy (systemd
+`Restart=on-failure`, compose `restart: unless-stopped`) starts a fresh one.
+Panics are written to the file log and the error reports with their location
+and a backtrace, not only to stderr. SIGHUP is logged and ignored; stop the hub
+with SIGTERM (or Ctrl-C), and the stop line names the signal.
+
 The check does not open `state.db` and does not read the stored `mcp.port`:
 if you run the hub on another port, set it with `FLEET_HUB_PORT`, not only
 `--port`.
@@ -1143,7 +1153,11 @@ What a client may do:
   server somebody started by hand — belongs to nobody and is `unclaimed`.
   Such a row leaks nothing: a caller who is not entitled to it is told a
   per-host COUNT and no more, and on a hub with one person that count is the
-  only thing that changes about the rows they could already see. Claiming one
+  only thing that changes about the rows they could already see. On a hub with
+  more people the count goes to whoever administers the host — the hub's
+  owner, or the admins of the company that owns the hub — and to an org's
+  admins for its hosts when the owner switched that on (*Companies: members
+  and roles*). Claiming one
   needs proof that the claimant is IN the session's pane — never host access
   on its own, and never org membership: the agent inside the session calls
   `session_claim` and its request's `X-Fleet-Pane` header has to name that
@@ -1328,6 +1342,60 @@ run as the person at its console, like `client bind-person` and `session
 claim`. It needs no running hub, and a running one honours it from its next
 request.
 
+### Companies: members and roles
+
+A person can be a **member** of an organisation (org administration phase D,
+`docs/superpowers/plans/2026-10-06-org-administration-phase-d.md`), with one of
+three roles:
+
+| Role | What they get |
+|---|---|
+| **admin** | Everything the hub's owner can do to that org in Settings → Organisations — its settings, colour, isolation, auto-tidy, Jev consent, its own settings, its spend, its members, its members' devices (pair, trust, revoke) and its catalogs' grants — and nothing outside it. |
+| **member** | The org's work, and what is shared with the org. |
+| **viewer** | The org's work view and overview, read-only. |
+
+A member's **devices follow their memberships**: a colleague's phone is fenced
+to the org they are in (to one of them, when they are in several — `bind_device`
+picks which), and a viewer's phone is read-only whatever it was paired as. The
+hub's owner and a person in no org keep whatever their device was bound to, so
+an upgrade changes nobody. A person taken out of their last org keeps their
+row and their sessions, but their devices then read nothing of any org — a
+departed colleague does not fall back to the whole fleet's work.
+
+Some things stay the **hub owner's** whoever administers an org, because each
+decides which company something belongs to: the orgs' rules, which org a
+tracker belongs to, whether bound devices see unassigned work, people's names,
+disabling a person, and the two switches below. **Who administers a host** is
+the hub's owner — or, when a company owns the hub (`org own-hub`), that
+company's admins: they route hosts into orgs and see how many sessions on each
+host nobody has claimed. An org's own admins see that count for its hosts only
+when the hub's owner turns it on (`org unclaimed-count`). Registering,
+removing and provisioning hosts stay the operator's, as before.
+
+```bash
+fleet-hub org member add 1 jane --role admin    # a new name becomes a person
+fleet-hub org member list 1
+fleet-hub org member grants 1 bob [--narrow | --revoke]
+fleet-hub org member rm 1 bob                   # also revokes what was shared with
+                                                # bob on the org's sessions
+fleet-hub org own-hub 1 | --none                # the company that owns this hub
+fleet-hub org unclaimed-count 1 on|off          # its admins see unclaimed counts
+```
+
+These write `state.db` directly, like `person` and `client bind-person`; a
+running hub honours them from its next request. From a device, the org page's
+**Members** section does the same (`org_admin`).
+
+**Sharing with a team** is a grant to an org: the owner of a session shares it
+with an org they are a member of (`session_share { org }`, or *an org* in the
+Share sheet), and it reaches the org's members and admins who are in it at that
+moment. Somebody who joins later gets nothing from it until the owner shares
+again — changing a membership never widens a grant — and a viewer never
+receives one. Taking a member out of the org revokes what was shared with them
+on its sessions (`--keep-grants` keeps it); an admin can also lower or revoke
+those grants while they stay. Downward only: no admin can widen a grant, add a
+recipient or redirect one, and **no admin reads a member's private session**.
+
 ### Two people on one host
 
 Give each person their own unix account on a shared host, and add each account
@@ -1402,7 +1470,7 @@ only one of them is fenced:
 
 | Role | Fenced? |
 |---|---|
-| **Org admin** — authority over an organisation's settings and membership | **Yes.** There is no path to a member's session content. |
+| **Org admin** — authority over an organisation's settings and membership (*Companies: members and roles*) | **Yes.** There is no path to a member's session content: they see the org's spend and members, never a member's private session. |
 | **Hub operator** — holds the master token and `state.db` | **No, and by design.** They pair a device as any person, read the database, and reach the hosts. |
 
 The operator is unfenced on purpose rather than by omission. `fleet-hub pair
@@ -1771,6 +1839,15 @@ fleet-hub tracker test 3
   and use a `--ref`) rather than keep one that lived on another machine.
 
 ## Organisations and isolation
+
+**From a paired desktop.** Settings → Company (Organisations, Devices,
+People) changes this hub's orgs, paired devices and people through the
+`org_admin` tool: the owner's own device bound to no org reads them, and a
+**trusted** `full` one changes them (`fleet-hub client trust <name>`). It
+pairs a phone with a one-time code and QR (`pair_device`, a person's device
+only — peer links and updater tokens stay `fleet-hub pair --mode`), and
+never revokes, untrusts, binds or hands over the device it is used from.
+`fleet-hub org|client|person` stay the operator's side on this machine.
 
 Organisations are optional. With none, the desktop's scope selector offers
 the GitHub owners of the live sessions (only when there are two or more) and
@@ -3143,16 +3220,12 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 255 commands, 175 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 24 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 267 commands, 194 route to a hub tool, 1 routes except for one argument shape, 48 refuse, and 24 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
-| `add_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `add_org_rule` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
-| `assign_host_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `assign_tracker_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
@@ -3177,8 +3250,6 @@ Of the 255 commands, 175 route to a hub tool, 1 routes except for one argument s
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
-| `remove_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
-| `remove_org_rule` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `remove_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `repair_session` | Refuses when explicit: false, the automatic pre-attach check (otherwise routes to `repair_session`): the hub's repair_session always runs the EXPLICIT repair, which may unregister a stale worktree entry, adopt a moved checkout and recreate a branch — this app will not turn an automatic pre-attach check into that; repair explicitly, or from the hub |
 | `repo_checkout` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
@@ -3199,7 +3270,6 @@ Of the 255 commands, 175 route to a hub tool, 1 routes except for one argument s
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |
-| `update_org` | organisations, their rules and which org a host or tracker belongs to are the hosts' security boundary and fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub org add\|rule add\|assign-host\|assign-tracker` |
 | `update_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `work_retention_status` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |
 | `work_retention_sweep` | work retention is the hub's own sweep of its store: its status and sweep_now are the hub's work_admin, master-only, and a paired client is never the fleet's administrator; set the windows with set_setting and read the status on the hub |

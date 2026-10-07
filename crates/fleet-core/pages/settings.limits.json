@@ -108,9 +108,26 @@
     {
       "title": "Voice",
       "items": [
-        { "type": "field", "key": "voice.enabled" },
-        { "type": "field", "key": "voice.max_capture_secs", "when": { "key": "voice.enabled", "truthy": true } },
-        { "type": "field", "key": "voice.claim_ttl_secs", "when": { "key": "voice.enabled", "truthy": true } }
+        {
+          "type": "field",
+          "key": "voice.enabled"
+        },
+        {
+          "type": "field",
+          "key": "voice.max_capture_secs",
+          "when": {
+            "key": "voice.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
+          "key": "voice.claim_ttl_secs",
+          "when": {
+            "key": "voice.enabled",
+            "truthy": true
+          }
+        }
       ]
     },
     {
@@ -140,6 +157,24 @@
           "type": "link",
           "page": "usage",
           "label": "See usage"
+        }
+      ]
+    },
+    {
+      "title": "Company budgets",
+      "items": [
+        {
+          "type": "field",
+          "key": "budget.org_daily_usd"
+        },
+        {
+          "type": "field",
+          "key": "budget.org_monthly_usd"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Each org can set its own budget on its page in Settings → Organisations. Spend is the estimated cost of the org's sessions, counted from the day this version was installed."
         }
       ]
     },

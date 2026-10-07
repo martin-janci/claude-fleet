@@ -112,7 +112,9 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let epoch = self.auth_epoch()?;
         let hosts = self.list_host_tokens()?;
-        let clients = self.active_client_tokens()?;
+        // As the auth layer must see them: org and mode from memberships
+        // (org administration phase D).
+        let clients = self.auth_client_tokens()?;
         tx.commit()?;
         Ok((epoch, hosts, clients))
     }

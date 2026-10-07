@@ -652,12 +652,14 @@ export async function captureSession(
  */
 export interface SessionGrant {
   session_id: number;
-  /** The recipient. M1 has person recipients only — `org_id` stays in the
-   *  schema for M2 and is refused by the store until then. */
+  /** The recipient: a person, or (org administration phase D) an org. */
   person_id: number | null;
   /** The recipient's name, when the hub sends one; the id is the fallback. */
   person_name?: string | null;
   person_display_name?: string | null;
+  /** An org recipient: its members and admins from when it was shared. */
+  org_id?: number | null;
+  org_name?: string | null;
   /** `watch` | `drive`, tolerantly. */
   level: string;
   /** The person who granted it, and when (unix seconds). */
@@ -665,34 +667,42 @@ export interface SessionGrant {
   granted_at?: number | null;
 }
 
+/** Who a share is addressed to: a person's name, or an org's (org
+ *  administration phase D — its members and admins from now on). */
+export type ShareTo = string | { org: string };
+
+function recipientArgs(to: ShareTo): { person: string } | { person: string; org: string } {
+  return typeof to === 'string' ? { person: to } : { person: '', org: to.org };
+}
+
 /**
- * Share this session with one person at `watch` or `drive`.
+ * Share this session with one person, or an org you are in, at `watch` or
+ * `drive`.
  *
  * Owner only, enforced on the hub (and in the store, against the row's own
  * `owner_person_id`); the Share sheet's own gate is the UI half of the same
- * rule. There is **no org recipient in M1** — team sharing needs memberships
- * and arrives in M2 — so there is no `org` argument to pass and nothing in the
- * sheet offers a team.
+ * rule. An org share reaches the members and admins who are in the org when
+ * it is made — never someone who joins later, never a viewer.
  */
 export async function shareSession(
   sessionId: number,
-  person: string,
+  to: ShareTo,
   level: 'watch' | 'drive',
 ): Promise<Result<SessionRow | null>> {
   const r = await invokeCmd<SessionRow | null>('session_share', {
-    args: { session_id: sessionId, person, level },
+    args: { session_id: sessionId, ...recipientArgs(to), level },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 
-/** Revoke one person's grant on this session. Owner only. */
+/** Revoke one person's (or org's) grant on this session. Owner only. */
 export async function unshareSession(
   sessionId: number,
-  person: string,
+  to: ShareTo,
 ): Promise<Result<SessionRow | null>> {
   const r = await invokeCmd<SessionRow | null>('session_unshare', {
-    args: { session_id: sessionId, person },
+    args: { session_id: sessionId, ...recipientArgs(to) },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;
@@ -709,10 +719,10 @@ export async function unshareSession(
  */
 export async function narrowShare(
   sessionId: number,
-  person: string,
+  to: ShareTo,
 ): Promise<Result<SessionRow | null>> {
   const r = await invokeCmd<SessionRow | null>('session_narrow', {
-    args: { session_id: sessionId, person },
+    args: { session_id: sessionId, ...recipientArgs(to) },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;

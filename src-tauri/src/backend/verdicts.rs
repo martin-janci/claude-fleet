@@ -86,12 +86,6 @@ pub fn verdict(command: &str) -> Option<&'static Verdict> {
         .map(|(_, v)| v)
 }
 
-/// Organisations (work graph M5.2): the hub's `work_admin` is master-only.
-const ORGS_ARE_ADMIN: &str = "organisations, their rules and which org a host or tracker belongs \
-     to are the hosts' security boundary and fleet administration: the hub's work_admin is \
-     master-only, and a paired client is never the fleet's administrator; configure them on the \
-     hub with `fleet-hub org add|rule add|assign-host|assign-tracker`";
-
 /// Trackers (work graph M3.1): the hub's `work_admin` is master-only.
 const TRACKERS_ARE_ADMIN: &str = "trackers and their credentials are fleet administration: the \
      hub's work_admin is master-only, and a paired client is never the fleet's administrator; \
@@ -443,54 +437,39 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // Task → session spec P-1: the start's dry run, the Work button's
     // popover. Nothing is made, so it routes exactly as the start does.
     ("preview_start_work", Verdict::Routed { tool: "work_link" }),
-    // Work graph M5: orgs are the per-host tokens' security boundary, so
-    // changing them is fleet administration (the hub's `work_admin`,
-    // master-only); reading them routes like every other work read.
-    (
-        "add_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "update_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "remove_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "add_org_rule",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "remove_org_rule",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "assign_host_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
-    (
-        "assign_tracker_org",
-        Verdict::LocalOnly {
-            instead: ORGS_ARE_ADMIN,
-        },
-    ),
+    // Work graph M5: orgs are the per-host tokens' security boundary. Since
+    // org administration phase B the hub's `org_admin` lets its owner's own
+    // trusted `full` device change them (and refuses anyone else), so they
+    // route; reading them routes like every other work read.
+    ("add_org", Verdict::Routed { tool: "org_admin" }),
+    ("update_org", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org", Verdict::Routed { tool: "org_admin" }),
+    ("add_org_rule", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org_rule", Verdict::Routed { tool: "org_admin" }),
+    ("assign_host_org", Verdict::Routed { tool: "org_admin" }),
+    ("assign_tracker_org", Verdict::Routed { tool: "org_admin" }),
+    ("set_org_setting", Verdict::Routed { tool: "org_admin" }),
+    ("set_org_member", Verdict::Routed { tool: "org_admin" }),
+    ("remove_org_member", Verdict::Routed { tool: "org_admin" }),
     ("work_scopes", Verdict::Routed { tool: "work" }),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),
+    // Org administration phase B: the company's paired devices and people,
+    // on the hub that holds them (`org_admin`; standalone, this desktop's
+    // own store, where `pair_device` refuses — a code is the hub's).
+    ("list_devices", Verdict::Routed { tool: "org_admin" }),
+    ("pair_device", Verdict::Routed { tool: "org_admin" }),
+    ("revoke_device", Verdict::Routed { tool: "org_admin" }),
+    ("set_device_trust", Verdict::Routed { tool: "org_admin" }),
+    ("bind_device_org", Verdict::Routed { tool: "org_admin" }),
+    ("set_device_person", Verdict::Routed { tool: "org_admin" }),
+    (
+        "grant_device_catalog",
+        Verdict::Routed { tool: "org_admin" },
+    ),
+    ("list_people", Verdict::Routed { tool: "org_admin" }),
+    ("rename_person", Verdict::Routed { tool: "org_admin" }),
+    ("disable_person", Verdict::Routed { tool: "org_admin" }),
     (
         "session_conversation",
         Verdict::Routed {

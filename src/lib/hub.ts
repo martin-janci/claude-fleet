@@ -178,22 +178,6 @@ const REASONS = {
     'section proposals are tracker administration, and a client is never the fleet’s administrator — use `fleet-hub decide proposals`',
   decide_status_map_proposal:
     'applying a section proposal writes the tracker’s section map, and a client is never the fleet’s administrator — use `fleet-hub decide proposals apply|reject`',
-  // Organisations (work graph M5): the per-host tokens' boundary is set on
-  // the hub only; `work_admin` is master-only.
-  add_org:
-    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org add`',
-  update_org:
-    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org set`',
-  remove_org:
-    'organisations are the hosts’ security boundary, and a client is never the fleet’s administrator — use `fleet-hub org rm`',
-  add_org_rule:
-    'which org a session belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org rule add`',
-  remove_org_rule:
-    'which org a session belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org rule rm`',
-  assign_host_org:
-    'a host’s org is its token’s boundary, set only by the fleet’s administrator — use `fleet-hub org assign-host`',
-  assign_tracker_org:
-    'which org a tracker belongs to is fleet administration, and a client is never the fleet’s administrator — use `fleet-hub org assign-tracker`',
   // Asset catalogs (Assets M6, R11): which catalogs exist is the master's
   // alone (`add_catalog` / `remove_catalog` are `MasterOnly`). Both commands
   // ROUTE, so this is not a command-named key: Settings → Catalogs shows a

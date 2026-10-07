@@ -210,7 +210,9 @@ enum Cmd {
         opts: HubOptions,
     },
     /// Name organisations, their placement rules, and which org each host
-    /// and tracker belongs to (work graph M5). Needs a running hub.
+    /// and tracker belongs to (work graph M5). Needs a running hub — except
+    /// `member`, `own-hub` and `unclaimed-count` (org administration phase
+    /// D: who is in which company), which write `state.db` directly.
     ///
     /// A host's org is its token's boundary: that host's Claude reads only
     /// its org's and unassigned work.

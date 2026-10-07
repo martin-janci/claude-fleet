@@ -220,6 +220,8 @@ pub struct PastConversation {
     pub key: String,
     pub host: String,
     pub claude_session_id: String,
+    /// The org the past session was in when it ended (`snap_org_id`).
+    pub org_id: Option<i64>,
 }
 
 /// What a link this caller may not summarise answers, and the same thing a
@@ -305,6 +307,7 @@ pub fn planned_conversation(
         key,
         host,
         claude_session_id,
+        org_id: link.org_id,
     })
 }
 
@@ -320,6 +323,7 @@ fn plan(
         key,
         host,
         claude_session_id,
+        org_id,
     } = planned_conversation(s, key, link_id, reader)?;
     if s.session_with_claude_id(&host, &claude_session_id)?
         .is_some()
@@ -336,7 +340,9 @@ fn plan(
         host,
         claude_session_id,
         stored_path,
-        model: settings::get_string(s, settings::WORK_SUMMARY_MODEL),
+        // Org administration phase C: the org the work was done for may
+        // pick its own model (its account pays).
+        model: settings::get_string_for(s, settings::WORK_SUMMARY_MODEL, org_id),
     })
 }
 

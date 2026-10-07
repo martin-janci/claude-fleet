@@ -2,7 +2,7 @@
   // One action's form: an input per declared param and a button labelled
   // with the action. Options come from the page (hosts, trackers), already
   // narrowed to what the record does not hold.
-  import { formReady, type ActionSpec } from './resources';
+  import { formReady, formValues, paramValue, type ActionSpec } from './resources';
 
   let {
     action,
@@ -25,7 +25,7 @@
   function submit(e: SubmitEvent) {
     e.preventDefault();
     if (!ready || busy) return;
-    const sent = { ...values };
+    const sent = formValues(action, values);
     values = {};
     onrun(sent);
   }
@@ -61,6 +61,15 @@
         data-testid={`param-${action.id}-${p.name}`}
         value={values[p.name] ?? '#3b82f6'}
         oninput={(e) => (values = { ...values, [p.name]: (e.currentTarget as HTMLInputElement).value })} />
+    {:else if p.type === 'choice'}
+      <select
+        aria-label={p.label}
+        disabled={busy}
+        data-testid={`param-${action.id}-${p.name}`}
+        value={paramValue(p, values)}
+        onchange={(e) => (values = { ...values, [p.name]: (e.currentTarget as HTMLSelectElement).value })}>
+        {#each p.options as [v, label] (v)}<option value={v}>{label}</option>{/each}
+      </select>
     {:else}
       {@const opts = options(p.name)}
       <select

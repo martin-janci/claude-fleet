@@ -5,7 +5,7 @@
   "parent": "settings",
   "layout": "master_detail",
   "resource": "org",
-  "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker, or to make it a boundary for its hosts.",
+  "intro": "Optional. Name an org to merge or split GitHub owners, to attach a tracker or a catalog, or to make it a boundary for its hosts and devices. Each org's page shows what belongs to it.",
   "list_items": [
     {
       "type": "custom",
@@ -27,6 +27,35 @@
       ]
     },
     {
+      "title": "Overview",
+      "items": [
+        {
+          "type": "field",
+          "key": "session_count"
+        },
+        {
+          "type": "field",
+          "key": "needs_you"
+        },
+        {
+          "type": "field",
+          "key": "spent_today_micros"
+        },
+        {
+          "type": "field",
+          "key": "spent_week_micros"
+        },
+        {
+          "type": "field",
+          "key": "spent_month_micros"
+        },
+        {
+          "type": "field",
+          "key": "over_budget"
+        }
+      ]
+    },
+    {
       "title": "What belongs to it",
       "items": [
         {
@@ -40,6 +69,38 @@
         {
           "type": "field",
           "key": "trackers"
+        },
+        {
+          "type": "field",
+          "key": "catalogs"
+        }
+      ]
+    },
+    {
+      "title": "Members",
+      "items": [
+        {
+          "type": "field",
+          "key": "members"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. A new person gets a device in Settings → Devices (Pair a device, for them)."
+        }
+      ]
+    },
+    {
+      "title": "Devices",
+      "items": [
+        {
+          "type": "field",
+          "key": "devices"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Pair a new phone, browser or desktop in Settings → Devices, and bind it to this org there or here."
         }
       ]
     },
@@ -58,6 +119,14 @@
         {
           "type": "field",
           "key": "bound_sees_unassigned"
+        },
+        {
+          "type": "field",
+          "key": "owns_hub"
+        },
+        {
+          "type": "field",
+          "key": "admins_see_unclaimed"
         }
       ]
     },
@@ -71,6 +140,20 @@
         {
           "type": "field",
           "key": "jev_allowed"
+        }
+      ]
+    },
+    {
+      "title": "Its own settings",
+      "items": [
+        {
+          "type": "field",
+          "key": "settings"
+        },
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "The fleet-wide values are in Settings → Limits and Settings → Work; what is set here applies to this org's sessions only."
         }
       ]
     }

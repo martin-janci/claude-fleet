@@ -28,6 +28,7 @@
     operatorHost,
     operatorFallback,
     operatorRow,
+    operatorError,
     blockedCopy,
     closeAgent,
     openAgent,
@@ -79,9 +80,21 @@
     $operatorState === 'absent' || ($operatorState === 'host_down' && $operatorFallback)
       ? () => void openAgent()
       : $operatorState === 'lost'
-        ? () => void restartOperator()
+        ? () => void restart()
         : null,
   );
+  // A restart is an SSH round trip or two (and after a host reboot, a new
+  // tmux session); the button says so and takes no second press meanwhile.
+  let restarting = $state(false);
+  async function restart() {
+    if (restarting) return;
+    restarting = true;
+    try {
+      await restartOperator();
+    } finally {
+      restarting = false;
+    }
+  }
 
   // Escape closes the sheet, INCLUDING from inside the composer. This is a
   // non-modal overlay, so it is not a <dialog> and gets no `cancel` event
@@ -236,7 +249,12 @@
     {#if blocked}
       <p class="blocked">{blocked.title}</p>
       {#if blocked.action && blockedAction}
-        <button onclick={blockedAction}>{blocked.action}</button>
+        <button onclick={blockedAction} disabled={restarting}
+          >{restarting ? 'Restarting…' : blocked.action}</button
+        >
+      {/if}
+      {#if $operatorError}
+        <p class="error" role="alert" data-testid="agent-panel-error">{$operatorError}</p>
       {/if}
     {:else if session}
       <!-- `blockWhileBusy` is the gate the sheet's own composer had before it
@@ -343,6 +361,11 @@
   .blocked {
     margin: 0;
     color: var(--fg-muted);
+  }
+  .error {
+    margin: 0;
+    color: var(--usage-crit);
+    font-size: 0.8rem;
   }
   .chip {
     align-self: flex-start;

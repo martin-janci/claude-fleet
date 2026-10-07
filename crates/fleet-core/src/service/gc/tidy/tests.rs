@@ -947,3 +947,27 @@ fn a_keep_holds_every_reason_of_a_live_session() {
     };
     assert!(run(&[kept], &cfg()).is_empty());
 }
+
+/// Org administration phase C: an org may set its own unlinked-idle window
+/// (`work.tidy_idle_unlinked_days` per org); the rest keep the fleet's.
+#[test]
+fn an_org_keeps_its_own_unlinked_idle_window() {
+    let in_org = |id: i64, org: Option<i64>| {
+        let mut s = unlinked(id, 9 * DAY);
+        s.row.org_id = org;
+        s
+    };
+    let sessions = [in_org(1, Some(7)), in_org(2, Some(8)), in_org(3, None)];
+    let cfg = TidyConfig {
+        org_unlinked_idle_secs: HashMap::from([(7, 30 * DAY), (8, 2 * DAY)]),
+        ..cfg()
+    };
+    assert_eq!(cfg.unlinked_idle_for(Some(7)), 30 * DAY);
+    assert_eq!(cfg.unlinked_idle_for(None), cfg.unlinked_idle_secs);
+    let ids: Vec<i64> = run(&sessions, &cfg).iter().map(|c| c.session_id).collect();
+    assert_eq!(
+        ids,
+        vec![2, 3],
+        "org 7 waits 30 days; 8 and the fleet do not"
+    );
+}

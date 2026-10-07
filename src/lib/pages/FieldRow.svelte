@@ -7,6 +7,7 @@
   // shows when it refuses.
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import { setFleetSetting, type SettingKey } from '../fleet_settings';
+  import type { Result } from '../result';
   import {
     fromDisplay,
     optionLabel,
@@ -34,6 +35,7 @@
     highlighted = false,
     readonly: forceReadonly = false,
     proposal,
+    save,
     now = () => Math.floor(Date.now() / 1000),
   }: {
     d: Descriptor;
@@ -46,6 +48,10 @@
     /** An agent's pending proposal for this setting (P5): shown as a
      *  suggestion the person applies or rejects, never applied by itself. */
     proposal?: SettingProposal;
+    /** Write somewhere else than the fleet's setting (an org's own value,
+     *  org administration phase C). The row then has no History or Reset:
+     *  its owner offers Inherit instead. */
+    save?: (next: string) => Promise<Result<unknown>>;
     now?: () => number;
   } = $props();
 
@@ -96,7 +102,7 @@
   async function commit(next: string) {
     busy = true;
     error = null;
-    const r = await setFleetSetting(d.key as SettingKey, next);
+    const r = save ? await save(next) : await setFleetSetting(d.key as SettingKey, next);
     busy = false;
     if (!r.ok) error = r.error.message;
   }
@@ -205,7 +211,7 @@
     {#if d.tags.includes('experimental')}<span class="tag">experimental</span>{/if}
     {#if d.restart === 'app'}<span class="tag" title="Read once at launch">applies after a restart</span>{/if}
     {#if d.restart === 'hooks'}<span class="tag" title="Takes effect on each host's next hook install">applies when hooks are reinstalled</span>{/if}
-    {#if !readonly && d.owned_by === undefined}
+    {#if !readonly && !save && d.owned_by === undefined}
       <button
         type="button"
         class="btn btn--quiet history-btn"
@@ -214,7 +220,7 @@
         onclick={() => void toggleHistory()}>History</button
       >
     {/if}
-    {#if modified && !readonly}
+    {#if modified && !readonly && !save}
       <button
         type="button"
         class="btn btn--quiet reset"

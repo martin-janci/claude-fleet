@@ -185,7 +185,7 @@ Parameters: `host_alias`, `project_id`
 
 ### `list_hosts`
 
-Registered hosts: reachability, claude/tmux versions, linked account. unclaimed_sessions is how many sessions on that host nobody owns, served only on a one-person fleet: null means you are not told, 0 means there are none.
+Registered hosts: reachability, claude/tmux versions, linked account. unclaimed_sessions is how many sessions on that host nobody owns, served to a one-person fleet and to who administers the host: null means not told, 0 means none.
 
 ### `list_layers`
 
@@ -260,6 +260,12 @@ Parameters: `base_branch`, `confirm_nonce`, `host_alias`, `name`, `new_worktree`
 ### `operator_status`
 
 Whether the UX agent can work, and why not: absent|lost|no_mcp|token_revoked|no_host|host_down; fallback: where ensure_operator moves it.
+
+### `org_admin`
+
+Administer the company: orgs (work_admin's org actions), devices (list, pair_device → code + QR, revoke, trust, bind, hand over, grant a catalog), people and members (roles, a member's grants). Hub owner's device: all; an org admin's: their org. Changes need a trusted full device, never locking out the one in use.
+
+Parameters: `action`, `admins_see_unclaimed`, `auto_tidy`, `bound_sees_unassigned`, `catalog`, `color`, `device`, `display_name`, `host_alias`, `isolate_sessions`, `jev`, `keep_grants`, `key`, `mode`, `name`, `on`, `org`, `org_id`, `owner`, `owns_hub`, `path_prefix`, `person`, `person_id`, `repo`, `role`, `rule_id`, `tracker_id`, `trusted`, `ttl_s`, `value`
 
 ### `pair_client`
 
@@ -479,7 +485,7 @@ Parameters: `client_msg_id`, `force`, `host_alias`, `keys`, `prompt`, `raw`, `se
 
 ### `session_access`
 
-Who holds a live grant on your session: person, level, who granted it and when. Owner only — the list names other people, so a grantee is not told. Errors: E_NOTFOUND, E_FORBIDDEN.
+Who holds a live grant on your session (a person or an org), the level, who granted it and when. Owner only: it names others. Errors: E_NOTFOUND, E_FORBIDDEN.
 
 Parameters: `session_id`
 
@@ -515,15 +521,15 @@ Parameters: `fresh_for`, `limit`, `session_id`
 
 ### `session_narrow`
 
-Lower one person's grant on your session from drive to watch (owner only). Nothing raises a grant: widen by revoking and sharing again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
+Lower a person's or org's grant on your session from drive to watch (owner only). Nothing raises one: revoke and share again. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
 
-Parameters: `person`, `session_id`
+Parameters: `org`, `person`, `session_id`
 
 ### `session_share`
 
-Share a session you OWN with one person at watch (read it) or drive (also prompt it). Owner only — a grantee cannot share on — and there is no org recipient and no 'own' level. Sharing never gives a terminal. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
+Share a session you OWN with a person, or an org you are in (its members from now), at watch (read) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
 
-Parameters: `level`, `person`, `session_id`
+Parameters: `level`, `org`, `person`, `session_id`
 
 ### `session_tool_detail`
 
@@ -539,9 +545,9 @@ Parameters: `fresh_for`, `max_chars`, `session_id`, `since_turn`
 
 ### `session_unshare`
 
-Revoke one person's grant on your session (owner only); the row is kept, revoked, for the audit trail. Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
+Revoke a person's or org's grant on your session (owner only; kept, revoked, for audit). Returns the session row. Errors: E_NOTFOUND, E_FORBIDDEN.
 
-Parameters: `person`, `session_id`
+Parameters: `org`, `person`, `session_id`
 
 ### `set_client_trust`
 
@@ -768,9 +774,22 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::remove_org_rule`
 - `commands::orgs::assign_host_org`
 - `commands::orgs::assign_tracker_org`
+- `commands::orgs::set_org_setting`
+- `commands::orgs::set_org_member`
+- `commands::orgs::remove_org_member`
 - `commands::orgs::work_scopes`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`
+- `commands::org_devices::list_devices`
+- `commands::org_devices::pair_device`
+- `commands::org_devices::revoke_device`
+- `commands::org_devices::set_device_trust`
+- `commands::org_devices::bind_device_org`
+- `commands::org_devices::set_device_person`
+- `commands::org_devices::grant_device_catalog`
+- `commands::org_devices::list_people`
+- `commands::org_devices::rename_person`
+- `commands::org_devices::disable_person`
 - `commands::sessions::session_history`
 - `commands::sessions::session_conversations`
 - `commands::sessions::session_conversation`
