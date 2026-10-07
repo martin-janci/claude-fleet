@@ -108,6 +108,11 @@ describe('conversation_nav', () => {
     ]);
     expect(idx[1].label).toHaveLength(80);
   });
+
+  it('turnIndex never cuts an emoji in half', () => {
+    const idx = turnIndex([{ kind: 'turn', turn: turn('a'.repeat(78) + '😀tail', []), index: 0 }]);
+    expect(idx[0].label).toBe('a'.repeat(78) + '😀…');
+  });
 });
 
 describe('scroll memory', () => {

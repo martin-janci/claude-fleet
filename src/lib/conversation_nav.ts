@@ -73,7 +73,9 @@ export function turnIndex(rows: ThreadRow[]): TurnIndexEntry[] {
     let label: string | null = null;
     if (turn.prompt !== null && turn.prompt.trim() !== '') {
       const first = turn.prompt.trim().split('\n')[0].trim();
-      label = first.length > INDEX_LABEL_MAX ? `${first.slice(0, INDEX_LABEL_MAX - 1)}…` : first;
+      // By code point: a UTF-16 cut splits an emoji into a lone surrogate.
+      const chars = first.length > INDEX_LABEL_MAX ? Array.from(first) : null;
+      label = chars && chars.length > INDEX_LABEL_MAX ? `${chars.slice(0, INDEX_LABEL_MAX - 1).join('')}…` : first;
     } else {
       const cmd = turn.items.find((i) => i.kind === 'command');
       if (cmd?.kind === 'command') label = cmd.args ? `${cmd.name} ${cmd.args}` : cmd.name;
