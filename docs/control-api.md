@@ -688,6 +688,31 @@ Index by area (names only; see the reference for details):
   `E_INVALID` too, naming it — its status belongs to its tracker, and the
   next sync would otherwise overwrite it here. The setting is final: fleet
   never derives a status back over what a person set.
+  **Sprints and releases** (design `2026-09-28-sprints-releases-epics-design.md`):
+  `work { action: "buckets", kind? }` lists the sprints and releases in the
+  caller's scope with their roll-up (`total`, `done`) and the tracker sprints
+  or versions each adopts from; `work { action: "bucket", bucket_id }` answers
+  one with its members, past ones too (`removed_at`: carried over, or taken
+  out). `work_link { action: "bucket_add" | "bucket_remove", bucket_id,
+  item_id }` plans work into one: an item is in at most one current sprint
+  (a second is `E_CONFLICT`, naming the first) and any number of releases; a
+  closed sprint takes nothing; an item of another organisation than the
+  bucket's is `E_FORBIDDEN` (`cross_org: true`); a per-host token is
+  `E_FORBIDDEN` — a session does not plan. Creating and changing them is the
+  master's: `work_admin { action: "bucket_create", kind, name, org_id?,
+  starts_at?, ends_at?, goal? }`, `bucket_update { bucket_id, …, state:
+  active | released, shipped_ref?, expected_version? }` (a sprint goes
+  planned → active, a release planned → released, stamping `shipped_at`; an
+  active sprint beside another active one answers with a `warning`, never a
+  refusal), `bucket_close { bucket_id, carry_to?, carry? }` (ends every
+  membership; carries the unfinished — all of them unless `carry` names the
+  confirmed list — into `carry_to`), `bucket_delete` (confirmed), and
+  `bucket_adopt | bucket_unadopt { bucket_id, tracker_id, external_id }`: a
+  Jira sprint or fixVersion, a Linear cycle or project milestone, a GitHub
+  milestone (by name) whose synced items join the bucket as `adopted` and
+  leave it when the tracker stops reporting them. A person's membership is
+  never touched by a sync. A provider without sprints (GitHub, Asana) or
+  versions (Asana) only cannot be adopted from (`E_INVALID`).
   `work { action: "local_items" }` lists local items (`id`, `key`, `title`,
   `created_at`, `updated_at`, `live_sessions`), newest change first.
   Readonly tokens cannot name or rename. A per-host token names work only on

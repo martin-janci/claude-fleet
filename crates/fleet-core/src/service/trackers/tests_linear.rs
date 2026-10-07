@@ -151,6 +151,10 @@ impl Harness for LinearHarness {
         f.once(Method::Post, "/graphql", ok("fetch_moved.json"));
     }
 
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        Some(("iss-0001", "Beta"))
+    }
+
     fn script_error(&self, f: &FakeTransport, case: ErrorCase) {
         match case {
             ErrorCase::Unauthorized => {

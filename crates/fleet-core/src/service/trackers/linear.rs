@@ -42,7 +42,7 @@ const RECENT_DAYS: i64 = 14;
 /// The fields fleet reads of an issue, and nothing else.
 const ISSUE_FIELDS: &str = "fragment I on Issue { id identifier title url updatedAt description \
      previousIdentifiers state { name type } team { key } assignee { id name } \
-     parent { id identifier } cycle { number name isActive } }";
+     parent { id identifier } cycle { number name isActive } projectMilestone { name } }";
 
 pub struct Linear {
     /// The workspace `urlKey` the site names.
@@ -296,6 +296,12 @@ impl Linear {
                     .unwrap_or_else(|| format!("Cycle {}", cycle["number"].as_u64().unwrap_or(0)))
             }),
             iteration_active: cycle["isActive"].as_bool().unwrap_or(false),
+            // E8: a release is a project milestone (it carries a target
+            // date; a Linear project is closer to an epic).
+            versions: n["projectMilestone"]["name"]
+                .as_str()
+                .map(|t| vec![t.to_string()])
+                .unwrap_or_default(),
             updated: n["updatedAt"].as_str().and_then(super::parse_timestamp),
             description,
             description_chars,
@@ -347,6 +353,7 @@ impl TrackerProvider for Linear {
             query_lang: Some("gql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,

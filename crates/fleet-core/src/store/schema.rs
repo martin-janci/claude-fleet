@@ -1243,6 +1243,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/107_org_members.sql"),
         already_applied: Some(orgs_has_admins_see_unclaimed),
     },
+    // Sprints and releases (design 2026-09-28 §1): three new tables, so
+    // plain.
+    Migration::plain(108, include_str!("../../migrations/108_work_buckets.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

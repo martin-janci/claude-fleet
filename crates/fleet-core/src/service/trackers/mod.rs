@@ -74,6 +74,12 @@ pub struct Caps {
     pub multi_container: bool,
     #[serde(default)]
     pub incremental: Incremental,
+    /// Release-like containers with a target date (Jira `fixVersions`, a
+    /// GitHub milestone, a Linear project milestone) — design 2026-09-28
+    /// §4. Without it a native release still works; it simply cannot adopt
+    /// one, and nothing offers "adopt from tracker".
+    #[serde(default)]
+    pub versions: bool,
     /// Always false in M3–M6: read-only.
     #[serde(default)]
     pub write: bool,
@@ -137,6 +143,8 @@ pub struct WorkItemSnapshot {
     pub iteration: Option<String>,
     /// The sprint named in `iteration` is active.
     pub iteration_active: bool,
+    /// The versions the item is planned into, by name (`Caps.versions`).
+    pub versions: Vec<String>,
     /// The tracker's `updated`, unix seconds.
     pub updated: Option<i64>,
     /// The first [`DESCRIPTION_MAX_CHARS`] of the description as plain text.
@@ -487,6 +495,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             query_lang: Some("jql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,
@@ -498,6 +507,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             query_lang: Some("jql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,
@@ -509,6 +519,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             query_lang: None,
             hierarchy: true,
             iterations: false,
+            versions: false,
             human_keys: false,
             repo_relative: false,
             multi_container: true,
@@ -520,6 +531,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             query_lang: Some("gql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,
@@ -531,6 +543,7 @@ pub fn provider_caps(row: &TrackerRow) -> Caps {
             query_lang: Some("gql".into()),
             hierarchy: true,
             iterations: false,
+            versions: true,
             human_keys: false,
             repo_relative: true,
             multi_container: false,
