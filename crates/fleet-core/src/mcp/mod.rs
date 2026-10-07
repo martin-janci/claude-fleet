@@ -161,13 +161,24 @@ pub fn generate_token() -> String {
     s
 }
 
-/// A failed bearer from one address is answered once per this interval; a
-/// repeat inside it gets 429 and a `debug` line instead of a `warn`, so a
+/// A failed bearer is always answered 401, but logged at `warn` once per
+/// this interval per address; a repeat inside it is a `debug` line, so a
 /// guessing loop costs the hub a hash-map probe and cannot flood the log.
 /// Keyed like `/pair` (`pairing::limiter_key`): the peer, or the last
-/// `X-Forwarded-For` hop when the peer is a trusted front end. Successful
-/// requests never touch the bucket.
+/// `X-Forwarded-For` hop when the peer is a trusted front end (an IPv6
+/// address by its /64). Successful requests never touch the bucket.
 pub const AUTH_FAIL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The most addresses the failed-bearer limiter tracks at once. Keys live
+/// one [`AUTH_FAIL_INTERVAL`]; past this many, an unseen address is logged
+/// at debug — a trusted front end's forwarding header can name a new
+/// address every request, and must not grow the map without bound.
+pub const AUTH_FAIL_KEYS: usize = 4096;
+
+/// Whatever the addresses, at most one failed-bearer `warn` per this long:
+/// ten lines a second is enough to see an attack in the log, and a flood
+/// spread over many addresses cannot write more.
+pub const AUTH_FAIL_WARN_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// What the auth middleware needs per request: the master token and a way
 /// to read the current per-host tokens (they change on provision/rotate
@@ -184,8 +195,9 @@ struct AuthState {
     /// tests, a store without a read pool — reads the tables through the
     /// writer per request, as before.
     tokens: Option<Arc<TokenCache>>,
-    /// The shared limiter (`McpGuards::rate`), keyed `auth:<address>` for
-    /// failed bearers. See [`AUTH_FAIL_INTERVAL`].
+    /// The failed-bearer limiter, keyed `auth:<address>`: its own, so its
+    /// horizon stays [`AUTH_FAIL_INTERVAL`] whatever interval another bucket
+    /// uses, and a flood never contends with `broadcast_prompt`'s bucket.
     rate: Arc<RateLimiter>,
 }
 
@@ -290,11 +302,13 @@ async fn authorize(
             // the interval is still `401` (a client reads 401 as "pair
             // again" and 429 as "the hub is busy, retry" — a revoked desktop
             // must see the first), logged at debug instead of warn.
+            let quiet = |key: &str, every| state.rate.check(key, every).is_err();
             if status == StatusCode::UNAUTHORIZED
-                && state
+                && (state
                     .rate
-                    .check(&format!("auth:{peer}"), AUTH_FAIL_INTERVAL)
+                    .check_capped(&format!("auth:{peer}"), AUTH_FAIL_INTERVAL, AUTH_FAIL_KEYS)
                     .is_err()
+                    || quiet("auth:*", AUTH_FAIL_WARN_EVERY))
             {
                 tracing::debug!(
                     %peer,
@@ -889,7 +903,7 @@ pub async fn start_with_listener<A: TlsAcceptor>(
             store: Arc::clone(&store),
             allowed_hosts: Arc::new(allowed_hosts.clone()),
             tokens,
-            rate: Arc::clone(&guards.rate),
+            rate: Arc::new(RateLimiter::new()),
         };
         let pair_state = pairing::PairState::new(
             Arc::clone(&store),

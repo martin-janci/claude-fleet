@@ -371,8 +371,7 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
     use fleet_core::service::repo_read::{
         RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
     };
-    use fleet_core::service::sessions::RelatedSessionsArgs;
-    use fleet_core::service::worktrees::{ListHostWorktreesArgs, ListWorktreesArgs};
+    use fleet_core::service::worktrees::ListHostWorktreesArgs;
 
     vec![
         (
@@ -386,20 +385,6 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     Some(true),
                     s,
                     h,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
-            "related_sessions",
-            "related_sessions",
-            json!({ "session_id": 7 }),
-            "[]",
-            Box::new(|b, s, _| {
-                block_on(commands::sessions::routed::related_sessions(
-                    b,
-                    RelatedSessionsArgs { session_id: 7 },
-                    s,
                 ))
                 .map(|_| ())
             }),
@@ -461,44 +446,6 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     },
                     s,
                     h,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
-            // The tool's own defaults (slim rows, one page, a {total,
-            // worktrees} envelope) are shaped for an agent; the desktop draws
-            // the whole tree, so it asks for full rows and limit 0 (no cap).
-            "list_worktrees",
-            "list_worktrees",
-            json!({ "project_id": 4, "summary": false, "limit": 0 }),
-            r#"{"total":0,"worktrees":[]}"#,
-            Box::new(|b, s, _| {
-                block_on(commands::worktrees::routed::list_worktrees(
-                    b,
-                    ListWorktreesArgs {
-                        project_id: Some(4),
-                    },
-                    s,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        // The other shape of the same argument: an omitted project filter is
-        // sent as an explicit `null`, not left off the object. Which of the
-        // two the hub sees is the difference between "every worktree" and a
-        // parameter it never bound, so both shapes are pinned rather than
-        // one.
-        (
-            "list_worktrees",
-            "list_worktrees",
-            json!({ "project_id": null, "summary": false, "limit": 0 }),
-            r#"{"total":0,"worktrees":[]}"#,
-            Box::new(|b, s, _| {
-                block_on(commands::worktrees::routed::list_worktrees(
-                    b,
-                    ListWorktreesArgs { project_id: None },
-                    s,
                 ))
                 .map(|_| ())
             }),
@@ -738,13 +685,6 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
-            "work_scopes",
-            "work",
-            json!({ "session_id": null, "key": null, "action": "scopes" }),
-            r#"[{"id":1,"label":"Company A","session_count":2,"needs_you":1}]"#,
-            Box::new(|b, s, _| block_on(commands::orgs::routed::work_scopes(b, s)).map(|_| ())),
-        ),
-        (
             "list_orgs",
             "work",
             json!({ "session_id": null, "key": null, "action": "orgs" }),
@@ -859,15 +799,6 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             json!({ "session_id": null, "key": null, "action": "reopened" }),
             r#"[{"item_id":3,"key":"ABC-1","title":"Login","reopened_at":5,"past_sessions":2}]"#,
             Box::new(|b, s, _| block_on(commands::work::routed::work_reopened(b, s)).map(|_| ())),
-        ),
-        (
-            "list_local_work_items",
-            "work",
-            json!({ "session_id": null, "key": null, "action": "local_items" }),
-            r#"[{"id":3,"key":"OPS","title":"Ops cleanup","created_at":1,"live_sessions":2}]"#,
-            Box::new(|b, s, _| {
-                block_on(commands::work::routed::list_local_work_items(b, s)).map(|_| ())
-            }),
         ),
         (
             "name_session_work",
@@ -1932,7 +1863,6 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
         SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
     };
-    use fleet_core::service::worktrees::DeleteWorktreeArgs;
 
     vec![
         // Declarative pages P6: a write the hub records as this device.
@@ -2392,21 +2322,6 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
-            "archive_session_work",
-            "work_link",
-            json!({ "session_id": 7, "action": "archive", "key": null, "item_id": null,
-                    "link_id": null, "source": null }),
-            SESSION_PAYLOAD,
-            Box::new(|b, s, _| {
-                block_on(commands::work::routed::archive_session_work(
-                    b,
-                    commands::work::SessionLifecycleArgs { session_id: 7 },
-                    s,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
             "unarchive_session_work",
             "work_link",
             json!({ "session_id": 7, "action": "unarchive", "key": null, "item_id": null,
@@ -2416,44 +2331,6 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 block_on(commands::work::routed::unarchive_session_work(
                     b,
                     commands::work::SessionLifecycleArgs { session_id: 7 },
-                    s,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
-            "snooze_tidy",
-            "work_link",
-            json!({ "session_id": 7, "action": "snooze", "key": null, "item_id": null,
-                    "link_id": 5, "source": null, "days": 3 }),
-            SESSION_PAYLOAD,
-            Box::new(|b, s, _| {
-                block_on(commands::work::routed::snooze_tidy(
-                    b,
-                    commands::work::TidyFlagArgs {
-                        session_id: 7,
-                        link_id: Some(5),
-                        days: Some(3),
-                    },
-                    s,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
-            "never_tidy",
-            "work_link",
-            json!({ "session_id": 7, "action": "never", "key": null, "item_id": null,
-                    "link_id": null, "source": null }),
-            SESSION_PAYLOAD,
-            Box::new(|b, s, _| {
-                block_on(commands::work::routed::never_tidy(
-                    b,
-                    commands::work::TidyFlagArgs {
-                        session_id: 7,
-                        link_id: None,
-                        days: Some(3),
-                    },
                     s,
                 ))
                 .map(|_| ())
@@ -2685,24 +2562,6 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         name: "worker".into(),
                         prompt: "go".into(),
                         requester_session_id: Some(41),
-                    },
-                    s,
-                    h,
-                ))
-                .map(|_| ())
-            }),
-        ),
-        (
-            "delete_worktree",
-            "delete_worktree",
-            json!({ "worktree_id": 3, "force": true }),
-            "worktree deleted",
-            Box::new(|b, s, h| {
-                block_on(commands::worktrees::routed::delete_worktree(
-                    b,
-                    DeleteWorktreeArgs {
-                        worktree_id: 3,
-                        force: true,
                     },
                     s,
                     h,

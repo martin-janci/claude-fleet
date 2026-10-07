@@ -13,7 +13,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::org_admin::OrgAdminArgs;
-use fleet_core::service::orgs::{OrgDetail, OrgSuggestion, ScopeEntry};
+use fleet_core::service::orgs::{OrgDetail, OrgSuggestion};
 use fleet_core::store::{OrgRow, OrgRuleRow, Store, TrackerRow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -351,14 +351,6 @@ pub async fn remove_org_member(
 // --- reads (routed) ------------------------------------------------------------
 
 #[tauri::command]
-pub async fn work_scopes(
-    backend: State<'_, Arc<FleetBackend>>,
-    store: State<'_, Arc<Mutex<Store>>>,
-) -> Result<Vec<ScopeEntry>, IpcError> {
-    routed::work_scopes(&backend, &store).await
-}
-
-#[tauri::command]
 pub async fn list_orgs(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -384,16 +376,6 @@ pub(crate) mod routed {
         WorkArgs {
             action: Some(action.into()),
             ..Default::default()
-        }
-    }
-
-    pub async fn work_scopes(
-        backend: &FleetBackend,
-        store: &Mutex<Store>,
-    ) -> Result<Vec<ScopeEntry>, IpcError> {
-        match backend.hub() {
-            Some(hub) => hub.route("work_scopes", &read("scopes")).await,
-            None => orgs::scopes(store, &ViewScope::internal()),
         }
     }
 
