@@ -142,6 +142,16 @@
     writePref('newsession.model', chosenModel);
     writePref('newsession.effort', chosenEffort);
   });
+  // Credential profile (`~/.claude-profiles/<name>` on the host, its own
+  // `/login`; docs/accounts.md); '' = the host's login. Deliberately not
+  // remembered: which account a session bills is chosen each time.
+  let chosenProfile = $state<string>('');
+  // The chosen host's known profiles, offered as suggestions; a new name
+  // is still accepted (the session asks for its /login).
+  const hostProfiles = $derived($hosts.find((h) => h.alias === chosenHost)?.claude_profiles ?? []);
+  const profileInvalid = $derived(
+    chosenProfile.trim() !== '' && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(chosenProfile.trim()),
+  );
 
   // Inverse of slugify-ish: take a worktree/branch name and produce a
   // sentence-cased label so the friendly-name field is pre-filled with
@@ -855,6 +865,7 @@
         friendly_name: friendlyName.trim() || null,
         model: chosenKind === 'work' && chosenModel ? chosenModel : null,
         effort: chosenKind === 'work' && chosenEffort ? chosenEffort : null,
+        profile: chosenKind === 'work' && chosenProfile.trim() ? chosenProfile.trim() : null,
       },
       createController.signal,
     );
@@ -1068,6 +1079,24 @@
             {/each}
           </select>
         </div>
+        <div class="launch-field">
+          <label for="launch-profile">Login profile</label>
+          <input
+            id="launch-profile"
+            data-testid="launch-profile"
+            bind:value={chosenProfile}
+            placeholder="Host login"
+            list="launch-profile-options"
+            maxlength="32"
+            aria-invalid={profileInvalid}
+            title="A name such as work: the session runs under ~/.claude-profiles/<name> on the host, with its own /login. A new profile asks you to log in, in the session."
+          />
+          <datalist id="launch-profile-options">
+            {#each hostProfiles as p (p.name)}
+              <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
+            {/each}
+          </datalist>
+        </div>
       </div>
     {/if}
 
@@ -1159,6 +1188,7 @@
         onclick={submit}
         data-testid="create-btn"
         disabled={(inNewMode && !newWorktreeName.trim()) ||
+          (chosenKind === 'work' && profileInvalid) ||
           (ticket && chosenKind === 'work' ? startBlocked !== null : newSessionBlocked !== null)}
         title={(ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
       >{ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>

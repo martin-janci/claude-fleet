@@ -84,8 +84,9 @@ pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use layers::HostLayerRow;
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
-    BaseEntry, FileStat, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow, LocalWorkspaceStatus,
-    NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS, LOCAL_WORKSPACE_STATES,
+    BaseEntry, FileStat, LocalActivityRow, LocalConflictRow, LocalPassWrite, LocalWorkspaceRow,
+    LocalWorkspaceStatus, NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS,
+    LOCAL_WORKSPACE_DRIVERS, LOCAL_WORKSPACE_STATES,
 };
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
@@ -770,6 +771,19 @@ impl Store {
         }
     }
 
+    /// A `BEGIN IMMEDIATE` transaction, for code that reads and then writes.
+    ///
+    /// A DEFERRED transaction that has read and then writes asks SQLite to
+    /// upgrade a read lock, and SQLite never runs the busy handler for that
+    /// upgrade: while another connection (the running hub, beside a
+    /// `fleet-hub guides …` CLI) holds the write lock, the write fails at
+    /// once with "database is locked", and a commit in between makes it
+    /// `SQLITE_BUSY_SNAPSHOT`. IMMEDIATE takes the write lock up front,
+    /// waiting the busy timeout for it; WAL readers never block it.
+    pub(crate) fn immediate_transaction(&self) -> Result<rusqlite::Transaction<'_>> {
+        rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+    }
+
     /// Run `f` inside a single `conn.transaction()`. Test-only since the
     /// reconcile write burst moved onto [`Store::in_savepoint`] (it now runs
     /// inside the per-host transaction and so cannot open its own).
@@ -966,6 +980,45 @@ mod tests {
         // lose the last commits but never corrupts the database.
         assert_eq!(pragma::<i64>(&s, "synchronous"), 1);
         assert!(pragma::<i64>(&s, "busy_timeout") >= 1000);
+    }
+
+    /// A `fleet-hub guides …` / `settings …` CLI opens `state.db` with
+    /// `open_with_bus` while the hub runs and writes. A migrate transaction
+    /// that reads before it writes got SQLITE_BUSY at once whenever the hub
+    /// held the write lock at that moment: SQLite never runs the busy
+    /// handler for a read→write upgrade. A writer that keeps taking the lock
+    /// makes that moment likely; every open must still wait it out.
+    #[test]
+    fn opens_wait_out_another_connections_writes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        drop(Store::open_with_bus(&db, Arc::new(NoopEventBus)).unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (db, stop) = (db.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let conn = Connection::open(&db).unwrap();
+                conn.busy_timeout(BUSY_TIMEOUT).unwrap();
+                while !stop.load(Ordering::Relaxed) {
+                    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    conn.execute_batch("COMMIT").unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            })
+        };
+        let failed: Vec<String> = (0..40)
+            .filter_map(|_| Store::open_with_bus(&db, Arc::new(NoopEventBus)).err())
+            .map(|e| e.to_string())
+            .collect();
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(
+            failed.is_empty(),
+            "{} of 40 opens failed: {failed:?}",
+            failed.len()
+        );
     }
 
     /// The bearer tokens live in `state.db-wal` until a checkpoint, and

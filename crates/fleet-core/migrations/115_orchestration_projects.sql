@@ -79,4 +79,4 @@ ALTER TABLE work_items ADD COLUMN orchestration_project_id INTEGER
 CREATE INDEX IF NOT EXISTS idx_work_items_orch
   ON work_items(orchestration_project_id) WHERE orchestration_project_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (112);
+INSERT OR IGNORE INTO schema_version (version) VALUES (115);

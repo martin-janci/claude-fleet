@@ -1486,6 +1486,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             resume_claude_session_id: None,
             model: None,
             effort: None,
+            profile: None,
             owner_person_id: Some(42),
         },
         &st,
@@ -2428,7 +2429,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "restart_session",
             "restart_session",
-            json!({ "host_alias": "trn", "name": "demo", "force": false }),
+            json!({ "host_alias": "trn", "name": "demo", "force": false, "profile": "work" }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::restart_session(
@@ -2437,6 +2438,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         host_alias: "trn".into(),
                         name: "demo".into(),
                         force: false,
+                        profile: Some("work".into()),
                     },
                     s,
                     h,
@@ -2834,6 +2836,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 "resume_claude_session_id": "550e8400-e29b-41d4-a716-446655440000",
                 "model": "opus",
                 "effort": "high",
+                "profile": "work",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -2855,6 +2858,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         ),
                         model: Some("opus".into()),
                         effort: Some("high".into()),
+                        profile: Some("work".into()),
                         // Set, and absent from the asserted JSON above: whose
                         // a session is follows from the CONNECTION, never from
                         // an argument a client could choose (multi-user M1,

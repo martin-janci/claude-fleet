@@ -25,7 +25,7 @@ const PUSH_MARK: &str = "@@FLEET-PUSH@@\n";
 const ERR_MARK: &str = "@@FLEET-ERR@@";
 
 /// `cd` into the root or say why not. Exit 3: the directory is missing.
-fn prologue(root: &str) -> String {
+pub(super) fn prologue(root: &str) -> String {
     format!(
         "set -u\ncd -- {} 2>/dev/null || {{ printf '{ERR_MARK} missing\\n'; exit 3; }}\n",
         quote(root)
@@ -130,7 +130,7 @@ pub(super) struct RemoteScan {
 }
 
 /// Run one script with `stdin` and return what it printed after `marker`.
-async fn run(
+pub(super) async fn run(
     ssh: &dyn SshExec,
     host: &str,
     script: &str,
@@ -197,7 +197,7 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-fn nul_list<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<u8> {
+pub(super) fn nul_list<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<u8> {
     let mut v = Vec::new();
     for p in paths {
         v.extend_from_slice(p.as_bytes());

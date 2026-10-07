@@ -76,6 +76,24 @@ describe('HostDetail', () => {
     expect(screen.getByTestId('detail-account').textContent).toContain('admin-janci@users.noreply.github.com');
   });
 
+  it('lists the host’s login profiles with their logins', () => {
+    const h = { ...fleetHosts().find((x) => x.alias === 'claude-fleet-oci')! };
+    h.claude_profiles = [
+      { name: 'work', account_uuid: 'acc-w', email: 'work@example.com' },
+      { name: 'fresh', account_uuid: null, email: null },
+    ];
+    mount('claude-fleet-oci', { host: h });
+    const text = screen.getByTestId('detail-profiles').textContent ?? '';
+    expect(text).toContain('work');
+    expect(text).toContain('work@example.com');
+    expect(text).toContain('fresh not logged in');
+  });
+
+  it('shows no profiles line for a host without any', () => {
+    mount('claude-fleet-oci');
+    expect(screen.queryByTestId('detail-profiles')).toBeNull();
+  });
+
   it('a host with no account says so and has no refresh', () => {
     mount('nas', { hostSessions: [] });
     expect(screen.getByTestId('usage-block').textContent).toContain('Not logged in to Claude on this host');

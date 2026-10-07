@@ -198,6 +198,7 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         resume_claude_session_id: None,
         model: None,
         effort: None,
+        profile: None,
         owner_person_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
@@ -226,6 +227,7 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         resume_claude_session_id: None,
         model: None,
         effort: None,
+        profile: None,
         owner_person_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
@@ -795,6 +797,7 @@ fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
         resume_claude_session_id: resume.map(str::to_string),
         model: None,
         effort: None,
+        profile: None,
         owner_person_id: None,
     }
 }
@@ -1279,6 +1282,7 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         resume_claude_session_id: None,
         model: None,
         effort: None,
+        profile: None,
         owner_person_id: None,
     };
 

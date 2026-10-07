@@ -151,6 +151,7 @@
     "DecidedRow": [
       "account_uuid",
       "ci_status",
+      "claude_profile",
       "claude_session_id",
       "claude_status",
       "context_at",
@@ -318,6 +319,7 @@
       "agent_version",
       "alias",
       "auth_overrides",
+      "claude_profiles",
       "claude_version",
       "claude_version_at",
       "disk_home_free_kb",
@@ -444,6 +446,7 @@
     "SessionRow": [
       "account_uuid",
       "ci_status",
+      "claude_profile",
       "claude_session_id",
       "claude_status",
       "context_at",

@@ -254,6 +254,7 @@ pub async fn spawn_author_session(
             resume_claude_session_id: None,
             model: None,
             effort: None,
+            profile: None,
             // Whose the authoring session is (multi-user M1, T5): the hub's
             // own person — this is the desktop's own catalog work and there is
             // no source row to inherit from. See
