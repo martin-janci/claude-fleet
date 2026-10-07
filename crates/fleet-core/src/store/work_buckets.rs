@@ -614,11 +614,13 @@ impl Store {
         Ok(())
     }
 
-    /// End an item's membership. `false` when it had none.
+    /// End an item's membership. `false` when it had none. The row becomes
+    /// `manual` whoever added it: ending it was a person's decision, which
+    /// adoption must not undo on the tracker's next sync.
     pub fn remove_bucket_item(&self, bucket_id: i64, item_id: i64) -> Result<bool, IpcError> {
         self.require_bucket(bucket_id)?;
         Ok(self.conn.execute(
-            "UPDATE work_bucket_items SET removed_at = ?1 \
+            "UPDATE work_bucket_items SET removed_at = ?1, source = 'manual' \
              WHERE bucket_id = ?2 AND item_id = ?3 AND removed_at IS NULL",
             rusqlite::params![now_unix(), bucket_id, item_id],
         )? == 1)
@@ -698,6 +700,11 @@ impl Store {
         if external_id.is_empty() {
             return Err(invalid("adopt needs the tracker's sprint or version name"));
         }
+        if external_id.chars().count() > BUCKET_NAME_MAX_CHARS {
+            return Err(invalid(format!(
+                "a sprint or version name is at most {BUCKET_NAME_MAX_CHARS} characters"
+            )));
+        }
         let tracker_org: Option<Option<i64>> = self
             .conn
             .query_row(
@@ -762,13 +769,23 @@ impl Store {
                 ));
             }
             // Adopted members of this bucket from this tracker, re-judged
-            // against the refs that remain.
-            conn.execute(
-                "UPDATE work_bucket_items SET removed_at = ?1 \
-                 WHERE bucket_id = ?2 AND source = 'adopted' AND removed_at IS NULL \
-                   AND item_id IN (SELECT id FROM work_items WHERE tracker_id = ?3)",
-                rusqlite::params![now, bucket_id, tracker_id],
-            )?;
+            // against the refs that remain. While another ref of this bucket
+            // to the tracker remains, adoption withdraws what it no longer
+            // justifies and keeps the rest with their `added_at`; with none
+            // left the bucket is no longer linked, so withdraw here.
+            // A ref adoption ignores (another org's tracker) does not count.
+            let still_linked = self
+                .tracker_bucket_refs(tracker_id)?
+                .iter()
+                .any(|r| r.0 == bucket_id);
+            if !still_linked {
+                conn.execute(
+                    "UPDATE work_bucket_items SET removed_at = ?1 \
+                     WHERE bucket_id = ?2 AND source = 'adopted' AND removed_at IS NULL \
+                       AND item_id IN (SELECT id FROM work_items WHERE tracker_id = ?3)",
+                    rusqlite::params![now, bucket_id, tracker_id],
+                )?;
+            }
             self.readopt_tracker(tracker_id, now)
         })?;
         self.require_bucket(bucket_id)
@@ -787,12 +804,16 @@ impl Store {
         let refs = self.tracker_bucket_refs(tracker_id)?;
         for (id, iteration, meta) in items {
             let versions = super::tracker_items::ItemMeta::parse(meta.as_deref()).versions;
-            self.adopt_with(&refs, id, iteration.as_deref(), &versions, now)?;
+            self.adopt_with(tracker_id, &refs, id, iteration.as_deref(), &versions, now)?;
         }
         Ok(())
     }
 
-    /// `(bucket_id, kind, state, external_id)` of every ref to a tracker.
+    /// `(bucket_id, kind, state, external_id)` of every ref to a tracker
+    /// whose bucket may hold its items. `add_bucket_ref` checks the org
+    /// match, but a tracker can move to another org afterwards: a ref
+    /// across organisations is then dormant, not a way to plan one org's
+    /// work in another's sprint.
     fn tracker_bucket_refs(
         &self,
         tracker_id: i64,
@@ -800,7 +821,10 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT r.bucket_id, b.kind, b.state, r.external_id FROM work_bucket_refs r \
              JOIN work_buckets b ON b.id = r.bucket_id \
-             WHERE r.tracker_id = ?1 ORDER BY r.bucket_id",
+             JOIN trackers t ON t.id = r.tracker_id \
+             WHERE r.tracker_id = ?1 \
+               AND (b.org_id IS NULL OR t.org_id IS NULL OR b.org_id = t.org_id) \
+             ORDER BY r.bucket_id",
         )?;
         let rows = stmt.query_map([tracker_id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
@@ -827,11 +851,12 @@ impl Store {
         if refs.is_empty() {
             return Ok(());
         }
-        self.adopt_with(&refs, item_id, iteration, versions, now_unix())
+        self.adopt_with(tracker_id, &refs, item_id, iteration, versions, now_unix())
     }
 
     fn adopt_with(
         &self,
+        tracker_id: i64,
         refs: &[(i64, String, String, String)],
         item_id: i64,
         iteration: Option<&str>,
@@ -839,14 +864,24 @@ impl Store {
         now: i64,
     ) -> Result<(), IpcError> {
         let linked: BTreeSet<i64> = refs.iter().map(|r| r.0).collect();
-        let mut wanted: BTreeSet<i64> = refs
+        let seen: Vec<&(i64, String, String, String)> = refs
             .iter()
             .filter(|(_, kind, _, ext)| match kind.as_str() {
-                "release" => versions.iter().any(|v| v == ext),
-                _ => iteration == Some(ext.as_str()),
+                "release" => versions.iter().any(|v| v.trim() == ext),
+                _ => iteration.map(str::trim) == Some(ext.as_str()),
             })
-            .map(|r| r.0)
             .collect();
+        // The tracker still reports these, whether or not this item is new
+        // to the bucket.
+        for (bucket, _, _, ext) in &seen {
+            self.conn.execute(
+                "UPDATE work_bucket_refs SET last_seen_at = ?1 \
+                 WHERE bucket_id = ?2 AND tracker_id = ?3 AND external_id = ?4 \
+                   AND IFNULL(last_seen_at, 0) < ?1",
+                rusqlite::params![now, bucket, tracker_id, ext],
+            )?;
+        }
+        let mut wanted: BTreeSet<i64> = seen.iter().map(|r| r.0).collect();
         // One sprint: the lowest-numbered open one when several link to the
         // same name.
         let sprint = refs
@@ -901,10 +936,6 @@ impl Store {
                 }
             }
             self.put_member(bucket, item_id, "adopted", now)?;
-            self.conn.execute(
-                "UPDATE work_bucket_refs SET last_seen_at = ?1 WHERE bucket_id = ?2",
-                rusqlite::params![now, bucket],
-            )?;
         }
         Ok(())
     }

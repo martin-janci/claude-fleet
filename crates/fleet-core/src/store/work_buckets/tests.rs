@@ -447,3 +447,177 @@ fn deleting_a_bucket_or_its_items_cascades() {
     assert!(!s.delete_bucket(sp.id).unwrap());
     assert!(s.item_buckets(item).unwrap().is_empty());
 }
+
+#[test]
+fn an_adopted_membership_a_person_ended_stays_ended() {
+    let s = store();
+    let t = jira(&s);
+    let item = ticket(&s, t, "1", Some("ABC Sprint 24"), &[]);
+    let sp = sprint(&s, "Sprint 24");
+    s.add_bucket_ref(sp.id, t, "ABC Sprint 24", None).unwrap();
+    assert_eq!(members(&s, sp.id), [(item, "adopted".into())]);
+    s.remove_bucket_item(sp.id, item).unwrap();
+    // The next sync that changes the ticket, and a re-run of adoption over
+    // the tracker, leave the person's decision alone.
+    ticket(&s, t, "1", Some("ABC Sprint 24"), &["0.3.0"]);
+    let r = release(&s, "0.3.0");
+    s.add_bucket_ref(r.id, t, "0.3.0", None).unwrap();
+    assert!(members(&s, sp.id).is_empty());
+    // A tracker's withdrawal is not a person's: it re-adopts.
+    let other = ticket(&s, t, "2", Some("ABC Sprint 24"), &[]);
+    ticket(&s, t, "2", Some("ABC Sprint 25"), &[]);
+    ticket(&s, t, "2", Some("ABC Sprint 24"), &[]);
+    assert_eq!(members(&s, sp.id), [(other, "adopted".into())]);
+}
+
+#[test]
+fn a_tracker_moved_to_another_org_stops_feeding_the_bucket() {
+    let s = store();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let b = s.add_org("B", None, false).unwrap().id;
+    let t = jira(&s);
+    let of_b = s
+        .create_bucket(&NewBucket {
+            kind: "sprint",
+            name: "B's sprint",
+            org_id: Some(b),
+            ..Default::default()
+        })
+        .unwrap();
+    s.add_bucket_ref(of_b.id, t, "ABC Sprint 24", None).unwrap();
+    let before = ticket(&s, t, "1", Some("ABC Sprint 24"), &[]);
+    assert_eq!(members(&s, of_b.id), [(before, "adopted".into())]);
+    s.set_tracker_org(t, Some(a)).unwrap();
+    ticket(&s, t, "2", Some("ABC Sprint 24"), &[]);
+    assert_eq!(members(&s, of_b.id), [(before, "adopted".into())]);
+}
+
+#[test]
+fn a_ref_matches_a_name_with_stray_whitespace_and_stamps_only_itself() {
+    let s = store();
+    let t = jira(&s);
+    let r = release(&s, "1.0");
+    s.add_bucket_ref(r.id, t, "v1.0", None).unwrap();
+    s.add_bucket_ref(r.id, t, "never reported", None).unwrap();
+    let item = ticket(&s, t, "1", None, &["v1.0 "]);
+    assert_eq!(members(&s, r.id), [(item, "adopted".into())]);
+    let seen: Vec<(String, Option<i64>)> = s
+        .conn
+        .prepare("SELECT external_id, last_seen_at FROM work_bucket_refs ORDER BY external_id")
+        .unwrap()
+        .query_map([], |x| Ok((x.get(0)?, x.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(seen[0].1.is_none(), "{seen:?}");
+    assert!(seen[1].1.is_some(), "{seen:?}");
+    let long = "x".repeat(BUCKET_NAME_MAX_CHARS + 1);
+    let e = s.add_bucket_ref(r.id, t, &long, None).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+}
+
+#[test]
+fn unlinking_one_of_two_refs_keeps_what_the_other_justifies() {
+    let s = store();
+    let t = jira(&s);
+    let r = release(&s, "1.0");
+    s.add_bucket_ref(r.id, t, "1.0", None).unwrap();
+    s.add_bucket_ref(r.id, t, "1.0-rc", None).unwrap();
+    let both = ticket(&s, t, "1", None, &["1.0", "1.0-rc"]);
+    let rc_only = ticket(&s, t, "2", None, &["1.0-rc"]);
+    s.conn
+        .execute("UPDATE work_bucket_items SET added_at = 7", [])
+        .unwrap();
+    s.remove_bucket_ref(r.id, t, "1.0-rc").unwrap();
+    let now: Vec<(i64, i64)> = s
+        .bucket_members(r.id, false)
+        .unwrap()
+        .into_iter()
+        .map(|m| (m.item.id, m.added_at))
+        .collect();
+    assert_eq!(now, [(both, 7)]);
+    let _ = rc_only;
+}
+
+#[test]
+fn deleting_an_org_unassigns_its_buckets_even_on_a_name_clash() {
+    let s = store();
+    let a = s.add_org("A", None, false).unwrap().id;
+    sprint(&s, "Sprint 24");
+    let of_a = s
+        .create_bucket(&NewBucket {
+            kind: "sprint",
+            name: "Sprint 24",
+            org_id: Some(a),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(s.remove_org(a).unwrap());
+    let moved = s.get_bucket(of_a.id).unwrap().unwrap();
+    assert_eq!(moved.org_id, None);
+    assert_eq!(moved.name, format!("Sprint 24 (#{})", of_a.id));
+}
+
+#[test]
+fn unlinking_withdraws_when_only_a_dormant_ref_remains() {
+    let s = store();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let b = s.add_org("B", None, false).unwrap().id;
+    let t = jira(&s);
+    let of_b = s
+        .create_bucket(&NewBucket {
+            kind: "release",
+            name: "1.0",
+            org_id: Some(b),
+            ..Default::default()
+        })
+        .unwrap();
+    s.add_bucket_ref(of_b.id, t, "1.0", None).unwrap();
+    s.add_bucket_ref(of_b.id, t, "1.0-rc", None).unwrap();
+    let item = ticket(&s, t, "1", None, &["1.0"]);
+    assert_eq!(members(&s, of_b.id), [(item, "adopted".into())]);
+    // The tracker moves to org A: both refs go dormant, and unlinking one
+    // must still withdraw what it adopted.
+    s.set_tracker_org(t, Some(a)).unwrap();
+    s.remove_bucket_ref(of_b.id, t, "1.0").unwrap();
+    assert!(members(&s, of_b.id).is_empty());
+}
+
+#[test]
+fn an_unassigned_name_clash_on_org_delete_stays_within_the_name_cap() {
+    let s = store();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let long = "s".repeat(BUCKET_NAME_MAX_CHARS);
+    sprint(&s, &long);
+    let of_a = s
+        .create_bucket(&NewBucket {
+            kind: "sprint",
+            name: &long,
+            org_id: Some(a),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(s.remove_org(a).unwrap());
+    let moved = s.get_bucket(of_a.id).unwrap().unwrap();
+    assert_eq!(moved.name.chars().count(), BUCKET_NAME_MAX_CHARS);
+    assert!(moved.name.ends_with(&format!(" (#{})", of_a.id)));
+}
+
+#[test]
+fn an_org_delete_finds_a_free_name_when_the_suffix_is_taken_too() {
+    let s = store();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let of_a = s
+        .create_bucket(&NewBucket {
+            kind: "sprint",
+            name: "S",
+            org_id: Some(a),
+            ..Default::default()
+        })
+        .unwrap();
+    sprint(&s, "S");
+    sprint(&s, &format!("S (#{})", of_a.id));
+    assert!(s.remove_org(a).unwrap());
+    let moved = s.get_bucket(of_a.id).unwrap().unwrap();
+    assert_eq!(moved.name, format!("S (#{}-2)", of_a.id));
+}

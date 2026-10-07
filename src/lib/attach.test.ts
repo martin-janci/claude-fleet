@@ -108,7 +108,17 @@ describe('attachSession', () => {
       key: 'PAY-139',
       expected_primary: 78,
       ack_live: true,
+      force_cross_org: true,
     });
+  });
+
+  it('Undo of a switch across orgs goes back across orgs', async () => {
+    handlers.switch_session_work = (a) =>
+      a.link_id === 30 ? { ...sameRepoBusy, work: onTask(78, 'PAY-142') } : { ...sameRepoBusy, work: onTask(79, 'PAY-139') };
+    const r = await attachSession(sameRepoBusy, target, { mode: 'switch', ackLive: true, forceCrossOrg: true });
+    if (!r.ok) throw new Error('attach failed');
+    await r.value.undo?.();
+    expect(calls('switch_session_work')[1]).toMatchObject({ link_id: 78, force_cross_org: true });
   });
 
   it('Add links a secondary and leaves the primary; there is nothing to undo', async () => {
@@ -151,5 +161,36 @@ describe('AttachPicker', () => {
     expect(calls('link_session_work')[1]).toEqual({ session_id: 3, key: 'PAY-142', primary: false, ack_live: true });
     expect(onattached).toHaveBeenCalledOnce();
     expect(onattached.mock.calls[0][1]).toBe('Added to pay-api--fix-x');
+  });
+
+  it('keeps both acknowledgements when a task is open elsewhere and in another org', async () => {
+    sessions.set([already, sameRepoBusy, sameRepoFree]);
+    // The backend asks P-3 first, then the org question, each until answered.
+    handlers.link_session_work = (a) => {
+      if (!a.ack_live) {
+        throw { code: 'E_EXISTS', message: 'live', details: { live_elsewhere: [{ message: 'Open elsewhere.' }] } };
+      }
+      if (!a.force_cross_org) {
+        throw { code: 'E_FORBIDDEN', message: 'org', details: { cross_org: true, work_org_id: 1, session_org_id: 2 } };
+      }
+      return sameRepoFree;
+    };
+    const onattached = vi.fn();
+    render(AttachPicker, { props: { target, heading: 'Attach', onclose: vi.fn(), onattached } });
+    await flush();
+    await fireEvent.click(screen.getAllByTestId('attach-picker-row')[0]);
+    await flush();
+    for (let i = 0; i < 3; i++) {
+      await fireEvent.click(screen.getByTestId('attach-picker-go'));
+      await flush();
+    }
+    expect(calls('link_session_work')[2]).toEqual({
+      session_id: 4,
+      key: 'PAY-142',
+      primary: true,
+      ack_live: true,
+      force_cross_org: true,
+    });
+    expect(onattached).toHaveBeenCalledOnce();
   });
 });

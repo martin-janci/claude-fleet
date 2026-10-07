@@ -7,11 +7,13 @@
 use crate::ipc_error::{codes, IpcError};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// Always left out. A link's own patterns come after these, so `!build/`
-/// brings a default back.
+/// Always left out, whatever a link's own patterns say: VCS metadata and
+/// the sync's own temp files.
+pub const FIXED_EXCLUDES: &[&str] = &[".git", ".fleet-sync-*"];
+
+/// Left out by default. A link's own patterns come after these, so
+/// `!build/` brings a default back.
 pub const DEFAULT_EXCLUDES: &[&str] = &[
-    ".git",
-    ".fleet-sync-*",
     "target/",
     "build/",
     ".gradle/",
@@ -31,7 +33,10 @@ pub const DEFAULT_EXCLUDES: &[&str] = &[
 pub const MAX_USER_EXCLUDES: usize = 100;
 
 #[derive(Clone)]
-pub(crate) struct Excludes(Gitignore);
+pub(crate) struct Excludes {
+    fixed: Gitignore,
+    rest: Gitignore,
+}
 
 impl Excludes {
     /// `E_INVALID` for a pattern gitignore syntax cannot parse, or too many.
@@ -42,6 +47,14 @@ impl Excludes {
                 format!("at most {MAX_USER_EXCLUDES} exclude patterns"),
             ));
         }
+        let mut f = GitignoreBuilder::new("");
+        for p in FIXED_EXCLUDES {
+            f.add_line(None, p)
+                .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("fixed exclude: {e}")))?;
+        }
+        let fixed = f
+            .build()
+            .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("fixed excludes: {e}")))?;
         let mut b = GitignoreBuilder::new("");
         for p in DEFAULT_EXCLUDES {
             b.add_line(None, p)
@@ -59,13 +72,19 @@ impl Excludes {
         let g = b
             .build()
             .map_err(|e| IpcError::new(codes::E_INVALID, format!("exclude patterns: {e}")))?;
-        Ok(Excludes(g))
+        Ok(Excludes { fixed, rest: g })
     }
 
     /// Whether `rel` (a `/`-separated path below the root), or any directory
     /// above it, is left out.
     pub(crate) fn excluded(&self, rel: &str, is_dir: bool) -> bool {
-        self.0.matched_path_or_any_parents(rel, is_dir).is_ignore()
+        self.fixed
+            .matched_path_or_any_parents(rel, is_dir)
+            .is_ignore()
+            || self
+                .rest
+                .matched_path_or_any_parents(rel, is_dir)
+                .is_ignore()
     }
 }
 
@@ -107,6 +126,14 @@ mod tests {
         assert!(x.excluded("logs/run.log", false));
         assert!(!x.excluded("build/gen.rs", false));
         assert!(x.excluded("target/x", false));
+    }
+
+    #[test]
+    fn no_pattern_brings_vcs_metadata_or_temp_files_back() {
+        let x = Excludes::new(&["!.git".into(), "!.git/".into(), "!.fleet-sync-*".into()]).unwrap();
+        assert!(x.excluded(".git", false));
+        assert!(x.excluded(".git/config", false));
+        assert!(x.excluded(".fleet-sync-ab12/f/x", false));
     }
 
     #[test]

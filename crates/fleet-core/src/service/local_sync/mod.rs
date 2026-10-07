@@ -61,6 +61,24 @@ const MASS_DELETE_MIN: usize = 20;
 /// Passes running at once, across links.
 const MAX_PARALLEL_PASSES: usize = 4;
 
+/// Whether `p` was left out, or lies below a symlink on either side: a
+/// path below a symlinked directory is in another tree, never ours to
+/// write or delete. Only links block what is below them; a file that
+/// became a directory still syncs its contents.
+fn is_blocked(blocked: &HashSet<String>, links: &HashSet<String>, p: &str) -> bool {
+    if blocked.contains(p) {
+        return true;
+    }
+    let mut cur = p;
+    while let Some(i) = cur.rfind('/') {
+        cur = &cur[..i];
+        if links.contains(cur) {
+            return true;
+        }
+    }
+    false
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -281,6 +299,7 @@ impl LocalSync {
 
         let mut skipped = lscan.skipped;
         let mut blocked: HashSet<String> = lscan.blocked.clone();
+        let mut links: HashSet<String> = lscan.links.clone();
         let mut rfiles: HashMap<String, FileStat> = HashMap::new();
         for (p, (kind, st)) in &rscan.entries {
             if ex.excluded(p, false) {
@@ -293,6 +312,9 @@ impl LocalSync {
                 remote::Kind::File | remote::Kind::Symlink => {
                     skipped += 1;
                     blocked.insert(p.clone());
+                    if *kind == remote::Kind::Symlink {
+                        links.insert(p.clone());
+                    }
                 }
                 remote::Kind::Other => {
                     blocked.insert(p.clone());
@@ -304,32 +326,39 @@ impl LocalSync {
         // not edited: stop before carrying that across.
         let live_base: Vec<&String> = base
             .keys()
-            .filter(|p| !ex.excluded(p, false) && !blocked.contains(*p))
+            .filter(|p| !ex.excluded(p, false) && !is_blocked(&blocked, &links, p))
             .collect();
-        for (side, gone) in [
+        // Gone from one side while the other still has it: a deletion made
+        // on both sides is agreement, not a wipe, and goes through.
+        for (side, gone, empty) in [
             (
                 "local folder",
                 live_base
                     .iter()
-                    .filter(|p| !lscan.files.contains_key(**p))
+                    .filter(|p| !lscan.files.contains_key(**p) && rfiles.contains_key(**p))
                     .count(),
+                lscan.files.is_empty(),
             ),
             (
                 "worktree on the host",
                 live_base
                     .iter()
-                    .filter(|p| !rfiles.contains_key(**p))
+                    .filter(|p| !rfiles.contains_key(**p) && lscan.files.contains_key(**p))
                     .count(),
+                rfiles.is_empty(),
             ),
         ] {
-            if gone >= MASS_DELETE_MIN && gone * 2 > live_base.len() {
+            // Every synced file gone and nothing left: an unmounted volume's
+            // empty mount point, which the count alone would let through.
+            let emptied = empty && gone > 0 && gone == live_base.len();
+            if emptied || (gone >= MASS_DELETE_MIN && gone * 2 > live_base.len()) {
                 return Err(PassFail {
                     error: IpcError::new(
                         codes::E_INVALID_STATE,
                         format!(
                             "{gone} of {} synced files disappeared from the {side}; sync is \
-                             paused and nothing was deleted. Restore them, or disconnect and \
-                             enable again",
+                             paused and nothing was deleted. Restore them, or, if they were \
+                             meant to go, delete them on the other side too and resume",
                             live_base.len()
                         ),
                     ),
@@ -347,7 +376,7 @@ impl LocalSync {
             .collect();
         let mut work: Vec<PathWork> = Vec::new();
         for p in all {
-            if ex.excluded(p, false) || blocked.contains(p) {
+            if ex.excluded(p, false) || is_blocked(&blocked, &links, p) {
                 continue;
             }
             let b = base.get(p);

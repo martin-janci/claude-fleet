@@ -73,22 +73,28 @@ pub(super) fn pull_script(root: &str) -> String {
 /// files to write under `f/`. Extracts into a temp directory inside the
 /// root (so the final `mv` is a rename on one filesystem), then for each
 /// record compares, and only on a match moves the file into place or
-/// deletes it. Answers `O \t size \t mtime \t path` for done, `C \t \t \t
-/// path` for a file that was not what was expected, `X \t \t \t path` for a
-/// failure, each NUL-terminated.
+/// deletes it. A path below a link or a file counts as a link (`L`), so
+/// nothing is written or deleted outside the root through a symlinked
+/// directory. Files land with their arrival time (`tar -m`), not the
+/// desktop's mtime: a build that ran on the host since the edit must still
+/// see the file as newer than its outputs. Answers `O \t size \t mtime \t
+/// path` for done, `C \t \t \t path` for a file that was not what was
+/// expected, `X \t \t \t path` for a failure, each NUL-terminated.
 pub(super) fn push_script(root: &str) -> String {
     format!(
         r#"{prologue}t=$(mktemp -d ./.fleet-sync-XXXXXX) || {{ printf '{ERR_MARK} mktemp\n'; exit 5; }}
 trap 'rm -rf -- "$t"' EXIT
-tar -xf - -C "$t" 2>/dev/null || {{ printf '{ERR_MARK} tar\n'; exit 5; }}
+tar -xmf - -C "$t" 2>/dev/null || {{ printf '{ERR_MARK} tar\n'; exit 5; }}
 if command -v sha256sum >/dev/null 2>&1; then h() {{ sha256sum < "$1" | cut -c1-64; }}
 else h() {{ shasum -a 256 < "$1" | cut -c1-64; }}; fi
 if stat --version >/dev/null 2>&1; then st() {{ stat --printf '%s\t%Y' -- "$1"; }}
 else st() {{ stat -f '%z%t%m' -- "$1"; }}; fi
+pl() {{ d=$(dirname -- "$1"); while [ "$d" != . ]; do
+  if [ -L "$d" ] || {{ [ -e "$d" ] && [ ! -d "$d" ]; }}; then return 0; fi; d=$(dirname -- "$d"); done; return 1; }}
 printf '{push}'
 while IFS= read -r -d '' rec; do
   op=${{rec%%$'\t'*}}; rec=${{rec#*$'\t'}}; exp=${{rec%%$'\t'*}}; p=${{rec#*$'\t'}}
-  if [ -L "$p" ]; then cur=L; elif [ -f "$p" ]; then cur=$(h "$p"); elif [ -e "$p" ]; then cur=D; else cur=-; fi
+  if pl "$p" || [ -L "$p" ]; then cur=L; elif [ -f "$p" ]; then cur=$(h "$p"); elif [ -e "$p" ]; then cur=D; else cur=-; fi
   if [ "$cur" != "$exp" ]; then printf 'C\t\t\t%s\0' "$p"; continue; fi
   if [ "$op" = W ]; then
     if mkdir -p -- "$(dirname -- "$p")" 2>/dev/null && mv -f -- "$t/f/$p" "$p" 2>/dev/null; then

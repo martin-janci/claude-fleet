@@ -558,6 +558,14 @@ const SCOPE_GUARDS: &[Guard] = &[
         file: "crates/fleet-core/src/service/work/mod.rs",
         func: "work_link_locked",
         nth: 3,
+        code: "let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());",
+        verdict: Verdict::OrgBoundary,
+        why: "the same compare-and-set on the visible primary, for a switch",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/mod.rs",
+        func: "work_link_locked",
+        nth: 4,
         code: "if !scope.is_all() || args.expected_version.is_some() {",
         verdict: Verdict::OrgBoundary,
         why: "the same org check before a reject by link id",
@@ -565,7 +573,7 @@ const SCOPE_GUARDS: &[Guard] = &[
     Guard {
         file: "crates/fleet-core/src/service/work/mod.rs",
         func: "work_link_locked",
-        nth: 4,
+        nth: 5,
         code: "} else if !scope.is_all() {",
         verdict: Verdict::OrgBoundary,
         why: "the same org check before a confirm by link id",
@@ -573,7 +581,7 @@ const SCOPE_GUARDS: &[Guard] = &[
     Guard {
         file: "crates/fleet-core/src/service/work/mod.rs",
         func: "work_link_locked",
-        nth: 5,
+        nth: 6,
         code: "if !scope.is_all() || args.expected_version.is_some() {",
         verdict: Verdict::OrgBoundary,
         why: "the same org check before an unlink by link id",

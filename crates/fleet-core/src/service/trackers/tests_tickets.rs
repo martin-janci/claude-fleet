@@ -518,6 +518,30 @@ fn own_tasks_are_listed_when_asked_for() {
     );
 }
 
+/// Tickets never take the whole limit while own tasks match: a picker
+/// asking for a few rows still shows the caller's TASK-n.
+#[test]
+fn own_tasks_are_not_starved_by_the_limit() {
+    let fx = Fx::new();
+    {
+        let s = fx.store.lock().unwrap();
+        s.create_local_work_item(None, "Release notes").unwrap();
+    }
+    let rows = crate::service::trackers::tickets::tickets_and_tasks(
+        &fx.store,
+        None,
+        None,
+        None,
+        Some(2),
+        true,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .unwrap();
+    let titles: Vec<&str> = rows.iter().map(|t| t.item.title.as_str()).collect();
+    assert_eq!(titles.len(), 2, "{titles:?}");
+    assert_eq!(titles[1], "Release notes");
+}
+
 #[test]
 fn views_are_evaluated_from_the_cache() {
     let fx = Fx::new();

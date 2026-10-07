@@ -57,6 +57,14 @@ describe('LocalWorkspaceCard', () => {
     });
   });
 
+  it('forgets a typed folder when the card moves to another session', async () => {
+    const view = render(LocalWorkspaceCard, { session: session('devbox', 'a', { id: 1, project_id: 4 }) });
+    const input = screen.getByTestId('lw-folder') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: '/Users/me/fleet/foo' } });
+    await view.rerender({ session: session('devbox', 'b', { id: 2, project_id: 4 }) });
+    expect((screen.getByTestId('lw-folder') as HTMLInputElement).value).toBe('');
+  });
+
   it('shows the state, both paths and the conflicts with their two picks', async () => {
     localWorkspaces.set([
       link({
