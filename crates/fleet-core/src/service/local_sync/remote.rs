@@ -25,7 +25,7 @@ const PUSH_MARK: &str = "@@FLEET-PUSH@@\n";
 const ERR_MARK: &str = "@@FLEET-ERR@@";
 
 /// `cd` into the root or say why not. Exit 3: the directory is missing.
-fn prologue(root: &str) -> String {
+pub(super) fn prologue(root: &str) -> String {
     format!(
         "set -u\ncd -- {} 2>/dev/null || {{ printf '{ERR_MARK} missing\\n'; exit 3; }}\n",
         quote(root)
@@ -73,9 +73,12 @@ pub(super) fn pull_script(root: &str) -> String {
 /// files to write under `f/`. Extracts into a temp directory inside the
 /// root (so the final `mv` is a rename on one filesystem), then for each
 /// record compares, and only on a match moves the file into place or
-/// deletes it. A path below a link or a file counts as a link (`L`), so
-/// nothing is written or deleted outside the root through a symlinked
-/// directory. Files land with their arrival time (`tar -m`), not the
+/// deletes it. A path below a link or a file counts as `L`, which never
+/// matches, so nothing is written or deleted outside the root through a
+/// symlinked directory. A link at the path itself is compared by its
+/// target (as the bytes `local::link_blob` makes) and replaced or deleted
+/// as a link, never followed: it is removed before the `mv`, which would
+/// otherwise move the new file into the directory it points at. Files land with their arrival time (`tar -m`), not the
 /// desktop's mtime: a build that ran on the host since the edit must still
 /// see the file as newer than its outputs. Answers `O \t size \t mtime \t
 /// path` for done, `C \t \t \t path` for a file that was not what was
@@ -87,6 +90,7 @@ trap 'rm -rf -- "$t"' EXIT
 tar -xmf - -C "$t" 2>/dev/null || {{ printf '{ERR_MARK} tar\n'; exit 5; }}
 if command -v sha256sum >/dev/null 2>&1; then h() {{ sha256sum < "$1" | cut -c1-64; }}
 else h() {{ shasum -a 256 < "$1" | cut -c1-64; }}; fi
+lh() {{ printf '\000fleet-symlink\000%s' "$(readlink -- "$1")" > "$t/.l" && h "$t/.l"; }}
 if stat --version >/dev/null 2>&1; then st() {{ stat --printf '%s\t%Y' -- "$1"; }}
 else st() {{ stat -f '%z%t%m' -- "$1"; }}; fi
 pl() {{ d=$(dirname -- "$1"); while [ "$d" != . ]; do
@@ -94,9 +98,10 @@ pl() {{ d=$(dirname -- "$1"); while [ "$d" != . ]; do
 printf '{push}'
 while IFS= read -r -d '' rec; do
   op=${{rec%%$'\t'*}}; rec=${{rec#*$'\t'}}; exp=${{rec%%$'\t'*}}; p=${{rec#*$'\t'}}
-  if pl "$p" || [ -L "$p" ]; then cur=L; elif [ -f "$p" ]; then cur=$(h "$p"); elif [ -e "$p" ]; then cur=D; else cur=-; fi
+  if pl "$p"; then cur=L; elif [ -L "$p" ]; then cur=$(lh "$p"); elif [ -f "$p" ]; then cur=$(h "$p"); elif [ -e "$p" ]; then cur=D; else cur=-; fi
   if [ "$cur" != "$exp" ]; then printf 'C\t\t\t%s\0' "$p"; continue; fi
   if [ "$op" = W ]; then
+    if [ -L "$p" ]; then rm -f -- "$p"; fi
     if mkdir -p -- "$(dirname -- "$p")" 2>/dev/null && mv -f -- "$t/f/$p" "$p" 2>/dev/null; then
       printf 'O\t%s\t%s\0' "$(st "$p")" "$p"
     else printf 'X\t\t\t%s\0' "$p"; fi
@@ -130,7 +135,7 @@ pub(super) struct RemoteScan {
 }
 
 /// Run one script with `stdin` and return what it printed after `marker`.
-async fn run(
+pub(super) async fn run(
     ssh: &dyn SshExec,
     host: &str,
     script: &str,
@@ -197,7 +202,7 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-fn nul_list<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<u8> {
+pub(super) fn nul_list<'a>(paths: impl IntoIterator<Item = &'a String>) -> Vec<u8> {
     let mut v = Vec::new();
     for p in paths {
         v.extend_from_slice(p.as_bytes());
@@ -298,7 +303,9 @@ pub(super) async fn pull(
     for entry in entries {
         let mut entry = entry
             .map_err(|e| IpcError::new(codes::E_IO, format!("{host}: unreadable tar: {e}")))?;
-        if entry.header().entry_type() != tar::EntryType::Regular {
+        let ty = entry.header().entry_type();
+        if ty != tar::EntryType::Regular && !(super::local::LINKS && ty == tar::EntryType::Symlink)
+        {
             continue;
         }
         let Ok(path) = entry.path() else { continue };
@@ -309,6 +316,15 @@ pub(super) async fn pull(
             continue;
         };
         if !wanted.contains(path.as_str()) {
+            continue;
+        }
+        if ty == tar::EntryType::Symlink {
+            let target = entry.link_name_bytes().map(|t| t.into_owned());
+            if let Some(t) = target.and_then(|t| String::from_utf8(t).ok()) {
+                if super::local::carriable_target(&t) {
+                    out.insert(path, (super::local::link_blob(&t), 0o777));
+                }
+            }
             continue;
         }
         let mode = entry.header().mode().unwrap_or(0o644);
@@ -381,6 +397,16 @@ pub(super) fn push_tar(ops: &[PushOp]) -> Result<Vec<u8>, IpcError> {
             ..
         } = op
         {
+            if let Some(target) = super::local::link_target(bytes) {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(0);
+                h.set_mode(0o777);
+                h.set_mtime(*mtime_secs);
+                h.set_entry_type(tar::EntryType::Symlink);
+                b.append_link(&mut h, format!("f/{path}"), target)
+                    .map_err(tar_err)?;
+                continue;
+            }
             let mut h = tar::Header::new_gnu();
             h.set_size(bytes.len() as u64);
             h.set_mode(if *executable { 0o755 } else { 0o644 });

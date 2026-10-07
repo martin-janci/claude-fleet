@@ -59,6 +59,7 @@
   import { orgs } from './orgs';
   import SpiralLoader from './SpiralLoader.svelte';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
+  import { projectById } from './projects';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -283,7 +284,13 @@
    * either way would be worse than saying nothing.
    */
   // Local workspace sync: the link on this row's worktree, if any.
-  const localLink = $derived(linkFor($localWorkspaces, sess));
+  const localLink = $derived(
+    linkFor(
+      $localWorkspaces,
+      sess,
+      sess.project_id != null ? $projectById.get(sess.project_id)?.project : undefined,
+    ),
+  );
   const localBadge = $derived(badgeFor(localLink));
   const privacyBadge = $derived.by((): { text: string; title: string } | null => {
     if (sess.visibility === 'unclaimed') {
@@ -686,6 +693,9 @@
               title="Local workspace: {localBadge.label} — {localLink.local_path}"
               aria-label="Local workspace: {localBadge.label}"
             ></span>
+            {#if (localLink.local_activity ?? 0) > 0}
+              <span class="lw-changes" data-testid="local-sync-changes">changes</span>
+            {/if}
           {/if}
           {#if workKey}
             <WorkChip {workKey} />
@@ -1187,6 +1197,7 @@
   .lw-dot.tone-conflict,
   .lw-dot.tone-error { background: var(--usage-crit); }
   .lw-dot.tone-idle { border: 1.5px solid var(--fg-muted); box-sizing: border-box; }
+  .lw-changes { font-size: 0.65rem; color: var(--usage-warn); }
   .privacy-chip {
     font-size: 0.6rem;
     text-transform: uppercase;

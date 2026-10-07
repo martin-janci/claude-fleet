@@ -117,7 +117,8 @@ impl Store {
     /// `false` when it was not pending.
     pub fn approve_guide_proposal(&self, id: i64, by: &str) -> Result<bool> {
         let now = now_unix();
-        let tx = self.conn.unchecked_transaction()?;
+        // Reads, then writes: IMMEDIATE (see `Store::immediate_transaction`).
+        let tx = self.immediate_transaction()?;
         let page_id: Option<String> = tx
             .query_row(
                 "SELECT page_id FROM guide_proposals WHERE id = ?1 AND state = 'pending'",
@@ -209,5 +210,29 @@ mod tests {
             .unwrap());
         assert!(s.guide_proposals_in("approved").unwrap().is_empty());
         assert!(s.guide_proposals_in("pending").unwrap().is_empty());
+    }
+
+    /// `fleet-hub guides approve` runs beside the hub, which may hold the
+    /// write lock: the approval reads, then writes, and must wait for it
+    /// rather than fail with "database is locked".
+    #[test]
+    fn an_approval_waits_out_another_connections_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("state.db");
+        let s =
+            Store::open_with_bus(&db, std::sync::Arc::new(crate::events::NoopEventBus)).unwrap();
+        let p = s.insert_guide_proposal(&new("guide.a", "1")).unwrap();
+        let (held, wait_held) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        wait_held.recv().unwrap();
+        let approved = s.approve_guide_proposal(p.id, "person");
+        writer.join().unwrap();
+        assert!(approved.unwrap());
     }
 }

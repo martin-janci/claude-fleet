@@ -22,6 +22,18 @@ is the Transfer sheet (terminal-header chip + `moves.ts`, live steps from the
 `move:progress` event), per
 `docs/superpowers/specs/2026-09-20-transfer-sheet-design.md`.
 
+Multi-account (docs/accounts.md): Hosts shows each host's `/login` from
+`$CLAUDE_CONFIG_DIR` and flags credential variables that outrank it
+(migration 111). **Login profiles** are landed for launching: `new_session
+{ profile }` and the New session dialog run a session under
+`~/.claude-profiles/<name>` (its own `/login`, everything else shared with
+`~/.claude`), and `restart_session { profile }` resumes a session under
+another login (migration 113; desktop: session details → Login). Each
+pass reads a host's profiles and their logins (migration 114), attributes a
+profile session to its profile's account and polls that account's usage
+through the profile. Not built: a hub vault for setup-tokens and API keys,
+and automatic switching when an account hits its limit.
+
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
 (pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Their
@@ -220,7 +232,7 @@ Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
-a brainstorming draft with open decisions TS1–TS14): A0, A1 and A2 are landed.
+recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed.
 The operator never accepts or rejects a proposal and is never a detection
 or classification-nudge subject (`operator::is_operator_session`,
 `detect::subject_state`). `work_link { preview_start }`
@@ -242,6 +254,14 @@ switches around it, and a link no switch touched reads as before. The
 desktop's attach picker (`AttachPicker.svelte`, `attach.ts`) and Work on
 task… (`SessionTasks.svelte`) read them. Not yet: the new task's brief
 waiting for the next prompt (J3), own tasks in ⌘K.
+C0: the operator is born with the `fleet-brainstorm` skill
+(`skills/fleet-brainstorm/SKILL.md`, written to its directory's
+`.claude/skills/` by `operator::operator_files`, so no catalog sync is
+needed): Diverge → Converge → Decide → Plan, each stage closed by the
+person; the plan becomes a task (`work_link create`, the plan in `notes`)
+with proposed subtasks a person accepts. An operator born before C0 gets
+it at its next birth. Not yet: plan rows, decision rows, the worker
+catalog copy (C1).
 
 Orchestration projects (spec
 `docs/superpowers/specs/2026-10-07-autonomous-orchestration-projects-design.md`,
@@ -278,11 +298,17 @@ details and a dot on the session row). A link belongs to the worktree
 (host, owner/repo, worktree key), not the session. Writes are guarded on
 both sides, two sides that changed differently become a conflict (Keep local
 / Keep remote, or by hand), and a folder that lost most of its files pauses
-the link instead of deleting the other side. Standalone desktop only: every
-mutation is `LocalOnly` on a paired desktop, and hosts reached through
-`fleet-agent` are refused (no stdin). Not yet (Phases 2–3): Open in IDE,
-diff / compare, "local changes detected" with Ask AI, agent handoff,
-worktree lifecycle from the card, symlinks.
+the link instead of deleting the other side. A desktop paired with a hub
+syncs too, over its own SSH, with the session and project read from the hub;
+hosts reached through `fleet-agent` are refused (no stdin). Phases 2 and 3 are built too (spec
+`docs/superpowers/specs/2026-10-07-local-workspace-handoff-design.md`,
+migration 112): Open in VS Code / IntelliJ / a terminal / the file manager,
+a per-path log of which side changed what ("7 local changes"), Review
+changes (git status and diff on the host, Commit, Discard), Ask AI about the
+changes, Take over / Hand back to AI, Compare / Keep both / Ask AI to
+resolve on a conflict, and an overview of every link with Clean up stale.
+Symlinks sync as links (their target, never followed; not on a Windows
+desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

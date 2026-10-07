@@ -340,6 +340,11 @@ pub struct SessionRow {
     /// privacy-critical one.
     #[serde(default = "visibility_unclaimed")]
     pub visibility: String,
+    /// The credential profile the session runs under (migration 113,
+    /// docs/accounts.md): `CLAUDE_CONFIG_DIR` is
+    /// `~/.claude-profiles/<name>` on its host. `None` = the host's own login.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_profile: Option<String>,
 }
 
 /// `sessions.visibility` (migration 100): private to its owner, and to the
@@ -493,7 +498,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
        WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
-     pr_evidence, pr_checked_at, owner_person_id, visibility"
+     pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -602,6 +607,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         pr_checked_at: row.get(63)?,
         owner_person_id: row.get(64)?,
         visibility: row.get(65)?,
+        claude_profile: row.get(66)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -971,6 +977,22 @@ pub struct HostRow {
     /// an older hub omits it.
     #[serde(default)]
     pub auth_overrides: Option<Vec<String>>,
+    /// The host's Claude login profiles (migration 114, docs/accounts.md),
+    /// by name, each with the account it is logged into when known. `None`:
+    /// never read. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub claude_profiles: Option<Vec<HostProfileRow>>,
+}
+
+/// One login profile on a host, as `hosts.claude_profiles` stores it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostProfileRow {
+    pub name: String,
+    /// The `accounts` row its `/login` is; `None` = not logged in yet.
+    #[serde(default)]
+    pub account_uuid: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
@@ -1030,7 +1052,7 @@ pub(super) const HOST_COLUMNS: &str =
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
-     harnesses, provision_warning, auth_overrides";
+     harnesses, provision_warning, auth_overrides, claude_profiles";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1079,6 +1101,10 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         auth_overrides: row
             .get::<_, Option<String>>(25)?
             .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
+        // Migration 114. Same lenient read.
+        claude_profiles: row
+            .get::<_, Option<String>>(26)?
+            .and_then(|t| serde_json::from_str::<Vec<HostProfileRow>>(&t).ok()),
     })
 }
 

@@ -145,9 +145,43 @@
   );
 
   const hostRow = $derived($hostByAlias.get(session.host_alias) ?? null);
+  // A session under a login profile bills that profile's account, not the
+  // host's (docs/accounts.md); it has none until the host reports the
+  // profile logged in.
   const accountRow = $derived(
-    hostRow?.account_uuid ? ($accountByUuid.get(hostRow.account_uuid) ?? null) : null,
+    session.claude_profile
+      ? session.account_uuid
+        ? ($accountByUuid.get(session.account_uuid) ?? null)
+        : null
+      : hostRow?.account_uuid
+        ? ($accountByUuid.get(hostRow.account_uuid) ?? null)
+        : null,
   );
+
+  // Switch the session to another login: a restart that resumes the same
+  // conversation under it ('' = the host's own login).
+  const canSwitchLogin = $derived(!hasNoPane(session) && session.kind !== 'shell');
+  const loginChoices = $derived.by(() => {
+    const listed = hostRow?.claude_profiles ?? [];
+    const current = session.claude_profile;
+    return current && !listed.some((p) => p.name === current)
+      ? [...listed, { name: current, account_uuid: null, email: null }]
+      : listed;
+  });
+  let loginPick = $state<string | null>(null);
+  const loginTarget = $derived(loginPick ?? session.claude_profile ?? '');
+  let confirmingSwitch = $state(false);
+  async function onSwitchLogin() {
+    confirmingSwitch = false;
+    if (restartBlocked !== null) return;
+    const target = loginTarget;
+    const r = await restartSession(session.host_alias, session.tmux_name, target);
+    if (!r.ok) pushError(r.error, 'Switching the login failed');
+    else {
+      loginPick = null;
+      push({ kind: 'info', message: `Resumed under ${target || 'the host login'}` });
+    }
+  }
   function accountForRow(s: SessionRow): AccountRow | null {
     if (!s.account_uuid) return null;
     return $accountByUuid.get(s.account_uuid) ?? null;
@@ -592,6 +626,32 @@
     <dt>Account</dt>
     <dd data-testid="session-account">{accountEmailTier(accountRow)}</dd>
 
+    {#if canSwitchLogin}
+      <dt>Login</dt>
+      <dd class="login" data-testid="session-login">
+        <select
+          data-testid="session-login-pick"
+          value={loginTarget}
+          onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
+          disabled={restartBlocked !== null}
+          title="The Claude login this session bills: the host's own, or a login profile (~/.claude-profiles/<name>)"
+        >
+          <option value="">Host login</option>
+          {#each loginChoices as p (p.name)}
+            <option value={p.name}>{p.name}{p.email ? ` (${p.email})` : p.account_uuid ? '' : ' (not logged in)'}</option>
+          {/each}
+        </select>
+        {#if loginTarget !== (session.claude_profile ?? '')}
+          <button
+            data-testid="session-login-switch"
+            onclick={() => (confirmingSwitch = true)}
+            disabled={restartBlocked !== null}
+            title={restartBlocked ?? ''}
+          >Switch</button>
+        {/if}
+      </dd>
+    {/if}
+
     <dt>Project</dt>
     <dd>
       {#if parentProject}
@@ -946,6 +1006,22 @@
     This stops the claude process in <code>{session.tmux_name}</code> on
     <code>{session.host_alias}</code> and starts a fresh one. Anything it is working
     on right now is lost; the tmux session and the worktree are kept. Continue?
+  </ConfirmDialog>
+{/if}
+
+{#if confirmingSwitch}
+  <ConfirmDialog
+    title="Switch login?"
+    confirmLabel="Switch"
+    danger
+    onconfirm={onSwitchLogin}
+    oncancel={() => (confirmingSwitch = false)}
+    confirmTestId="confirm-login-switch"
+  >
+    This restarts claude in <code>{session.tmux_name}</code> and resumes the same
+    conversation under <code>{loginTarget || 'the host login'}</code>. Anything it is
+    working on right now is lost. A profile that is not logged in yet asks for
+    <code>/login</code> in the session.
   </ConfirmDialog>
 {/if}
 

@@ -113,6 +113,15 @@ pub trait TmuxExec: Send + Sync {
         None
     }
 
+    /// The host's Claude login profiles (`~/.claude-profiles/<name>`,
+    /// docs/accounts.md), each with the account its `.claude.json` is
+    /// logged into. `None` = could not tell (or an executor that does not
+    /// implement it): the stored list is then left alone. `Some(vec![])` =
+    /// the host has none. `LocalTmux` and `RemoteTmux` override it.
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        None
+    }
+
     /// Everything a reconcile pass needs from the host. The default composes
     /// the per-call methods (local tmux, test fakes); `RemoteTmux` overrides
     /// it with one script so a pass costs one round trip, not 5 + N.
@@ -136,6 +145,11 @@ pub trait TmuxExec: Send + Sync {
         } else {
             None
         };
+        let profiles = if sessions.is_ok() {
+            self.read_profiles().await
+        } else {
+            None
+        };
         let mut pane_tails = std::collections::HashMap::new();
         if let Ok(live) = &sessions {
             for s in live {
@@ -151,6 +165,7 @@ pub trait TmuxExec: Send + Sync {
             pane_tails,
             versions,
             health,
+            profiles,
         }
     }
 }
@@ -209,6 +224,82 @@ pub struct ProbeSnapshot {
     pub versions: Option<HostVersions>,
     /// The health section (every pass), when the host answered it.
     pub health: Option<HostHealthSample>,
+    /// The host's login profiles ([`TmuxExec::read_profiles`]); `None` =
+    /// could not tell.
+    pub profiles: Option<Vec<HostProfile>>,
+}
+
+/// One Claude login profile on a host: `~/.claude-profiles/<name>` and the
+/// account its `.claude.json` is logged into (`None`: not logged in yet, or
+/// unreadable).
+#[derive(Debug, Clone)]
+pub struct HostProfile {
+    pub name: String,
+    pub account: Option<crate::service::hosts::OauthAccount>,
+}
+
+/// Shell section listing the host's login profiles: one
+/// `@@P\t<name>\t<oauthAccount json>` line per `~/.claude-profiles/<name>`
+/// directory whose name is a valid profile name (anything else is skipped,
+/// never echoed into a line a parser splits on tabs). The account is read
+/// by the same script as the host's own, with `CLAUDE_CONFIG_DIR` pointed
+/// at the profile, and squeezed onto one line.
+pub(crate) fn profiles_script() -> String {
+    format!(
+        "for d in \"$HOME\"/.claude-profiles/*/; do [ -d \"$d\" ] || continue; n=$(basename \"$d\"); \
+         case \"$n\" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) continue;; esac; \
+         printf '@@P\\t%s\\t%s\\n' \"$n\" \"$(CLAUDE_CONFIG_DIR=\"${{d%/}}\"; {} | tr -d '\\n')\"; done",
+        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
+    )
+}
+
+/// Parse [`profiles_script`] output (or the `profiles` probe section).
+/// Lines that are not `@@P` lines, and names that do not validate, are
+/// dropped.
+pub(crate) fn parse_profiles(body: &str) -> Vec<HostProfile> {
+    let mut out: Vec<HostProfile> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("@@P\t"))
+        .filter_map(|rest| {
+            let (name, json) = rest.split_once('\t').unwrap_or((rest, ""));
+            crate::validate::claude_profile(name).ok()?;
+            Some(HostProfile {
+                name: name.to_string(),
+                account: crate::service::hosts::parse_oauth_account(json),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// `local`'s login profiles, read from `<home>/.claude-profiles` directly
+/// (blocking fs reads: call off the async worker). `None` when the
+/// directory exists but cannot be listed; a missing directory is no
+/// profiles.
+pub(crate) fn read_local_profiles(home: &std::path::Path) -> Option<Vec<HostProfile>> {
+    let dir = home.join(".claude-profiles");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut out: Vec<HostProfile> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            crate::validate::claude_profile(&name).ok()?;
+            let account = match crate::service::hosts::probe_local_account_in(&e.path()) {
+                crate::service::hosts::LocalAccountProbe::LoggedIn(a) => Some(a),
+                _ => None,
+            };
+            Some(HostProfile { name, account })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(out)
 }
 
 /// Shell script listing the most recently modified Claude transcripts under
@@ -596,6 +687,14 @@ impl TmuxExec for LocalTmux {
             .filter(|o| o.status.success())?;
         Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
     }
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        local_allowed().ok()?;
+        let home = crate::service::hosts::local_home_dir();
+        tokio::task::spawn_blocking(move || read_local_profiles(&home))
+            .await
+            .ok()
+            .flatten()
+    }
 }
 
 /// tmux over an `SshExec`. Generic (defaulting to the production client) so
@@ -684,10 +783,12 @@ pub fn probe_snapshot_script(tail_lines: u32, want_versions: bool) -> String {
          printf '%s\\n' '---FLEET:health'; {HOST_HEALTH_SCRIPT}; \
          printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'; \
          printf '%s\\n' '---FLEET:account'; {}; \
+         printf '%s\\n' '---FLEET:profiles'; {}; \
          printf '%s\\n' '---FLEET:panes'; \
          tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
          printf '%s\\n' '---FLEET:end'",
-        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
+        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT,
+        profiles_script()
     )
 }
 
@@ -769,6 +870,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
         section("account").and_then(|b| crate::service::hosts::parse_oauth_account(b.trim()));
     let versions = section("versions").map(parse_host_versions);
     let health = section("health").map(parse_host_health);
+    let profiles = section("profiles").map(parse_profiles);
     let mut pane_tails = std::collections::HashMap::new();
     for (name, body) in &sections {
         if let Some(pane) = name.strip_prefix("pane ") {
@@ -782,6 +884,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
         pane_tails,
         versions,
         health,
+        profiles,
     })
 }
 
@@ -1001,6 +1104,14 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .filter(|o| o.status.success())?;
         Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
     }
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        let out = self
+            .remote_sh(&profiles_script())
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(parse_profiles(&String::from_utf8_lossy(&out.stdout)))
+    }
     async fn probe_snapshot(&self, tail_lines: u32, want_versions: bool) -> ProbeSnapshot {
         let script = probe_snapshot_script(tail_lines, want_versions);
         match self.remote_sh(&script).await {
@@ -1011,6 +1122,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                 pane_tails: Default::default(),
                 versions: None,
                 health: None,
+                profiles: None,
             },
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -1030,6 +1142,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                             pane_tails: Default::default(),
                             versions: None,
                             health: None,
+                            profiles: None,
                         }
                     }
                 }
@@ -1262,6 +1375,18 @@ pub(crate) fn scrollback_start(lines: u32) -> String {
 /// `--effort`), so the chain below is identical whichever one runs.
 pub(crate) const CL_FALLBACK: &str = r#"if ! command -v cl >/dev/null 2>&1; then if [ -x "$HOME/.local/share/ag/ag" ]; then cl() { "$HOME/.local/share/ag/ag" claude --yolo "$@"; }; else cl() { claude --dangerously-skip-permissions "$@"; }; fi; fi;"#;
 
+/// Makes `$CLAUDE_CONFIG_DIR` a credential profile that shares everything
+/// with `~/.claude` except the login (docs/accounts.md). Each visible entry
+/// of `~/.claude` (`projects/`, `settings.json` with fleet's hooks, skills,
+/// …) is symlinked in unless the profile already has its own; the dotfiles
+/// are not, so `.credentials.json` and the profile's `.claude.json` (its
+/// `/login` account) stay the profile's own. Fleet reads transcripts from
+/// `~/.claude/projects` and a resumed session must find its transcript
+/// under any profile, so `projects/` is created first. Idempotent: run on
+/// every launch, it also links an entry `~/.claude` gained since. Run by
+/// `/bin/sh`, so a zsh pane shell's no-match glob error cannot abort it.
+pub const PROFILE_LINKS: &str = r#"umask 077; mkdir -p "$HOME/.claude/projects" "$CLAUDE_CONFIG_DIR" || exit 0; for f in "$HOME"/.claude/*; do [ -e "$f" ] || continue; b="${f##*/}"; [ -e "$CLAUDE_CONFIG_DIR/$b" ] || [ -L "$CLAUDE_CONFIG_DIR/$b" ] || ln -s "$f" "$CLAUDE_CONFIG_DIR/$b"; done"#;
+
 /// Puts fleet's `/voice` recorder ahead of any real `arecord` (docs/voice.md).
 pub(crate) const VOICE_PATH_PREFIX: &str = "PATH=\"$HOME/.claude-fleet/voice/bin:$PATH\"; ";
 
@@ -1294,16 +1419,36 @@ pub fn pane_command_for(claude_session_id: Option<&str>, tmux_name: &str) -> Str
 pub struct ClaudeLaunch {
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// The credential profile the session runs under: `CLAUDE_CONFIG_DIR`
+    /// is `~/.claude-profiles/<profile>` ([`PROFILE_LINKS`]). `None` = the
+    /// host's own login. Must have passed `validate::claude_profile`.
+    pub profile: Option<String>,
 }
 
 impl ClaudeLaunch {
     /// Stored launch options, each kept only when it still validates: a
     /// value read back from the DB never reaches the shell unchecked (an
     /// invalid one degrades to the host's default, like a bad claude id).
-    pub fn checked(model: Option<String>, effort: Option<String>) -> Self {
+    pub fn checked(model: Option<String>, effort: Option<String>, profile: Option<String>) -> Self {
         Self {
             model: model.filter(|m| crate::validate::claude_model(m).is_ok()),
             effort: effort.filter(|e| crate::validate::effort_level(e).is_ok()),
+            profile: profile.filter(|p| crate::validate::claude_profile(p).is_ok()),
+        }
+    }
+
+    /// `export CLAUDE_CONFIG_DIR=…; <PROFILE_LINKS>` for a session with a
+    /// profile; empty otherwise. Exported, not `-e` on the tmux session, so
+    /// a restart (`respawn-pane`, which takes no environment), a repair or
+    /// a move rebuilds it from the stored profile like `--model`.
+    fn profile_prefix(&self) -> String {
+        match self.profile.as_deref() {
+            Some(p) => format!(
+                "export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"{}; /bin/sh -c {} 2>/dev/null; ",
+                crate::shell::quote(p),
+                crate::shell::quote(PROFILE_LINKS),
+            ),
+            None => String::new(),
         }
     }
 
@@ -1333,11 +1478,12 @@ pub fn pane_command_with(
         crate::shell::quote(tmux_name),
         launch.flags()
     );
+    let profile = launch.profile_prefix();
     match claude_session_id {
         Some(id) => format!(
-            "{VOICE_PATH_PREFIX}{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
+            "{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --resume '{id}' {name} 2>/dev/null || cl --session-id '{id}' {name} || cl {name}; {tail}"
         ),
-        None => format!("{VOICE_PATH_PREFIX}{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
+        None => format!("{VOICE_PATH_PREFIX}{profile}{CL_FALLBACK} cl --continue {name} || cl {name}; {tail}"),
     }
 }
 
@@ -2168,6 +2314,7 @@ mod tests {
         let launch = ClaudeLaunch {
             model: Some("sonnet[1m]".into()),
             effort: Some("high".into()),
+            profile: None,
         };
         for shell in available_shells() {
             let argv =
@@ -2180,6 +2327,161 @@ mod tests {
                 "{shell}"
             );
         }
+    }
+
+    /// A profile session runs `cl` with `CLAUDE_CONFIG_DIR` at
+    /// `~/.claude-profiles/<name>`, which shares `~/.claude`'s visible
+    /// entries (transcripts, settings with fleet's hooks) but never its
+    /// login, and keeps whatever the profile already has of its own.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_session_runs_under_its_config_dir_and_shares_all_but_the_login() {
+        use super::fake_exec::{write_exec, PROBE_GUARD};
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let launch = ClaudeLaunch {
+            profile: Some("work".into()),
+            ..ClaudeLaunch::default()
+        };
+        let cmd = pane_command_with(Some(id), "dev-x", &launch);
+        for shell in available_shells() {
+            let home = tempfile::tempdir().unwrap();
+            let h = home.path();
+            let log = h.join("cl.log");
+            write_exec(
+                h,
+                "cl",
+                &format!(
+                    "#!/bin/sh\n{PROBE_GUARD}printf '%s %s\\n' \"$CLAUDE_CONFIG_DIR\" \"$*\" >> '{}'\nexit 0\n",
+                    log.display()
+                ),
+            );
+            write_exec(
+                h,
+                "fake-shell",
+                &format!("#!/bin/sh\n{PROBE_GUARD}exit 0\n"),
+            );
+            let claude = h.join(".claude");
+            std::fs::create_dir_all(claude.join("skills")).unwrap();
+            std::fs::write(claude.join("settings.json"), "{\"hooks\":{}}").unwrap();
+            std::fs::write(claude.join(".credentials.json"), "host-login").unwrap();
+            std::fs::write(claude.join("CLAUDE.md"), "shared").unwrap();
+            let profile = h.join(".claude-profiles/work");
+            std::fs::create_dir_all(&profile).unwrap();
+            std::fs::write(profile.join("CLAUDE.md"), "the profile's own").unwrap();
+            let out = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(&cmd)
+                .env_clear()
+                .env("PATH", format!("{}:/usr/bin:/bin", h.display()))
+                .env("HOME", h)
+                .env("SHELL", h.join("fake-shell"))
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{shell}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let logged = std::fs::read_to_string(&log).unwrap();
+            assert_eq!(
+                logged.trim(),
+                format!(
+                    "{}/.claude-profiles/work --resume {id} --name dev-x",
+                    h.display()
+                ),
+                "{shell}"
+            );
+            for shared in ["projects", "settings.json", "skills"] {
+                let link = std::fs::read_link(profile.join(shared))
+                    .unwrap_or_else(|e| panic!("{shell}: {shared} not linked: {e}"));
+                assert_eq!(link, claude.join(shared), "{shell}");
+            }
+            assert!(claude.join("projects").is_dir(), "{shell}");
+            assert!(!profile.join(".credentials.json").exists(), "{shell}");
+            assert_eq!(
+                std::fs::read_to_string(profile.join("CLAUDE.md")).unwrap(),
+                "the profile's own",
+                "{shell}"
+            );
+        }
+    }
+
+    /// The profiles section lists each valid `~/.claude-profiles/<name>`
+    /// with its login, skips a name that is not a profile name, and reports
+    /// a profile with no login yet as such.
+    #[cfg(unix)]
+    #[test]
+    fn the_profiles_script_lists_each_profile_and_its_login() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().join(".claude-profiles");
+        std::fs::create_dir_all(p.join("work")).unwrap();
+        std::fs::write(
+            p.join("work/.claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"acc-w","emailAddress":"w@x.com"},"other":1}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(p.join("fresh")).unwrap();
+        std::fs::create_dir_all(p.join("bad name")).unwrap();
+        std::fs::create_dir_all(p.join("-dash")).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(profiles_script())
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = parse_profiles(&String::from_utf8_lossy(&out.stdout));
+        let names: Vec<&str> = got.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["fresh", "work"]);
+        assert!(got[0].account.is_none());
+        let w = got[1].account.as_ref().unwrap();
+        assert_eq!(w.uuid.as_deref(), Some("acc-w"));
+        assert_eq!(w.email.as_deref(), Some("w@x.com"));
+
+        let local = read_local_profiles(home.path()).unwrap();
+        let names: Vec<&str> = local.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["fresh", "work"]);
+        assert_eq!(
+            local[1].account.as_ref().unwrap().uuid.as_deref(),
+            Some("acc-w")
+        );
+        assert_eq!(
+            read_local_profiles(&home.path().join("nowhere"))
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_probe_reports_its_profiles_section() {
+        let text = "---FLEET:sessions\nrc=0\n---FLEET:profiles\n@@P\twork\t{\"accountUuid\":\"a\"}\n@@P\tx y\t\n---FLEET:end\n";
+        let snap = parse_probe_snapshot(text).unwrap();
+        let profiles = snap.profiles.unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "work");
+        let old = parse_probe_snapshot("---FLEET:sessions\nrc=0\n---FLEET:end\n").unwrap();
+        assert!(
+            old.profiles.is_none(),
+            "no section = could not tell, never 'none'"
+        );
+        assert!(probe_snapshot_script(10, false).contains("---FLEET:profiles"));
+    }
+
+    #[test]
+    fn a_session_without_a_profile_leaves_the_config_dir_alone() {
+        let cmd = pane_command_with(None, "dev-x", &ClaudeLaunch::default());
+        assert!(!cmd.contains("CLAUDE_CONFIG_DIR"), "{cmd}");
+        let bad = ClaudeLaunch::checked(None, None, Some("../../etc".into()));
+        assert_eq!(
+            bad.profile, None,
+            "a stored profile that no longer validates is dropped"
+        );
     }
 
     #[cfg(unix)]

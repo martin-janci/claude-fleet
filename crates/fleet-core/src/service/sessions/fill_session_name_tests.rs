@@ -19,6 +19,7 @@ fn args(
         resume_claude_session_id: None,
         model: None,
         effort: None,
+        profile: None,
         owner_person_id: None,
     }
 }

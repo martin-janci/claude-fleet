@@ -928,6 +928,7 @@ pub fn resume_session_args(
         resume_claude_session_id,
         model: None,
         effort: None,
+        profile: None,
         owner_person_id,
     })
 }

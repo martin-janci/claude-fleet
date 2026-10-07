@@ -77,6 +77,13 @@ impl Verdict {
 /// to the hub is the fleet's database and hosts, not this machine.
 const WHY_ATTACH: &str = "the same story as `upload_to_session`: this machine has the disk, the file dialog and the `ssh` that carries the bytes, and the session is addressed by the alias passed in, reading no state.db. Being a window onto a hub does not take this machine away";
 
+/// Why local workspace sync is the same in both modes: a link binds a
+/// folder on this machine to a worktree it reaches over its own SSH, as
+/// `upload_to_session` does; nothing in it is the hub's fleet.
+const WHY_LOCAL_SYNC: &str = "a link binds a folder on THIS machine to a worktree this machine \
+     reaches over its own SSH, the same story as `upload_to_session`; its rows live in this \
+     machine's database, paired or not";
+
 /// The verdict of `command`, or `None` when the table has no row for it —
 /// which the tests make unshippable.
 pub fn verdict(command: &str) -> Option<&'static Verdict> {
@@ -1461,56 +1468,115 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "list_local_workspaces",
         Verdict::SameInBoth {
             why: "links bind a folder on THIS machine, so they live in this machine's \
-                  database; a paired desktop has none and answers an empty list",
+                  database, paired or not",
         },
     ),
     (
         "enable_local_workspace",
-        Verdict::LocalOnly {
-            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
-                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        Verdict::SameInBoth {
+            why: "the folder is on THIS machine and the sync runs over its own SSH; paired, \
+                  the session and its project are read from the hub (list_sessions, \
+                  list_projects) and the worktree's path from the session's pane",
         },
     ),
     (
         "pause_local_workspace",
-        Verdict::LocalOnly {
-            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
-                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
         },
     ),
     (
         "resume_local_workspace",
-        Verdict::LocalOnly {
-            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
-                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
         },
     ),
     (
         "sync_local_workspace_now",
-        Verdict::LocalOnly {
-            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
-                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
         },
     ),
     (
         "disconnect_local_workspace",
-        Verdict::LocalOnly {
-            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
-                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
         },
     ),
     (
         "set_local_workspace_excludes",
-        Verdict::LocalOnly {
-            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
-                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
         },
     ),
     (
         "resolve_local_workspace_conflict",
-        Verdict::LocalOnly {
-            instead: "it syncs a folder on this machine with a host over this machine's own SSH \
-                      connection, and the hub exposes no tool for it; use a standalone desktop",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "open_local_workspace",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "local_workspace_changes",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "local_workspace_diff",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "commit_local_workspace",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "discard_local_workspace_changes",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "dismiss_local_workspace_activity",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "compare_local_conflict",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "keep_both_local_conflict",
+        Verdict::SameInBoth {
+            why: WHY_LOCAL_SYNC,
+        },
+    ),
+    (
+        "ask_ai_about_local_changes",
+        Verdict::SameInBoth {
+            why: "the link and its folder are THIS machine's; paired, the session is found \
+                  among the hub's (list_sessions) and the prompt goes through the hub's \
+                  send_prompt",
+        },
+    ),
+    (
+        "set_local_workspace_driver",
+        Verdict::SameInBoth {
+            why: "the link and its folder are THIS machine's; paired, the session is found \
+                  among the hub's (list_sessions) and the prompt goes through the hub's \
+                  send_prompt",
         },
     ),
     (

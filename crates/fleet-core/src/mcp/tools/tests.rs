@@ -1565,6 +1565,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 resume_claude_session_id: None,
                 model: None,
                 effort: None,
+                profile: None,
                 confirm_nonce: None,
             }),
         )
@@ -1796,6 +1797,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 friendly_name: Some("a".repeat(81)), // over the 80-char cap
                 model: None,
                 effort: None,
+                profile: None,
                 confirm_nonce: None,
             }),
         )
@@ -3846,7 +3848,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 78,504 on 2026-10-07 after merging sprints and releases
     /// (`work { buckets | bucket }`, `work_link { bucket_add | bucket_remove }`
     /// and six `work_admin` bucket actions, +1,280 bytes) with it.
-    const BUDGET_BYTES: usize = 78_902;
+    /// Measured at 78,993 on 2026-10-07 after login profiles
+    /// (`new_session { profile }` and `restart_session { profile }`, +91
+    /// bytes).
+    const BUDGET_BYTES: usize = 79_093;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

@@ -404,9 +404,19 @@ bullet for the area you are about to change.
   overwritten. The host side is three bash scripts over
   `SshExec::run_with_stdin` (GNU and BSD userlands); `.gitignore` is git's own
   answer there and the `ignore` crate's here, plus `excludes::DEFAULT_EXCLUDES`
-  and the link's patterns. The tick (`spawn_local_sync_tick`) is fleet-owning,
-  started by `bootstrap::tasks`; every mutation is `LocalOnly` on a paired
-  desktop. Row event `local_workspace:changed` carries the id only.
+  and the link's patterns. The tick (`spawn_local_sync_tick`) is started by
+  `bootstrap::tasks` in both modes: the folders and the SSH are this
+  machine's, so every command is `SameInBoth`, and a paired desktop reads the
+  session and project from the hub (`commands/local_workspaces.rs`). Row event `local_workspace:changed` carries the id only.
+  Phases 2 and 3 (migration 112; spec
+  `docs/superpowers/specs/2026-10-07-local-workspace-handoff-design.md`):
+  each pass records which side carried each path
+  (`local_workspace_activity`, nothing on the first pass); `local_sync::git`
+  runs status / diff / commit / discard / compare in the worktree by its
+  path, so no session is needed; `local_sync::handoff` composes the Ask AI
+  and driver prompts in fleet-core and `src-tauri` delivers them through
+  `sessions::send_prompt`; `local_sync::open` builds the Open in IDE command
+  per OS.
 - **Hub daemon** (`crates/fleet-hub`): the same core headless; `hub.*`
   settings, `HubBase` in `service/hub.rs`.
 - **Hub client mode** (`src-tauri/src/backend/`): a desktop paired with a hub

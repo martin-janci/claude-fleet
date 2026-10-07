@@ -1080,6 +1080,15 @@ starts and kills are refused (`E_FORBIDDEN`); there it offers archive or
 snooze instead. The agent panel's **Tidy up done tickets** chip fills the
 operator's composer with that request; it never sends it.
 
+**Brainstorming with the operator.** Ask the operator to brainstorm or plan
+something new and it works in four stages: options, a choice, decisions, a
+plan. Each stage waits for your answer. When you say yes to the plan it
+creates a task (`TASK-<id>`) whose notes hold the plan, and proposes up to
+ten subtasks under it. You accept or reject each one; the operator cannot,
+and it starts nothing: press **Work** on a subtask when you want it done.
+The skill is `skills/fleet-brainstorm/SKILL.md`, written into the
+operator's directory when it starts.
+
 Your own starts and kills from the desktop are not gated by this rule. With
 `mcp.confirm_destructive` on, a tidy-up batch that contains a kill still
 asks you to confirm, like any kill.

@@ -261,6 +261,26 @@ pub const OPERATOR_MCP_FILE: &str = ".mcp.json";
 /// reading the secret back off the host.
 pub const SETTING_OPERATOR_TOKEN_SHA: &str = "operator.token_sha";
 
+/// The brainstorming skill (task → session spec §4.1, slice C0). It goes
+/// into the operator's own directory at birth, so the operator always has
+/// it whether or not the asset catalog ever syncs.
+const BRAINSTORM_SKILL: &str = include_str!("../../../../skills/fleet-brainstorm/SKILL.md");
+
+/// Where [`BRAINSTORM_SKILL`] lives, relative to the operator's directory:
+/// a project skill, which Claude Code reads from `.claude/skills/` in the
+/// directory it starts in.
+pub const BRAINSTORM_SKILL_PATH: &str = ".claude/skills/fleet-brainstorm/SKILL.md";
+
+/// PURE: every plain (non-secret) file of the operator's directory, as
+/// `(path relative to the directory, body)`. The `.mcp.json` is not here: it
+/// carries the token and takes the secret path.
+pub fn operator_files() -> [(&'static str, &'static str); 2] {
+    [
+        ("CLAUDE.md", claude_md()),
+        (BRAINSTORM_SKILL_PATH, BRAINSTORM_SKILL),
+    ]
+}
+
 /// PURE: the operator's standing instructions.
 pub fn claude_md() -> &'static str {
     "# You are the fleet operator\n\
@@ -283,6 +303,12 @@ pub fn claude_md() -> &'static str {
      \n\
      You are not the fleet controller: skip `register_self`, whatever the\n\
      control skill says. The panel restarts you through it.\n\
+     \n\
+     **Brainstorming something new.** When the person wants to make,\n\
+     design or plan something new, use the `fleet-brainstorm` skill: options,\n\
+     a choice, decisions, then a plan, each stage closed by the person. The\n\
+     plan becomes a task with proposed subtasks; you never accept them and\n\
+     never start their sessions.\n\
      \n\
      **Tidying up done tickets.** `work` action `tidy` lists what fleet\n\
      suggests cleaning up, each with a reason (`done_idle`, `pr_merged_idle`,\n\
@@ -423,12 +449,13 @@ pub(crate) trait OperatorHost: Send + Sync {
     /// acts on it.
     async fn resolve_dir(&self, host: &str) -> Result<String, IpcError>;
 
-    /// Write `CLAUDE.md` and [`OPERATOR_MCP_FILE`] under `dir` on `host`.
+    /// Write `files` ([`operator_files`]: paths relative to `dir`) and
+    /// [`OPERATOR_MCP_FILE`] under `dir` on `host`.
     async fn write_files(
         &self,
         host: &str,
         dir: &str,
-        claude_md: &str,
+        files: &[(&str, &str)],
         mcp_json: &str,
     ) -> Result<(), IpcError>;
 
@@ -459,17 +486,21 @@ impl OperatorHost for LiveHost {
         &self,
         host: &str,
         dir: &str,
-        claude_md: &str,
+        files: &[(&str, &str)],
         mcp_json: &str,
     ) -> Result<(), IpcError> {
-        crate::service::provision::write_host_file(
-            self.ssh.as_ref(),
-            host,
-            dir,
-            &format!("{dir}/CLAUDE.md"),
-            claude_md,
-        )
-        .await?;
+        for (rel, body) in files {
+            let path = format!("{dir}/{rel}");
+            let parent = path.rsplit_once('/').map_or(dir, |(p, _)| p);
+            crate::service::provision::write_host_file(
+                self.ssh.as_ref(),
+                host,
+                parent,
+                &path,
+                body,
+            )
+            .await?;
+        }
         // `.mcp.json` carries the bearer token, so it goes through the
         // secret path: never in an argv, never a truncated file on a failed
         // write, and 0600 on disk.
@@ -526,6 +557,7 @@ impl OperatorHost for LiveHost {
                 friendly_name: Some("fleet operator".to_string()),
                 model: None,
                 effort: None,
+                profile: None,
                 // Whose the operator's session is (multi-user M1, T5): the
                 // hub's own person. The UX agent is fleet acting for whoever
                 // runs this hub, and its session has to be readable by them —
@@ -943,7 +975,7 @@ pub(crate) async fn ensure_operator_on(
     //    records none; that is a property of a guard twenty lines away, not
     //    of this step, and it is the same weakness the birth lock above
     //    closes against a race.
-    host.write_files(&home, &dir, claude_md(), &mcp_json(&endpoint, &token))
+    host.write_files(&home, &dir, &operator_files(), &mcp_json(&endpoint, &token))
         .await?;
     //    And the answer to the trust dialog Claude Code would otherwise stop
     //    at when it starts in that directory — part of delivering the
@@ -1041,6 +1073,44 @@ mod tests {
         // ordinary sessions.
         refuse_if_operator(&s, "mefistos", "fleet-operator", "kill_session").unwrap();
         refuse_if_operator(&s, "local", "blue-sirius", "kill_session").unwrap();
+    }
+
+    /// The brainstorming skill is a project skill of the operator's
+    /// directory: Claude Code finds it by the directory name, so the
+    /// frontmatter's `name` must be that name, and the standing
+    /// instructions must point at it by the same name.
+    #[test]
+    fn the_brainstorm_skill_is_named_where_claude_code_looks_for_it() {
+        let (path, body) = operator_files()
+            .into_iter()
+            .find(|(p, _)| *p == BRAINSTORM_SKILL_PATH)
+            .expect("the skill is one of the operator's files");
+        let dir_name = path
+            .strip_suffix("/SKILL.md")
+            .and_then(|d| d.rsplit_once('/'))
+            .map(|(_, n)| n)
+            .expect(".claude/skills/<name>/SKILL.md");
+        let front = body
+            .strip_prefix("---\n")
+            .and_then(|b| b.split_once("\n---\n"))
+            .map(|(f, _)| f)
+            .expect("the skill opens with YAML frontmatter");
+        assert!(
+            front.lines().any(|l| l == format!("name: {dir_name}")),
+            "frontmatter name must be {dir_name}: {front}"
+        );
+        let desc = front
+            .lines()
+            .find_map(|l| l.strip_prefix("description: "))
+            .expect("a description, which is what makes Claude pick the skill");
+        assert!(
+            desc.chars().count() <= 1024,
+            "a skill description is capped"
+        );
+        assert!(
+            claude_md().contains(&format!("`{dir_name}`")),
+            "CLAUDE.md names the skill"
+        );
     }
 
     #[test]
@@ -1232,11 +1302,13 @@ mod tests {
             &self,
             host: &str,
             dir: &str,
-            claude_md: &str,
+            files: &[(&str, &str)],
             mcp_json: &str,
         ) -> Result<(), IpcError> {
             let mut f = self.files.lock().unwrap();
-            f.push((format!("{host}:{dir}/CLAUDE.md"), claude_md.to_string()));
+            for (rel, body) in files {
+                f.push((format!("{host}:{dir}/{rel}"), body.to_string()));
+            }
             f.push((
                 format!("{host}:{dir}/{OPERATOR_MCP_FILE}"),
                 mcp_json.to_string(),
@@ -1654,7 +1726,13 @@ mod tests {
         async fn resolve_dir(&self, h: &str) -> Result<String, IpcError> {
             self.inner.resolve_dir(h).await
         }
-        async fn write_files(&self, h: &str, d: &str, c: &str, m: &str) -> Result<(), IpcError> {
+        async fn write_files(
+            &self,
+            h: &str,
+            d: &str,
+            c: &[(&str, &str)],
+            m: &str,
+        ) -> Result<(), IpcError> {
             self.inner.write_files(h, d, c, m).await
         }
         async fn pre_trust(&self, _h: &str, _d: &str) -> Result<(), IpcError> {
@@ -1726,6 +1804,13 @@ mod tests {
         // would leave both sides individually well-formed and the agent
         // permanently unauthorised.
         let files = host.files.lock().unwrap();
+        // The brainstorming skill is born with the operator (slice C0), in
+        // its own directory, so it never waits on a catalog sync.
+        let skill = files
+            .iter()
+            .find(|(p, _)| p == &format!("{OPERATOR_HOST}:{}/{BRAINSTORM_SKILL_PATH}", host.dir))
+            .expect("the brainstorming skill is written into the operator's directory");
+        assert_eq!(skill.1, BRAINSTORM_SKILL);
         let (path, body) = files
             .iter()
             .find(|(p, _)| p.ends_with(OPERATOR_MCP_FILE))
@@ -2116,7 +2201,13 @@ mod tests {
             tokio::task::yield_now().await;
             self.inner.resolve_dir(h).await
         }
-        async fn write_files(&self, h: &str, d: &str, c: &str, m: &str) -> Result<(), IpcError> {
+        async fn write_files(
+            &self,
+            h: &str,
+            d: &str,
+            c: &[(&str, &str)],
+            m: &str,
+        ) -> Result<(), IpcError> {
             tokio::task::yield_now().await;
             self.inner.write_files(h, d, c, m).await
         }
@@ -2145,7 +2236,7 @@ mod tests {
             &self,
             _h: &str,
             _d: &str,
-            _c: &str,
+            _c: &[(&str, &str)],
             _m: &str,
         ) -> Result<(), IpcError> {
             Err(IpcError::new(codes::E_PROVISION, "no space left on device"))
