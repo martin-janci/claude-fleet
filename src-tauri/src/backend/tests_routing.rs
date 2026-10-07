@@ -859,6 +859,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // The board (sprints design 2026-09-28 §6c).
+        (
+            "set_work_status",
+            "work_link",
+            json!({ "session_id": null, "action": "set_status", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "status": "in_progress" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_status(
+                    b,
+                    commands::work::SetWorkStatusArgs {
+                        item_id: 9,
+                        status: "in_progress".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "accept_work_proposal",
             "work_link",

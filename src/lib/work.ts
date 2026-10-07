@@ -525,6 +525,19 @@ export async function createWorkTask(input: {
   return r;
 }
 
+/** The statuses a person may give a native item (`blocked` is a session's
+ *  state, never an item's). */
+export type WorkItemStatus = 'todo' | 'in_progress' | 'done';
+
+/** A person's status for a native item: final over the derived one
+ *  (sprints design 2026-09-28 §2). A tracker's ticket is refused,
+ *  `E_INVALID`, naming it: its status is its tracker's. */
+export async function setWorkStatus(itemId: number, status: WorkItemStatus): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>('set_work_status', { args: { item_id: itemId, status } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
 /** A person accepts or rejects an agent's proposed subtask. */
 export async function decideWorkProposal(itemId: number, accept: boolean): Promise<Result<WorkItemRow>> {
   const r = await invokeCmd<WorkItemRow>(accept ? 'accept_work_proposal' : 'reject_work_proposal', {
