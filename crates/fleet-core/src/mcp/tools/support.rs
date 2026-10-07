@@ -749,7 +749,8 @@ pub(super) fn work_link_start_summary(
 ) -> String {
     format!(
         "{} key={} url={} item_id={:?} link_id={:?} host={} project_id={:?} project_ids={:?} \
-         repos=[{}] mode={} name={} worktree={} with_brief={:?} brief={} force_cross_org={:?}",
+         repos=[{}] mode={} name={} worktree={} with_brief={:?} brief={} force_cross_org={:?} \
+         role={} parallel={:?}",
         a.action,
         bound_text(a.key.as_deref()),
         bound_text(a.url.as_deref()),
@@ -765,6 +766,8 @@ pub(super) fn work_link_start_summary(
         a.with_brief,
         bound_body(a.brief.as_deref()),
         a.force_cross_org,
+        bound_text(a.role.as_deref()),
+        a.parallel,
     )
 }
 

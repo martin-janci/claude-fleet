@@ -142,7 +142,7 @@ pub(crate) fn item_visible(
 /// B's `start` or be named as working on B's ticket by typing its key. The
 /// rule is [`Store::bind_tracker_refs`]'s: an unassigned side never
 /// conflicts, and a forced item link keeps its item's org.
-fn live_work_on(
+pub(crate) fn live_work_on(
     s: &Store,
     key: &str,
     item_org: Option<i64>,

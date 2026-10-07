@@ -1762,7 +1762,19 @@ async fn run_matrix(isolate: bool) {
                     is_code(who, a, "E_FORBIDDEN", "a per-host token runs nothing")
                 }
                 Who::BoundA => is_code(who, a, "E_NOTFOUND", "run another org's item"),
-                _ => assert_ne!(code(a), "E_FORBIDDEN", "{who:?}: {a:?}"),
+                // Reached: the item is found, and the start then asks what
+                // every start asks of B's item in project 1 (org A): the
+                // cross-org question, or B's own fence on A's project.
+                _ => {
+                    let said = format!("{a:?}");
+                    assert!(
+                        code(a) != "E_FORBIDDEN"
+                            || said.contains("cross_org")
+                            || (matches!(who, Who::BoundB)
+                                && said.contains("only in its own org's projects")),
+                        "{who:?}: {a:?}"
+                    )
+                }
             }
         },
     )

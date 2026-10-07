@@ -73,6 +73,15 @@ pub fn precheck(
         Some(i) if tickets::item_visible(&view.org, s, &i)? => i,
         _ => return Err(orgs::not_found("work item", item_id)),
     };
+    // A job's mirror item: its title and notes are the dispatch prompt of
+    // someone else's job, which a run would copy into a brief and a task
+    // row. The job itself is the run.
+    if item.origin.as_deref() == Some("agent") {
+        return Err(IpcError::new(
+            codes::E_INVALID_STATE,
+            format!("work item {item_id} mirrors a dispatched job; it is not run on its own"),
+        ));
+    }
     if let Some(open) = s.open_task_for_item(item_id, role)? {
         if tasks::task_visible_in_scope(s, &open, view)? {
             return Ok(Precheck::Existing(Box::new(open)));
@@ -169,10 +178,22 @@ pub async fn run_item(
         }
         Precheck::Fresh { attempt } => attempt,
     };
+    // A run always starts its own worker: a live session already on the
+    // item (another role's run, a failed attempt's session that lives on,
+    // a person's own) is not a reason to refuse, but a reason for this
+    // attempt to get its own `-N` checkout, as a parallel start does.
+    let parallel = start.parallel || {
+        let s = lock(store.as_ref())?;
+        match s.get_work_item(item_id)?.and_then(|i| i.key) {
+            Some(key) => !tickets::live_work_on(&s, &key, s.item_org(item_id)?)?.is_empty(),
+            None => false,
+        }
+    };
     let start = StartArgs {
         item_id: Some(item_id),
         reference: None,
         with_brief: true,
+        parallel,
         ..start.clone()
     };
     let (row, plan, queued) =
@@ -266,6 +287,23 @@ mod tests {
             .unwrap();
         assert_eq!(before, after);
         assert_eq!(s.get_work_item(item).unwrap().unwrap().task_id, None);
+    }
+
+    #[test]
+    fn a_jobs_mirror_item_is_not_run() {
+        let (s, _, item) = store_with_item();
+        s.conn_ref()
+            .execute(
+                "UPDATE work_items SET origin = 'agent' WHERE id = ?1",
+                [item],
+            )
+            .unwrap();
+        assert_eq!(
+            precheck(&s, &ViewScope::internal(), item, "implement")
+                .unwrap_err()
+                .code,
+            codes::E_INVALID_STATE
+        );
     }
 
     #[test]
