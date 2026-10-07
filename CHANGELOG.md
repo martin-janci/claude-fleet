@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.5.2] - 2026-10-07
+
+**Upgrade note:** this release carries migrations 109–111 (local workspace
+sync, work-item runs, host credential overrides). Back up `state.db` before
+upgrading the desktop or the hub; an older build refuses a migrated database.
+
+### Added
+- **local-sync:** sync a remote session's worktree with a local folder — a
+  three-way sync over SSH that never overwrites an edit made during a pass,
+  turns divergent changes into conflicts you resolve with *Keep local* /
+  *Keep remote*, and pauses a link whose folder lost most of its files
+  instead of deleting the other side
+- **local-sync:** the **Local workspace** card in session details (enable,
+  state, paths, conflicts, sync now, pause / resume, excludes, disconnect)
+  and a sync dot on linked session rows
+- **work:** `work_link` run — an attempt at a work item tracked as a task,
+  started in its own worktree with the brief; one open attempt per item and
+  role (orchestration O0)
+- **hosts:** the account probe reads the login `CLAUDE_CONFIG_DIR` points at,
+  and hosts flag credential variables that outrank a `/login`
+  (`ANTHROPIC_API_KEY`, Bedrock / Vertex, OAuth tokens …, by name only) in
+  `fleet_health` and the Hosts view
+
+### Fixed
+- **work:** an open run attempt is only described to a caller who may see its
+  task; the job-item column index follows the new task columns
+
 ## [0.5.1] - 2026-10-07
 
 **Upgrade note:** this release carries migration 108 (sprints and releases in
@@ -2850,6 +2877,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.5.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.2
 [0.5.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.1
 [0.5.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.0
 [0.4.12]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.4.12

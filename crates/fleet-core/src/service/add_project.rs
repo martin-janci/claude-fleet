@@ -2662,13 +2662,20 @@ mod tests {
 
     #[cfg(unix)]
     fn git_ok(dir: &std::path::Path, args: &[&str]) -> bool {
-        std::process::Command::new("git")
+        let out = std::process::Command::new("git")
             .args(args)
             .current_dir(dir)
             .output()
-            .unwrap()
-            .status
-            .success()
+            .unwrap();
+        if !out.status.success() {
+            // Captured with the test's output, so a red run names git's reason.
+            eprintln!(
+                "git {args:?} in {} failed: {}",
+                dir.display(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        out.status.success()
     }
 
     #[cfg(unix)]
@@ -2749,6 +2756,20 @@ mod tests {
             &bare,
             &["remote", "add", "origin", "git@github.com:acme/widget.git"]
         ));
+        // The push below makes `receive-pack` start auto maintenance in the
+        // bare repo, detached, and since git 2.54 its default "geometric"
+        // strategy has tasks (pack-refs among them) that can still be
+        // running when the `worktree add` below touches the same refs. That
+        // is the likeliest cause of `worktree add` failing intermittently on
+        // git 2.55 CI runners (2026-10-07; the run kept no stderr, which
+        // `git_ok` now prints). Nothing here needs maintenance: turn it off.
+        for (key, value) in [
+            ("receive.autogc", "false"),
+            ("maintenance.auto", "false"),
+            ("gc.auto", "0"),
+        ] {
+            assert!(git_ok(&bare, &["config", key, value]));
+        }
 
         // Seed the bare repo with one commit on `main` from a throwaway
         // clone, so `worktree add` has a branch to check out.
