@@ -675,7 +675,7 @@ pub(crate) fn probe_local_in(
 /// `sync_local_account`, the only caller that cares about the distinction —
 /// `probe_local_in` collapses `LoggedOut` and `Unavailable` to `None` since
 /// its caller (a manual "Re-probe") already treats "no account" uniformly.
-enum LocalAccountProbe {
+pub(crate) enum LocalAccountProbe {
     /// The file parsed and has an `oauthAccount` with a uuid.
     LoggedIn(OauthAccount),
     /// The file parsed but has no `oauthAccount` (or one without a uuid) —
@@ -686,7 +686,7 @@ enum LocalAccountProbe {
     Unavailable,
 }
 
-fn probe_local_account_in(home: &std::path::Path) -> LocalAccountProbe {
+pub(crate) fn probe_local_account_in(home: &std::path::Path) -> LocalAccountProbe {
     let Ok(contents) = std::fs::read_to_string(home.join(".claude.json")) else {
         return LocalAccountProbe::Unavailable;
     };
@@ -793,6 +793,43 @@ pub(crate) fn sync_host_account(
         s.set_host_account(alias, Some(&row.uuid))?;
     }
     Ok(Some(row.uuid))
+}
+
+/// Record a host's login profiles from this pass's read and return each
+/// profile's account uuid by name. `Some(profiles)`: every logged-in
+/// profile's account row is upserted (so the Accounts view and the usage
+/// poll know it) and the host's list is replaced. `None` (could not tell):
+/// nothing is written and the stored list answers. Takes the store guard
+/// the caller already holds — never `.await`s.
+pub(crate) fn sync_host_profiles(
+    s: &Store,
+    alias: &str,
+    profiles: Option<&[crate::tmux::HostProfile]>,
+) -> Result<std::collections::HashMap<String, Option<String>>, IpcError> {
+    let rows: Vec<crate::store::HostProfileRow> = match profiles {
+        Some(profiles) => {
+            let now = now_unix();
+            let mut rows = Vec::with_capacity(profiles.len());
+            for p in profiles {
+                let account = p.account.as_ref().and_then(|a| account_row_from(a, now));
+                if let Some(a) = account.as_ref() {
+                    s.upsert_account(a)?;
+                }
+                rows.push(crate::store::HostProfileRow {
+                    name: p.name.clone(),
+                    account_uuid: account.as_ref().map(|a| a.uuid.clone()),
+                    email: account.and_then(|a| a.email),
+                });
+            }
+            s.set_host_profiles(alias, &rows)?;
+            rows
+        }
+        None => s
+            .get_host_row(alias)?
+            .and_then(|h| h.claude_profiles)
+            .unwrap_or_default(),
+    };
+    Ok(rows.into_iter().map(|r| (r.name, r.account_uuid)).collect())
 }
 
 pub(crate) fn parse_tmux_version(line: &str) -> Option<String> {
@@ -904,6 +941,7 @@ mod tests {
             unclaimed_sessions: None,
             provision_warning: None,
             auth_overrides: None,
+            claude_profiles: None,
             harnesses: None,
         }
     }

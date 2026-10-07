@@ -1070,6 +1070,7 @@ impl HubBackend {
                 "resume_claude_session_id": args.resume_claude_session_id,
                 "model": args.model,
                 "effort": args.effort,
+                "profile": args.profile,
             }),
         )
         .await

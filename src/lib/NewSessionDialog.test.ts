@@ -152,6 +152,31 @@ describe('NewSessionDialog', () => {
     spy.mockRestore();
   });
 
+  it('sends a typed login profile, refuses an invalid one, and none for a shell', async () => {
+    const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
+      ok: false,
+      error: { code: 'E_INVALID', message: 'stop here' },
+    } as never);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const create = () => screen.getByTestId('create-btn') as HTMLButtonElement;
+    await fireEvent.input(screen.getByTestId('launch-profile'), { target: { value: '../etc' } });
+    await tick();
+    expect(create().disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('launch-profile'), { target: { value: ' work ' } });
+    await tick();
+    expect(create().disabled).toBe(false);
+    await fireEvent.click(create());
+    await tick();
+    expect(spy.mock.calls[0][0]).toMatchObject({ profile: 'work' });
+
+    await fireEvent.click(screen.getByTestId('kind-shell'));
+    await fireEvent.click(screen.getByText('Create'));
+    await tick();
+    expect(spy.mock.calls[1][0]).toMatchObject({ profile: null });
+    spy.mockRestore();
+  });
+
   it('clicking + new chip, typing a name, and clicking Create passes new_worktree and worktree_id=null', async () => {
     const newSessionAbortableSpy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockResolvedValue({
       ok: true,

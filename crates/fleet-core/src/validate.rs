@@ -337,6 +337,29 @@ pub fn claude_model(value: &str) -> Result<(), IpcError> {
     }
 }
 
+/// Validate a Claude credential profile name: the directory
+/// `~/.claude-profiles/<name>` a session runs under as `CLAUDE_CONFIG_DIR`
+/// (docs/accounts.md). A plain name, never a path: letters, digits, `_`
+/// and `-`, starting with a letter or digit, at most 32 characters.
+pub fn claude_profile(value: &str) -> Result<(), IpcError> {
+    let ok = !value.is_empty()
+        && value.len() <= 32
+        && value
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(invalid(
+            "profile must be a name of up to 32 letters, digits, _ or -, starting with a letter or digit",
+        ))
+    }
+}
+
 /// The levels `claude --effort` takes at launch.
 pub const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
@@ -408,6 +431,32 @@ pub fn remote_worktree_path(label: &str, value: &str) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_profile_takes_plain_names_only() {
+        for ok in ["work", "Personal-2", "a", "team_max", &"x".repeat(32)] {
+            assert!(claude_profile(ok).is_ok(), "{ok:?}");
+        }
+        for bad in [
+            "",
+            "-work",
+            "_work",
+            "../x",
+            "a/b",
+            "~",
+            "a b",
+            "a'b",
+            "$HOME",
+            ".hidden",
+            &"x".repeat(33),
+        ] {
+            assert_eq!(
+                claude_profile(bad).unwrap_err().code,
+                "E_INVALID",
+                "{bad:?}"
+            );
+        }
+    }
 
     #[test]
     fn not_blank_accepts_leading_dash_rejects_whitespace_only() {

@@ -103,6 +103,9 @@ pub struct NewSessionParams {
     /// low|medium|high|xhigh|max.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Login profile (~/.claude-profiles/<name>).
+    #[serde(default)]
+    pub profile: Option<String>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -245,6 +248,9 @@ pub struct RestartSessionParams {
     /// Restart even the fleet controller.
     #[serde(default)]
     pub force: bool,
+    /// Switch login profile ("" = host login).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,

@@ -209,10 +209,11 @@ impl FleetTools {
             "restart_session",
             p.confirm_nonce.as_deref(),
             &format!(
-                "host={} name={} force={}",
+                "host={} name={} force={} profile={}",
                 bound_text(Some(&host_alias)),
                 bound_text(Some(&name)),
-                p.force
+                p.force,
+                bound_text(p.profile.as_deref())
             ),
             &caller,
         )?;
@@ -220,6 +221,7 @@ impl FleetTools {
             host_alias,
             name,
             force: p.force,
+            profile: p.profile,
         };
         let row = sessions::restart_session(args, &self.store, &self.ssh)
             .await

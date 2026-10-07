@@ -917,24 +917,47 @@ impl Store {
             .optional()
     }
 
-    /// The `claude --model` / `--effort` a session launches with
-    /// (`sessions.launch_model` / `effort_level`); `(None, None)` for a
-    /// missing row. Unvalidated: callers pass them to
-    /// `tmux::ClaudeLaunch::checked`.
+    /// The `claude --model` / `--effort` / credential profile a session
+    /// launches with (`sessions.launch_model` / `effort_level` /
+    /// `claude_profile`); all `None` for a missing row. Unvalidated: callers
+    /// pass them to `tmux::ClaudeLaunch::checked`.
+    #[allow(clippy::type_complexity)]
     pub fn session_launch(
         &self,
         id: i64,
-    ) -> Result<(Option<String>, Option<String>), rusqlite::Error> {
+    ) -> Result<(Option<String>, Option<String>, Option<String>), rusqlite::Error> {
         use rusqlite::OptionalExtension;
         Ok(self
             .conn
             .query_row(
-                "SELECT launch_model, effort_level FROM sessions WHERE id = ?1",
+                "SELECT launch_model, effort_level, claude_profile FROM sessions WHERE id = ?1",
                 [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
-            .unwrap_or((None, None)))
+            .unwrap_or((None, None, None)))
+    }
+
+    /// Record the credential profile a session runs under (`None` = the
+    /// host's own login). A change also drops the session's account link:
+    /// the account it recorded belonged to the login it is leaving, and
+    /// reconcile only ever fills an empty link (a profile session's from
+    /// nothing yet, a host-login session's from the host). `claude_profile`
+    /// is on the row (the sidebar shows it), so this emits `session_updated`.
+    pub fn set_session_profile(
+        &self,
+        id: i64,
+        profile: Option<&str>,
+    ) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET claude_profile = ?1, account_uuid = NULL \
+             WHERE id = ?2 AND claude_profile IS NOT ?1",
+            rusqlite::params![profile, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
     }
 
     /// Record the model a session launches with (`None` = the host's

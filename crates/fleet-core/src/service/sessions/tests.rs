@@ -476,6 +476,7 @@ fn row(
         pr_checked_at: None,
         owner_person_id: None,
         visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
+        claude_profile: None,
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
@@ -2408,6 +2409,7 @@ async fn reconcile_links_the_local_account_when_it_becomes_known() {
 struct AccountTmux {
     inner: ScriptedTmux,
     account: Option<crate::service::hosts::OauthAccount>,
+    profiles: Option<Vec<crate::tmux::HostProfile>>,
 }
 
 #[async_trait::async_trait]
@@ -2439,6 +2441,9 @@ impl TmuxExec for AccountTmux {
     async fn read_oauth_account(&self) -> Option<crate::service::hosts::OauthAccount> {
         self.account.clone()
     }
+    async fn read_profiles(&self) -> Option<Vec<crate::tmux::HostProfile>> {
+        self.profiles.clone()
+    }
 }
 
 fn oauth_account(uuid: &str, email: &str) -> crate::service::hosts::OauthAccount {
@@ -2455,6 +2460,15 @@ fn remote_account_deps(
     sessions: Vec<crate::tmux::TmuxSession>,
     account: Option<crate::service::hosts::OauthAccount>,
 ) -> Arc<ReconcileDeps> {
+    remote_profile_deps(sessions, account, None)
+}
+
+/// [`remote_account_deps`] whose host `h` also reports login `profiles`.
+fn remote_profile_deps(
+    sessions: Vec<crate::tmux::TmuxSession>,
+    account: Option<crate::service::hosts::OauthAccount>,
+    profiles: Option<Vec<crate::tmux::HostProfile>>,
+) -> Arc<ReconcileDeps> {
     ReconcileDeps::fake(
         move |alias| {
             let is_h = alias == "h";
@@ -2466,6 +2480,7 @@ fn remote_account_deps(
                     probes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 },
                 account: if is_h { account.clone() } else { None },
+                profiles: if is_h { profiles.clone() } else { None },
             })
         },
         std::time::Duration::from_secs(5),
@@ -2534,6 +2549,113 @@ async fn reconcile_relinks_a_remote_host_after_an_account_switch() {
     assert_eq!(
         s.get_session_account("h", "fresh").unwrap().as_deref(),
         Some("acc-2")
+    );
+}
+
+/// A session under a credential profile bills that profile's login, so
+/// reconcile never hands it the host's account, while a session on the
+/// host's own login still gets it.
+#[tokio::test]
+async fn reconcile_never_gives_a_profile_session_the_hosts_account() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let deps = remote_account_deps(
+        vec![tmux_session("plain"), tmux_session("prof")],
+        Some(oauth_account("acc-host", "host@x.com")),
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let id = s.get_session("prof", "h").unwrap().unwrap().id;
+        s.set_session_profile(id, Some("work")).unwrap();
+    }
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    let s = store.lock().unwrap();
+    assert_eq!(s.get_session_account("h", "prof").unwrap(), None);
+    assert_eq!(
+        s.get_session_account("h", "plain").unwrap().as_deref(),
+        Some("acc-host")
+    );
+}
+
+/// Once the host reports its profiles, a profile session is attributed to
+/// its profile's login, the account row exists for the usage poll, and the
+/// host row lists the profiles; a pass that cannot read them keeps both.
+#[tokio::test]
+async fn reconcile_attributes_a_profile_session_to_its_profiles_login() {
+    let store = Mutex::new(Store::open_in_memory().expect("store"));
+    store.lock().unwrap().upsert_host("h").unwrap();
+    let profiles = vec![
+        crate::tmux::HostProfile {
+            name: "work".into(),
+            account: Some(oauth_account("acc-work", "work@x.com")),
+        },
+        crate::tmux::HostProfile {
+            name: "fresh".into(),
+            account: None,
+        },
+    ];
+    let deps = remote_profile_deps(
+        vec![tmux_session("prof")],
+        Some(oauth_account("acc-host", "host@x.com")),
+        Some(profiles),
+    );
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        let id = s.get_session("prof", "h").unwrap().unwrap().id;
+        s.set_session_profile(id, Some("work")).unwrap();
+    }
+    reconcile_sessions_with(&store, &deps).await.unwrap();
+    {
+        let s = store.lock().unwrap();
+        assert_eq!(
+            s.get_session_account("h", "prof").unwrap().as_deref(),
+            Some("acc-work")
+        );
+        assert!(s
+            .list_accounts()
+            .unwrap()
+            .iter()
+            .any(|a| a.uuid == "acc-work"));
+        let listed = s
+            .get_host_row("h")
+            .unwrap()
+            .unwrap()
+            .claude_profiles
+            .unwrap();
+        assert_eq!(
+            listed,
+            vec![
+                crate::store::HostProfileRow {
+                    name: "work".into(),
+                    account_uuid: Some("acc-work".into()),
+                    email: Some("work@x.com".into()),
+                },
+                crate::store::HostProfileRow {
+                    name: "fresh".into(),
+                    account_uuid: None,
+                    email: None,
+                },
+            ]
+        );
+    }
+    // Could not tell this pass: the list and the attribution stay.
+    let blind = remote_profile_deps(vec![tmux_session("prof")], None, None);
+    reconcile_sessions_with(&store, &blind).await.unwrap();
+    let s = store.lock().unwrap();
+    assert_eq!(
+        s.get_session_account("h", "prof").unwrap().as_deref(),
+        Some("acc-work")
+    );
+    assert_eq!(
+        s.get_host_row("h")
+            .unwrap()
+            .unwrap()
+            .claude_profiles
+            .unwrap()
+            .len(),
+        2
     );
 }
 
@@ -3163,6 +3285,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: None,
         versions: None,
@@ -3212,6 +3335,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: None,
         versions: None,
@@ -3734,6 +3858,7 @@ fn reconcile_linking(
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: None,
         versions: None,
@@ -5920,6 +6045,7 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: Some(crate::tmux::HostIdentity {
             boot_id: Some("a".into()),
@@ -6399,6 +6525,7 @@ fn pair_pass(
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
+        profiles: None,
         pr_info: PrInfoMap::new(),
         identity: None,
         versions: None,
@@ -6570,6 +6697,7 @@ fn vps_probe(
         agent_mtimes: Some(std::collections::HashMap::new()),
         intel: PaneIntelMap::new(),
         account: None,
+        profiles: None,
         pr_info,
         identity,
         versions: None,
@@ -7239,6 +7367,109 @@ fn a_sent_switch_is_stored_and_relaunched() {
     let s = store.lock().unwrap();
     assert_eq!(stored_launch(&s, id), crate::tmux::ClaudeLaunch::default());
     assert_eq!(s.get_session_by_id(id).unwrap().unwrap().effort_level, None);
+}
+
+/// A session's credential profile is part of its stored launch: a rebuilt
+/// pane runs under the same `CLAUDE_CONFIG_DIR`. Changing it drops the
+/// account the session recorded under the login it is leaving.
+#[test]
+fn a_stored_profile_relaunches_under_its_config_dir_and_a_switch_drops_the_old_account() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("dev-prof", "local", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.upsert_account(&crate::store::AccountRow {
+        uuid: "acc-host".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET account_uuid = 'acc-host' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+
+    s.set_session_profile(id, Some("work")).unwrap();
+    let row = s.get_session_by_id(id).unwrap().unwrap();
+    assert_eq!(row.claude_profile.as_deref(), Some("work"));
+    assert_eq!(
+        row.account_uuid, None,
+        "the host login's account is not this session's any more"
+    );
+    let launch = stored_launch(&s, id);
+    assert_eq!(launch.profile.as_deref(), Some("work"));
+    let sid = "550e8400-e29b-41d4-a716-446655440000";
+    let pane = recreate_pane_command("work", Some(sid), "dev-prof", &launch);
+    assert!(
+        pane.contains("export CLAUDE_CONFIG_DIR=\"$HOME/.claude-profiles/\"'work';"),
+        "{pane}"
+    );
+
+    // A shell session never runs under one, whatever is stored.
+    assert!(
+        !recreate_pane_command("shell", None, "dev-prof", &launch).contains("CLAUDE_CONFIG_DIR")
+    );
+
+    // A tampered value never reaches the shell.
+    s.conn_for_test()
+        .execute(
+            "UPDATE sessions SET claude_profile = '../../x' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
+    assert_eq!(stored_launch(&s, id).profile, None);
+
+    s.set_session_profile(id, None).unwrap();
+    assert_eq!(
+        s.get_session_by_id(id).unwrap().unwrap().claude_profile,
+        None
+    );
+}
+
+#[test]
+fn a_restart_profile_is_keep_host_login_or_a_valid_name() {
+    use crate::service::sessions::lifecycle::profile_switch;
+    assert_eq!(profile_switch(None).unwrap(), None);
+    assert_eq!(profile_switch(Some("")).unwrap(), Some(None));
+    assert_eq!(profile_switch(Some("  ")).unwrap(), Some(None));
+    assert_eq!(
+        profile_switch(Some(" work ")).unwrap(),
+        Some(Some("work".into()))
+    );
+    assert_eq!(profile_switch(Some("a/b")).unwrap_err().code, "E_INVALID");
+}
+
+#[test]
+fn a_new_shell_session_refuses_a_profile() {
+    let mut args = NewSessionArgs {
+        host_alias: "local".into(),
+        project_id: 1,
+        worktree_id: None,
+        name: "x".into(),
+        call_id: None,
+        new_worktree: None,
+        base_branch: None,
+        kind: Some("shell".into()),
+        start_command: None,
+        friendly_name: None,
+        resume_claude_session_id: None,
+        model: None,
+        effort: None,
+        profile: Some("work".into()),
+        owner_person_id: None,
+    };
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, "E_INVALID");
+    args.kind = None;
+    args.profile = Some("../x".into());
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, "E_INVALID");
+    args.profile = Some(" work ".into());
+    normalize_launch(&mut args).unwrap();
+    assert_eq!(args.profile.as_deref(), Some("work"));
+    args.profile = Some("  ".into());
+    normalize_launch(&mut args).unwrap();
+    assert_eq!(args.profile, None);
 }
 
 /// A tampered stored value never reaches the pane command.

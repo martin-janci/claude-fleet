@@ -63,6 +63,17 @@ export interface HostRow {
    *  (ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK, …), in Claude Code's precedence
    *  order. null or absent = unknown (never sampled, or an older hub); [] = none. */
   auth_overrides?: string[] | null;
+  /** The host's Claude login profiles (`~/.claude-profiles/<name>`, docs/accounts.md),
+   *  each with the account it is logged into; account_uuid null = not logged in yet.
+   *  null or absent = never read (or an older hub). */
+  claude_profiles?: HostProfile[] | null;
+}
+
+/** One login profile on a host. */
+export interface HostProfile {
+  name: string;
+  account_uuid?: string | null;
+  email?: string | null;
 }
 
 /** The volatile half of a host row, as `host:pinged` carries it. */

@@ -50,6 +50,13 @@ pub struct NewSessionArgs {
     /// default. Rejected for a `"shell"` session.
     #[serde(default)]
     pub effort: Option<String>,
+    /// Credential profile for the new session: `claude` runs with
+    /// `CLAUDE_CONFIG_DIR=~/.claude-profiles/<profile>` on the host, so it
+    /// bills that profile's `/login` (docs/accounts.md). A profile with no
+    /// login yet asks for one in the pane. `None` / empty = the host's own
+    /// login. Rejected for a `"shell"` session.
+    #[serde(default)]
+    pub profile: Option<String>,
     /// Whose session this is to be (multi-user M1, T5): the `people` row the
     /// new row is owned by, and therefore `private` to. `None` leaves it
     /// `unclaimed` — the safe holding state (spec §4.3), never "everybody's".
@@ -641,11 +648,17 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
     };
     trim(&mut args.model);
     trim(&mut args.effort);
-    if args.kind.as_deref() == Some("shell") && (args.model.is_some() || args.effort.is_some()) {
+    trim(&mut args.profile);
+    if args.kind.as_deref() == Some("shell")
+        && (args.model.is_some() || args.effort.is_some() || args.profile.is_some())
+    {
         return Err(IpcError::new(
             codes::E_INVALID,
-            "model and effort apply to Claude sessions, not shell sessions",
+            "model, effort and profile apply to Claude sessions, not shell sessions",
         ));
+    }
+    if let Some(p) = args.profile.as_deref() {
+        crate::validate::claude_profile(p)?;
     }
     if let Some(m) = args.model.as_deref() {
         crate::validate::claude_model(m)?;
@@ -673,6 +686,7 @@ pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, 
     let launch = crate::tmux::ClaudeLaunch {
         model: args.model.clone(),
         effort: args.effort.clone(),
+        profile: args.profile.clone(),
     };
     match args.resume_claude_session_id.as_deref() {
         Some(id) => (
@@ -1029,6 +1043,7 @@ pub(super) async fn new_session_inner(
         let launch = crate::tmux::ClaudeLaunch {
             model: args.model.clone(),
             effort: args.effort.clone(),
+            profile: args.profile.clone(),
         };
         if let Err(e) = store_launch(&s, row.id, &launch) {
             tracing::warn!(session = %args.name, error = %e, "[new_session] storing the launch options failed");
@@ -1620,6 +1635,26 @@ pub struct RestartSessionArgs {
     /// Override the controller self-target guard.
     #[serde(default)]
     pub force: bool,
+    /// Switch the session's credential profile on the way through: a
+    /// profile name, or `""` for the host's own login. The conversation is
+    /// resumed under it (a running `claude` cannot change its login, so a
+    /// switch IS a restart). `None` keeps the stored profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
+/// The stored-profile change a [`RestartSessionArgs::profile`] asks for:
+/// `None` = keep, `Some(None)` = the host's login, `Some(Some(name))` = that
+/// profile. A name is validated here, before anything is written.
+pub(crate) fn profile_switch(raw: Option<&str>) -> Result<Option<Option<String>>, IpcError> {
+    match raw.map(str::trim) {
+        None => Ok(None),
+        Some("") => Ok(Some(None)),
+        Some(p) => {
+            crate::validate::claude_profile(p)?;
+            Ok(Some(Some(p.to_string())))
+        }
+    }
 }
 
 pub async fn restart_session(
@@ -1629,6 +1664,7 @@ pub async fn restart_session(
 ) -> Result<SessionRow, IpcError> {
     crate::validate::host_alias(&args.host_alias)?;
     crate::validate::tmux_name_addressable(&args.name)?;
+    let switch = profile_switch(args.profile.as_deref())?;
     // EXEMPT from `service::operator::refuse_if_operator`, deliberately, and
     // alone among the session-addressed operations. This IS the agent
     // panel's `lost` recovery — `restartOperator()` in `src/lib/operator.ts`
@@ -1651,8 +1687,26 @@ pub async fn restart_session(
         let gone_cwd = gone_pane_cwd(&s, row.as_ref(), &args.host_alias, &args.name)?;
         match row {
             Some(r) => {
+                if let Some(profile) = switch.as_ref() {
+                    if r.kind == "shell" || crate::store::has_no_pane(&r.kind) {
+                        return Err(IpcError::new(
+                            codes::E_INVALID,
+                            "a credential profile applies to Claude sessions only",
+                        ));
+                    }
+                    s.set_session_profile(r.id, profile.as_deref())?;
+                }
                 let launch = stored_launch(&s, r.id);
                 (r.kind, r.claude_session_id, Some(r.id), launch, gone_cwd)
+            }
+            None if switch.is_some() => {
+                return Err(IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!(
+                        "no session {} on {} to switch the profile of",
+                        args.name, args.host_alias
+                    ),
+                ));
             }
             // No row under that name: a restart is about to create a live
             // tmux session fleet has no record of. It lands `unclaimed`
@@ -1842,22 +1896,23 @@ pub(crate) fn recreate_pane_command(
     crate::tmux::pane_command_with(id, tmux_name, launch)
 }
 
-/// Store `launch` as the session's own (both halves, `None` included).
+/// Store `launch` as the session's own (every part, `None` included).
 pub(crate) fn store_launch(
     s: &Store,
     session_id: i64,
     launch: &crate::tmux::ClaudeLaunch,
 ) -> Result<(), rusqlite::Error> {
     s.set_session_launch_model(session_id, launch.model.as_deref())?;
+    s.set_session_profile(session_id, launch.profile.as_deref())?;
     s.set_session_effort(session_id, launch.effort.as_deref())
 }
 
-/// The model / effort a session was started or last switched to, checked
+/// The model / effort / profile a session was started or last switched to, checked
 /// again ([`crate::tmux::ClaudeLaunch::checked`]). A failed read is the
 /// host's default: a rebuilt pane must not fail over a cosmetic column.
 pub(crate) fn stored_launch(s: &Store, session_id: i64) -> crate::tmux::ClaudeLaunch {
     match s.session_launch(session_id) {
-        Ok((model, effort)) => crate::tmux::ClaudeLaunch::checked(model, effort),
+        Ok((model, effort, profile)) => crate::tmux::ClaudeLaunch::checked(model, effort, profile),
         Err(e) => {
             tracing::warn!(session_id, error = %e, "reading the session's launch options failed");
             crate::tmux::ClaudeLaunch::default()

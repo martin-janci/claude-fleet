@@ -249,7 +249,7 @@ Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
+Parameters: `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -427,7 +427,7 @@ Parameters: `host_alias`
 
 Restart a tmux session in place (kill and recreate): for a wedged Claude REPL whose tmux and worktree are fine; cheaper than recreate_session. Returns the updated row.
 
-Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
+Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `profile`, `session_id`
 
 ### `restore_host_sessions`
 
