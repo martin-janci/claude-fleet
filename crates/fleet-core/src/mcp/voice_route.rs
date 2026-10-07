@@ -196,6 +196,27 @@ const SOURCE_PING: Duration = SOURCE_PING_EVERY;
 #[cfg(test)]
 const SOURCE_PING: Duration = Duration::from_millis(200);
 
+/// A device silent for this many pings in a row (no pong, no audio, no
+/// frame at all) is gone: a half-open socket must not hold the claim.
+const SOURCE_SILENT_PINGS: u32 = 3;
+
+/// How long one frame to the device may take to send. A device that stops
+/// reading (a zero TCP window) otherwise parks the loop inside a send for
+/// good, and the claim with it.
+const SOURCE_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Sends `msg`, bounded by [`SOURCE_SEND_TIMEOUT`]; `false` when the socket
+/// failed or the send timed out.
+async fn send_bounded<S>(sink: &mut S, msg: Message) -> bool
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    matches!(
+        tokio::time::timeout(SOURCE_SEND_TIMEOUT, sink.send(msg)).await,
+        Ok(Ok(()))
+    )
+}
+
 /// A claim held by a websocket: `start` asks the device to open its
 /// microphone; the returned guard asks it to close it. The command queue is
 /// unbounded so a stop is never lost while the socket is backpressured — a
@@ -332,10 +353,15 @@ async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
     let mut live: Option<(u64, PcmTx)> = None;
     let mut ping = tokio::time::interval_at(Instant::now() + SOURCE_PING, SOURCE_PING);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_heard = Instant::now();
     loop {
         tokio::select! {
             _ = ping.tick() => {
-                if sink.send(Message::Ping(Default::default())).await.is_err() {
+                if last_heard.elapsed() > SOURCE_PING * SOURCE_SILENT_PINGS {
+                    tracing::debug!(session_id, "voice source silent; dropping its claim");
+                    break;
+                }
+                if !send_bounded(&mut sink, Message::Ping(Default::default())).await {
                     break;
                 }
             }
@@ -343,7 +369,7 @@ async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
                 Some(SourceCmd::Start { capture, tx }) => {
                     live = Some((capture, tx));
                     let start = format!("{{\"start\":{capture}}}");
-                    if sink.send(Message::Text(start.into())).await.is_err() {
+                    if !send_bounded(&mut sink, Message::Text(start.into())).await {
                         break;
                     }
                 }
@@ -354,41 +380,46 @@ async fn serve_source(socket: WebSocket, session_id: i64, owner: String) {
                     }
                     live = None;
                     let stop = format!("{{\"stop\":{capture}}}");
-                    if sink.send(Message::Text(stop.into())).await.is_err() {
+                    if !send_bounded(&mut sink, Message::Text(stop.into())).await {
                         break;
                     }
                 }
                 Some(SourceCmd::Revoked(reason)) => {
-                    let _ = sink
-                        .send(Message::Close(Some(CloseFrame {
+                    let _ = send_bounded(
+                        &mut sink,
+                        Message::Close(Some(CloseFrame {
                             code: reason.close_code(),
                             reason: reason.text().into(),
-                        })))
-                        .await;
+                        })),
+                    )
+                    .await;
                     break;
                 }
                 None => {
                     // The claim was released by someone other than this socket.
-                    let _ = sink
-                        .send(Message::Close(Some(CloseFrame {
+                    let _ = send_bounded(
+                        &mut sink,
+                        Message::Close(Some(CloseFrame {
                             code: CLOSE_CLAIMED_ELSEWHERE,
                             reason: "microphone claimed elsewhere".into(),
-                        })))
-                        .await;
+                        })),
+                    )
+                    .await;
                     break;
                 }
             },
             msg = stream.next() => match msg {
                 Some(Ok(Message::Binary(pcm))) => {
+                    last_heard = Instant::now();
                     if let Some(capture) = relay_pcm(&mut live, pcm.to_vec()) {
                         let stop = format!("{{\"stop\":{capture}}}");
-                        if sink.send(Message::Text(stop.into())).await.is_err() {
+                        if !send_bounded(&mut sink, Message::Text(stop.into())).await {
                             break;
                         }
                     }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
-                Some(Ok(_)) => {}
+                Some(Ok(_)) => last_heard = Instant::now(),
             },
         }
     }

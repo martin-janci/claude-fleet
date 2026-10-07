@@ -26,6 +26,7 @@ mod prompt;
 mod reconcile;
 mod restore;
 mod review;
+pub mod seed;
 mod sharing;
 mod targeting;
 

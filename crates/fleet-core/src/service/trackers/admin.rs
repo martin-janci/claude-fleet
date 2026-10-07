@@ -20,7 +20,7 @@ use std::sync::Mutex;
 #[derive(Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "WorkAdminParams")]
 pub struct WorkAdminArgs {
-    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage
+    /// list|add|update|set_credential|test|remove|status|list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|assign_client|sweep_now|usage|bucket_create|bucket_update|bucket_close|bucket_delete|bucket_adopt|bucket_unadopt
     pub action: String,
     /// Tracker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +91,39 @@ pub struct WorkAdminArgs {
     /// usage window, 1-365 (30)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<i64>,
+    /// Bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_id: Option<i64>,
+    /// sprint|release
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Unix; 0 clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_at: Option<i64>,
+    /// End/target; 0 clears.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at: Option<i64>,
+    /// Sprint goal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<String>,
+    /// active|released
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// Tag or URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shipped_ref: Option<String>,
+    /// Version seen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<i64>,
+    /// Close: next sprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry_to: Option<i64>,
+    /// Close: items (all open).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry: Option<Vec<i64>>,
+    /// Tracker's sprint/version name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
 }
 
 impl fmt::Debug for WorkAdminArgs {
@@ -122,6 +155,11 @@ impl fmt::Debug for WorkAdminArgs {
             .field("jev", &self.jev)
             .field("bound_sees_unassigned", &self.bound_sees_unassigned)
             .field("days", &self.days)
+            .field("bucket_id", &self.bucket_id)
+            .field("kind", &self.kind)
+            .field("state", &self.state)
+            .field("carry_to", &self.carry_to)
+            .field("external_id", &self.external_id)
             .finish()
     }
 }
@@ -133,7 +171,8 @@ impl WorkAdminArgs {
             "action={} tracker_id={:?} provider={:?} site_url={:?} auth_kind={:?} \
              credential_ref={:?} transport={:?} settings={} secret={} org_id={:?} \
              rule_id={:?} host_alias={:?} owner={:?} repo={:?} path_prefix={:?} \
-             isolate_sessions={:?} auto_tidy={:?} jev={:?} bound_sees_unassigned={:?} days={:?}",
+             isolate_sessions={:?} auto_tidy={:?} jev={:?} bound_sees_unassigned={:?} days={:?} \
+             bucket_id={:?} kind={:?} state={:?} carry_to={:?} external_id={:?}",
             self.action,
             self.tracker_id,
             self.provider,
@@ -162,6 +201,11 @@ impl WorkAdminArgs {
             self.jev,
             self.bound_sees_unassigned,
             self.days,
+            self.bucket_id,
+            self.kind,
+            self.state,
+            self.carry_to,
+            self.external_id,
         )
     }
 
@@ -195,6 +239,9 @@ pub enum AdminAction {
     /// Work graph M13.2: counts of how the work graph is used over `days`
     /// (`service::work::usage`). Read-only.
     Usage,
+    /// Sprints and releases (design 2026-09-28 §7,
+    /// `service::work::buckets`).
+    Bucket(crate::service::work::buckets::BucketAction),
 }
 
 impl AdminAction {
@@ -220,6 +267,12 @@ impl AdminAction {
         "assign_client",
         "sweep_now",
         "usage",
+        "bucket_create",
+        "bucket_update",
+        "bucket_close",
+        "bucket_delete",
+        "bucket_adopt",
+        "bucket_unadopt",
     ];
 
     /// Actions that destroy something and pass the confirmation gate.
@@ -229,12 +282,16 @@ impl AdminAction {
             AdminAction::Remove
                 | AdminAction::Org(crate::service::orgs::OrgAction::RemoveOrg)
                 | AdminAction::Org(crate::service::orgs::OrgAction::RemoveRule)
+                | AdminAction::Bucket(crate::service::work::buckets::BucketAction::Delete)
         )
     }
 
     pub fn parse(s: &str) -> Result<Self, IpcError> {
         if let Some(o) = crate::service::orgs::OrgAction::parse(s) {
             return Ok(AdminAction::Org(o));
+        }
+        if let Some(b) = crate::service::work::buckets::BucketAction::parse(s) {
+            return Ok(AdminAction::Bucket(b));
         }
         Ok(match s {
             "list" | "list_trackers" => AdminAction::List,
@@ -549,6 +606,7 @@ pub fn admin_sync(
             "retention runs outside the admin lock; use service::work::retention",
         )),
         AdminAction::Org(o) => crate::service::orgs::admin(o, args, &s),
+        AdminAction::Bucket(b) => crate::service::work::buckets::admin(b, args, &s),
     }
 }
 

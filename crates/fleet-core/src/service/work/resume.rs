@@ -18,7 +18,6 @@ use super::handover;
 use crate::cancel::CancellationRegistry;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::orgs::OrgScope;
-use crate::service::pane_intel::StuckKind;
 use crate::service::sessions::{self, NewSessionArgs};
 use crate::ssh::{SshClient, SshExec};
 use crate::store::{SessionRow, Store, WorkLinkRow};
@@ -1229,7 +1228,7 @@ pub async fn resume_work(
 }
 
 /// Type `prompt` into `row`'s pane once its REPL is ready, in the
-/// background (see [`send_start_prompt`] for what it never types into).
+/// background (see [`sessions::seed`] for what it never types into).
 /// Shared by a brief resume and a brief start (work graph M3.4).
 pub fn spawn_start_prompt(
     store: Arc<Mutex<Store>>,
@@ -1237,139 +1236,7 @@ pub fn spawn_start_prompt(
     row: &SessionRow,
     prompt: String,
 ) {
-    let (id, host, tmux) = (row.id, row.host_alias.clone(), row.tmux_name.clone());
-    crate::rt::spawn(async move {
-        send_start_prompt(store, ssh, id, host, tmux, prompt).await;
-    });
-}
-
-/// What the pane says about typing into it now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PromptGate {
-    /// The REPL is up and waiting: type.
-    Ready,
-    /// "Do you trust the files in this folder?": NEVER type (Enter would
-    /// answer it). The brief stays queued for the user's first prompt.
-    TrustDialog,
-    /// Another dialog or stuck state: do not type.
-    Blocked,
-    /// Still starting.
-    NotYet,
-}
-
-/// PURE: decide from a captured pane.
-pub fn prompt_gate(pane: &str) -> PromptGate {
-    let intel = crate::service::pane_intel::analyze(pane);
-    match intel.stuck {
-        Some(StuckKind::TrustPrompt) => return PromptGate::TrustDialog,
-        Some(_) => return PromptGate::Blocked,
-        None => {}
-    }
-    if intel.waiting_for.is_some() {
-        return PromptGate::Blocked;
-    }
-    if crate::service::tasks::pane_shows_repl(pane) {
-        PromptGate::Ready
-    } else {
-        PromptGate::NotYet
-    }
-}
-
-const START_PROMPT_WAIT: Duration = Duration::from_secs(60);
-const START_PROMPT_POLL: Duration = Duration::from_millis(1000);
-const START_PROMPT_ACK: Duration = Duration::from_secs(15);
-
-/// Type the short start prompt once the REPL is ready — and never while the
-/// pane shows the trust dialog, another dialog, or a stuck state. Confirmed
-/// through `prompt_submit_seq`. Every outcome is a timeline event; the brief
-/// itself is already queued and rides the next prompt whatever happens here.
-async fn send_start_prompt(
-    store: Arc<Mutex<Store>>,
-    ssh: Arc<SshClient>,
-    session_id: i64,
-    host: String,
-    tmux_name: String,
-    prompt: String,
-) {
-    let tmux: Box<dyn crate::tmux::TmuxExec> = if host == "local" {
-        Box::new(crate::tmux::LocalTmux)
-    } else {
-        Box::new(crate::tmux::RemoteTmux {
-            client: Arc::clone(&ssh),
-            host: host.clone(),
-        })
-    };
-    let event = |kind: &str, detail: Option<&str>| {
-        if let Ok(s) = store.lock() {
-            let _ = s.insert_session_event(session_id, kind, detail);
-        }
-    };
-    let deadline = tokio::time::Instant::now() + START_PROMPT_WAIT;
-    loop {
-        let gate = match tmux.capture_pane(&tmux_name).await {
-            Ok(text) => prompt_gate(&text),
-            Err(_) => PromptGate::NotYet,
-        };
-        match gate {
-            PromptGate::Ready => break,
-            PromptGate::TrustDialog => {
-                event("handover_waiting", Some("trust_prompt"));
-                return;
-            }
-            PromptGate::Blocked | PromptGate::NotYet => {}
-        }
-        if tokio::time::Instant::now() >= deadline {
-            event("handover_waiting", Some("repl_not_ready"));
-            return;
-        }
-        tokio::time::sleep(START_PROMPT_POLL).await;
-    }
-    let before = match store.lock() {
-        Ok(s) => s
-            .prompt_ack_state(session_id)
-            .ok()
-            .flatten()
-            .map(|st| st.prompt_submit_seq),
-        Err(_) => return,
-    };
-    let sent = sessions::send_prompt(
-        sessions::SendPromptArgs {
-            host_alias: host,
-            tmux_name,
-            prompt,
-            submit: true,
-            keys: None,
-        },
-        &store,
-        &ssh,
-    )
-    .await;
-    if let Err(e) = sent {
-        event(
-            "handover_waiting",
-            Some(&format!("send failed: {}", e.code)),
-        );
-        return;
-    }
-    let deadline = tokio::time::Instant::now() + START_PROMPT_ACK;
-    loop {
-        let seq = store
-            .lock()
-            .ok()
-            .and_then(|s| s.prompt_ack_state(session_id).ok().flatten())
-            .map(|st| st.prompt_submit_seq);
-        if let (Some(b), Some(now)) = (before, seq) {
-            if now > b {
-                event("handover_started", None);
-                return;
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            event("handover_waiting", Some("start prompt not acknowledged"));
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    sessions::seed::spawn_seed(store, ssh, row, prompt, sessions::seed::HANDOVER);
 }
 
 #[cfg(test)]
@@ -2428,18 +2295,6 @@ mod tests {
         let _fresh = InFlight::claim(&c, "ABC-1").expect("a new store starts clean");
     }
 
-    #[test]
-    fn the_start_prompt_is_never_typed_into_a_dialog() {
-        assert_eq!(
-            prompt_gate("Do you trust the files in this folder?\n❯ 1. Yes, proceed\n  2. No, exit"),
-            PromptGate::TrustDialog
-        );
-        assert_eq!(prompt_gate("Loading…"), PromptGate::NotYet);
-        assert_eq!(
-            prompt_gate("╭────╮\n│ >  │\n╰────╯\n  ? for shortcuts"),
-            PromptGate::Ready
-        );
-    }
     /// **A resume's refusal names a live session only to a reader that may
     /// see it** (multi-user M1, T9c).
     ///

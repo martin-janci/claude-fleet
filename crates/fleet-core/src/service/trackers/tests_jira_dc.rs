@@ -189,6 +189,9 @@ impl Harness for DcHarness {
     fn describe_ref(&self) -> &'static str {
         "OPS-1"
     }
+    fn version(&self) -> Option<(&'static str, &'static str)> {
+        Some(("40002", "2026.11"))
+    }
 
     fn script_probe(&self, f: &FakeTransport) {
         f.once(Method::Get, "/rest/api/2/myself", ok("myself.json"))

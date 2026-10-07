@@ -2151,6 +2151,11 @@ curl -s --compressed https://fleet.example.com/mcp/json \
 (The `Accept` header still offers both types — rmcp requires the pair on
 either mount.)
 
+Both mounts read a request body of at most 8 MiB and answer `413` past it (a
+declared `Content-Length` over the cap is refused before a byte is read). No
+tool call comes near it; the cap is what stops one oversized POST from any
+valid token buffering until the hub runs out of memory.
+
 What it is worth, measured on a 44-session fleet: `list_sessions`
 `{summary:false}` is 51 968 B unframed and 7 767 B gzipped, `list_projects`
 7 660 → 1 308 B, `list_hosts` 1 707 → 475 B. A phone's cold start is those
@@ -3418,8 +3423,10 @@ deliberately.
   to a token an agent holds. What crosses the room in the QR is a
   single-use, minutes-long pairing *code* in a URL fragment — not a token —
   and `POST /pair`, the one unauthenticated route besides `/healthz`, is
-  rate-limited to one attempt per address every six seconds. See *Pair a
-  phone* and *Clients* above.
+  rate-limited to one attempt per address every six seconds (an IPv6
+  address counts as its /64) and to thirty attempts a minute across the
+  whole hub, so minting addresses buys no extra guesses. See *Pair a phone* and
+  *Clients* above.
 - **Failed bearers are logged once per address.** A bad or missing token on
   any authenticated route is answered `401`, every time — a client reads
   `401` as "pair again", never as a busy hub. The `[mcp] rejected request`
@@ -3427,6 +3434,16 @@ deliberately.
   address (the peer, or the last `X-Forwarded-For` hop when the peer is a
   private or loopback proxy — the same rule `/pair` uses); repeats inside
   that second are logged at debug. Successes do not touch the bucket.
+- **Slow and surplus connections are closed.** A connection must deliver
+  each request's head (request line and headers) within 30 s of the hub
+  starting to wait for it, so a peer that connects and sends nothing, drips
+  a header byte at a time, or leaves a kept-alive connection idle is closed
+  without a token ever being checked. At most 512 connections are served at
+  once; one past that is closed on accept (logged at warn, at most once a
+  minute), so a flood fills that cap before it can exhaust the process's
+  file descriptors. Long-lived streams (`/events`, `/agent`, the `/mcp` long
+  polls) are unaffected once their request is in. The hub speaks HTTP/1.1
+  only.
 - **Peer tokens.** A linked hub holds a fourth kind of token, mode `peer`: it
   reaches the `peer_exchange` tool only — every other tool answers
   `E_FORBIDDEN` and `/events` answers `403` — and it is never trusted; there
@@ -3574,7 +3591,8 @@ deliberately.
 - **The phone says the pairing code is invalid** — a code is single-use, it
   expires (10 minutes by default), and a hub restart voids every outstanding
   one. Mint a fresh one with `fleet-hub pair`. A `429` instead means the
-  address has spent its attempt budget: one every six seconds.
+  address has spent its attempt budget (one every six seconds), or the hub as a
+  whole has had thirty attempts this minute; retry after `Retry-After`.
 - **`fleet-hub pair` refuses with `E_EXISTS`** — a live client already holds
   that name. `fleet-hub client revoke <name>` first, or pair under another
   name; a revoked row does not block the name.

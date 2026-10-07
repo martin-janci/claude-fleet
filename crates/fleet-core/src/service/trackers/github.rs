@@ -44,7 +44,7 @@ const RECENT_DAYS: i64 = 14;
 /// The fields fleet reads of an issue, and nothing else.
 const ISSUE_FIELDS: &str = "fragment I on Issue { id number title url state stateReason \
      updatedAt body repository { nameWithOwner } assignees(first: 10) { nodes { login } } \
-     issueType { name } parent { id number repository { nameWithOwner } } \
+     issueType { name } parent { id number repository { nameWithOwner } } milestone { title } \
      linkedBranches(first: 1) { totalCount } \
      closedByPullRequestsReferences(first: 1, includeClosedPrs: false) { totalCount } }";
 
@@ -282,6 +282,11 @@ impl GitHub {
             assignee_id,
             iteration: None,
             iteration_active: false,
+            // A milestone is GitHub's release: a due date and a closed state.
+            versions: n["milestone"]["title"]
+                .as_str()
+                .map(|t| vec![t.to_string()])
+                .unwrap_or_default(),
             updated: n["updatedAt"].as_str().and_then(super::parse_timestamp),
             description,
             description_chars,
@@ -346,6 +351,7 @@ impl TrackerProvider for GitHub {
             query_lang: Some("gql".into()),
             hierarchy: true,
             iterations: false,
+            versions: true,
             human_keys: false,
             repo_relative: true,
             multi_container: false,

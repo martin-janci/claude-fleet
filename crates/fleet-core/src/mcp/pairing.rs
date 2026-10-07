@@ -43,6 +43,62 @@ pub const DEFAULT_TTL: Duration = Duration::from_secs(10 * 60);
 /// every 6 s, i.e. the ten-a-minute budget the design asks for.
 pub const ATTEMPT_INTERVAL: Duration = Duration::from_secs(6);
 
+/// `POST /pair` attempts allowed across the whole hub, whatever address they
+/// come from, in any rolling [`GLOBAL_WINDOW`]. The per-address budget alone
+/// is only as good as the address: a peer behind a believed front end can
+/// name a fresh `X-Forwarded-For` address per request, and an IPv6 host owns
+/// a /64 of them. A window rather than a fixed spacing because pairing comes
+/// in bursts (an operator pairing a phone, a tablet and a laptop in a row)
+/// that a one-a-second spacing would refuse; thirty a minute caps guessing
+/// however the addresses are minted and costs no real pairing anything.
+pub const GLOBAL_ATTEMPTS: usize = 30;
+
+/// The window [`GLOBAL_ATTEMPTS`] is counted over.
+pub const GLOBAL_WINDOW: Duration = Duration::from_secs(60);
+
+/// The hub-wide attempt budget: the times of the attempts it let through in
+/// the current window. Holds at most the limit's worth of instants.
+#[derive(Default)]
+pub struct GlobalBudget {
+    recent: Mutex<std::collections::VecDeque<Instant>>,
+}
+
+impl GlobalBudget {
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::VecDeque<Instant>> {
+        self.recent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// `Err(time until a slot frees)` when `limit` attempts already landed in
+    /// the `window` ending at `now`. Records nothing: [`Self::record`] does,
+    /// once the per-address budget has let the attempt through too, so one
+    /// address hammering its own bucket cannot spend the hub's.
+    fn peek(&self, now: Instant, limit: usize, window: Duration) -> Result<(), Duration> {
+        let mut recent = self.lock();
+        while recent
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) >= window)
+        {
+            recent.pop_front();
+        }
+        match recent.front() {
+            Some(oldest) if recent.len() >= limit => {
+                Err(window.saturating_sub(now.saturating_duration_since(*oldest)))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn record(&self, now: Instant, limit: usize) {
+        let mut recent = self.lock();
+        recent.push_back(now);
+        while recent.len() > limit {
+            recent.pop_front();
+        }
+    }
+}
+
 /// Largest `POST /pair` body accepted. The real one is a few dozen bytes.
 const MAX_BODY: usize = 4 * 1024;
 
@@ -160,6 +216,20 @@ fn bucket_of(ip: std::net::IpAddr) -> String {
             }
         },
         v4 => v4.to_string(),
+    }
+}
+
+/// The per-address bucket for a [`limiter_key`]: an IPv6 address counts as
+/// its /64, the block one host or one subscriber line is handed, so cycling
+/// addresses inside it does not mint fresh buckets. IPv4 (mapped or not) and
+/// a non-address key are their own bucket.
+fn address_bucket(key: &str) -> String {
+    match key.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) if v6.to_ipv4_mapped().is_none() => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
+        }
+        _ => key.to_string(),
     }
 }
 
@@ -374,6 +444,13 @@ pub struct PairState {
     /// so only this crate's tests can weaken the budget — an embedder must
     /// not be able to switch it off.
     pub(crate) attempt_interval: Duration,
+    /// The hub-wide attempt budget, shared by every clone.
+    pub global: Arc<GlobalBudget>,
+    /// Attempts allowed hub-wide per `global_window`: [`GLOBAL_ATTEMPTS`]
+    /// and [`GLOBAL_WINDOW`] in production; `pub(crate)` for the same reason
+    /// as `attempt_interval`.
+    pub(crate) global_limit: usize,
+    pub(crate) global_window: Duration,
 }
 
 impl PairState {
@@ -389,6 +466,9 @@ impl PairState {
             rate,
             base_url: Arc::new(base_url),
             attempt_interval: ATTEMPT_INTERVAL,
+            global: Arc::new(GlobalBudget::default()),
+            global_limit: GLOBAL_ATTEMPTS,
+            global_window: GLOBAL_WINDOW,
         }
     }
 }
@@ -472,11 +552,22 @@ pub async fn handle_pair(
         request.headers(),
     );
     // Spend the attempt budget before parsing anything: a flood of guesses
-    // must cost the hub a hash-map probe, not a body read.
-    if let Err(left) = state
-        .rate
-        .check(&format!("pair:{peer}"), state.attempt_interval)
-    {
+    // must cost the hub a hash-map probe, not a body read. The hub-wide
+    // budget is asked first, so a flood of minted addresses is cut off
+    // before each one gets a bucket of its own, and charged last, so an
+    // attempt its own address's budget refuses costs the hub nothing.
+    let now = Instant::now();
+    let budget = state
+        .global
+        .peek(now, state.global_limit, state.global_window)
+        .and_then(|()| {
+            state.rate.check(
+                &format!("pair:{}", address_bucket(&peer)),
+                state.attempt_interval,
+            )
+        })
+        .map(|()| state.global.record(now, state.global_limit));
+    if let Err(left) = budget {
         let retry = left.as_secs().max(1).to_string();
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -758,6 +849,22 @@ mod tests {
     /// Testing only the rightmost element would find nothing, fall back to
     /// the peer, and collapse every client behind that proxy into the proxy's
     /// own bucket. The scan walks left until something parses.
+    #[test]
+    fn an_ipv6_address_is_bucketed_by_its_64() {
+        assert_eq!(
+            address_bucket("2001:db8:1:2:aaaa::1"),
+            address_bucket("2001:db8:1:2:ffff:ffff:ffff:ffff")
+        );
+        assert_eq!(address_bucket("2001:db8:1:2::9"), "2001:db8:1:2::/64");
+        assert_ne!(
+            address_bucket("2001:db8:1:2::1"),
+            address_bucket("2001:db8:1:3::1")
+        );
+        assert_eq!(address_bucket("203.0.113.7"), "203.0.113.7");
+        assert_eq!(address_bucket("::ffff:203.0.113.7"), "::ffff:203.0.113.7");
+        assert_eq!(address_bucket(UNKNOWN_PEER), UNKNOWN_PEER);
+    }
+
     #[test]
     fn a_non_address_last_hop_does_not_collapse_everyone_into_the_proxy() {
         let hdrs = |vals: &[&str]| {

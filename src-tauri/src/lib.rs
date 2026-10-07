@@ -141,11 +141,16 @@ pub fn run() {
             let store = Store::open_with_bus(&db_path, bus).unwrap_or_else(|e| {
                 // Still a hard fail (the app can't run without its DB), but
                 // with an actionable message instead of a bare "open store".
-                panic!(
-                    "failed to open the claude-fleet database at {}: {e}\n\
-                     If the file is corrupt, deleting it resets all local \
+                // No "delete it" advice for a database a newer release
+                // migrated: it is intact, and its message says what to do.
+                let advice = fleet_core::store::open_failure_advice(
+                    &e,
+                    "\nIf the file is corrupt, deleting it resets all local \
                      state — hosts, projects and sessions are re-discovered \
                      on the next launch.",
+                );
+                panic!(
+                    "failed to open the claude-fleet database at {}: {e}{advice}",
                     db_path.display()
                 )
             });

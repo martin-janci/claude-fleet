@@ -70,6 +70,12 @@ rmcp = { version = "1", features = [
 # stack, plus their `sha1` and `data-encoding` — four packages, all MIT or
 # MIT/Apache-2.0.
 axum = { version = "0.8", features = ["ws"] }
+# `mcp::conn` serves connections itself (axum::serve sets no header-read
+# deadline and no connection cap). All three are already in the tree through
+# axum, at the same versions.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower-service = "0.3"
 # `GET /events` builds its SSE body with `stream::unfold`, which is what lets
 # one state machine hold the caller's stream permit for the life of the
 # connection. `sink` is what `/agent` needs: `StreamExt::split`, so the socket's

@@ -407,6 +407,18 @@ pub fn create_task(
             "task prompt must be non-empty",
         ));
     }
+    // The paste at delivery caps it anyway; refusing here keeps an
+    // undeliverable prompt out of the table and out of `list_tasks`.
+    if prompt.len() > crate::service::sessions::MAX_PROMPT_BYTES {
+        return Err(IpcError::new(
+            codes::E_VALIDATE,
+            format!(
+                "task prompt is {} bytes; the limit is {} bytes",
+                prompt.len(),
+                crate::service::sessions::MAX_PROMPT_BYTES
+            ),
+        ));
+    }
     let nonce = make_nonce();
     let task = s.insert_task(requester_session_id, worker_session_id, prompt, &nonce)?;
     if let Some(req) = requester_session_id {
@@ -1000,10 +1012,6 @@ pub async fn handle_stop_for_worker(
     }
 }
 
-/// How long `wait_for_repl_ready` polls a freshly spawned worker's pane.
-const REPL_READY_TIMEOUT: Duration = Duration::from_secs(20);
-const REPL_READY_POLL: Duration = Duration::from_secs(1);
-
 /// PURE: does a pane tail show the Claude REPL's input chrome (i.e. it will
 /// accept a typed prompt)? The same cues `pane_intel::derive_status` treats
 /// as idle.
@@ -1017,34 +1025,6 @@ pub fn pane_shows_repl(text: &str) -> bool {
     ]
     .iter()
     .any(|cue| lower.contains(cue))
-}
-
-/// After `new_session` the tmux pane exists but Claude may still be
-/// starting; text typed before the REPL is up lands in the wrong process.
-/// Poll the pane (bounded) until it shows the REPL chrome. Best-effort: on
-/// timeout or capture failure the caller proceeds anyway.
-pub async fn wait_for_repl_ready(ssh: &Arc<SshClient>, host_alias: &str, tmux_name: &str) {
-    let tmux: Box<dyn crate::tmux::TmuxExec> = if host_alias == "local" {
-        Box::new(crate::tmux::LocalTmux)
-    } else {
-        Box::new(crate::tmux::RemoteTmux {
-            client: Arc::clone(ssh),
-            host: host_alias.to_string(),
-        })
-    };
-    let deadline = tokio::time::Instant::now() + REPL_READY_TIMEOUT;
-    loop {
-        if let Ok(text) = tmux.capture_pane(tmux_name).await {
-            if pane_shows_repl(&text) {
-                return;
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!("REPL of {host_alias}/{tmux_name} not ready after {REPL_READY_TIMEOUT:?}; sending anyway");
-            return;
-        }
-        tokio::time::sleep(REPL_READY_POLL).await;
-    }
 }
 
 /// The worker's last transcript turn, or `None` when it cannot be read.
@@ -1217,6 +1197,17 @@ mod tests {
             Some(ticket.id),
             "depth stays one"
         );
+    }
+
+    #[test]
+    fn an_oversized_task_prompt_is_refused_before_it_is_stored() {
+        let s = Store::open_in_memory().unwrap();
+        let w = seed(&s, "local", "w");
+        let big = "x".repeat(crate::service::sessions::MAX_PROMPT_BYTES + 1);
+        let err = create_task(&s, None, Some(w), &big).unwrap_err();
+        assert_eq!(err.code, codes::E_VALIDATE);
+        let at_cap = "x".repeat(crate::service::sessions::MAX_PROMPT_BYTES);
+        create_task(&s, None, Some(w), &at_cap).unwrap();
     }
 
     #[test]

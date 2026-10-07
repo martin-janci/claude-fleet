@@ -3286,63 +3286,6 @@ fn upsert_session_captures_new_account_for_fresh_row() {
     );
 }
 
-#[tokio::test]
-async fn wait_for_repl_ready_returns_once_prompt_appears() {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc as StdArc;
-
-    struct FakeTmux {
-        calls: StdArc<AtomicU32>,
-    }
-    #[async_trait::async_trait]
-    impl TmuxExec for FakeTmux {
-        async fn list_sessions(&self) -> Result<Vec<crate::tmux::TmuxSession>, IpcError> {
-            Ok(vec![])
-        }
-        async fn new_session(&self, _: &str, _: &std::path::Path, _: &str) -> Result<(), IpcError> {
-            Ok(())
-        }
-        async fn kill_session(&self, _: &str) -> Result<(), IpcError> {
-            Ok(())
-        }
-        async fn rename_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
-            Ok(())
-        }
-        async fn restart_session(&self, _: &str, _: &str) -> Result<(), IpcError> {
-            Ok(())
-        }
-        async fn capture_pane(&self, _: &str) -> Result<String, IpcError> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst);
-            // Not ready for the first 2 polls, then the prompt appears.
-            if n < 2 {
-                Ok("starting…".into())
-            } else {
-                Ok("│ > ".into())
-            }
-        }
-        async fn capture_pane_scrollback(
-            &self,
-            _name: &str,
-            _lines: u32,
-        ) -> Result<String, IpcError> {
-            Ok(String::new())
-        }
-        async fn list_claude_agents(&self) -> Option<Vec<crate::claude_agents::ClaudeAgentRow>> {
-            Some(vec![])
-        }
-    }
-
-    let calls = StdArc::new(AtomicU32::new(0));
-    let tmux = FakeTmux {
-        calls: calls.clone(),
-    };
-    let start = std::time::Instant::now();
-    wait_for_repl_ready(&tmux, "x").await;
-    // Returned after ~3 polls (~600ms), well under the 6s cap.
-    assert!(start.elapsed() < std::time::Duration::from_secs(2));
-    assert!(calls.load(Ordering::SeqCst) >= 3);
-}
-
 #[test]
 fn resolve_session_cwd_prefers_worktree_then_project_then_errors() {
     let s = Store::open_in_memory().unwrap();

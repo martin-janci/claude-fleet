@@ -109,6 +109,7 @@ impl JiraCloud {
             "updated",
             "project",
             "description",
+            "fixVersions",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -293,6 +294,7 @@ impl JiraCloud {
             assignee_id: f["assignee"]["accountId"].as_str().map(str::to_string),
             iteration,
             iteration_active,
+            versions: super::jira_common::fix_versions(&f["fixVersions"]),
             updated: f["updated"].as_str().and_then(super::parse_timestamp),
             description,
             description_chars,
@@ -342,6 +344,7 @@ impl TrackerProvider for JiraCloud {
             query_lang: Some("jql".into()),
             hierarchy: true,
             iterations: true,
+            versions: true,
             human_keys: true,
             repo_relative: false,
             multi_container: false,

@@ -4,6 +4,7 @@
 //! share, so a paired desktop and a local one answer the same way.
 
 pub mod agent_handover;
+pub mod buckets;
 pub mod card;
 pub mod describe;
 pub mod detect;
@@ -112,6 +113,12 @@ pub struct WorkArgs {
     /// Org id; 0 none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// sprint|release
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -240,6 +247,9 @@ pub struct WorkLinkArgs {
     /// view_delete.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_id: Option<i64>,
+    /// Bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket_id: Option<i64>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -347,6 +357,10 @@ pub enum WorkAction {
     Views,
     /// What moving a local task to another org changes.
     OrgImpact,
+    /// Sprints and releases in scope, with roll-ups (design 2026-09-28 §7).
+    Buckets,
+    /// One sprint or release with its members.
+    Bucket,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -377,6 +391,8 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("rule_preview", WorkAction::RulePreview),
     ("views", WorkAction::Views),
     ("org_impact", WorkAction::OrgImpact),
+    ("buckets", WorkAction::Buckets),
+    ("bucket", WorkAction::Bucket),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -415,6 +431,8 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "rule_delete",
     "view_save",
     "view_delete",
+    "bucket_add",
+    "bucket_remove",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls

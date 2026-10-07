@@ -675,9 +675,21 @@ fn an_older_build_refuses_a_newer_database() {
     }
     let err = match Store::open_with_bus(&path, Arc::new(NoopEventBus)) {
         Ok(_) => panic!("a newer database opened"),
-        Err(e) => e.to_string(),
+        Err(e) => e,
     };
-    assert!(err.contains("newer release"), "{err}");
+    assert!(err.to_string().contains("newer release"), "{err}");
+    // Openers drop their "delete it if corrupt" advice for this refusal.
+    assert!(crate::store::is_newer_schema_error(&err));
+    assert_eq!(crate::store::open_failure_advice(&err, "delete it"), "");
+    let other = rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+        Some("file is not a database".into()),
+    );
+    assert!(!crate::store::is_newer_schema_error(&other));
+    assert_eq!(
+        crate::store::open_failure_advice(&other, "delete it"),
+        "delete it"
+    );
     // The read-only open (a CLI beside a newer daemon) never migrates, so it
     // is not refused.
     let ro = Store::open_read_only(&path).unwrap();

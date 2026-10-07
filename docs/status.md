@@ -162,6 +162,19 @@ owner's Part R run is open, and *Assign org…* / *Make a rule…* stay
 desktop-only (owner, 2026-09-28; M14's D31–D36 and Jev's D31–D47 share
 numbers, so write "M14-D3x" / "Jev-D3x").
 
+Sprints and releases (design
+`docs/superpowers/specs/2026-09-28-sprints-releases-epics-design.md`): the
+backend is landed — migration 108 (`work_buckets`, `work_bucket_items`,
+`work_bucket_refs`), `store::work_buckets` (one current sprint per item,
+history kept on removal and close, adoption from a tracker's sprint or
+version and its withdrawal), `Caps.versions` with Jira `fixVersions`,
+GitHub milestones and Linear project milestones (E8's default), and the MCP
+actions (`work { buckets | bucket }`, `work_link { bucket_add |
+bucket_remove }`, six `work_admin` bucket actions). No UI yet: the Work
+view's Sprint / Release axis, bulk assignment and the sprint board are not
+built, nor are epics for local items (phase 4). E9–E11 run on their
+defaults.
+
 The Jev evaluation (TypeSafe's decision model as an optional reader for
 closed-set decisions) has started with a local language census: `fleet-hub
 census languages` over `service::nl` (cargo feature `nl-detect`, lingua, ON

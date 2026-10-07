@@ -24,7 +24,8 @@
     },
     "title": "Billing platform",
     "updated": 1789977600,
-    "url": "https://jira.corp.example/jira/browse/PLAT-1"
+    "url": "https://jira.corp.example/jira/browse/PLAT-1",
+    "versions": []
   },
   {
     "aliases": [],
@@ -51,7 +52,11 @@
     },
     "title": "Invoice export",
     "updated": 1789978530,
-    "url": "https://jira.corp.example/jira/browse/PLAT-2"
+    "url": "https://jira.corp.example/jira/browse/PLAT-2",
+    "versions": [
+      "2026.10",
+      "2026.11"
+    ]
   },
   {
     "aliases": [],
@@ -78,7 +83,8 @@
     },
     "title": "Export: date format",
     "updated": 1789898400,
-    "url": "https://jira.corp.example/jira/browse/PLAT-3"
+    "url": "https://jira.corp.example/jira/browse/PLAT-3",
+    "versions": []
   },
   {
     "aliases": [],
@@ -105,7 +111,8 @@
     },
     "title": "Renew certificates",
     "updated": 1789826400,
-    "url": "https://jira.corp.example/jira/browse/OPS-4"
+    "url": "https://jira.corp.example/jira/browse/OPS-4",
+    "versions": []
   },
   {
     "aliases": [],
@@ -132,7 +139,8 @@
     },
     "title": "Migrate CI to v1",
     "updated": 1789718400,
-    "url": "https://jira.corp.example/jira/browse/OPS-5"
+    "url": "https://jira.corp.example/jira/browse/OPS-5",
+    "versions": []
   },
   {
     "aliases": [],
@@ -157,6 +165,7 @@
     },
     "title": "Rotate backups",
     "updated": 1789714800,
-    "url": "https://jira.corp.example/jira/browse/OPS-6"
+    "url": "https://jira.corp.example/jira/browse/OPS-6",
+    "versions": []
   }
 ]
