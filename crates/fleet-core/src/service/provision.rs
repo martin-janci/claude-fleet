@@ -171,10 +171,24 @@ fn marker_content() -> String {
 }
 
 /// Prints the git toplevel when `~/.claude/skills` (following a symlink)
-/// sits inside a work tree, else nothing.
+/// sits inside a work tree AND that tree tracks a file in one of fleet's two
+/// skill dirs, else nothing. A dotfiles checkout that untracks or ignores
+/// them is fine: provisioning then overwrites nothing anyone committed.
 fn git_tree_probe_script() -> String {
+    let dirs = [SKILL_DIR, FRIENDLY_NAME_SKILL_DIR]
+        .iter()
+        .map(|d| {
+            quote(
+                d.strip_prefix(SKILLS_ROOT)
+                    .unwrap_or(d)
+                    .trim_start_matches('/'),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     format!(
-        "cd {} 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null || true",
+        "cd {} 2>/dev/null && top=$(git rev-parse --show-toplevel 2>/dev/null) \
+         && [ -n \"$(git ls-files -- {dirs} 2>/dev/null)\" ] && echo \"$top\"; true",
         remote_path(SKILLS_ROOT)
     )
 }
@@ -332,9 +346,10 @@ async fn provision_skills(
         return Err(IpcError::new(
             codes::E_INVALID,
             format!(
-                "{host}: {SKILLS_ROOT} is inside the git work tree {toplevel}; fleet would overwrite \
-                 tracked files. Untrack {SKILL_DIR} and {FRIENDLY_NAME_SKILL_DIR} there (or add them \
-                 to .gitignore), or set provision.force_git_tree=true to write anyway"
+                "{host}: the git work tree {toplevel} tracks files in {SKILL_DIR} or \
+                 {FRIENDLY_NAME_SKILL_DIR}; fleet would overwrite them. Untrack both dirs there \
+                 (git rm -r --cached, then add them to .gitignore), or set \
+                 provision.force_git_tree=true to write anyway"
             ),
         )
         .with_details(serde_json::json!({ "skills_dir": SKILLS_ROOT, "git_toplevel": toplevel })));
@@ -2536,8 +2551,8 @@ mod tests {
         }
     }
 
-    /// hosts F2, decision B-2: a skills dir inside somebody's dotfiles
-    /// checkout is refused unless `provision.force_git_tree`.
+    /// hosts F2, decision B-2: a dotfiles checkout that tracks fleet's skill
+    /// dirs is refused unless `provision.force_git_tree`.
     #[tokio::test]
     async fn a_skills_dir_inside_a_git_work_tree_is_refused_unless_forced() {
         let fake = fresh_host();
@@ -2568,6 +2583,69 @@ mod tests {
         provision_one_with(&forced, "h1", &base(), TOKEN, true)
             .await
             .unwrap();
+    }
+
+    /// The probe itself, run by a real bash against a real repo: a skills dir
+    /// inside a checkout passes while fleet's dirs are untracked or ignored,
+    /// and is reported only once the checkout tracks a file in one of them.
+    #[cfg(unix)]
+    #[test]
+    fn the_git_tree_probe_reports_only_a_checkout_that_tracks_fleets_skill_dirs() {
+        let home = tempfile::tempdir().unwrap();
+        let skills = home.path().join(".claude/skills");
+        let probe = || {
+            let out = crate::proc::std_command("bash")
+                .args(["-c", &git_tree_probe_script()])
+                .env("HOME", home.path())
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "the probe always exits 0");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let git = |args: &[&str]| {
+            let st = crate::proc::std_command("git")
+                .args(args)
+                .current_dir(home.path())
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .status()
+                .unwrap();
+            assert!(st.success(), "git {args:?}");
+        };
+
+        assert_eq!(probe(), "", "no skills dir at all");
+        std::fs::create_dir_all(skills.join("claude-fleet-control")).unwrap();
+        std::fs::write(skills.join("claude-fleet-control/SKILL.md"), "x").unwrap();
+        std::fs::create_dir_all(skills.join("mine")).unwrap();
+        std::fs::write(skills.join("mine/SKILL.md"), "x").unwrap();
+        assert_eq!(probe(), "", "not a git work tree");
+
+        git(&["init", "-q"]);
+        git(&["add", ".claude/skills/mine/SKILL.md"]);
+        assert_eq!(
+            probe(),
+            "",
+            "a checkout tracking only the user's own skills"
+        );
+
+        std::fs::write(
+            home.path().join(".gitignore"),
+            ".claude/skills/claude-fleet-control/\n",
+        )
+        .unwrap();
+        assert_eq!(probe(), "", "fleet's dir ignored");
+
+        git(&["add", "-f", ".claude/skills/claude-fleet-control/SKILL.md"]);
+        let top = std::fs::canonicalize(home.path()).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(probe()).unwrap(),
+            top,
+            "a tracked file in fleet's dir names the toplevel"
+        );
     }
 
     /// Voice relay F1: the `arecord` stand-in lands executable under

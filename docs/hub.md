@@ -601,10 +601,12 @@ out, set `provision.install_ag=false` right after upgrading.
 | `~/.tmux.conf` `set -g set-clipboard on` line | fleet (append-only) | `provision_tmux_clipboard` |
 | every other skill, hook, plugin, `~/.claude/projects` | the user / dotfiles | never touched |
 
-If `~/.claude/skills` is inside a git work tree (a dotfiles checkout),
-provisioning **refuses** that host (`E_INVALID`, `details.git_toplevel`) rather
-than dirty tracked files: untrack the two fleet dirs there (or `.gitignore`
-them), or set `provision.force_git_tree = true` to write anyway.
+If `~/.claude/skills` is inside a git work tree (a dotfiles checkout) that
+tracks files in either fleet dir, provisioning **refuses** that host
+(`E_INVALID`, `details.git_toplevel`) rather than overwrite committed files:
+untrack the two fleet dirs there (`git rm -r --cached`, then `.gitignore`
+them), or set `provision.force_git_tree = true` to write anyway. A checkout
+that leaves them untracked or ignored is provisioned as usual.
 
 **What a host needs for prompt delivery.** A prompt rides to the pane as
 `base64 -d` piped into `tmux load-buffer -`, so each managed host needs
