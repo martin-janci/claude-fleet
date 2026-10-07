@@ -1257,6 +1257,38 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "work_missions",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "missions" }),
+            r#"[{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::work_missions(
+                    b,
+                    commands::missions::WorkMissionsArgs {},
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "work_mission",
+            "work",
+            json!({ "session_id": null, "key": null, "action": "mission", "mission_id": 4,
+                    "before_event": 90 }),
+            r#"{"mission":{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::work_mission(
+                    b,
+                    commands::missions::WorkMissionArgs {
+                        mission_id: 4,
+                        before_event: Some(90),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "work_session_tasks",
             "work",
             json!({ "session_id": 7, "key": null, "action": "session_tasks" }),
@@ -3116,6 +3148,108 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         view_id: 9,
                         expected_version: Some(1),
                     },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // ── orchestration O1: missions ────────────────────────────────────
+        (
+            "save_mission",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_save", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "expected_version": 2, "mission_id": 4,
+                    "mission": { "name": "m", "goal": "g", "level": 1 } }),
+            r#"{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::save_mission(
+                    b,
+                    commands::missions::SaveMissionArgs {
+                        mission_id: Some(4),
+                        item_id: Some(3),
+                        expected_version: Some(2),
+                        mission: fleet_core::service::work::missions::MissionInput {
+                            name: Some("m".into()),
+                            goal: Some("g".into()),
+                            level: Some(1),
+                            ..Default::default()
+                        },
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_mission_state",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_state", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "status": "active",
+                    "expected_version": 1, "mission_id": 4 }),
+            r#"{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_mission_state(
+                    b,
+                    commands::missions::SetMissionStateArgs {
+                        mission_id: 4,
+                        state: "active".into(),
+                        expected_version: Some(1),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_mission_repo",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_repo", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "project_id": 8, "on": true,
+                    "role": "backend", "mission_id": 4 }),
+            r#"{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_mission_repo(
+                    b,
+                    commands::missions::SetMissionRepoArgs {
+                        mission_id: 4,
+                        project_id: 8,
+                        role: Some("backend".into()),
+                        on: true,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_mission_item",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_item", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "on": false, "mission_id": 4 }),
+            r#"{"id":4,"name":"m","goal":"g","mode":"finite","state":"draft","level":0,"plan_version":1,"created_at":1,"updated_at":1,"version":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_mission_item(
+                    b,
+                    commands::missions::SetMissionItemArgs {
+                        mission_id: 4,
+                        item_id: 3,
+                        on: false,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "delete_mission",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_delete", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "mission_id": 4 }),
+            r#"{"removed":4}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::delete_mission(
+                    b,
+                    commands::missions::DeleteMissionArgs { mission_id: 4 },
                     s,
                 ))
                 .map(|_| ())
@@ -5070,6 +5204,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/local_workspaces.rs"),
     ),
     ("commands/mcp.rs", include_str!("../commands/mcp.rs")),
+    (
+        "commands/missions.rs",
+        include_str!("../commands/missions.rs"),
+    ),
     (
         "commands/move_session.rs",
         include_str!("../commands/move_session.rs"),

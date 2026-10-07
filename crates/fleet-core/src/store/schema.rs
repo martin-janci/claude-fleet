@@ -559,6 +559,17 @@ fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 112.
+fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') \
+         WHERE name = 'orchestration_project_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 111.
 fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1284,6 +1295,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 111,
         sql: include_str!("../../migrations/111_host_auth_overrides.sql"),
         already_applied: Some(hosts_has_auth_overrides),
+    },
+    // Orchestration O1: the mission container, its repos and its event log
+    // (new tables), and work_items.orchestration_project_id (ADD COLUMN,
+    // so guarded on it).
+    Migration {
+        version: 112,
+        sql: include_str!("../../migrations/112_orchestration_projects.sql"),
+        already_applied: Some(work_items_has_orchestration_project),
     },
 ];
 

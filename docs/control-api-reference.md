@@ -663,9 +663,9 @@ Parameters: `tmux_name`
 
 ### `work`
 
-Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact. buckets {kind?}: sprints, releases; bucket {bucket_id}.
+Work links: {session_id} → its live links; {key} → ended (past) links; neither → recently ended. action context|resume_plan {key}; purge_impact; tickets (cached); lookup {key|url}; trackers; scopes; orgs; org_suggestions; today {since}; card {key}; describe {key} (the tracker's whole description, cached); tidy; reopened. Work view: tree {filters, cursor} (archived: false hides archived tasks); task {task_id}; session_tasks; review; rules; rule_preview {rule}; views; org_impact. buckets {kind?}: sprints, releases; bucket {bucket_id}. missions; mission {mission_id, before_event?}.
 
-Parameters: `action`, `bucket_id`, `cursor`, `filters`, `host_alias`, `host_aliases`, `include_local`, `key`, `kind`, `limit`, `link_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
+Parameters: `action`, `before_event`, `bucket_id`, `cursor`, `filters`, `host_alias`, `host_aliases`, `include_local`, `key`, `kind`, `limit`, `link_id`, `mission_id`, `org_id`, `per_task`, `project_id`, `query`, `rule`, `session_id`, `since`, `task_id`, `tracker_id`, `url`, `view`, `with_brief`
 
 ### `work_admin`
 
@@ -675,9 +675,9 @@ Parameters: `action`, `auth_kind`, `auto_tidy`, `bound_sees_unassigned`, `bucket
 
 ### `work_link`
 
-Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
+Decide a session's work: action link (becomes its primary; key or item_id), reject (sticky 'not this'; or a suggestion's link_id), confirm (link_id), unlink (link_id). Returns the updated row. switch {link_id, key|item_id}: end that link, take the primary. trust_project {project_id, on}. resume {key, mode}: new session on past work. start {key|url|item_id}: new session on a ticket (project_ids: one per repo; parallel: beside a live one); preview_start: where it would land, nothing made. run {item_id, role?}: an attempt at the item in its own session and worktree, tracked as a task. handover {session_id}: ask it to write its hand-off. summarize {key, link_id}: a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe kill when dirty). set_status {item_id, status}: a person's status for work with no ticket. create {title, parent?, notes?}: a task or subtask. propose {parent, title, why?}: a subtask a person accepts or rejects {item_id, no session_id}. bucket_add|bucket_remove {bucket_id, item_id}: sprint/release. mission_save {mission, mission_id?, item_id?: root}; mission_state {mission_id, status}; mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; mission_delete. Work view: primary:false links a secondary; expected_* guard (E_CONFLICT).
 
-Parameters: `ack_live`, `action`, `brief`, `bucket_id`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mode`, `name`, `note`, `notes`, `on`, `org_id`, `parallel`, `parent`, `primary`, `project_id`, `project_ids`, `role`, `rule`, `rule_id`, `session_id`, `source`, `status`, `task_id`, `title`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
+Parameters: `ack_live`, `action`, `brief`, `bucket_id`, `confirm_nonce`, `days`, `decisions`, `expected_primary`, `expected_version`, `force_cross_org`, `group`, `host_alias`, `impact_token`, `item_id`, `items`, `key`, `link_id`, `mission`, `mission_id`, `mode`, `name`, `note`, `notes`, `on`, `org_id`, `parallel`, `parent`, `primary`, `project_id`, `project_ids`, `role`, `rule`, `rule_id`, `session_id`, `source`, `status`, `task_id`, `title`, `url`, `view`, `view_id`, `why`, `with_brief`, `worktree`
 
 ## Tauri IPC commands
 
@@ -752,6 +752,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::work_view::delete_work_rule`
 - `commands::work_view::save_work_view`
 - `commands::work_view::delete_work_view`
+- `commands::missions::work_missions`
+- `commands::missions::work_mission`
+- `commands::missions::save_mission`
+- `commands::missions::set_mission_state`
+- `commands::missions::set_mission_repo`
+- `commands::missions::set_mission_item`
+- `commands::missions::delete_mission`
 - `commands::trackers::add_tracker`
 - `commands::trackers::update_tracker`
 - `commands::trackers::set_tracker_credential`

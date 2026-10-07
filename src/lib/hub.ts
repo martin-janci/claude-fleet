@@ -403,6 +403,9 @@ export const ROUTED_ACTIONS = [
   'session_share',
   'session_unshare',
   'session_narrow',
+  // Orchestration O1: the Missions tab's writes.
+  'save_mission',
+  'set_mission_state',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

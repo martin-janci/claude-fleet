@@ -29,6 +29,7 @@
   import WorkFiltersBar from './WorkFiltersBar.svelte';
   import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
+  import WorkMissions from './WorkMissions.svelte';
   import WorkRules from './WorkRules.svelte';
   import TaskList from './TaskList.svelte';
   import {
@@ -85,7 +86,7 @@
 
   const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
-  let tab = $state<'tasks' | 'review'>('tasks');
+  let tab = $state<'tasks' | 'review' | 'missions'>('tasks');
   let page = $state.raw<WorkTreePage | null>(null);
   const archivedHidden = $derived(page?.archived_hidden ?? 0);
   function setArchived(on: boolean) {
@@ -551,6 +552,14 @@
           data-testid="work-tab-review"
           onclick={() => (tab = 'review')}>Review{#if reviewTotal}&nbsp;· {reviewTotal}{/if}</button
         >
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={tab === 'missions'}
+          class:is-active={tab === 'missions'}
+          data-testid="work-tab-missions"
+          onclick={() => (tab = 'missions')}>Missions</button
+        >
       </div>
       {#if tab === 'tasks'}
         <div class="layout" role="group" aria-label="Layout">
@@ -600,6 +609,8 @@
     {/if}
     {#if tab === 'review'}
       <WorkReview onchanged={() => void loadReviewCount()} />
+    {:else if tab === 'missions'}
+      <WorkMissions />
     {:else if listMode}
       <TaskList {debounceMs} {maxWaitMs} onpage={onListPage} />
     {:else if error}

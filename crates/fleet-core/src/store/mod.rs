@@ -21,6 +21,7 @@ mod hosts_accounts;
 mod layers;
 mod local_workspaces;
 mod nl_census;
+mod orchestration;
 mod org_members;
 mod orgs;
 mod participants;
@@ -89,6 +90,11 @@ pub use local_workspaces::{
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
     NL_CENSUS_MIN_SCHEMA,
+};
+pub use orchestration::{
+    mission_transition_allowed, MissionEventRow, MissionPatch, MissionRepoRow, MissionRow,
+    NewMission, NewMissionEvent, MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES,
+    MISSION_STATES,
 };
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,

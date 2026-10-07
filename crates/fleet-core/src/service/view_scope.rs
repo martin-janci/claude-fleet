@@ -365,6 +365,27 @@ impl ViewScope {
         self.owns_person(row.owner_person_id)
     }
 
+    /// May this scope act as the OWNER of a row a person owns outright,
+    /// outside the session model — a mission (orchestration O1)?
+    ///
+    /// The clause order is [`Self::sees_session_row`]'s: the ORG boundary
+    /// first, for everyone; then the hub's own reader; then the owner, by
+    /// the one ownership comparison ([`Self::owns_person`]); and an unowned
+    /// row only for the one live person on a single-person hub (rule 7, as
+    /// for an `unclaimed` session). A person-less caller — a per-host token
+    /// — is never an owner. Org membership, which widens READING a mission
+    /// to the org's members and changing it to the org's admins, is the
+    /// caller's to add: it needs the store (`service::work::missions`).
+    pub fn may_own_person_row(&self, org: Option<i64>, owner: Option<i64>) -> bool {
+        if !self.org.sees_org(org) {
+            return false;
+        }
+        if self.internal || self.owns_person(owner) {
+            return true;
+        }
+        owner.is_none() && self.sole_person
+    }
+
     /// [`Self::owns`] over the column alone, so the kill frame's carried
     /// facts ([`SessionFacts`]) go through the same comparison a live row
     /// does. Private: a caller with an `Option<i64>` in hand and no row is

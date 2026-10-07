@@ -486,6 +486,18 @@ const SCOPE_GUARDS: &[Guard] = &[
               data and survive the person fence exactly as `task_visible`'s do",
     },
     Guard {
+        file: "crates/fleet-core/src/service/work/missions.rs",
+        func: "create",
+        nth: 0,
+        code: "None if !scope.org.is_all() => {",
+        verdict: Verdict::OrgBoundary,
+        why: "`create_task` #0's rule for a mission's new ROOT task: a \
+              standalone native task has no links and no sessions, so there is \
+              no row and no person to fence. This is the org boundary, not a \
+              privacy fence; the mission itself is person-fenced by \
+              `ViewScope::may_own_person_row` and org membership",
+    },
+    Guard {
         file: "crates/fleet-core/src/service/work/local.rs",
         func: "propose",
         nth: 0,
