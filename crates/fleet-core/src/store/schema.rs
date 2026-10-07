@@ -569,6 +569,16 @@ fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 112.
+fn local_workspaces_has_driver_since(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('local_workspaces') WHERE name = 'driver_since'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 067 (work graph M14.1b, D31).
 fn orgs_has_bound_sees_unassigned(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1284,6 +1294,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 111,
         sql: include_str!("../../migrations/111_host_auth_overrides.sql"),
         already_applied: Some(hosts_has_auth_overrides),
+    },
+    // Local workspace, Phases 2 and 3: who drives the worktree (two ADD
+    // COLUMNs, guarded on the last) and the per-path activity log.
+    Migration {
+        version: 112,
+        sql: include_str!("../../migrations/112_local_workspace_handoff.sql"),
+        already_applied: Some(local_workspaces_has_driver_since),
     },
 ];
 

@@ -95,10 +95,61 @@ describe('LocalWorkspaceCard', () => {
     expect(await screen.findByTestId('lw-resume')).toBeInTheDocument();
   });
 
-  it('says why there are no controls on a paired desktop', () => {
+  it('works on a desktop paired with a hub too', () => {
     hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
     render(LocalWorkspaceCard, { session: row() });
-    expect(screen.getByTestId('lw-remote-note')).toBeInTheDocument();
-    expect(screen.queryByTestId('lw-enable')).toBeNull();
+    expect(screen.getByTestId('lw-enable')).toBeInTheDocument();
+  });
+
+  it('opens the folder in an IDE and hands the worktree over', async () => {
+    localWorkspaces.set([link()]);
+    invoke.mockResolvedValue(link({ driver: 'developer' }));
+    render(LocalWorkspaceCard, { session: row() });
+    await fireEvent.click(screen.getByTestId('lw-open-vscode'));
+    expect(invoke).toHaveBeenCalledWith('open_local_workspace', { args: { id: 9, app: 'vscode' } });
+    await fireEvent.click(screen.getByTestId('lw-take-over'));
+    expect(invoke).toHaveBeenCalledWith('set_local_workspace_driver', {
+      args: { id: 9, driver: 'developer' },
+    });
+    expect(await screen.findByTestId('lw-driver')).toHaveTextContent('You’re driving');
+    expect(screen.queryByTestId('lw-take-over')).toBeNull();
+  });
+
+  it('counts each side’s changes and asks the agent to continue', async () => {
+    localWorkspaces.set([link({ local_activity: 7, remote_activity: 2 })]);
+    invoke.mockResolvedValue(link());
+    render(LocalWorkspaceCard, { session: row() });
+    expect(screen.getByTestId('lw-activity')).toHaveTextContent('7 local changes');
+    expect(screen.getByTestId('lw-activity')).toHaveTextContent('2 agent changes');
+    await fireEvent.click(screen.getByTestId('lw-ask-continue'));
+    expect(invoke).toHaveBeenCalledWith('ask_ai_about_local_changes', {
+      args: { id: 9, intent: 'continue', question: null, paths: null },
+    });
+  });
+
+  it('offers Compare, Keep both and Ask AI to resolve on a conflict', async () => {
+    localWorkspaces.set([
+      link({
+        state: 'conflict',
+        conflicts: [{ path: 'src/foo.rs', kind: 'both_modified', detected_at: 1 }],
+      }),
+    ]);
+    invoke.mockResolvedValueOnce({
+      path: 'src/foo.rs',
+      diff: '@@ -1 +1 @@\n-mine\n+theirs\n',
+      binary: false,
+      truncated: false,
+    });
+    render(LocalWorkspaceCard, { session: row() });
+    await fireEvent.click(screen.getByTestId('lw-compare'));
+    expect(invoke).toHaveBeenCalledWith('compare_local_conflict', {
+      args: { id: 9, path: 'src/foo.rs' },
+    });
+    expect(await screen.findByTestId('lw-compare-diff')).toHaveTextContent('theirs');
+    invoke.mockResolvedValue(link());
+    await fireEvent.click(screen.getByTestId('lw-keep-both'));
+    expect(invoke).toHaveBeenCalledWith('keep_both_local_conflict', {
+      args: { id: 9, path: 'src/foo.rs' },
+    });
   });
 });

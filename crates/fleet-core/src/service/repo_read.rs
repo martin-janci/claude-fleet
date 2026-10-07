@@ -132,7 +132,7 @@ pub struct CommitDetail {
 
 /// Parse `git status --porcelain=v1 -z` output. Entries are NUL-separated;
 /// a rename/copy entry is followed by a second token (the original path).
-fn parse_status_z(raw: &[u8]) -> Vec<ChangedFile> {
+pub(crate) fn parse_status_z(raw: &[u8]) -> Vec<ChangedFile> {
     let text = String::from_utf8_lossy(raw);
     let tokens: Vec<&str> = text.split('\0').filter(|t| !t.is_empty()).collect();
     let mut out = Vec::new();
