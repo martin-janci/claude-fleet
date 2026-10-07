@@ -3840,7 +3840,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// bytes). Measured at 76,964 on 2026-10-06 after merging `main`
     /// (76,788: the operator's other-host start and the project picker,
     /// +72 bytes over 76,716) into it: exactly the two sides' sum.
-    const BUDGET_BYTES: usize = 77_064;
+    /// Measured at 77,224 on 2026-10-06 after the task → session spec's A2
+    /// (`work_link { switch }`, `ack_live` on link and switch, and `work {
+    /// tickets }`'s `include_local`, +260 bytes).
+    const BUDGET_BYTES: usize = 77_324;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10481,6 +10484,7 @@ const WORK_LINK_TAIL_ACTIONS: &[&str] = &[
     "link",
     "reject",
     "unlink",
+    "switch",
     "confirm",
     "archive",
     "unarchive",
@@ -10690,6 +10694,7 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "snooze", &["Drive"]),
     ("work_link", "never", &["Drive"]),
     ("work_link", "set_primary", &["Drive"]),
+    ("work_link", "switch", &["Drive"]),
     ("work_link", "reconsider", &["Drive"]),
     ("work_link", "ack", &["Drive"]),
     // Gated per decision, at the level a single decision takes.

@@ -2457,8 +2457,13 @@ pub fn task(
             .map(|i| s.work_item_meta(i.item.id))
             .transpose()?
             .unwrap_or_default();
+        // Inside that link's window (P-7): a session switched away kept its
+        // conversation, and what it did after the switch is the next task's.
         let journal = match last {
-            Some(_) => s.journal_for_conversations(&conversations)?,
+            Some(l) => s.journal_for_conversations_within(
+                &conversations,
+                s.link_journal_window(l.link_id)?,
+            )?,
             None => Vec::new(),
         };
         let work = native_work(&s, &g, scope, item, task.key.as_deref())?;

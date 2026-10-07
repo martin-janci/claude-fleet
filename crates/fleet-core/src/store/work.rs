@@ -74,6 +74,14 @@ impl Decider {
     }
 }
 
+/// What [`Store::decide_session_work_in_tx`] did with the target's link.
+enum Decided {
+    /// Nothing was written: a person's decision stands as it is.
+    Kept(i64),
+    /// The link was written (inserted or updated).
+    Wrote(i64),
+}
+
 /// What an agent's decision does to a live link a decision already settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AgentOver {
@@ -788,6 +796,40 @@ impl Store {
         take_primary: bool,
         expected: Option<i64>,
     ) -> Result<WorkLinkRow, IpcError> {
+        let tx = self.conn.unchecked_transaction()?;
+        let id = match self.decide_session_work_in_tx(
+            session_id,
+            target,
+            state,
+            source,
+            take_primary,
+            expected,
+        )? {
+            Decided::Kept(id) => {
+                return self
+                    .get_work_link(id)?
+                    .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"))
+            }
+            Decided::Wrote(id) => id,
+        };
+        self.bump_session_for_work(session_id)?;
+        tx.commit()?;
+        self.emit_session(session_id)?;
+        self.get_work_link(id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
+    }
+
+    /// The writes of [`Self::decide_session_work_as`], inside a transaction
+    /// the caller holds (the switch's, P-2): no commit, no bump, no emit.
+    fn decide_session_work_in_tx(
+        &self,
+        session_id: i64,
+        target: WorkTarget<'_>,
+        state: &str,
+        source: &str,
+        take_primary: bool,
+        expected: Option<i64>,
+    ) -> Result<Decided, IpcError> {
         if !WORK_LINK_SOURCES.contains(&source) {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -808,7 +850,6 @@ impl Store {
         )?;
         let primary = state == "confirmed" && (take_primary || !has_primary);
 
-        let tx = self.conn.unchecked_transaction()?;
         let existing: Option<(i64, String, String, i64)> = self
             .conn
             .query_row(
@@ -843,9 +884,7 @@ impl Store {
         if let (AgentOver::KeepPersons, Some(id), false) = (keep, existing, primary) {
             // A person rejected it already (or confirmed it, and this
             // confirm takes no primary): nothing to write.
-            return self
-                .get_work_link(id)?
-                .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished"));
+            return Ok(Decided::Kept(id));
         }
         if primary {
             self.conn.execute(
@@ -911,11 +950,7 @@ impl Store {
                 self.conn.last_insert_rowid()
             }
         };
-        self.bump_session_for_work(session_id)?;
-        tx.commit()?;
-        self.emit_session(session_id)?;
-        self.get_work_link(id)?
-            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
+        Ok(Decided::Wrote(id))
     }
 
     /// Say that `session_id` works on `target`; it becomes the session's
@@ -1106,6 +1141,105 @@ impl Store {
         tx.commit()?;
         self.emit_session(session_id)?;
         Ok(())
+    }
+
+    /// Move session `session_id` from the work of its live link `from` to
+    /// `to` in one step (task → session P-2): `from` ENDS (`end_reason =
+    /// 'switched'`, with the snapshot an ended link keeps, so Continue on the
+    /// old task resumes this session's conversation) and `to` becomes the
+    /// session's primary, as `link` would make it. A compare-and-set on the
+    /// primary the caller saw (`expected_primary`; `Some(0)`: none; `None`:
+    /// no check), so the link → set_primary → unlink sequence it replaces
+    /// can no longer half-fail, and two devices cannot both switch. `to`
+    /// already being `from`'s target is `E_INVALID`; `from` not a live
+    /// confirmed link of this session is `E_NOTFOUND`. The agent's rules are
+    /// [`Self::link_session_work`]'s: an agent never turns a person's
+    /// rejection of `to` into a link.
+    pub fn switch_session_work(
+        &self,
+        session_id: i64,
+        from: i64,
+        to: WorkTarget<'_>,
+        source: &str,
+        expected_primary: Option<i64>,
+    ) -> Result<WorkLinkRow, IpcError> {
+        let participant = self.work_participant(session_id)?;
+        let (to_item, to_ref) = self.resolve_work_target(to)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let current: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT id FROM work_links WHERE participant_id = ?1 AND ended_at IS NULL \
+                   AND is_primary = 1 AND state = 'confirmed' ORDER BY id LIMIT 1",
+                rusqlite::params![participant],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(expected) = expected_primary {
+            if current.unwrap_or(0) != expected {
+                return Err(primary_conflict(session_id, current));
+            }
+        }
+        let old: Option<(Option<i64>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT item_id, ref_key FROM work_links WHERE id = ?1 AND participant_id = ?2 \
+                   AND ended_at IS NULL AND state = 'confirmed'",
+                rusqlite::params![from, participant],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((old_item, old_ref)) = old else {
+            return Err(IpcError::new(
+                codes::E_NOTFOUND,
+                format!("session {session_id} has no live confirmed work link {from}"),
+            ));
+        };
+        let same = |a: &Option<i64>, b: &Option<i64>| a.is_some() && a == b;
+        if same(&old_item, &to_item) || (old_ref.is_some() && old_ref == to_ref) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("work link {from} is already on that work: nothing to switch"),
+            ));
+        }
+        self.end_live_link(from, session_id, "switched", now_unix())?;
+        let id = match self.decide_session_work_in_tx(
+            session_id,
+            to,
+            "confirmed",
+            source,
+            true,
+            None,
+        )? {
+            Decided::Kept(id) | Decided::Wrote(id) => id,
+        };
+        self.bump_session_for_work(session_id)?;
+        tx.commit()?;
+        self.emit_session(session_id)?;
+        self.get_work_link(id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work link vanished after write"))
+    }
+
+    /// The sessions with a live confirmed link to `target`, other than
+    /// `except` (task → session P-3: "this task is already open in …").
+    /// Ids only; the caller decides which of them it may name.
+    pub fn live_sessions_on_target(
+        &self,
+        target: WorkTarget<'_>,
+        except: i64,
+    ) -> Result<Vec<i64>, IpcError> {
+        let (item_id, ref_key) = self.resolve_work_target(target)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.session_id FROM work_links l \
+               JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
+             WHERE l.ended_at IS NULL AND l.state = 'confirmed' AND p.session_id IS NOT NULL \
+               AND p.session_id != ?3 \
+               AND ((?1 IS NOT NULL AND l.item_id = ?1) \
+                    OR (?2 IS NOT NULL AND l.item_id IS NULL AND l.ref_key = ?2)) \
+             ORDER BY p.session_id",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![item_id, ref_key, except], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<i64>>>()?)
     }
 
     /// Undo a person's decision (work graph M14.1c): a live confirmed or

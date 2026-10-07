@@ -415,6 +415,7 @@ pub fn run() {
             commands::work_view::work_views,
             commands::work_view::work_org_impact,
             commands::work_view::set_primary_work,
+            commands::work_view::switch_session_work,
             commands::work_view::reconsider_work_link,
             commands::work_view::ack_work_link,
             commands::work_view::decide_work_batch,

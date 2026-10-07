@@ -72,6 +72,9 @@ pub struct WorkArgs {
     /// Tickets: max rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Tickets: own tasks too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_local: Option<bool>,
     /// Lookup: a ticket URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -168,6 +171,9 @@ pub struct WorkLinkArgs {
     /// Start: beside a live one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallel: Option<bool>,
+    /// link/switch: false refuses when live elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_live: Option<bool>,
     /// Snooze (7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub days: Option<u32>,
@@ -380,6 +386,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "link",
     "reject",
     "unlink",
+    "switch",
     "confirm",
     "trust_project",
     "resume",
@@ -428,6 +435,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("link_session_work", "work_link", "link"),
     ("reject_session_work", "work_link", "reject"),
     ("unlink_session_work", "work_link", "unlink"),
+    ("switch_session_work", "work_link", "switch"),
     ("confirm_session_work", "work_link", "confirm"),
     ("set_work_project_trust", "work_link", "trust_project"),
     ("resume_work", "work_link", "resume"),
@@ -1072,6 +1080,18 @@ fn work_link_locked<'a>(
         }
     };
     match args.action.as_str() {
+        // Task → session P-2: end the live link `link_id` and make the
+        // target the primary, in one compare-and-set on the primary.
+        "switch" => {
+            let from = args
+                .link_id
+                .ok_or_else(|| IpcError::new(codes::E_INVALID, "switch needs link_id"))?;
+            visible_link(from)?;
+            let source = link_source(None, decider)?;
+            let (t, org) = visible_target(target()?)?;
+            orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), force)?;
+            s.switch_session_work(session_id, from, t, source, args.expected_primary)?;
+        }
         "link" => {
             let source = link_source(args.source.as_deref(), decider)?;
             let (t, org) = visible_target(target()?)?;
@@ -1187,13 +1207,113 @@ fn work_link_locked<'a>(
     // A link made after the PR: the probe queues only when the PR's signals
     // change, so queue its write-back here (M13.4e). `on_pr` keeps it to a
     // person's confirmed link; the outbox makes a repeat a no-op.
-    if matches!(args.action.as_str(), "link" | "confirm") {
+    if matches!(args.action.as_str(), "link" | "switch" | "confirm") {
         if let Err(e) = crate::service::trackers::write_back::on_session_pr(s, session_id) {
             tracing::debug!(error = %e.message, "[write-back] not queued after a link");
         }
     }
     s.get_session_by_id(session_id)?
         .ok_or_else(|| IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found")))
+}
+
+/// One session already on the task a `link` or `switch` names (task →
+/// session P-3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveElsewhere {
+    /// Named only when the caller may see the session (D7, T9b).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    /// One plain sentence for the person.
+    pub message: String,
+}
+
+/// Task → session P-3: a `link` or `switch` that asks for the warning
+/// (`ack_live: false`) is refused with `E_EXISTS` and
+/// `details.live_elsewhere[]` when the task already has another live
+/// session; the person then sends it again with `ack_live: true`.
+/// Absent `ack_live` checks nothing, so an older client, the phone and the
+/// agents link exactly as before. Only sessions in the caller's orgs are
+/// counted, so the refusal never says another org works on a key; one the
+/// caller may not see is "someone", never named.
+pub fn check_live_elsewhere(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    view: &crate::service::view_scope::ViewScope,
+) -> Result<(), IpcError> {
+    if args.ack_live != Some(false)
+        || !matches!(args.action.as_str(), "link" | "switch")
+        || args.source.as_deref() == Some(AGENT_INFERRED)
+    {
+        return Ok(());
+    }
+    let Some(session_id) = args.session_id else {
+        return Ok(());
+    };
+    let target = match (args.item_id, args.key.as_deref()) {
+        (Some(id), None) => WorkTarget::Item(id),
+        (None, Some(key)) => WorkTarget::Key(key),
+        // The action itself refuses the shape.
+        _ => return Ok(()),
+    };
+    let s = lock(store)?;
+    // The target as the action will read it: an item outside the scope
+    // answers as unknown there, so it is not looked at here; a key outside
+    // it is the bare key it is to this caller.
+    let target = match s.work_target_org(target) {
+        Ok(org) if view.org.sees_org(org) => target,
+        Ok(_) => match target {
+            WorkTarget::Key(k) | WorkTarget::Ref(k) => WorkTarget::Ref(k),
+            WorkTarget::Item(_) => return Ok(()),
+        },
+        Err(e) if matches!(e.code.as_str(), codes::E_NOTFOUND | codes::E_INVALID) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let ids = match s.live_sessions_on_target(target, session_id) {
+        Ok(ids) => ids,
+        // An unknown item or a malformed key: the action answers it.
+        Err(e) if matches!(e.code.as_str(), codes::E_NOTFOUND | codes::E_INVALID) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut found = Vec::new();
+    for id in ids {
+        let Some(row) = s.get_session_by_id(id)? else {
+            continue;
+        };
+        // The org half alone decides whether the session COUNTS: a task's
+        // other live session in the caller's org is worth a warning even
+        // when the caller may not see it. The person half,
+        // `sees_session_row`, decides only whether it is NAMED.
+        if !view.org.sees_row_org_only(&row) {
+            continue;
+        }
+        let visible = view.sees_session_row(&row).is_visible();
+        found.push(LiveElsewhere {
+            session_id: visible.then_some(row.id),
+            message: if visible {
+                format!(
+                    "Already open in {} on {}.",
+                    row.friendly_name.as_deref().unwrap_or(&row.tmux_name),
+                    row.host_alias
+                )
+            } else {
+                "Someone is already working on this.".into()
+            },
+        });
+    }
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_EXISTS,
+        format!(
+            "this task already has {} live session{}; send again with ack_live: true to \
+             {} anyway",
+            found.len(),
+            if found.len() == 1 { "" } else { "s" },
+            args.action
+        ),
+    )
+    .with_details(serde_json::json!({ "live_elsewhere": found })))
 }
 
 fn lifecycle_row(s: &Store, session_id: i64) -> Result<SessionRow, IpcError> {
@@ -1293,6 +1413,90 @@ mod tests {
             action: action.into(),
             ..Default::default()
         }
+    }
+
+    /// Task → session P-2 through the service: the primary moves, the old
+    /// link ends, and a stale view of the primary is a conflict.
+    #[test]
+    fn switch_moves_the_primary_in_one_step() {
+        let (st, sid) = store();
+        let a = WorkLinkArgs {
+            key: Some("ABC-1".into()),
+            ..link(sid, "link")
+        };
+        work_link(&a, &st, &OrgScope::All).unwrap();
+        let from = lock(&st)
+            .unwrap()
+            .current_primary_link(sid)
+            .unwrap()
+            .unwrap();
+        let stale = WorkLinkArgs {
+            key: Some("DEF-2".into()),
+            link_id: Some(from),
+            expected_primary: Some(from + 1),
+            ..link(sid, "switch")
+        };
+        assert_eq!(
+            work_link(&stale, &st, &OrgScope::All).unwrap_err().code,
+            codes::E_CONFLICT
+        );
+        let row = work_link(
+            &WorkLinkArgs {
+                expected_primary: Some(from),
+                ..stale
+            },
+            &st,
+            &OrgScope::All,
+        )
+        .unwrap();
+        let w = row.work.expect("the row carries its work");
+        assert_eq!(w.key.as_deref(), Some("DEF-2"));
+        let s = lock(&st).unwrap();
+        let old = s.get_work_link(from).unwrap().unwrap();
+        assert_eq!(old.end_reason.as_deref(), Some("switched"));
+        assert_eq!(s.session_work_links(sid).unwrap().len(), 1);
+    }
+
+    /// Task → session P-3: asked for, the warning names the other live
+    /// session; acknowledged, or not asked for, the link goes ahead.
+    #[test]
+    fn a_link_asked_to_warn_names_the_tasks_other_live_session() {
+        let (st, sid) = store();
+        let other = {
+            let s = lock(&st).unwrap();
+            let o = s
+                .upsert_session("other", "h", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.link_session_work(o, WorkTarget::Key("ABC-1"), "manual")
+                .unwrap();
+            o
+        };
+        let view = crate::service::view_scope::ViewScope::internal();
+        let ask = |ack: Option<bool>| WorkLinkArgs {
+            key: Some("abc-1".into()),
+            ack_live: ack,
+            ..link(sid, "link")
+        };
+        let e = check_live_elsewhere(&ask(Some(false)), &st, &view).unwrap_err();
+        assert_eq!(e.code, codes::E_EXISTS);
+        let d = e.details.unwrap();
+        assert_eq!(d["live_elsewhere"][0]["session_id"], other);
+        assert!(d["live_elsewhere"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("other"));
+        check_live_elsewhere(&ask(Some(true)), &st, &view).unwrap();
+        check_live_elsewhere(&ask(None), &st, &view).unwrap();
+        // Nothing else on the work: nothing to say.
+        check_live_elsewhere(
+            &WorkLinkArgs {
+                key: Some("XYZ-9".into()),
+                ..ask(Some(false))
+            },
+            &st,
+            &view,
+        )
+        .unwrap();
     }
 
     #[test]

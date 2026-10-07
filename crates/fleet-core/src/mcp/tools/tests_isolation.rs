@@ -3079,6 +3079,64 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Task → session P-2: a switch is the set_primary compare-and-set plus
+    // the link's own target fence. The stale expectation keeps every row
+    // from moving the fixture's links: the unrestricted callers reach the
+    // compare-and-set and lose it, everyone else is refused before it.
+    m.row(
+        "work_link",
+        "switch",
+        |fx, _| {
+            json!({ "action": "switch", "session_id": fx.s_x,
+                    "link_id": relink(fx, fx.s_x, fx.item_b), "key": "ZZ-9",
+                    "expected_primary": 987_654 })
+        },
+        move |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => is_code(who, a, "E_CONFLICT", "stale primary"),
+            _ => s_x_refused(who, a, "switch B's link on A's session"),
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "switch",
+        move |fx, who| {
+            let sid = own(fx, who);
+            let p = primary_of(fx, sid);
+            json!({ "action": "switch", "session_id": sid, "link_id": p, "key": "ZZ-9",
+                    "expected_primary": p + 1000 })
+        },
+        |_, who, a| {
+            if !readonly_refused(who, a) {
+                is_code(who, a, "E_CONFLICT", "stale primary");
+                assert!(text(a).contains("primary_link_id"), "{who:?}: {a:?}");
+            }
+        },
+    )
+    .await;
+    // P-3: the live-elsewhere warning names only what the caller may see.
+    // B's ticket is live on s_b (B's) and s_x (A's, forced). Out of scope it
+    // answers as the unknown item it is; in B's scope s_x is another org's
+    // session and is not counted, so the link goes ahead.
+    m.row(
+        "work_link",
+        "link",
+        move |fx, who| {
+            json!({ "action": "link", "session_id": own(fx, who), "item_id": fx.item_b,
+                    "primary": false, "ack_live": false })
+        },
+        |_, who, a| match who {
+            _ if readonly_refused(who, a) => {}
+            Who::Master | Who::ClientFull => {
+                is_code(who, a, "E_EXISTS", "live elsewhere");
+                assert!(text(a).contains("live_elsewhere"), "{who:?}: {a:?}");
+            }
+            Who::HostB | Who::BoundB => is_ok(who, a, "own link, nothing else in B"),
+            _ => is_code(who, a, "E_NOTFOUND", "B's item out of scope"),
+        },
+    )
+    .await;
     // Undo is for proposed links; the fixture's are made by hand.
     m.row(
         "work_link",

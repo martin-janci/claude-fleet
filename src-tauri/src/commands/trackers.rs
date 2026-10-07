@@ -300,6 +300,9 @@ pub struct WorkTicketsArgs {
     pub query: Option<String>,
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Own tasks too (task → session P-4).
+    #[serde(default)]
+    pub include_local: Option<bool>,
 }
 
 /// One ticket by key or URL.
@@ -440,16 +443,18 @@ pub(crate) mod routed {
             view: args.view.clone(),
             query: args.query.clone(),
             limit: args.limit,
+            include_local: args.include_local,
             ..Default::default()
         };
         match backend.hub() {
             Some(hub) => hub.route("work_tickets", &wire).await,
-            None => tickets::tickets(
+            None => tickets::tickets_and_tasks(
                 store,
                 args.tracker_id,
                 args.view.as_deref(),
                 args.query.as_deref(),
                 args.limit,
+                args.include_local == Some(true),
                 &fleet_core::service::view_scope::ViewScope::internal(),
             ),
         }
