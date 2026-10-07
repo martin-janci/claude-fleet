@@ -1103,7 +1103,19 @@ fn work_link_locked<'a>(
             let source = link_source(None, decider)?;
             let (t, org) = visible_target(target()?)?;
             orgs::check_cross_org(org, s.session_org(session_id)?, &target_name(t), force)?;
-            s.switch_session_work(session_id, from, t, source, args.expected_primary)?;
+            // The compare-and-set is on the primary the caller can see, as
+            // in `set_primary`: another org's primary reads as none and its
+            // id is never named in the refusal.
+            let actual = s.current_primary_link(session_id)?;
+            // This is the org boundary, not a privacy fence: the same org question about the
+            // primary link.
+            let seen = actual.filter(|id| scope.is_all() || visible_link(*id).is_ok());
+            if let Some(expected) = args.expected_primary {
+                if seen.unwrap_or(0) != expected {
+                    return Err(crate::store::primary_conflict(session_id, seen));
+                }
+            }
+            s.switch_session_work(session_id, from, t, source, Some(actual.unwrap_or(0)))?;
         }
         "link" => {
             let source = link_source(args.source.as_deref(), decider)?;

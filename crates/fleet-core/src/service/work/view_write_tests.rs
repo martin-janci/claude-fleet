@@ -1459,3 +1459,53 @@ fn a_hidden_primary_neither_blocks_nor_leaks_to_a_bound_client() {
         .iter()
         .any(|l| l.link.link_id == hidden && l.link.state == "active"));
 }
+
+/// A switch's compare-and-set is on the primary the caller can see, as
+/// `set_primary`'s: a client bound to org A, whose session's primary is a
+/// forced link to org B's task, saw "none" and switches with that; the
+/// refusal for a stale view never names B's link.
+#[test]
+fn a_switch_compares_the_primary_this_org_can_see() {
+    let w = world();
+    link(&w, w.s1, w.t1, false);
+    let local_b = local_of_b(&w, "XO-2");
+    work_link(
+        &WorkLinkArgs {
+            item_id: Some(local_b),
+            primary: Some(true),
+            force_cross_org: Some(true),
+            ..wl(&w, "link", w.s1)
+        },
+        &w.st,
+        &OrgScope::All,
+    )
+    .unwrap();
+    let st = links_of(&w, w.s1);
+    let foreign = st.primary_link_id.unwrap();
+    let from = st
+        .links
+        .iter()
+        .find(|l| l.link.link_id != foreign)
+        .unwrap()
+        .link
+        .link_id;
+    let switch = |seen: i64| {
+        work_link(
+            &WorkLinkArgs {
+                link_id: Some(from),
+                item_id: Some(w.t2),
+                expected_primary: Some(seen),
+                ..wl(&w, "switch", w.s1)
+            },
+            &w.st,
+            &bound(w.org_a),
+        )
+    };
+    let err = switch(foreign).unwrap_err();
+    assert_eq!(err.code, codes::E_CONFLICT);
+    assert!(
+        !err.details.as_ref().unwrap()["primary_link_id"].is_number(),
+        "{err:?}"
+    );
+    switch(0).unwrap();
+}

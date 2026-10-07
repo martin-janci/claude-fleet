@@ -135,7 +135,11 @@ export async function attachSession(row: SessionRow, target: AttachTarget, opts:
         row: r.value,
         undo:
           back && now != null
-            ? async () => refused() ?? switchSessionWork(row.id, now, back, { expectedPrimary: now, ackLive: true })
+            ? async () => refused() ?? switchSessionWork(row.id, now, back, {
+                  expectedPrimary: now,
+                  ackLive: true,
+                  forceCrossOrg: opts.forceCrossOrg,
+                })
             : null,
       },
     };

@@ -38,6 +38,10 @@
   let error = $state<string | null>(null);
   /** The second click's reason: P-3 or another organisation. */
   let confirm = $state<{ kind: 'live'; live: LiveElsewhere[] } | { kind: 'cross_org'; sentence: string } | null>(null);
+  /** What the person already went ahead past, sticky until another pick:
+   *  a task open elsewhere AND in another org takes both, one per click. */
+  let acked = false;
+  let forced = false;
   let input: HTMLInputElement | undefined = $state();
 
   const rows = $derived(attachCandidates($sessions, target, filter));
@@ -50,6 +54,8 @@
     picked = r.id;
     mode = defaultMode(r);
     confirm = null;
+    acked = false;
+    forced = false;
     error = null;
   }
 
@@ -60,8 +66,10 @@
     if (!row || busy || blocked) return;
     busy = true;
     error = null;
-    const ackLive = confirm?.kind === 'live';
-    const forceCrossOrg = confirm?.kind === 'cross_org';
+    if (confirm?.kind === 'live') acked = true;
+    if (confirm?.kind === 'cross_org') forced = true;
+    const ackLive = acked;
+    const forceCrossOrg = forced;
     // Said from what was picked: the row the write answers is on this task.
     const how = other
       ? mode === 'switch'

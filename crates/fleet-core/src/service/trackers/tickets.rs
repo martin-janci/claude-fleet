@@ -249,21 +249,38 @@ pub fn tickets_and_tasks(
     include_local: bool,
     reader: &crate::service::view_scope::ViewScope,
 ) -> Result<Vec<Ticket>, IpcError> {
+    let want_local = include_local && tracker_id.is_none() && view.is_none();
+    // The same gate as the task list (`work { local_items }`): a scoped
+    // caller sees a task only through a link it can see, so a teammate's
+    // private task is not listed here either. Read before the guard below,
+    // which it takes itself.
+    let visible: Option<HashSet<i64>> = if want_local {
+        Some(
+            crate::service::work::local::local_items(store, reader)?
+                .into_iter()
+                .map(|i| i.id)
+                .collect(),
+        )
+    } else {
+        None
+    };
     let s = lock(store)?;
-    let mut out = tickets_in(&s, tracker_id, view, query, limit, reader)?;
-    if include_local && tracker_id.is_none() && view.is_none() {
-        let limit = limit
-            .unwrap_or(TICKETS_DEFAULT_LIMIT)
-            .clamp(1, TICKETS_MAX_LIMIT);
+    let limit_n = limit
+        .unwrap_or(TICKETS_DEFAULT_LIMIT)
+        .clamp(1, TICKETS_MAX_LIMIT);
+    let mut tasks: Vec<WorkItemRow> = Vec::new();
+    if let Some(visible) = &visible {
         let allowed = allowed(&reader.org, &s)?;
         let q = query
             .map(|q| q.trim().to_lowercase())
             .filter(|q| !q.is_empty());
         for item in s.local_work_items()? {
-            if out.len() >= limit {
+            if tasks.len() >= limit_n {
                 break;
             }
-            if allowed.as_ref().is_some_and(|a| !a.contains(&item.id)) {
+            if !visible.contains(&item.id)
+                || allowed.as_ref().is_some_and(|a| !a.contains(&item.id))
+            {
                 continue;
             }
             let own = match item.origin.as_deref() {
@@ -281,14 +298,25 @@ pub fn tickets_and_tasks(
                     continue;
                 }
             }
-            let live = live_ids(&s, reader, &item)?;
-            out.push(Ticket {
-                item,
-                live_session_ids: live,
-                description: None,
-                views: Vec::new(),
-            });
+            tasks.push(item);
         }
+    }
+    // Tickets first, but never the whole limit while tasks match: up to
+    // half of it is kept for them, so a query matching many tickets still
+    // shows the caller's TASK-n.
+    let reserve = tasks.len().min(limit_n / 2);
+    let mut out = tickets_in(&s, tracker_id, view, query, Some(limit_n - reserve), reader)?;
+    for item in tasks {
+        if out.len() >= limit_n {
+            break;
+        }
+        let live = live_ids(&s, reader, &item)?;
+        out.push(Ticket {
+            item,
+            live_session_ids: live,
+            description: None,
+            views: Vec::new(),
+        });
     }
     Ok(out)
 }
