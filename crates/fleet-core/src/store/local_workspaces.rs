@@ -2,6 +2,10 @@
 //! `docs/superpowers/specs/2026-10-07-local-workspace-sync-design.md`): the
 //! link between one remote worktree and one directory on this machine, its
 //! BASE (what both sides last agreed on, per path) and its open conflicts.
+//! Phases 2 and 3 (migration 112,
+//! `docs/superpowers/specs/2026-10-07-local-workspace-handoff-design.md`)
+//! add who drives the worktree and the per-path activity log: what each
+//! side changed that nobody has looked at yet.
 //! The engine is `service::local_sync`; nothing here touches a file.
 
 use super::*;
@@ -27,6 +31,9 @@ pub const LOCAL_CONFLICT_KINDS: [&str; 4] = [
     "local_deleted",
     "remote_deleted",
 ];
+
+/// The values `local_workspaces.driver` takes (migration 112's CHECK).
+pub const LOCAL_WORKSPACE_DRIVERS: [&str; 3] = ["shared", "developer", "agent"];
 
 /// One link, with its open conflicts. `project_id` is the current id of the
 /// owner/repo project (ids are re-derived, so it is joined, never stored);
@@ -63,6 +70,34 @@ pub struct LocalWorkspaceRow {
     #[serde(default)]
     pub conflicts: Vec<LocalConflictRow>,
     pub created_at: i64,
+    /// Who drives the worktree: `shared`, `developer` or `agent`.
+    #[serde(default = "shared")]
+    pub driver: String,
+    /// When `driver` was last set.
+    #[serde(default)]
+    pub driver_since: Option<i64>,
+    /// Changes carried from the folder to the host that nobody has handed
+    /// on, committed, discarded or dismissed yet (activity rows, `local`).
+    #[serde(default)]
+    pub local_activity: i64,
+    /// The same for changes carried from the host to the folder (`remote`).
+    #[serde(default)]
+    pub remote_activity: i64,
+}
+
+fn shared() -> String {
+    "shared".to_string()
+}
+
+/// One path a pass carried and nobody has looked at yet.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LocalActivityRow {
+    pub path: String,
+    /// `local` (the folder's change, pushed) or `remote` (the host's, pulled).
+    pub origin: String,
+    /// `added`, `modified` or `deleted`.
+    pub change: String,
+    pub at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -147,6 +182,9 @@ pub struct LocalPassWrite {
     pub remove: Vec<String>,
     pub add_conflicts: Vec<NewLocalConflict>,
     pub clear_conflicts: Vec<String>,
+    /// What was carried across, for the activity log: path, origin
+    /// (`local` / `remote`) and change (`added` / `modified` / `deleted`).
+    pub activity: Vec<(String, &'static str, &'static str)>,
 }
 
 const COLS: &str = "w.id, w.host_alias, w.owner, w.repo,
@@ -154,7 +192,11 @@ const COLS: &str = "w.id, w.host_alias, w.owner, w.repo,
          ORDER BY p.system, p.id LIMIT 1),
        w.worktree_key, w.remote_path, w.local_path, w.session_id, w.paused, w.excludes,
        w.state, w.last_sync_at, w.last_error, w.pending_local, w.pending_remote, w.skipped,
-       w.created_at";
+       w.created_at, w.driver, w.driver_since,
+       (SELECT COUNT(*) FROM local_workspace_activity a
+         WHERE a.workspace_id = w.id AND a.origin = 'local'),
+       (SELECT COUNT(*) FROM local_workspace_activity a
+         WHERE a.workspace_id = w.id AND a.origin = 'remote')";
 
 fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LocalWorkspaceRow> {
     let excludes: String = r.get(10)?;
@@ -178,6 +220,10 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<LocalWorkspaceRow> {
         skipped: r.get(16)?,
         conflicts: Vec::new(),
         created_at: r.get(17)?,
+        driver: r.get(18)?,
+        driver_since: r.get(19)?,
+        local_activity: r.get(20)?,
+        remote_activity: r.get(21)?,
     })
 }
 
@@ -421,6 +467,10 @@ impl Store {
             "DELETE FROM local_workspace_conflicts WHERE workspace_id = ?1",
             [id],
         )?;
+        tx.execute(
+            "DELETE FROM local_workspace_activity WHERE workspace_id = ?1",
+            [id],
+        )?;
         let n = tx.execute("DELETE FROM local_workspaces WHERE id = ?1", [id])?;
         tx.commit()?;
         if n > 0 {
@@ -521,9 +571,102 @@ impl Store {
             for path in &w.clear_conflicts {
                 clear.execute(rusqlite::params![id, path])?;
             }
+            let mut act = tx.prepare_cached(
+                "INSERT INTO local_workspace_activity (workspace_id, path, origin, change, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(workspace_id, path) DO UPDATE SET
+                     origin = excluded.origin, change = excluded.change, at = excluded.at",
+            )?;
+            for (path, origin, change) in &w.activity {
+                act.execute(rusqlite::params![id, path, origin, change, now])?;
+            }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// The link's activity log, newest first.
+    pub fn local_workspace_activity(&self, id: i64) -> Result<Vec<LocalActivityRow>, IpcError> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT path, origin, change, at FROM local_workspace_activity
+              WHERE workspace_id = ?1 ORDER BY at DESC, path",
+        )?;
+        let rows = stmt.query_map([id], |r| {
+            Ok(LocalActivityRow {
+                path: r.get(0)?,
+                origin: r.get(1)?,
+                change: r.get(2)?,
+                at: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Forget activity rows: those of `origin` (or both sides when `None`),
+    /// and only `paths` when given. Answers how many went.
+    pub fn clear_local_workspace_activity(
+        &self,
+        id: i64,
+        origin: Option<&str>,
+        paths: Option<&[String]>,
+    ) -> Result<usize, IpcError> {
+        if let Some(o) = origin {
+            if o != "local" && o != "remote" {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("origin must be local or remote, not {o:?}"),
+                ));
+            }
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut n = 0;
+        match paths {
+            None => {
+                n += tx.execute(
+                    "DELETE FROM local_workspace_activity
+                      WHERE workspace_id = ?1 AND (?2 IS NULL OR origin = ?2)",
+                    rusqlite::params![id, origin],
+                )?;
+            }
+            Some(paths) => {
+                let mut stmt = tx.prepare_cached(
+                    "DELETE FROM local_workspace_activity
+                      WHERE workspace_id = ?1 AND path = ?2 AND (?3 IS NULL OR origin = ?3)",
+                )?;
+                for p in paths {
+                    n += stmt.execute(rusqlite::params![id, p, origin])?;
+                }
+            }
+        }
+        tx.commit()?;
+        if n > 0 {
+            self.local_workspace_changed(id);
+        }
+        Ok(n)
+    }
+
+    /// Set who drives the worktree. `E_INVALID` for an unknown driver.
+    pub fn set_local_workspace_driver(
+        &self,
+        id: i64,
+        driver: &str,
+        now: i64,
+    ) -> Result<LocalWorkspaceRow, IpcError> {
+        if !LOCAL_WORKSPACE_DRIVERS.contains(&driver) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("driver must be shared, developer or agent, not {driver:?}"),
+            ));
+        }
+        let n = self.conn.execute(
+            "UPDATE local_workspaces SET driver = ?2, driver_since = ?3 WHERE id = ?1",
+            rusqlite::params![id, driver, now],
+        )?;
+        if n == 0 {
+            return Err(not_found(id));
+        }
+        self.local_workspace_changed(id);
+        self.local_workspace(id)?.ok_or_else(|| not_found(id))
     }
 }
 

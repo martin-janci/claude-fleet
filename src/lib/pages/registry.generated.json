@@ -907,7 +907,7 @@
         "message": "Fleet will write its skills into a folder another git repository tracks."
       },
       "default": "false",
-      "help": "Write fleet's skills even when a host's ~/.claude/skills is inside a git work tree, such as a dotfiles checkout. Off: provisioning refuses such a host.",
+      "help": "Write fleet's skills even when a git work tree on the host, such as a dotfiles checkout, tracks files in fleet's two skill dirs. Off: provisioning refuses such a host; untracking or ignoring those two dirs is enough.",
       "key": "provision.force_git_tree",
       "kind": {
         "type": "bool"

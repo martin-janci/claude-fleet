@@ -340,7 +340,7 @@ pub struct SessionRow {
     /// privacy-critical one.
     #[serde(default = "visibility_unclaimed")]
     pub visibility: String,
-    /// The credential profile the session runs under (migration 112,
+    /// The credential profile the session runs under (migration 113,
     /// docs/accounts.md): `CLAUDE_CONFIG_DIR` is
     /// `~/.claude-profiles/<name>` on its host. `None` = the host's own login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -977,7 +977,7 @@ pub struct HostRow {
     /// an older hub omits it.
     #[serde(default)]
     pub auth_overrides: Option<Vec<String>>,
-    /// The host's Claude login profiles (migration 113, docs/accounts.md),
+    /// The host's Claude login profiles (migration 114, docs/accounts.md),
     /// by name, each with the account it is logged into when known. `None`:
     /// never read. Per-field default: an older hub omits it.
     #[serde(default)]
@@ -1101,7 +1101,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         auth_overrides: row
             .get::<_, Option<String>>(25)?
             .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
-        // Migration 113. Same lenient read.
+        // Migration 114. Same lenient read.
         claude_profiles: row
             .get::<_, Option<String>>(26)?
             .and_then(|t| serde_json::from_str::<Vec<HostProfileRow>>(&t).ok()),

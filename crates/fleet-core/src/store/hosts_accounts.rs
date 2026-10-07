@@ -433,7 +433,7 @@ impl Store {
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
-    /// Record a host's login profiles (migration 113). Emits `host:probed`
+    /// Record a host's login profiles (migration 114). Emits `host:probed`
     /// only when the list changed, so a steady host costs no event per pass.
     pub fn set_host_profiles(
         &self,

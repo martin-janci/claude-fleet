@@ -601,10 +601,12 @@ out, set `provision.install_ag=false` right after upgrading.
 | `~/.tmux.conf` `set -g set-clipboard on` line | fleet (append-only) | `provision_tmux_clipboard` |
 | every other skill, hook, plugin, `~/.claude/projects` | the user / dotfiles | never touched |
 
-If `~/.claude/skills` is inside a git work tree (a dotfiles checkout),
-provisioning **refuses** that host (`E_INVALID`, `details.git_toplevel`) rather
-than dirty tracked files: untrack the two fleet dirs there (or `.gitignore`
-them), or set `provision.force_git_tree = true` to write anyway.
+If `~/.claude/skills` is inside a git work tree (a dotfiles checkout) that
+tracks files in either fleet dir, provisioning **refuses** that host
+(`E_INVALID`, `details.git_toplevel`) rather than overwrite committed files:
+untrack the two fleet dirs there (`git rm -r --cached`, then `.gitignore`
+them), or set `provision.force_git_tree = true` to write anyway. A checkout
+that leaves them untracked or ignored is provisioned as usual.
 
 **What a host needs for prompt delivery.** A prompt rides to the pane as
 `base64 -d` piped into `tmux load-buffer -`, so each managed host needs
@@ -3225,7 +3227,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 268 commands, 187 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 25 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 278 commands, 187 route to a hub tool, 1 routes except for one argument shape, 48 refuse, and 42 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -3235,10 +3237,8 @@ Of the 268 commands, 187 route to a hub tool, 1 routes except for one argument s
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
-| `disconnect_local_workspace` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
-| `enable_local_workspace` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `fetch_page_source` | a page's data sources read this fleet's store, which the hub owns; read the same numbers on the hub with usage_report |
 | `flow_back` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
 | `flow_cancel` | a flow administers the fleet this app owns, and the hub owns it; connect a tracker on the hub with fleet-hub tracker add <ticket-url> |
@@ -3252,7 +3252,6 @@ Of the 268 commands, 187 route to a hub tool, 1 routes except for one argument s
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
 | `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
-| `pause_local_workspace` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
@@ -3270,15 +3269,11 @@ Of the 268 commands, 187 route to a hub tool, 1 routes except for one argument s
 | `repo_push` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
-| `resolve_local_workspace_conflict` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
-| `resume_local_workspace` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
-| `set_local_workspace_excludes` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `status_map_proposals` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
-| `sync_local_workspace_now` | it syncs a folder on this machine with a host over this machine's own SSH connection, and the hub exposes no tool for it; use a standalone desktop |
 | `test_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tracker_sync_metrics` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `tunnel_status` | the tunnels belong to the process that owns the fleet; check them on the hub |

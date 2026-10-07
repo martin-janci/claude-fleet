@@ -559,7 +559,7 @@ fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 113.
+/// `already_applied` guard of migration 114.
 fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'claude_profiles'",
@@ -569,7 +569,7 @@ fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 112.
+/// `already_applied` guard of migration 113.
 fn sessions_has_claude_profile(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'claude_profile'",
@@ -583,6 +583,16 @@ fn sessions_has_claude_profile(conn: &Connection) -> rusqlite::Result<bool> {
 fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'auth_overrides'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 112.
+fn local_workspaces_has_driver_since(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('local_workspaces') WHERE name = 'driver_since'",
         [],
         |r| r.get(0),
     )?;
@@ -1305,17 +1315,24 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/111_host_auth_overrides.sql"),
         already_applied: Some(hosts_has_auth_overrides),
     },
+    // Local workspace, Phases 2 and 3: who drives the worktree (two ADD
+    // COLUMNs, guarded on the last) and the per-path activity log.
+    Migration {
+        version: 112,
+        sql: include_str!("../../migrations/112_local_workspace_handoff.sql"),
+        already_applied: Some(local_workspaces_has_driver_since),
+    },
     // A session's credential profile (multi-account phase 2): one ADD
     // COLUMN, guarded, and the row-version trigger re-issued to watch it.
     Migration {
-        version: 112,
-        sql: include_str!("../../migrations/112_session_claude_profile.sql"),
+        version: 113,
+        sql: include_str!("../../migrations/113_session_claude_profile.sql"),
         already_applied: Some(sessions_has_claude_profile),
     },
     // A host's login profiles and their accounts: one ADD COLUMN, guarded.
     Migration {
-        version: 113,
-        sql: include_str!("../../migrations/113_host_claude_profiles.sql"),
+        version: 114,
+        sql: include_str!("../../migrations/114_host_claude_profiles.sql"),
         already_applied: Some(hosts_has_claude_profiles),
     },
 ];
@@ -1595,7 +1612,9 @@ impl Store {
             ("hosts", "tmux_server_pid", "INTEGER"),
             ("sessions", "lost_reason", "TEXT"),
         ];
-        let tx = self.conn.unchecked_transaction()?;
+        // Reads, then writes (035's `INSERT OR IGNORE`): IMMEDIATE, or a
+        // CLI opening this file beside the running hub fails on its write lock.
+        let tx = self.immediate_transaction()?;
         for (table, column, def) in COLUMNS {
             let n: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
@@ -1659,7 +1678,7 @@ impl Store {
             already_applied,
         } in pending
         {
-            let tx = self.conn.unchecked_transaction()?;
+            let tx = self.immediate_transaction()?;
             if already_applied
                 .map(|applied| applied(&tx))
                 .transpose()?
@@ -5450,7 +5469,7 @@ mod tests {
             )
             .unwrap();
         // Raw too: `upsert_session` reads the row back with every current
-        // `sessions` column (112's `claude_profile` among them).
+        // `sessions` column (113's `claude_profile` among them).
         s.conn
             .execute(
                 "INSERT INTO sessions (tmux_name, host_alias, project_id, worktree_id, \

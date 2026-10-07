@@ -51,7 +51,7 @@ digit, at most 32 characters (`validate::claude_profile`).
 ### See a host's profiles
 
 Every reconcile pass reads `~/.claude-profiles/*` on each host and the login
-in each (`hosts.claude_profiles`, migration 113; `list_hosts` returns it).
+in each (`hosts.claude_profiles`, migration 114; `list_hosts` returns it).
 Host details lists them as **Login profiles**, with the account each is
 logged into, or "not logged in". Each logged-in profile's account appears in
 Accounts like a host's login.
@@ -74,7 +74,7 @@ MCP: `restart_session { session_id, profile: "work" }` stores the new profile an
 restarts the session, resuming its conversation under that login.
 `profile: ""` switches back to the host's login; leaving `profile` out keeps
 the current one. Restart, recreate, repair, rewind and move all relaunch
-with the stored profile (`sessions.claude_profile`, migration 112).
+with the stored profile (`sessions.claude_profile`, migration 113).
 
 A moved session keeps its profile name; on the target host that name is a
 separate profile, which asks for its own `/login` the first time.

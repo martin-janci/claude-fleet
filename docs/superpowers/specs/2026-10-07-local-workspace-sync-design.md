@@ -122,7 +122,8 @@ host did not answer; retried with backoff), `error` (anything else, with
 A conflicting path is left alone on both sides and listed. Resolution
 (Phase 1): **Keep local** (push over the remote), **Keep remote** (pull over
 the local), or resolve by hand — once both sides have the same content the
-next pass clears it. Compare (a diff view) is Phase 2.
+next pass clears it. Compare, Keep both and Ask AI to resolve came in Phase 2
+(`2026-10-07-local-workspace-handoff-design.md`).
 
 ## Engine and commands
 
@@ -138,9 +139,9 @@ next pass clears it. Compare (a diff view) is Phase 2.
   files on either side), `set_local_workspace_excludes`,
   `resolve_local_workspace_conflict { path, keep: local|remote }`.
   Row events `local_workspace:changed` / `:removed` keep the UI live.
-- Hub-client mode: the hub cannot reach a directory on the desktop, so every
-  command is `LocalOnly` in Phase 1 (`backend/verdicts.rs`). Making it work
-  through the hub needs file transfer tools on the hub — a later phase.
+- Hub-client mode: `LocalOnly` in Phase 1. It works on a paired desktop
+  since, over this machine's own SSH, as the handoff design's *Hub-client
+  mode* says (`2026-10-07-local-workspace-handoff-design.md`).
   Hosts reached through `fleet-agent` are refused (`E_UNSUPPORTED`): the agent
   cannot pipe stdin yet.
 
@@ -159,4 +160,4 @@ next pass clears it. Compare (a diff view) is Phase 2.
 Open in IDE, diff/compare, "N local changes detected" with Review / Ask AI /
 Commit / Discard, agent handoff, worktree create/attach/merge/archive/clean
 from this screen, symlinks, file modes beyond the executable bit carried by
-tar, hub-client mode, a filesystem watcher (polling is enough at 5 s).
+tar, a filesystem watcher (polling is enough at 5 s).

@@ -1,4 +1,4 @@
--- 112: `sessions.claude_profile`, the Claude credential profile a session
+-- 113: `sessions.claude_profile`, the Claude credential profile a session
 -- runs under (multi-account, docs/accounts.md). `claude` runs with
 -- `CLAUDE_CONFIG_DIR=~/.claude-profiles/<name>` on the host, so it bills
 -- that profile's `/login` instead of the host's. Set by `new_session
@@ -100,4 +100,4 @@ BEGIN
   UPDATE sessions SET row_version = OLD.row_version + 1 WHERE id = NEW.id;
 END;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (112);
+INSERT OR IGNORE INTO schema_version (version) VALUES (113);
