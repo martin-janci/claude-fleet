@@ -61,6 +61,21 @@ const MASS_DELETE_MIN: usize = 20;
 /// Passes running at once, across links.
 const MAX_PARALLEL_PASSES: usize = 4;
 
+/// Whether `p` or a directory above it was left out: a path below a
+/// symlinked directory is in another tree, never ours to write or delete.
+fn under_blocked(blocked: &HashSet<String>, p: &str) -> bool {
+    let mut cur = p;
+    loop {
+        if blocked.contains(cur) {
+            return true;
+        }
+        match cur.rfind('/') {
+            Some(i) => cur = &cur[..i],
+            None => return false,
+        }
+    }
+}
+
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -304,15 +319,16 @@ impl LocalSync {
         // not edited: stop before carrying that across.
         let live_base: Vec<&String> = base
             .keys()
-            .filter(|p| !ex.excluded(p, false) && !blocked.contains(*p))
+            .filter(|p| !ex.excluded(p, false) && !under_blocked(&blocked, p))
             .collect();
-        for (side, gone) in [
+        for (side, gone, empty) in [
             (
                 "local folder",
                 live_base
                     .iter()
                     .filter(|p| !lscan.files.contains_key(**p))
                     .count(),
+                lscan.files.is_empty(),
             ),
             (
                 "worktree on the host",
@@ -320,16 +336,20 @@ impl LocalSync {
                     .iter()
                     .filter(|p| !rfiles.contains_key(**p))
                     .count(),
+                rfiles.is_empty(),
             ),
         ] {
-            if gone >= MASS_DELETE_MIN && gone * 2 > live_base.len() {
+            // Few files, all gone and nothing left: an unmounted volume's
+            // empty mount point, which the count alone would let through.
+            let emptied = empty && gone > 1 && gone == live_base.len();
+            if emptied || (gone >= MASS_DELETE_MIN && gone * 2 > live_base.len()) {
                 return Err(PassFail {
                     error: IpcError::new(
                         codes::E_INVALID_STATE,
                         format!(
                             "{gone} of {} synced files disappeared from the {side}; sync is \
-                             paused and nothing was deleted. Restore them, or disconnect and \
-                             enable again",
+                             paused and nothing was deleted. Restore them, or, if they were \
+                             meant to go, delete them on the other side too and resume",
                             live_base.len()
                         ),
                     ),
@@ -347,7 +367,7 @@ impl LocalSync {
             .collect();
         let mut work: Vec<PathWork> = Vec::new();
         for p in all {
-            if ex.excluded(p, false) || blocked.contains(p) {
+            if ex.excluded(p, false) || under_blocked(&blocked, p) {
                 continue;
             }
             let b = base.get(p);

@@ -559,3 +559,72 @@ async fn the_upload_guard_refuses_a_remote_file_that_moved() {
         .collect();
     assert!(leftovers.is_empty());
 }
+
+#[tokio::test]
+async fn an_emptied_folder_pauses_even_when_the_repo_is_small() {
+    let f = fixture();
+    let row = f.enable().await;
+    assert_eq!(row.state, "synced");
+    // An unmounted volume: the mount point is still there, and empty.
+    for e in std::fs::read_dir(&f.local).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            std::fs::remove_dir_all(p).unwrap();
+        } else {
+            std::fs::remove_file(p).unwrap();
+        }
+    }
+    let r = f.pass(row.id).await;
+    assert!(r.paused, "{r:?}");
+    assert!(f.remote.join("README.md").exists());
+    assert!(f.remote.join("src/main.rs").exists());
+}
+
+#[tokio::test]
+async fn a_symlinked_directory_is_never_written_or_deleted_through() {
+    let f = fixture();
+    let row = f.enable().await;
+    // Locally, `docs` points at a folder outside the link.
+    let outside_local = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside_local.path(), f.local.join("docs")).unwrap();
+    write(&f.remote, "docs/a.md", "from the host\n");
+    // On the host, `vendor` points outside the worktree.
+    let outside_remote = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside_remote.path(), f.remote.join("vendor")).unwrap();
+    std::fs::create_dir_all(f.local.join("vendor")).unwrap();
+    write(&f.local, "vendor/x.txt", "from the desktop\n");
+    f.pass(row.id).await;
+    f.pass(row.id).await;
+    assert!(
+        !outside_local.path().join("a.md").exists(),
+        "pulled through a local link"
+    );
+    assert!(
+        !outside_remote.path().join("x.txt").exists(),
+        "pushed through a host link"
+    );
+}
+
+#[tokio::test]
+async fn a_pushed_file_lands_with_its_arrival_time() {
+    let f = fixture();
+    let row = f.enable().await;
+    write(&f.local, "src/main.rs", "fn main() { edited(); }\n");
+    let hour_ago = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(f.local.join("src/main.rs"))
+        .unwrap()
+        .set_modified(hour_ago)
+        .unwrap();
+    let r = f.pass(row.id).await;
+    assert_eq!(r.state, "synced", "{r:?}");
+    let landed = std::fs::metadata(f.remote.join("src/main.rs"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert!(
+        landed > hour_ago + Duration::from_secs(1800),
+        "a build on the host would think its outputs are newer"
+    );
+}

@@ -56,16 +56,61 @@ pub(super) fn stat_of(m: &std::fs::Metadata) -> FileStat {
     }
 }
 
+/// What sits at `rel`, looked at without following any link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Probe {
+    /// A regular file, reached through plain directories only.
+    File(FileStat),
+    /// Nothing: the path, or a directory above it, does not exist.
+    Absent,
+    /// Something that is not ours to read or replace: a link, a directory,
+    /// a path below a link or a file, or one the OS would not tell us about
+    /// (permission denied, an I/O error). Never read as deleted.
+    Other,
+}
+
+/// Look at `rel` component by component: a directory above it that is a
+/// link (into another tree the walk never entered) makes it `Other`, so a
+/// write or delete cannot escape the root through it; only `NotFound`
+/// means absent.
+pub(super) fn probe(root: &Path, rel: &str) -> Probe {
+    let mut p = root.to_path_buf();
+    let parts: Vec<&str> = rel.split('/').collect();
+    for (i, c) in parts.iter().enumerate() {
+        p.push(c);
+        let m = match std::fs::symlink_metadata(&p) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Probe::Absent,
+            Err(_) => return Probe::Other,
+        };
+        let last = i + 1 == parts.len();
+        if !last && !m.file_type().is_dir() {
+            return Probe::Other;
+        }
+        if last {
+            return if m.file_type().is_file() {
+                Probe::File(stat_of(&m))
+            } else {
+                Probe::Other
+            };
+        }
+    }
+    Probe::Absent
+}
+
 /// The stat of a regular file at `rel`, or `None` when nothing (or not a
 /// regular file) is there.
 pub(super) fn stat_file(root: &Path, rel: &str) -> Option<FileStat> {
-    let m = std::fs::symlink_metadata(abs(root, rel)).ok()?;
-    m.file_type().is_file().then(|| stat_of(&m))
+    match probe(root, rel) {
+        Probe::File(st) => Some(st),
+        _ => None,
+    }
 }
 
-/// Whether anything at all (a file, a link, a directory) sits at `rel`.
+/// Whether anything at all (a file, a link, a directory, or something the
+/// OS would not show us) sits at `rel`.
 pub(super) fn exists(root: &Path, rel: &str) -> bool {
-    std::fs::symlink_metadata(abs(root, rel)).is_ok()
+    probe(root, rel) != Probe::Absent
 }
 
 /// Walk `root`, honouring the `.gitignore` files in it and `ex`. `also`
@@ -137,18 +182,16 @@ pub(super) fn scan(
         if out.files.contains_key(rel) || !safe_rel(rel) || ex.excluded(rel, false) {
             continue;
         }
-        match stat_file(root, rel) {
-            Some(st) if st.size as u64 <= MAX_FILE_BYTES => {
+        match probe(root, rel) {
+            Probe::File(st) if st.size as u64 <= MAX_FILE_BYTES => {
                 out.files.insert(rel.clone(), st);
             }
-            // Too big, or no longer a regular file (a link, a directory).
-            Some(_) => {
+            // Too big, no longer a regular file (a link, a directory), or
+            // unreadable: present either way, so never a deletion.
+            Probe::File(_) | Probe::Other => {
                 out.blocked.insert(rel.clone());
             }
-            None if exists(root, rel) => {
-                out.blocked.insert(rel.clone());
-            }
-            None => {}
+            Probe::Absent => {}
         }
     }
     Ok(out)
@@ -243,7 +286,7 @@ pub(super) fn write_guarded(
     std::fs::create_dir_all(dir).map_err(|e| io(&target, e))?;
     let tmp = dir.join(format!(".fleet-sync-{}.tmp", uuid::Uuid::new_v4().simple()));
     std::fs::write(&tmp, bytes).map_err(|e| io(&tmp, e))?;
-    set_executable(&tmp, executable);
+    set_mode(&tmp, &target, executable);
     // Last look before the rename: an editor that saved meanwhile wins.
     if stat_file(root, rel) != expect {
         let _ = std::fs::remove_file(&tmp);
@@ -284,20 +327,30 @@ pub(super) fn delete_guarded(
     Ok(Guarded::Done(None))
 }
 
+/// The temp file's mode before it replaces `target`: the target's own
+/// (a `0600` file stays `0600`), else the default; the executable bits
+/// then follow the other side.
 #[cfg(unix)]
-fn set_executable(path: &Path, executable: bool) {
+fn set_mode(tmp: &Path, target: &Path, executable: bool) {
     use std::os::unix::fs::PermissionsExt;
-    if executable {
-        if let Ok(m) = std::fs::metadata(path) {
-            let mut p = m.permissions();
-            p.set_mode(p.mode() | 0o111);
-            let _ = std::fs::set_permissions(path, p);
-        }
+    let base = std::fs::symlink_metadata(target)
+        .ok()
+        .filter(|m| m.file_type().is_file())
+        .or_else(|| std::fs::metadata(tmp).ok());
+    if let Some(m) = base {
+        let mode = m.permissions().mode() & 0o777;
+        let mode = if executable {
+            // Execute where read is granted, as git checks out a 0755.
+            mode | ((mode & 0o444) >> 2)
+        } else {
+            mode & !0o111
+        };
+        let _ = std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(mode));
     }
 }
 
 #[cfg(not(unix))]
-fn set_executable(_path: &Path, _executable: bool) {}
+fn set_mode(_tmp: &Path, _target: &Path, _executable: bool) {}
 
 fn io(path: &Path, e: std::io::Error) -> IpcError {
     IpcError::new(codes::E_IO, format!("{}: {e}", path.display()))
@@ -401,6 +454,53 @@ mod tests {
         assert!(r.exists());
         // No temp file is left behind.
         assert_eq!(std::fs::read_dir(r).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_file_keeps_its_mode_and_takes_the_executable_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        let p = r.join("secret.env");
+        std::fs::write(&p, b"a=1").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let st = stat_file(r, "secret.env").unwrap();
+        let Guarded::Done(Some(st)) =
+            write_guarded(r, "secret.env", b"a=22", false, Some(st)).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        write_guarded(r, "secret.env", b"a=333", true, Some(st)).unwrap();
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_path_below_a_link_is_neither_absent_nor_writable() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("f"), b"theirs").unwrap();
+        std::os::unix::fs::symlink(outside.path(), d.path().join("l")).unwrap();
+        assert_eq!(probe(d.path(), "l/f"), Probe::Other);
+        assert_eq!(probe(d.path(), "l/new"), Probe::Other);
+        assert_eq!(probe(d.path(), "nothing/here"), Probe::Absent);
+        assert_eq!(
+            write_guarded(d.path(), "l/new", b"x", false, None).unwrap(),
+            Guarded::Moved
+        );
+        assert!(!outside.path().join("new").exists());
+        let also: HashSet<String> = ["l/f".to_string()].into();
+        let s = scan(d.path(), &Excludes::new(&[]).unwrap(), &also).unwrap();
+        assert!(s.blocked.contains("l/f"), "{s:?}");
+        assert!(!s.files.contains_key("l/f"));
     }
 
     #[test]

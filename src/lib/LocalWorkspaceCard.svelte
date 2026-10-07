@@ -45,8 +45,25 @@
   const clock = setInterval(() => (nowMs = Date.now()), 1000);
   onDestroy(() => clearInterval(clock));
 
+  // The card outlives a switch to another session: what was typed for one
+  // session must never be enabled for the next (it would bind this
+  // worktree to the other repo's folder). The suggestion fills the field
+  // once per session, so clearing it stays cleared.
+  let shownFor: number | null = null;
+  let seededFor: number | null = null;
   $effect(() => {
-    if (!folder && project) folder = suggestedFolder(project.repo, session.worktree_key);
+    const id = session.id;
+    if (shownFor !== id) {
+      shownFor = id;
+      folder = '';
+      excludesText = '';
+      editingExcludes = false;
+      confirmDisconnect = false;
+    }
+    if (seededFor !== id && project) {
+      seededFor = id;
+      folder = suggestedFolder(project.repo, session.worktree_key);
+    }
   });
 
   async function pickFolder() {
