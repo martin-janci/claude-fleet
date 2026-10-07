@@ -37,6 +37,9 @@
 pub mod bench;
 pub mod haiku;
 pub mod jev;
+pub mod start_project;
+#[cfg(test)]
+mod start_project_tests;
 pub mod status_map;
 #[cfg(test)]
 mod tests;
@@ -75,15 +78,18 @@ pub enum Feature {
     StatusMap,
     /// Choosing a work item for a session no rule could link.
     WorkLink,
+    /// Pre-selecting the repository of a task's first start (K1).
+    StartProject,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 2] = [Feature::StatusMap, Feature::WorkLink];
+    pub const ALL: [Feature; 3] = [Feature::StatusMap, Feature::WorkLink, Feature::StartProject];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Feature::StatusMap => "status_map",
             Feature::WorkLink => "work_link",
+            Feature::StartProject => "start_project",
         }
     }
 
@@ -96,6 +102,7 @@ impl Feature {
         match self {
             Feature::StatusMap => settings::DECIDE_JEV_STATUS_MAP,
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
+            Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
         }
     }
 }

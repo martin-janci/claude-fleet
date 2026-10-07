@@ -1614,11 +1614,14 @@ impl FleetTools {
                 super::fleet::owner_for(&caller, &s)
             };
             let view_scope = self.view_scope(&caller)?;
-            let preview = crate::service::trackers::tickets::preview_start(
+            // Jev K1 asks only when its gate opens (off by default).
+            let decide = crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store));
+            let preview = crate::service::trackers::tickets::preview_start_decided(
                 &self.store,
                 &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
                 &view_scope,
                 &crate::service::trackers::default_net(),
+                Some(&decide),
             )
             .await
             .map_err(to_mcp_err)?;

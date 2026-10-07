@@ -40,6 +40,15 @@ export interface StartPreview {
   conflicts: StartConflict[];
   brief?: string | null;
   checkout?: { exists: boolean; busy_by?: number | null } | null;
+  /** With `missing: 'project'`: the repository Jev proposes (K1, assist).
+   *  A pre-selection only; the person still presses Start. */
+  suggested_project?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
+}
+
+/** The project a preview proposes, when it is one of its candidates. */
+export function suggestedProjectId(p: StartPreview): number | null {
+  const id = p.suggested_project?.project_id;
+  return id != null && p.missing === 'project' && p.projects.some((x) => x.id === id) ? id : null;
 }
 
 /** Preview a start: the same arguments `startWork` takes. */
@@ -100,7 +109,7 @@ export interface StartChoice {
  *  parallel start; a cross-org one is never chosen for the person. */
 export function choiceFromPreview(p: StartPreview, withBrief = true): StartChoice {
   return {
-    project_id: p.plan?.project_id ?? null,
+    project_id: p.plan?.project_id ?? suggestedProjectId(p),
     host_alias: p.plan?.host_alias ?? null,
     worktree: null,
     with_brief: withBrief,

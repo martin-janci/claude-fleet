@@ -249,6 +249,7 @@ Each becomes a full card above when its adapter is built.
 | Acceptance (assist) | accuracy on answered ≥ 0.85 at coverage ≥ 0.50, ≥ 15 points above "first row" |
 | Safety | a pre-selection only; the person still presses Start. Never on the start path: shadow asks after the preview has answered |
 | Setting | `decide.jev.start_project` (`off / shadow / assist`), off |
+| Components | **[built]** `service/decide/start_project.rs` (question `start_project.v1`, subject `work_start` `item:<id>` / `key:<HMAC>`, options `p<id>` + `unsure`, floor 0.5, a decided run reused for 14 days); `tickets::preview_start_decided` (shadow spawned off the path, assist awaited → `suggested_project`), wired in the hub's `work_link { preview_start }` and the standalone desktop's `preview_start_work`; `record_start` marks the assist proposal `confirmed` / `corrected` on a person's start; the popover pre-selects it (`suggestedProjectId`, *Proposed by Jev*). Tests: `service/decide/start_project_tests.rs`, `src/lib/start_preview.test.ts`, `src/lib/WorkTaskDetail.test.ts`. Not built: a phase-0 bench over past first starts |
 
 #### K2 — which operator thread a prompt belongs to (`operator_thread`)
 
