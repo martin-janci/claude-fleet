@@ -231,7 +231,12 @@ impl Dialer {
                 body: resp
                     .body()
                     .as_deref()
-                    .map(|b| String::from_utf8_lossy(b).trim().to_string())
+                    .map(|b| {
+                        fleet_proto::sanitize_for_log(
+                            String::from_utf8_lossy(b).trim(),
+                            REFUSAL_BODY_LOG_MAX,
+                        )
+                    })
                     .unwrap_or_default(),
             }),
             Err(e) => Err(DialError::Failed(format!("{}: {e}", ep.url()))),
@@ -720,6 +725,12 @@ fn close_end(frame: Option<CloseFrame>) -> SessionEnd {
 
 /// The most a WebSocket close frame's reason may carry, per RFC 6455.
 const CLOSE_REASON_MAX: usize = 123;
+
+/// The most of a refused dial's HTTP body kept for the log line and the
+/// systemd `STATUS=`. The body is whatever the hub (or a proxy in front of
+/// it) answered the upgrade with, so it gets the close reason's treatment:
+/// bounded, and no control or bidi characters to forge journal lines with.
+const REFUSAL_BODY_LOG_MAX: usize = 256;
 
 /// The most of the hub's `hub_version` [`sanitize_for_log`] keeps for the
 /// "hub protocol compatible" log line. Generous next to a real build string
@@ -1604,6 +1615,27 @@ mod tests {
             Err(DialError::Refused { status, body }) => {
                 assert_eq!(status, 403);
                 assert_eq!(body, "this host's token is readonly");
+            }
+            other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_dial_neutralises_and_bounds_the_hub_s_body() {
+        let fake = FakeHub::new().await;
+        let dialer = fake.dialer();
+        let dial = tokio::spawn(async move { dialer.dial().await });
+        let hostile = format!(
+            "bad\r\nfleet-agent[1]: connected\x1b[31m{}",
+            "x".repeat(4000)
+        );
+        fake.refuse(401, &hostile).await;
+        match dial.await.unwrap() {
+            Err(DialError::Refused { status, body }) => {
+                assert_eq!(status, 401);
+                assert!(body.len() <= REFUSAL_BODY_LOG_MAX, "{}", body.len());
+                assert!(!body.chars().any(char::is_control), "{body:?}");
+                assert!(body.starts_with("bad"));
             }
             other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
         }
