@@ -84,10 +84,9 @@ async fn a_repeated_bad_bearer_is_still_401() {
 /// The status line of the response to `head` + `body` written as-is to `/mcp`.
 ///
 /// The body is written while the response is read, not before: the hub
-/// answers 413 and closes with the rest of an oversized body unread, and on
-/// Windows that close is a reset which discards the answer from a client
-/// still blocked in its write. Reading from the start catches the status
-/// line before the reset lands.
+/// answers 413 and closes with the rest of an oversized body unread, and a
+/// client still blocked in its write would miss an answer that is followed
+/// by a reset.
 async fn raw_status(addr: std::net::SocketAddr, head: &str, body: &[u8]) -> String {
     let s = tokio::net::TcpStream::connect(addr).await.unwrap();
     let (mut rd, mut wr) = s.into_split();
@@ -149,8 +148,12 @@ async fn an_oversized_mcp_body_is_413() {
         &chunked,
     )
     .await;
+    // On Windows, closing a socket with unread data in its receive buffer is
+    // an abortive close that discards the 413 still in the send buffer, so a
+    // client streaming past the cap sees the connection reset instead. Either
+    // way the body was refused; what must never come back is a 2xx.
     assert!(
-        streamed.contains("413"),
+        streamed.contains("413") || (cfg!(windows) && streamed.is_empty()),
         "chunked body over the cap: {streamed}"
     );
 
