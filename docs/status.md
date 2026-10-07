@@ -282,7 +282,16 @@ fence by the mission's org first, then its owner or the org's members (only
 an org admin changes one); per-host and peer tokens are refused. Seven routed
 desktop commands (`commands/missions.rs`) back the Work view's Missions tab.
 Projects carry no org, so the repo allow-list is not org-checked yet. The
-phone does not show missions yet. No graph or loop yet (O2–O8).
+phone does not show missions yet. O2 is built: `work_item_deps` and
+`work_items.held_at` (migration 116), drawn by `work_link { dep | hold }`
+(cycles and cross-org edges refused in the store, `store/item_deps.rs`);
+`service/work/graph.rs` derives each member's state (ready, waiting,
+blocked, running, failed, held, …) and wave on every read and gives an
+active mission its `running | blocked | waiting` phase. An agent proposes a
+plan with `work_link { propose_tree }`, whose proposals join the parent's
+mission; a person takes it with `accept_many` and can `undo_accept` within
+10 minutes while nothing has touched it. The Missions tab lists tasks by
+wave. No evidence or loop yet (O3–O8).
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,

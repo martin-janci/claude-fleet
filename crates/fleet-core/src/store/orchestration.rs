@@ -771,19 +771,7 @@ impl Store {
                     .with_details(serde_json::json!({ "mission_id": c })));
                 }
                 None => {
-                    let counted: i64 = tx.query_row(
-                        "SELECT COUNT(*) FROM work_items WHERE orchestration_project_id = ?1 \
-                           AND (?2 = 'finite' OR status_category <> 'done')",
-                        rusqlite::params![id, m.mode],
-                        |r| r.get(0),
-                    )?;
-                    if counted >= MISSION_ITEM_CAP {
-                        return Err(invalid(format!(
-                            "{} already holds {MISSION_ITEM_CAP} items; split it into \
-                             another mission",
-                            m.name
-                        )));
-                    }
+                    self.check_mission_room(id, 1)?;
                     tx.execute(
                         "UPDATE work_items SET orchestration_project_id = ?1 WHERE id = ?2",
                         rusqlite::params![id, item_id],
@@ -818,6 +806,49 @@ impl Store {
         }
         tx.commit()?;
         self.require_mission(id)
+    }
+
+    /// Refuse `n` more members for mission `id`: a finished mission takes
+    /// none, and no mission holds more than [`MISSION_ITEM_CAP`] (a
+    /// continuous one counts its open members only).
+    pub(super) fn check_mission_room(&self, id: i64, n: usize) -> Result<(), IpcError> {
+        let m = self.require_mission(id)?;
+        refuse_final(&m)?;
+        let counted: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM work_items WHERE orchestration_project_id = ?1 \
+               AND (?2 = 'finite' OR status_category <> 'done')",
+            rusqlite::params![id, m.mode],
+            |r| r.get(0),
+        )?;
+        if counted + n as i64 > MISSION_ITEM_CAP {
+            return Err(invalid(format!(
+                "{} already holds {counted} of {MISSION_ITEM_CAP} items; split it into \
+                 another mission",
+                m.name
+            )));
+        }
+        Ok(())
+    }
+
+    /// Place a just-made item in mission `id` and log it, inside the
+    /// caller's transaction (a proposal joining its parent's mission).
+    pub(super) fn join_mission(&self, id: i64, item_id: i64, actor: &str) -> Result<(), IpcError> {
+        self.conn.execute(
+            "UPDATE work_items SET orchestration_project_id = ?1 \
+             WHERE id = ?2 AND orchestration_project_id IS NULL",
+            rusqlite::params![id, item_id],
+        )?;
+        self.touch_mission(id)?;
+        self.insert_mission_event(
+            id,
+            &NewMissionEvent {
+                kind: "item_added",
+                actor,
+                work_item_id: Some(item_id),
+                ..Default::default()
+            },
+        )?;
+        Ok(())
     }
 
     fn touch_mission(&self, id: i64) -> Result<(), IpcError> {
@@ -867,6 +898,16 @@ impl Store {
         let row = self.insert_mission_event(id, e)?;
         tx.commit()?;
         Ok(row)
+    }
+
+    /// [`Self::record_mission_event`] inside the caller's transaction, for
+    /// the store's other writers (`item_deps`).
+    pub(super) fn append_mission_event(
+        &self,
+        id: i64,
+        e: &NewMissionEvent<'_>,
+    ) -> Result<Option<i64>, IpcError> {
+        self.insert_mission_event(id, e)
     }
 
     /// [`Self::record_mission_event`] inside the caller's transaction.

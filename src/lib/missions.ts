@@ -53,13 +53,39 @@ export interface MissionEvent {
   payload?: unknown;
 }
 
+/** One node of a mission's graph (`service::work::graph::GraphNode`). */
+export interface GraphNode {
+  item_id: number;
+  /** done | proposed | rejected | running | failed | held | doing |
+   *  blocked | waiting | ready — tolerant of more. */
+  state: string;
+  wave: number;
+  depends_on?: number[];
+  waiting_for?: number[];
+}
+
+export interface OutsideItem {
+  id: number;
+  key?: string | null;
+  title: string;
+  status_category: string;
+}
+
+export interface MissionGraph {
+  nodes?: GraphNode[];
+  waves?: number;
+  outside?: OutsideItem[];
+}
+
 /** `work_mission`'s answer. */
 export interface MissionDetail {
   mission: Mission;
   items?: WorkItemRow[];
   events?: MissionEvent[];
-  /** `running` | `waiting`, for an active mission only. */
+  /** `running` | `blocked` | `waiting`, for an active mission only. */
   phase?: string | null;
+  /** Absent from an older hub. */
+  graph?: MissionGraph;
   may_change?: boolean;
 }
 
@@ -120,6 +146,51 @@ export function doneWhenRows(text: string): string[] {
     .filter((l) => l.length > 0);
 }
 
+const NODE_GLYPH: Record<string, string> = {
+  done: '✓',
+  running: '●',
+  failed: '⚠',
+  blocked: '⚠',
+  held: '⏸',
+  proposed: '?',
+  rejected: '✕',
+  doing: '◐',
+  waiting: '…',
+  ready: '○',
+};
+
+/** A node's state as one glyph. */
+export function nodeGlyph(state: string): string {
+  return NODE_GLYPH[state] ?? '·';
+}
+
+/** A node's state in words. */
+export function nodeLabel(state: string): string {
+  return state === 'ready' ? 'Ready' : state.charAt(0).toUpperCase() + state.slice(1);
+}
+
+/** The graph's nodes by wave, W1 first; items the graph leaves out (an
+ *  older hub) land in one wave of their own. */
+export function wavesOf(detail: MissionDetail): { wave: number; nodes: GraphNode[] }[] {
+  const nodes = detail.graph?.nodes ?? [];
+  const known = new Set(nodes.map((n) => n.item_id));
+  const rest: GraphNode[] = (detail.items ?? [])
+    .filter((i) => !known.has(i.id))
+    .map((i) => ({ item_id: i.id, state: i.status_category === 'done' ? 'done' : 'ready', wave: 1 }));
+  const by = new Map<number, GraphNode[]>();
+  for (const n of [...nodes, ...rest]) {
+    const w = by.get(n.wave) ?? [];
+    w.push(n);
+    by.set(n.wave, w);
+  }
+  return [...by.entries()].sort((a, b) => a[0] - b[0]).map(([wave, ns]) => ({ wave, nodes: ns }));
+}
+
+/** The proposals waiting for a decision. */
+export function openProposals(detail: MissionDetail): number[] {
+  return (detail.items ?? []).filter((i) => i.proposal_state === 'proposed').map((i) => i.id);
+}
+
 /** One log row as a sentence. */
 export function eventSentence(e: MissionEvent): string {
   const p = (e.payload ?? {}) as Record<string, unknown>;
@@ -140,6 +211,14 @@ export function eventSentence(e: MissionEvent): string {
       return `Task ${e.work_item_id ?? ''} added`;
     case 'item_removed':
       return `Task ${e.work_item_id ?? ''} removed`;
+    case 'dep_added':
+      return `Task ${e.work_item_id ?? ''} waits for ${String(p.depends_on ?? '')}`;
+    case 'dep_removed':
+      return `Task ${e.work_item_id ?? ''} no longer waits for ${String(p.depends_on ?? '')}`;
+    case 'held':
+      return `Task ${e.work_item_id ?? ''} held`;
+    case 'released':
+      return `Task ${e.work_item_id ?? ''} released`;
     case 'digest':
       return 'Older events, summarised';
     default:
@@ -220,4 +299,26 @@ export function setMissionItem(missionId: number, itemId: number, on: boolean): 
 
 export function deleteMission(missionId: number): Promise<Result<{ removed: number }>> {
   return changed(invokeCmd<{ removed: number }>('delete_mission', { args: { mission_id: missionId } }));
+}
+
+/** What a graph write answers. */
+export interface GraphChange {
+  item_id: number;
+  changed: boolean;
+}
+
+export function setWorkDep(itemId: number, dependsOn: number, on: boolean): Promise<Result<GraphChange>> {
+  return invokeCmd<GraphChange>('set_work_dep', { args: { item_id: itemId, depends_on: dependsOn, on } });
+}
+
+export function setWorkHold(itemId: number, on: boolean): Promise<Result<GraphChange>> {
+  return invokeCmd<GraphChange>('set_work_hold', { args: { item_id: itemId, on } });
+}
+
+export function acceptWorkProposals(itemIds: number[]): Promise<Result<WorkItemRow[]>> {
+  return changed(invokeCmd<WorkItemRow[]>('accept_work_proposals', { args: { item_ids: itemIds } }));
+}
+
+export function undoWorkAccept(itemIds: number[]): Promise<Result<WorkItemRow[]>> {
+  return changed(invokeCmd<WorkItemRow[]>('undo_work_accept', { args: { item_ids: itemIds } }));
 }

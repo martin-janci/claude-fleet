@@ -3854,7 +3854,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 79,584 on 2026-10-07 after merging `main` (79,093) into
     /// missions (`work { missions | mission }` and five `work_link`
     /// mission actions, +491 bytes): exactly the two sides' sum.
-    const BUDGET_BYTES: usize = 79_684;
+    /// Measured at 80,099 on 2026-10-07 after the mission graph (`work_link
+    /// { dep | hold | propose_tree | accept_many | undo_accept }` and their
+    /// arguments, +515 bytes).
+    const BUDGET_BYTES: usize = 80_199;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10737,6 +10740,12 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // Mission membership (orchestration O1): the same person gate on the
     // item added or taken out.
     ("work_link", "mission_item", &["Drive"]),
+    // The mission graph (orchestration O2): an edge and a hold change the
+    // plan of the item's own work, so its sessions pass `set_status`'s
+    // gate; a tree is `propose`'s, stored in the proposing session's name.
+    ("work_link", "dep", &["Drive"]),
+    ("work_link", "hold", &["Drive"]),
+    ("work_link", "propose_tree", &["Drive"]),
     // The two conversation-addressed arms of the `own` tier: a resume
     // replays the whole transcript into a new session, a summary stores a
     // durable précis that outlives a grant (§4.3 invariant 5 names
@@ -10978,6 +10987,17 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "work_link",
         "mission_repo",
         "a mission's repo allow-list (a project, not a session)",
+    ),
+    (
+        "work_link",
+        "accept_many",
+        "proposals, each a work ITEM; refused outright to a per-host token \
+         and a bound client, as `accept` is",
+    ),
+    (
+        "work_link",
+        "undo_accept",
+        "the same proposals, back to proposed; refused as `accept_many` is",
     ),
     (
         "work_link",
