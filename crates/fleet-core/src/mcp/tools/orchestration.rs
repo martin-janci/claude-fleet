@@ -584,8 +584,24 @@ impl FleetTools {
         };
         if spawned {
             // A freshly launched REPL needs a moment before it accepts
-            // typed input; wait (bounded) for its input chrome.
-            tasks::wait_for_repl_ready(&self.ssh, &worker.host_alias, &worker.tmux_name).await;
+            // typed input; wait (bounded) for it to settle. A dialog (the
+            // trust prompt, whose default answer is "No, exit") is never
+            // typed into: the task fails, naming it, instead.
+            use crate::service::sessions::seed::{wait_for_repl, ReplWait};
+            if let ReplWait::Dialog(why) = wait_for_repl(&self.store, &self.ssh, &worker).await {
+                let e = crate::ipc_error::IpcError::new(
+                    crate::ipc_error::codes::E_INVALID_STATE,
+                    format!(
+                        "worker {} is waiting on a dialog ({why}); answer it in the session, \
+                         then dispatch the task again",
+                        worker.tmux_name
+                    ),
+                );
+                if let Ok(s) = self.store.lock() {
+                    let _ = tasks::fail_task(&s, task.id, &e.message);
+                }
+                return Err(to_mcp_err(e));
+            }
         }
         let body = task_delivery_body(&p.prompt, &task.nonce, &caller, p.raw)?;
         match self.deliver_prompt(&worker, body, true, false).await {

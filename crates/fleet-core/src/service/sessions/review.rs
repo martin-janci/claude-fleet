@@ -111,27 +111,27 @@ pub async fn spawn_review(
         row.id
     };
 
-    // 5. Seed the prompt. Wait until cl's TUI is ready before send-keys lands.
-    wait_for_repl_ready(tmux.as_ref(), &review_name).await;
-    // Soft-fail: the review session is already spawned, registered, and tagged.
-    // If seeding the prompt fails (e.g. cl wasn't ready yet), DON'T discard the
-    // session — return it anyway so the user can type the review prompt manually
-    // in the terminal. Log the failure for diagnostics.
-    if let Err(e) = send_prompt_inner(
+    // 5. Seed the prompt once cl's REPL reads input (`seed`: never into a
+    //    dialog, and resubmitted when its Enter is lost). Soft-fail: the
+    //    review session is already spawned, registered, and tagged, so an
+    //    unseeded one is returned anyway and the user types the prompt.
+    let row = {
+        let s = lock(store)?;
+        s.get_session_by_id(review_id)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "review row missing after tag"))?
+    };
+    if !super::seed::seed_now_as(
         store,
         ssh,
-        &source.host_alias,
-        &review_name,
+        &row,
         &args.prompt,
-        true,
         super::prompt::Origin::Unlabeled,
     )
     .await
     {
         tracing::warn!(
             session = %review_name,
-            error = %e,
-            "[spawn_review] seeding the review prompt failed (the session is live; seed it manually)"
+            "[spawn_review] the review prompt was not typed (the session is live; seed it manually)"
         );
     }
 

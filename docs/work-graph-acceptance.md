@@ -296,8 +296,10 @@ ambiguous, opens the New session dialog on T2), and selects it:
 - the session is named `T2-KEY title`;
 - its chip is solid (source `started`);
 - with **Brief Claude** on, a short start prompt is typed only once
-  Claude's REPL is ready (never into a trust dialog), and Claude's first
-  answer shows it knows the ticket.
+  Claude's REPL is ready (never into a trust dialog: it waits for the
+  dialog to be answered, then types), it is submitted (no prompt left
+  sitting in the input box), and Claude's first answer shows it knows the
+  ticket.
 
 Result: [ ] pass / [ ] fail
 
