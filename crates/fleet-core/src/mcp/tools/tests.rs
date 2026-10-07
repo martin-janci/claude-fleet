@@ -3851,7 +3851,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 78,993 on 2026-10-07 after login profiles
     /// (`new_session { profile }` and `restart_session { profile }`, +91
     /// bytes).
-    const BUDGET_BYTES: usize = 79_093;
+    /// Measured at 79,584 on 2026-10-07 after merging `main` (79,093) into
+    /// missions (`work { missions | mission }` and five `work_link`
+    /// mission actions, +491 bytes): exactly the two sides' sum.
+    const BUDGET_BYTES: usize = 79_684;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10731,6 +10734,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
     ("work_link", "bucket_remove", &["Drive"]),
+    // Mission membership (orchestration O1): the same person gate on the
+    // item added or taken out.
+    ("work_link", "mission_item", &["Drive"]),
     // The two conversation-addressed arms of the `own` tier: a resume
     // replays the whole transcript into a new session, a summary stores a
     // durable précis that outlives a grant (§4.3 invariant 5 names
@@ -10945,6 +10951,39 @@ const VIEW_SCOPE_PROOF: &[(&str, &str, &str, &str)] = &[
 /// a reviewer can check, not an exemption: each says what the arm acts on
 /// INSTEAD of a session.
 const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
+    (
+        "work",
+        "missions",
+        "missions, each fenced by its org and then its owner or the org's \
+         members (`missions::sees_mission`); no session is named or answered",
+    ),
+    (
+        "work",
+        "mission",
+        "one mission, its member ITEMS (each fenced by its org) and its event \
+         log; no session is named or answered",
+    ),
+    (
+        "work_link",
+        "mission_save",
+        "a mission's own fields, or a new mission owned by the caller; \
+         refused to a per-host or peer token",
+    ),
+    (
+        "work_link",
+        "mission_state",
+        "a mission's lifecycle; its owner or an org admin only",
+    ),
+    (
+        "work_link",
+        "mission_repo",
+        "a mission's repo allow-list (a project, not a session)",
+    ),
+    (
+        "work_link",
+        "mission_delete",
+        "a draft or finished mission; its items stay",
+    ),
     (
         "work",
         "purge_impact",

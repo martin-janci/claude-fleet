@@ -277,7 +277,17 @@ brief) and tracks it as a `tasks` row naming the item, attempt and role
 (migration 110); its first prompt carries the done marker, and no mirror
 item is made. One open attempt per (item, role): a second run answers it.
 Per-host tokens are refused; the operator's run is confirmed like a start.
-No project container, graph or loop yet (O1–O8).
+O1 is built: missions ("Mission" in the UI, `orchestration_projects` in the
+store, migration 115) with a root task, member tasks
+(`work_items.orchestration_project_id`, one mission per item, 30 per
+mission), a repo allow-list and a capped event log (`store/orchestration.rs`).
+`work { missions | mission }` and `work_link { mission_save | mission_state |
+mission_repo | mission_item | mission_delete }` (`service/work/missions.rs`)
+fence by the mission's org first, then its owner or the org's members (only
+an org admin changes one); per-host and peer tokens are refused. Seven routed
+desktop commands (`commands/missions.rs`) back the Work view's Missions tab.
+Projects carry no org, so the repo allow-list is not org-checked yet. The
+phone does not show missions yet. No graph or loop yet (O2–O8).
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
