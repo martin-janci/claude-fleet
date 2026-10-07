@@ -966,7 +966,7 @@ pub struct HostRow {
     #[serde(default)]
     pub provision_warning: Option<String>,
     /// Credential variables set on the host that outrank its `/login`, by
-    /// name only (migration 109, [`crate::tmux::AUTH_OVERRIDE_VARS`]).
+    /// name only (migration 110, [`crate::tmux::AUTH_OVERRIDE_VARS`]).
     /// `None`: never sampled, or the host could not tell. Per-field default:
     /// an older hub omits it.
     #[serde(default)]
@@ -986,7 +986,7 @@ pub struct HostHealth {
     pub mem_avail_kb: Option<i64>,
     pub uptime_secs: Option<i64>,
     pub health_at: Option<i64>,
-    /// Sampled with the rest (migration 109). Per-field default: an older
+    /// Sampled with the rest (migration 110). Per-field default: an older
     /// hub's ping omits it.
     #[serde(default)]
     pub auth_overrides: Option<Vec<String>>,
@@ -1075,7 +1075,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         // Migration 091: what the last provisioning warned about, if it
         // degraded. Cleared by the next clean run.
         provision_warning: row.get(24)?,
-        // Migration 109. Same lenient read as `harnesses`.
+        // Migration 110. Same lenient read as `harnesses`.
         auth_overrides: row
             .get::<_, Option<String>>(25)?
             .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),

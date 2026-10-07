@@ -550,7 +550,7 @@ fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 109.
+/// `already_applied` guard of migration 110.
 fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'auth_overrides'",
@@ -1256,11 +1256,16 @@ const MIGRATIONS: &[Migration] = &[
     // Sprints and releases (design 2026-09-28 §1): three new tables, so
     // plain.
     Migration::plain(108, include_str!("../../migrations/108_work_buckets.sql")),
+    // Local workspace sync, Phase 1: three new tables, so plain.
+    Migration::plain(
+        109,
+        include_str!("../../migrations/109_local_workspaces.sql"),
+    ),
     // Auth-override names per host (multi-account groundwork): one ADD
     // COLUMN, guarded.
     Migration {
-        version: 109,
-        sql: include_str!("../../migrations/109_host_auth_overrides.sql"),
+        version: 110,
+        sql: include_str!("../../migrations/110_host_auth_overrides.sql"),
         already_applied: Some(hosts_has_auth_overrides),
     },
 ];
@@ -5356,7 +5361,7 @@ mod tests {
     fn migration_105_flattens_slash_named_worktrees_and_their_session_keys() {
         let s = store_at_version(104);
         // Raw rows: `upsert_host` reads back every current `hosts` column,
-        // and a 104 store predates the later ones (109's `auth_overrides`).
+        // and a 104 store predates the later ones (110's `auth_overrides`).
         s.conn
             .execute_batch(
                 "INSERT INTO hosts (alias, reachable) VALUES ('trn', 1), ('mefistos', 1);",

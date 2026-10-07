@@ -127,6 +127,12 @@ pub enum RowChange {
     /// `list_downloads`. Kind `download`, so never sent to a host-bound or
     /// org-bound stream (it names files of every host).
     DownloadChanged(i64),
+    /// A local workspace link (migration 109) was made, moved state, had a
+    /// pass or was removed. The id only — the desktop re-reads
+    /// `list_local_workspaces`. Kind `local_workspace`; links live on the
+    /// desktop that made them, so a hub never emits one, and it is host-bound
+    /// hidden besides (it names a directory on someone's machine).
+    LocalWorkspaceChanged(i64),
 }
 
 /// The payload of `update:changed`.
@@ -419,6 +425,7 @@ impl RowChange {
             RowChange::GrantChanged(_) => "grant:changed",
             RowChange::UpdateChanged(_) => "update:changed",
             RowChange::DownloadChanged(_) => "download:changed",
+            RowChange::LocalWorkspaceChanged(_) => "local_workspace:changed",
         }
     }
 
@@ -476,6 +483,7 @@ impl RowChange {
             RowChange::GrantChanged(g) => to_value(g),
             RowChange::UpdateChanged(u) => to_value(u),
             RowChange::DownloadChanged(id) => serde_json::json!({ "id": id }),
+            RowChange::LocalWorkspaceChanged(id) => serde_json::json!({ "id": id }),
         }
     }
 }
@@ -668,7 +676,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 28] = [
+pub const EVENT_NAMES: [&str; 29] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -697,12 +705,13 @@ pub const EVENT_NAMES: [&str; 28] = [
     "update:changed",
     "download:changed",
     "grant:changed",
+    "local_workspace:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 16] = [
+pub const EVENT_KINDS: [&str; 17] = [
     "session",
     "host",
     "account",
@@ -719,6 +728,7 @@ pub const EVENT_KINDS: [&str; 16] = [
     "update",
     "download",
     "grant",
+    "local_workspace",
 ];
 
 /// Seconds since the Unix epoch (0 on a clock set before 1970).
@@ -1021,7 +1031,7 @@ impl EventBus for RecordingEventBus {
             RowChange::UpdateChanged(u) => {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
             }
-            RowChange::DownloadChanged(id) => id.to_string(),
+            RowChange::DownloadChanged(id) | RowChange::LocalWorkspaceChanged(id) => id.to_string(),
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -1224,6 +1234,7 @@ mod tests {
                 RowChange::GrantChanged(_) => pinned_name!("grant:changed"),
                 RowChange::UpdateChanged(_) => pinned_name!("update:changed"),
                 RowChange::DownloadChanged(_) => pinned_name!("download:changed"),
+                RowChange::LocalWorkspaceChanged(_) => pinned_name!("local_workspace:changed"),
             }
         }
         // And for every variant a test can build without a full store row,

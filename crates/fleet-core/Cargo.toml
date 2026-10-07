@@ -118,6 +118,12 @@ toml = "0.8"
 # Asset catalog: `import_host` stages a remote host's dumped `~/.claude`
 # under a throwaway directory before importing it (`service/catalog/mod.rs`).
 tempfile = "3"
+# Local workspace sync (`service/local_sync/`): the local walk honours the
+# synced `.gitignore` files (`ignore`, BurntSushi, MIT/Unlicense), and files
+# cross the SSH pipe as tar streams (`tar`, MIT/Apache-2.0) — the host side
+# uses its own `tar`.
+ignore = "0.4"
+tar = { version = "0.4", default-features = false }
 
 # `run_local_script` (service/add_project.rs) signals a script's whole process
 # group (`kill(-pgid, ..)`).

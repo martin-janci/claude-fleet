@@ -256,6 +256,21 @@ a failure after the worktree removes the copy, the tree, the branch and
 the row. Spec
 `docs/superpowers/specs/2026-09-26-reply-actions-design.md`.
 
+Local workspace sync, Phase 1, is built (spec
+`docs/superpowers/specs/2026-10-07-local-workspace-sync-design.md`): a
+session's worktree bound to a folder on the desktop's machine and kept in
+step both ways by a three-way engine over the existing SSH layer
+(`service/local_sync/`, migration 109; the Local workspace card in session
+details and a dot on the session row). A link belongs to the worktree
+(host, owner/repo, worktree key), not the session. Writes are guarded on
+both sides, two sides that changed differently become a conflict (Keep local
+/ Keep remote, or by hand), and a folder that lost most of its files pauses
+the link instead of deleting the other side. Standalone desktop only: every
+mutation is `LocalOnly` on a paired desktop, and hosts reached through
+`fleet-agent` are refused (no stdin). Not yet (Phases 2–3): Open in IDE,
+diff / compare, "local changes detected" with Ask AI, agent handoff,
+worktree lifecycle from the card, symlinks.
+
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
 `stale_working_at` (migration 065); a StopFailure reads as failed; one

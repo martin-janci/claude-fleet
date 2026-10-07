@@ -9,4 +9,4 @@
 -- ADD COLUMN is not idempotent: guarded in schema.rs.
 ALTER TABLE hosts ADD COLUMN auth_overrides TEXT;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (109);
+INSERT OR IGNORE INTO schema_version (version) VALUES (110);

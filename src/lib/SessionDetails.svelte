@@ -33,6 +33,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
   import TicketCard from './TicketCard.svelte';
+  import LocalWorkspaceCard from './LocalWorkspaceCard.svelte';
   import PrResult from './PrResult.svelte';
   import { assessRow, hasReading } from './evidence';
   import SessionTasks from './SessionTasks.svelte';
@@ -663,6 +664,7 @@
 
   <TicketCard {session} />
   <SessionTasks {session} />
+  <LocalWorkspaceCard {session} />
 
   {#if related.length > 0}
     <section class="related" data-testid="related-sessions">
