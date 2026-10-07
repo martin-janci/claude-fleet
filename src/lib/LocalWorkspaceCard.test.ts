@@ -1,0 +1,96 @@
+// The Local workspace card in session details: Enable when the worktree has
+// no link, the state, paths and conflicts when it does, and a note instead of
+// controls on a desktop paired with a hub.
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const invoke = vi.fn();
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
+
+import LocalWorkspaceCard from './LocalWorkspaceCard.svelte';
+import { session } from './hosts_fixture';
+import { hubStatus, STANDALONE } from './hub';
+import {
+  localWorkspaces,
+  _resetLocalWorkspacesForTests,
+  type LocalWorkspace,
+} from './local_workspaces';
+
+const link = (over: Partial<LocalWorkspace> = {}): LocalWorkspace => ({
+  id: 9,
+  host_alias: 'devbox',
+  owner: 'acme',
+  repo: 'app',
+  project_id: 4,
+  worktree_key: 'main',
+  remote_path: '/home/u/projects/github.com/acme/app',
+  local_path: '/Users/me/fleet/app',
+  paused: false,
+  excludes: [],
+  state: 'synced',
+  last_sync_at: Math.floor(Date.now() / 1000) - 3,
+  pending_local: 0,
+  pending_remote: 0,
+  skipped: 0,
+  conflicts: [],
+  created_at: 1,
+  ...over,
+});
+
+const row = () => session('devbox', 'dev-app', { project_id: 4, worktree_key: null });
+
+beforeEach(() => {
+  invoke.mockReset();
+  _resetLocalWorkspacesForTests();
+  hubStatus.set({ ...STANDALONE });
+});
+
+describe('LocalWorkspaceCard', () => {
+  it('offers Enable when the worktree has no link, and sends the folder', async () => {
+    invoke.mockResolvedValue(link());
+    render(LocalWorkspaceCard, { session: row() });
+    const input = screen.getByTestId('lw-folder') as HTMLInputElement;
+    await fireEvent.input(input, { target: { value: '/Users/me/code/app' } });
+    await fireEvent.click(screen.getByTestId('lw-enable'));
+    expect(invoke).toHaveBeenCalledWith('enable_local_workspace', {
+      args: { session_id: expect.any(Number), local_path: '/Users/me/code/app', excludes: [] },
+    });
+  });
+
+  it('shows the state, both paths and the conflicts with their two picks', async () => {
+    localWorkspaces.set([
+      link({
+        state: 'conflict',
+        conflicts: [{ path: 'src/foo.rs', kind: 'both_modified', detected_at: 1 }],
+      }),
+    ]);
+    invoke.mockResolvedValue(link());
+    render(LocalWorkspaceCard, { session: row() });
+    expect(screen.getByTestId('lw-status')).toHaveTextContent('1 conflict');
+    expect(screen.getByTestId('local-workspace')).toHaveTextContent('/Users/me/fleet/app');
+    expect(screen.getByTestId('local-workspace')).toHaveTextContent(
+      'devbox:/home/u/projects/github.com/acme/app',
+    );
+    expect(screen.getByTestId('lw-conflict')).toHaveTextContent('src/foo.rs');
+    await fireEvent.click(screen.getByRole('button', { name: 'Keep remote' }));
+    expect(invoke).toHaveBeenCalledWith('resolve_local_workspace_conflict', {
+      args: { id: 9, path: 'src/foo.rs', keep: 'remote' },
+    });
+  });
+
+  it('pauses and resumes', async () => {
+    localWorkspaces.set([link()]);
+    invoke.mockResolvedValue(link({ paused: true, state: 'paused' }));
+    render(LocalWorkspaceCard, { session: row() });
+    await fireEvent.click(screen.getByTestId('lw-pause'));
+    expect(invoke).toHaveBeenCalledWith('pause_local_workspace', { args: { id: 9 } });
+    expect(await screen.findByTestId('lw-resume')).toBeInTheDocument();
+  });
+
+  it('says why there are no controls on a paired desktop', () => {
+    hubStatus.set({ ...STANDALONE, remote: true, url: 'https://hub.example' });
+    render(LocalWorkspaceCard, { session: row() });
+    expect(screen.getByTestId('lw-remote-note')).toBeInTheDocument();
+    expect(screen.queryByTestId('lw-enable')).toBeNull();
+  });
+});

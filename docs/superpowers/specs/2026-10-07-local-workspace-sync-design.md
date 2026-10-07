@@ -1,6 +1,6 @@
 # Local workspace sync — Phase 1 design
 
-Status: Phase 1 in progress (2026-10-07). Phases 2 and 3 of the handover
+Status: Phase 1 built (2026-10-07). Phases 2 and 3 of the handover
 (Open in IDE, diff UI, "Ask AI about these changes", agent/developer handoff,
 AI review and commit, worktree cleanup) are out of scope here.
 

@@ -8,6 +8,7 @@ pub mod health;
 pub mod history;
 pub mod hosts;
 pub mod hub;
+pub mod local_workspaces;
 pub mod mcp;
 pub mod move_session;
 pub mod mutate;

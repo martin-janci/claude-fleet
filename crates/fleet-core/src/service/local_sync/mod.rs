@@ -134,8 +134,8 @@ impl LocalSync {
     }
 
     /// Give every due, unpaused link a pass every [`PASS_INTERVAL`] until
-    /// `token` fires.
-    pub fn spawn_tick(self: &Arc<Self>, token: CancellationToken) {
+    /// `token` fires. See [`spawn_local_sync_tick`].
+    fn spawn_tick(self: &Arc<Self>, token: CancellationToken) {
         let me = Arc::clone(self);
         crate::rt::spawn(async move {
             loop {
@@ -621,6 +621,13 @@ impl LocalSync {
         }
         Ok(out)
     }
+}
+
+/// The background tick: every [`PASS_INTERVAL`], a pass for each enabled,
+/// unpaused link that is due. Desktop and standalone only (the desktop's
+/// `bootstrap::tasks` starts it; a hub client never does).
+pub fn spawn_local_sync_tick(engine: &Arc<LocalSync>, token: CancellationToken) {
+    engine.spawn_tick(token);
 }
 
 /// How a pass failed, and whether the link must pause (mass deletion).
