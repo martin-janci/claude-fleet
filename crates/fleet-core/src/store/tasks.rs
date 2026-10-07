@@ -100,7 +100,7 @@ impl Store {
     }
 
     /// Mark a task as an attempt at a work item (`work_link { run }`,
-    /// migration 109): its item, attempt number and role. Emits
+    /// migration 110): its item, attempt number and role. Emits
     /// `task_updated`.
     pub fn set_task_run(
         &self,

@@ -17,4 +17,4 @@ ALTER TABLE tasks ADD COLUMN role TEXT;
 CREATE INDEX IF NOT EXISTS idx_tasks_item
   ON tasks(work_item_id, created_at DESC) WHERE work_item_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (109);
+INSERT OR IGNORE INTO schema_version (version) VALUES (110);

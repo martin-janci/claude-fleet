@@ -32,6 +32,7 @@ pub mod hooks;
 pub mod hooks_install;
 pub mod hosts;
 pub mod hub;
+pub mod local_sync;
 pub mod messages;
 pub mod move_session;
 pub mod names;

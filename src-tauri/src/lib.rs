@@ -261,6 +261,14 @@ pub fn run() {
                 fleet_core::service::account_usage::UsageCache::new(),
             ));
             app.manage(std::sync::Arc::clone(&usage_cache));
+            // Local workspace sync: managed in both modes (its commands are
+            // refused in hub-client mode); its tick starts with the other
+            // fleet-owning tasks below.
+            let local_sync = fleet_core::service::local_sync::LocalSync::new(
+                std::sync::Arc::clone(&store),
+                std::sync::Arc::clone(&ssh_client_for_setup) as std::sync::Arc<dyn fleet_core::ssh::SshExec>,
+            );
+            app.manage(std::sync::Arc::clone(&local_sync));
             // Standalone, a window onto a `fleet-hub`, or configured for a hub
             // this launch cannot use? Decided once, here, from
             // `hub.remote_url` plus the client token kept outside the
@@ -338,6 +346,7 @@ pub fn run() {
                     tunnels: std::sync::Arc::clone(&tunnels_for_setup),
                     guards: guards.clone(),
                     usage_cache: std::sync::Arc::clone(&usage_cache),
+                    local_sync,
                     bus: bus_for_usage,
                     frontend: std::sync::Arc::clone(&frontend_bus),
                     remote: backend.remote().cloned(),
@@ -371,6 +380,14 @@ pub fn run() {
             commands::projects::list_github_repos,
             commands::projects::project_picks,
             commands::projects::set_project_pick,
+            commands::local_workspaces::list_local_workspaces,
+            commands::local_workspaces::enable_local_workspace,
+            commands::local_workspaces::pause_local_workspace,
+            commands::local_workspaces::resume_local_workspace,
+            commands::local_workspaces::sync_local_workspace_now,
+            commands::local_workspaces::disconnect_local_workspace,
+            commands::local_workspaces::set_local_workspace_excludes,
+            commands::local_workspaces::resolve_local_workspace_conflict,
             commands::sessions::list_sessions,
             commands::sessions::new_session,
             commands::sessions::kill_session,

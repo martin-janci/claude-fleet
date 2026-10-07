@@ -1255,12 +1255,17 @@ const MIGRATIONS: &[Migration] = &[
     // Sprints and releases (design 2026-09-28 §1): three new tables, so
     // plain.
     Migration::plain(108, include_str!("../../migrations/108_work_buckets.sql")),
+    // Local workspace sync, Phase 1: three new tables, so plain.
+    Migration::plain(
+        109,
+        include_str!("../../migrations/109_local_workspaces.sql"),
+    ),
     // Orchestration O0: a task names the work item it is an attempt at, with
     // its attempt number and role. ADD COLUMN is not idempotent: guarded on
     // the last one.
     Migration {
-        version: 109,
-        sql: include_str!("../../migrations/109_task_runs.sql"),
+        version: 110,
+        sql: include_str!("../../migrations/110_task_runs.sql"),
         already_applied: Some(tasks_has_role),
     },
 ];

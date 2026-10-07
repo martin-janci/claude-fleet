@@ -1286,7 +1286,7 @@ pub struct TaskRow {
     #[serde(skip)]
     pub detached_at: Option<i64>,
     /// The work item this task is an attempt at (`work_link { run }`,
-    /// migration 109); `None` for a plain dispatch.
+    /// migration 110); `None` for a plain dispatch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item_id: Option<i64>,
     /// 1, 2, … within (`work_item_id`, `role`).

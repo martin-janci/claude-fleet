@@ -394,6 +394,19 @@ bullet for the area you are about to change.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
   the WKWebView setup. Only one PTY is attached at a time.
+- **Local workspace sync** (`service/local_sync/`, `store/local_workspaces.rs`,
+  migration 109; spec
+  `docs/superpowers/specs/2026-10-07-local-workspace-sync-design.md`): one
+  link per worktree (host, owner/repo, worktree key), never per session. A
+  pass scans both sides, hashes (local) or downloads (remote) only what moved
+  since the BASE, asks the pure `plan::decide`, and writes under guards on
+  both sides — a target that moved is left for the next pass, never
+  overwritten. The host side is three bash scripts over
+  `SshExec::run_with_stdin` (GNU and BSD userlands); `.gitignore` is git's own
+  answer there and the `ignore` crate's here, plus `excludes::DEFAULT_EXCLUDES`
+  and the link's patterns. The tick (`spawn_local_sync_tick`) is fleet-owning,
+  started by `bootstrap::tasks`; every mutation is `LocalOnly` on a paired
+  desktop. Row event `local_workspace:changed` carries the id only.
 - **Hub daemon** (`crates/fleet-hub`): the same core headless; `hub.*`
   settings, `HubBase` in `service/hub.rs`.
 - **Hub client mode** (`src-tauri/src/backend/`): a desktop paired with a hub

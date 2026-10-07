@@ -692,6 +692,14 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::projects::list_github_repos`
 - `commands::projects::project_picks`
 - `commands::projects::set_project_pick`
+- `commands::local_workspaces::list_local_workspaces`
+- `commands::local_workspaces::enable_local_workspace`
+- `commands::local_workspaces::pause_local_workspace`
+- `commands::local_workspaces::resume_local_workspace`
+- `commands::local_workspaces::sync_local_workspace_now`
+- `commands::local_workspaces::disconnect_local_workspace`
+- `commands::local_workspaces::set_local_workspace_excludes`
+- `commands::local_workspaces::resolve_local_workspace_conflict`
 - `commands::sessions::list_sessions`
 - `commands::sessions::new_session`
 - `commands::sessions::kill_session`

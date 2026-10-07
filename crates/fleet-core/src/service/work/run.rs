@@ -9,7 +9,7 @@
 //! on it unchanged. Unlike `dispatch_task { new_worker }`, which starts its
 //! worker in the project's main checkout and mirrors the job as a NEW
 //! `agent` item, a run points at the item that already exists
-//! (`tasks.work_item_id`, migration 109), so one item can be attempted more
+//! (`tasks.work_item_id`, migration 110), so one item can be attempted more
 //! than once and by more than one role.
 //!
 //! Idempotent per (item, role): while an attempt is open, a second run

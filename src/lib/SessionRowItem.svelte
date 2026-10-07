@@ -58,6 +58,7 @@
   import type { Result } from './result';
   import { orgs } from './orgs';
   import SpiralLoader from './SpiralLoader.svelte';
+  import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -281,6 +282,9 @@
    * out and an unowned private row cannot be described honestly. Guessing
    * either way would be worse than saying nothing.
    */
+  // Local workspace sync: the link on this row's worktree, if any.
+  const localLink = $derived(linkFor($localWorkspaces, sess));
+  const localBadge = $derived(badgeFor(localLink));
   const privacyBadge = $derived.by((): { text: string; title: string } | null => {
     if (sess.visibility === 'unclaimed') {
       return {
@@ -673,6 +677,15 @@
             <span class="privacy-chip" data-testid="privacy-chip" title={privacyBadge.title}
               >{privacyBadge.text}</span
             >
+          {/if}
+          {#if localLink}
+            <!-- Local workspace sync: shown only on a linked worktree. -->
+            <span
+              class="lw-dot tone-{localBadge.tone}"
+              data-testid="local-sync-dot"
+              title="Local workspace: {localBadge.label} — {localLink.local_path}"
+              aria-label="Local workspace: {localBadge.label}"
+            ></span>
           {/if}
           {#if workKey}
             <WorkChip {workKey} />
@@ -1162,6 +1175,18 @@
   /* The privacy badge (multi-user M1). Quiet on purpose: on a one-person
      fleet every row carries it, so it has to read as a label and not as an
      alert. */
+  .lw-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: inline-block;
+  }
+  .lw-dot.tone-ok { background: var(--usage-ok); }
+  .lw-dot.tone-pending { background: var(--usage-warn); }
+  .lw-dot.tone-conflict,
+  .lw-dot.tone-error { background: var(--usage-crit); }
+  .lw-dot.tone-idle { border: 1.5px solid var(--fg-muted); box-sizing: border-box; }
   .privacy-chip {
     font-size: 0.6rem;
     text-transform: uppercase;
