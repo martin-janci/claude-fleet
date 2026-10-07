@@ -557,3 +557,48 @@ fn deleting_an_org_unassigns_its_buckets_even_on_a_name_clash() {
     assert_eq!(moved.org_id, None);
     assert_eq!(moved.name, format!("Sprint 24 (#{})", of_a.id));
 }
+
+#[test]
+fn unlinking_withdraws_when_only_a_dormant_ref_remains() {
+    let s = store();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let b = s.add_org("B", None, false).unwrap().id;
+    let t = jira(&s);
+    let of_b = s
+        .create_bucket(&NewBucket {
+            kind: "release",
+            name: "1.0",
+            org_id: Some(b),
+            ..Default::default()
+        })
+        .unwrap();
+    s.add_bucket_ref(of_b.id, t, "1.0", None).unwrap();
+    s.add_bucket_ref(of_b.id, t, "1.0-rc", None).unwrap();
+    let item = ticket(&s, t, "1", None, &["1.0"]);
+    assert_eq!(members(&s, of_b.id), [(item, "adopted".into())]);
+    // The tracker moves to org A: both refs go dormant, and unlinking one
+    // must still withdraw what it adopted.
+    s.set_tracker_org(t, Some(a)).unwrap();
+    s.remove_bucket_ref(of_b.id, t, "1.0").unwrap();
+    assert!(members(&s, of_b.id).is_empty());
+}
+
+#[test]
+fn an_unassigned_name_clash_on_org_delete_stays_within_the_name_cap() {
+    let s = store();
+    let a = s.add_org("A", None, false).unwrap().id;
+    let long = "s".repeat(BUCKET_NAME_MAX_CHARS);
+    sprint(&s, &long);
+    let of_a = s
+        .create_bucket(&NewBucket {
+            kind: "sprint",
+            name: &long,
+            org_id: Some(a),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(s.remove_org(a).unwrap());
+    let moved = s.get_bucket(of_a.id).unwrap().unwrap();
+    assert_eq!(moved.name.chars().count(), BUCKET_NAME_MAX_CHARS);
+    assert!(moved.name.ends_with(&format!(" (#{})", of_a.id)));
+}

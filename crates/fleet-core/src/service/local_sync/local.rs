@@ -18,6 +18,9 @@ use std::path::{Path, PathBuf};
 pub(super) struct LocalScan {
     pub files: HashMap<String, FileStat>,
     pub blocked: HashSet<String>,
+    /// The symlinks among `blocked`: whatever lies below one is in another
+    /// tree, so it is blocked too.
+    pub links: HashSet<String>,
     pub skipped: i64,
 }
 
@@ -164,6 +167,9 @@ pub(super) fn scan(
         }
         if ex.excluded(&rel, false) {
             continue;
+        }
+        if ft.is_symlink() {
+            out.links.insert(rel.clone());
         }
         if ft.is_symlink() || !ft.is_file() || !safe_rel(&rel) {
             out.skipped += 1;

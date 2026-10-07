@@ -773,12 +773,11 @@ impl Store {
             // to the tracker remains, adoption withdraws what it no longer
             // justifies and keeps the rest with their `added_at`; with none
             // left the bucket is no longer linked, so withdraw here.
-            let still_linked: bool = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM work_bucket_refs \
-                 WHERE bucket_id = ?1 AND tracker_id = ?2)",
-                rusqlite::params![bucket_id, tracker_id],
-                |r| r.get(0),
-            )?;
+            // A ref adoption ignores (another org's tracker) does not count.
+            let still_linked = self
+                .tracker_bucket_refs(tracker_id)?
+                .iter()
+                .any(|r| r.0 == bucket_id);
             if !still_linked {
                 conn.execute(
                     "UPDATE work_bucket_items SET removed_at = ?1 \
@@ -877,7 +876,8 @@ impl Store {
         for (bucket, _, _, ext) in &seen {
             self.conn.execute(
                 "UPDATE work_bucket_refs SET last_seen_at = ?1 \
-                 WHERE bucket_id = ?2 AND tracker_id = ?3 AND external_id = ?4",
+                 WHERE bucket_id = ?2 AND tracker_id = ?3 AND external_id = ?4 \
+                   AND IFNULL(last_seen_at, 0) < ?1",
                 rusqlite::params![now, bucket, tracker_id, ext],
             )?;
         }

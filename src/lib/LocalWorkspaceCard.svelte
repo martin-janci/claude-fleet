@@ -4,7 +4,7 @@
   // both paths, when it last synced, open conflicts with Keep local / Keep
   // remote, and Sync now / Pause / Resume / Disconnect. A paired desktop shows
   // a note instead: the sync runs over this machine's own SSH.
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
   import type { SessionRow } from './sessions';
   import {
     localWorkspaces,
@@ -62,7 +62,7 @@
     }
     if (seededFor !== id && project) {
       seededFor = id;
-      folder = suggestedFolder(project.repo, session.worktree_key);
+      if (!untrack(() => folder)) folder = suggestedFolder(project.repo, session.worktree_key);
     }
   });
 

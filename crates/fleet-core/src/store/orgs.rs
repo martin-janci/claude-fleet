@@ -594,9 +594,10 @@ impl Store {
             "UPDATE work_buckets SET org_id = NULL, \
                name = CASE WHEN EXISTS(SELECT 1 FROM work_buckets u \
                  WHERE u.org_id IS NULL AND u.kind = work_buckets.kind AND u.name = work_buckets.name) \
-               THEN name || ' (#' || id || ')' ELSE name END \
+               THEN substr(name, 1, ?2 - length(' (#' || id || ')')) || ' (#' || id || ')' \
+               ELSE name END \
              WHERE org_id = ?1",
-            rusqlite::params![id],
+            rusqlite::params![id, super::work_buckets::BUCKET_NAME_MAX_CHARS as i64],
         )?;
         let removed = tx.execute("DELETE FROM orgs WHERE id = ?1", rusqlite::params![id])? > 0;
         tx.commit()?;

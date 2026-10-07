@@ -628,3 +628,27 @@ async fn a_pushed_file_lands_with_its_arrival_time() {
         "a build on the host would think its outputs are newer"
     );
 }
+
+#[tokio::test]
+async fn files_deleted_on_both_sides_are_agreement_not_a_wipe() {
+    let f = fixture();
+    let row = f.enable().await;
+    for root in [&f.local, &f.remote] {
+        for rel in ["README.md", "notes.txt", "src/main.rs", ".gitignore"] {
+            let _ = std::fs::remove_file(root.join(rel));
+        }
+    }
+    let r = f.pass(row.id).await;
+    assert!(!r.paused, "{r:?}");
+    assert_eq!(r.state, "synced", "{r:?}");
+}
+
+#[test]
+fn only_a_link_blocks_what_lies_below_it() {
+    let blocked: HashSet<String> = ["config".to_string(), "docs".to_string()].into();
+    let links: HashSet<String> = ["docs".to_string()].into();
+    assert!(is_blocked(&blocked, &links, "config"));
+    assert!(!is_blocked(&blocked, &links, "config/app.toml"));
+    assert!(is_blocked(&blocked, &links, "docs/a/b.md"));
+    assert!(!is_blocked(&blocked, &links, "docsx/a.md"));
+}

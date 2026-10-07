@@ -61,19 +61,22 @@ const MASS_DELETE_MIN: usize = 20;
 /// Passes running at once, across links.
 const MAX_PARALLEL_PASSES: usize = 4;
 
-/// Whether `p` or a directory above it was left out: a path below a
-/// symlinked directory is in another tree, never ours to write or delete.
-fn under_blocked(blocked: &HashSet<String>, p: &str) -> bool {
+/// Whether `p` was left out, or lies below a symlink on either side: a
+/// path below a symlinked directory is in another tree, never ours to
+/// write or delete. Only links block what is below them; a file that
+/// became a directory still syncs its contents.
+fn is_blocked(blocked: &HashSet<String>, links: &HashSet<String>, p: &str) -> bool {
+    if blocked.contains(p) {
+        return true;
+    }
     let mut cur = p;
-    loop {
-        if blocked.contains(cur) {
+    while let Some(i) = cur.rfind('/') {
+        cur = &cur[..i];
+        if links.contains(cur) {
             return true;
         }
-        match cur.rfind('/') {
-            Some(i) => cur = &cur[..i],
-            None => return false,
-        }
     }
+    false
 }
 
 fn now_secs() -> i64 {
@@ -296,6 +299,7 @@ impl LocalSync {
 
         let mut skipped = lscan.skipped;
         let mut blocked: HashSet<String> = lscan.blocked.clone();
+        let mut links: HashSet<String> = lscan.links.clone();
         let mut rfiles: HashMap<String, FileStat> = HashMap::new();
         for (p, (kind, st)) in &rscan.entries {
             if ex.excluded(p, false) {
@@ -308,6 +312,9 @@ impl LocalSync {
                 remote::Kind::File | remote::Kind::Symlink => {
                     skipped += 1;
                     blocked.insert(p.clone());
+                    if *kind == remote::Kind::Symlink {
+                        links.insert(p.clone());
+                    }
                 }
                 remote::Kind::Other => {
                     blocked.insert(p.clone());
@@ -319,14 +326,16 @@ impl LocalSync {
         // not edited: stop before carrying that across.
         let live_base: Vec<&String> = base
             .keys()
-            .filter(|p| !ex.excluded(p, false) && !under_blocked(&blocked, p))
+            .filter(|p| !ex.excluded(p, false) && !is_blocked(&blocked, &links, p))
             .collect();
+        // Gone from one side while the other still has it: a deletion made
+        // on both sides is agreement, not a wipe, and goes through.
         for (side, gone, empty) in [
             (
                 "local folder",
                 live_base
                     .iter()
-                    .filter(|p| !lscan.files.contains_key(**p))
+                    .filter(|p| !lscan.files.contains_key(**p) && rfiles.contains_key(**p))
                     .count(),
                 lscan.files.is_empty(),
             ),
@@ -334,7 +343,7 @@ impl LocalSync {
                 "worktree on the host",
                 live_base
                     .iter()
-                    .filter(|p| !rfiles.contains_key(**p))
+                    .filter(|p| !rfiles.contains_key(**p) && lscan.files.contains_key(**p))
                     .count(),
                 rfiles.is_empty(),
             ),
@@ -367,7 +376,7 @@ impl LocalSync {
             .collect();
         let mut work: Vec<PathWork> = Vec::new();
         for p in all {
-            if ex.excluded(p, false) || under_blocked(&blocked, p) {
+            if ex.excluded(p, false) || is_blocked(&blocked, &links, p) {
                 continue;
             }
             let b = base.get(p);
