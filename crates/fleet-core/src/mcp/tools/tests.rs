@@ -4652,11 +4652,13 @@ async fn send_message_with_a_client_msg_id_already_in_flight_is_e_in_flight() {
         .upsert_session("beta", "local", None, None, 0, 0, "running", None)
         .unwrap();
     let t = test_tools(s);
-    // Seeded under `send_message`'s own namespaced key (`send_message:` +
-    // the id), matching what the tool itself reserves under — not the bare
-    // id, which is `send_prompt`'s namespace since fix round 1.
-    let _ =
-        lock_sends(&t.recent_sends).reserve(&Caller::master().label(), "send_message:in-flight");
+    // Seeded under `send_message`'s own key (`send_message:` + sender +
+    // recipient session + recipient address + the id), matching what the
+    // tool itself reserves under.
+    let _ = lock_sends(&t.recent_sends).reserve(
+        &Caller::master().label(),
+        &format!("send_message:{a}:{b}::in-flight"),
+    );
     let e = t
         .send_message(
             Extension(Caller::master()),
@@ -17727,4 +17729,44 @@ fn transcript_turns_bounds_the_client_s_since_turn() {
     assert_eq!(transcript_turns(5, Some(5)), 1);
     assert_eq!(transcript_turns(5, Some(2)), 3);
     assert_eq!(transcript_turns(5, None), 1);
+}
+
+/// The dedupe key names the recipient: the same `client_msg_id` to another
+/// session is another message, not a replay of the first one's result.
+#[tokio::test]
+async fn a_client_msg_id_reused_for_another_recipient_still_sends() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let a = s
+        .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let c = s
+        .upsert_session("gamma", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    for to in [b, c] {
+        t.send_message(
+            Extension(Caller::master()),
+            Parameters(send_message_params(a, to, "hello", Some("1"))),
+        )
+        .await
+        .unwrap();
+    }
+    for to in [b, c] {
+        let n: i64 = t
+            .store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages WHERE to_session_id = ?1",
+                rusqlite::params![to],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "session {to} got its message");
+    }
 }
