@@ -3398,12 +3398,13 @@ the missing parameters, route it then.
   that gate, as `E_HUB_PROTOCOL`. The dialog treats either as "this hub can't
   list them", says so, and offers "+ new worktree" or the project root, which
   works on any host either way.
-- **Not yet run as an app.** At the time of writing this mode is verified by
-  its test suites only: the desktop has not been launched against a real hub.
-  The macOS keychain path (`token_store.rs`) compiles on every macOS CI run,
-  but no test exercises it against a real keychain — only the file-backed
-  fallback used on other platforms has test coverage. Report anything that
-  does not match this page.
+- **Partly accepted live.** A macOS desktop has run in this mode against a
+  remote hub since 2026-09-25: launch, the keychain token, reconnect after a
+  lost network or a hub restart, and gap replay are observed. Steering,
+  un-pairing and the dialogs listed in [hub-acceptance.md](hub-acceptance.md)
+  are not yet. The macOS keychain arm of `token_store.rs` is tested against
+  the real login keychain (`token_store::keychain_tests`). Report anything
+  that does not match this page.
 
 ### Going back
 

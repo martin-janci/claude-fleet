@@ -48,6 +48,10 @@ pub struct OsTokenStore {
     /// names its own so it never touches a real pairing on the machine.
     #[cfg(windows)]
     target: String,
+    /// The keychain item's service. `SERVICE` in the app; a test names its
+    /// own so it never touches a real pairing on the machine.
+    #[cfg(target_os = "macos")]
+    service: String,
 }
 
 impl OsTokenStore {
@@ -56,6 +60,8 @@ impl OsTokenStore {
             data_dir,
             #[cfg(windows)]
             target: format!("{SERVICE}/{ACCOUNT}"),
+            #[cfg(target_os = "macos")]
+            service: SERVICE.to_string(),
         }
     }
 
@@ -91,8 +97,10 @@ impl TokenStore for OsTokenStore {
         // upstream (`security-framework-3.7.0/src/passwords.rs:39`) and so a
         // deprecation waiting to happen. Not a behaviour change: the hidden
         // function's whole body is this call.
-        let options =
-            security_framework::passwords::PasswordOptions::new_generic_password(SERVICE, ACCOUNT);
+        let options = security_framework::passwords::PasswordOptions::new_generic_password(
+            &self.service,
+            ACCOUNT,
+        );
         match security_framework::passwords::generic_password(options) {
             Ok(bytes) => {
                 let token = String::from_utf8_lossy(&bytes).trim().to_string();
@@ -107,7 +115,7 @@ impl TokenStore for OsTokenStore {
 
     fn set(&self, token: &str) -> Result<(), String> {
         security_framework::passwords::set_generic_password(
-            SERVICE,
+            &self.service,
             ACCOUNT,
             token.trim().as_bytes(),
         )
@@ -115,7 +123,7 @@ impl TokenStore for OsTokenStore {
     }
 
     fn clear(&self) -> Result<(), String> {
-        match security_framework::passwords::delete_generic_password(SERVICE, ACCOUNT) {
+        match security_framework::passwords::delete_generic_password(&self.service, ACCOUNT) {
             // Already gone is success: Disconnect may be pressed twice.
             Ok(()) => Ok(()),
             Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
@@ -431,6 +439,53 @@ mod credential_manager_tests {
             Some(&b"cl_from_file"[..])
         );
         store.clear().unwrap();
+    }
+}
+
+/// The real login keychain, under a service of the test's own, so a pairing
+/// on the machine is never read or replaced. Until these existed the macOS
+/// arm only compiled (#156).
+#[cfg(all(test, target_os = "macos"))]
+mod keychain_tests {
+    use super::*;
+
+    fn store(tag: &str) -> OsTokenStore {
+        let mut store = OsTokenStore::new(std::path::PathBuf::from("/nonexistent"));
+        store.service = format!("{SERVICE}-test-{tag}-{}", std::process::id());
+        let _ = store.clear();
+        store
+    }
+
+    #[test]
+    fn an_unpaired_app_has_no_token() {
+        let store = store("unpaired");
+        assert_eq!(store.get().unwrap(), None);
+    }
+
+    #[test]
+    fn a_token_round_trips_and_clear_forgets_it() {
+        let store = store("round-trip");
+        store.set("  cl_abc123\n").unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("cl_abc123"));
+        // Replacing must not keep a tail of the longer token.
+        store.set("cl_short").unwrap();
+        assert_eq!(store.get().unwrap().as_deref(), Some("cl_short"));
+        store.clear().unwrap();
+        assert_eq!(store.get().unwrap(), None);
+        // Disconnect pressed twice.
+        store.clear().unwrap();
+    }
+
+    /// The data dir is never touched on macOS: no fallback file appears.
+    #[test]
+    fn the_keychain_arm_writes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = OsTokenStore::new(dir.path().to_path_buf());
+        store.service = format!("{SERVICE}-test-nofile-{}", std::process::id());
+        store.set("cl_abc").unwrap();
+        let entries = std::fs::read_dir(dir.path()).unwrap().count();
+        store.clear().unwrap();
+        assert_eq!(entries, 0, "the token must not reach the data dir");
     }
 }
 
