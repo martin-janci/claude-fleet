@@ -21,7 +21,8 @@ mod remote;
 // Unix only: the fixture plays the host with this machine's own `bash`, and
 // a fleet host is always a Unix box. Windows still runs the local-side
 // (`local.rs`) and planning tests.
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests;
 
 use crate::ipc_error::{codes, lock, IpcError};
