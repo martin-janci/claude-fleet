@@ -147,7 +147,26 @@ database's) and is matched to sessions by owner/repo. The host must be one this
 machine reaches over SSH; a session on the hub's own machine (`local`) is
 refused.
 
+## Symlinks
+
+A symlink syncs as a link: its target is what is compared and carried,
+never what it points at. It travels as the bytes `\0fleet-symlink\0<target>`
+(`local::link_blob`), so its hash differs from any file's and the plan, the
+BASE, conflicts and the activity log need nothing new; only the edges do.
+
+- Scans list a link itself (`lstat`), both sides; paths below a link stay
+  blocked, as before, since they are in another tree.
+- The download's tar carries links as link entries; the upload's tar does
+  too, and the host extracts and renames the link into place.
+- The upload guard compares a link at the path by its target, and removes
+  it before the `mv` (which would otherwise move the new file into the
+  directory a link points at). Locally the temp link is renamed over the
+  path, which replaces a link rather than following it.
+- A target that is not UTF-8, holds a NUL or ends in a newline is not
+  carried. A Windows desktop leaves every link out and counts it: creating
+  one there needs a privilege.
+
 ## Not here
 
 A filesystem watcher (polling at 5 s stays), three-way merge UI inside
-fleet, symlinks, fleet-agent hosts, the mobile app (it has no local folder).
+fleet, fleet-agent hosts, the mobile app (it has no local folder).

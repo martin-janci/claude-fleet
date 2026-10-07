@@ -74,7 +74,9 @@ One pass for one link:
    built-in defaults (`.git`, `target/`, `build/`, `.gradle/`, `node_modules/`,
    `.idea/`, `*.iml`, `.vscode/`, `.DS_Store`, `dist/`, `out/`,
    `__pycache__/`, `.venv/`, `.fleet-sync-*`) plus the link's own patterns
-   (gitignore syntax). Symlinks and files over 64 MiB are skipped and counted.
+   (gitignore syntax). Files over 64 MiB are skipped and counted. Symlinks
+   were too in Phase 1; they now sync as links (see *Symlinks* in the
+   handoff design).
 2. **Hash what moved.** A path whose `(size, mtime)` differs from the BASE is
    hashed (the remote ones in one batched call). A file recorded within two
    seconds of its mtime is stored "racy" and re-hashed on the next pass, as

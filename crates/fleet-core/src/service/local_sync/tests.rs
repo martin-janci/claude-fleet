@@ -618,6 +618,104 @@ async fn a_symlinked_directory_is_never_written_or_deleted_through() {
     );
 }
 
+fn link_of(root: &Path, rel: &str) -> Option<String> {
+    let p = root.join(rel);
+    std::fs::symlink_metadata(&p)
+        .ok()
+        .filter(|m| m.file_type().is_symlink())?;
+    Some(std::fs::read_link(p).ok()?.to_string_lossy().into_owned())
+}
+
+#[tokio::test]
+async fn symlinks_sync_both_ways_as_links() {
+    let f = fixture();
+    // On the host before the first pass: a link git tracks.
+    std::os::unix::fs::symlink("src/main.rs", f.remote.join("main-link")).unwrap();
+    git(&f.remote, &["add", "main-link"]);
+    let row = f.enable().await;
+    assert_eq!(row.state, "synced", "{row:?}");
+    assert_eq!(
+        link_of(&f.local, "main-link").as_deref(),
+        Some("src/main.rs")
+    );
+
+    // A link made on the desktop, pointing outside: carried, not followed.
+    std::os::unix::fs::symlink("../../elsewhere", f.local.join("src/out")).unwrap();
+    let r = f.pass(row.id).await;
+    assert_eq!(r.state, "synced", "{r:?}");
+    assert_eq!(
+        link_of(&f.remote, "src/out").as_deref(),
+        Some("../../elsewhere")
+    );
+
+    // Retargeted on the host: the desktop's link follows suit.
+    std::fs::remove_file(f.remote.join("main-link")).unwrap();
+    std::os::unix::fs::symlink("README.md", f.remote.join("main-link")).unwrap();
+    let r = f.pass(row.id).await;
+    assert_eq!(r.state, "synced", "{r:?}");
+    assert_eq!(link_of(&f.local, "main-link").as_deref(), Some("README.md"));
+    assert_eq!(
+        read(&f.local, "src/main.rs").as_deref(),
+        Some("fn main() {}\n"),
+        "the file the link used to name is untouched"
+    );
+
+    // Replaced by a file on the desktop: the host's link becomes that file.
+    std::fs::remove_file(f.local.join("main-link")).unwrap();
+    write(&f.local, "main-link", "now a file\n");
+    f.pass(row.id).await;
+    assert_eq!(link_of(&f.remote, "main-link"), None);
+    assert_eq!(
+        read(&f.remote, "main-link").as_deref(),
+        Some("now a file\n")
+    );
+    assert_eq!(read(&f.remote, "README.md").as_deref(), Some("hello\n"));
+
+    // Deleted on the host: only the link goes.
+    std::fs::remove_file(f.remote.join("src/out")).unwrap();
+    let r = f.pass(row.id).await;
+    assert_eq!(r.state, "synced", "{r:?}");
+    assert!(!local::exists(&f.local, "src/out"));
+}
+
+#[tokio::test]
+async fn a_host_link_to_a_directory_is_never_written_through_on_push() {
+    let f = fixture();
+    let row = f.enable().await;
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("keep.txt"), "theirs\n").unwrap();
+    // The desktop makes `shared` a link; the host has a link of the same
+    // name to a directory elsewhere, made meanwhile.
+    std::os::unix::fs::symlink("src", f.local.join("shared")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), f.remote.join("shared")).unwrap();
+    let r = f.pass(row.id).await;
+    // Both added differently: a conflict, and nothing moved into `outside`.
+    assert_eq!(r.state, "conflict", "{r:?}");
+    let names: Vec<_> = std::fs::read_dir(outside.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("keep.txt")]);
+    // Keep local replaces the host's link itself, not what it points at.
+    resolve_conflict(
+        &f.engine,
+        ResolveLocalConflictArgs {
+            id: row.id,
+            path: "shared".into(),
+            keep: "local".into(),
+        },
+    )
+    .await
+    .unwrap();
+    f.pass(row.id).await;
+    assert_eq!(link_of(&f.remote, "shared").as_deref(), Some("src"));
+    let names: Vec<_> = std::fs::read_dir(outside.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("keep.txt")]);
+}
+
 #[tokio::test]
 async fn a_pushed_file_lands_with_its_arrival_time() {
     let f = fixture();

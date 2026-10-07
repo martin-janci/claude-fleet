@@ -239,7 +239,7 @@
     {/if}
     {#if link.skipped > 0}
       <p class="muted small">
-        {link.skipped} file{link.skipped === 1 ? '' : 's'} left out (symlinks or files over 64 MB).
+        {link.skipped} file{link.skipped === 1 ? '' : 's'} left out (files over 64 MB, or links the sync cannot carry).
       </p>
     {/if}
     {#if link.conflicts.length > 0}

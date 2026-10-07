@@ -11,15 +11,43 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// What a walk found: regular files by `/`-separated relative path, and the
-/// paths it left out on purpose (symlinks, files over the cap, anything else
-/// that is not a regular file) — present, so never read as deleted.
+/// Whether this machine syncs symlinks. Windows creates one only with a
+/// privilege or developer mode, so there they stay left out, as before.
+pub(super) const LINKS: bool = cfg!(unix);
+
+/// A symlink travels as these bytes followed by its target: content no
+/// text file starts with, so its hash never equals a file's, and the plan,
+/// the BASE and the transfers treat it as one more version of the path. It
+/// is never followed: the link itself is read, written and deleted.
+pub(super) const LINK_PREFIX: &[u8] = b"\0fleet-symlink\0";
+
+/// The bytes a link to `target` travels as.
+pub(super) fn link_blob(target: &str) -> Vec<u8> {
+    let mut v = LINK_PREFIX.to_vec();
+    v.extend_from_slice(target.as_bytes());
+    v
+}
+
+/// The target `bytes` say to link to, when they are a link's.
+pub(super) fn link_target(bytes: &[u8]) -> Option<&str> {
+    std::str::from_utf8(bytes.strip_prefix(LINK_PREFIX)?).ok()
+}
+
+/// A target the sync can carry both ways: UTF-8, no NUL, and not ending in
+/// a newline (the host's `$(readlink)` would drop it).
+pub(super) fn carriable_target(t: &str) -> bool {
+    !t.is_empty() && !t.contains('\0') && !t.ends_with('\n')
+}
+
+/// What a walk found: regular files and (where [`LINKS`]) symlinks by
+/// `/`-separated relative path, and the paths it left out on purpose (files
+/// over the cap, anything else) — present, so never read as deleted.
 #[derive(Debug, Default)]
 pub(super) struct LocalScan {
     pub files: HashMap<String, FileStat>,
     pub blocked: HashSet<String>,
-    /// The symlinks among `blocked`: whatever lies below one is in another
-    /// tree, so it is blocked too.
+    /// Every symlink found: whatever lies below one is in another tree, so
+    /// it is blocked.
     pub links: HashSet<String>,
     pub skipped: i64,
 }
@@ -64,6 +92,8 @@ pub(super) fn stat_of(m: &std::fs::Metadata) -> FileStat {
 pub(super) enum Probe {
     /// A regular file, reached through plain directories only.
     File(FileStat),
+    /// A symlink (itself, not followed), likewise; only where [`LINKS`].
+    Link(FileStat),
     /// Nothing: the path, or a directory above it, does not exist.
     Absent,
     /// Something that is not ours to read or replace: a link, a directory,
@@ -93,6 +123,8 @@ pub(super) fn probe(root: &Path, rel: &str) -> Probe {
         if last {
             return if m.file_type().is_file() {
                 Probe::File(stat_of(&m))
+            } else if LINKS && m.file_type().is_symlink() {
+                Probe::Link(stat_of(&m))
             } else {
                 Probe::Other
             };
@@ -101,12 +133,30 @@ pub(super) fn probe(root: &Path, rel: &str) -> Probe {
     Probe::Absent
 }
 
-/// The stat of a regular file at `rel`, or `None` when nothing (or not a
-/// regular file) is there.
+/// The stat of the regular file or symlink at `rel`, or `None` when nothing
+/// (or something else) is there.
 pub(super) fn stat_file(root: &Path, rel: &str) -> Option<FileStat> {
     match probe(root, rel) {
-        Probe::File(st) => Some(st),
+        Probe::File(st) | Probe::Link(st) => Some(st),
         _ => None,
+    }
+}
+
+/// The link at `rel` as the bytes it travels as, `None` when it is not a
+/// link the sync can carry.
+fn read_link_blob(root: &Path, rel: &str) -> Option<Vec<u8>> {
+    let t = std::fs::read_link(abs(root, rel)).ok()?;
+    let t = t.to_str()?;
+    carriable_target(t).then(|| link_blob(t))
+}
+
+/// The bytes of the file or link at `rel`, provided it is still the kind
+/// `probe` saw.
+fn read_entry(root: &Path, rel: &str, link: bool) -> Option<Vec<u8>> {
+    if link {
+        read_link_blob(root, rel)
+    } else {
+        std::fs::read(abs(root, rel)).ok()
     }
 }
 
@@ -170,6 +220,12 @@ pub(super) fn scan(
         }
         if ft.is_symlink() {
             out.links.insert(rel.clone());
+            if LINKS && safe_rel(&rel) && read_link_blob(root, &rel).is_some() {
+                if let Ok(m) = std::fs::symlink_metadata(entry.path()) {
+                    out.files.insert(rel, stat_of(&m));
+                    continue;
+                }
+            }
         }
         if ft.is_symlink() || !ft.is_file() || !safe_rel(&rel) {
             out.skipped += 1;
@@ -191,6 +247,14 @@ pub(super) fn scan(
         match probe(root, rel) {
             Probe::File(st) if st.size as u64 <= MAX_FILE_BYTES => {
                 out.files.insert(rel.clone(), st);
+            }
+            Probe::Link(st) if read_link_blob(root, rel).is_some() => {
+                out.links.insert(rel.clone());
+                out.files.insert(rel.clone(), st);
+            }
+            Probe::Link(_) => {
+                out.links.insert(rel.clone());
+                out.blocked.insert(rel.clone());
             }
             // Too big, no longer a regular file (a link, a directory), or
             // unreadable: present either way, so never a deletion.
@@ -222,6 +286,11 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
 /// read; `None` when it is gone or changed under the read.
 pub(super) fn hash_file(root: &Path, rel: &str) -> Option<(String, FileStat)> {
     let path = abs(root, rel);
+    if let Probe::Link(before) = probe(root, rel) {
+        let blob = read_link_blob(root, rel)?;
+        let after = stat_file(root, rel)?;
+        return (before == after).then(|| (sha256_hex(&blob), after));
+    }
     let before = stat_file(root, rel)?;
     let mut f = std::fs::File::open(&path).ok()?;
     let mut h = Sha256::new();
@@ -239,17 +308,19 @@ pub(super) fn hash_file(root: &Path, rel: &str) -> Option<(String, FileStat)> {
 
 /// The file's bytes, provided it still has `expect`.
 pub(super) fn read_guarded(root: &Path, rel: &str, expect: FileStat) -> Option<Vec<u8>> {
-    if stat_file(root, rel)? != expect {
-        return None;
-    }
-    let bytes = std::fs::read(abs(root, rel)).ok()?;
+    let link = match probe(root, rel) {
+        Probe::File(st) if st == expect => false,
+        Probe::Link(st) if st == expect => true,
+        _ => return None,
+    };
+    let bytes = read_entry(root, rel, link)?;
     (stat_file(root, rel)? == expect).then_some(bytes)
 }
 
 #[cfg(unix)]
 pub(super) fn is_executable(root: &Path, rel: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(abs(root, rel))
+    std::fs::symlink_metadata(abs(root, rel))
         .map(|m| m.permissions().mode() & 0o111 != 0)
         .unwrap_or(false)
 }
@@ -291,8 +362,14 @@ pub(super) fn write_guarded(
     let dir = target.parent().unwrap_or(root);
     std::fs::create_dir_all(dir).map_err(|e| io(&target, e))?;
     let tmp = dir.join(format!(".fleet-sync-{}.tmp", uuid::Uuid::new_v4().simple()));
-    std::fs::write(&tmp, bytes).map_err(|e| io(&tmp, e))?;
-    set_mode(&tmp, &target, executable);
+    match link_target(bytes) {
+        // The rename below replaces the link itself, never what it points at.
+        Some(t) => make_link(t, &tmp)?,
+        None => {
+            std::fs::write(&tmp, bytes).map_err(|e| io(&tmp, e))?;
+            set_mode(&tmp, &target, executable);
+        }
+    }
     // Last look before the rename: an editor that saved meanwhile wins.
     if stat_file(root, rel) != expect {
         let _ = std::fs::remove_file(&tmp);
@@ -331,6 +408,25 @@ pub(super) fn delete_guarded(
         dir = d.parent();
     }
     Ok(Guarded::Done(None))
+}
+
+#[cfg(unix)]
+fn make_link(target: &str, at: &Path) -> Result<(), IpcError> {
+    if !carriable_target(target) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("a link to {target:?} cannot be carried"),
+        ));
+    }
+    std::os::unix::fs::symlink(target, at).map_err(|e| io(at, e))
+}
+
+#[cfg(not(unix))]
+fn make_link(_target: &str, at: &Path) -> Result<(), IpcError> {
+    Err(IpcError::new(
+        codes::E_INVALID,
+        format!("{}: symlinks are not synced on this OS", at.display()),
+    ))
 }
 
 /// The temp file's mode before it replaces `target`: the target's own
@@ -404,9 +500,48 @@ mod tests {
         let s = scan(r, &ex, &also).unwrap();
         let mut got: Vec<&str> = s.files.keys().map(String::as_str).collect();
         got.sort();
-        assert_eq!(got, vec![".gitignore", "forced.tmp", "src/a.rs"]);
+        // The link is carried as a link.
         #[cfg(unix)]
-        assert_eq!(s.skipped, 1);
+        assert_eq!(got, vec![".gitignore", "forced.tmp", "link", "src/a.rs"]);
+        #[cfg(not(unix))]
+        assert_eq!(got, vec![".gitignore", "forced.tmp", "src/a.rs"]);
+        assert_eq!(s.skipped, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_hashed_read_written_and_deleted_as_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let r = d.path();
+        std::fs::write(outside.path().join("f"), b"theirs").unwrap();
+        let target = outside.path().join("f").to_string_lossy().into_owned();
+        // Written as a link, pointing outside: never followed.
+        assert!(matches!(
+            write_guarded(r, "l", &link_blob(&target), false, None).unwrap(),
+            Guarded::Done(Some(_))
+        ));
+        assert_eq!(
+            std::fs::read_link(r.join("l")).unwrap().to_string_lossy(),
+            target
+        );
+        let Probe::Link(st) = probe(r, "l") else {
+            panic!("not a link")
+        };
+        let (sha, _) = hash_file(r, "l").unwrap();
+        assert_eq!(sha, sha256_hex(&link_blob(&target)));
+        assert_eq!(read_guarded(r, "l", st).unwrap(), link_blob(&target));
+        // Replaced by a file: the link goes, its target is untouched.
+        write_guarded(r, "l", b"mine", false, Some(st)).unwrap();
+        assert_eq!(std::fs::read(r.join("l")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(outside.path().join("f")).unwrap(), b"theirs");
+        // And a link again, then deleted: only the link.
+        let st = stat_file(r, "l").unwrap();
+        write_guarded(r, "l", &link_blob(&target), false, Some(st)).unwrap();
+        let st = stat_file(r, "l").unwrap();
+        assert_eq!(delete_guarded(r, "l", st).unwrap(), Guarded::Done(None));
+        assert!(!exists(r, "l"));
+        assert_eq!(std::fs::read(outside.path().join("f")).unwrap(), b"theirs");
     }
 
     #[test]

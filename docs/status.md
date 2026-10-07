@@ -299,7 +299,8 @@ a per-path log of which side changed what ("7 local changes"), Review
 changes (git status and diff on the host, Commit, Discard), Ask AI about the
 changes, Take over / Hand back to AI, Compare / Keep both / Ask AI to
 resolve on a conflict, and an overview of every link with Clean up stale.
-Not yet: symlinks, a filesystem watcher, a three-way merge editor.
+Symlinks sync as links (their target, never followed; not on a Windows
+desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
