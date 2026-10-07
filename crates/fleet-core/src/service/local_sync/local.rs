@@ -382,12 +382,14 @@ mod tests {
             write_guarded(r, "a/b/c.txt", b"two", false, Some(stale)).unwrap(),
             Guarded::Moved
         );
+        // A different size, so the stat moves even where two writes land in
+        // the same clock tick (Windows' file times often do).
         let Guarded::Done(Some(st2)) =
-            write_guarded(r, "a/b/c.txt", b"two", true, Some(st)).unwrap()
+            write_guarded(r, "a/b/c.txt", b"three", true, Some(st)).unwrap()
         else {
             panic!()
         };
-        assert_eq!(std::fs::read(r.join("a/b/c.txt")).unwrap(), b"two");
+        assert_eq!(std::fs::read(r.join("a/b/c.txt")).unwrap(), b"three");
         #[cfg(unix)]
         assert!(is_executable(r, "a/b/c.txt"));
         assert_eq!(delete_guarded(r, "a/b/c.txt", st).unwrap(), Guarded::Moved);
