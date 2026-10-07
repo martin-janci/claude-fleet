@@ -39,9 +39,16 @@ fn lock_cache(cache: &Mutex<UsageCache>) -> std::sync::MutexGuard<'_, UsageCache
 /// [`list_account_usage`]'s source).
 pub(crate) fn distinct_account_uuids(hosts: &[HostRow]) -> Vec<String> {
     let mut seen = HashSet::new();
+    // A host's own login first, then its login profiles' (docs/accounts.md).
     hosts
         .iter()
         .filter_map(|h| h.account_uuid.clone())
+        .chain(
+            hosts
+                .iter()
+                .flat_map(|h| h.claude_profiles.iter().flatten())
+                .filter_map(|p| p.account_uuid.clone()),
+        )
         .filter(|u| seen.insert(u.clone()))
         .collect()
 }
@@ -271,6 +278,7 @@ mod tests {
             unclaimed_sessions: None,
             provision_warning: None,
             auth_overrides: None,
+            claude_profiles: None,
             harnesses: None,
         }
     }

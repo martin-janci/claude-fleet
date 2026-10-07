@@ -179,6 +179,11 @@ pub(crate) fn sample_host() -> HostRow {
         provision_warning: Some("ag launcher not installed".into()),
         // Some, so the golden pins the name the Hosts view reads.
         auth_overrides: Some(vec!["ANTHROPIC_API_KEY".into()]),
+        claude_profiles: Some(vec![fleet_core::store::HostProfileRow {
+            name: "work".into(),
+            account_uuid: Some("acct-work".into()),
+            email: Some("work@example.com".into()),
+        }]),
     }
 }
 

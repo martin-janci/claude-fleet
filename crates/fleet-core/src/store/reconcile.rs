@@ -1166,6 +1166,7 @@ mod tests {
             unclaimed_sessions: None,
             provision_warning: None,
             auth_overrides: None,
+            claude_profiles: None,
             harnesses: None,
         }
     }

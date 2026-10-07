@@ -146,6 +146,9 @@
   // `/login`; docs/accounts.md); '' = the host's login. Deliberately not
   // remembered: which account a session bills is chosen each time.
   let chosenProfile = $state<string>('');
+  // The chosen host's known profiles, offered as suggestions; a new name
+  // is still accepted (the session asks for its /login).
+  const hostProfiles = $derived($hosts.find((h) => h.alias === chosenHost)?.claude_profiles ?? []);
   const profileInvalid = $derived(
     chosenProfile.trim() !== '' && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(chosenProfile.trim()),
   );
@@ -1083,10 +1086,16 @@
             data-testid="launch-profile"
             bind:value={chosenProfile}
             placeholder="Host login"
+            list="launch-profile-options"
             maxlength="32"
             aria-invalid={profileInvalid}
             title="A name such as work: the session runs under ~/.claude-profiles/<name> on the host, with its own /login. A new profile asks you to log in, in the session."
           />
+          <datalist id="launch-profile-options">
+            {#each hostProfiles as p (p.name)}
+              <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
+            {/each}
+          </datalist>
         </div>
       </div>
     {/if}

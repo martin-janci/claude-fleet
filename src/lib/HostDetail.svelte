@@ -451,6 +451,17 @@
         {#if account.email}<span class="muted">{account.email}</span>{/if}
       </div>
     {/if}
+    {#if host.claude_profiles && host.claude_profiles.length > 0}
+      <div class="account-line" data-testid="detail-profiles">
+        <span class="label">Login profiles</span>
+        <span class="profiles">
+          {#each host.claude_profiles as p, i (p.name)}{#if i > 0}, {/if}<span
+              class="profile"
+              title="~/.claude-profiles/{p.name}"
+            ><code>{p.name}</code> <span class="muted">{p.email ?? (p.account_uuid ? '' : 'not logged in')}</span></span>{/each}
+        </span>
+      </div>
+    {/if}
     <!-- Usage is the embed page `embed.host_detail` (declarative pages L8). -->
     <EmbedSlot
       slot="host_detail"

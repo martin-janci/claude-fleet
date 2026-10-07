@@ -977,6 +977,22 @@ pub struct HostRow {
     /// an older hub omits it.
     #[serde(default)]
     pub auth_overrides: Option<Vec<String>>,
+    /// The host's Claude login profiles (migration 113, docs/accounts.md),
+    /// by name, each with the account it is logged into when known. `None`:
+    /// never read. Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub claude_profiles: Option<Vec<HostProfileRow>>,
+}
+
+/// One login profile on a host, as `hosts.claude_profiles` stores it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostProfileRow {
+    pub name: String,
+    /// The `accounts` row its `/login` is; `None` = not logged in yet.
+    #[serde(default)]
+    pub account_uuid: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 /// The volatile half of a host row, as `host:pinged` carries it (host
@@ -1036,7 +1052,7 @@ pub(super) const HOST_COLUMNS: &str =
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
-     harnesses, provision_warning, auth_overrides";
+     harnesses, provision_warning, auth_overrides, claude_profiles";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1085,6 +1101,10 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         auth_overrides: row
             .get::<_, Option<String>>(25)?
             .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
+        // Migration 113. Same lenient read.
+        claude_profiles: row
+            .get::<_, Option<String>>(26)?
+            .and_then(|t| serde_json::from_str::<Vec<HostProfileRow>>(&t).ok()),
     })
 }
 

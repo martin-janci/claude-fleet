@@ -319,6 +319,7 @@
       "agent_version",
       "alias",
       "auth_overrides",
+      "claude_profiles",
       "claude_version",
       "claude_version_at",
       "disk_home_free_kb",

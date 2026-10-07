@@ -559,6 +559,16 @@ fn hosts_has_provision_warning(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 113.
+fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'claude_profiles'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 112.
 fn sessions_has_claude_profile(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1301,6 +1311,12 @@ const MIGRATIONS: &[Migration] = &[
         version: 112,
         sql: include_str!("../../migrations/112_session_claude_profile.sql"),
         already_applied: Some(sessions_has_claude_profile),
+    },
+    // A host's login profiles and their accounts: one ADD COLUMN, guarded.
+    Migration {
+        version: 113,
+        sql: include_str!("../../migrations/113_host_claude_profiles.sql"),
+        already_applied: Some(hosts_has_claude_profiles),
     },
 ];
 

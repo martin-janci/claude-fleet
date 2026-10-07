@@ -433,6 +433,24 @@ impl Store {
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }
 
+    /// Record a host's login profiles (migration 113). Emits `host:probed`
+    /// only when the list changed, so a steady host costs no event per pass.
+    pub fn set_host_profiles(
+        &self,
+        alias: &str,
+        profiles: &[crate::store::HostProfileRow],
+    ) -> Result<(), rusqlite::Error> {
+        let json = serde_json::to_string(profiles).unwrap_or_else(|_| "[]".into());
+        let n = self.conn.execute(
+            "UPDATE hosts SET claude_profiles = ?1 WHERE alias = ?2 AND claude_profiles IS NOT ?1",
+            rusqlite::params![json, alias],
+        )?;
+        if n > 0 {
+            self.emit_host(alias, |bus, row| bus.host_probed(row))?;
+        }
+        Ok(())
+    }
+
     /// Set a host's transport (migration 034): `"ssh"` (the default, reached
     /// over SSH as today) or `"agent"` (reached through an outbound
     /// fleet-agent connection). `E_INVALID` for any other value — an

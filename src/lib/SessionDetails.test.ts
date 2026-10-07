@@ -104,6 +104,57 @@ describe('SessionDetails', () => {
     expect((await screen.findByTestId('session-account')).textContent?.trim()).toBe('—');
   });
 
+  it('a profile session shows its own login’s account, not the host’s', async () => {
+    hosts.set([
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: 'u1', provisioned: false, transport: 'ssh' },
+    ]);
+    accounts.set([
+      { uuid: 'u1', email: 'host@x.com', display_name: 'H', organization_name: null, organization_uuid: null, seat_tier: 'max', last_seen_at: 1, nickname: null, has_extra_usage: false },
+      { uuid: 'u2', email: 'work@x.com', display_name: 'W', organization_name: null, organization_uuid: null, seat_tier: 'pro', last_seen_at: 1, nickname: null, has_extra_usage: false },
+    ]);
+    render(SessionDetails, { props: { session: { ...sampleSession, claude_profile: 'work', account_uuid: 'u2' } } });
+    await tick();
+    const cell = await screen.findByTestId('session-account');
+    expect(cell.textContent).toContain('work@x.com');
+    expect(cell.textContent).not.toContain('host@x.com');
+  });
+
+  it('switching the login asks first, then restarts under the picked profile', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const inv = invoke as unknown as ReturnType<typeof vi.fn>;
+    inv.mockReset();
+    inv.mockResolvedValue({ ...sampleSession, claude_profile: 'work' });
+    hosts.set([
+      {
+        alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh',
+        claude_profiles: [{ name: 'work', account_uuid: 'u2', email: 'work@x.com' }],
+      },
+    ]);
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    const pick = (await screen.findByTestId('session-login-pick')) as HTMLSelectElement;
+    expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(['Host login', 'work (work@x.com)']);
+    expect(screen.queryByTestId('session-login-switch')).toBeNull();
+    await fireEvent.change(pick, { target: { value: 'work' } });
+    await tick();
+    (await screen.findByTestId('session-login-switch')).click();
+    await tick();
+    expect(inv.mock.calls.some((c) => c[0] === 'restart_session')).toBe(false);
+    (await screen.findByTestId('confirm-login-switch')).click();
+    await tick();
+    await tick();
+    expect(inv.mock.calls).toContainEqual([
+      'restart_session',
+      { args: { host_alias: 'mefistos', name: 'dev-foo', profile: 'work' } },
+    ]);
+  });
+
+  it('a shell session has no login to switch', async () => {
+    render(SessionDetails, { props: { session: { ...sampleSession, kind: 'shell' } } });
+    await tick();
+    expect(screen.queryByTestId('session-login')).toBeNull();
+  });
+
   it('shows Related sessions panel when siblings exist', async () => {
     const source = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10, worktree_key: 'main' };
     const sibling = { ...sampleSession, id: 2, tmux_name: 'dev-sib', host_alias: 'mefistos', project_id: 1, worktree_id: 10, worktree_key: 'main' };

@@ -236,6 +236,9 @@ pub(super) struct HostProbe {
     /// left untouched, never cleared. `local` always carries `None` here
     /// (it is synced by `service::hosts::sync_local_account` instead).
     pub(super) account: Option<crate::service::hosts::OauthAccount>,
+    /// The host's login profiles this pass (`TmuxExec::read_profiles`):
+    /// `None` = could not tell, and the stored list is left alone.
+    pub(super) profiles: Option<Vec<crate::tmux::HostProfile>>,
     /// This pass's read of the host's boot identity (`TmuxExec::host_identity`),
     /// read BEFORE `list_sessions` (so the list can never be older than the
     /// identity that judges it) and discarded unless the list succeeded. `None`
@@ -687,6 +690,25 @@ fn write_reachable_host(
                 host.account_uuid.clone()
             }
         };
+    // The host's login profiles and the account each is logged into, so a
+    // session under a profile is attributed to THAT login (docs/accounts.md).
+    // Best-effort like the host account above.
+    let profile_accounts = match crate::service::hosts::sync_host_profiles(
+        s,
+        &host.alias,
+        probe.profiles.as_deref(),
+    ) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(
+                host = %host.alias,
+                error = %e.message,
+                "[reconcile] host profile sync failed; keeping the stored list"
+            );
+            s.ensure_in_tx()?;
+            Default::default()
+        }
+    };
     let mut keep: Vec<String> = Vec::with_capacity(live.len());
     let mut sessions: Vec<ReconcileSession> = Vec::with_capacity(live.len());
     // ── Task G: reconcile transition-detection (event timeline) ──
@@ -726,10 +748,15 @@ fn write_reachable_host(
         // Preservation invariant: if the session already has an
         // account_uuid in the DB, keep it; only capture the host's
         // current account for newly-discovered sessions. A session under a
-        // credential profile bills that profile's login, never the host's,
-        // so it never takes the host's account.
+        // credential profile bills that profile's login, never the host's:
+        // it takes the profile's account when the host reported one, and
+        // otherwise keeps what it has.
         let account_uuid = match prior_row {
-            Some(p) if p.claude_profile.is_some() => p.account_uuid.clone(),
+            Some(p) if p.claude_profile.is_some() => p
+                .claude_profile
+                .as_ref()
+                .and_then(|name| profile_accounts.get(name).cloned().flatten())
+                .or_else(|| p.account_uuid.clone()),
             _ => prior_row
                 .and_then(|p| p.account_uuid.clone())
                 .or_else(|| host_account.clone()),
@@ -1530,6 +1557,11 @@ pub(super) async fn probe_with_timeout(
         } else {
             None
         };
+        let profiles = if tmux_result.is_ok() {
+            snap.profiles
+        } else {
+            None
+        };
         // One pane-tail read per live session, parsed into reconcile intel.
         let intel = intel_from_tails(&snap.pane_tails);
         // `None`: not due this pass (cadence) or the host could not be
@@ -1563,28 +1595,36 @@ pub(super) async fn probe_with_timeout(
             agent_rows,
             agent_mtimes,
             intel,
-            account,
+            (account, profiles),
             identity,
             versions,
             health,
         )
     };
     let mut probe = match tokio::time::timeout(timeout, probe).await {
-        Ok((result, agent_rows, agent_mtimes, intel, account, identity, versions, health)) => {
-            HostProbe {
-                host,
-                versions,
-                health,
-                result,
-                agent_rows,
-                agent_mtimes,
-                intel,
-                pr_info: PrInfoMap::new(),
-                account,
-                identity,
-                started_at,
-            }
-        }
+        Ok((
+            result,
+            agent_rows,
+            agent_mtimes,
+            intel,
+            (account, profiles),
+            identity,
+            versions,
+            health,
+        )) => HostProbe {
+            host,
+            versions,
+            health,
+            result,
+            agent_rows,
+            agent_mtimes,
+            intel,
+            pr_info: PrInfoMap::new(),
+            account,
+            profiles,
+            identity,
+            started_at,
+        },
         Err(_elapsed) => {
             tracing::warn!(
                 host = %host.alias,
@@ -1601,6 +1641,7 @@ pub(super) async fn probe_with_timeout(
                 intel: PaneIntelMap::new(),
                 pr_info: PrInfoMap::new(),
                 account: None,
+                profiles: None,
                 identity: None,
                 started_at,
             };

@@ -113,6 +113,15 @@ pub trait TmuxExec: Send + Sync {
         None
     }
 
+    /// The host's Claude login profiles (`~/.claude-profiles/<name>`,
+    /// docs/accounts.md), each with the account its `.claude.json` is
+    /// logged into. `None` = could not tell (or an executor that does not
+    /// implement it): the stored list is then left alone. `Some(vec![])` =
+    /// the host has none. `LocalTmux` and `RemoteTmux` override it.
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        None
+    }
+
     /// Everything a reconcile pass needs from the host. The default composes
     /// the per-call methods (local tmux, test fakes); `RemoteTmux` overrides
     /// it with one script so a pass costs one round trip, not 5 + N.
@@ -136,6 +145,11 @@ pub trait TmuxExec: Send + Sync {
         } else {
             None
         };
+        let profiles = if sessions.is_ok() {
+            self.read_profiles().await
+        } else {
+            None
+        };
         let mut pane_tails = std::collections::HashMap::new();
         if let Ok(live) = &sessions {
             for s in live {
@@ -151,6 +165,7 @@ pub trait TmuxExec: Send + Sync {
             pane_tails,
             versions,
             health,
+            profiles,
         }
     }
 }
@@ -209,6 +224,82 @@ pub struct ProbeSnapshot {
     pub versions: Option<HostVersions>,
     /// The health section (every pass), when the host answered it.
     pub health: Option<HostHealthSample>,
+    /// The host's login profiles ([`TmuxExec::read_profiles`]); `None` =
+    /// could not tell.
+    pub profiles: Option<Vec<HostProfile>>,
+}
+
+/// One Claude login profile on a host: `~/.claude-profiles/<name>` and the
+/// account its `.claude.json` is logged into (`None`: not logged in yet, or
+/// unreadable).
+#[derive(Debug, Clone)]
+pub struct HostProfile {
+    pub name: String,
+    pub account: Option<crate::service::hosts::OauthAccount>,
+}
+
+/// Shell section listing the host's login profiles: one
+/// `@@P\t<name>\t<oauthAccount json>` line per `~/.claude-profiles/<name>`
+/// directory whose name is a valid profile name (anything else is skipped,
+/// never echoed into a line a parser splits on tabs). The account is read
+/// by the same script as the host's own, with `CLAUDE_CONFIG_DIR` pointed
+/// at the profile, and squeezed onto one line.
+pub(crate) fn profiles_script() -> String {
+    format!(
+        "for d in \"$HOME\"/.claude-profiles/*/; do [ -d \"$d\" ] || continue; n=$(basename \"$d\"); \
+         case \"$n\" in ''|[!A-Za-z0-9]*|*[!A-Za-z0-9_-]*) continue;; esac; \
+         printf '@@P\\t%s\\t%s\\n' \"$n\" \"$(CLAUDE_CONFIG_DIR=\"${{d%/}}\"; {} | tr -d '\\n')\"; done",
+        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
+    )
+}
+
+/// Parse [`profiles_script`] output (or the `profiles` probe section).
+/// Lines that are not `@@P` lines, and names that do not validate, are
+/// dropped.
+pub(crate) fn parse_profiles(body: &str) -> Vec<HostProfile> {
+    let mut out: Vec<HostProfile> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("@@P\t"))
+        .filter_map(|rest| {
+            let (name, json) = rest.split_once('\t').unwrap_or((rest, ""));
+            crate::validate::claude_profile(name).ok()?;
+            Some(HostProfile {
+                name: name.to_string(),
+                account: crate::service::hosts::parse_oauth_account(json),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
+/// `local`'s login profiles, read from `<home>/.claude-profiles` directly
+/// (blocking fs reads: call off the async worker). `None` when the
+/// directory exists but cannot be listed; a missing directory is no
+/// profiles.
+pub(crate) fn read_local_profiles(home: &std::path::Path) -> Option<Vec<HostProfile>> {
+    let dir = home.join(".claude-profiles");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(Vec::new()),
+        Err(_) => return None,
+    };
+    let mut out: Vec<HostProfile> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.to_string();
+            crate::validate::claude_profile(&name).ok()?;
+            let account = match crate::service::hosts::probe_local_account_in(&e.path()) {
+                crate::service::hosts::LocalAccountProbe::LoggedIn(a) => Some(a),
+                _ => None,
+            };
+            Some(HostProfile { name, account })
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(out)
 }
 
 /// Shell script listing the most recently modified Claude transcripts under
@@ -596,6 +687,14 @@ impl TmuxExec for LocalTmux {
             .filter(|o| o.status.success())?;
         Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
     }
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        local_allowed().ok()?;
+        let home = crate::service::hosts::local_home_dir();
+        tokio::task::spawn_blocking(move || read_local_profiles(&home))
+            .await
+            .ok()
+            .flatten()
+    }
 }
 
 /// tmux over an `SshExec`. Generic (defaulting to the production client) so
@@ -684,10 +783,12 @@ pub fn probe_snapshot_script(tail_lines: u32, want_versions: bool) -> String {
          printf '%s\\n' '---FLEET:health'; {HOST_HEALTH_SCRIPT}; \
          printf '%s\\n' '---FLEET:sessions'; out=$(tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1); rc=$?; printf 'rc=%s\\n' \"$rc\"; printf '%s\\n' \"$out\" | sed 's/^---FLEET/ &/'; \
          printf '%s\\n' '---FLEET:account'; {}; \
+         printf '%s\\n' '---FLEET:profiles'; {}; \
          printf '%s\\n' '---FLEET:panes'; \
          tmux list-sessions -F '#{{session_name}}' 2>/dev/null | while IFS= read -r s; do printf '%s\\n' \"---FLEET:pane $s\"; tmux capture-pane -t \"=$s:\" -S {start} -p 2>/dev/null | sed 's/^---FLEET/ &/'; done; \
          printf '%s\\n' '---FLEET:end'",
-        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT
+        crate::service::hosts::OAUTH_ACCOUNT_SCRIPT,
+        profiles_script()
     )
 }
 
@@ -769,6 +870,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
         section("account").and_then(|b| crate::service::hosts::parse_oauth_account(b.trim()));
     let versions = section("versions").map(parse_host_versions);
     let health = section("health").map(parse_host_health);
+    let profiles = section("profiles").map(parse_profiles);
     let mut pane_tails = std::collections::HashMap::new();
     for (name, body) in &sections {
         if let Some(pane) = name.strip_prefix("pane ") {
@@ -782,6 +884,7 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
         pane_tails,
         versions,
         health,
+        profiles,
     })
 }
 
@@ -1001,6 +1104,14 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
             .filter(|o| o.status.success())?;
         Some(parse_host_health(&String::from_utf8_lossy(&out.stdout)))
     }
+    async fn read_profiles(&self) -> Option<Vec<HostProfile>> {
+        let out = self
+            .remote_sh(&profiles_script())
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(parse_profiles(&String::from_utf8_lossy(&out.stdout)))
+    }
     async fn probe_snapshot(&self, tail_lines: u32, want_versions: bool) -> ProbeSnapshot {
         let script = probe_snapshot_script(tail_lines, want_versions);
         match self.remote_sh(&script).await {
@@ -1011,6 +1122,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                 pane_tails: Default::default(),
                 versions: None,
                 health: None,
+                profiles: None,
             },
             Ok(out) => {
                 let text = String::from_utf8_lossy(&out.stdout);
@@ -1030,6 +1142,7 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                             pane_tails: Default::default(),
                             versions: None,
                             health: None,
+                            profiles: None,
                         }
                     }
                 }
@@ -2292,6 +2405,72 @@ mod tests {
                 "{shell}"
             );
         }
+    }
+
+    /// The profiles section lists each valid `~/.claude-profiles/<name>`
+    /// with its login, skips a name that is not a profile name, and reports
+    /// a profile with no login yet as such.
+    #[cfg(unix)]
+    #[test]
+    fn the_profiles_script_lists_each_profile_and_its_login() {
+        let home = tempfile::tempdir().unwrap();
+        let p = home.path().join(".claude-profiles");
+        std::fs::create_dir_all(p.join("work")).unwrap();
+        std::fs::write(
+            p.join("work/.claude.json"),
+            r#"{"oauthAccount":{"accountUuid":"acc-w","emailAddress":"w@x.com"},"other":1}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(p.join("fresh")).unwrap();
+        std::fs::create_dir_all(p.join("bad name")).unwrap();
+        std::fs::create_dir_all(p.join("-dash")).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(profiles_script())
+            .env("HOME", home.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = parse_profiles(&String::from_utf8_lossy(&out.stdout));
+        let names: Vec<&str> = got.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["fresh", "work"]);
+        assert!(got[0].account.is_none());
+        let w = got[1].account.as_ref().unwrap();
+        assert_eq!(w.uuid.as_deref(), Some("acc-w"));
+        assert_eq!(w.email.as_deref(), Some("w@x.com"));
+
+        let local = read_local_profiles(home.path()).unwrap();
+        let names: Vec<&str> = local.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["fresh", "work"]);
+        assert_eq!(
+            local[1].account.as_ref().unwrap().uuid.as_deref(),
+            Some("acc-w")
+        );
+        assert_eq!(
+            read_local_profiles(&home.path().join("nowhere"))
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_probe_reports_its_profiles_section() {
+        let text = "---FLEET:sessions\nrc=0\n---FLEET:profiles\n@@P\twork\t{\"accountUuid\":\"a\"}\n@@P\tx y\t\n---FLEET:end\n";
+        let snap = parse_probe_snapshot(text).unwrap();
+        let profiles = snap.profiles.unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].name, "work");
+        let old = parse_probe_snapshot("---FLEET:sessions\nrc=0\n---FLEET:end\n").unwrap();
+        assert!(
+            old.profiles.is_none(),
+            "no section = could not tell, never 'none'"
+        );
+        assert!(probe_snapshot_script(10, false).contains("---FLEET:profiles"));
     }
 
     #[test]
