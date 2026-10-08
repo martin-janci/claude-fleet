@@ -1091,6 +1091,7 @@ mod tests {
         assert!(bs[2].is_remote);
     }
 
+    #[cfg(unix)]
     fn by_name<'a>(bs: &'a [Branch], name: &str) -> &'a Branch {
         bs.iter()
             .find(|b| b.name == name)
