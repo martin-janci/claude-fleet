@@ -50,6 +50,8 @@
   import { hintAnchor } from './hints';
   import { openNewSessionPicker } from './switcher_request';
   import { requestNewSession } from './new_session_request';
+  import { foldedIds, lostFolds } from './lost_fold';
+  import LostFoldRow from './LostFoldRow.svelte';
   import { setProjectPick } from './project_picks';
   import { detectMac } from './terminal_keys';
   import {
@@ -290,7 +292,10 @@
       const id = focus.id;
       return (s) => s.id === id;
     }
-    return triagePredicate(workPredicate);
+    // A mass loss's rows live in their fold row (redesign 1.1), not the tree.
+    const folded = foldedIdSet;
+    const unfolded: SessionPredicate = folded.size === 0 ? null : (s) => !folded.has(s.id);
+    return bothPredicates(unfolded, triagePredicate(workPredicate));
   });
 
   // What narrows the list, for the empty state (the chrome shows the same
@@ -671,8 +676,24 @@
   // countNeedsYou() classifies each row, and classify() files an external
   // (Outside fleet) row as working/idle, so a read-only row never inflates
   // the pill (spec §5).
-  const needsYouTotal = $derived(countNeedsYou(hostVisibleSessions, attentionOpts));
-  const severityByProject = $derived(worstSeverityByProject(hostVisibleSessions));
+  // Redesign 1.1: a mass loss (a host reboot, a tmux server restart) folds
+  // into one "12 stopped on trn · Restore" row per host, and its rows leave
+  // the badge and the project sort: nobody can answer a stopped pane until it
+  // is restored, so counting them would bury the sessions that do need you.
+  const lostFoldList = $derived(focus ? [] : lostFolds(hostVisibleSessions));
+  const foldedIdSet = $derived(foldedIds(lostFoldList));
+  const countedSessions = $derived(
+    foldedIdSet.size === 0 ? hostVisibleSessions : hostVisibleSessions.filter((s) => !foldedIdSet.has(s.id)),
+  );
+  let openFolds = $state<Set<string>>(new Set());
+  function toggleFold(host: string) {
+    const next = new Set(openFolds);
+    if (next.has(host)) next.delete(host);
+    else next.add(host);
+    openFolds = next;
+  }
+  const needsYouTotal = $derived(countNeedsYou(countedSessions, attentionOpts));
+  const severityByProject = $derived(worstSeverityByProject(countedSessions));
 
   // Only show projects that either match the filter directly OR have at least
   // one active session. Without sessions the sidebar would be flooded with
@@ -1226,6 +1247,9 @@
       orgColor={orgColorOf(sess, $orgColorById)}
     />
   {/snippet}
+  {#snippet foldSessionRow(sess: SessionRow)}
+    {@render sessionRow(sess)}
+  {/snippet}
 
   <!-- The shared chrome (Refresh, Needs you, bulk actions, Settings,
        Attention) stays in both views; only the list below swaps. -->
@@ -1530,6 +1554,10 @@
         {/if}
       </div>
     {/if}
+
+    {#each lostFoldList as fold (fold.host)}
+      <LostFoldRow {fold} open={openFolds.has(fold.host)} ontoggle={() => toggleFold(fold.host)} row={foldSessionRow} />
+    {/each}
 
     {#if outsideFleet.length > 0}
       <div class="orphan-section" data-testid="outside-fleet-section">
