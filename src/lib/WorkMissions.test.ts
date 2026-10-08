@@ -9,6 +9,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
 import { hosts } from './hosts';
+import { uiLayout } from './prefs';
 import {
   doneWhenRows,
   eventSentence,
@@ -176,6 +177,62 @@ describe('WorkMissions', () => {
     await fireEvent.click(screen.getByTestId('mission-dep-remove'));
     await flush();
     expect(calls('set_work_dep')[0]).toEqual({ item_id: 12, depends_on: 11, on: false });
+  });
+
+  describe('task graph', () => {
+    const graphDetail = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), { ...item(11, 'Schema'), status_category: 'done' }, item(12, 'API'), item(13, 'UI')],
+      graph: {
+        nodes: [
+          { item_id: 10, state: 'ready', wave: 1 },
+          { item_id: 11, state: 'done', wave: 1 },
+          { item_id: 12, state: 'running', wave: 2, depends_on: [11] },
+          { item_id: 13, state: 'waiting', wave: 3, depends_on: [12], waiting_for: [12] },
+        ],
+        waves: 3,
+      },
+      events: [],
+      may_change: true,
+    });
+
+    async function open() {
+      handlers.work_mission = graphDetail;
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('stays out of the Classic layout', async () => {
+      uiLayout.set('classic');
+      await open();
+      expect(screen.queryByTestId('mission-view-graph')).toBeNull();
+      expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
+    });
+
+    it('draws lanes × waves with progress and the critical path in the New layout', async () => {
+      uiLayout.set('new');
+      try {
+        await open();
+        await fireEvent.click(screen.getByTestId('mission-view-graph'));
+        await flush();
+        expect(screen.queryAllByTestId('mission-wave')).toHaveLength(0);
+        expect(screen.getByTestId('mission-graph-progress').textContent).toBe('1 of 4 done · 25%');
+        expect(screen.getAllByTestId('mission-graph-wave')).toHaveLength(3);
+        expect(screen.getAllByTestId('mission-graph-node')).toHaveLength(4);
+        expect(screen.getByTestId('mission-graph-critical').textContent).toContain('2 tasks');
+        const api = screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('API'))!;
+        expect(api.getAttribute('aria-label')).toContain('on the critical path');
+        await fireEvent.click(screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('UI'))!);
+        expect(screen.getByTestId('mission-graph-chosen').textContent).toContain('waits for API');
+        await fireEvent.click(screen.getByTestId('mission-view-list'));
+        await flush();
+        expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
+      } finally {
+        uiLayout.set('classic');
+      }
+    });
   });
 
   it('accepts every proposal at once and can undo it', async () => {

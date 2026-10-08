@@ -11,6 +11,9 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { projects } from './projects';
+  import { readPref, uiLayout, writePref } from './prefs';
+  import MissionGraph from './MissionGraph.svelte';
+  import { defaultLaneBy, type LaneBy } from './mission_graph';
   import { hosts } from './hosts';
   import { timeAgo } from './session_status';
   import { createWorkTask, onWorkChangedDebounced } from './work';
@@ -117,6 +120,25 @@
   const changeBlocked = $derived(!!hubActionBlocked('set_mission_state', $hubStatus, $hubConnection));
 
   const mission = $derived(detail?.mission ?? null);
+
+  // The task graph (New layout only): List keeps every write, Graph draws
+  // lanes × waves with the critical path. The choice outlives the mission;
+  // the lanes reset to the mission's own default when another one opens.
+  type TasksView = 'list' | 'graph';
+  const isTasksView = (v: unknown): v is TasksView => v === 'list' || v === 'graph';
+  let tasksView = $state<TasksView>(readPref<TasksView>('work.missions.view', 'list', isTasksView));
+  $effect(() => writePref('work.missions.view', tasksView));
+  const showGraph = $derived($uiLayout === 'new' && tasksView === 'graph');
+  let laneOverride = $state<{ mission: number; by: LaneBy } | null>(null);
+  const laneBy = $derived(
+    laneOverride && laneOverride.mission === mission?.id ? laneOverride.by : detail ? defaultLaneBy(detail) : 'none',
+  );
+  function repoName(id: number): string | null {
+    const own = (mission?.repos ?? []).find((r) => r.project_id === id);
+    if (own) return own.name;
+    const p = $projects.find((x) => x.project.id === id)?.project;
+    return p ? `${p.owner}/${p.repo}` : null;
+  }
   const waves = $derived(detail ? wavesOf(detail) : []);
   const proposals = $derived(detail ? openProposals(detail) : []);
   const itemById = $derived(new Map((detail?.items ?? []).map((i) => [i.id, i])));
@@ -664,7 +686,35 @@
           >
         </div>
       {/if}
-      {#each waves as w (w.wave)}
+      {#if $uiLayout === 'new'}
+        <div class="view-switch" role="tablist" aria-label="Show tasks as">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tasksView === 'list'}
+            data-testid="mission-view-list"
+            onclick={() => (tasksView = 'list')}>List</button
+          >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tasksView === 'graph'}
+            data-testid="mission-view-graph"
+            onclick={() => (tasksView = 'graph')}>Graph</button
+          >
+        </div>
+      {/if}
+      {#if showGraph && detail}
+        <MissionGraph
+          {detail}
+          {laneBy}
+          {repoName}
+          onlanechange={(by) => {
+            if (mission) laneOverride = { mission: mission.id, by };
+          }}
+        />
+      {/if}
+      {#each showGraph ? [] : waves as w (w.wave)}
         <div class="wave" data-testid="mission-wave">
           {#if waves.length > 1}<span class="wave-head">W{w.wave}</span>{/if}
           <ul class="items" data-testid="mission-items">
@@ -973,6 +1023,14 @@
   .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
   .dep { font-size: 0.7rem; }
   .dep-pick { max-width: 7rem; font-size: 0.75rem; }
+  /* The design system's Tabs (of-tabs). */
+  .view-switch { display: flex; gap: 20px; border-bottom: 1px solid var(--border); margin-bottom: 0.4rem; }
+  .view-switch button {
+    font: inherit; font-size: 13px; color: var(--fg-muted); background: none; border: 0; cursor: pointer;
+    padding: 6px 0; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .view-switch button:hover { color: var(--fg); }
+  .view-switch button[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 500; }
   .wave { display: flex; flex-direction: column; gap: 0.1rem; }
   .wave-head { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.3rem; }
   .vbadge { font-size: 0.7rem; align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: 999px; }

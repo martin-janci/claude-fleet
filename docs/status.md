@@ -317,7 +317,9 @@ active mission its `running | blocked | waiting` phase. An agent proposes a
 plan with `work_link { propose_tree }`, whose proposals join the parent's
 mission; a person takes it with `accept_many` and can `undo_accept` within
 10 minutes while nothing has touched it. The Missions tab lists tasks by
-wave. O3 is built: a run's prompt asks for a fenced JSON report after its
+wave; in the New layout its Graph view draws them as lanes (repo, assignee or
+none) × waves with the dependency arrows, the critical path and the progress
+per lane and wave (`src/lib/mission_graph.ts`), read-only. O3 is built: a run's prompt asks for a fenced JSON report after its
 done marker, stored as `tasks.result_json` (the worker's word), and when the
 run finishes fleet reads the commits and changed files from git in the
 worker's checkout into `tasks.evidence_json` (migration 117,
