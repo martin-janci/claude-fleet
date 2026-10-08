@@ -49,6 +49,7 @@
   import SessionStatusChip from './SessionStatusChip.svelte';
   import SessionRowDetails from './SessionRowDetails.svelte';
   import SessionRowMeta from './SessionRowMeta.svelte';
+  import LimitActions from './LimitActions.svelte';
   import { COMPACT_ROW_PX, uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
@@ -967,6 +968,13 @@
             {promptText}
             reason={blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u)))}
           />
+          {#if triage.bucket === 'account_limit'}
+            <LimitActions
+              {sess}
+              resetsAt={$attentionFacts?.limited_accounts?.[sess.account_uuid ?? '']?.resets_at ?? null}
+              accountName={(u) => accountLabel($accountByUuid.get(u))}
+            />
+          {/if}
         {:else if $showRowDetails}
           <SessionRowDetails {sess} {nowSec} {secondaryName} />
         {/if}
