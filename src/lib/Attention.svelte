@@ -37,7 +37,7 @@
     }
     if (get(notifyStuckOs)) {
       for (let i = 0; i < rows.length; i++) {
-        showOsNotification('claude-fleet: session stuck', messages[i], `stuck-${rows[i].id}`);
+        showOsNotification('Orbit Fleet: session stuck', messages[i], `stuck-${rows[i].id}`);
       }
     }
   }

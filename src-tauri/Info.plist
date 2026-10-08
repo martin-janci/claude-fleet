@@ -2,7 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- The name macOS shows in the menu bar, Dock and Finder. The bundle itself
+       keeps productName (claude-fleet.app) so release assets and the updater
+       do not change. -->
+  <key>CFBundleName</key>
+  <string>Orbit Fleet</string>
+  <key>CFBundleDisplayName</key>
+  <string>Orbit Fleet</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>claude-fleet streams your microphone to Claude Code's /voice on the host you are attached to, only while you record.</string>
+  <string>Orbit Fleet streams your microphone to Claude Code's /voice on the host you are attached to, only while you record.</string>
 </dict>
 </plist>
