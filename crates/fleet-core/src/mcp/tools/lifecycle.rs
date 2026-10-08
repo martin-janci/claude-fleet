@@ -53,6 +53,47 @@ impl FleetTools {
         ok_json(&id)
     }
 
+    #[tool(description = "A session's shell terminals: tmux sessions \
+        <name>--sh<N> (N 1-9) beside its agent, started in the agent's \
+        directory and never listed as sessions. action=list (default), open \
+        (n, or the lowest free) or close (n). Closing one never stops the \
+        session. Returns the open terminals.")]
+    pub(super) async fn shell_terminals(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<ShellTerminalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "shell_terminals",
+            &format!(
+                "session_id={} action={:?} n={:?}",
+                p.session_id, p.action, p.n
+            ),
+        );
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            // `own`: a terminal is a shell on the owner's host, which a
+            // grant never confers (spec §4.3, invariant 4).
+            Reach::Own,
+            "the session whose terminals to manage",
+        )?;
+        let out = sessions::shell_terminals(
+            sessions::ShellTerminalsArgs {
+                session_id: row.id,
+                action: p.action,
+                n: p.n,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
     #[tool(description = "Ask a running Claude session to persist its work \
         (commit + push), then arm deletion of its worktree + tmux session: \
         for retiring a session that may hold unpushed work. Returns the row \

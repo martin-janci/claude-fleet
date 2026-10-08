@@ -1,6 +1,8 @@
 <script lang="ts">
   import { fmtBytes } from './attachments';
   import Modal from './Modal.svelte';
+  import HostStream from './HostStream.svelte';
+  import { uiLayout } from './prefs';
   import { hosts } from './hosts';
   import { hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -493,6 +495,7 @@
       {:else if run.origin === 'observed'}
         <p class="note">Started elsewhere — this window is following along.</p>
       {/if}
+      {#if $uiLayout === 'new'}<HostStream from={run.fromHost} to={run.toHost} paused={!!run.error} />{/if}
       {@render steps()}
       <div class="buttons">
         {#if run.origin === 'observed'}

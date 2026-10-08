@@ -269,6 +269,7 @@
     "set_work_status",
     "setting_history",
     "setting_proposals",
+    "shell_terminals",
     "shutdown_debug_device",
     "spawn_review",
     "start_mission_wave",

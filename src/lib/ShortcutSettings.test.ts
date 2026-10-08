@@ -13,7 +13,9 @@ describe('Settings → Shortcuts', () => {
     expect(settings.textContent).toContain('⌘,');
     expect(screen.getByTestId('shortcut-hosts').textContent).toContain('Ctrl+Shift+H');
     expect(screen.getByTestId('shortcut-inspector').textContent).not.toContain('coming');
-    expect(screen.getByTestId('shortcut-new-terminal').textContent).toContain('coming');
+    // Step 5.3 wired the terminal chords; Go to file is still planned.
+    expect(screen.getByTestId('shortcut-new-terminal').textContent).not.toContain('coming');
+    expect(screen.getByTestId('shortcut-go-to-file').textContent).not.toContain('coming');
   });
 
   it('filters by action or chord', async () => {
