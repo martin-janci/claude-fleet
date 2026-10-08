@@ -22,15 +22,16 @@
 //!   `hub_verdicts.test.ts` needs `routed`/`routed_unless` too.
 //! - `docs/hub.md`, between `BEGIN_MARKER`/`END_MARKER` — the REFUSAL table:
 //!   one row per command that is `LocalOnly` or `RoutedUnless`, with what to
-//!   do instead. The counts are deliberately NOT written here: two copies of
-//!   them drifted apart (and from the truth) the moment a command was added.
-//!   [`summary_sentence`] computes them from `VERDICTS` on every regen, and
-//!   the generated block in `docs/hub.md` is where to read them. `Routed`/`SameInBoth` rows are left
+//!   do instead. No counts are written here. A summary sentence ("Of the N
+//!   commands, …") used to sit above the table, and since every PR that adds
+//!   a command changed that one line, every open PR conflicted with every
+//!   merge to main (2026-10-08). The rows themselves are sorted by name, so
+//!   two PRs adding different commands touch different lines. `Routed`/`SameInBoth` rows are left
 //!   out on purpose — `| list_sessions | \`list_sessions\` |` tells an
 //!   operator nothing they came to docs to learn; the full verdict, for
-//!   every command, is what `verdicts.rs` is *for*, and the generated
-//!   summary sentence ([`summary_sentence`]) points there. [`render_doc_table`]
-//!   renders the whole block (summary + table); [`splice_doc`] replaces the
+//!   every command, is what `verdicts.rs` is *for*, and the line above the
+//!   table points there. [`render_doc_table`]
+//!   renders the whole block (that line + the table); [`splice_doc`] replaces the
 //!   marked span in the file without touching the hand-written prose around
 //!   it.
 //!
@@ -148,57 +149,18 @@ fn refusal_detail(verdict: &Verdict) -> Option<String> {
     }
 }
 
-/// A singular/plural verb for `n`, so the summary sentence reads correctly
-/// whether a bucket holds one command or many — `repair_session` is the only
-/// `RoutedUnless` row today ("1 routes"), but nothing here assumes that
-/// stays true.
-fn verb(n: usize, singular: &'static str, plural: &'static str) -> &'static str {
-    if n == 1 {
-        singular
-    } else {
-        plural
-    }
-}
+/// The line above the refusal table. It states no count: a count changes
+/// with every command added, so it made every open PR conflict with main.
+pub const TABLE_LEAD: &str =
+    "Every command below refuses in hub client mode; the full table, with \
+     the commands that route to a hub tool, is `src-tauri/src/backend/verdicts.rs`.";
 
-/// The generated sentence above the refusal table, with real counts. Kept
-/// pure and separate from [`render_doc_table`] for the same reason
-/// `contract.rs`'s `regen_verdict` is pure: the pluralisation edge (one row
-/// vs many) is what is worth testing directly, independent of how many rows
-/// `VERDICTS` happens to have today.
-pub fn summary_sentence(
-    total: usize,
-    routed: usize,
-    routed_unless: usize,
-    local_only: usize,
-    same_in_both: usize,
-) -> String {
-    format!(
-        "Of the {total} commands, {routed} {} to a hub tool, {routed_unless} {} except for one \
-         argument shape, {local_only} {}, and {same_in_both} {} the same in both modes; the \
-         full table is `src-tauri/src/backend/verdicts.rs`.",
-        verb(routed, "routes", "route"),
-        verb(routed_unless, "routes", "route"),
-        verb(local_only, "refuses", "refuse"),
-        verb(same_in_both, "is", "are"),
-    )
-}
-
-/// Render the whole generated block: the summary sentence, then the refusal
+/// Render the whole generated block: [`TABLE_LEAD`], then the refusal
 /// table — one row per `LocalOnly`/`RoutedUnless` command, sorted
-/// alphabetically by command name. The count is [`summary_sentence`]'s,
-/// computed from `VERDICTS`; it is not repeated here. `VERDICTS`' own order is
+/// alphabetically by command name. `VERDICTS`' own order is
 /// `generate_handler!`'s, which groups by feature area and is a worse read
 /// as a lookup table than a straight alphabetical list.
 pub fn render_doc_table() -> String {
-    let lists = verdict_lists();
-    let summary = summary_sentence(
-        VERDICTS.len(),
-        lists.routed.len(),
-        lists.routed_unless.len(),
-        lists.local_only.len(),
-        lists.same_in_both.len(),
-    );
-
     let mut rows: Vec<(&str, String)> = VERDICTS
         .iter()
         .filter_map(|(name, verdict)| refusal_detail(verdict).map(|detail| (*name, detail)))
@@ -212,7 +174,7 @@ pub fn render_doc_table() -> String {
         "<!-- Regenerate with: {REGEN_ENV}=1 cargo test -p claude-fleet --lib verdict_gen -->\n"
     ));
     out.push('\n');
-    out.push_str(&summary);
+    out.push_str(TABLE_LEAD);
     out.push('\n');
     out.push('\n');
     out.push_str("| Command | What to do instead |\n");
