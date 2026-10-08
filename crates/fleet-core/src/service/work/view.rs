@@ -1919,6 +1919,9 @@ fn blocked_on(g: &Graph, id: i64) -> (bool, Vec<String>) {
         }
         blocked = true;
         let visible = item.is_some_and(|i| {
+            // This is the org boundary, not a privacy fence: whether a scoped
+            // caller is told the id of a work item in another org. Items are
+            // the org's work data; nothing about a person is named here.
             g.scope.is_all() || g.item_org(i).is_some_and(|o| g.scope.sees_org(Some(o)))
         });
         if visible {
