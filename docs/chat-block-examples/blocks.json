@@ -20,8 +20,10 @@
         { "type": "table", "title": "Slowest", "columns": [ { "label": "Route" }, { "label": "ms", "ty": "int" } ], "rows": [ ["/sessions", 812], ["/hosts", null] ] } ] }, "problems": [] },
     { "name": "an error with a next step", "block": { "spec": "fleet.ui/1", "kind": "error", "code": "E_SSH", "title": "mercury did not answer", "body": "The SSH connection timed out after **10 s**.", "detail": "ssh: connect to host mercury port 22: Operation timed out", "next": [ { "label": "Retry", "prompt": "Try mercury again" }, { "label": "Skip it", "prompt": "Go on without mercury", "hint": "The other hosts still deploy" } ] }, "problems": [] },
     { "name": "an error with no next step", "block": { "spec": "fleet.ui/1", "kind": "error", "code": "build.failed", "title": "The build failed" }, "problems": [] },
+    { "name": "a guide fleet has", "block": { "spec": "fleet.ui/1", "kind": "guide", "page": "guide.cleanup" }, "problems": [] },
+    { "name": "a settings change", "block": { "spec": "fleet.ui/1", "kind": "setting", "proposal": 42, "note": "Missions may start review runs without a press." }, "problems": [] },
 
-    { "name": "not a known kind", "block": { "spec": "fleet.ui/1", "kind": "chart" }, "problems": ["`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error"] },
+    { "name": "not a known kind", "block": { "spec": "fleet.ui/1", "kind": "chart" }, "problems": ["`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error, setting"] },
     { "name": "the wrong spec", "block": { "spec": "fleet.ui/2", "kind": "callout", "body": "x" }, "problems": ["`spec` must be \"fleet.ui/1\""] },
     { "name": "a callout with no body and a bad tone", "block": { "spec": "fleet.ui/1", "kind": "callout", "tone": "loud" }, "problems": ["`tone` must be one of info, tip, success, warning, danger", "`body` is required"] },
     { "name": "facts that are not pairs", "block": { "spec": "fleet.ui/1", "kind": "facts", "items": [ ["a"], { "a": 1 } ] }, "problems": ["item 1: must be [label, value]", "item 2: must be [label, value]"] },
@@ -43,6 +45,11 @@
     { "name": "a table with ragged rows", "block": { "spec": "fleet.ui/1", "kind": "results", "items": [ { "type": "table", "columns": [ { "label": "A" }, { "label": "B" } ], "rows": [ ["x"], ["x", { "y": 1 }], "row" ] } ] }, "problems": ["item 1 › row 1: has 1 cells for 2 columns", "item 1 › row 2: cell 2 must be text, a number, a bool or null", "item 1 › row 3: must be a list"] },
     { "name": "an error without a code", "block": { "spec": "fleet.ui/1", "kind": "error", "title": "Failed" }, "problems": ["`code` is required"] },
     { "name": "an error code that is prose", "block": { "spec": "fleet.ui/1", "kind": "error", "code": "it broke", "title": "Failed", "next": [ { "label": "Retry" } ] }, "problems": ["`code` must be letters, digits and . _ : -", "next 1: `prompt` is required"] },
+    { "name": "a guide page that is prose", "block": { "spec": "fleet.ui/1", "kind": "guide", "page": "the cleanup guide" }, "problems": ["`page` must be letters, digits and . _ : -"] },
+    { "name": "a guide page that is not text", "block": { "spec": "fleet.ui/1", "kind": "guide", "page": 3 }, "problems": ["`page` must be text"] },
+    { "name": "a settings change without its proposal", "block": { "spec": "fleet.ui/1", "kind": "setting", "key": "orchestrator.max_level", "value": "2" }, "problems": ["`proposal` is required"] },
+    { "name": "a settings change whose proposal is not an id", "block": { "spec": "fleet.ui/1", "kind": "setting", "proposal": "42", "note": 7 }, "problems": ["`proposal` must be a number", "`note` must be text"] },
+    { "name": "a settings change with proposal 0", "block": { "spec": "fleet.ui/1", "kind": "setting", "proposal": 0 }, "problems": ["`proposal` must be at least 1"] },
     { "name": "an error with too many next steps", "block": { "spec": "fleet.ui/1", "kind": "error", "code": "E", "title": "Failed", "next": [ { "label": "a", "prompt": "a" }, { "label": "b", "prompt": "b" }, { "label": "c", "prompt": "c" }, { "label": "d", "prompt": "d" }, { "label": "e", "prompt": "e" } ] }, "problems": ["`next` has more than 4 entries"] }
   ]
 }

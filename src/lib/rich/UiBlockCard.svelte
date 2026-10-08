@@ -17,9 +17,11 @@
   import type { Values } from '../forms/forms';
   import Markdown from '../MarkdownView.svelte';
   import ErrorCard from './ErrorCard.svelte';
+  import GuidePageCard from './GuidePageCard.svelte';
   import ProgressCard from './ProgressCard.svelte';
   import ReportCard from './ReportCard.svelte';
   import ResultsCard from './ResultsCard.svelte';
+  import SettingCard from './SettingCard.svelte';
 
   let { block, raw, sessionId = null }: { block: UiBlock; raw: string; sessionId?: number | null } = $props();
 
@@ -99,6 +101,8 @@
       {/each}
     </ol>
   </section>
+{:else if block.kind === 'guide' && block.page}
+  <GuidePageCard pageId={block.page} />
 {:else if block.kind === 'guide'}
   <section class="card" data-testid="rich-guide" aria-label={block.title}>
     <strong>{block.title}</strong>
@@ -146,6 +150,8 @@
   <ResultsCard {block} />
 {:else if block.kind === 'error'}
   <ErrorCard {block} onfill={fill} canFill={sessionId !== null} />
+{:else if block.kind === 'setting'}
+  <SettingCard {block} />
 {/if}
 
 <style>

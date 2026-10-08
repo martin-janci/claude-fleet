@@ -15,7 +15,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::account_usage::{AccountUsageSnapshot, UsageCache};
 use fleet_core::service::account_usage_poll;
 use fleet_core::ssh::SshClient;
-use fleet_core::store::Store;
+use fleet_core::store::{Store, UsageSnapshotRow};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -23,6 +23,13 @@ use tauri::State;
 #[derive(Deserialize)]
 pub struct RefreshAccountUsageArgs {
     pub account_uuid: String,
+}
+
+#[derive(Deserialize)]
+pub struct AccountUsageHistoryArgs {
+    pub account_uuid: String,
+    /// Unix seconds; snapshots fetched before it are left out.
+    pub since: i64,
 }
 
 /// Every known account's cached usage snapshot. Never fetches.
@@ -50,4 +57,18 @@ pub async fn refresh_account_usage(
     backend.refuse_local_only("refresh_account_usage")?;
     account_usage_poll::refresh_account_usage(&args.account_uuid, &store, &*ssh, &cache, &**bus)
         .await
+}
+
+/// One account's stored usage snapshots since `since`, oldest first (the
+/// Accounts page's history). Never fetches. `E_NOTFOUND` for an unknown
+/// account. Refused in remote mode like the two above: this app's store has
+/// no history while a hub owns the fleet.
+#[tauri::command]
+pub fn account_usage_history(
+    args: AccountUsageHistoryArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<UsageSnapshotRow>, IpcError> {
+    backend.refuse_local_only("account_usage_history")?;
+    account_usage_poll::account_usage_history(&args.account_uuid, args.since, &store)
 }

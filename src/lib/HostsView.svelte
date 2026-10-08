@@ -10,7 +10,7 @@
   // while an input has focus, and no bound key is destructive — Rotate and
   // Remove are reachable only by Tab or pointer.
   import { isEditable } from './terminal_keys';
-  import { onMount } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { hosts } from './hosts';
   import { accounts, accountByUuid } from './accounts';
   import { sessions } from './sessions';
@@ -37,6 +37,10 @@
   import AddHostPicker from './AddHostPicker.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
+  import HostsTable from './HostsTable.svelte';
+  import { tableOrder } from './hosts_table';
+  import { uiLayout } from './prefs';
+  import { attentionIdleMinutes } from './notify';
   import { hubStatus, hubBlock, hubActionBlocked, ownsTheFleet } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import { fleetSettings, SETTING_KEYS, settingInt, settingSecs } from './fleet_settings';
@@ -89,13 +93,23 @@
   let refusal = $state<{ alias: string; nextTryAt: number } | null>(null);
   let copied = $state(false);
 
+  // Orbit Fleet 4.6: under Layout: New the view opens on the Hosts table,
+  // and Open (or Enter) shows a host in the master–detail below it. Classic
+  // never sees the table. A preselected host opens straight in its detail.
+  const newLayout = $derived($uiLayout === 'new');
+  let detailOpen = $state(untrack(() => preselect) !== null);
+  const showTable = $derived(newLayout && !detailOpen);
+  let tableEl = $state<HTMLElement>();
+
   let listEl = $state<HTMLElement>();
   let filterEl = $state<HTMLInputElement>();
   let detailEl = $state<HTMLElement>();
 
   const allGroups = $derived(groupHostsByAccount($hosts, $accounts));
   const groups = $derived(filterGroups(allGroups, filter));
-  const ordered = $derived(groups.flatMap((g) => g.hosts));
+  const tableHosts = $derived(tableOrder($hosts));
+  // The order the keyboard walks: the table's when it shows, else the list's.
+  const ordered = $derived(showTable ? tableHosts : groups.flatMap((g) => g.hosts));
   const versionMaxAge = $derived(settingSecs($fleetSettings, SETTING_KEYS.healthVersionMaxAgeSecs));
   const diskLowPct = $derived(settingInt($fleetSettings, SETTING_KEYS.healthDiskLowPct));
   const newestClaude = $derived(newestClaudeVersion($hosts, now, versionMaxAge));
@@ -170,7 +184,8 @@
   });
 
   onMount(() => {
-    listEl?.focus();
+    if (showTable) tableEl?.focus();
+    else listEl?.focus();
     // `list_host_tokens` and `refresh_account_usage` are both local-only in
     // remote mode (`host_tokens`, `refresh_account_usage` REASONS) — a hub
     // client must not fire either only to drop an E_LOCAL_ONLY each time.
@@ -208,7 +223,22 @@
     rows[next].focus();
   }
 
-  const focusList = () => listEl?.focus();
+  const focusList = () => (showTable ? tableEl : listEl)?.focus();
+
+  /** Table → the host's detail (Open, Enter, double-click). */
+  async function openHost(alias: string) {
+    select(alias);
+    detailOpen = true;
+    await tick();
+    focusDetail();
+  }
+
+  /** Detail → back to the table (New layout only). */
+  async function backToTable() {
+    detailOpen = false;
+    await tick();
+    tableEl?.focus();
+  }
   const focusDetail = () => detailEl?.focus();
 
   // Gated in the handlers, not only on the buttons that call them: a
@@ -310,7 +340,10 @@
       case 'Enter':
       case 'ArrowRight':
         // Enter on a detail button activates it natively.
-        if (inDetail || target !== listEl) handled = false;
+        if (showTable) {
+          if (target === tableEl && alias) void openHost(alias);
+          else handled = false;
+        } else if (inDetail || target !== listEl) handled = false;
         else focusDetail();
         break;
       case 'ArrowLeft':
@@ -320,6 +353,7 @@
       case 'Escape':
         if (legendOpen) legendOpen = false;
         else if (inDetail) focusList();
+        else if (newLayout && detailOpen) void backToTable();
         else onClose();
         break;
       case 'r':
@@ -335,10 +369,14 @@
         if (alias) onNewSession(alias);
         break;
       case 'e':
+        if (showTable) {
+          handled = false;
+          break;
+        }
         startEdit(inDetail ? 'detail' : 'list', selectedHost?.account_uuid);
         break;
       case '/':
-        if (inDetail) handled = false;
+        if (inDetail || showTable) handled = false;
         else filterEl?.focus();
         break;
       case '?':
@@ -373,7 +411,7 @@
   const LEGEND: [string, string][] = [
     ['↑ ↓  j k  Home End', 'move the selection (in the detail: between sessions)'],
     ['Enter  →', 'open the detail'],
-    ['←  Esc', 'back to the list (Esc in the list closes Hosts)'],
+    ['←  Esc', 'back to the list (Esc in the list closes Hosts; under Layout: New it goes back to the table first)'],
     ['r', 're-probe the host'],
     ['u', "refresh the account's usage (at most every 5 min)"],
     ['s', "view this host's sessions (closes Hosts)"],
@@ -388,6 +426,9 @@
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <section class="hosts-view" aria-label="Hosts" data-testid="hosts-view" onkeydown={onKeydown}>
   <header class="view-head">
+    {#if newLayout && detailOpen}
+      <button type="button" class="head-btn" data-testid="hosts-back-to-table" onclick={() => void backToTable()}>← All hosts</button>
+    {/if}
     <h1>Hosts</h1>
     <span class="summary" data-testid="hosts-summary">{$hosts.length} · {onlineCount} online</span>
     <span class="cadence">usage every 5 min</span>
@@ -442,6 +483,24 @@
     </p>
   {/if}
 
+  {#if showTable}
+    <HostsTable
+      hosts={tableHosts}
+      {rowInfo}
+      sessions={$sessions}
+      accountByUuid={$accountByUuid}
+      {newestClaude}
+      {selectedAlias}
+      {now}
+      idleSecs={$attentionIdleMinutes * 60}
+      bind:tableEl
+      onselect={(a) => {
+        select(a);
+        tableEl?.focus();
+      }}
+      onopen={(a) => void openHost(a)}
+    />
+  {:else}
   <div class="panes">
     <div class="list-pane">
       <HostsList
@@ -489,6 +548,8 @@
             oneditdone={endEdit}
             onreprobe={() => void reprobe(selectedHost.alias)}
             onrefreshusage={() => void refreshUsage(selectedHost.alias)}
+            onnewsession={() => onNewSession(selectedHost.alias)}
+            {hubVersion}
           />
         {/key}
       {:else}
@@ -498,6 +559,7 @@
       {/if}
     </div>
   </div>
+  {/if}
 </section>
 
 {#if showAddPicker}

@@ -14,7 +14,15 @@
   // switches. The Work view brings its own search and filters
   // (WorkFiltersBar, the same strip and panel shape); the Sessions list's
   // controls step aside there.
-  import { sessions, showBgAgents, showFriendlyNames, showRowDetails, sidebarGroupBy } from './sessions';
+  import {
+    sessions,
+    showBgAgents,
+    showFriendlyNames,
+    showRowDetails,
+    sidebarGroupBy,
+    type SidebarGroupBy,
+  } from './sessions';
+  import SegmentedControl from './SegmentedControl.svelte';
   import { diskMeter } from './hosts_view';
   import { hosts, hostFilter, effectiveHostFilter } from './hosts';
   import { hintAnchor } from './hints';
@@ -110,6 +118,18 @@
     clearSelected: () => void;
   } = $props();
   const sessionsList = $derived(listView !== 'work');
+
+  // Work keeps its own test id and toggles back to Project when pressed
+  // again, as it did before it became a SegmentedControl.
+  const GROUP_BY_OPTIONS: readonly { id: SidebarGroupBy; label: string; title?: string; testid?: string }[] = [
+    { id: 'project', label: 'Project' },
+    {
+      id: 'work',
+      label: 'Work',
+      title: 'Group sessions by work: a ticket key (ABC-123) in a tag, branch or worktree name',
+      testid: 'group-by-toggle',
+    },
+  ];
 
   // ── Work filters (work graph M10.4) ──
   // Their group in the panel shows once there is work to filter (a tracker,
@@ -373,22 +393,17 @@
         {#if optionsOpen}
           <div class="menu" role="group" aria-label="View options" data-testid="view-options">
             <span class="menu-label">Group by</span>
-            <div class="btn-group seg" role="group" aria-label="Group by">
-              <button
-                type="button"
-                class="btn btn--chip btn--toggle"
-                aria-pressed={$sidebarGroupBy === 'project'}
-                data-testid="group-by-project"
-                onclick={() => sidebarGroupBy.set('project')}>Project</button
-              >
-              <button
-                type="button"
-                class="btn btn--chip btn--toggle"
-                aria-pressed={$sidebarGroupBy === 'work'}
-                data-testid="group-by-toggle"
-                title="Group sessions by work: a ticket key (ABC-123) in a tag, branch or worktree name"
-                onclick={() => sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))}>Work</button
-              >
+            <div class="group-by">
+              <SegmentedControl
+                label="Group by"
+                testidPrefix="group-by-"
+                value={$sidebarGroupBy}
+                options={GROUP_BY_OPTIONS}
+                onchange={(id) =>
+                  id === 'work'
+                    ? sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))
+                    : sidebarGroupBy.set('project')}
+              />
             </div>
             <button
               type="button"
@@ -564,8 +579,13 @@
   <Attention />
   <ScopeAttention />
   <TrackerAttention />
-  <LinkReview />
-  <TidyReview />
+  <!-- Redesign 1.2: one quiet attention line, "3 links to review · 4 to
+       tidy · 1 reopened", in place of the link bar and the Tidy chips. Each
+       segment opens its own sheet, which wraps onto the lines below. -->
+  <div class="attention-line" data-testid="attention-line">
+    <LinkReview />
+    <TidyReview />
+  </div>
   {#if $sessionFocus && sessionsList}
     <!-- A clicked suggestion: the tree shows only this session. -->
     <div class="focus-bar" data-testid="session-focus-bar" role="status">
@@ -624,6 +644,21 @@
 </header>
 
 <style>
+  .attention-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    padding: 0 0.5rem;
+  }
+  /* "a · b · c": a dot before every segment after the first. The segments
+     belong to LinkReview and TidyReview, hence :global. */
+  .attention-line :global(.al-seg ~ .al-seg)::before {
+    content: '·';
+    margin-right: 0.3rem;
+    color: var(--fg-muted);
+    text-decoration: none;
+    display: inline-block;
+  }
   .sidebar-header {
     flex: 0 0 auto;
     display: flex;
@@ -746,16 +781,8 @@
     font-weight: 600;
     color: var(--fg-muted);
   }
-  .seg {
-    display: flex;
+  .group-by {
     margin-bottom: 4px;
-  }
-  .seg .btn {
-    flex: 1 1 0;
-    border-radius: 0;
-  }
-  .seg .btn + .btn {
-    margin-left: -1px;
   }
 
   .panel {

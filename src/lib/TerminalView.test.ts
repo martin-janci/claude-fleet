@@ -152,6 +152,20 @@ describe('TerminalView session identity (FE-1)', () => {
     expect(screen.getByTestId('terminal-header').textContent).toContain('on alpha');
   });
 
+  it('names its PTY on every call, so a shell terminal never lands on the agent pane', async () => {
+    render(TerminalView);
+    selectSession(onAlpha);
+    await settle();
+    // Switching away closes the attach; every pty_* call so far carries the id.
+    selectSession(onBeta);
+    await settle();
+    const ptyCalls = inv().mock.calls.filter((c) => String(c[0]).startsWith('pty_'));
+    expect(ptyCalls.length).toBeGreaterThan(0);
+    for (const [cmd, payload] of ptyCalls) {
+      expect((payload as { args?: { id?: string } } | undefined)?.args?.id, String(cmd)).toBe('agent');
+    }
+  });
+
   it('puts the Transfer chip on the host name for a movable session', async () => {
     const movable = makeSession({
       id: 1, host_alias: 'alpha', kind: 'work', worktree_id: 10, claude_session_id: 'c-1',

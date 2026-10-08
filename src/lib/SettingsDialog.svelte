@@ -1,5 +1,7 @@
 <script lang="ts">
   import WorkSettings from './WorkSettings.svelte';
+  import ShortcutSettings from './ShortcutSettings.svelte';
+  import { DEFAULT_LEAF, leafById, leafForPage, resolveSection, type PanelId } from './settings_tree';
   import { onDestroy, onMount, tick } from 'svelte';
   import PageView from './pages/PageView.svelte';
   import SettingsNav from './pages/SettingsNav.svelte';
@@ -37,7 +39,7 @@
   import McpSettings from './McpSettings.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import { loadHostTokens } from './host_actions';
-  import { hostsChordLabel, requestHostsView, settingsSection } from './app_views';
+  import { hostsChordLabel, requestHostsView, settingsKey, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
@@ -224,9 +226,10 @@
     void refreshComposerPresetsIfIdle();
   });
 
-  // --- Pages: General (the hand-written panels below) or a generated page
-  // (declarative pages P3; `crates/fleet-core/pages/`), picked in the nav. ---
-  let view = $state('general');
+  // --- The Settings tree (redesign step 7.1, `settings_tree.ts`): a leaf
+  // is a hand-written panel below, a generated page (declarative pages P3;
+  // `crates/fleet-core/pages/`) or one section of one, picked in the nav. ---
+  let view = $state(DEFAULT_LEAF);
   let focusKey = $state<string | null>(null);
   let settingsLoadError: string | null = $state(null);
   // Declarative pages P6: on a paired desktop the pages are the hub's
@@ -236,10 +239,18 @@
   let hubPagesError = $state<string | null>(null);
   /** The generated pages have the fleet's settings to show here. */
   const pagesHere = $derived(ownsFleet || hubPages === 'ok');
-  const currentPage = $derived($allPages.find((p) => p.id === view));
+  const leaf = $derived(leafById(view, $allPages) ?? leafById(DEFAULT_LEAF, $allPages));
+  const panel = $derived<PanelId | undefined>(leaf?.panel);
+  // The panel edits the same settings as its page where this app owns the
+  // fleet; elsewhere the page (the hub's settings) stands in for it.
+  const currentPage = $derived(
+    leaf?.page && !(leaf.pageOnlyRemote && ownsFleet) ? $allPages.find((p) => p.id === leaf.page) : undefined,
+  );
 
+  /** Open a leaf by id, or the leaf showing a page (a search hit, a link
+   *  between pages): the one holding `key`'s section when there is one. */
   function select(next: string, key?: string) {
-    view = next;
+    view = leafById(next, $allPages) ? next : (leafForPage(next, $allPages, key)?.id ?? `page:${next}`);
     focusKey = key ?? null;
   }
 
@@ -253,20 +264,16 @@
   });
 
   // Opened at a section (a "Reconnect Jira (acme)" Attention item, work
-  // graph M12.4): scroll it into view once, then forget the request. A
-  // page id opens that page instead.
+  // graph M12.4): a leaf id, a page id or one of the old General panels'
+  // names opens its leaf, then the request is forgotten.
   onMount(() => {
     const section = $settingsSection;
     if (!section) return;
+    const key = $settingsKey;
     settingsSection.set(null);
-    if (section.includes('.') || section === 'settings' || section === 'usage' || section === 'guides') {
-      select(section);
-      return;
-    }
-    void tick().then(() => {
-      const el = document.querySelector<HTMLElement>(`[data-testid="${section}-section"]`);
-      el?.scrollIntoView?.({ block: 'start' });
-    });
+    settingsKey.set(null);
+    // With a setting named, a page id opens the leaf that holds it.
+    select(key ? section : (resolveSection(section, $allPages) ?? section), key ?? undefined);
   });
 
   async function subscribeSettings() {
@@ -465,15 +472,19 @@
       pages={$allPages}
       descs={$descriptors}
       values={$settingValues}
-      selected={view}
+      selected={leaf?.id ?? view}
       counts={pagesHere ? { 'settings.review': $settingProposals.length, guides: $guideProposals.length } : {}}
       canWrite={pagesHere && $settingsWritable}
       onselect={select} />
     <div class="settings-content">
-    {#if view === 'general'}
-
+    <!-- The hand-written panels stay mounted and are hidden when another
+         leaf is open, so a draft (a hub URL, a projects root) survives a
+         look at another section. -->
+    <div class="panel" hidden={panel !== 'appearance'} data-testid="settings-panel-appearance">
     <AppearanceSettings />
+    </div>
 
+    <div class="panel" hidden={panel !== 'hosts'} data-testid="settings-panel-hosts">
     <section class="block hosts-line" data-testid="settings-hosts-line">
       <h4>Hosts</h4>
       <span class="hosts-summary" data-testid="settings-hosts-summary"
@@ -483,7 +494,13 @@
         >Open Hosts <kbd>{hostsChord}</kbd></button
       >
     </section>
+    <p class="hook-desc">
+      Accounts and hosts have their own view, beside Sessions and Work. Settings keeps the
+      preferences; the hosts themselves are there.
+    </p>
+    </div>
 
+    <div class="panel" hidden={panel !== 'hub'} data-testid="settings-panel-hub">
     <section class="block" data-testid="hub-section">
       <div class="section-header">
         <h4>Hub</h4>
@@ -675,23 +692,11 @@
         </p>
       {/if}
     </section>
+    </div>
 
-    {#if !ownsFleet}
-      <section class="block" data-testid="projects-remote-section">
-        <div class="section-header"><h4>Projects</h4></div>
-        {#if pagesHere}
-          <p class="hook-desc" data-testid="projects-remote">
-            The hub’s projects roots and layout are on the
-            <button type="button" class="link-btn" data-testid="projects-remote-open" onclick={() => select('settings.projects')}>Projects page</button>;
-            a rescan runs on the hub.
-          </p>
-        {:else}
-          <p class="hook-desc" data-testid="projects-remote">
-            {hubBlock('fleet_settings', $hubStatus)}
-          </p>
-        {/if}
-      </section>
-    {:else}
+    <div class="panel" hidden={panel !== 'projects'} data-testid="settings-panel-projects">
+    <!-- A paired desktop: the leaf shows the hub's Projects page instead. -->
+    {#if ownsFleet}
     <section class="block" data-testid="projects-section">
       <div class="section-header">
         <h4>Projects</h4>
@@ -750,7 +755,9 @@
       {#if projectsError}<p class="err">{projectsError}</p>{/if}
     </section>
     {/if}
+    </div>
 
+    <div class="panel" hidden={panel !== 'appearance'} data-testid="settings-panel-onboarding">
     <section class="block" data-testid="onboarding-section">
       <div class="section-header">
         <h4>Setup guide</h4>
@@ -788,7 +795,9 @@
         </label>
       </div>
     </section>
+    </div>
 
+    <div class="panel" hidden={panel !== 'notifications'} data-testid="settings-panel-notifications">
     <section class="block" data-testid="notifications-section">
       <div class="section-header">
         <h4>Notifications</h4>
@@ -836,7 +845,13 @@
         <span class="hook-desc">minutes before an idle work session counts as "needs attention" (0 = never)</span>
       </div>
     </section>
+    </div>
 
+    {#if panel === 'shortcuts'}
+      <ShortcutSettings />
+    {/if}
+
+    <div class="panel" hidden={panel !== 'composer'} data-testid="settings-panel-composer">
     <section class="block" data-testid="composer-section">
       <h4>Conversation composer</h4>
       <div class="hook-section">
@@ -903,9 +918,13 @@
         </div>
       </div>
     </section>
+    </div>
 
+    <div class="panel" hidden={panel !== 'work'} data-testid="settings-panel-work">
     <WorkSettings onopen={(id) => select(id)} />
+    </div>
 
+    <div class="panel" hidden={panel !== 'mcp'} data-testid="settings-panel-mcp">
     {#if !ownsFleet}
       <section class="block" data-testid="mcp-remote-section">
         <div class="section-header"><h4>Control API (MCP)</h4></div>
@@ -922,7 +941,9 @@
          when a slow multi-host provision outlives this dialog. -->
     <McpSettings bind:this={mcpSettings} onProvisioned={loadHostTokens} />
     {/if}
+    </div>
 
+    <div class="panel" hidden={panel !== 'diagnostics'} data-testid="settings-panel-diagnostics">
     <section class="block" data-testid="diagnostics-section">
       <div class="section-header">
         <h4>Diagnostics</h4>
@@ -952,12 +973,14 @@
         </p>
       {/if}
     </section>
-    {:else if currentPage}
+    </div>
+
+    {#if currentPage}
       {#if !ownsFleet && currentPage.layout === 'master_detail'}
         <!-- A resource's list routes to the hub: shown, read-only, with
              where to change it instead. -->
         {@const res = $pagesBundle.resources.find((r) => r.id === currentPage.resource)}
-        {#key currentPage.id}
+        {#key view}
           <PageView
             page={currentPage}
             pages={$allPages}
@@ -968,11 +991,12 @@
             actions={$pagesBundle.actions}
             readonly
             reason={res ? resourceBlock(res, $hubStatus) : null}
+            section={leaf?.section}
             onnavigate={(id) => select(id)} />
         {/key}
       {:else if !pagesHere}
         <section class="block" data-testid="pages-remote">
-          <div class="section-header"><h4>{currentPage.title}</h4></div>
+          <div class="section-header"><h4>{leaf?.section ?? currentPage.title}</h4></div>
           {#if hubPages === 'loading'}
             <p class="hook-desc">Reading the hub’s settings…</p>
           {:else}
@@ -992,7 +1016,7 @@
             {/if}
           </p>
         {/if}
-        {#key currentPage.id}
+        {#key view}
           <PageView
             readonly={!ownsFleet && !$settingsWritable}
             remote={!ownsFleet}
@@ -1004,6 +1028,7 @@
             resources={$pagesBundle.resources}
             actions={$pagesBundle.actions}
             {focusKey}
+            section={leaf?.section}
             proposals={$settingProposals}
             onnavigate={(id) => select(id)}
             onopen={(id, key) => select(id, key)} />
@@ -1024,7 +1049,7 @@
   header { display: flex; align-items: center; justify-content: space-between; }
   .settings-body {
     display: grid;
-    grid-template-columns: 12rem minmax(0, 1fr);
+    grid-template-columns: var(--settings-nav-w) minmax(0, 1fr);
     gap: 1.25rem;
     align-items: start;
   }
@@ -1037,6 +1062,13 @@
     flex-direction: column;
     gap: 0.8rem;
     min-width: 0;
+    max-width: var(--prose-max);
+  }
+  .panel {
+    display: contents;
+  }
+  .panel[hidden] {
+    display: none;
   }
   @media (max-width: 640px) {
     .settings-body {
@@ -1121,14 +1153,5 @@
 
   .hub-scope {
     margin: 0 0 0.6rem;
-  }
-  .link-btn {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--accent);
-    font: inherit;
-    cursor: pointer;
-    text-decoration: underline;
   }
 </style>
