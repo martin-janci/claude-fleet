@@ -140,4 +140,10 @@
 //!   the rule above says explicitly not to bump for, and an older client
 //!   absorbs them through `#[serde(default)]`. One bump covers the milestone.
 //!   There is deliberately no mixed window: hub and desktop upgrade together.
-pub const CONTRACT_REVISION: u32 = 8;
+//! - **9** — *a brand-new tool the desktop routes to.* Chat forms: the
+//!   desktop routes `list_forms` / `get_form` / `answer_form` /
+//!   `decline_form` to the hub's new `ask` tool, and session rows carry
+//!   `pending_form`. A revision-8 hub serves no `ask`, so a desktop paired
+//!   with one would draw the forms card and fail every answer with an
+//!   unknown tool.
+pub const CONTRACT_REVISION: u32 = 9;

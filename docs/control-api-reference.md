@@ -849,6 +849,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::pages::list_guides`
 - `commands::pages::decide_guide`
 - `commands::pages::remove_guide`
+- `commands::forms::list_forms`
+- `commands::forms::get_form`
+- `commands::forms::answer_form`
+- `commands::forms::decline_form`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`

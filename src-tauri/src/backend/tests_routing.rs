@@ -169,6 +169,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 
 /// A minimal but complete `SessionRow`, null-stripped the way the hub leaves
 /// one. Nothing in the local store ever looks like this.
+const FORM_VIEW_JSON: &str = r#"{"form_id":"f_a","session_id":4,"host_alias":"h","title":"T","spec":{},"state":"pending","created_at":1}"#;
 const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}"#;
 /// `transport` is required on the wire (migration 034): it is a `String`,
 /// not an `Option`, so `ok_json_compact` never strips it and a row without
@@ -658,6 +659,30 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     "the hub decides whether this device may approve"
                 );
                 Ok(())
+            }),
+        ),
+        (
+            "list_forms",
+            "ask",
+            json!({ "list": { "session_id": 4, "state": "pending" } }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::forms::routed::list_forms(
+                    b,
+                    s,
+                    Some(4),
+                    Some("pending".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "get_form",
+            "ask",
+            json!({ "get": "f_a" }),
+            FORM_VIEW_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::forms::routed::get_form(b, s, "f_a".into())).map(|_| ())
             }),
         ),
         (
@@ -1901,6 +1926,38 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     b,
                     s,
                     "guide.cleanup".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "answer_form",
+            "ask",
+            json!({ "answer": "f_a", "values": { "x": "y" } }),
+            FORM_VIEW_JSON,
+            Box::new(|b, s, ssh| {
+                let values = serde_json::from_value(json!({ "x": "y" })).unwrap();
+                block_on(commands::forms::routed::answer_form(
+                    b,
+                    s,
+                    ssh,
+                    "f_a".into(),
+                    values,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decline_form",
+            "ask",
+            json!({ "decline": "f_a", "note": "later" }),
+            FORM_VIEW_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::forms::routed::decline_form(
+                    b,
+                    s,
+                    "f_a".into(),
+                    Some("later".into()),
                 ))
                 .map(|_| ())
             }),
@@ -4643,6 +4700,26 @@ const M1_REVIEWED_DESKTOP_COMMANDS: &[(&str, &str, &str)] = &[
     ),
     ("remove_guide", "guide", "retiring one live guide"),
     (
+        "list_forms",
+        "ask",
+        "the hub filters forms to sessions this device may read",
+    ),
+    (
+        "get_form",
+        "ask",
+        "the hub gates the form's session with Reach::Read",
+    ),
+    (
+        "answer_form",
+        "ask",
+        "the hub gates the form's session with Reach::Drive and refuses host tokens",
+    ),
+    (
+        "decline_form",
+        "ask",
+        "the hub gates the form's session with Reach::Drive and refuses host tokens",
+    ),
+    (
         "catalog_set_host_harnesses",
         "catalog_admin",
         "which harnesses a HOST serves, i.e. what the next `apply_sync` \
@@ -5079,6 +5156,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/move_session.rs"),
     ),
     ("commands/mutate.rs", include_str!("../commands/mutate.rs")),
+    ("commands/forms.rs", include_str!("../commands/forms.rs")),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",

@@ -713,6 +713,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("list_guides", Verdict::Routed { tool: "guide" }),
     ("decide_guide", Verdict::Routed { tool: "guide" }),
     ("remove_guide", Verdict::Routed { tool: "guide" }),
+    ("list_forms", Verdict::Routed { tool: "ask" }),
+    ("get_form", Verdict::Routed { tool: "ask" }),
+    ("answer_form", Verdict::Routed { tool: "ask" }),
+    ("decline_form", Verdict::Routed { tool: "ask" }),
     (
         "set_fleet_setting",
         Verdict::Routed {
