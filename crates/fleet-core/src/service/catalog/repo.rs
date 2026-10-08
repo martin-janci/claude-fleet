@@ -166,7 +166,11 @@ fn git_output(dir: &Path, args: &[&str]) -> Result<std::process::Output, IpcErro
     // `layers/a.yaml` (Assets M4, Task 6 review round 3).
     cmd.args(args)
         .current_dir(dir)
-        .env("GIT_LITERAL_PATHSPECS", "1");
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        // Nobody is at a terminal to answer a credential prompt: on a hub or
+        // a desktop launched from the dock, git asking for a password would
+        // wait forever while holding the authoring lock. Fail instead.
+        .env("GIT_TERMINAL_PROMPT", "0");
     // Tests must not depend on (or be broken by) the host's own global git
     // config or identity environment: isolate every git invocation the
     // production code makes from both. This has no effect on release builds
@@ -305,8 +309,17 @@ pub fn ensure_repo(path: &Path, remote: Option<&str>) -> Result<(), IpcError> {
                     std::io::Error::new(e.kind(), format!("creating {}: {e}", parent.display()));
                 unreadable(path, &e)
             })?;
+            // A URL that begins with `-` would be parsed by git as an option
+            // (`--upload-pack=<cmd>` runs a command); refused outright, and
+            // `--` ends option parsing for anything that slips past.
+            if url.trim_start().starts_with('-') {
+                return Err(IpcError::new(
+                    E_CATALOG_GIT,
+                    format!("{url:?} is not a repository URL"),
+                ));
+            }
             let target = path.to_string_lossy().to_string();
-            git(parent, &["clone", "-q", url, &target])?;
+            git(parent, &["clone", "-q", "--", url, &target])?;
             Ok(())
         }
         None => Err(IpcError::new(
@@ -1057,12 +1070,33 @@ fn rel(root: &Path, p: &Path) -> String {
     }
 }
 
-fn read_resources(dir: &Path) -> std::io::Result<Vec<Resource>> {
-    let mut out = Vec::new();
-    let res = dir.join("resources");
-    if !res.is_dir() {
-        return Ok(out);
+/// Refuse `p` when it is a symlink. An asset's own files (`asset.yaml`, its
+/// body, `resources/`) come from a catalog repo that other people push to,
+/// and a committed symlink is checked out as one: `SKILL.md ->
+/// ~/.ssh/id_ed25519` would otherwise be read on the hub and shipped as the
+/// skill's body to every host. A symlinked asset FOLDER stays allowed (a
+/// local catalog may link one in); what is inside it is read as files.
+fn refuse_symlink(p: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(p) {
+        Ok(m) if m.file_type().is_symlink() => Err(format!(
+            "{} is a symlink; an asset's files must be regular files",
+            p.file_name().unwrap_or_default().to_string_lossy()
+        )),
+        _ => Ok(()),
     }
+}
+
+fn read_resources(dir: &Path) -> Result<Vec<Resource>, String> {
+    let res = dir.join("resources");
+    refuse_symlink(&res)?;
+    if !res.is_dir() {
+        return Ok(Vec::new());
+    }
+    read_resource_tree(dir, res).map_err(|e| e.to_string())
+}
+
+fn read_resource_tree(dir: &Path, res: PathBuf) -> std::io::Result<Vec<Resource>> {
+    let mut out = Vec::new();
     let mut stack = vec![res];
     while let Some(d) = stack.pop() {
         let mut entries: Vec<_> = std::fs::read_dir(&d)?.collect::<Result<_, _>>()?;
@@ -1091,6 +1125,7 @@ fn read_resources(dir: &Path) -> std::io::Result<Vec<Resource>> {
 }
 
 fn load_one(root: &Path, kind: Kind, yaml_path: &Path, stem: &str) -> Result<Asset, String> {
+    refuse_symlink(yaml_path)?;
     let text = std::fs::read_to_string(yaml_path).map_err(|e| e.to_string())?;
     let mut asset = Asset::from_yaml(Some(kind), &text)?;
     if asset.header.name != stem {
@@ -1106,9 +1141,10 @@ fn load_one(root: &Path, kind: Kind, yaml_path: &Path, stem: &str) -> Result<Ass
     if kind.is_folder() {
         let dir = yaml_path.parent().unwrap_or(root);
         let body = dir.join(body_file(kind));
+        refuse_symlink(&body)?;
         asset.body =
             std::fs::read_to_string(&body).map_err(|_| format!("missing {}", body_file(kind)))?;
-        asset.resources = read_resources(dir).map_err(|e| e.to_string())?;
+        asset.resources = read_resources(dir)?;
     }
     Ok(asset)
 }
@@ -1948,6 +1984,82 @@ mod tests {
         let skill = cat.find(Kind::Skill, "x").unwrap();
         assert_eq!(skill.resources.len(), 1);
         assert_eq!(skill.resources[0].rel_path, "resources/real.txt");
+    }
+
+    #[test]
+    fn a_remote_that_looks_like_an_option_is_not_cloned() {
+        let root = tmp("dash-url");
+        let path = root.join("checkout");
+        let marker = root.join("ran");
+        let url = format!("--upload-pack=touch {}", marker.display());
+        let err = ensure_repo(&path, Some(&url)).unwrap_err();
+        assert_eq!(err.code, E_CATALOG_GIT);
+        assert!(!marker.exists());
+        assert!(!path.exists());
+    }
+
+    /// A catalog repo is pushed to by other people, and a committed symlink
+    /// is checked out as one. The asset's own files must not reach outside
+    /// it: the body, `asset.yaml` and `resources/` are refused as symlinks,
+    /// and the asset becomes a problem rather than shipping the target.
+    #[cfg(unix)]
+    #[test]
+    fn load_dir_refuses_an_asset_whose_own_files_are_symlinks() {
+        let root = tmp("symlink-own");
+        let outside = tmp("symlink-outside");
+        write(&outside, "id_ed25519", "PRIVATE KEY\n");
+        write(&outside, "secrets/token", "t0ken\n");
+        write(
+            &outside,
+            "asset.yaml",
+            "kind: skill\nname: y\ndescription: d\n",
+        );
+        write(&root, "catalog.yaml", "schema_version: 1\n");
+        // Body links out.
+        write(
+            &root,
+            "skills/a/asset.yaml",
+            "kind: skill\nname: a\ndescription: d\n",
+        );
+        std::os::unix::fs::symlink(outside.join("id_ed25519"), root.join("skills/a/body.md"))
+            .unwrap();
+        // resources/ links out.
+        write(
+            &root,
+            "skills/b/asset.yaml",
+            "kind: skill\nname: b\ndescription: d\n",
+        );
+        write(&root, "skills/b/body.md", "b\n");
+        std::os::unix::fs::symlink(outside.join("secrets"), root.join("skills/b/resources"))
+            .unwrap();
+        // asset.yaml links out.
+        fs::create_dir_all(root.join("skills/y")).unwrap();
+        write(&root, "skills/y/body.md", "b\n");
+        std::os::unix::fs::symlink(outside.join("asset.yaml"), root.join("skills/y/asset.yaml"))
+            .unwrap();
+        // A plain asset beside them still loads.
+        write(
+            &root,
+            "skills/ok/asset.yaml",
+            "kind: skill\nname: ok\ndescription: d\n",
+        );
+        write(&root, "skills/ok/body.md", "fine\n");
+
+        let cat = load_dir(&root).unwrap();
+        assert!(cat.find(Kind::Skill, "ok").is_some());
+        for name in ["a", "b", "y"] {
+            assert!(cat.find(Kind::Skill, name).is_none(), "{name} loaded");
+            assert!(
+                cat.problems
+                    .iter()
+                    .any(|p| p.path.starts_with(&format!("skills/{name}/"))
+                        && p.message.contains("symlink")),
+                "{name}: {:?}",
+                cat.problems
+            );
+        }
+        let all = format!("{cat:?}");
+        assert!(!all.contains("PRIVATE KEY") && !all.contains("t0ken"));
     }
 
     #[cfg(unix)]
