@@ -608,6 +608,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "adopt_session",
+        Verdict::Routed {
+            tool: "adopt_session",
+        },
+    ),
+    (
         "dismiss_ghost_session",
         Verdict::Routed {
             tool: "dismiss_ghost_session",

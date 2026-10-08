@@ -57,6 +57,7 @@
     "add_org",
     "add_org_rule",
     "add_project",
+    "adopt_session",
     "answer_form",
     "assets_inventory",
     "assets_scan_hosts",

@@ -1045,6 +1045,17 @@ export async function dismissGhostSession(sessionId: number): Promise<Result<voi
   return r;
 }
 
+/** Adopt a live tmux session fleet did not start (`started_at` null): fleet
+ *  runs it from now on and the caller owns it when nobody did (Lost and
+ *  found, redesign step 4.8). */
+export async function adoptSession(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('adopt_session', {
+    args: { session_id: sessionId },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
 // ─── background sessions ─────────────────────────────────────────────────────
 
 export interface NewBgSessionResult {

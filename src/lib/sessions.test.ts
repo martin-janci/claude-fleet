@@ -6,7 +6,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, adoptSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
 import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel, sessionAgent } from './sessions';
 import type { SessionRow } from './sessions';
 
@@ -229,6 +229,18 @@ describe('sessions store', () => {
       'discover_lost_sessions',
       { args: { host_alias: 'mefistos', limit: 100 } },
     ]);
+  });
+
+  it('adoptSession sends the id and puts the adopted row in the list', async () => {
+    const adopted = { ...base, id: 9, tmux_name: 'scratch', started_at: 100 };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(adopted); // adopt_session
+    const r = await adoptSession(9);
+    expect(r.ok).toBe(true);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'adopt_session',
+      { args: { session_id: 9 } },
+    ]);
+    expect(get(sessions).find((s) => s.id === 9)?.started_at).toBe(100);
   });
 
   it('discoverLostSessions defaults omitted limit to null', async () => {
