@@ -655,8 +655,17 @@
   const pendingForm = $derived(viewing === null ? (session.pending_form ?? null) : null);
   let closedForm = $state<string | null>(null);
   let lastFormId: string | null = null;
+  let lastFormSessionId: number | null = null;
   $effect(() => {
     const id = session.pending_form?.form_id ?? null;
+    if (session.id !== lastFormSessionId) {
+      // This panel is one instance across sessions: a different session is
+      // not a form that closed, and its predecessor's line does not follow.
+      lastFormSessionId = session.id;
+      closedForm = null;
+      lastFormId = id;
+      return;
+    }
     if (lastFormId && id === null) closedForm = lastFormId;
     if (id !== null) closedForm = null;
     lastFormId = id;

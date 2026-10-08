@@ -56,7 +56,7 @@
   );
 
   async function submit(values: Values) {
-    if (blocked) return;
+    if (blocked !== null) return;
     busy = true;
     error = null;
     problems = [];
@@ -73,7 +73,7 @@
   }
 
   async function decline() {
-    if (blocked) return;
+    if (blocked !== null) return;
     busy = true;
     error = null;
     const r = await declineForm(formId, note);

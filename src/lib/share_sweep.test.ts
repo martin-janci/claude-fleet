@@ -827,10 +827,10 @@ const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
       why:
         'The card is given a form id, never the row, so it cannot ask for itself; the access half ' +
         'arrives as the `blocked` prop, which ConversationPanel computes from the row it holds ' +
-        '(`hubActionBlocked` ?? `$sessionBlocked`), and the card refuses to write while it is set.',
+        '(`hubActionBlocked` ?? `$sessionBlocked`), and the card refuses to write while it is set. The `closed` card has no write path.',
       pins: [
         { file: './forms/FormCard.svelte', needle: 'blocked: string | null;' },
-        { file: './forms/FormCard.svelte', needle: 'if (blocked) return;' },
+        { file: './forms/FormCard.svelte', needle: 'if (blocked !== null) return;' },
         { file: './ConversationPanel.svelte', needle: "$sessionBlocked(session, 'answer_form')" },
         { file: './ConversationPanel.svelte', needle: 'blocked={formBlocked}' },
       ],
@@ -844,7 +844,7 @@ const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
         'writes of the card.',
       pins: [
         { file: './forms/FormCard.svelte', needle: 'blocked: string | null;' },
-        { file: './forms/FormCard.svelte', needle: 'if (blocked) return;' },
+        { file: './forms/FormCard.svelte', needle: 'if (blocked !== null) return;' },
         { file: './ConversationPanel.svelte', needle: "$sessionBlocked(session, 'answer_form')" },
         { file: './ConversationPanel.svelte', needle: 'blocked={formBlocked}' },
       ],

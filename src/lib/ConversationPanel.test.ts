@@ -37,6 +37,7 @@ vi.mock('./selection', async () => {
 });
 import { sessionConversation, sessionActivity, listConversations, toolDetail, type ConversationSummary, PROMPT_CLAMP_LINES, CONVERSATION_POLL_MS, ACTIVITY_POLL_MS, QUIET_POLL_MS, PROBE_TTL_MS, CONV_MAX_TURNS, type Conversation, type ActivityProbe } from './conversation';
 import ConversationPanel from './ConversationPanel.svelte';
+import { getForm } from './forms/forms';
 import { sendPrompt, sessions, type SessionRow } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { tasks, type TaskRow } from './tasks';
@@ -1467,6 +1468,54 @@ describe('ConversationPanel live indicator', () => {
     });
     await settle();
     expect(screen.getByTestId('form-card')).toBeTruthy();
+  });
+
+  describe('closed form line', () => {
+    const answered = { ok: true, value: { form_id: 'f_a', title: 'Deploy', state: 'answered', answered_by: 'me', spec: { steps: [] } } };
+    beforeEach(() => {
+      vi.mocked(getForm).mockResolvedValue(answered as never);
+    });
+
+    it('a form that leaves the same session\'s row leaves a closed outcome line', async () => {
+      mockedConv.mockReturnValue(ok(conv()));
+      const { rerender } = render(ConversationPanel, {
+        session: session({ id: 1, pending_form: { form_id: 'f_a', title: 'Deploy' } }),
+        visible: true,
+      });
+      await settle();
+      await rerender({ session: session({ id: 1, pending_form: null }), visible: true });
+      await settle();
+      expect(screen.getByTestId('form-outcome')).toBeTruthy();
+      expect(screen.queryByTestId('form-card')).toBeNull();
+    });
+
+    it('selecting another session does not show the previous session\'s form as closed', async () => {
+      mockedConv.mockReturnValue(ok(conv()));
+      const { rerender } = render(ConversationPanel, {
+        session: session({ id: 1, pending_form: { form_id: 'f_a', title: 'Deploy' } }),
+        visible: true,
+      });
+      await settle();
+      await rerender({ session: session({ id: 2, tmux_name: 'other', pending_form: null }), visible: true });
+      await settle();
+      expect(screen.queryByTestId('form-outcome')).toBeNull();
+      expect(screen.queryByTestId('form-card')).toBeNull();
+    });
+
+    it('a closed line of one session does not carry over to the next', async () => {
+      mockedConv.mockReturnValue(ok(conv()));
+      const { rerender } = render(ConversationPanel, {
+        session: session({ id: 1, pending_form: { form_id: 'f_a', title: 'Deploy' } }),
+        visible: true,
+      });
+      await settle();
+      await rerender({ session: session({ id: 1, pending_form: null }), visible: true });
+      await settle();
+      expect(screen.getByTestId('form-outcome')).toBeTruthy();
+      await rerender({ session: session({ id: 2, tmux_name: 'other', pending_form: null }), visible: true });
+      await settle();
+      expect(screen.queryByTestId('form-outcome')).toBeNull();
+    });
   });
 
   it('a blocked row with a dialog shows the answer card instead of the bare banner', async () => {
