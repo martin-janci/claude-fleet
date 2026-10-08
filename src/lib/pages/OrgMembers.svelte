@@ -247,7 +247,7 @@
   th {
     text-align: left;
     font-weight: 500;
-    color: var(--text-dim);
+    color: var(--fg-muted);
     font-size: 0.8rem;
     padding: 0.25rem 0.4rem;
     border-bottom: 1px solid var(--border);
@@ -263,7 +263,7 @@
   }
   .dim,
   .none {
-    color: var(--text-dim);
+    color: var(--fg-muted);
     font-size: 0.8rem;
   }
   .acts {
@@ -281,7 +281,7 @@
     margin-top: 0.6rem;
     padding: 0.6rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
   }
   .pair form {
     display: flex;
@@ -289,7 +289,7 @@
     flex-wrap: wrap;
   }
   .error {
-    color: var(--danger, #c33);
+    color: var(--danger);
   }
   .choices {
     display: flex;
