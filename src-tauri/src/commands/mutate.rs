@@ -119,6 +119,21 @@ pub async fn repo_commit_create(
     repo_mutate::repo_commit_create(args, &store, &ssh).await
 }
 
+/// Draft a commit message from the staged changes (Orbit Fleet 5.12): one
+/// `claude -p` on the session's host, under its account. Nothing is
+/// committed.
+#[tauri::command]
+pub async fn draft_commit_message(
+    args: SessionIdArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::drafts::CommitDraft, IpcError> {
+    backend.refuse_local_only("draft_commit_message")?;
+    fleet_core::service::drafts::draft_commit_message(&store, ssh.inner().as_ref(), args.session_id)
+        .await
+}
+
 /// `git fetch` (all remotes).
 #[tauri::command]
 pub async fn repo_fetch(

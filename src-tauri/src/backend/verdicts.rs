@@ -116,6 +116,10 @@ const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
 
+const NO_DRAFT_TOOL: &str =
+    "the hub exposes no draft tool — a commit message is drafted where the commit is made: \
+     in the session, or from a standalone app";
+
 /// Every command in `generate_handler!`, grouped as there, with its verdict.
 pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── health and this app's own logs ──────────────────────────────────────
@@ -1013,6 +1017,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "repo_commit_create",
         Verdict::LocalOnly {
             instead: NO_GIT_WRITE_TOOL,
+        },
+    ),
+    (
+        "draft_commit_message",
+        Verdict::LocalOnly {
+            instead: NO_DRAFT_TOOL,
         },
     ),
     (

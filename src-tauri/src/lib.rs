@@ -615,6 +615,7 @@ pub fn run() {
             commands::mutate::repo_stage,
             commands::mutate::repo_unstage,
             commands::mutate::repo_commit_create,
+            commands::mutate::draft_commit_message,
             commands::mutate::repo_fetch,
             commands::mutate::repo_pull,
             commands::mutate::repo_push,
