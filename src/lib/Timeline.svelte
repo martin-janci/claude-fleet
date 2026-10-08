@@ -2,6 +2,7 @@
   // Read-only session event timeline (Q9). Renders the `session_events`
   // rows the backend already records (status changes, prompts, stuck,
   // kills, repairs, …) newest first, with filter chips.
+  import ListLoading from './ListLoading.svelte';
   import { untrack } from 'svelte';
   import {
     sessionHistory,
@@ -123,7 +124,7 @@
   </div>
 
   {#if loading}
-    <p class="muted">Loading…</p>
+    <ListLoading />
   {:else if error}
     <p class="err" data-testid="timeline-error">{error}</p>
   {:else if shown.length === 0}

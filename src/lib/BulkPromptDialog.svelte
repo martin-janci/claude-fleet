@@ -3,6 +3,7 @@
   // PromptComposer's send loop (one `send_prompt` per target, per-target
   // error/success), but the target list is fixed by the selection instead of
   // derived from a source session.
+  import Loader from './Loader.svelte';
   import { sendPrompt, type SessionRow } from './sessions';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -109,7 +110,7 @@
         onclick={send}
         data-testid="bulk-prompt-send"
       >
-        {sending ? 'Sending…' : 'Send →'}
+        {#if sending}<Loader name="comet" size={12} class="btn-loader" />{/if}{sending ? 'Sending…' : 'Send →'}
       </button>
     </div>
   </div>

@@ -1,5 +1,6 @@
 <script lang="ts" module>
   import type { ChangedFile, RepoTree } from './files';
+  import ListLoading from './ListLoading.svelte';
   import { fileIcon, folderIcon } from './fileicons';
 
   interface TreeNode {
@@ -125,7 +126,7 @@
 
   <div class="rows">
     {#if loading}
-      <p class="hint">Loading…</p>
+      <ListLoading />
     {:else if error}
       <p class="hint err">{error}</p>
     {:else if mode === 'changes'}

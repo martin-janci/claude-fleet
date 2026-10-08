@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ListLoading from './ListLoading.svelte';
   import type { Branch } from './history';
 
   let {
@@ -57,7 +58,7 @@
     {/if}
   </div>
   {#if loading}
-    <p class="hint">Loading…</p>
+    <ListLoading />
   {:else if error}
     <p class="hint err">{error}</p>
   {:else}

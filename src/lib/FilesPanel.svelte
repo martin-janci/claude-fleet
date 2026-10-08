@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ListLoading from './ListLoading.svelte';
   import { untrack } from 'svelte';
   import type { SessionRow } from './sessions';
   import {
@@ -355,7 +356,7 @@
       </div>
       <div class="hscroll">
         {#if loading && commits.length === 0}
-          <p class="hint">Loading…</p>
+          <ListLoading />
         {:else if error}
           <p class="hint err">{error}</p>
         {:else}
