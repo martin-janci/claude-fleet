@@ -30,7 +30,7 @@ test file (and test) that covers it today.
 
 | # | Today | Goes to | Reached by | Step | Now | Proof |
 |---|---|---|---|---|---|---|
-| P1 | Sessions · Work switch | Sessions and Work rail items | ⌘⇧W / Ctrl+Shift+W, unchanged | 3.2 | Classic | `src/lib/WorkViewSwitch.test.ts`, `src/lib/shortcuts.test.ts` |
+| P1 | Sessions · Work switch | Sessions and Work rail items | ⌘⇧W / Ctrl+Shift+W, unchanged | 3.2 | Both | `src/lib/WorkViewSwitch.test.ts`, `src/lib/shortcuts.test.ts`; New: `src/App.destination.test.ts` › Work and Sessions pick the sidebar tree and leave a fleet page |
 | P2 | Tasks · Review · Missions tabs | Views at the top of the Work list, same names | Click; Review count kept | 3.4 | Classic | `src/lib/WorkTree.test.ts` |
 | P3 | List · Grouped · Board | One segmented control; Board fills the main pane | Click; ← → and e on the board | 3.4 | Classic | `src/lib/WorkTree.test.ts` (layout toggle), `src/lib/WorkBoard.test.ts` |
 | P4 | Work ⚙ Placement rules | Work view ⋯ menu, and Settings → Work & trackers → Placement rules… (landed in 7.1) | Both | 7.1 | Both | `src/lib/WorkRuleEditor.test.ts`, `src/lib/WorkSettings.test.ts` › opens the placement rules from Settings… |
@@ -51,7 +51,7 @@ test file (and test) that covers it today.
 | P19 | Mission Complete, Mark failed, Cancel | ⋯ menu beside Edit and Pause | Click, with a confirm | 6.2 | Classic | `src/lib/WorkMissions.test.ts` |
 | P20 | Session Details actions (about 15) | Inspector actions plus ⋯ menu, all kept | Click | 3.5 | Classic | `src/lib/SessionDetails.test.ts` |
 | P21 | Empty task sections | Hidden while empty; + Add subtask stays a button | Click | 1.4 | Classic | `src/lib/TaskWorkSections.test.ts` › starts a subtask and adds one under this task |
-| P22 | Hosts tab | Accounts & hosts rail item | ⌘I / Ctrl+Shift+H, unchanged | 3.2, 4.1 | Classic | `src/lib/HostsView.test.ts`, `src/lib/shortcuts.test.ts` |
+| P22 | Hosts tab | Accounts & hosts rail item | ⌘I / Ctrl+Shift+H, unchanged | 3.2, 4.1 | Both | `src/lib/HostsView.test.ts`, `src/lib/shortcuts.test.ts`; New: `src/lib/AppRail.test.ts` (the item is current on Hosts and names ⌘I), `src/App.destination.test.ts` › Accounts opens as one more overlay… |
 | P23 | Assets | Renamed Toolkit, same content | Click | 3.16 | Classic | `src/lib/AssetsPanel.test.ts`, `src/lib/AssetsWorkspace.test.ts` |
 | P24 | Sessions and Work filters | One engine; every facet of both kept (machine, time, tracker column, background agents, archived, saved views) | Same chips; ⌘⇧O / Ctrl+Shift+O | 3.7 | Classic | `src/lib/WorkFiltersBar.test.ts`, `src/lib/work_view_persist.test.ts`, `src/lib/Sidebar.test.ts` |
 | P25 | About 15 ways to start a session | All kept; they open the same flow | ⌘N / Ctrl+Shift+N and every existing button | 1.9, 3.12 | Classic | `src/lib/NewSessionDialog.test.ts`, `src/lib/QuickSwitcher.test.ts` |
