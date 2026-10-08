@@ -33,7 +33,7 @@ pub enum PromptGate {
 
 /// PURE: decide from a captured pane.
 pub fn prompt_gate(pane: &str) -> PromptGate {
-    let intel = crate::service::pane_intel::analyze(pane);
+    let intel = crate::agent_adapter::claude().analyze_pane(pane);
     match intel.stuck {
         Some(StuckKind::TrustPrompt) => return PromptGate::TrustDialog,
         Some(_) => return PromptGate::Blocked,
@@ -433,7 +433,7 @@ fn unacked_step(pane: &str, prompt: &str, may_retype: bool) -> Nudge {
     if prompt_gate(pane) != PromptGate::Ready {
         return Nudge::Wait;
     }
-    let intel = crate::service::pane_intel::analyze(pane);
+    let intel = crate::agent_adapter::claude().analyze_pane(pane);
     if intel.derived_status == Some(ClaudeStatus::Working) {
         return Nudge::Wait;
     }
