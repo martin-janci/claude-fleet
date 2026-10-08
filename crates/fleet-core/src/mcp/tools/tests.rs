@@ -3945,7 +3945,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// the Files tab's `repo_blame` and `repo_branches`' `merged` note.
     /// Measured at 86,933 on 2026-10-08 after the redesign's
     /// `touch_session_viewed` (step 2.3, +308 bytes over main's 86,625).
-    const BUDGET_BYTES: usize = 87_033;
+    /// Measured at 87,031 on 2026-10-08 after the loop registry
+    /// (`fleet_health` names `loops[]` and `automation_paused`, +176 bytes).
+    const BUDGET_BYTES: usize = 87_131;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

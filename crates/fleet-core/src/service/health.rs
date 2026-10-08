@@ -114,6 +114,16 @@ pub struct Health {
     /// sent) otherwise and from an older hub.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub org_budgets: Vec<crate::service::org_spend::OrgBudgetAlert>,
+    /// Every background loop's last run, next run and result
+    /// (`service::loops`, redesign 8.1), in this process. Not sent when
+    /// empty (an unready store, an older hub); no client reads it yet, so it
+    /// is not in the desktop's wire contract.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loops: Vec<crate::service::loops::LoopHealth>,
+    /// `automation.paused`: the pausable loops are standing still. Not sent
+    /// while false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub automation_paused: bool,
 }
 
 /// `fleet_health.hub`: this process's uptime and its last reconcile pass.
@@ -1013,6 +1023,8 @@ pub fn health_for(
             }
             _ => Vec::new(),
         },
+        loops: crate::service::loops::registry().snapshot(),
+        automation_paused: crate::service::loops::paused(s),
     };
     h.set_tunnels(tunnels);
     if matches!(view, HealthView::Blank) {
@@ -1097,6 +1109,8 @@ pub fn unready_health() -> Health {
         hosts: Vec::new(),
         decide: None,
         org_budgets: Vec::new(),
+        loops: Vec::new(),
+        automation_paused: false,
     }
 }
 
@@ -1953,6 +1967,8 @@ mod tests {
             hosts: Vec::new(),
             decide: None,
             org_budgets: Vec::new(),
+            loops: Vec::new(),
+            automation_paused: false,
         })
         .expect("Health serialises");
         let back: Health = serde_json::from_str(&whole).expect("a whole Health parses");
