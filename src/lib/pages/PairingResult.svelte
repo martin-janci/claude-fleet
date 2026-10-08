@@ -5,6 +5,7 @@
   import { onDestroy } from 'svelte';
   import { copyText } from '../clipboard';
   import { qrRects, type Pairing } from '../devices';
+  import Loader from '../Loader.svelte';
 
   let { pairing, onclose }: { pairing: Pairing; onclose: () => void } = $props();
 
@@ -46,6 +47,9 @@
       <button type="button" class="btn" data-testid="pairing-copy" onclick={() => void copyText(pairing.url)}>Copy link</button>
     </div>
     <p class="meta">
+      <!-- 11.12: a Halo round the code while it waits for the device. -->
+      <span class="halo" data-testid="pairing-halo"
+        ><Loader name="halo" size={24} delay={0} label={`Waiting for ${pairing.name}, ${clock(left)} left`} /></span>
       Code <code data-testid="pairing-code">{pairing.code}</code> · {pairing.mode === 'readonly' ? 'read-only' : 'full'}{pairing.person
         ? ` · ${pairing.person}'s device`
         : ''}
@@ -95,5 +99,14 @@
   code {
     font-size: 11px;
     word-break: break-all;
+  }
+  .meta {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+  .halo {
+    display: inline-flex;
   }
 </style>

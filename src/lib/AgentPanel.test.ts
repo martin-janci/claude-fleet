@@ -9,6 +9,7 @@ import { get } from 'svelte/store';
 import AgentPanel from './AgentPanel.svelte';
 import { agentPanelOpen, operatorError, operatorState, operatorSession } from './operator';
 import { sessions } from './sessions';
+import { hostsViewRequest, settingsOpen, settingsSection } from './app_views';
 import { agentPanelSize, agentPanelMaximized, AGENT_PANEL_MIN_W } from './agent_panel_size';
 
 const row = (over = {}) =>
@@ -138,3 +139,66 @@ describe('AgentPanel', () => {
   });
 });
 
+describe('AgentPanel: a next step for every blocked state (step 9.1)', () => {
+  it('no_mcp opens Settings › Control API, and calls no command', async () => {
+    operatorState.set('no_mcp');
+    render(AgentPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Open Settings › Control API' }));
+    expect(get(settingsSection)).toBe('control-api');
+    expect(get(settingsOpen)).toBe(true);
+    expect(invoke).not.toHaveBeenCalled();
+    settingsOpen.set(false);
+    settingsSection.set(null);
+  });
+
+  it('no_host and host_down without a fallback open the Hosts view', async () => {
+    operatorState.set('no_host');
+    const { unmount } = render(AgentPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Add a host' }));
+    expect(get(hostsViewRequest)).toEqual({ host: null });
+    unmount();
+    hostsViewRequest.set(null);
+  });
+
+  it('token_revoked asks before it kills, and Cancel kills nothing', async () => {
+    operatorState.set('token_revoked');
+    render(AgentPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Replace the agent' }));
+    expect(screen.getByTestId('agent-replace-confirm')).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByTestId('agent-replace-confirm')).toBeNull();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('token_revoked, confirmed, kills the session and starts a new agent', async () => {
+    operatorState.set('token_revoked');
+    operatorSession.set(row({ id: 71 }));
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'kill_session') return 71;
+      if (cmd === 'operator_status') return { ready: false, session: null, blocked: 'absent' };
+      if (cmd === 'ensure_operator') return row({ id: 72 });
+      return null;
+    });
+    render(AgentPanel);
+    await fireEvent.click(screen.getByRole('button', { name: 'Replace the agent' }));
+    await fireEvent.click(screen.getByTestId('agent-replace-yes'));
+    await vi.waitFor(() => expect(get(operatorState)).toBe('ready'));
+    const cmds = invoke.mock.calls.map((c) => c[0]);
+    expect(cmds).toEqual(['kill_session', 'operator_status', 'ensure_operator']);
+  });
+
+  it('embedded (Control) shows without the sheet and has no close or grip', async () => {
+    agentPanelOpen.set(false);
+    operatorState.set('lost');
+    invoke.mockResolvedValue({ ready: false, session: row(), blocked: 'lost' });
+    render(AgentPanel, { embedded: true });
+    expect(screen.getByTestId('control-agent')).toBeTruthy();
+    expect(screen.queryByTestId('agent-panel-close')).toBeNull();
+    expect(screen.queryByTestId('agent-panel-grip')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Restart the agent' })).toBeTruthy();
+    // Opening Control makes sure there is an agent, without opening the sheet.
+    expect(invoke).toHaveBeenCalledWith('operator_status', undefined);
+    expect(get(agentPanelOpen)).toBe(false);
+  });
+});
