@@ -224,7 +224,16 @@ including tasks with no session at all — as reads of the `work` tool
   count under the filters), and the orgs and trackers the caller sees.
   Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
-  `suggested`), `review`, `query`, `group`, `archived`. A task is
+  `suggested`), `review`, `query`, `group`, `archived`, and (redesign
+  step 6.2) `assignee` (one person by name, any case), `status_name` (one
+  tracker column, the tracker's own status name, any case) and `group_by`:
+  what a section under each org is, `group` (the default: a person, rule,
+  tracker container, repo or key), `org` (one section per org), `person`
+  (the first assignee), `mission` (named only when the caller may read the
+  mission), `account` (the account its sessions run on, an active one
+  first) or `repo`. A task with nothing to group by sits in `none`, last;
+  `group` then names a section of that grouping. An unknown `group_by` is
+  refused; a hub from before 6.2 ignores all three. A task is
   *archived* when it has no active session and is done, or every one of
   its links (at least one of them past) is archived, judged over every
   link of the task, not only the ones the caller sees. The tree hides
@@ -410,7 +419,7 @@ Fleet watches for work in:
 One recogniser (`service/work/recognize.rs`, mirrored in
 `src/lib/work_keys.ts` over a shared fixture) finds keys; with a tracker
 connected, a key must carry one of its prefixes, so `GPT-4` or `COVID-19`
-are never keys. One resolver (`service/work/resolve.rs`, rules R1–R11)
+are never keys. One resolver (`service/work/resolve.rs`, rules R1–R12)
 decides what each sighting becomes:
 
 - a **confirmed automatic link**, only for strong, unambiguous signals, for
@@ -446,7 +455,7 @@ suggestions, each with its **evidence**: one line per signal, for example
 - pull request closes ABC-123 · R4
 - Claude named ABC-7 when asked at 11:40 · R11
 
-The rule tag (R1…R11) says which resolver rule decided it. With
+The rule tag (R1…R12) says which resolver rule decided it. With
 `work.evidence_snippets` on (the default), hovering an evidence line shows
 a redacted ±40-character snippet of the prompt around the match; off, only
 the matched text is kept. The popover's buttons are **Confirm** (↵ / `y`),
@@ -476,6 +485,16 @@ gets one short note (at most 400 characters) asking Claude to name its
 work. Claude's answer (`source: agent_inferred`) is only ever a
 pre-selected suggestion (rule R11) that you confirm or reject. It spends
 context on a guess, which is why it is off.
+
+### Jev's proposal (off by default)
+
+With `decide.jev.work_link` on `assist`, the same unlinked conversation can
+get a suggestion from the decision model instead, without touching the
+conversation: Jev reads the first prompt (keys, links and the branch
+removed) and picks one of the same candidates or none. Its answer is a
+pre-selected suggestion (rule R12, source `jev`), marked ✦ and "Proposed by
+Jev" on the row and in Review, that you confirm or reject. See
+[decisions](decisions.md#work_link--the-work-item-of-a-session-no-rule-could-link-j1).
 
 ### SessionStart context (off by default)
 

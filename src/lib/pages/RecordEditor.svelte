@@ -9,6 +9,8 @@
   import ActionForm from './ActionForm.svelte';
   import TrackerExtras from '../TrackerExtras.svelte';
   import OrgSettingsList from './OrgSettingsList.svelte';
+  import OrgMembers from './OrgMembers.svelte';
+  import type { OrgMember } from '../orgs';
   import Chart from './Chart.svelte';
   import type { OrgSettingRow } from '../orgs';
   import type { TrackerRow } from '../trackers';
@@ -256,6 +258,22 @@
                       title={f.label}
                       testid={`chart-${f.id}`} />
                   </div>
+                {:else if f.type === 'items' && f.item_label.type === 'member'}
+                  <OrgMembers
+                    {record}
+                    members={itemsOf(f, record) as OrgMember[]}
+                    addAction={f.add[0]}
+                    removeAction={f.remove}
+                    {readonly}
+                    {busy}
+                    options={(p) => options(f, p)}
+                    run={async (a, args) => {
+                      busy = true;
+                      const ok = await run(a, args);
+                      busy = false;
+                      return ok;
+                    }}
+                    {now} />
                 {:else if f.type === 'items'}
                   <div class="chips" aria-labelledby={`rf-${f.id}`}>
                     {#each itemsOf(f, record) as it (itemKey(it))}

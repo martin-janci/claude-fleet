@@ -447,6 +447,22 @@
     workTreeSessionIds.set(ids);
   });
 
+  // The people and tracker columns of the tasks loaded, for the filter
+  // bar's Assignee and Tracker column chips (redesign step 6.2).
+  function namesOf(pick: (t: WorkTask) => readonly (string | null | undefined)[]): string[] {
+    const seen = new Map<string, string>();
+    const lists = [page?.tasks ?? [], listPage?.tasks ?? [], ...[...states.values()].map((x) => x.tasks)];
+    for (const tasks of lists)
+      for (const t of tasks)
+        for (const n of pick(t)) {
+          const v = n?.trim();
+          if (v && !seen.has(v.toLowerCase())) seen.set(v.toLowerCase(), v);
+        }
+    return [...seen.values()].sort((a, b) => a.localeCompare(b));
+  }
+  const people = $derived(namesOf((t) => t.assignees ?? []));
+  const columns = $derived(namesOf((t) => [t.status_name]));
+
   function toggleOrg(o: OrgSection) {
     setExpanded(get(workViewKey), o.key, !orgOpen(o));
   }
@@ -687,7 +703,7 @@
     </div>
     {#if tab === 'tasks'}
       {@const meta = listMode ? listPage : page}
-      <WorkFiltersBar orgs={meta?.orgs ?? []} trackers={meta?.trackers ?? []} listLayout={listMode} />
+      <WorkFiltersBar orgs={meta?.orgs ?? []} trackers={meta?.trackers ?? []} listLayout={listMode} {people} {columns} />
     {/if}
   </header>
 
@@ -1074,12 +1090,12 @@
     flex: 0 0 auto;
   }
   .needs {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 11px;
   }
   .review {
     font-weight: 700;
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .task-meta {
     display: flex;
@@ -1094,7 +1110,7 @@
     white-space: nowrap;
   }
   .down {
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .occurrences {
     padding-left: 1.4rem;
@@ -1176,10 +1192,10 @@
   .refresh-error {
     margin: 0.2rem 0.4rem;
     font-size: 11px;
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .error p {
     margin: 0 0 0.4rem;

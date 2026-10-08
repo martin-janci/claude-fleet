@@ -15,6 +15,8 @@
     type ToolDetail,
   } from './conversation';
   import CopyButton from './CopyButton.svelte';
+  import Loader from './Loader.svelte';
+  import { uiLayout } from './prefs';
   import Icon, { type IconName } from './Icon.svelte';
   import { lineDiff, splitPath, parseNumbered, parseTodos, parseFileList, inputField, detailKind } from './tool_view';
 
@@ -85,6 +87,9 @@
   const target = $derived(shortTarget(line.target) ?? argsOf(line.summary));
   const elapsed = $derived(toolDurationMs(line.at, line.ended_at, line.done || !live ? null : nowMs));
   const noResult = $derived(!line.done && !live);
+  // Redesign 5.14 (LoadersInFlows, Chat · Agent tool calls), New layout: a
+  // Comet only on the call that is running; a finished call goes still.
+  const running = $derived(!line.done && live);
   const duration = $derived(
     line.done
       ? elapsed === null
@@ -171,6 +176,11 @@
 
 {#snippet row()}
   <span class="chev" aria-hidden="true"></span>
+  {#if $uiLayout === 'new'}
+    <span class="state" data-testid="conv-tool-state" data-state={running ? 'running' : line.done && !line.error ? 'done' : 'still'}
+      >{#if running}<Loader name="comet" size={12} />{:else if line.done && !line.error}<span class="tick" aria-hidden="true">✓</span>{/if}</span
+    >
+  {/if}
   <span class="ticon"><Icon name={icon} size={13} /></span>
   <span class="verb">{verb}</span>
   {#if target}<span class="target" title={line.summary}>{target}</span>{/if}
@@ -345,6 +355,17 @@
   .open button.tool .chev {
     transform: rotate(90deg);
   }
+  .state {
+    flex: 0 0 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+  }
+  .tick {
+    color: var(--status-done);
+    font-size: 11px;
+  }
   .verb {
     flex: 0 0 auto;
     color: var(--fg);
@@ -430,20 +451,10 @@
     color: var(--diff-del-fg);
   }
   .detail {
-    --diff-add-fg: #1a7f37;
-    --diff-del-fg: #cf222e;
-    --diff-add-bg: rgba(46, 160, 67, 0.14);
-    --diff-del-bg: rgba(248, 81, 73, 0.14);
-  }
-  :global(:root[data-theme='dark']) .detail {
-    --diff-add-fg: #3fb950;
-    --diff-del-fg: #f85149;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root:not([data-theme='light'])) .detail {
-      --diff-add-fg: #3fb950;
-      --diff-del-fg: #f85149;
-    }
+    --diff-add-fg: var(--status-done);
+    --diff-del-fg: var(--status-failed);
+    --diff-add-bg: var(--done-soft);
+    --diff-del-bg: var(--failed-soft);
   }
   .code {
     margin: 0 0 0.35rem;

@@ -136,8 +136,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'scope', 'Organisation scope', split(['Meta+Shift+O'], ['Ctrl+Shift+O'])),
   row('global', 'today', 'Today', split(['Meta+Shift+T'], ['Ctrl+Shift+T'])),
   // The design manual's new chords (keyboard.md); ⌥⌘ is Ctrl+Alt elsewhere.
-  row('global', 'open-in-editor', 'Open in VS Code',
-    split(['Meta+Shift+E'], ['Ctrl+Alt+E']), { status: 'planned', step: '5.6' }),
+  row('global', 'open-in-editor', 'Open in VS Code', split(['Meta+Shift+E'], ['Ctrl+Alt+E'])),
   row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B'])),
   row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { status: 'planned', step: '5.5' }),
   row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { status: 'planned', step: '5.5' }),

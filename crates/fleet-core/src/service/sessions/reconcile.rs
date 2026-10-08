@@ -570,7 +570,7 @@ pub(super) fn intel_from_tails(tails: &std::collections::HashMap<String, String>
     tails
         .iter()
         .filter(|(_, t)| !t.is_empty())
-        .map(|(name, t)| (name.clone(), crate::service::pane_intel::analyze(t)))
+        .map(|(name, t)| (name.clone(), crate::agent_adapter::claude().analyze_pane(t)))
         .collect()
 }
 

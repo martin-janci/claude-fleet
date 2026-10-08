@@ -1554,6 +1554,9 @@ connection, with about one round-trip of latency.
 1. On the hub that will listen: `fleet-hub pair --mode peer --name <label>`.
 2. On the hub that will dial: `fleet-hub peer add https://<other-hub> <code>`.
    `fleet-hub peer list` shows the link `connected` within a few seconds.
+   From a desktop paired to that hub, Settings → Federation → Link a hub does
+   the same (a trusted full device), and lists each link's state, latency and
+   messages carried.
 
 Pair only a hub you trust: the **first** peer token to claim a given (never
 linked) fleet id gets that link, and no other token can claim the same fleet
@@ -3243,6 +3246,7 @@ Every command below refuses in hub client mode; the full table, with the command
 
 | Command | What to do instead |
 | --- | --- |
+| `account_spend` | this app collects no usage while a hub owns the fleet, so its store has no spend per account; read usage on the hub |
 | `account_usage_history` | this app does not poll account usage while a hub owns the fleet, so it keeps no history; read usage on the hub |
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |

@@ -104,7 +104,23 @@ pub struct WorkTreeFilters {
     /// active) into archived_hidden; absent shows them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
+    /// One person the task is assigned to in its tracker, by name (any
+    /// case).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// One tracker column: the tracker's own status name ("QA Review"),
+    /// any case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    /// What a section under each org is: group (default; a person, rule,
+    /// tracker container, repo or key), org (one section per org), person,
+    /// mission, account or repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_by: Option<String>,
 }
+
+/// [`WorkTreeFilters::group_by`]'s values.
+pub const GROUP_BY_VALUES: [&str; 6] = ["group", "org", "person", "mission", "account", "repo"];
 
 /// Where a task sits and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -593,6 +609,44 @@ pub struct ReviewItem {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<ReviewAlternative>,
     pub created_at: i64,
+    /// Who proposed it, when it is not a rule's reading of a signal: the
+    /// decision model's suggestion (J1, rule R12, redesign 6.8). Absent for
+    /// every other item, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<ReviewProposer>,
+}
+
+/// [`ReviewItem::proposed_by`]: "Proposed by Jev · from the first prompt ·
+/// 82%".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewProposer {
+    /// `jev`.
+    pub source: String,
+    /// Why, in fleet's words.
+    pub reason: String,
+    /// The model's confidence, in whole percent, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+}
+
+/// PURE: who proposed a link that carries `rule` and `evidence`: the
+/// decision model for an R12 suggestion, with the confidence its evidence
+/// note holds (`82%`); `None` for a rule's own reading.
+pub fn proposer_of(rule: Option<&str>, evidence: &[serde_json::Value]) -> Option<ReviewProposer> {
+    if rule != Some(crate::service::decide::work_link::RULE) {
+        return None;
+    }
+    let confidence_pct = evidence
+        .iter()
+        .filter(|e| e.get("signal").and_then(|s| s.as_str()) == Some("jev"))
+        .filter_map(|e| e.get("note").and_then(|n| n.as_str()))
+        .filter_map(|n| n.trim_end_matches('%').parse::<u8>().ok())
+        .next_back();
+    Some(ReviewProposer {
+        source: "jev".into(),
+        reason: "from the first prompt".into(),
+        confidence_pct,
+    })
 }
 
 /// Another suggestion of the same session, for *Change…*.
@@ -685,6 +739,13 @@ pub(crate) struct Graph {
     /// The scope the graph was loaded for, so a task's `blocked_by` names
     /// only items this caller may see.
     pub(crate) scope: OrgScope,
+    /// Item id → the mission it belongs to, `(id, name)`, for the missions
+    /// this caller may read: filled by [`tree`] only for a group by mission
+    /// (redesign step 6.2), so every other read pays nothing for it.
+    pub(crate) missions_by_item: HashMap<i64, (i64, String)>,
+    /// Account uuid → how it is named (nickname, else email), filled by
+    /// [`tree`] only for a group by account.
+    pub(crate) account_labels: HashMap<String, String>,
 }
 
 /// How a session is named when an agent proposes a subtask in its name:
@@ -901,6 +962,8 @@ impl Graph {
             visible_proposers,
             deps,
             scope: scope.clone(),
+            missions_by_item: HashMap::new(),
+            account_labels: HashMap::new(),
         })
     }
 
@@ -1306,10 +1369,18 @@ fn why_of(e: &Evidence) -> String {
         Some("prompt_key") => "mentioned in a prompt",
         Some("prompt_issue") => "issue number in a prompt",
         Some("agent_inferred") => "Claude named it",
+        Some("jev") => "Jev proposed",
         _ => "seen",
     };
     let text: String = e.text.chars().take(60).collect();
-    format!("{what} {text} · {}", e.rule).trim().to_string()
+    // The decision model's confidence rides the note (`82%`).
+    let note = match (e.signal, e.note.as_deref()) {
+        (super::resolve::Signal::Jev, Some(n)) => format!(" ({n})"),
+        _ => String::new(),
+    };
+    format!("{what} {text}{note} · {}", e.rule)
+        .trim()
+        .to_string()
 }
 
 fn strength_rank(s: Option<&str>) -> u8 {
@@ -2052,6 +2123,25 @@ pub fn check_filters(f: &WorkTreeFilters) -> Result<(), IpcError> {
     if f.query.as_deref().is_some_and(|q| q.chars().count() > 200) {
         return Err(bad("filters.query is longer than 200 characters"));
     }
+    if f.assignee
+        .as_deref()
+        .is_some_and(|q| q.chars().count() > 200)
+    {
+        return Err(bad("filters.assignee is longer than 200 characters"));
+    }
+    if f.status_name
+        .as_deref()
+        .is_some_and(|q| q.chars().count() > 200)
+    {
+        return Err(bad("filters.status_name is longer than 200 characters"));
+    }
+    if let Some(by) = f.group_by.as_deref() {
+        if !GROUP_BY_VALUES.contains(&by) {
+            return Err(bad(format!(
+                "filters.group_by is group, org, person, mission, account or repo, not {by:?}"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -2077,6 +2167,34 @@ fn matches_filters(t: &WorkTask, f: &WorkTreeFilters, with_group: bool) -> bool 
     }
     if f.mine == Some(true) && !t.mine {
         return false;
+    }
+    if let Some(who) = f
+        .assignee
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+    {
+        if !t
+            .assignees
+            .iter()
+            .any(|a| a.trim().eq_ignore_ascii_case(who))
+        {
+            return false;
+        }
+    }
+    if let Some(col) = f
+        .status_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+    {
+        if !t
+            .status_name
+            .as_deref()
+            .is_some_and(|n| n.trim().eq_ignore_ascii_case(col))
+        {
+            return false;
+        }
     }
     let c = t.counts;
     let ok = match f.has.as_deref() {
@@ -2121,6 +2239,64 @@ fn hidden_as_archived(t: &WorkTask, f: &WorkTreeFilters) -> bool {
         && f.archived == Some(false)
         && f.status.as_deref() != Some("done")
         && f.has.as_deref() != Some("past_only")
+}
+
+/// The section a task sits in under [`WorkTreeFilters::group_by`]
+/// (redesign step 6.2), under its org as always: one section per org
+/// (`org`), its first assignee (`person`), its mission (`mission`), the
+/// account its sessions run on (`account`, an active one first) or its repo
+/// (`repo`). `None` keeps its own group (`group`, the default). A task with
+/// nothing to group by sits in `none`, last.
+fn regroup(g: &Graph, s: &TaskSummary<'_>, by: &str) -> Option<GroupRef> {
+    let t = &s.task;
+    let mk = |id: String, label: String, source: &str| GroupRef {
+        id,
+        label,
+        source: source.into(),
+        rule_id: None,
+        tracker_value: None,
+    };
+    let none = |label: &str| mk("none".into(), label.into(), "none");
+    Some(match by {
+        "org" => mk("org".into(), "All tasks".into(), "org"),
+        "person" => match t.assignees.iter().map(|a| a.trim()).find(|a| !a.is_empty()) {
+            Some(a) => mk(
+                format!("person:{}", a.to_lowercase()),
+                a.to_string(),
+                "person",
+            ),
+            None => none("No assignee"),
+        },
+        "mission" => match t.item_id.and_then(|i| g.missions_by_item.get(&i)) {
+            Some((id, name)) => mk(format!("mission:{id}"), name.clone(), "mission"),
+            None => none("No mission"),
+        },
+        "account" => {
+            let account_of = |want_active: bool| {
+                s.links.iter().find_map(|(l, st, _)| {
+                    if want_active && *st != "active" {
+                        return None;
+                    }
+                    let row = g.sessions.get(&l.session_id?)?;
+                    row.account_uuid.clone().filter(|u| !u.is_empty())
+                })
+            };
+            match account_of(true).or_else(|| account_of(false)) {
+                Some(uuid) => {
+                    let label = g.account_labels.get(&uuid).cloned().unwrap_or_else(|| {
+                        format!("Account {}", uuid.chars().take(8).collect::<String>())
+                    });
+                    mk(format!("account:{uuid}"), label, "account")
+                }
+                None => none("No account"),
+            }
+        }
+        "repo" => match t.repos.first().or(t.project_label.as_ref()) {
+            Some(r) => mk(format!("repo:{r}"), r.clone(), "repo"),
+            None => none("No repo"),
+        },
+        _ => return None,
+    })
 }
 
 /// A task's place in the order: named orgs by name then unassigned, groups
@@ -2282,7 +2458,16 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     // Section headers count every task under the filters but the group
     // one, so every section of the view has its header and count.
     let mut groups: BTreeMap<(Option<i64>, String), GroupAcc> = BTreeMap::new();
-    let summaries: Vec<TaskSummary<'_>> = built.iter().map(|b| summarize(g, b, false)).collect();
+    let mut summaries: Vec<TaskSummary<'_>> =
+        built.iter().map(|b| summarize(g, b, false)).collect();
+    // Before any filter: `filters.group` names a section of this grouping.
+    if let Some(by) = args.filters.group_by.as_deref() {
+        for summary in &mut summaries {
+            if let Some(group) = regroup(g, summary, by) {
+                summary.task.group = group;
+            }
+        }
+    }
     let mut matching: Vec<(SortKey, usize)> = Vec::new();
     for (i, summary) in summaries.iter().enumerate() {
         let t = &summary.task;
@@ -2465,9 +2650,42 @@ pub fn tree(
     args: &TreeArgs,
 ) -> Result<TreePage, IpcError> {
     let scope = &view.org;
+    // A group by mission names only the missions this caller may read
+    // (`missions::sees_mission`); read before the graph, which takes the
+    // lock itself.
+    let readable_missions: HashMap<i64, String> = match args.filters.group_by.as_deref() {
+        Some("mission") => super::missions::missions(store, view)?
+            .into_iter()
+            .map(|m| (m.id, m.name))
+            .collect(),
+        _ => HashMap::new(),
+    };
     let g = {
         let s = lock(store)?;
-        Graph::load_for(&s, view)?
+        let mut g = Graph::load_for(&s, view)?;
+        match args.filters.group_by.as_deref() {
+            Some("mission") => {
+                for (item, mission) in s.mission_membership()? {
+                    if let Some(name) = readable_missions.get(&mission) {
+                        g.missions_by_item.insert(item, (mission, name.clone()));
+                    }
+                }
+            }
+            Some("account") => {
+                for a in s.list_accounts()? {
+                    let label = a
+                        .nickname
+                        .clone()
+                        .or(a.email.clone())
+                        .or(a.display_name.clone());
+                    if let Some(label) = label.filter(|l| !l.trim().is_empty()) {
+                        g.account_labels.insert(a.uuid, label);
+                    }
+                }
+            }
+            _ => {}
+        }
+        g
     };
     tree_of(&g, scope, args)
 }
@@ -3220,6 +3438,9 @@ pub(crate) fn review_of(
             preselected: l.link.preselected,
             alternatives: alts,
             created_at: l.link.decided_at.unwrap_or(l.link.created_at),
+            proposed_by: (kind == "suggestion")
+                .then(|| proposer_of(l.link.rule.as_deref(), &l.link.evidence))
+                .flatten(),
         }
     };
     for (sid, links) in &by_session {

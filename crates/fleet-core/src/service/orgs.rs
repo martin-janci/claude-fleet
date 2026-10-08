@@ -1016,6 +1016,17 @@ pub struct OrgMember {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     pub role: String,
+    /// Redesign 11.2: when they joined (absent from an older hub).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_at: Option<i64>,
+    /// Redesign 11.2: since when an org share reaches them (a grant made
+    /// before it does not); absent for a viewer, who receives none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares_since: Option<i64>,
+    /// Redesign 11.2, for whoever administers the org: their live devices,
+    /// by name. Absent for anyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub devices: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1359,8 +1370,9 @@ fn org_details_locked(
         let (session_count, needs_you) = counts.get(&o.id).copied().unwrap_or_default();
         let administers = devices.administers(o.id);
         let my_role = devices.role(o.id).map(str::to_string);
+        let member_devices = clients.as_deref().filter(|_| administers);
         let members = (admin || my_role.is_some())
-            .then(|| org_member_list(s, o.id))
+            .then(|| org_member_list(s, o.id, member_devices))
             .transpose()?;
         // The devices fenced to it, as its administrators are shown them.
         let org_clients: Option<Vec<&crate::store::ClientTokenRow>> =
@@ -1474,8 +1486,13 @@ fn org_details_locked(
     Ok(out)
 }
 
-/// The live members of `org`, admins first, as the overview lists them.
-fn org_member_list(s: &Store, org: i64) -> Result<Vec<OrgMember>, IpcError> {
+/// The live members of `org`, admins first, as the overview lists them;
+/// with each one's devices out of `devices` when the caller administers it.
+fn org_member_list(
+    s: &Store,
+    org: i64,
+    devices: Option<&[crate::store::ClientTokenRow]>,
+) -> Result<Vec<OrgMember>, IpcError> {
     let mut out = Vec::new();
     for m in s.org_members(org)? {
         if let Some(p) = s
@@ -1483,10 +1500,19 @@ fn org_member_list(s: &Store, org: i64) -> Result<Vec<OrgMember>, IpcError> {
             .filter(|p| p.disabled_at.is_none())
         {
             out.push(OrgMember {
+                devices: devices.map(|cs| {
+                    cs.iter()
+                        .filter(|c| c.person_id == Some(p.id) && c.revoked_at.is_none())
+                        .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
+                        .map(|c| c.name.clone())
+                        .collect()
+                }),
                 person_id: p.id,
                 name: p.name,
                 display_name: p.display_name,
                 role: m.role,
+                added_at: Some(m.added_at),
+                shares_since: m.shares_since,
             });
         }
     }
