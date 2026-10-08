@@ -489,7 +489,7 @@ const PAIR_PAGE: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>claude-fleet pairing</title>
+<title>Orbit Fleet pairing</title>
 <style>
  :root { color-scheme: light dark }
  body { margin: 0; padding: 2rem 1.25rem; font: 16px/1.55 system-ui, sans-serif; max-width: 34rem }
@@ -497,9 +497,9 @@ const PAIR_PAGE: &str = r#"<!doctype html>
  p { margin: 0 0 1rem }
  .muted { opacity: .7; font-size: .875rem }
 </style></head><body>
-<h1>claude-fleet pairing</h1>
-<p>This link pairs a device with a claude-fleet hub.</p>
-<p><strong>Open the claude-fleet app on this device</strong> and scan the code
+<h1>Orbit Fleet pairing</h1>
+<p>This link pairs a device with an Orbit Fleet hub.</p>
+<p><strong>Open the Orbit Fleet app on this device</strong> and scan the code
 again from inside it. The app reads the pairing code out of this link and
 exchanges it for a credential of its own.</p>
 <p class="muted">The code is in the part of the address after the

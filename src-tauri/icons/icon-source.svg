@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- Orbit Fleet app icon. A hub, one orbit, three hosts; the amber host is waiting on you.
+       Drawn on the 108-unit grid of fleet-mobile's ic_launcher_foreground.xml, inset to the macOS 824 px tile.
+       Regenerate every size: pnpm tauri icon src-tauri/icons/icon-source.svg -o src-tauri/icons -->
+  <g transform="translate(100 100) scale(7.62963)">
+    <rect width="108" height="108" rx="24" fill="#1B2430"/>
+    <circle cx="54" cy="54" r="24" fill="none" stroke="#F2F4F7" stroke-opacity="0.5" stroke-width="5"/><circle cx="54" cy="54" r="10" fill="#F2F4F7"/><circle cx="54" cy="30" r="7.5" fill="#F2F4F7"/><circle cx="74.78" cy="66" r="7.5" fill="#D29B4A"/><circle cx="33.22" cy="66" r="7.5" fill="#F2F4F7"/>
+  </g>
+</svg>
