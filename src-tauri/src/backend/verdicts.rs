@@ -1515,10 +1515,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     (
         "pty_write",
         Verdict::SameInBoth {
-            why: "acts on the one pty THIS process opened, and pty_open is the same in \
-                  both modes, so there is one answer either way; E_PTY_CLOSED when \
-                  nothing is attached, which includes every session the pane declined \
-                  to attach",
+            why: "acts on a pty THIS process opened, named by the id it was opened \
+                  under, and pty_open is the same in both modes, so there is one answer \
+                  either way; E_PTY_CLOSED when nothing is attached under that id, which \
+                  includes every session the pane declined to attach",
         },
     ),
     (

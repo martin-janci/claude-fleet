@@ -704,7 +704,7 @@ pub fn run() {
                     }
                 }
                 if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
-                    pty::close_pty(pty.inner());
+                    pty::close_all_ptys(pty.inner());
                 }
             }
         })

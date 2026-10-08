@@ -16,8 +16,8 @@ bullet for the area you are about to change.
   `tokio::process`); tmux command construction in `tmux.rs`; SQLite in `store/`
   (migrations are registered in the `MIGRATIONS` table there — add a new
   `NNN_<topic>.sql` plus an entry); the event bus in `events.rs`; cancellation
-  registry in `cancel.rs`. The single global PTY (`pty.rs`) stays in
-  `src-tauri`, since it is desktop-only.
+  registry in `cancel.rs`. The PTY map (`pty.rs`) stays in `src-tauri`,
+  since it is desktop-only.
 - **Session listing** is cache-first: `service::sessions::list_sessions` serves
   stored rows and only runs a reconcile pass when the last one is stale;
   `refresh_sessions` is the forced path for an explicit user refresh.
@@ -429,7 +429,10 @@ bullet for the area you are about to change.
   never stored.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
-  the WKWebView setup. Only one PTY is attached at a time.
+  the WKWebView setup. PTYs live in an id-keyed map (`PtyState` in `pty.rs`,
+  at most `MAX_PTYS` open): each id has its own child, reader and writer
+  threads and 1 MiB output cap, and every `pty_*` command names its id. The
+  agent pane uses `agent`; opening an id replaces only that id's PTY.
 - **Local workspace sync** (`service/local_sync/`, `store/local_workspaces.rs`,
   migration 109; spec
   `docs/superpowers/specs/2026-10-07-local-workspace-sync-design.md`): one
