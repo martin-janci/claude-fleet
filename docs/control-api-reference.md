@@ -329,6 +329,12 @@ Install fleet skills, the Stop / UserPromptSubmit / EnterWorktree http hooks and
 
 Parameters: `content_only`, `host`, `rotate`
 
+### `prs`
+
+Pull requests sessions opened, newest first, with state, CI, merge time and opener.
+
+Parameters: `action`, `limit`, `project_id`, `state`
+
 ### `quick_replies`
 
 Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults; not a host token or the operator). Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.
@@ -914,6 +920,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::install_debug_device`
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
+- `commands::prs::list_pull_requests`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
@@ -957,6 +964,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::account_usage::list_account_usage`
 - `commands::account_usage::refresh_account_usage`
 - `commands::account_usage::account_usage_history`
+- `commands::account_usage::check_account_headroom`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`

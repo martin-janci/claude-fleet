@@ -21,9 +21,9 @@
     type SessionRow,
   } from './sessions';
   import { selectSessionExplicitly } from './selection';
-  import { claudeStatusLabel, stuckKindLabel } from './attention';
+  import { claudeStatusLabel, stuckStatus } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost, viewHostSessions } from './host_actions';
   import { pushError, push } from './toasts';
   import {
@@ -318,7 +318,7 @@
   }
 
   function sessionState(s: SessionRow): string {
-    if (s.stuck_kind) return `stuck: ${stuckKindLabel(s.stuck_kind)}`;
+    if (s.stuck_kind) return stuckStatus(s.stuck_kind);
     if (s.status === 'ghost') return 'ghost';
     return claudeStatusLabel(s.claude_status) || s.status;
   }
@@ -644,7 +644,7 @@
                 <div class="d-main">
                   <span class="d-cwd">{c.cwd}</span>
                   {#if c.git_branch}<span class="muted">{c.git_branch}</span>{/if}
-                  <span class="muted">{timeAgo(c.transcript_mtime, now * 1000)}</span>
+                  <span class="muted">{shortAge(c.transcript_mtime, now)}</span>
                   {#if rankLabel(c.rank_hint)}<span class="badge">{rankLabel(c.rank_hint)}</span>{/if}
                   {#if c.derived_tmux_name}<span class="muted">{c.derived_tmux_name}</span>{/if}
                 </div>

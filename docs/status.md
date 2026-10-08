@@ -395,7 +395,7 @@ Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.f
 
 PR shepherd, step 1 of 5, is built and does nothing until a person grants a
 rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
-migration 128 (`pr_shepherd_rules`, `pr_shepherd_episodes`),
+migration 129 (`pr_shepherd_rules`, `pr_shepherd_episodes`),
 `service/pr_shepherd/` on the reconcile tick (loop `pr_shepherd`, stopped by
 `automation.paused`). For a project with a rule it
 reads each session's `pr_evidence` and, once per conflict / behind / red CI

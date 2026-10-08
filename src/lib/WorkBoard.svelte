@@ -1,12 +1,17 @@
 <script lang="ts">
   // The task board (sprints design 2026-09-28 §6c): every task the Work
-  // view's filters match, in To do / Doing / Done columns, from one
-  // `work_tree` read (archived on, so Done has its rows; the status filter
-  // off, since the columns are the status). A native task's card drags to
-  // another column — the one place a status is set by dragging, a person's
-  // setting that is final over the derived one. A tracker's card sits in
-  // the column its tracker reports and says so when dragged (E11), rather
-  // than failing silently. A card shows its live session and host.
+  // view's filters match, from one `work_tree` read (archived on, so Done
+  // has its rows; the status filter off, since the columns are the status).
+  // The columns come from the trackers (redesign 6.1): To do, In progress
+  // and Done, and every status name a shown ticket's tracker reports
+  // (Backlog, In Review, an Asana section) beside the status it belongs to,
+  // the List's mapping (`groupTasksForBoard`). A native task's card drags to
+  // another status's column — the one place a status is set by dragging, a
+  // person's setting that is final over the derived one — and lands in that
+  // status's own column. A tracker's card sits where its tracker reports
+  // and says so when dragged (E11): no tracker takes a status back yet
+  // (`Caps.write` is false for all), so none moves. A card shows its live
+  // session and host.
   //
   // The drag is pointer events, not HTML5 drag and drop: the window takes
   // OS file drops (`dragDropEnabled`), which on Windows swallows the
@@ -31,15 +36,14 @@
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import {
-    BOARD_COLUMNS,
-    BOARD_COLUMN_LABELS,
     BOARD_COLUMN_STATUS,
-    boardColumnOf,
+    boardLaneOf,
     boardLiveSession,
     boardMoveRefusal,
+    boardStep,
     displayTitle,
     groupTasksForBoard,
-    type BoardColumn,
+    type BoardLane,
     type TaskNode,
   } from './task_list';
   import type { IpcError } from './result';
@@ -56,8 +60,8 @@
   let more = $state(false);
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
-  /** Cards a person moved, placed before the hub answers. */
-  let overrides = $state.raw<Map<string, BoardColumn>>(new Map());
+  /** Cards a person moved (task → lane id), placed before the hub answers. */
+  let overrides = $state.raw<Map<string, string>>(new Map());
   /** Cards moved on this board: kept on Done past its window. */
   let moved = $state.raw<Set<string>>(new Set());
   /** A refused or failed move, on the card it was about. */
@@ -68,6 +72,11 @@
   const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
   const moveBlocked = $derived(hubActionBlocked('set_work_status', $hubStatus, $hubConnection));
   const columns = $derived(groupTasksForBoard(tasks, Math.floor(Date.now() / 1000), overrides, moved));
+  /** Some column is a tracker's own name: say where the columns come from. */
+  const trackerLanes = $derived(columns.lanes.some((l) => l.id !== l.status));
+  const laneById = (id: string | undefined) => columns.lanes.find((l) => l.id === id);
+  /** The column a card shows in now: a pending move's, else its own. */
+  const laneOfCard = (t: WorkTask): BoardLane => laneById(overrides.get(t.task_id)) ?? boardLaneOf(t);
 
   let seq = 0;
   async function load() {
@@ -114,10 +123,12 @@
   }
 
   /** Move a card to `to`: refused on the card for a task fleet does not own
-   *  the status of, else placed at once and set on the hub. */
-  async function move(t: WorkTask, to: BoardColumn) {
-    const from = overrides.get(t.task_id) ?? boardColumnOf(t);
-    if (from === to) return;
+   *  the status of, else placed at once and set on the hub. A native task
+   *  lands in the status's own column, whichever column of that status it
+   *  was dropped on. */
+  async function move(t: WorkTask, to: BoardLane) {
+    const from = laneOfCard(t);
+    if (from.id === to.id) return;
     const refusal = boardMoveRefusal(t);
     if (refusal) {
       setCardError(t.task_id, refusal);
@@ -127,10 +138,11 @@
       setCardError(t.task_id, moveBlocked);
       return;
     }
+    if (from.status === to.status) return;
     setCardError(t.task_id, null);
-    overrides = new Map(overrides).set(t.task_id, to);
+    overrides = new Map(overrides).set(t.task_id, to.status);
     moved = new Set(moved).add(t.task_id);
-    const r = await setWorkStatus(t.item_id as number, BOARD_COLUMN_STATUS[to]);
+    const r = await setWorkStatus(t.item_id as number, BOARD_COLUMN_STATUS[to.status]);
     if (!r.ok) {
       const back = new Map(overrides);
       back.delete(t.task_id);
@@ -149,14 +161,13 @@
   let press: { task: WorkTask; x: number; y: number } | null = null;
   let dragging = $state<WorkTask | null>(null);
   let ghost = $state({ x: 0, y: 0 });
-  let over = $state<BoardColumn | null>(null);
+  let over = $state<string | null>(null);
   /** The click a drag ends with is not an "open". */
   let swallowClick = false;
 
-  function columnAt(x: number, y: number): BoardColumn | null {
+  function columnAt(x: number, y: number): BoardLane | null {
     const el = document.elementFromPoint?.(x, y)?.closest<HTMLElement>('[data-board-column]');
-    const c = el?.dataset.boardColumn;
-    return c && (BOARD_COLUMNS as readonly string[]).includes(c) ? (c as BoardColumn) : null;
+    return laneById(el?.dataset.boardColumn) ?? null;
   }
 
   function onpointerdown(e: PointerEvent, t: WorkTask) {
@@ -173,7 +184,7 @@
       dragging = press.task;
     }
     ghost = { x: e.clientX, y: e.clientY };
-    over = columnAt(e.clientX, e.clientY);
+    over = columnAt(e.clientX, e.clientY)?.id ?? null;
   }
   function onpointerup(e: PointerEvent) {
     const t = dragging;
@@ -199,7 +210,7 @@
     open(t);
   }
 
-  function oncardkey(e: KeyboardEvent, t: WorkTask, col: BoardColumn) {
+  function oncardkey(e: KeyboardEvent, t: WorkTask, lane: BoardLane) {
     if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
     if ((e.key === 'e' || e.key === 'E') && !boardMoveRefusal(t) && !editBlocked) {
       e.preventDefault();
@@ -207,10 +218,10 @@
       return;
     }
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    const i = BOARD_COLUMNS.indexOf(col) + (e.key === 'ArrowRight' ? 1 : -1);
-    if (i < 0 || i >= BOARD_COLUMNS.length) return;
+    const to = boardStep(columns.lanes, lane, e.key === 'ArrowRight' ? 1 : -1);
+    if (!to) return;
     e.preventDefault();
-    void move(t, BOARD_COLUMNS[i]).then(() => {
+    void move(t, to).then(() => {
       document.querySelector<HTMLElement>(`[data-board-card="${CSS.escape(t.task_id)}"]`)?.focus();
     });
   }
@@ -256,33 +267,39 @@
     {#if more}
       <p class="muted pad" data-testid="work-board-more">Showing the 200 most recent tasks. Narrow the Work view's filters to see the rest.</p>
     {/if}
-    <div class="columns">
-      {#each BOARD_COLUMNS as col (col)}
-        {@const nodes = columns[col]}
+    <div class="columns" style:grid-template-columns="repeat({columns.lanes.length}, minmax(200px, 1fr))">
+      {#each columns.lanes as lane (lane.id)}
+        {@const nodes = columns.cards[lane.id] ?? []}
         <div
           class="column"
-          class:over={over === col && dragging && (overrides.get(dragging.task_id) ?? boardColumnOf(dragging)) !== col}
-          data-board-column={col}
-          data-testid="work-board-column-{col}"
+          class:over={over === lane.id && dragging && laneOfCard(dragging).id !== lane.id}
+          data-board-column={lane.id}
+          data-status={lane.status}
+          data-testid="work-board-column-{lane.id}"
           role="list"
-          aria-label={BOARD_COLUMN_LABELS[col]}
+          aria-label={lane.label}
         >
           <h3>
-            {BOARD_COLUMN_LABELS[col]}{#if col === 'done'}<span class="window"> · last 7 days</span>{/if}
+            {lane.label}{#if lane.id === 'done'}<span class="window"> · last 7 days</span>{/if}
             <span class="count">{nodes.length}</span>
           </h3>
           <ul>
             {#each nodes as n (n.task.task_id)}
-              {@render card(n, col)}
+              {@render card(n, lane)}
             {/each}
           </ul>
           {#if nodes.length === 0}<p class="muted empty">Nothing here.</p>{/if}
-          {#if col === 'done' && columns.doneHidden > 0}
+          {#if lane.id === 'done' && columns.doneHidden > 0}
             <p class="muted empty" data-testid="work-board-done-hidden">{columns.doneHidden} older not shown</p>
           {/if}
         </div>
       {/each}
     </div>
+    {#if trackerLanes}
+      <p class="muted board-note" data-testid="work-board-note">
+        Columns come from the tracker. List and Board place a task in the same status.
+      </p>
+    {/if}
   {/if}
 </section>
 
@@ -296,7 +313,7 @@
   <EditTaskDialog taskId={editing} onclose={() => (editing = null)} ondone={() => void load()} />
 {/if}
 
-{#snippet card(n: TaskNode, col: BoardColumn)}
+{#snippet card(n: TaskNode, lane: BoardLane)}
   {@const t = n.task}
   {@const refusal = boardMoveRefusal(t)}
   {@const live = boardLiveSession(t)}
@@ -314,7 +331,7 @@
       aria-current={$selectedTaskId === t.task_id ? 'true' : undefined}
       onpointerdown={(e) => onpointerdown(e, t)}
       onclick={() => onclick(t)}
-      onkeydown={(e) => oncardkey(e, t, col)}
+      onkeydown={(e) => oncardkey(e, t, lane)}
     >
       <span class="top">
         <span class="tb" title={t.tracker_name ?? t.kind}>{badge(t)}</span>
@@ -349,6 +366,10 @@
 {/snippet}
 
 <style>
+  .board-note {
+    margin: 8px 0 0;
+    font-size: 0.8rem;
+  }
   .board {
     display: flex;
     flex-direction: column;
