@@ -3257,6 +3257,14 @@ async fn move_session_inner(
                     &e,
                 )
             })?;
+        // The origin travels with the session (migration 124): a moved
+        // mission run is still the mission's. Soft, like the rest of this
+        // block but the owner: an origin is a label, not an access rule.
+        if let Some(carried) = crate::store::SessionOrigin::of_row(&snap.row) {
+            if let Err(e) = s.set_session_origin(row.id, &carried) {
+                tracing::warn!(session_id = row.id, error = %e, "[move] carrying the origin failed");
+            }
+        }
         // The GRANTS, on the other hand, are DROPPED — the owner's decision of
         // 2026-09-30 (spec §4.3). A grant is a statement about a ROW: it is
         // keyed on `sessions.id`, the target is a new row with a new id, and
@@ -4126,6 +4134,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(revoked, 1);
+    }
+
+    /// Migration 122: a moved session keeps who started it.
+    #[tokio::test]
+    async fn a_move_carries_the_origin() {
+        let f = fixture();
+        let hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        f.store
+            .lock()
+            .unwrap()
+            .set_session_origin(f.source_id, &crate::store::SessionOrigin::mission(7))
+            .unwrap();
+        let rep = run(&f, &hooks, true).await.expect("the fixture moves");
+        assert_eq!(
+            (
+                rep.target.origin.as_deref(),
+                rep.target.origin_ref.as_deref()
+            ),
+            (Some("mission"), Some("7"))
+        );
     }
 
     /// The carry is a HARD failure: it is the one write in the target-row block

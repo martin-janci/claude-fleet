@@ -1085,6 +1085,37 @@ pub(super) fn owner_for(caller: &Caller, s: &Store) -> Option<i64> {
     }
 }
 
+/// Who or what a start over this connection records as the session's
+/// origin (migration 124): the operator's own client, a per-host token
+/// (with the session its pane proves, when it proves one), or else the
+/// person behind the connection, as [`owner_for`] resolves them.
+///
+/// A store read that fails degrades the REFERENCE, never the kind: the
+/// origin of an operator start is `operator` even when its row cannot be
+/// read.
+pub(super) fn origin_for(caller: &Caller, s: &Store) -> crate::store::SessionOrigin {
+    use crate::store::SessionOrigin;
+    if caller.is_operator() {
+        let id = crate::service::operator::operator_ref(s).and_then(|r| {
+            s.get_session(&r.tmux_name, &r.host_alias)
+                .ok()
+                .flatten()
+                .map(|row| row.id)
+        });
+        return SessionOrigin::operator(id);
+    }
+    if let Some(alias) = caller.host_alias.as_deref() {
+        let proven = caller.pane.as_deref().and_then(|pane| {
+            s.find_session_by_pane(alias, pane)
+                .ok()
+                .flatten()
+                .map(|row| row.id)
+        });
+        return SessionOrigin::token(proven);
+    }
+    SessionOrigin::person(owner_for(caller, s))
+}
+
 /// The hub's personal owner by NAME, or `None` when it has none.
 ///
 /// `pair_client` needs the name rather than the id because a pairing code

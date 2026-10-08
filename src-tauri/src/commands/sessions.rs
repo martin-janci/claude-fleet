@@ -44,6 +44,7 @@ use fleet_core::service::sessions::{
     self, AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
     LostCandidate, NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
     RestoreHostSessionsArgs, RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+    TouchSessionViewedArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{SessionRow, Store};
@@ -141,6 +142,16 @@ pub async fn set_session_friendly_name(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<SessionRow, IpcError> {
     routed::set_session_friendly_name(&backend, args, &store).await
+}
+
+/// The session on screen (redesign 2.3): its finished turns read as seen.
+#[tauri::command]
+pub async fn touch_session_viewed(
+    args: TouchSessionViewedArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::touch_session_viewed(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -682,6 +693,17 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("set_session_friendly_name", &args).await,
             None => sessions::set_session_friendly_name(args, store),
+        }
+    }
+
+    pub async fn touch_session_viewed(
+        backend: &FleetBackend,
+        args: TouchSessionViewedArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("touch_session_viewed", &args).await,
+            None => sessions::touch_session_viewed(args, store),
         }
     }
 

@@ -65,6 +65,9 @@ export function requestCloseHosts(): void {
 /** Settings dialog visibility (mounted by the Sidebar; ⌘, sets it). */
 export const settingsOpen = writable(false);
 
+/** The `?` keyboard-shortcut sheet (redesign step 3.8; ⌘K opens it too). */
+export const shortcutSheetOpen = writable(false);
+
 /** The Settings section to scroll to when the dialog opens (`work`: the
  *  work section, e.g. from a "Reconnect Jira (acme)" Attention item). The
  *  dialog clears it once it has scrolled. */
@@ -127,7 +130,8 @@ const APP_CHORDS: readonly AppChord[] = ['hosts', 'settings', 'session-view', 'a
  * opens Settings (Cmd never reaches the PTY); on non-mac Ctrl+Shift+H,
  * Ctrl+Shift+J and Ctrl+Shift+E do the same (Ctrl+Shift+I is the devtools
  * chord). Plain Ctrl chords stay with the terminal — Ctrl+J is line-feed
- * there. ⌘⇧O / Ctrl+Shift+O cycles the org scope (work graph M5), and
+ * there — except Ctrl+, for Settings (redesign 1.9), which no terminal
+ * program reads. ⌘⇧O / Ctrl+Shift+O cycles the org scope (work graph M5), and
  * ⌘⇧T / Ctrl+Shift+T toggles the Today view over Details (M9.1), and
  * ⌘⇧W / Ctrl+Shift+W flips the sidebar between Sessions and Work (M14).
  * The chords themselves live in the shortcut registry (`shortcuts.ts`).

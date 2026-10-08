@@ -21,12 +21,17 @@
       ]
     },
     {
-      "title": "Features",
+      "title": "Use cases",
       "when": {
         "key": "decide.jev.enabled",
         "truthy": true
       },
       "items": [
+        {
+          "type": "notice",
+          "tone": "info",
+          "text": "Each use case is off, shadow or assist. Shadow only records; assist pre-selects an answer you confirm. There is no auto mode."
+        },
         {
           "type": "field",
           "key": "decide.jev.work_link",
@@ -45,6 +50,26 @@
         {
           "type": "field",
           "key": "decide.jev.unassigned"
+        }
+      ]
+    },
+    {
+      "title": "Today",
+      "when": {
+        "key": "decide.jev.enabled",
+        "truthy": true
+      },
+      "items": [
+        {
+          "type": "record",
+          "source": {
+            "id": "decide.today"
+          }
+        },
+        {
+          "type": "link",
+          "page": "settings.orgs",
+          "label": "Choose which organisations allow Jev"
         }
       ]
     },

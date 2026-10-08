@@ -569,6 +569,26 @@ fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 125.
+fn sessions_has_last_viewed_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'last_viewed_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 124.
+fn sessions_has_origin(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'origin'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 121.
 fn sessions_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1440,6 +1460,21 @@ const MIGRATIONS: &[Migration] = &[
         version: 123,
         sql: include_str!("../../migrations/123_host_probe_facts.sql"),
         already_applied: Some(hosts_has_worktree_at),
+    },
+    // Orbit Fleet 2.2: who or what started a session (two ADD COLUMNs,
+    // guarded, and the row-version trigger re-issued). No backfill.
+    Migration {
+        version: 124,
+        sql: include_str!("../../migrations/124_session_origin.sql"),
+        already_applied: Some(sessions_has_origin),
+    },
+    // Orbit Fleet 2.3: when a person last looked at a session (one ADD
+    // COLUMN, guarded, every row backfilled as viewed now, and the
+    // row-version trigger re-issued).
+    Migration {
+        version: 125,
+        sql: include_str!("../../migrations/125_session_last_viewed.sql"),
+        already_applied: Some(sessions_has_last_viewed_at),
     },
     // Orbit Fleet 4.9: the add-host wizard's saved drafts (`host_setups`)
     // and the fleet-agent install jobs (`agent_installs`). New tables only,
@@ -2913,6 +2948,67 @@ mod tests {
             .unwrap();
         old.migrate().expect("re-running 121 is safe");
         assert_eq!(agent(work), "codex", "a re-run does not backfill again");
+    }
+
+    /// 124 on a database stopped at 123: the columns arrive empty (no
+    /// guessed backfill), the CHECK refuses an unknown origin, and the
+    /// row-version trigger watches both.
+    #[test]
+    fn migration_124_adds_an_empty_origin() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let id = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "DROP TRIGGER sessions_row_version_bump;\
+                 ALTER TABLE sessions DROP COLUMN origin_ref;\
+                 ALTER TABLE sessions DROP COLUMN origin;\
+                 DELETE FROM schema_version WHERE version >= 124;",
+            )
+            .unwrap();
+        old.migrate().expect("124 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = || old.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!((row().origin, row().origin_ref), (None, None));
+        let before = row().row_version;
+        old.set_session_origin(id, &crate::store::SessionOrigin::token(Some(3)))
+            .unwrap();
+        assert_eq!(row().row_version, before + 1, "the trigger watches origin");
+        assert_eq!(row().origin_ref.as_deref(), Some("3"));
+        assert!(old
+            .conn
+            .execute("UPDATE sessions SET origin = 'cron' WHERE id = ?1", [id])
+            .is_err());
+    }
+
+    /// 125 on an existing DB: every row reads as viewed at upgrade time, so
+    /// nothing turns unread by upgrading; the stamp only moves forward.
+    #[test]
+    fn migration_125_counts_every_session_as_viewed() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let id = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "DROP TRIGGER sessions_row_version_bump;\
+                 ALTER TABLE sessions DROP COLUMN last_viewed_at;\
+                 DELETE FROM schema_version WHERE version >= 125;",
+            )
+            .unwrap();
+        old.migrate().expect("125 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = || old.get_session_by_id(id).unwrap().unwrap();
+        let stamped = row().last_viewed_at.expect("backfilled as viewed");
+        assert!(stamped > 1_600_000_000);
+        let before = row().row_version;
+        assert!(!old.touch_session_viewed(id, stamped - 5).unwrap());
+        assert!(old.touch_session_viewed(id, stamped + 5).unwrap());
+        assert_eq!(row().last_viewed_at, Some(stamped + 5));
+        assert_eq!(row().row_version, before + 1, "the trigger watches it");
     }
 
     /// 091 on a database stopped at 090: existing host_layers rows and managed

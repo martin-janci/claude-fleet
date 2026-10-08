@@ -290,6 +290,10 @@ fn stamp_bg_row(
         );
     }
     let _ = s.set_started_at(row.id, now);
+    // A `claude --bg` agent, for its requester when it names one
+    // (migration 124). Soft, like the stamps around it: the agent runs
+    // either way, and a missing origin reads as "found on the host".
+    let _ = s.set_session_origin(row.id, &crate::store::SessionOrigin::background(requester));
     let _ = s.set_last_prompt(row.id, prompt);
     if row.friendly_name.is_none() {
         // The launch prompt may carry the untrusted MCP marker as its first
@@ -521,6 +525,12 @@ mod tests {
         let row =
             stamp_bg_row(&store, "u1", "go", Some(parent), None).expect("the row is reconciled");
         assert_eq!(row.parent_session_id, Some(parent));
+        // Migration 122: a background agent, started for that session.
+        let parent_ref = parent.to_string();
+        assert_eq!(
+            (row.origin.as_deref(), row.origin_ref.as_deref()),
+            (Some("background"), Some(parent_ref.as_str()))
+        );
     }
 
     #[test]
@@ -534,6 +544,10 @@ mod tests {
         }
         let row = stamp_bg_row(&store, "u1", "go", None, None).expect("the row is reconciled");
         assert_eq!(row.parent_session_id, None);
+        assert_eq!(
+            (row.origin.as_deref(), row.origin_ref),
+            (Some("background"), None)
+        );
     }
 
     /// A listed background agent launched at `started_at` (unix seconds).

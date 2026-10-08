@@ -528,6 +528,30 @@ impl FleetTools {
         ok_json(&v)
     }
 
+    #[tool(description = "Blame of one worktree file as runs of lines: \
+        {path, hunks: [{start, lines, hash, author, time, summary, \
+        uncommitted}], truncated}.")]
+    pub(super) async fn repo_blame(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<repo_read::RepoFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_blame",
+            &format!("session_id={} path={}", args.session_id, args.path),
+        );
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
+        let v = repo_read::repo_blame(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
     #[tool(description = "Unified diff of one worktree file vs HEAD \
         (untracked: all added): {path, diff, binary, truncated}.")]
     pub(super) async fn repo_diff(
@@ -630,7 +654,7 @@ impl FleetTools {
     }
 
     #[tool(description = "Local + remote branches of a session's worktree, \
-        with ahead/behind.")]
+        with ahead/behind and `merged` (the base branch contains the tip).")]
     pub(super) async fn repo_branches(
         &self,
         Extension(caller): Extension<Caller>,

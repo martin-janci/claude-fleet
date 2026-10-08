@@ -59,6 +59,9 @@ export interface PrEvidence {
   checks: CheckSummary;
 }
 
+/** `sessions.origin` (migration 124). */
+export type SessionOrigin = 'person' | 'operator' | 'mission' | 'background' | 'token' | 'routine';
+
 /** `sessions.agent` (migration 121). */
 export type SessionAgent = 'claude' | 'codex' | 'agy' | 'shell';
 
@@ -227,6 +230,16 @@ export interface SessionRow {
    *  or none for a plain shell (`kind: 'shell'`). Absent from a hub older
    *  than the column, whose sessions all run Claude Code. */
   agent?: SessionAgent;
+  /** Who or what started the session (migration 124); absent for a row
+   *  fleet did not start (found on a host) or one older than the column. */
+  origin?: SessionOrigin | null;
+  /** What `origin` points at: a person id (`person`), a session id
+   *  (`operator`, `background`, `token`), a mission id (`mission`). */
+  origin_ref?: string | null;
+  /** When a person last looked at the session (migration 125), unix
+   *  seconds. A turn that ended after it is unread; absent for a row nobody
+   *  has opened since fleet found it. */
+  last_viewed_at?: number | null;
   /** A digest of the versions and ids of the session's live (non-ended)
    *  work links (work graph M14): it moves whenever any of them changes —
    *  added, removed, primary, state — a secondary link too. Absent = 0 (no
@@ -394,8 +407,11 @@ showRowDetails.subscribe((v) => writePref('rows.details', v));
 // Sidebar grouping — `project` (the tree by repository) or `work` (sessions
 // that carry a work key grouped by it first, the rest still under their
 // project; see work_keys.ts). Persisted across restarts.
-export type SidebarGroupBy = 'project' | 'work';
-const isGroupBy = (v: unknown): v is SidebarGroupBy => v === 'project' || v === 'work';
+/** Project and work are trees with their own headers; state, host and agent
+ *  (redesign step 3.6) are flat groups, `row_groups.ts`. */
+export type SidebarGroupBy = 'project' | 'work' | 'state' | 'host' | 'agent';
+const isGroupBy = (v: unknown): v is SidebarGroupBy =>
+  v === 'project' || v === 'work' || v === 'state' || v === 'host' || v === 'agent';
 export const sidebarGroupBy = writable<SidebarGroupBy>(readPref('sidebar.group', 'project', isGroupBy));
 sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 
@@ -514,6 +530,17 @@ export async function setFriendlyName(
 ): Promise<Result<SessionRow>> {
   const r = await invokeCmd<SessionRow>('set_session_friendly_name', {
     args: { host_alias: hostAlias, tmux_name: tmuxName, friendly_name: friendlyName },
+  });
+  if (r.ok) acceptCommandRow(r.value);
+  return r;
+}
+
+/** Mark the session viewed now (redesign 2.3): its finished turns read as
+ *  seen and it leaves the `done_unread` bucket. A watcher's call is refused
+ *  by the hub (the stamp is one per row); that is not an error to show. */
+export async function touchSessionViewed(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('touch_session_viewed', {
+    args: { session_id: sessionId },
   });
   if (r.ok) acceptCommandRow(r.value);
   return r;

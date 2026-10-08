@@ -1,12 +1,17 @@
 <script lang="ts">
   import type { SessionRow } from './sessions';
   import {
+    repoBlame,
     repoDiff,
     repoFile,
+    blameGutter,
+    canBlame,
     hasDiff,
+    type FileBlame,
     type FileContent,
     type FileDiff,
   } from './files';
+  import { timeAgo } from './session_status';
   import { repoCommitDiff } from './history';
   import DiffView from './DiffView.svelte';
   import { highlight, langForPath } from './highlight';
@@ -153,6 +158,54 @@
     }
   }
 
+  // Blame: a gutter beside the File view, on for every file until turned
+  // off. Fetched separately from the content (it is slower), cached the same
+  // way, and never shown inside a commit view.
+  let blameOn = $state(false);
+  let blame = $state<FileBlame | null>(null);
+  let blameError = $state<string | null>(null);
+  const blameCache = new Map<string, FileBlame>();
+  let blameSeq = 0;
+  const blameable = $derived(commit === null && canBlame(status));
+  const showBlame = $derived(blameOn && blameable && view === 'file');
+
+  $effect(() => {
+    const p = path;
+    reloadKey; // tracked — a Refresh re-fetches
+    if (!showBlame || !p) {
+      blame = null;
+      blameError = null;
+      return;
+    }
+    void loadBlame(p);
+  });
+
+  async function loadBlame(p: string): Promise<void> {
+    const sid = session.id;
+    const token = ++blameSeq;
+    blameError = null;
+    const k = cacheKey(sid, p);
+    const cached = blameCache.get(k);
+    if (cached) {
+      blame = cached;
+      return;
+    }
+    blame = null;
+    const r = await repoBlame(sid, p);
+    if (token !== blameSeq) return;
+    if (r.ok) {
+      cachePut(blameCache, k, r.value);
+      blame = r.value;
+    } else {
+      blameError = r.error.message;
+    }
+  }
+
+  function toggleBlame(): void {
+    blameOn = !blameOn;
+    if (blameOn) view = 'file';
+  }
+
   // Tokenised file body, one token row per line. Keyed off the path's
   // extension; binary files never reach here.
   const hlLines = $derived(
@@ -160,6 +213,7 @@
       ? highlight(file.content, langForPath(path))
       : [],
   );
+  const gutter = $derived(showBlame && blame ? blameGutter(blame.hunks, hlLines.length) : []);
 </script>
 
 <div class="viewer" data-testid="file-viewer">
@@ -183,6 +237,15 @@
         >
       </div>
       {#if commit === null}
+        <button
+          class="blame-toggle"
+          class:active={showBlame}
+          aria-pressed={showBlame}
+          data-testid="blame-toggle"
+          disabled={!blameable}
+          title={blameable ? 'Show who last changed each line' : 'No blame — the file is not in any commit yet'}
+          onclick={toggleBlame}>Blame</button
+        >
         <button
           class="send"
           data-testid="send-to-downloads"
@@ -217,9 +280,25 @@
           {#if file.truncated}
             <p class="hint">File truncated (over 512 KiB).</p>
           {/if}
+          {#if showBlame && blameError}
+            <p class="hint err" data-testid="blame-error">Blame: {blameError}</p>
+          {:else if showBlame && blame?.truncated}
+            <p class="hint">Blame stops at line {blame.hunks.reduce((n, h) => Math.max(n, h.start + h.lines - 1), 0)}.</p>
+          {/if}
           <div class="file" bind:this={fileEl}>
             {#each hlLines as toks, i}
               <div class="frow" class:focus={commit === null && focusLine === i + 1} data-testid={commit === null && focusLine === i + 1 ? 'file-focus-row' : undefined}>
+                {#if showBlame}
+                  {@const g = gutter[i]}
+                  <span
+                    class="blame"
+                    class:first={g?.first}
+                    class:uncommitted={g?.hunk.uncommitted}
+                    title={g ? (g.hunk.uncommitted ? 'Not committed yet' : `${g.hunk.hash.slice(0, 8)} · ${g.hunk.author}\n${g.hunk.summary}`) : ''}
+                    data-testid={g?.first ? 'blame-label' : undefined}
+                    >{#if g?.first}{g.hunk.uncommitted ? 'Not committed' : `${g.hunk.hash.slice(0, 7)} ${g.hunk.author} · ${timeAgo(g.hunk.time)}`}{/if}</span
+                  >
+                {/if}
                 <span class="fno">{i + 1}</span><span class="ftext"
                   >{#each toks as t}{#if t.cls === 'txt'}{t.text}{:else}<span class={t.cls}>{t.text}</span>{/if}{:else}&nbsp;{/each}</span
                 >
@@ -282,6 +361,41 @@
   }
   .send:hover {
     color: var(--fg);
+  }
+  .blame-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 0.72rem;
+    padding: 0.15rem 0.55rem;
+  }
+  .blame-toggle.active {
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-pane));
+    color: var(--fg);
+    border-color: var(--accent);
+  }
+  .blame-toggle:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  .blame {
+    flex: 0 0 auto;
+    width: 22ch;
+    padding: 0 0.6em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--fg-muted);
+    border-right: 1px solid var(--border);
+    font-size: 0.72rem;
+    user-select: none;
+  }
+  .blame.first {
+    box-shadow: inset 0 1px 0 var(--border);
+  }
+  .blame.uncommitted {
+    color: var(--accent);
   }
   .toggle {
     flex: 0 0 auto;

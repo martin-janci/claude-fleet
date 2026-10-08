@@ -2,12 +2,15 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import AppearanceSettings from './AppearanceSettings.svelte';
-import { uiLayout } from './prefs';
+import { uiDensity, uiLayout } from './prefs';
 import { applyTheme, theme } from './theme';
+import { motionPref } from './motion';
 
 afterEach(() => {
   uiLayout.set('classic');
+  uiDensity.set('comfortable');
   applyTheme('auto');
+  motionPref.set('system');
 });
 
 describe('AppearanceSettings', () => {
@@ -29,5 +32,23 @@ describe('AppearanceSettings', () => {
     await fireEvent.click(screen.getByTestId('appearance-theme-auto'));
     expect(get(theme)).toBe('auto');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it('starts on Comfortable (0.5.4 rows) and persists Compact', async () => {
+    render(AppearanceSettings);
+    expect(screen.getByTestId('appearance-density-comfortable').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('appearance-density-compact'));
+    expect(get(uiDensity)).toBe('compact');
+    expect(localStorage.getItem('cf:pref:ui.density')).toBe('"compact"');
+  });
+
+  it('picks Motion and persists it, System first', async () => {
+    render(AppearanceSettings);
+    expect(screen.getByTestId('appearance-motion-system').getAttribute('aria-pressed')).toBe('true');
+    for (const id of ['full', 'reduced', 'off'] as const) {
+      await fireEvent.click(screen.getByTestId(`appearance-motion-${id}`));
+      expect(get(motionPref)).toBe(id);
+      expect(localStorage.getItem('cf:pref:ui.motion')).toBe(`"${id}"`);
+    }
   });
 });

@@ -29,7 +29,7 @@ export type ParamSpec = { name: string; label: string; required: boolean } & (
 );
 
 /** How an action's answer is shown (`ResultView`). */
-export type ResultView = 'pairing';
+export type ResultView = 'pairing' | 'output' | 'image';
 
 export interface ActionSpec {
   id: string;
@@ -52,7 +52,11 @@ export type ItemLabel =
   | { type: 'field'; field: string }
   | { type: 'org_rule' }
   | { type: 'device' }
-  | { type: 'member' };
+  | { type: 'member' }
+  | { type: 'admin_need' };
+
+/** A tile's line under its value (`Sub`). */
+export type Sub = { type: 'budget'; field: string } | { type: 'count'; field: string; text: string };
 
 export type Badge =
   | { when: 'true'; text: string }
@@ -69,6 +73,7 @@ export type FieldKind =
   | { type: 'time' }
   | { type: 'count' }
   | { type: 'money' }
+  | { type: 'money_series' }
   | { type: 'settings'; set: ActionSpec }
   | { type: 'items'; item_label: ItemLabel; remove?: ActionSpec; add: ActionSpec[] };
 
@@ -81,6 +86,8 @@ export type FieldSpec = {
   confirm?: string;
   /** The value lives at this path inside the record's `edit` object. */
   merge_path?: string[];
+  /** Its line under the value in a `tiles` section. */
+  sub?: Sub;
 } & FieldKind;
 
 export interface ResourceType {
@@ -210,12 +217,72 @@ export function itemLabel(label: ItemLabel, item: unknown): string {
   if (label.type === 'plain') return String(item);
   if (label.type === 'org_rule') return ruleChip(item as OrgRuleRow);
   if (label.type === 'device') return deviceChip(item as DeviceItem);
+  if (label.type === 'admin_need') return needLine(item as AdminNeed).text;
   if (label.type === 'member') {
     const m = item as { name?: string; display_name?: string; role?: string };
     return `${m.display_name || m.name || ''} · ${m.role ?? ''}`;
   }
   const v = (item as Record<string, unknown> | null)?.[label.field];
   return v === undefined || v === null ? '' : String(v);
+}
+
+/** One of an org's "Needs an admin" (`service::org_needs::AdminNeed`). */
+export type AdminNeed =
+  | { kind: 'budget'; period: 'daily' | 'monthly'; spent_micros: number; budget_micros: number; pace_day?: number }
+  | { kind: 'untrusted_device'; device: string; paired_at: number }
+  | { kind: 'unclaimed_sessions'; host: string; count: number };
+
+const ORDINAL = (n: number) => {
+  const t = n % 100;
+  if (t >= 11 && t <= 13) return `${n}th`;
+  return `${n}${['th', 'st', 'nd', 'rd'][n % 10] ?? 'th'}`;
+};
+
+/** What a need is, in a line, and why or when, in a second; `warn` for a
+ *  budget reached or a device that may prompt, else `info`. */
+export function needLine(
+  n: AdminNeed,
+  now = Math.floor(Date.now() / 1000),
+): { text: string; detail: string; tone: 'warn' | 'info' } {
+  switch (n.kind) {
+    case 'budget': {
+      const which = n.period === 'daily' ? 'Daily' : 'Monthly';
+      const pct = n.budget_micros > 0 ? Math.floor((n.spent_micros * 100) / n.budget_micros) : 0;
+      const reached = n.spent_micros >= n.budget_micros;
+      return {
+        text: reached ? `${which} budget reached` : `${which} budget at ${pct}%`,
+        detail: reached
+          ? `${dollars(n.spent_micros)} of ${dollars(n.budget_micros)} · Fleet warns, it never stops a session`
+          : n.pace_day
+            ? `at this pace it is reached on the ${ORDINAL(n.pace_day)}`
+            : `${dollars(n.spent_micros)} of ${dollars(n.budget_micros)}`,
+        tone: reached ? 'warn' : 'info',
+      };
+    }
+    case 'untrusted_device':
+      return {
+        text: `${n.device} is not trusted yet`,
+        detail: `paired ${ago(n.paired_at, now)} · what it types reaches agents marked until it is trusted in Settings → Devices`,
+        tone: 'warn',
+      };
+    case 'unclaimed_sessions':
+      return {
+        text: `${n.count} unclaimed ${n.count === 1 ? 'session' : 'sessions'} on ${n.host}`,
+        detail: 'nobody has claimed them; shown to the admins who may see the count',
+        tone: 'info',
+      };
+  }
+}
+
+/** A tile's line under its value, or `''`. */
+export function subLine(sub: Sub | undefined, value: unknown, record: ResourceRecord): string {
+  if (!sub) return '';
+  const n = record[sub.field];
+  if (sub.type === 'count') return typeof n === 'number' && n > 0 ? `${n} ${sub.text}` : '';
+  if (typeof n !== 'number' || n <= 0) return '';
+  const spent = typeof value === 'number' ? value : 0;
+  const budget = `$${n.toLocaleString('en-US')}`;
+  return spent > 0 ? `${Math.floor((spent * 100) / (n * 1_000_000))}% of ${budget}` : `of ${budget} budget`;
 }
 
 /** A paired device in an org's `devices` (`OrgDevice`). */

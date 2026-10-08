@@ -1,5 +1,6 @@
 //! Mutating git operations on a session's worktree: checkout, branch
-//! create/delete, stage/unstage/commit, and remote sync. Reuses the shared
+//! create/delete (one, or every merged one), stage/unstage/commit, and remote
+//! sync. Reuses the shared
 //! plumbing in `service::repo`. Branch names go through `validate::git_ref`,
 //! hashes through `validate::commit_hash`, paths through
 //! `validate::repo_rel_path`; every interpolated value is shell-quoted.
@@ -12,7 +13,7 @@ use crate::service::repo::{ensure_clean, run_git, session_target, SessionIdArgs}
 use crate::shell::quote;
 use crate::ssh::SshClient;
 use crate::store::Store;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 #[derive(Deserialize)]
@@ -113,6 +114,80 @@ pub async fn repo_delete_branch(
     let body = format!("git -C \"$root\" branch {flag} {}", quote(&args.name));
     run_git(ssh, &host, &name, &body).await?;
     Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct DeleteMergedArgs {
+    pub session_id: i64,
+    /// Local branches the caller saw flagged `merged` and asked to delete.
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
+pub struct DeleteMergedResult {
+    pub deleted: Vec<String>,
+    /// Asked for but kept: no longer merged into the base, the base or its
+    /// local twin, checked out here or in another worktree, or gone.
+    pub kept: Vec<String>,
+}
+
+/// Delete the named local branches that the base branch (see
+/// `repo_read::BASE_BRANCH_SH`) still contains. Each name is re-checked on
+/// the host at delete time, so a branch that gained a commit since the list
+/// was read is kept rather than lost; `-D` only because `-d` measures against
+/// HEAD or the upstream, not the base. Refuses when there is no base branch.
+pub async fn repo_delete_merged_branches(
+    args: DeleteMergedArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<DeleteMergedResult, IpcError> {
+    if args.names.is_empty() {
+        return Ok(DeleteMergedResult::default());
+    }
+    for n in &args.names {
+        crate::validate::git_ref(n)?;
+    }
+    let (host, name) = session_target(store, args.session_id)?;
+    let out = run_git(ssh, &host, &name, &delete_merged_body(&args.names)).await?;
+    parse_delete_merged(&out.stdout)
+}
+
+fn delete_merged_body(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| quote(n)).collect();
+    format!(
+        "{base}\
+         if [ -z \"$base\" ]; then echo cf-no-base; exit 0; fi\n\
+         for n in {names}; do\n\
+           if [ \"$n\" != \"$base\" ] && [ \"$n\" != \"$base_local\" ] \
+              && git -C \"$root\" merge-base --is-ancestor \"refs/heads/$n\" \"$base\" 2>/dev/null \
+              && git -C \"$root\" branch -D \"$n\" >/dev/null 2>&1; then\n\
+             printf 'D %s\\n' \"$n\"\n\
+           else\n\
+             printf 'K %s\\n' \"$n\"\n\
+           fi\n\
+         done",
+        base = crate::service::repo_read::BASE_BRANCH_SH,
+        names = quoted.join(" "),
+    )
+}
+
+fn parse_delete_merged(raw: &[u8]) -> Result<DeleteMergedResult, IpcError> {
+    let text = String::from_utf8_lossy(raw);
+    if text.lines().any(|l| l == "cf-no-base") {
+        return Err(IpcError::new(
+            codes::E_REPO,
+            "no base branch (origin/HEAD, main or master) to tell merged branches by",
+        ));
+    }
+    let mut r = DeleteMergedResult::default();
+    for line in text.lines() {
+        if let Some(n) = line.strip_prefix("D ") {
+            r.deleted.push(n.to_string());
+        } else if let Some(n) = line.strip_prefix("K ") {
+            r.kept.push(n.to_string());
+        }
+    }
+    Ok(r)
 }
 
 #[derive(Deserialize)]
@@ -228,4 +303,62 @@ pub async fn repo_push(
     };
     run_git(ssh, &host, &name, &body).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use crate::service::repo_read::git_fixture;
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    fn local_branches(dir: &std::path::Path) -> Vec<String> {
+        let out = git_fixture::run_body(
+            dir,
+            "git -C \"$root\" for-each-ref --format='%(refname:short)' refs/heads",
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_merged_deletes_only_what_the_base_still_contains() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = git_fixture::branches_repo(tmp.path());
+        let asked = names(&["done", "old", "open", "main", "fresh", "gone"]);
+        let out = git_fixture::run_body(&work, &delete_merged_body(&asked));
+        let r = parse_delete_merged(&out.stdout).unwrap();
+        assert_eq!(r.deleted, names(&["done", "old"]));
+        // open: not merged; main: the base's twin; fresh: checked out;
+        // gone: never existed.
+        assert_eq!(r.kept, names(&["open", "main", "fresh", "gone"]));
+        assert_eq!(local_branches(&work), names(&["fresh", "main", "open"]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_merged_refuses_without_a_base_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git_fixture::git(dir, &["init", "-q", "-b", "trunk"]);
+        git_fixture::commit_file(dir, "a.txt", "a\n", "first");
+        git_fixture::git(dir, &["branch", "side"]);
+        let out = git_fixture::run_body(dir, &delete_merged_body(&names(&["side"])));
+        let err = parse_delete_merged(&out.stdout).unwrap_err();
+        assert_eq!(err.code, codes::E_REPO);
+        assert_eq!(local_branches(dir), names(&["side", "trunk"]));
+    }
+
+    #[test]
+    fn delete_merged_names_are_quoted_one_word_each() {
+        let body = delete_merged_body(&names(&["feat/a$(x)"]));
+        assert!(body.contains("'feat/a$(x)'"), "{body}");
+    }
 }

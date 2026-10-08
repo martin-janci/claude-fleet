@@ -169,6 +169,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 
 /// A minimal but complete `SessionRow`, null-stripped the way the hub leaves
 /// one. Nothing in the local store ever looks like this.
+const RUN_OUTPUT_JSON: &str = r#"{"exit_code":0,"output":"Success","truncated":false}"#;
 const DEBUG_DEVICE_JSON: &str = r#"{"id":3,"title":"Pixel 8","host":"mac","platform":"android","kind":"physical","key":"R5","name":"Pixel 8","state":"online","ready":true,"shared":false,"first_seen_at":1,"last_seen_at":2}"#;
 const FORM_VIEW_JSON: &str = r#"{"form_id":"f_a","session_id":4,"host_alias":"h","title":"T","spec":{},"state":"pending","created_at":1}"#;
 const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}"#;
@@ -272,6 +273,13 @@ fn check(cases: Vec<Case>) {
 /// the row itself unchecked, which is how the first version of this list was
 /// wrong.
 const ROUTED_WITHOUT_A_CASE: &[(&str, &str)] = &[
+    (
+        "debug_device_screenshot",
+        "a_hub_screenshot_comes_back_as_the_image_block_it_answered holds its \
+         VERDICTS row against the tool the request carried, the same way check \
+         does; it is not a case because its answer is an image block, which the \
+         fake's text-only answer cannot carry",
+    ),
     (
         "save_download",
         "a_hub_download_is_checked_through_list_downloads_before_a_byte_moves \
@@ -1243,6 +1251,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "repo_blame",
+            "repo_blame",
+            json!({ "session_id": 7, "path": "src/lib.rs" }),
+            r#"{"path":"src/lib.rs","hunks":[],"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_blame(
+                    b,
+                    RepoFileArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // The simple `(b, s, _)` shape: `operator_status` needs neither ssh
         // nor a cancellation registry, unlike `ensure_operator` below.
         (
@@ -1567,6 +1593,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             effort: None,
             profile: None,
             agent: None,
+            origin: None,
             owner_person_id: Some(42),
         },
         &st,
@@ -1993,6 +2020,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
         NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
         RestoreHostSessionsArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+        TouchSessionViewedArgs,
     };
 
     vec![
@@ -2126,6 +2154,62 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     ssh,
                     commands::debug_devices::DebugDeviceArgs { id: 3 },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "claim_debug_device",
+            "debug_devices",
+            json!({ "action": "claim", "device": "3", "note": "login flow", "claim_s": null }),
+            DEBUG_DEVICE_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::debug_devices::routed::claim_debug_device(
+                    b,
+                    s,
+                    commands::debug_devices::ClaimDebugDeviceArgs {
+                        id: 3,
+                        note: Some("login flow".into()),
+                        claim_s: None,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "install_debug_device",
+            "debug_devices",
+            json!({ "action": "install", "device": "3", "path": "~/app.apk", "host": null }),
+            RUN_OUTPUT_JSON,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::install_debug_device(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::InstallDebugDeviceArgs {
+                        id: 3,
+                        path: "~/app.apk".into(),
+                        // An empty host means the device's own: sent as absent.
+                        host: Some(" ".into()),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "debug_device_logs",
+            "debug_devices",
+            json!({ "action": "logs", "device": "3", "lines": 200, "contains": "FATAL" }),
+            RUN_OUTPUT_JSON,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::debug_device_logs(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::DebugDeviceLogsArgs {
+                        id: 3,
+                        contains: Some("FATAL".into()),
+                    },
                 ))
                 .map(|_| ())
             }),
@@ -2270,6 +2354,20 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         tmux_name: "demo".into(),
                         friendly_name: "the demo".into(),
                     },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "touch_session_viewed",
+            "touch_session_viewed",
+            json!({ "session_id": 7 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::touch_session_viewed(
+                    b,
+                    TouchSessionViewedArgs { session_id: 7 },
                     s,
                 ))
                 .map(|_| ())
@@ -2723,6 +2821,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         source_session_id: 7,
                         prompt: "review it".into(),
                         call_id: None,
+                        origin: None,
                     },
                     s,
                     h,
@@ -2746,6 +2845,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         source_session_id: 7,
                         prompt: "review it".into(),
                         call_id: Some(123),
+                        origin: None,
                     },
                     s,
                     h,
@@ -3117,6 +3217,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         effort: Some("high".into()),
                         profile: Some("work".into()),
                         agent: Some("claude".into()),
+                        origin: None,
                         // Set, and absent from the asserted JSON above: whose
                         // a session is follows from the CONNECTION, never from
                         // an argument a client could choose (multi-user M1,
@@ -5573,7 +5674,7 @@ fn every_route_names_a_command_the_table_can_route() {
         .collect();
     for (file, src) in &stripped {
         let src = src.as_str();
-        for call in ["route(", "route_text("] {
+        for call in ["route(", "route_text(", "route_image("] {
             for (i, _) in src.match_indices(call) {
                 let Some(rest) = src[i + call.len()..].trim_start().strip_prefix('"') else {
                     continue;
@@ -6667,4 +6768,58 @@ fn a_hub_download_is_checked_through_list_downloads_before_a_byte_moves() {
     let e = got.expect_err("a file still copying is not saved");
     assert_eq!(e.code, codes::E_NOTFOUND);
     assert!(!asked.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+/// 11.6: the one routed command whose answer is an image block rather than
+/// the tool's JSON. The caption is the first text block, the image the first
+/// image block, and the row's tool is the one the request carried.
+#[test]
+fn a_hub_screenshot_comes_back_as_the_image_block_it_answered() {
+    let fake = Arc::new(Fake {
+        body: format!(
+            "event: message\ndata: {}\n\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "content": [
+                    { "type": "text", "text": "Pixel 8 on mac: 3 bytes" },
+                    { "type": "image", "data": "AAEC", "mimeType": "image/png" },
+                ] },
+            })
+        ),
+        seen: Mutex::new(Vec::new()),
+    });
+    let (_dir, st) = store();
+    let shot = block_on(commands::debug_devices::routed::debug_device_screenshot(
+        &remote_backend(&fake),
+        &st,
+        &ssh(),
+        commands::debug_devices::DebugDeviceArgs { id: 3 },
+    ))
+    .expect("the image block");
+    let (tool, args) = fake.only_call();
+    assert_eq!(args, json!({ "action": "screenshot", "device": "3" }));
+    assert_eq!(
+        verdicts::verdict("debug_device_screenshot").and_then(Verdict::tool),
+        Some(tool.as_str())
+    );
+    assert_eq!(
+        (
+            shot.caption.as_str(),
+            shot.mime.as_str(),
+            shot.data.as_str()
+        ),
+        ("Pixel 8 on mac: 3 bytes", "image/png", "AAEC")
+    );
+
+    // A text-only answer is not an image: an error, never an empty picture.
+    let fake = Fake::answering("{}");
+    let err = block_on(commands::debug_devices::routed::debug_device_screenshot(
+        &remote_backend(&fake),
+        &st,
+        &ssh(),
+        commands::debug_devices::DebugDeviceArgs { id: 3 },
+    ))
+    .expect_err("no image block");
+    assert_eq!(err.code, fleet_core::ipc_error::codes::E_PARSE);
 }

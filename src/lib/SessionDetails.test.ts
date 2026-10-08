@@ -1131,3 +1131,41 @@ describe('SessionDetails Share… and the per-session action gate (multi-user M1
     }
   });
 });
+
+describe('SessionDetails action hierarchy (redesign 1.5)', () => {
+  it('one primary, three quick actions, and everything else behind ⋯ with Kill last', async () => {
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    const bar = screen.getByTestId('details-actions');
+    // Exactly one primary in the view, and it is Send prompt.
+    const primaries = document.querySelectorAll('[data-testid="session-details"] .btn--primary');
+    expect(primaries).toHaveLength(1);
+    expect(primaries[0]).toBe(screen.getByTestId('send-prompt-from-details'));
+    // The quick row: Send prompt, Review, Share, then ⋯.
+    const quick = Array.from(bar.children)
+      .filter((el) => el.tagName === 'BUTTON')
+      .map((el) => el.getAttribute('data-testid'));
+    expect(quick).toEqual(['send-prompt-from-details', 'open-review', 'share-from-details']);
+    // Everything else is still a button, inside ⋯, destructive last.
+    const more = screen.getByTestId('details-more');
+    const inMore = Array.from(more.querySelectorAll('button')).map((el) => el.getAttribute('data-testid'));
+    expect(inMore).toEqual([
+      'label-from-details',
+      'rename-from-details',
+      'restart-from-details',
+      'recreate-from-details',
+      'safe-kill-from-details',
+      'kill-from-details',
+    ]);
+    expect(screen.getByTestId('kill-from-details').classList.contains('danger')).toBe(true);
+  });
+
+  it('Kill, from ⋯, still asks before it kills', async () => {
+    render(SessionDetails, { props: { session: sampleSession } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('kill-from-details'));
+    await tick();
+    expect(screen.getByTestId('confirm-kill-details')).toBeTruthy();
+    expect(vi.mocked(mockedInvoke).mock.calls.some((c) => c[0] === 'kill_session')).toBe(false);
+  });
+});

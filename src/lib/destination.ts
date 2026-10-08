@@ -10,8 +10,8 @@
 // survives any round trip.
 //
 // Classic reads this store with no visible change; the New layout's rail
-// (step 3.2) will write the same store. `accounts` (step 4.1) is reachable
-// only in the New layout until the rail lands.
+// (step 3.2, `AppRail.svelte`) writes the same store. `accounts` (step 4.1)
+// is reachable only from the rail, so only in the New layout.
 import { derived, writable, type Readable } from 'svelte/store';
 
 export type Destination = 'session' | 'files' | 'hosts' | 'assets' | 'board' | 'accounts';

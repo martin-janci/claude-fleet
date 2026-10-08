@@ -16,6 +16,7 @@ const branch = {
   ahead: 0,
   behind: 0,
   tipHash: 'abc123',
+  merged: false,
 };
 
 beforeEach(() => {

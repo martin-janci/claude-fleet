@@ -2773,6 +2773,11 @@
         {
           "items": [
             {
+              "text": "Each use case is off, shadow or assist. Shadow only records; assist pre-selects an answer you confirm. There is no auto mode.",
+              "tone": "info",
+              "type": "notice"
+            },
+            {
               "hint": "An offline benchmark only until J1 passes its acceptance lines (D32).",
               "key": "decide.jev.work_link",
               "type": "field",
@@ -2792,7 +2797,27 @@
               "type": "field"
             }
           ],
-          "title": "Features",
+          "title": "Use cases",
+          "when": {
+            "key": "decide.jev.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "items": [
+            {
+              "source": {
+                "id": "decide.today"
+              },
+              "type": "record"
+            },
+            {
+              "label": "Choose which organisations allow Jev",
+              "page": "settings.orgs",
+              "type": "link"
+            }
+          ],
+          "title": "Today",
           "when": {
             "key": "decide.jev.enabled",
             "truthy": true
@@ -3092,19 +3117,7 @@
         {
           "items": [
             {
-              "key": "session_count",
-              "type": "field"
-            },
-            {
-              "key": "needs_you",
-              "type": "field"
-            },
-            {
               "key": "spent_today_micros",
-              "type": "field"
-            },
-            {
-              "key": "spent_week_micros",
               "type": "field"
             },
             {
@@ -3112,11 +3125,38 @@
               "type": "field"
             },
             {
-              "key": "over_budget",
+              "key": "spent_week_micros",
+              "type": "field"
+            },
+            {
+              "key": "session_count",
               "type": "field"
             }
           ],
+          "tiles": true,
           "title": "Overview"
+        },
+        {
+          "items": [
+            {
+              "key": "spend_series",
+              "type": "field"
+            }
+          ],
+          "title": "Spend"
+        },
+        {
+          "items": [
+            {
+              "key": "needs_admin",
+              "type": "field"
+            },
+            {
+              "key": "needs_you",
+              "type": "field"
+            }
+          ],
+          "title": "Needs an admin"
         },
         {
           "items": [
@@ -3801,7 +3841,12 @@
         {
           "help": "Its live sessions that you can see.",
           "id": "session_count",
-          "label": "Sessions",
+          "label": "Live sessions",
+          "sub": {
+            "field": "needs_you",
+            "text": "need you",
+            "type": "count"
+          },
           "type": "count"
         },
         {
@@ -3814,6 +3859,10 @@
           "help": "Estimated cost of its sessions today (UTC). Shown when you can see every session.",
           "id": "spent_today_micros",
           "label": "Spent today",
+          "sub": {
+            "field": "budget_daily_usd",
+            "type": "budget"
+          },
           "type": "money"
         },
         {
@@ -3826,16 +3875,26 @@
           "help": "Estimated cost of its sessions this calendar month (UTC).",
           "id": "spent_month_micros",
           "label": "This month",
+          "sub": {
+            "field": "budget_monthly_usd",
+            "type": "budget"
+          },
           "type": "money"
         },
         {
+          "help": "Estimated cost of its sessions on each of the last 14 days (UTC), today last.",
+          "id": "spend_series",
+          "label": "Last 14 days",
+          "type": "money_series"
+        },
+        {
           "add": [],
-          "help": "The budgets it has reached. Fleet only warns; it never stops a session.",
-          "id": "over_budget",
+          "help": "What its admins should look at: a budget at 80% or past it (Fleet only warns; it never stops a session), a device that may prompt but is not trusted yet (trust it in Settings → Devices), sessions on its hosts nobody has claimed.",
+          "id": "needs_admin",
           "item_label": {
-            "type": "plain"
+            "type": "admin_need"
           },
-          "label": "Over budget",
+          "label": "Needs an admin",
           "type": "items"
         },
         {
@@ -4390,7 +4449,7 @@
           "edit": "jev",
           "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
           "id": "jev_allowed",
-          "label": "Send to Jev",
+          "label": "Allow Jev (decision model) for this organisation's work",
           "on_off": true,
           "type": "bool"
         },
@@ -5437,6 +5496,123 @@
                 "from": "record",
                 "name": "id"
               }
+            ],
+            [
+              "note",
+              {
+                "from": "param",
+                "name": "note"
+              }
+            ]
+          ],
+          "command": "claim_debug_device",
+          "envelope": "args",
+          "id": "debug_device.claim",
+          "label": "Claim",
+          "params": [
+            {
+              "label": "For (optional)",
+              "max": 200,
+              "name": "note",
+              "placeholder": "testing the login flow",
+              "required": false,
+              "type": "text"
+            }
+          ],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "path",
+              {
+                "from": "param",
+                "name": "path"
+              }
+            ],
+            [
+              "host",
+              {
+                "from": "param",
+                "name": "host"
+              }
+            ]
+          ],
+          "command": "install_debug_device",
+          "envelope": "args",
+          "id": "debug_device.install",
+          "label": "Install app…",
+          "params": [
+            {
+              "label": "App (.apk, .app or .ipa)",
+              "max": 1024,
+              "name": "path",
+              "placeholder": "~/app/build/outputs/apk/debug/app-debug.apk",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "label": "On host (optional; the device's own when empty)",
+              "name": "host",
+              "required": false,
+              "source": "hosts",
+              "type": "options"
+            }
+          ],
+          "report": false,
+          "result": "output"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "debug_device_logs",
+          "envelope": "args",
+          "id": "debug_device.logs",
+          "label": "Logs",
+          "params": [],
+          "report": false,
+          "result": "output"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "debug_device_screenshot",
+          "envelope": "args",
+          "id": "debug_device.screenshot",
+          "label": "Screenshot",
+          "params": [],
+          "report": false,
+          "result": "image"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
             ]
           ],
           "command": "release_debug_device",
@@ -5970,6 +6146,45 @@
       "help": "When the last sweep ran and what it deleted.",
       "id": "work.retention_last",
       "label": "Last retention sweep",
+      "params": [],
+      "shape": "record"
+    },
+    {
+      "fields": [
+        {
+          "id": "input_tokens",
+          "label": "Used today",
+          "ty": "tokens"
+        },
+        {
+          "id": "budget",
+          "label": "Daily budget",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Cost today",
+          "ty": "usd_micros"
+        },
+        {
+          "id": "breaker",
+          "label": "Breaker",
+          "ty": "text"
+        },
+        {
+          "id": "key",
+          "label": "Key",
+          "ty": "text"
+        },
+        {
+          "id": "orgs_allowed",
+          "label": "Orgs that allow Jev",
+          "ty": "text"
+        }
+      ],
+      "help": "Today's use of the decision model (Jev): input tokens against the daily budget, the breaker, the key and the organisations that allow it (`fleet-hub decide status`).",
+      "id": "decide.today",
+      "label": "Decision model today",
       "params": [],
       "shape": "record"
     }

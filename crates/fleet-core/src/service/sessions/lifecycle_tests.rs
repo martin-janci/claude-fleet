@@ -200,6 +200,7 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         effort: None,
         profile: None,
         agent: None,
+        origin: None,
         owner_person_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
@@ -230,6 +231,7 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         effort: None,
         profile: None,
         agent: None,
+        origin: None,
         owner_person_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
@@ -497,7 +499,17 @@ fn finalize_new_session_claims_the_row_for_its_caller_and_never_takes_anothers()
     let ann = s.create_person("ann", None).unwrap().id;
     let bob = s.create_person("bob", None).unwrap().id;
     let finalize = |owner: Option<i64>, name: &str, id: i64| {
-        finalize_new_session(&s, id, "local", name, None, None, false, owner)
+        finalize_new_session(
+            &s,
+            id,
+            "local",
+            name,
+            None,
+            None,
+            false,
+            owner,
+            &crate::store::SessionOrigin::person(owner),
+        )
     };
 
     // 1. The ordinary create.
@@ -697,8 +709,14 @@ fn finalize_new_session_returns_the_row_as_of_its_last_write() {
         Some("uuid-9"),
         false,
         None,
+        &crate::store::SessionOrigin::mission(7),
     )
     .unwrap();
+    assert_eq!(
+        (row.origin.as_deref(), row.origin_ref.as_deref()),
+        (Some("mission"), Some("7")),
+        "the origin is on the returned row"
+    );
     assert!(
         row.started_at.is_some(),
         "started_at is on the returned row"
@@ -720,7 +738,18 @@ fn finalize_new_session_tags_a_shell_session() {
     let id = s
         .upsert_session("f4shell", "local", None, None, 1, 1, "running", None)
         .unwrap();
-    let row = finalize_new_session(&s, id, "local", "f4shell", None, None, true, None).unwrap();
+    let row = finalize_new_session(
+        &s,
+        id,
+        "local",
+        "f4shell",
+        None,
+        None,
+        true,
+        None,
+        &crate::store::SessionOrigin::token(None),
+    )
+    .unwrap();
     assert_eq!(row.kind, "shell");
     assert!(row.started_at.is_some());
 }
@@ -821,6 +850,7 @@ fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
         effort: None,
         profile: None,
         agent: None,
+        origin: None,
         owner_person_id: None,
     }
 }
@@ -1307,6 +1337,7 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         effort: None,
         profile: None,
         agent: None,
+        origin: None,
         owner_person_id: None,
     };
 
@@ -1792,4 +1823,103 @@ fn the_agent_settles_against_the_kind() {
     args.agent = Some("shell".into());
     args.effort = Some("high".into());
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+}
+
+/// Recreate on a remote host whose checkout was deleted clones it back into
+/// the root the repair resolved, without a worktree step: the repair that
+/// runs next re-adds the worktree from its branch on origin.
+#[tokio::test]
+async fn recreate_reclones_a_missing_remote_checkout_into_the_resolved_root() {
+    use super::lifecycle::reclone_project_root;
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("trn").unwrap();
+    let pid = s.upsert_project("o", "pos-frontend", "/repo").unwrap();
+    let wt = "/home/dev/projects/github.com/o/pos-frontend/.worktrees/feat";
+    let wid = s
+        .upsert_worktree_on("trn", pid, "feat", wt, Some("feat"))
+        .unwrap();
+    let sid = s
+        .upsert_session(
+            "dev-pos--feat",
+            "trn",
+            Some(pid),
+            Some(wid),
+            1,
+            1,
+            "lost",
+            None,
+        )
+        .unwrap();
+    let store = Mutex::new(s);
+    let fake = FakeSsh::new();
+    fake.with_home("/home/dev")
+        .on(Match::script_contains("git clone"), Reply::ok(""));
+
+    reclone_project_root(&store, &fake, sid).await.unwrap();
+
+    let script = fake
+        .calls_for("trn")
+        .into_iter()
+        .filter_map(|c| c.script())
+        .find(|sc| sc.contains("git clone"))
+        .expect("a clone script ran");
+    assert!(
+        script.contains("git clone 'git@github.com:o/pos-frontend.git'"),
+        "{script}"
+    );
+    assert!(
+        script.contains("if [ ! -d '/home/dev/projects/github.com/o/pos-frontend'/.git ]"),
+        "{script}"
+    );
+    assert!(!script.contains("worktree add"), "{script}");
+}
+
+/// A failed clone (no access to origin) surfaces git's stderr as
+/// `E_GIT_SETUP`, so the user sees why Recreate could not restore it.
+#[tokio::test]
+async fn a_failed_reclone_reports_git_setup() {
+    use super::lifecycle::reclone_project_root;
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("trn").unwrap();
+    let pid = s.upsert_project("o", "r", "/repo").unwrap();
+    let sid = s
+        .upsert_session("dev-r", "trn", Some(pid), None, 1, 1, "lost", None)
+        .unwrap();
+    let store = Mutex::new(s);
+    let fake = FakeSsh::new();
+    fake.with_home("/home/dev").on(
+        Match::script_contains("git clone"),
+        Reply::fail(128, "Permission denied (publickey).\n"),
+    );
+    let err = reclone_project_root(&store, &fake, sid).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_GIT_SETUP);
+    assert!(err.message.contains("Permission denied"), "{}", err.message);
+}
+
+/// Step 2.3: viewing stamps the row and answers it; an unknown id is
+/// NOTFOUND, not a silent success.
+#[test]
+fn touching_a_session_marks_it_viewed() {
+    use super::lifecycle::{touch_session_viewed, TouchSessionViewedArgs};
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let row = touch_session_viewed(TouchSessionViewedArgs { session_id: id }, &store).unwrap();
+    assert!(row.last_viewed_at.is_some_and(|t| t > 1_600_000_000));
+    let missing = touch_session_viewed(
+        TouchSessionViewedArgs {
+            session_id: id + 99,
+        },
+        &store,
+    );
+    assert_eq!(
+        missing.err().map(|e| e.code),
+        Some(crate::ipc_error::codes::E_NOTFOUND.to_string())
+    );
 }

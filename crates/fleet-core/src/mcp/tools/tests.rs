@@ -1668,6 +1668,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                     source_session_id: on_b,
                     prompt: "review".into(),
                     call_id: None,
+                    origin: None,
                 },
                 confirm_nonce: None,
             }),
@@ -2409,9 +2410,10 @@ fn router_sum_serves_every_tool() {
     // claim tools (T12) + the New session picker's `project_picks` /
     // `set_project_pick` + org administration's `org_admin` (phase B) +
     // chat forms' `ask` + debug devices' `debug_devices` + Lost and found's
-    // `adopt_session` + the fleet-agent install job's `install_agent` /
-    // `agent_installs` (Orbit Fleet 4.9).
-    assert_eq!(served, 122);
+    // `adopt_session` + the Files tab's `repo_blame` + the redesign's
+    // `touch_session_viewed` (step 2.3) + the fleet-agent install job's
+    // `install_agent` / `agent_installs` (Orbit Fleet 4.9).
+    assert_eq!(served, 124);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3940,9 +3942,14 @@ fn the_served_definition_budget_stays_bounded() {
     /// `debug_devices` tool, one entry by `action`, +1,967 bytes).
     /// Measured at 86,158 on 2026-10-08 after Lost and found's adopt (the
     /// `adopt_session` tool, +557 bytes).
-    /// Measured at 87,101 on 2026-10-08 after the fleet-agent install job
-    /// (Orbit Fleet 4.9: `install_agent` and `agent_installs`, +943 bytes).
-    const BUDGET_BYTES: usize = 87_201;
+    /// Measured at 86,625 on 2026-10-08 after merging `main` (86,158) into
+    /// the Files tab's `repo_blame` and `repo_branches`' `merged` note.
+    /// Measured at 86,933 on 2026-10-08 after the redesign's
+    /// `touch_session_viewed` (step 2.3, +308 bytes over main's 86,625).
+    /// Measured at 87,798 on 2026-10-08 after the fleet-agent install job
+    /// (Orbit Fleet 4.9: `install_agent` and `agent_installs`, +865 bytes
+    /// over main's 86,933).
+    const BUDGET_BYTES: usize = 87_898;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10069,6 +10076,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("safe_kill_session", &["Own"]),
     ("set_friendly_name", &["Drive"]),
     ("spawn_review", &["Own"]),
+    ("touch_session_viewed", &["Drive"]),
     // forms.rs
     // `list` and `get` and `wait` read the form's session; `answer` and
     // `decline` drive it.
@@ -10118,6 +10126,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // grantee is offered the control and refused it. `share.ts` has to move to
     // `'own'` — frontend territory, named in this round's hand-off.
     ("delete_worktree", &["Own"]),
+    ("repo_blame", &["Read"]),
     ("repo_branches", &["Read"]),
     ("repo_changes", &["Read"]),
     ("repo_commit", &["Read"]),
@@ -18230,4 +18239,68 @@ async fn a_client_msg_id_reused_for_another_recipient_still_sends() {
             .unwrap();
         assert_eq!(n, 1, "session {to} got its message");
     }
+}
+
+/// Redesign 2.2 (migration 124): what a start over each kind of connection
+/// records as the session's origin. Every MCP start path asks this one
+/// function, so it pins them all.
+#[test]
+fn a_starts_origin_follows_the_connection() {
+    use crate::store::SessionOrigin;
+    let store = Store::open_in_memory().unwrap();
+    store.upsert_host("h").unwrap();
+    let agent_row = store
+        .upsert_session("agent", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    store
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET tmux_pane_id = '%3' WHERE id = ?1",
+            [agent_row],
+        )
+        .unwrap();
+    let operator_row = store
+        .upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    crate::service::operator::set_operator_ref(
+        &store,
+        &crate::service::operator::OperatorRef {
+            host_alias: "h".into(),
+            tmux_name: "fleet-operator".into(),
+        },
+    )
+    .unwrap();
+
+    // A person's own device: that person.
+    assert_eq!(
+        super::fleet::origin_for(&client_caller("phone", TokenMode::Full), &store),
+        SessionOrigin::person(Some(OWNER_PERSON))
+    );
+    // A per-host token: an agent in the session its pane proves, else a
+    // script on the host. A pane on another host proves nothing.
+    assert_eq!(
+        super::fleet::origin_for(&pane_caller(Some("%3")), &store),
+        SessionOrigin::token(Some(agent_row))
+    );
+    assert_eq!(
+        super::fleet::origin_for(&pane_caller(None), &store),
+        SessionOrigin::token(None)
+    );
+    let mut elsewhere = pane_caller(Some("%3"));
+    elsewhere.host_alias = Some("other".into());
+    assert_eq!(
+        super::fleet::origin_for(&elsewhere, &store),
+        SessionOrigin::token(None)
+    );
+    // The operator's own client: the operator, by its session.
+    assert_eq!(
+        super::fleet::origin_for(
+            &client_caller(
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                TokenMode::Full
+            ),
+            &store
+        ),
+        SessionOrigin::operator(Some(operator_row))
+    );
 }

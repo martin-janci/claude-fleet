@@ -639,6 +639,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Stamps the row's `last_viewed_at`: a write, though a harmless one.
+    ToolPolicy {
+        name: "touch_session_viewed",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "restart_session",
         access: Access::Client,
@@ -984,6 +992,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     ToolPolicy {
         name: "repo_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_blame",
         access: Access::Client,
         readonly: true,
         confirm: false,
