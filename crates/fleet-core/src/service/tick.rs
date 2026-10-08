@@ -253,6 +253,17 @@ pub fn spawn_reconcile_tick(
                     }
                     service::loops::report("playbooks", Ok::<_, String>(()), Some(period));
                 }
+                // PR shepherd: projects a person granted a rule for get their
+                // sessions' conflicting or red PRs recorded, and nudged at
+                // `nudge`. No rule, no work: one indexed read and out. Stops
+                // while `automation.paused` is on.
+                if service::loops::gate("pr_shepherd", store, Some(period)) {
+                    let n = service::pr_shepherd::run(store, ssh).await;
+                    if n > 0 {
+                        tracing::info!("reconcile tick: recorded {n} PR shepherd episode(s)");
+                    }
+                    service::loops::report("pr_shepherd", Ok::<_, String>(()), Some(period));
+                }
                 // Wave 5 G-hub-latency Task 1: single-flight, off the tick
                 // body — a slow sweep (it does SSH work) must not stretch
                 // the tick past its period. Mirrors `service::usage::spawn_collect`.

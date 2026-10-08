@@ -45,6 +45,7 @@ pub const LOOPS: &[LoopSpec] = &[
     spec("stale_working", "Stale working", false),
     spec("forms", "Chat forms expiry", false),
     spec("playbooks", "Stuck playbooks", true),
+    spec("pr_shepherd", "PR shepherd", true),
     spec("gc", "Garbage collection", true),
     spec("usage", "Session usage", false),
     spec("tasks", "Task sweep", false),

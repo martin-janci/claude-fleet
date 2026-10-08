@@ -34,6 +34,7 @@ mod orgs;
 mod participants;
 mod peer_links;
 mod people;
+mod pr_shepherd;
 mod project_picks;
 mod projects;
 mod read_cursors;
@@ -134,6 +135,9 @@ pub use peer_links::{
 };
 pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
+};
+pub use pr_shepherd::{
+    ShepherdEpisodeRow, ShepherdRuleRow, SHEPHERD_LEVELS, SHEPHERD_RECIPES_MAX_CHARS,
 };
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use read_cursors::CursorRow;
