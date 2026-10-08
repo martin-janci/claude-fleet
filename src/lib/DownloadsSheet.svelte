@@ -189,7 +189,7 @@
     border-radius: 4px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.55rem;
   }
   .bar button:disabled { opacity: 0.5; cursor: default; }
@@ -233,11 +233,11 @@
   .meta,
   .note,
   .state {
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .err {
-    color: var(--danger, #d33);
+    color: var(--danger);
   }
   .actions {
     display: flex;
@@ -250,7 +250,7 @@
     border-radius: 4px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.55rem;
   }
   .actions button:hover {

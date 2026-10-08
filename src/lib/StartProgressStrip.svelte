@@ -126,14 +126,14 @@
     text-align: right;
   }
   .caption--warn {
-    color: var(--usage-warn, #b26a00);
+    color: var(--usage-warn);
   }
   .actions {
     display: inline-flex;
     gap: 4px;
   }
   .err {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     text-align: right;
   }
 </style>

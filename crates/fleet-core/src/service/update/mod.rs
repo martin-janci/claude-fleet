@@ -1251,7 +1251,12 @@ pub fn spawn_refresh_tick(
         loop {
             let base = channel_base_url();
             let fetch = HttpsFetch::new(Some(&base));
-            match refresh(&store, &fetch, &base, &keys, crate::store::now_unix()).await {
+            let refreshed = refresh(&store, &fetch, &base, &keys, crate::store::now_unix()).await;
+            let outcome = refreshed
+                .as_ref()
+                .map(|_| ())
+                .map_err(|e| e.message.clone());
+            match refreshed {
                 Ok(o) => {
                     last_code = None;
                     tracing::info!(
@@ -1276,6 +1281,11 @@ pub fn spawn_refresh_tick(
             let interval = lock(&store)
                 .map(|s| check_interval_secs(&s))
                 .unwrap_or(21_600);
+            crate::service::loops::report(
+                "updates",
+                outcome,
+                Some(std::time::Duration::from_secs(interval)),
+            );
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,

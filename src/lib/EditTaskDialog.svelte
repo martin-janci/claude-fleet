@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -194,7 +195,7 @@
       <div class="actions">
         <button type="button" onclick={onclose}>Cancel</button>
         <button type="submit" class="primary" disabled={!canSubmit} title={blocked ?? ''} data-testid="edit-task-submit"
-          >{busy ? 'Saving…' : 'Save'}</button
+          >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Saving…' : 'Save'}</button
         >
       </div>
     </form>
@@ -206,7 +207,7 @@
   .row { display: flex; gap: 0.6rem; }
   .field { display: flex; flex-direction: column; gap: 0.25rem; }
   .field.grow { flex: 1; }
-  .field span { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .field span { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .field input,
   .field textarea,
   .field select {

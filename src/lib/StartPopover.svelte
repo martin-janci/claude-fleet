@@ -10,12 +10,15 @@
   import { selectSessionExplicitly } from './selection';
   import { decideWorkProposal } from './work';
   import { readErrorText } from './work_view';
+  import { uiLayout } from './prefs';
+  import ProposedBy from './ProposedBy.svelte';
   import { startWork, type StartWorkArgs } from './trackers';
   import {
     argsWithChoice,
     choiceFromPreview,
     previewStartWork,
     projectLabel,
+    projectProposal,
     startBlockedBy,
     suggestedProjectId,
     type StartChoice,
@@ -54,6 +57,8 @@
   const suggested = suggestedProjectId(initial);
   // svelte-ignore state_referenced_locally
   const suggestedPct = initial.suggested_project?.confidence_pct ?? null;
+  // svelte-ignore state_referenced_locally
+  const suggestedProposal = projectProposal(initial);
   let branch = $state('');
   let showBrief = $state(false);
   let busy = $state(false);
@@ -204,9 +209,21 @@
     </select>
   </label>
   {#if suggested != null && choice.project_id === suggested}
-    <span class="hint" data-testid="start-popover-suggested"
-      >Proposed by Jev{suggestedPct != null ? ` (${suggestedPct}%)` : ''}: check it before you start.</span
-    >
+    {#if $uiLayout === 'new'}
+      <ProposedBy
+        proposal={suggestedProposal}
+        field="project"
+        testid="start-popover-suggested"
+        onchange={() => {
+          setProject('');
+          root?.querySelector<HTMLElement>('[data-field="project"]')?.focus();
+        }}
+      />
+    {:else}
+      <span class="hint" data-testid="start-popover-suggested"
+        >Proposed by Jev{suggestedPct != null ? ` (${suggestedPct}%)` : ''}: check it before you start.</span
+      >
+    {/if}
   {/if}
 
   <label class="field">
@@ -403,11 +420,11 @@
     align-items: start;
   }
   .warn {
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .err {
     margin: 0;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .acts {
     display: flex;

@@ -1,6 +1,6 @@
 //! Deferred prompts (redesign step 5.10, the Send prompt dialog): "busy
 //! sessions get it when they are idle". A prompt for a session that is not
-//! between turns is kept in `deferred_prompts` (migration 127) and typed in
+//! between turns is kept in `deferred_prompts` (migration 130) and typed in
 //! as a new turn once the session is idle again: from the Stop hook, which
 //! is the moment a turn ends, and from the reconcile tick as the backstop for
 //! a hook that never came.

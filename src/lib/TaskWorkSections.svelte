@@ -217,7 +217,7 @@
     gap: 6px;
     align-items: center;
     margin: 0 0 6px;
-    font-size: 0.72rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -265,22 +265,22 @@
   }
   .key {
     font-family: var(--mono);
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .chip {
-    font-size: 0.7rem;
+    font-size: 11px;
     border-radius: 999px;
     padding: 0 6px;
     white-space: nowrap;
   }
   .prop {
-    background: color-mix(in srgb, var(--usage-warn, #b45309) 14%, transparent);
-    color: var(--usage-warn, #b45309);
+    background: var(--accent-soft);
+    color: var(--fg);
   }
   .agent {
-    background: color-mix(in srgb, #7c3aed 12%, transparent);
-    color: #7c3aed;
+    background: var(--chip-bg);
+    color: var(--fg-2);
   }
   .prop-card {
     border: 1px dashed var(--border);
@@ -298,15 +298,15 @@
     padding: 4px 0;
   }
   .result {
-    border-left: 2px solid #7c3aed;
+    border-left: 2px solid var(--control-border);
     padding-left: 8px;
   }
   .state--done {
-    color: var(--usage-ok, #2e7d32);
+    color: var(--usage-ok);
   }
   .state--failed,
   .state--cancelled {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .dot {
     width: 7px;
@@ -320,8 +320,8 @@
     border-color: var(--accent);
   }
   .dot--done {
-    background: var(--usage-ok, #2e7d32);
-    border-color: var(--usage-ok, #2e7d32);
+    background: var(--usage-ok);
+    border-color: var(--usage-ok);
   }
   details {
     border: 1px solid var(--border);
@@ -348,7 +348,7 @@
     flex: none;
   }
   .step--completed .m {
-    color: var(--usage-ok, #2e7d32);
+    color: var(--usage-ok);
   }
   .step--in_progress .m {
     color: var(--accent);
@@ -358,10 +358,10 @@
     margin: 0;
   }
   .small {
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .err {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     margin: 0;
   }
   .add {

@@ -115,9 +115,9 @@
   </label>
 
   <div class="field">
-    <span class="field-label">Prompt</span>
+    <span class="field-label" id="review-prompt-h">Prompt</span>
     <pre class="preamble" data-testid="review-preamble">{preamble}</pre>
-    <textarea bind:value={prompt} rows="9" data-testid="review-textarea"></textarea>
+    <textarea bind:value={prompt} rows="9" aria-labelledby="review-prompt-h" data-testid="review-textarea"></textarea>
   </div>
 
   {#if spawnBlocked}

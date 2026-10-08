@@ -1,4 +1,4 @@
-//! Deferred prompts (`deferred_prompts`, migration 127, redesign step 5.10):
+//! Deferred prompts (`deferred_prompts`, migration 130, redesign step 5.10):
 //! prompts for a session that was busy when they were sent, typed in once it
 //! is idle. The decisions (send now or keep, when to type, retries) are
 //! `service::sessions::deferred`'s; this is the table.

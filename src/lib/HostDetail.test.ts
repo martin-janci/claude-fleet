@@ -20,7 +20,7 @@ vi.mock('./hosts', async () => {
 
 import HostDetail from './HostDetail.svelte';
 import { sharedWith } from './hosts_view';
-import { timeAgo } from './session_status';
+import { shortAge } from './session_status';
 import { hubStatus, STANDALONE } from './hub';
 import { UNKNOWN_SESSION_REASON } from './share';
 import { hubConnection } from './hub_connection';
@@ -652,15 +652,14 @@ describe('HostDetail find lost conversations', () => {
     await fireEvent.click(screen.getByTestId('discover-lost'));
     await tick();
 
-    // `now` (the mounted prop) is epoch SECONDS; timeAgo's second param is
-    // epoch MILLISECONDS — the expected string is derived from timeAgo
-    // itself rather than hardcoded, so this stays correct if its buckets
-    // change.
-    const expected = timeAgo(threeHoursAgo.transcript_mtime, NOW * 1000);
+    // `now` (the mounted prop) is epoch SECONDS, as shortAge's second
+    // param is — the expected string is derived from shortAge itself rather
+    // than hardcoded, so this stays correct if its buckets change.
+    const expected = shortAge(threeHoursAgo.transcript_mtime, NOW);
     expect(screen.getByTestId('discover-list').textContent).toContain(expected);
-    // Guard against a vacuous pass: "just now" (what the seconds/ms mixup
+    // Guard against a vacuous pass: "now" (what a seconds/ms mixup
     // produces) must not be what we just asserted for a 3h-old transcript.
-    expect(expected).not.toBe('just now');
+    expect(expected).toBe('3h');
   });
 
   it('an empty result says so', async () => {
@@ -717,5 +716,21 @@ describe('HostDetail Codex assets (F3a)', () => {
     const sel = screen.getByTestId('detail-codex') as HTMLSelectElement;
     expect(sel.disabled).toBe(true);
     expect(sel.title).toContain('https://hub.example');
+  });
+});
+
+describe('an offline host (states kit, step 10.6)', () => {
+  it('says so in its own pane, with Try again running the probe', async () => {
+    const onreprobe = vi.fn();
+    mount('mercury', { host: host('mercury', { reachable: false, last_pinged_at: NOW - 360 }), onreprobe, now: NOW });
+    const off = screen.getByTestId('host-offline-state');
+    expect(off.textContent).toContain('last answered 6 m ago');
+    await fireEvent.click(screen.getByTestId('host-offline-try'));
+    expect(onreprobe).toHaveBeenCalledOnce();
+  });
+
+  it('a reachable host shows no offline state', () => {
+    mount('mercury', { host: host('mercury', { reachable: true }) });
+    expect(screen.queryByTestId('host-offline-state')).toBeNull();
   });
 });

@@ -186,12 +186,12 @@
     font-family: var(--mono);
   }
   .help {
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .err {
     margin: 0;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--usage-crit);
   }
   .row {

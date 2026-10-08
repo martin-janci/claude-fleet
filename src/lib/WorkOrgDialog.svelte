@@ -213,7 +213,7 @@
 <style>
   .form { display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem; }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
-  .field span { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .field span { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .field select {
     font: inherit;
     padding: 0.3rem 0.45rem;
@@ -226,7 +226,7 @@
   .note { font-size: 0.8rem; color: var(--fg-muted); }
   .impact { border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.5rem; }
   .impact ul { margin: 0.2rem 0; padding-left: 1.1rem; }
-  .warn { color: var(--usage-warn, #b45309); }
+  .warn { color: var(--usage-warn); }
   .err { color: var(--danger); }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   p { margin: 0; }

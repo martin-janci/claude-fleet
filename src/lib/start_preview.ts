@@ -4,8 +4,10 @@
 // opens the start popover with the conflicts and the choices.
 import { invokeCmd, type IpcError, type Result } from './result';
 import { startWork, type StartWorkArgs } from './trackers';
+import type { DecisionProposal } from './proposals';
 import type { SessionRow } from './sessions';
 import type { WorkTask } from './work_view';
+import { preselect, type ProposalLike } from './ai_proposal';
 
 /** What would stop or change a start. */
 export interface StartConflict {
@@ -43,12 +45,24 @@ export interface StartPreview {
   /** With `missing: 'project'`: the repository Jev proposes (K1, assist).
    *  A pre-selection only; the person still presses Start. */
   suggested_project?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
+  /** The same pre-selection as a proposal (redesign 2.8): feature
+   *  `start_project`, value `p<id>`. */
+  proposal?: DecisionProposal | null;
 }
 
-/** The project a preview proposes, when it is one of its candidates. */
+/** Jev's K1 answer as the shared chip reads it (redesign 3.12), when the
+ *  preview still lacks a project and the answer is one of its candidates. */
+export function projectProposal(p: StartPreview): ProposalLike | null {
+  const s = p.suggested_project;
+  if (s == null || p.missing !== 'project' || !p.projects.some((x) => x.id === s.project_id)) return null;
+  return { value: String(s.project_id), source: 'jev', confidence_pct: s.confidence_pct ?? null };
+}
+
+/** The project a preview pre-selects: Jev's answer, only above the floor
+ *  (ai_proposal `preselect`), so the field and the chip always agree. */
 export function suggestedProjectId(p: StartPreview): number | null {
-  const id = p.suggested_project?.project_id;
-  return id != null && p.missing === 'project' && p.projects.some((x) => x.id === id) ? id : null;
+  const v = preselect('project', projectProposal(p));
+  return v == null ? null : Number(v);
 }
 
 /** Preview a start: the same arguments `startWork` takes. */

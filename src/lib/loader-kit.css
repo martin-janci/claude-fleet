@@ -85,3 +85,18 @@
   animation: none !important;
   transform: rotate(calc(var(--ofl-p) * 360deg));
 }
+
+/* A Comet before a busy button's label ("Saving…"), redesign step 3.13. Its
+ * box is held from the first frame, so the label does not shift at 400 ms. */
+.btn-loader {
+  margin-right: 0.35em;
+}
+
+/* Signal lost never loops (redesign step 3.14): it drifts once and rests
+ * there. The board loops it for review; a lost hub shown as a loop would be
+ * a loop of hope. Reduced and Off motion get their one fade, and stop too. */
+.ofl.ofl-name-signal-lost *,
+.ofl.ofl-name-signal-lost.ofl--still * {
+  animation-iteration-count: 1 !important;
+  animation-fill-mode: forwards !important;
+}

@@ -785,6 +785,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("get_form", Verdict::Routed { tool: "ask" }),
     ("answer_form", Verdict::Routed { tool: "ask" }),
     ("decline_form", Verdict::Routed { tool: "ask" }),
+    ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "list_debug_devices",
         Verdict::Routed {
@@ -1070,6 +1071,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "check_account_headroom",
+        Verdict::LocalOnly {
+            instead: "this app does not poll account usage while a hub owns the fleet, so \
+                      it cannot tell which account has headroom; start the session as usual",
+        },
+    ),
+    (
         "refresh_account_usage",
         Verdict::LocalOnly {
             instead: "it reads the account's usage over this machine's SSH connection to the \
@@ -1182,6 +1190,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "forgets this machine's own token and setting. It revokes nothing on the \
                   hub: only an operator can, and a paired client is refused revoke_client by \
                   design",
+        },
+    ),
+    (
+        "hub_retry_now",
+        Verdict::SameInBoth {
+            why: "cuts THIS process's wait before it reconnects to the hub. It is the \
+                  banner's Retry now, pressed exactly when the hub cannot be reached",
         },
     ),
     (
@@ -1606,6 +1621,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "pty_drain",
         Verdict::SameInBoth {
             why: "the same as pty_write",
+        },
+    ),
+    (
+        "open_session_in_editor",
+        Verdict::SameInBoth {
+            why: "the same story as pty_open: VS Code and the `ssh` that asks the pane \
+                  for its folder are this machine's, built from the alias and tmux name \
+                  passed in; it reads no state.db and the hub is not in the path",
         },
     ),
     // ── the voice relay's microphone claim ──────────────────────────────────

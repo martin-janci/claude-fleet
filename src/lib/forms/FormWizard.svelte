@@ -1,8 +1,13 @@
 <script lang="ts">
   // One chat form, step by step. The field markup is FlowView's; what is
   // asked follows the answers (form_model.ts). A secret is cleared once
-  // sent and never prefilled.
+  // sent and never prefilled. A choice of up to nine options is drawn as
+  // numbered options; when it is the step's only one, 1–9 pick from it
+  // (step 10.1), as on the Conversation's question card.
   import { untrack } from 'svelte';
+  import { destination } from '../destination';
+  import { matchShortcut } from '../shortcuts';
+  import { detectMac, isEditable } from '../terminal_keys';
   import { stepProblems, visibleSteps } from './form_model';
   import type { FieldProblem, FormField, FormSpec, Values } from './forms';
 
@@ -77,7 +82,46 @@
 
   const off = $derived(busy || disabled);
   const str = (f: FormField) => (typeof values[f.name] === 'string' ? (values[f.name] as string) : '');
+
+  /** A choice short enough to number: a select or multiselect of 1–9 options. */
+  const numbered = (f: FormField) =>
+    (f.type === 'select' || f.type === 'multiselect') && (f.options?.length ?? 0) > 0 && (f.options?.length ?? 0) <= 9;
+  /** The field 1–9 answer: the step's only numbered choice, or none. */
+  const keyField = $derived.by(() => {
+    const choices = step?.fields.filter(numbered) ?? [];
+    return choices.length === 1 ? choices[0] : null;
+  });
+
+  function pick(f: FormField, v: string) {
+    if (f.type === 'multiselect') {
+      const cur = Array.isArray(values[f.name]) ? (values[f.name] as string[]) : [];
+      set(f.name, cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v]);
+    } else {
+      // Picking the chosen option of an optional choice clears it, as the
+      // dropdown's empty entry did.
+      set(f.name, values[f.name] === v && !f.required ? undefined : v);
+    }
+  }
+
+  // 1–9: only while the session view shows, no field, terminal or dialog has
+  // the keyboard, and no question card takes the digits first.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  function onWindowKeydown(e: KeyboardEvent) {
+    const f = keyField;
+    if (!f || off || e.defaultPrevented || $destination !== 'session') return;
+    if (matchShortcut('form-card', e, isMac) !== 'form-card.option') return;
+    // A key sent to the window itself has no element to ask.
+    const target = e.target instanceof HTMLElement ? e.target : null;
+    if (isEditable(target) || target?.dataset?.imeProxy !== undefined || target?.closest?.('dialog')) return;
+    if (document.querySelector('[data-testid="answer-card"]:not(.compact)')) return;
+    const o = f.options?.[Number(e.key) - 1];
+    if (!o) return;
+    e.preventDefault();
+    pick(f, o[0]);
+  }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="wizard">
   {#if steps.length > 1}
@@ -100,7 +144,7 @@
           </label>
         {:else if f.type === 'multiselect'}
           <span class="label">{f.label}</span>
-          {#each f.options ?? [] as [v, l] (v)}
+          {#each f.options ?? [] as [v, l], i (v)}
             <label class="check">
               <input
                 type="checkbox"
@@ -111,9 +155,28 @@
                   const cur = Array.isArray(values[f.name]) ? (values[f.name] as string[]) : [];
                   set(f.name, (e.currentTarget as HTMLInputElement).checked ? [...cur, v] : cur.filter((x) => x !== v));
                 }} />
+              {#if keyField === f}<span class="kbd" aria-hidden="true">{i + 1}</span>{/if}
               {l}
             </label>
           {/each}
+        {:else if f.type === 'select' && numbered(f)}
+          <span class="label" id={`${uid}-${f.name}`}>{f.label}{f.required ? ' *' : ''}</span>
+          <div class="options" role="radiogroup" aria-labelledby={`${uid}-${f.name}`}>
+            {#each f.options ?? [] as [v, l], i (v)}
+              <button
+                type="button"
+                role="radio"
+                class="opt"
+                class:on={values[f.name] === v}
+                aria-checked={values[f.name] === v}
+                data-testid={`form-field-${f.name}-${v}`}
+                disabled={off}
+                onclick={() => pick(f, v)}>
+                {#if keyField === f}<span class="kbd" aria-hidden="true">{i + 1}</span>{/if}
+                {l}
+              </button>
+            {/each}
+          </div>
         {:else}
           <label for={`${uid}-${f.name}`}>{f.label}{f.required ? ' *' : ''}</label>
           {#if f.type === 'select'}
@@ -183,14 +246,19 @@
 
 <style>
   .wizard { display: flex; flex-direction: column; gap: 0.6rem; }
-  .count { font-size: 0.72rem; color: var(--fg-muted); }
+  .count { font-size: 11px; color: var(--fg-muted); }
   h6 { margin: 0; font-size: 0.9rem; }
   .intro { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
   label, .label { font-size: 0.82rem; }
   .check { display: flex; gap: 0.35rem; align-items: flex-start; }
   input:not([type='checkbox']), select, textarea { font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; }
-  .help { font-size: 0.72rem; color: var(--fg-muted); }
-  .err { font-size: 0.75rem; color: var(--usage-crit); }
+  .help { font-size: 11px; color: var(--fg-muted); }
+  .err { font-size: 11px; color: var(--usage-crit); }
   .row { display: flex; gap: 0.4rem; justify-content: flex-end; }
+  .options { display: flex; flex-direction: column; gap: 0.15rem; }
+  .opt { display: flex; gap: 0.45rem; align-items: center; text-align: left; font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; border: 1px solid transparent; border-radius: 4px; background: none; color: inherit; cursor: pointer; }
+  .opt:hover:not(:disabled) { background: var(--bg-hover); }
+  .opt.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .kbd { font-size: 11px; line-height: 1; padding: 0.1rem 0.3rem; border: 1px solid var(--border); border-radius: 3px; color: var(--fg-muted); }
 </style>

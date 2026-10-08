@@ -229,7 +229,7 @@
 <style>
   .form { display: flex; flex-direction: column; gap: 0.5rem; font-size: 0.85rem; }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
-  .field span, legend { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .field span, legend { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .field input, .field select {
     font: inherit;
     padding: 0.3rem 0.45rem;

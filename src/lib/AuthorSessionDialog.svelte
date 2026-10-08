@@ -16,6 +16,7 @@
 </script>
 
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
   import { spawnAuthorSession } from './assets';
   import { selectSessionExplicitly } from './selection';
@@ -85,7 +86,7 @@
       onclick={openSession}
       disabled={busy || instructions.trim() === ''}
       data-testid="author-open"
-    >{busy ? 'Opening…' : 'Open session'}</button>
+    >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Opening…' : 'Open session'}</button>
   </div>
 </Modal>
 

@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
   import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
   import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
-  import { newSessionAbortable, sessions, type SessionRow } from './sessions';
+  import { newBgSession, newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { defaultHost, hosts, isPickableHost } from './hosts';
-  import { readPref, writePref } from './prefs';
+  import { readPref, writePref, uiLayout } from './prefs';
   import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS } from './conversation';
   import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
   import { generateName, nameWords, tmuxNameSuffix } from './names';
@@ -15,6 +15,15 @@
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
+  import { accountByUuid, accountLabel } from './accounts';
+  import {
+    checkAccountHeadroom,
+    freestLogin,
+    loginLabel,
+    usedText,
+    type Headroom,
+    type HostLogin,
+  } from './account_limits';
   import { push, pushError } from './toasts';
   import type { PickerItem } from './PickerList.svelte';
   import {
@@ -30,6 +39,9 @@
   import { hubConnection } from './hub_connection';
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
+  import ProposedBy from './ProposedBy.svelte';
+  import type { ProposalLike } from './ai_proposal';
+  import { openNewSessionPicker } from './switcher_request';
 
   let {
     project,
@@ -39,6 +51,7 @@
     initialHost,
     ticket,
     autostart = false,
+    proposal = null,
     clock = () => Math.floor(Date.now() / 1000),
     locale,
     timeZone,
@@ -58,6 +71,9 @@
     /** Start at once with the remembered choices (the picker's ⌘↵); the
      *  dialog stays open only if something needs a person. */
     autostart?: boolean;
+    /** What chose `project` (redesign 3.12, K1): shown as the shared chip
+     *  in the New layout; Change re-opens the picker for another one. */
+    proposal?: ProposalLike | null;
     /** Unix seconds for the host chips' usage wording; injectable for tests. */
     clock?: () => number;
     locale?: string;
@@ -149,6 +165,93 @@
   // The chosen host's known profiles, offered as suggestions; a new name
   // is still accepted (the session asks for its /login).
   const hostProfiles = $derived($hosts.find((h) => h.alias === chosenHost)?.claude_profiles ?? []);
+  // Limit handling (redesign step 4.4): a start on an account past
+  // `accounts.pause_at` asks first and offers the login with headroom.
+  // Cleared when the host or the profile changes, so an answer never
+  // carries over to a different login.
+  let limitAsk = $state<Headroom | null>(null);
+  let limitConfirmed = $state(false);
+  $effect(() => {
+    void chosenHost;
+    void chosenProfile;
+    untrack(() => {
+      limitAsk = null;
+      limitConfirmed = false;
+    });
+  });
+  const accountName = (uuid: string) => accountLabel($accountByUuid.get(uuid));
+  function useLogin(l: HostLogin) {
+    chosenProfile = l.profile ?? '';
+    // The effect above clears the flags on the profile change; confirm after it.
+    void tick().then(() => {
+      limitConfirmed = true;
+      void submit();
+    });
+  }
+  function startAnyway() {
+    limitConfirmed = true;
+    limitAsk = null;
+    void submit();
+  }
+  // Redesign step 4.5 (New layout): the login is picked from the host's
+  // logins with their live usage, defaulting to the one with the most
+  // headroom until the person picks; "Other profile…" brings back the free
+  // name field (a new profile still asks for its /login in the pane).
+  const newLayout = $derived($uiLayout === 'new');
+  const OTHER_PROFILE = '\u0000other';
+  let hostLogins = $state<HostLogin[] | null>(null);
+  let pickedLogin = false;
+  let otherProfile = $state(false);
+  $effect(() => {
+    const host = chosenHost;
+    if (!newLayout) return;
+    untrack(() => {
+      hostLogins = null;
+      pickedLogin = false;
+      otherProfile = false;
+    });
+    void checkAccountHeadroom(host, null).then((h) => {
+      if (chosenHost !== host) return;
+      const logins = h.ok && Array.isArray(h.value?.logins) ? h.value.logins : [];
+      hostLogins = logins;
+      const best = pickedLogin ? null : freestLogin(logins);
+      if (best) chosenProfile = best.profile ?? '';
+    });
+  });
+  function onPickLogin(v: string) {
+    pickedLogin = true;
+    if (v === OTHER_PROFILE) {
+      otherProfile = true;
+      chosenProfile = '';
+    } else {
+      chosenProfile = v;
+    }
+  }
+  // "Run: in background" (step 4.5): a supervised background session, what
+  // the sidebar's ⚡ dialog launches, which stays as it was.
+  let runBackground = $state(false);
+  let bgPrompt = $state('');
+  const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
+  const asBackground = $derived(newLayout && runBackground && chosenKind === 'work' && !ticket);
+  async function submitBackground() {
+    if (bgSessionBlocked !== null) return;
+    if (!bgPrompt.trim()) {
+      error = 'A background session needs its first prompt';
+      return;
+    }
+    busy = true;
+    error = null;
+    const bgName = friendlyName.trim() || name.trim() || nameWords(generateName(takenSlugs));
+    const r = await newBgSession(chosenHost, bgName, bgPrompt.trim());
+    busy = false;
+    if (!r.ok) {
+      if (destroyed) pushError(r.error, 'Background session failed');
+      else error = r.error.message;
+      return;
+    }
+    push({ kind: 'info', message: `Started ${bgName} in the background on ${chosenHost}` });
+    onCancel();
+  }
   const profileInvalid = $derived(
     chosenProfile.trim() !== '' && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(chosenProfile.trim()),
   );
@@ -828,6 +931,10 @@
     // any field (`onKeydown` below) calls `submit()` directly — the handler
     // must refuse too, or a blocked hub client could still route
     // `new_session` from the keyboard.
+    if (asBackground) {
+      await submitBackground();
+      return;
+    }
     if (newSessionBlocked) return;
     if (inNewMode) {
       // Strip any trailing dash the live slugifier left in place so the
@@ -846,6 +953,17 @@
     // current when the response lands.
     const submittedHost = chosenHost;
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
+    if (chosenKind === 'work' && !limitConfirmed) {
+      busy = true;
+      const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null);
+      busy = false;
+      // No answer (a hub client, an unknown host): start as before.
+      if (h.ok && h.value?.over) {
+        limitAsk = h.value;
+        return;
+      }
+    }
+    limitAsk = null;
     busy = true;
     error = null;
     createController = new AbortController();
@@ -947,6 +1065,17 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="dialog" onkeydown={onKeydown}>
   <h3>New session — {owner}/{repo}</h3>
+  {#if $uiLayout === 'new'}
+    <ProposedBy
+      {proposal}
+      field="project"
+      testid="new-session-proposed"
+      onchange={() => {
+        onCancel();
+        openNewSessionPicker(initialHost, ticket);
+      }}
+    />
+  {/if}
 
   <div class="fields">
     <label for="friendly-name">Name</label>
@@ -1006,6 +1135,7 @@
           {#if briefOn}
             <textarea
               class="brief"
+              aria-label="Brief for Claude"
               data-testid="ticket-brief"
               rows="6"
               value={briefText}
@@ -1039,27 +1169,61 @@
       <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
     {/if}
 
-    <label for="kind-picker">Type</label>
-    <div class="kind-row" id="kind-picker" role="group">
-      <button
-        class="kind-pick"
-        class:active={chosenKind === 'work'}
-        data-testid="kind-work"
-        onclick={() => onPickKind('work')}
-      >
-        Claude
-      </button>
-      <button
-        class="kind-pick"
-        class:active={chosenKind === 'shell'}
-        data-testid="kind-shell"
-        onclick={() => onPickKind('shell')}
-      >
-        Shell
-      </button>
-    </div>
+    {#if newLayout}
+      <!-- A group, not a labelable control: it is named by aria-labelledby. -->
+      <span class="field-label" id="kind-picker-label">Agent</span>
+      <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label" data-testid="agent-picker">
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'work'}
+          aria-pressed={chosenKind === 'work'}
+          data-testid="kind-work"
+          onclick={() => onPickKind('work')}
+        >
+          Claude Code
+        </button>
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'shell'}
+          aria-pressed={chosenKind === 'shell'}
+          data-testid="kind-shell"
+          onclick={() => onPickKind('shell')}
+        >
+          Shell
+        </button>
+        <button class="kind-pick" aria-pressed="false" data-testid="agent-codex" disabled title="Codex sessions are coming">
+          Codex <span class="soon">coming</span>
+        </button>
+        <button class="kind-pick" aria-pressed="false" data-testid="agent-agy" disabled title="Agy sessions are coming">
+          Agy <span class="soon">coming</span>
+        </button>
+      </div>
+    {:else}
+      <!-- A group, not a labelable control: it is named by aria-labelledby. -->
+      <span class="field-label" id="kind-picker-label">Type</span>
+      <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label">
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'work'}
+          aria-pressed={chosenKind === 'work'}
+          data-testid="kind-work"
+          onclick={() => onPickKind('work')}
+        >
+          Claude
+        </button>
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'shell'}
+          aria-pressed={chosenKind === 'shell'}
+          data-testid="kind-shell"
+          onclick={() => onPickKind('shell')}
+        >
+          Shell
+        </button>
+      </div>
+    {/if}
 
-    {#if chosenKind === 'work' && !ticket}
+    {#if chosenKind === 'work' && !ticket && !asBackground}
       <div class="launch-row">
         <div class="launch-field">
           <label for="launch-model">Model</label>
@@ -1079,25 +1243,74 @@
             {/each}
           </select>
         </div>
-        <div class="launch-field">
-          <label for="launch-profile">Login profile</label>
-          <input
-            id="launch-profile"
-            data-testid="launch-profile"
-            bind:value={chosenProfile}
-            placeholder="Host login"
-            list="launch-profile-options"
-            maxlength="32"
-            aria-invalid={profileInvalid}
-            title="A name such as work: the session runs under ~/.claude-profiles/<name> on the host, with its own /login. A new profile asks you to log in, in the session."
-          />
-          <datalist id="launch-profile-options">
-            {#each hostProfiles as p (p.name)}
-              <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
-            {/each}
-          </datalist>
-        </div>
+        {#if newLayout && hostLogins && hostLogins.length > 0 && !otherProfile}
+          <div class="launch-field">
+            <label for="launch-account">Account</label>
+            <select
+              id="launch-account"
+              data-testid="launch-account"
+              value={chosenProfile}
+              onchange={(e) => onPickLogin(e.currentTarget.value)}
+            >
+              {#each hostLogins as l (l.profile ?? '')}
+                <option value={l.profile ?? ''}>{loginLabel(l, accountName)} · {usedText(l)}</option>
+              {/each}
+              <option value={OTHER_PROFILE}>Other profile…</option>
+            </select>
+          </div>
+        {:else}
+          <div class="launch-field">
+            <label for="launch-profile">Login profile</label>
+            <input
+              id="launch-profile"
+              data-testid="launch-profile"
+              bind:value={chosenProfile}
+              placeholder="Host login"
+              list="launch-profile-options"
+              maxlength="32"
+              aria-invalid={profileInvalid}
+              title="A name such as work: the session runs under ~/.claude-profiles/<name> on the host, with its own /login. A new profile asks you to log in, in the session."
+            />
+            <datalist id="launch-profile-options">
+              {#each hostProfiles as p (p.name)}
+                <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
+              {/each}
+            </datalist>
+          </div>
+        {/if}
       </div>
+    {/if}
+
+    {#if newLayout && chosenKind === 'work' && !ticket}
+      <span class="field-label" id="run-picker-label">Run</span>
+      <div class="kind-row" id="run-picker" role="group" aria-labelledby="run-picker-label">
+        <button
+          class="kind-pick"
+          class:active={!runBackground}
+          aria-pressed={!runBackground}
+          data-testid="run-pane"
+          onclick={() => (runBackground = false)}
+        >
+          In a pane
+        </button>
+        <button
+          class="kind-pick"
+          class:active={runBackground}
+          aria-pressed={runBackground}
+          data-testid="run-background"
+          onclick={() => (runBackground = true)}
+          title="A supervised background session on the host, outside this project's worktree"
+        >
+          In background
+        </button>
+      </div>
+      {#if runBackground}
+        <label for="bg-prompt">First prompt</label>
+        <textarea id="bg-prompt" data-testid="bg-prompt" rows="3" bind:value={bgPrompt} placeholder="What should Claude work on?"></textarea>
+        <p class="work-note" data-testid="bg-note">
+          Runs supervised on {chosenHost} in its home folder, with no pane; it shows in the list when it starts.
+        </p>
+      {/if}
     {/if}
 
     {#if chosenKind === 'shell'}
@@ -1123,7 +1336,9 @@
       }}
     />
 
-    <label for="wt-picker">Worktree</label>
+    <!-- Not a <label>: the picker is a listbox, which a label cannot name
+         (it names itself with ariaLabel). -->
+    <span class="field-label" aria-hidden="true">Worktree</span>
     {#if worktreeStatus}
       <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
     {/if}
@@ -1177,6 +1392,21 @@
 
   <div class="actions">
     <span class="hint">↵ create · Ctrl/⌘R re-roll</span>
+    {#if limitAsk && limitAsk.chosen}
+      <div class="limit-ask" role="alert" data-testid="limit-ask">
+        <span
+          >{accountName(limitAsk.chosen.account_uuid)} is at {Math.round(limitAsk.chosen.used_pct ?? 0)}% of its
+          limit (this asks from {limitAsk.pause_at_pct}%).</span
+        >
+        {#if limitAsk.suggestion}
+          {@const s = limitAsk.suggestion}
+          <button class="primary" data-testid="limit-use-suggestion" onclick={() => useLogin(s)}
+            >Use {loginLabel(s, accountName)} · {usedText(s)}</button
+          >
+        {/if}
+        <button data-testid="limit-start-anyway" onclick={startAnyway}>Start anyway</button>
+      </div>
+    {/if}
     <button onclick={onCancel} disabled={busy}>Cancel</button>
     {#if hubCreateNote}
       <span class="hub-create-note" data-testid="hub-create-note" title={hubCreateNote}>{hubCreateNote}</span>
@@ -1189,15 +1419,35 @@
         data-testid="create-btn"
         disabled={(inNewMode && !newWorktreeName.trim()) ||
           (chosenKind === 'work' && profileInvalid) ||
-          (ticket && chosenKind === 'work' ? startBlocked !== null : newSessionBlocked !== null)}
-        title={(ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
-      >{ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
+          (asBackground
+            ? bgSessionBlocked !== null || !bgPrompt.trim()
+            : ticket && chosenKind === 'work'
+              ? startBlocked !== null
+              : newSessionBlocked !== null)}
+        title={(asBackground ? bgSessionBlocked : ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
+      >{asBackground ? 'Start in background' : ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
     {/if}
   </div>
 </div>
 </Modal>
 
 <style>
+  .soon {
+    font-size: 11px;
+    color: var(--fg-muted);
+  }
+  .limit-ask {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--usage-warn) 45%, transparent);
+    border-radius: 4px;
+    color: var(--fg);
+    font-size: 0.8rem;
+  }
   /* The dialog owns its height budget: the field stack scrolls, the
      Create/Cancel row is pinned, so no number of worktrees or hosts can push
      the buttons off-screen. Modal's body caps at 85vh and adds 1rem padding
@@ -1224,7 +1474,7 @@
      scrolls instead of squeezing them toward zero. :global so it reaches
      PickerList's root too. */
   .fields > :global(*) { flex-shrink: 0; }
-  label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
+  label, .field-label { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;
     padding: 0.3rem 0.4rem;
@@ -1237,7 +1487,7 @@
   .name-row { display: flex; gap: 0.3rem; }
   .work-note {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .work-note .dup { color: var(--fg); }
@@ -1274,7 +1524,7 @@
     min-width: 0;
   }
   .kind-pick {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
@@ -1285,16 +1535,16 @@
   .kind-pick.active { color: var(--fg); border-color: var(--accent); }
   .preview {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
+  .preview .k { text-transform: uppercase; font-size: 11px; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
-  .wt-status { font-size: 0.72rem; color: var(--fg-muted); margin: 0 0 0.2rem; }
+  .wt-status { font-size: 11px; color: var(--fg-muted); margin: 0 0 0.2rem; }
   .wt-status.err { color: var(--danger); }
   .actions {
     display: flex;
@@ -1305,8 +1555,8 @@
     padding-top: 0.2rem;
     border-top: 1px solid var(--border);
   }
-  .actions .hint { margin-right: auto; font-size: 0.68rem; color: var(--fg-muted); }
-  .hub-create-note { font-size: 0.68rem; color: var(--fg-muted); text-align: right; }
+  .actions .hint { margin-right: auto; font-size: 11px; color: var(--fg-muted); }
+  .hub-create-note { font-size: 11px; color: var(--fg-muted); text-align: right; }
   .actions button {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
@@ -1332,12 +1582,12 @@
   .brief {
     font: inherit;
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
   }
   .small {
-    font-size: 0.7rem;
+    font-size: 11px;
   }
 </style>

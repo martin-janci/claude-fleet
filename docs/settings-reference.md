@@ -26,6 +26,12 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `restore.batch_size` | `4` | 1–16 | Sessions resumed in parallel by Restore lost sessions. |
 | `restore.stagger_ms` | `3000` | 0–60000 ms | Pause between starting each resumed session in a batch restore. |
 
+## automation
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `automation.paused` | `false` | on / off | Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused. |
+
 ## orchestrator
 
 | Setting | Default | Range | What it does |
@@ -106,6 +112,12 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `usage.enabled` | `true` | on / off | Sum each session's token usage from its Claude transcript and show an estimated cost. |
 | `usage.interval_secs` | `300` | seconds, `0` = off | Seconds between usage passes, one batched read per host. |
 | `usage.prices_json` | `{}` | JSON map: model → USD per million tokens | Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only. |
+
+## accounts
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `accounts.pause_at` | `90` | 50–100% | Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom. |
 
 ## Error reports
 

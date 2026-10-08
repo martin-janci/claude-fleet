@@ -128,7 +128,7 @@
     border-radius: var(--radius-md);
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
   }
-  .title { padding: 0.3rem 0.5rem; font-size: 0.7rem; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .title { padding: 0.3rem 0.5rem; font-size: 11px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mi {
     display: flex; align-items: center; width: 100%; gap: 0.5rem;
     height: var(--control-h-lg); padding: 0 0.5rem;
@@ -137,6 +137,6 @@
   }
   .mi:hover, .mi:focus-visible { background: var(--accent-soft); outline: none; }
   .mi[aria-checked='true'] { font-weight: 600; }
-  kbd { margin-left: auto; font: inherit; font-size: 0.65rem; color: var(--fg-muted); }
+  kbd { margin-left: auto; font: inherit; font-size: 11px; color: var(--fg-muted); }
   .gi { width: 100%; box-sizing: border-box; margin-bottom: 0.3rem; padding: 0.3rem 0.5rem; font: inherit; font-size: 0.8rem; }
 </style>

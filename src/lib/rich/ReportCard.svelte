@@ -103,7 +103,7 @@
   .summary { font-size: 0.92em; }
   h6 {
     margin: 0 0 0.2rem;
-    font-size: 0.7rem;
+    font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -124,14 +124,14 @@
     border: 1px solid var(--control-border);
     border-radius: var(--radius-sm, 4px);
     color: var(--control-fg-quiet, var(--fg-muted));
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0 0.4rem;
     cursor: pointer;
   }
   .ghost:hover { color: var(--fg); }
   .raw summary {
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, monospace);
   }
@@ -140,7 +140,7 @@
     margin: 0.2rem 0 0;
     max-height: 18rem;
     overflow: auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     white-space: pre-wrap;
     word-break: break-word;
   }

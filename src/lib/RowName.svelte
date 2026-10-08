@@ -31,6 +31,6 @@
   .why { color: var(--fg-muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .kico {
     display: grid; place-items: center; width: 16px; height: 16px; border-radius: var(--radius-sm);
-    background: var(--control-bg-active); color: var(--control-fg-quiet); font-family: var(--mono); font-size: 9.5px; font-weight: 700;
+    background: var(--control-bg-active); color: var(--control-fg-quiet); font-family: var(--mono); font-size: 11px; font-weight: 700;
   }
 </style>

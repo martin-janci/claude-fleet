@@ -85,7 +85,7 @@
     border-radius: 9px;
     padding: 10px 11px;
     box-shadow: 0 6px 22px rgba(0, 0, 0, 0.16);
-    font-size: 0.75rem;
+    font-size: 11px;
     line-height: 1.45;
   }
   .htext {
@@ -99,18 +99,18 @@
   }
   .gotit {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
     border: none;
     border-radius: 6px;
     padding: 4px 10px;
-    font-size: 0.75rem;
+    font-size: 11px;
     cursor: pointer;
   }
   .x {
     background: none;
     border: none;
-    color: var(--fg-muted, #777);
-    font-size: 0.75rem;
+    color: var(--fg-muted);
+    font-size: 11px;
     cursor: pointer;
   }
   .gotit:hover {
