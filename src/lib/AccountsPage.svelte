@@ -33,6 +33,7 @@
   import { showFriendlyNames } from './sessions';
   import { selectSessionExplicitly } from './selection';
   import { pushError } from './toasts';
+  import { accountsPageRequest } from './account_pill';
   import { untrack } from 'svelte';
 
   let {
@@ -53,6 +54,14 @@
 
   const list = $derived(accountSummaries($accounts, $hosts, $sessions, $accountUsage));
   let picked = $state<string | null>(null);
+  // A pill elsewhere (step 4.3) asked for one account: show it, then clear
+  // the request so a later visit keeps whatever was picked by hand.
+  $effect(() => {
+    const req = $accountsPageRequest;
+    if (req === null) return;
+    picked = req;
+    accountsPageRequest.set(null);
+  });
   const selected: AccountSummary | null = $derived(
     list.find((a) => a.uuid === picked) ?? list[0] ?? null,
   );
