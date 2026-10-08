@@ -1025,14 +1025,17 @@ mod tests {
         };
         let out = run(&scan_script());
         let scan = parse_scan(&out.stdout).unwrap();
-        assert_eq!(
-            scan.running.len(),
-            1,
-            "{}",
-            String::from_utf8_lossy(&out.stdout)
-        );
-        assert_eq!(scan.running[0].os_version.as_deref(), Some("Android 14"));
-        assert_eq!(scan.tools, ["adb"]);
+        // A macOS runner also has a real `xcrun` in /usr/bin, and maybe a
+        // booted simulator: only the stub's Android device is pinned.
+        let android: Vec<_> = scan
+            .running
+            .iter()
+            .filter(|d| d.platform == "android")
+            .collect();
+        assert_eq!(android.len(), 1, "{}", String::from_utf8_lossy(&out.stdout));
+        assert_eq!(android[0].os_version.as_deref(), Some("Android 14"));
+        assert_eq!(scan.tools.first().map(String::as_str), Some("adb"));
+        assert!(!scan.tools.iter().any(|t| t == "emulator"));
 
         let t = Target::Adb {
             serial: "R5CT1".into(),
