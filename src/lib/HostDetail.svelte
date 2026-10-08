@@ -860,7 +860,7 @@
   h2 { margin: 0; font-size: 1.1rem; }
   h3 {
     margin: 0 0 0.35rem;
-    font-size: 0.7rem;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -907,7 +907,7 @@
   .d-main { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; flex: 1; min-width: 0; }
   .d-cwd { font-variant-numeric: tabular-nums; }
   .badge {
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0 0.35rem;
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -936,12 +936,12 @@
     border: 1px solid var(--border);
     color: var(--fg);
     border-radius: 4px;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .action,
   .small {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.6rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -954,7 +954,7 @@
   .action.danger { color: var(--usage-crit); border-color: var(--usage-crit); }
   kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.65rem;
+    font-size: 11px;
     padding: 0 0.2rem;
     border: 1px solid var(--border);
     border-radius: 3px;

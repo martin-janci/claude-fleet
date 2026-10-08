@@ -72,7 +72,7 @@
 <style>
   .form { display: flex; flex-direction: column; gap: 0.6rem; }
   .field { display: flex; flex-direction: column; gap: 0.25rem; }
-  .field span { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .field span { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .field input {
     font: inherit;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

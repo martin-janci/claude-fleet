@@ -367,7 +367,7 @@
   }
   .block h4 {
     margin: 0 0 0.35rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted, #999);
@@ -408,7 +408,7 @@
   .level {
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 0.68rem;
+    font-size: 11px;
     padding: 0.1rem 0.35rem;
     border: 1px solid var(--border);
     border-radius: 4px;

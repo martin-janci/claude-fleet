@@ -1248,7 +1248,7 @@
      scrolls instead of squeezing them toward zero. :global so it reaches
      PickerList's root too. */
   .fields > :global(*) { flex-shrink: 0; }
-  label, .field-label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
+  label, .field-label { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;
     padding: 0.3rem 0.4rem;
@@ -1261,7 +1261,7 @@
   .name-row { display: flex; gap: 0.3rem; }
   .work-note {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .work-note .dup { color: var(--fg); }
@@ -1298,7 +1298,7 @@
     min-width: 0;
   }
   .kind-pick {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
@@ -1309,16 +1309,16 @@
   .kind-pick.active { color: var(--fg); border-color: var(--accent); }
   .preview {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
+  .preview .k { text-transform: uppercase; font-size: 11px; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
-  .wt-status { font-size: 0.72rem; color: var(--fg-muted); margin: 0 0 0.2rem; }
+  .wt-status { font-size: 11px; color: var(--fg-muted); margin: 0 0 0.2rem; }
   .wt-status.err { color: var(--danger); }
   .actions {
     display: flex;
@@ -1329,8 +1329,8 @@
     padding-top: 0.2rem;
     border-top: 1px solid var(--border);
   }
-  .actions .hint { margin-right: auto; font-size: 0.68rem; color: var(--fg-muted); }
-  .hub-create-note { font-size: 0.68rem; color: var(--fg-muted); text-align: right; }
+  .actions .hint { margin-right: auto; font-size: 11px; color: var(--fg-muted); }
+  .hub-create-note { font-size: 11px; color: var(--fg-muted); text-align: right; }
   .actions button {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
@@ -1356,12 +1356,12 @@
   .brief {
     font: inherit;
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
   }
   .small {
-    font-size: 0.7rem;
+    font-size: 11px;
   }
 </style>

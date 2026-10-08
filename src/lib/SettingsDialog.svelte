@@ -1095,7 +1095,7 @@
   }
   .hosts-line h4 {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -1103,7 +1103,7 @@
   .hosts-summary { flex: 1; font-size: 0.8rem; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
   .hosts-line kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
 

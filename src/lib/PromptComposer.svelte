@@ -224,7 +224,7 @@
   .dialog h3 { margin: 0; font-size: 1rem; }
   .dialog h4 {
     margin: 0 0 0.3rem 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -253,20 +253,20 @@
   .target-row.not-mine label { opacity: 0.55; cursor: not-allowed; }
   .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
     border-radius: 3px;
   }
-  .account { color: var(--fg-muted); font-size: 0.75rem; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .sess-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.78rem; }
+  .account { color: var(--fg-muted); font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
   /* The severity tokens, not hand-picked hexes: #50c86e is the exact green
      this branch removed from attention.ts for failing its contrast floor
      (2.05:1 on --bg-pane), and its twin lived on here. */
   .warn { color: var(--usage-warn); }
   .ok { color: var(--usage-ok); }
-  .err { color: var(--usage-crit); font-size: 0.75rem; }
+  .err { color: var(--usage-crit); font-size: 11px; }
 
   .show-all {
     display: flex;

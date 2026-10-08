@@ -44,7 +44,7 @@
     gap: 0.3rem;
   }
   .pill {
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.1rem 0.45rem;
     border-radius: 999px;
     border: 1px solid var(--border);

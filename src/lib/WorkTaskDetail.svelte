@@ -627,7 +627,7 @@
   }
   h4 {
     margin: 0.3rem 0 0.1rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .head-actions,
@@ -649,7 +649,7 @@
     text-decoration: line-through;
   }
   .badge {
-    font-size: 0.72rem;
+    font-size: 11px;
     border: 1px solid var(--border);
     border-radius: 3px;
     padding: 0 0.3rem;
@@ -711,7 +711,7 @@
     font-weight: 600;
   }
   .state {
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .why,
@@ -729,7 +729,7 @@
     cursor: pointer;
   }
   .small {
-    font-size: 0.78rem;
+    font-size: 11px;
     margin: 0;
   }
   .muted {

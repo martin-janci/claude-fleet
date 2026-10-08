@@ -536,7 +536,7 @@
     background: none;
     padding: 0.1rem 0.15rem;
     font: inherit;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     cursor: pointer;
     border-radius: var(--radius-sm);
@@ -562,7 +562,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     outline: none;
   }
   .tidy-sheet:focus-visible {
@@ -580,14 +580,14 @@
   }
   .group-head {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding-top: 0.2rem;
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     flex: 1;
   }
   .only {
@@ -615,7 +615,7 @@
   }
   .warn {
     color: var(--usage-warn, #b7791f);
-    font-size: 0.65rem;
+    font-size: 11px;
   }
   .badge {
     color: var(--accent, #3b82f6);

@@ -171,14 +171,14 @@
     border: none;
     cursor: pointer;
     font-family: inherit;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-2);
     padding: 0.15rem 0 0.2rem 0.4rem;
     text-align: left;
   }
   .caret {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     width: 0.7rem;
     text-align: center;
     transition: transform var(--dur-fast) ease;

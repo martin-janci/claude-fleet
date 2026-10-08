@@ -808,7 +808,7 @@
   .ro { display: inline-flex; align-items: center; gap: 8px; }
   .grant { font-size: 12px; color: var(--fg-muted); }
   .grant code, .problems code { font-family: var(--mono); font-size: 11.5px; user-select: text; }
-  kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 4px; border-radius: 3px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); opacity: 0.85; }
+  kbd { font-family: var(--mono); font-size: 11px; padding: 0 4px; border-radius: 3px; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); opacity: 0.85; }
   .newlayer { padding: 10px 14px 0; }
   .body { flex: 1; min-height: 0; overflow: auto; outline: 0; }
   .body:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }

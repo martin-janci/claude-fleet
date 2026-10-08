@@ -389,7 +389,7 @@
     padding-right: 0.2rem;
   }
   .fields > :global(*) { flex-shrink: 0; }
-  label, .label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
+  label, .label { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; }
   label.check {
     display: flex;
     gap: 0.4rem;
@@ -419,13 +419,13 @@
   }
   .preview {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
+  .preview .k { text-transform: uppercase; font-size: 11px; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
 </style>
