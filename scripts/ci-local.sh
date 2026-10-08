@@ -6,7 +6,8 @@
 #                  migration this tree adds is numbered above origin/main's
 #                  highest, and no two share a number (main took a branch's
 #                  number four times in one week); then its own test,
-#                  scripts/check-migration-numbers-test.sh. Every mode.
+#                  scripts/check-migration-numbers-test.sh and
+#                  scripts/renumber-migrations-test.sh. Every mode.
 #   version job:   scripts/check-version-consistency.sh — the six version
 #                  carriers, their Cargo.lock entries and fleet-core's
 #                  allowlisted 0.1.0; then a smoke test of
@@ -215,6 +216,7 @@ run_frontend() {
 # clone's last fetch (best-effort: offline it checks the local ref).
 step scripts/check-migration-numbers.sh --fetch
 step bash scripts/check-migration-numbers-test.sh
+step bash scripts/renumber-migrations-test.sh
 
 # ci.yml's version-consistency job. Cheap, and a mismatch
 # here is what turns a release tag into three different advertised versions.

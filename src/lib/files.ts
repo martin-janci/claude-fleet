@@ -3,6 +3,7 @@
 // FilesPanel holds its own component-local state and caches results.
 
 import { invokeCmd, type Result } from './result';
+import type { Commit } from './history';
 
 /** One entry from `git status` for a session's worktree. */
 export interface ChangedFile {
@@ -60,6 +61,31 @@ export interface FileBlame {
   truncated: boolean;
 }
 
+/** Which committed range a Changed-section diff covers (redesign step 5.6):
+ *  the branch's commits no remote has, or the branch against its base. */
+export type DiffRange = 'unpushed' | 'base';
+
+/** What the session's branch carries beyond the worktree: commits not
+ *  pushed yet, and what it changes against the base branch. */
+export interface BranchDiff {
+  /** The checked-out branch; null when HEAD is detached. */
+  branch: string | null;
+  /** Its upstream (`origin/feat`); null when it was never pushed. */
+  upstream: string | null;
+  /** Commits no remote has, newest first. */
+  unpushed: Commit[];
+  /** The files those commits change, as one diff. */
+  unpushedFiles: ChangedFile[];
+  /** More unpushed commits than the backend lists. */
+  truncated: boolean;
+  /** The base branch (`origin/main`), or null without one. */
+  base: string | null;
+  /** Commits on the branch since it left the base. */
+  aheadOfBase: number;
+  /** The files the branch changes against its merge base with the base. */
+  baseFiles: ChangedFile[];
+}
+
 export function repoChanges(sessionId: number): Promise<Result<ChangedFile[]>> {
   return invokeCmd<ChangedFile[]>('repo_changes', { args: { session_id: sessionId } });
 }
@@ -78,6 +104,14 @@ export function repoDiff(sessionId: number, path: string): Promise<Result<FileDi
 
 export function repoBlame(sessionId: number, path: string): Promise<Result<FileBlame>> {
   return invokeCmd<FileBlame>('repo_blame', { args: { session_id: sessionId, path } });
+}
+
+export function repoBranchDiff(sessionId: number): Promise<Result<BranchDiff>> {
+  return invokeCmd<BranchDiff>('repo_branch_diff', { args: { session_id: sessionId } });
+}
+
+export function repoRangeDiff(sessionId: number, path: string, range: DiffRange): Promise<Result<FileDiff>> {
+  return invokeCmd<FileDiff>('repo_range_diff', { args: { session_id: sessionId, path, range } });
 }
 
 /** Blame needs the file in a commit: an untracked file has no history. */

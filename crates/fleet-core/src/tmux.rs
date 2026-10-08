@@ -574,6 +574,11 @@ pub struct HostHealthSample {
     /// shows. `None`: the host could not tell (an older agent, a failed
     /// line); `Some(empty)`: none set.
     pub auth_overrides: Option<Vec<String>>,
+    /// Which of [`crate::service::host_check::AGENT_BINARIES`] are on the
+    /// probing shell's `PATH`, in that order (Orbit Fleet 12.4: the New
+    /// session picker enables an agent only where it can run). `None`: the
+    /// host could not tell; `Some(empty)`: none found.
+    pub agents_on_path: Option<Vec<String>>,
 }
 
 /// The variables that outrank a Claude Code `/login` subscription
@@ -602,6 +607,8 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// `authenv=` lists which [`AUTH_OVERRIDE_VARS`] hold a non-empty value in
 /// this shell or in `tmux show-environment -g`: `grep` matches whole lines
 /// inside the pipe and `cut` keeps only the name, so no value is printed.
+/// `agents=` lists which agent CLIs `command -v` finds (Orbit Fleet 12.4;
+/// the names are [`crate::service::host_check::AGENT_BINARIES`]).
 pub const HOST_HEALTH_SCRIPT: &str = "printf 'dfhome=%s\\n' \"$(df -Pk \"$HOME\" 2>/dev/null | tail -n 1)\"; \
 printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; \
 printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
@@ -610,7 +617,8 @@ printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -
 printf 'cpus=%s\\n' \"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)\"; \
 printf 'memtotal=%s\\n' \"$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || { m=$(sysctl -n hw.memsize 2>/dev/null); [ -n \"$m\" ] && echo $(( m / 1024 )); })\"; \
 printf 'bootat=%s\\n' \"$(awk '/^btime / {print $2}' /proc/stat 2>/dev/null || sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p')\"; \
-printf 'authenv=%s\\n' \"$({ env; tmux show-environment -g 2>/dev/null; } | grep -E '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_PROFILE)=.' | cut -d= -f1 | sort -u | tr '\\n' ' ')\"";
+printf 'authenv=%s\\n' \"$({ env; tmux show-environment -g 2>/dev/null; } | grep -E '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_PROFILE)=.' | cut -d= -f1 | sort -u | tr '\\n' ' ')\"; \
+printf 'agents=%s\\n' \"$(for a in claude codex agy gemini; do command -v \"$a\" >/dev/null 2>&1 && printf '%s ' \"$a\"; done)\"";
 
 /// Second field of a `df -Pk` data line is total kB, fourth is available kB.
 fn df_kb(line: &str) -> (Option<i64>, Option<i64>) {
@@ -653,6 +661,16 @@ pub fn parse_host_health(stdout: &str) -> HostHealthSample {
                     .iter()
                     .filter(|n| set.contains(n))
                     .map(|n| n.to_string())
+                    .collect(),
+            );
+        } else if let Some(v) = line.strip_prefix("agents=") {
+            // In the checklist's order, and only names fleet asked about.
+            let found: Vec<&str> = v.split_whitespace().collect();
+            h.agents_on_path = Some(
+                crate::service::host_check::AGENT_BINARIES
+                    .iter()
+                    .filter(|a| found.contains(a))
+                    .map(|a| a.to_string())
                     .collect(),
             );
         }
@@ -3012,6 +3030,60 @@ mod tests {
             h.boot_at.is_some_and(|b| b > 1_000_000_000 && b <= now),
             "{stdout}"
         );
+    }
+
+    #[test]
+    fn parse_host_health_reads_the_agents_on_path_in_checklist_order() {
+        let h = parse_host_health("agents=codex claude vim gemini \n");
+        assert_eq!(
+            h.agents_on_path,
+            Some(vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "gemini".to_string()
+            ]),
+            "known names only, in AGENT_BINARIES order"
+        );
+        assert_eq!(parse_host_health("agents=\n").agents_on_path, Some(vec![]));
+        // An older agent's sample has no line at all: unknown, not none.
+        assert_eq!(parse_host_health("uptime=5\n").agents_on_path, None);
+        // The script asks about exactly the checklist's agents.
+        let asked = format!(
+            "for a in {}; do",
+            crate::service::host_check::AGENT_BINARIES.join(" ")
+        );
+        assert!(HOST_HEALTH_SCRIPT.contains(&asked), "{HOST_HEALTH_SCRIPT}");
+    }
+
+    /// The real script, with a fake `codex` and `agy` first on PATH and
+    /// nothing else of the four reachable: it reports exactly those two.
+    #[cfg(unix)]
+    #[test]
+    fn the_health_script_finds_the_agents_on_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = tempfile::tempdir().unwrap();
+        for tool in ["codex", "agy"] {
+            let p = bin.path().join(tool);
+            std::fs::write(&p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Only the fake dir and the system tool dirs: a developer's own
+        // `claude` in ~/.local/bin must not leak into the answer.
+        let path = format!("{}:/usr/bin:/bin", bin.path().display());
+        let out = std::process::Command::new("/bin/sh")
+            .args(["-c", HOST_HEALTH_SCRIPT])
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let found = parse_host_health(&stdout)
+            .agents_on_path
+            .unwrap_or_default();
+        assert!(
+            found.contains(&"codex".to_string()) && found.contains(&"agy".to_string()),
+            "{stdout}"
+        );
+        assert!(!found.iter().any(|a| a == "gemini"), "{stdout}");
     }
 
     #[test]

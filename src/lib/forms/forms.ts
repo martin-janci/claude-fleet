@@ -62,6 +62,17 @@ export interface FormView {
   answered_by?: string | null;
   created_at: number;
   decided_at?: number | null;
+  proposal?: FormProposal | null;
+}
+
+/** Jev's likely option for a pending form's first choice (J5, step 10.9):
+ *  the field and the option's value. Absent when there is none. */
+export interface FormProposal {
+  field: string;
+  value: string;
+  source: 'jev' | 'rule' | 'llm';
+  confidence_pct?: number | null;
+  run_id?: number | null;
 }
 
 export interface FieldProblem {

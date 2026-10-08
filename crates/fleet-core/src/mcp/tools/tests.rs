@@ -10095,6 +10095,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `'own'` — frontend territory, named in this round's hand-off.
     ("delete_worktree", &["Own"]),
     ("repo_blame", &["Read"]),
+    ("repo_branch_diff", &["Read"]),
     ("repo_branches", &["Read"]),
     ("repo_changes", &["Read"]),
     ("repo_commit", &["Read"]),
@@ -10102,6 +10103,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("repo_diff", &["Read"]),
     ("repo_file", &["Read"]),
     ("repo_log", &["Read"]),
+    ("repo_range_diff", &["Read"]),
     ("repo_tree", &["Read"]),
     // session_ops.rs
     ("capture_session", &["Read"]),

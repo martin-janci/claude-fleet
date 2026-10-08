@@ -379,7 +379,7 @@ fn routed_read_cases() -> Vec<Case> {
 fn routed_read_cases_but_org_admin() -> Vec<Case> {
     use fleet_core::service::repo::SessionIdArgs;
     use fleet_core::service::repo_read::{
-        RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
+        DiffRange, RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs, RepoRangeDiffArgs,
     };
     use fleet_core::service::worktrees::ListHostWorktreesArgs;
 
@@ -1235,6 +1235,40 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::files::routed::repo_changes(
                     b,
                     SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_branch_diff",
+            "repo_branch_diff",
+            json!({ "session_id": 7 }),
+            r#"{"branch":"feat","upstream":null,"unpushed":[],"unpushedFiles":[],"truncated":false,"base":"origin/main","aheadOfBase":2,"baseFiles":[]}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_branch_diff(
+                    b,
+                    SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_range_diff",
+            "repo_range_diff",
+            json!({ "session_id": 7, "path": "src/lib.rs", "range": "base" }),
+            r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_range_diff(
+                    b,
+                    RepoRangeDiffArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                        range: DiffRange::Base,
+                    },
                     s,
                     h,
                 ))

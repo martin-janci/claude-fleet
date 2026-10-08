@@ -59,6 +59,18 @@ impl FleetTools {
             };
             let view =
                 forms::open(&self.store, session_id, spec, p.why.as_deref()).map_err(to_mcp_err)?;
+            // J5: the likely option of its first choice, off the form's path.
+            let org = lock(&self.store)
+                .ok()
+                .and_then(|s| s.session_org(session_id).ok().flatten());
+            crate::service::decide::quick_answer::spawn_for_form(
+                crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store)),
+                &view.form_id,
+                org,
+                &view.title,
+                view.why.as_deref(),
+                &view.spec,
+            );
             return self
                 .wait_on(&caller, session_id, &view.form_id, p.timeout_s)
                 .await;
@@ -107,7 +119,11 @@ impl FleetTools {
                 Reach::Read,
                 "the form's session",
             )?;
-            return ok_json_compact(&forms::view(&row));
+            let view = match lock(&self.store) {
+                Ok(s) => forms::view_with_proposal(&s, &row),
+                Err(_) => forms::view(&row),
+            };
+            return ok_json_compact(&view);
         }
         // answer / decline: a person's, through `drive` on the session.
         let id = p

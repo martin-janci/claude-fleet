@@ -129,7 +129,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'hosts', 'Accounts and hosts', split(['Meta+I'], ['Ctrl+Shift+H', 'Meta+I'])),
   row('global', 'session-view', 'Flip the Session view (agent tab)',
     split(['Meta+J'], ['Ctrl+Shift+J', 'Meta+J'])),
-  row('global', 'agent', 'Open the agent (Control from 9.1)', split(['Meta+E'], ['Ctrl+Shift+E', 'Meta+E'])),
+  row('global', 'agent', 'The fleet agent (Control in the New layout)', split(['Meta+E'], ['Ctrl+Shift+E', 'Meta+E'])),
   // Ctrl+, off the Mac is new in 1.9 (keyboard.md); the Super form stays.
   row('global', 'settings', 'Settings', split(['Meta+,'], ['Ctrl+,', 'Meta+,'])),
   row('global', 'work-view', 'Switch Sessions and Work', split(['Meta+Shift+W'], ['Ctrl+Shift+W'])),

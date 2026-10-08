@@ -299,6 +299,39 @@ impl FleetTools {
         ok_json(&row)
     }
 
+    #[tool(description = "Install fleet-agent on a host this hub reaches \
+        over SSH, then move the host onto it. Returns the job at once (see \
+        agent_installs): target, download (checked against SHA256SUMS), \
+        start (token on stdin), connect (no hello in 120 s: back on SSH). \
+        Defaults: this hub's public URL and version. Hub only.")]
+    pub(super) async fn install_agent(
+        &self,
+        Parameters(args): Parameters<agent_install::InstallAgentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("install_agent", &format!("alias={}", args.alias));
+        let ssh: Arc<dyn crate::ssh::SshExec> = self.ssh.clone();
+        let row = agent_install::start(
+            Arc::clone(&self.store),
+            ssh,
+            self.ssh.agent_registry().cloned(),
+            args,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "fleet-agent install jobs, newest first: state, \
+        step, detail.")]
+    pub(super) async fn agent_installs(
+        &self,
+        Parameters(args): Parameters<agent_install::AgentInstallsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("agent_installs", "");
+        ok_json_compact(
+            &agent_install::list(&self.store, args.alias.as_deref()).map_err(to_mcp_err)?,
+        )
+    }
+
     #[tool(description = "Re-probe a host's reachability and versions. \
         Returns the host row.")]
     pub(super) async fn probe_host(
