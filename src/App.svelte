@@ -95,6 +95,7 @@
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
+  import StatusBarMark from './lib/StatusBarMark.svelte';
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
@@ -1319,6 +1320,7 @@
 {/if}
 
 <footer class="status">
+  <StatusBarMark />
   {#if healthError}
     <span class="err" data-testid="health-error">ipc error: {healthError}</span>
   {:else if bootstrapError}

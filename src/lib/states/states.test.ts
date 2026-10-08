@@ -72,6 +72,13 @@ describe('host offline', () => {
     expect(screen.getByTestId('host-offline-code').textContent).toBe('E_SSH_TIMEOUT');
   });
 
+  it('marks it with Signal lost, which plays once and rests (redesign 3.14)', () => {
+    render(HostOffline, { props: { alias: 'mercury' } });
+    const mark = screen.getByTestId('host-offline-mark');
+    expect(mark.dataset.loader).toBe('signal-lost');
+    expect(mark.classList).toContain('ofl-name-signal-lost');
+  });
+
   it('Try again runs the probe, and is off while one runs or the hub blocks it', async () => {
     const ontry = vi.fn();
     const { rerender } = render(HostOffline, { props: { alias: 'mercury', ontry } });
