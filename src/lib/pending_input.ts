@@ -39,6 +39,9 @@ export interface AnswerView {
   kind: PendingInput['kind'];
   question: string | null;
   options: AnswerOption[];
+  /** A multi-select question: a choice's key toggles its box, and nothing
+   *  is answered until the card moves on (`MULTI_CONTINUE_KEY`). */
+  multi: boolean;
   /** True when this came from a probe (seconds old) rather than the row. */
   live: boolean;
 }
@@ -68,8 +71,25 @@ export function pendingInputFor(a: {
     kind: dialog.kind,
     question: dialog.question,
     options: dialog.options.map((o) => ({ ...o, key: answerKeyFor(o.n) })),
+    multi: dialog.multi === true,
     live,
   };
+}
+
+/**
+ * The key that finishes a multi-select question. A digit only toggles a box
+ * and Enter toggles the highlighted one, so neither ever answers it; `Tab`
+ * keeps the ticks and moves on, to the next question or to the "Review your
+ * answers" step, whose `1. Submit answers` the card then shows as an ordinary
+ * single-select dialog.
+ */
+export const MULTI_CONTINUE_KEY = 'Tab';
+
+/** The free-text row Claude Code adds under every question. On a
+ *  multi-select, ticking it without text answers nothing, and with the
+ *  cursor on it a digit is TYPED into its box rather than toggling. */
+export function isFreeTextOption(o: { label: string }): boolean {
+  return /^type something\.?$/i.test(o.label.trim());
 }
 
 /**
@@ -78,7 +98,9 @@ export function pendingInputFor(a: {
  * dialog, the click answers something the user never read.
  *
  * Which option is *highlighted* is deliberately not part of it — arrow keys
- * move the `❯` glyph without changing the question.
+ * move the `❯` glyph without changing the question — and neither is which
+ * box of a multi-select is ticked: toggling one is answering this question,
+ * not moving to another.
  */
 export function answerFingerprint(p: {
   kind: string;

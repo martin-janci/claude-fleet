@@ -1900,7 +1900,9 @@ mod tests {
                 n: 1,
                 label: "Yes".into(),
                 selected: true,
+                checked: false,
             }],
+            multi: false,
         };
         let pass = |store: &mut Store, pending: Option<PendingInput>, observed: bool| {
             let sessions = vec![ReconcileSession {

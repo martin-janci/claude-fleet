@@ -1,0 +1,17 @@
+⏺ A few things to settle before I scaffold the service.
+
+────────────────────────────────────────────────────────────────────────────────
+ ←  ☐ Features  ✔ Submit  →
+
+Which features do you want to enable?
+
+❯ 1. [ ] Auth
+     Login and sessions for the admin pages.
+  2. [✔] Logging
+     Structured request logs.
+  3. [✔] Metrics
+     A Prometheus endpoint.
+  4. [ ] Type something
+     Submit
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

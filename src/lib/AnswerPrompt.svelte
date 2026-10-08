@@ -12,6 +12,12 @@
   // caller: the freshness check below is the whole safety of the feature and
   // must not be something a second caller can forget.
   //
+  // A multi-select question is answered in two steps, because a digit only
+  // TOGGLES a box there: each choice button toggles (and the card stays up),
+  // then Continue presses `Tab`, which keeps the ticks and moves Claude Code
+  // on — to the next question or to "Review your answers", whose
+  // `1. Submit answers` arrives as an ordinary dialog on this same card.
+  //
   // Answering re-reads the pane first and refuses unless the dialog it is
   // about to answer is still the dialog on screen. The row is written by the
   // 20 s reconcile tick, so without that check a click on a stale card could
@@ -22,7 +28,14 @@
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
   import { sendPrompt, type SessionRow } from './sessions';
-  import { answerFingerprint, pendingInputFor, type AnswerOption, type AnswerView } from './pending_input';
+  import {
+    answerFingerprint,
+    isFreeTextOption,
+    MULTI_CONTINUE_KEY,
+    pendingInputFor,
+    type AnswerOption,
+    type AnswerView,
+  } from './pending_input';
 
   interface Props {
     session: SessionRow;
@@ -56,6 +69,11 @@
     hubActionBlocked('send_prompt', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'send_prompt'),
   );
 
+  /** Boxes this card toggled that no reading of the pane shows yet: a toggle
+   *  does not change the question, and the row behind the sidebar's card is
+   *  up to a tick old. Once a reading's ticks change, it is the truth again. */
+  let toggled = $state<ReadonlySet<number>>(new Set());
+
   // A new question is a new card: whatever the last one answered is spent.
   const identity = $derived(answerFingerprint(view));
   $effect(() => {
@@ -64,7 +82,22 @@
     errorMsg = null;
     staleMsg = null;
   });
+  const ticks = $derived(view.options.filter((o) => o.checked).map((o) => o.n).join());
+  $effect(() => {
+    void identity;
+    void ticks;
+    toggled = new Set();
+  });
 
+  const isChecked = (o: AnswerOption) => (o.checked === true) !== toggled.has(o.n);
+
+  /** Why a multi-select's boxes cannot be toggled from here right now: with
+   *  the cursor in the free-text row, a digit is typed into that box. */
+  const toggleBlocked = $derived(
+    view.multi && view.options.some((o) => o.selected && isFreeTextOption(o))
+      ? 'The cursor is in the “Type something” box, where a digit would be typed — move it in the terminal'
+      : null,
+  );
   /** An option that changes what Claude asks NEXT time, not just this time.
    *  Claude writes these labels, so this reads them rather than guessing
    *  from the ordinal (which differs between dialog kinds). */
@@ -72,10 +105,18 @@
     return /don'?t ask again|auto[- ]?accept/i.test(o.label);
   }
 
+  /** A multi-select's free-text row: a tick on it answers nothing without
+   *  text, and text is typed in the terminal. */
+  const terminalOnly = (o: AnswerOption) => view.multi && isFreeTextOption(o);
+
   const optionTitle = (o: AnswerOption) =>
     o.key === null
       ? `Option ${o.n} has no single keystroke — answer it in the terminal`
-      : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
+      : terminalOnly(o)
+        ? 'Type your own answer in the terminal'
+        : view.multi
+          ? (toggleBlocked ?? `Press ${o.key} — ${isChecked(o) ? 'untick' : 'tick'} it`)
+          : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
 
   /** The pane as it is right now, or `null` when it cannot be read.
    *
@@ -96,7 +137,10 @@
     return { view: fresh?.live ? fresh : null };
   }
 
-  async function press(key: string, label: string) {
+  /** Re-read the pane, then press `key` only if it still shows this card's
+   *  dialog. `label` is what the card reports as sent; a `null` label (a
+   *  multi-select toggle) leaves the choices up and runs `onSent` instead. */
+  async function press(key: string, label: string | null, onSent?: () => void) {
     if (busy || writeBlocked !== null) return;
     busy = true;
     errorMsg = null;
@@ -124,13 +168,29 @@
     }
     const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: key });
     if (!r.ok) errorMsg = r.error.message;
-    else sent = label;
+    else if (label !== null) sent = label;
+    else onSent?.();
     busy = false;
   }
 
   function choose(o: AnswerOption) {
     if (o.key === null) return;
-    void press(o.key, o.label);
+    if (!view.multi) {
+      void press(o.key, o.label);
+      return;
+    }
+    if (toggleBlocked !== null || terminalOnly(o)) return;
+    void press(o.key, null, () => {
+      const next = new Set(toggled);
+      if (!next.delete(o.n)) next.add(o.n);
+      toggled = next;
+    });
+  }
+
+  /** What Continue reports: the ticked choices, so "Sent" says what went. */
+  function continueLabel(): string {
+    const ticked = view.options.filter(isChecked).map((o) => o.label);
+    return ticked.length ? ticked.join(', ') : 'Nothing ticked';
   }
 
   /** In the sidebar this card sits inside a row that is itself a button:
@@ -169,12 +229,27 @@
         data-n={o.n}
         data-selected={o.selected || undefined}
         data-sticky={isSticky(o) || undefined}
-        disabled={busy || writeBlocked !== null || o.key === null}
+        data-checked={(view.multi && isChecked(o)) || undefined}
+        role={view.multi ? 'checkbox' : undefined}
+        aria-checked={view.multi ? isChecked(o) : undefined}
+        disabled={busy || writeBlocked !== null || o.key === null || (view.multi && (toggleBlocked !== null || terminalOnly(o)))}
         title={writeBlocked ?? optionTitle(o)}
         onclick={(e) => mine(e, () => choose(o))}
-      ><span class="ordinal" aria-hidden="true">{o.n}</span><span class="label">{o.label}</span></button>
+      ><span class="ordinal" aria-hidden="true">{o.n}</span>{#if view.multi}<span class="box" aria-hidden="true">{isChecked(o) ? '✔' : ''}</span>{/if}<span class="label">{o.label}</span></button>
     {/each}
   </div>
+  {#if view.multi}
+    <div class="multi">
+      <button
+        type="button"
+        class="btn btn--chip continue"
+        data-testid="answer-continue"
+        disabled={busy || writeBlocked !== null}
+        title={writeBlocked ?? 'Keep these ticks and go on (Tab) — Claude asks you to confirm next'}
+        onclick={(e) => mine(e, () => void press(MULTI_CONTINUE_KEY, continueLabel()))}>Continue →</button>
+      {#if !compact}<span class="hint">Tick every answer that applies, then continue.</span>{/if}
+    </div>
+  {/if}
   {#if !compact}
     <div class="secondary">
       <button
@@ -247,6 +322,34 @@
   }
   .option[data-selected] {
     border-color: var(--usage-warn);
+  }
+  .box {
+    flex: none;
+    width: 0.95em;
+    height: 0.95em;
+    line-height: 0.95em;
+    border: 1px solid currentColor;
+    border-radius: 2px;
+    font-size: 0.85em;
+    text-align: center;
+    opacity: 0.8;
+  }
+  .option[data-checked] .box {
+    opacity: 1;
+    background: color-mix(in srgb, var(--usage-warn) 45%, transparent);
+  }
+  .multi {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .continue {
+    border-color: var(--usage-warn);
+    font-weight: 600;
+  }
+  .hint {
+    opacity: 0.75;
   }
   /* The one choice that changes what Claude asks next time reads differently
      from the ones that only answer today. */

@@ -2271,7 +2271,9 @@ mod tests {
                 n: 1,
                 label: "Yes".into(),
                 selected: true,
+                checked: false,
             }],
+            multi: false,
         };
         s.conn_ref()
             .execute(

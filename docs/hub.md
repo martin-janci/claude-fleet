@@ -2282,7 +2282,10 @@ A session row's `pending_input` (carried on `session:updated`, migration 040)
 is the permission/question dialog a blocked pane is showing —
 `{kind, question, options[{n,label,selected}]}`, or null when the pane shows
 none — so a client can turn the numbered choices into buttons instead of
-typing them.
+typing them. A multi-select question adds `multi: true` and `checked: true` on
+each ticked option (both absent otherwise): there a digit toggles a box, and
+`send_prompt { keys: "Tab" }` keeps the ticks and moves on to the next
+question or to the "Review your answers" step.
 
 `session:created` and `session:updated` frames also carry `needs_attention`
 (`{reason, since}`, absent when the session needs nobody) — the same answer

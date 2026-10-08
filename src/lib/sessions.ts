@@ -170,7 +170,12 @@ export interface SessionRow {
   pending_input: {
     kind: 'permission' | 'input';
     question: string | null;
-    options: { n: number; label: string; selected: boolean }[];
+    /** `checked`: ticked, on a multi-select (absent = false, and from a hub
+     *  older than multi-select support). The label never carries the box. */
+    options: { n: number; label: string; selected: boolean; checked?: boolean }[];
+    /** A multi-select question: a digit TOGGLES an option, `Tab` moves on
+     *  with the ticks kept (see `AnswerPrompt.svelte`). Absent = false. */
+    multi?: boolean;
   } | null;
   /** The session's primary work link (migration 046), set through the work
    *  commands (`work.ts`). Absent from a hub older than the work graph. */
@@ -871,8 +876,9 @@ export function acceptCommandRow(row: SessionRow | null | undefined): void {
 /**
  * Type `prompt` into a session's REPL and submit it.
  *
- * `opts.keys` presses one key instead — `Enter`, `Escape`, `C-c`, or a digit
- * `1`-`9` that picks that option of a `pending_input` dialog. A key is never
+ * `opts.keys` presses one key instead — `Enter`, `Escape`, `Tab`, `C-c`, or a
+ * digit `1`-`9` that picks that option of a `pending_input` dialog (toggles
+ * it, on a multi-select). A key is never
  * marked untrusted and is never recorded as a prompt, and `prompt` must be
  * empty alongside it (the backend refuses the pair with `E_VALIDATE`).
  * Answering a dialog has to go this way. The text path pastes through
