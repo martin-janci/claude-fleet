@@ -215,6 +215,25 @@ pub async fn handle_hook(
                     _ => StatusCode::NO_CONTENT.into_response(),
                 };
             }
+            // The worker guard (orchestration §7.2): only a command the
+            // installed prefilter let through reaches here.
+            if event == "PreToolUse" {
+                return match crate::service::hooks::pre_tool_use_denial(
+                    &state.store,
+                    &payload,
+                    &ctx,
+                ) {
+                    Some(why) => axum::Json(serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": event,
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": why,
+                        }
+                    }))
+                    .into_response(),
+                    None => StatusCode::NO_CONTENT.into_response(),
+                };
+            }
             if event != "UserPromptSubmit" {
                 return StatusCode::NO_CONTENT.into_response();
             }
