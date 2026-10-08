@@ -8,7 +8,7 @@ import { get } from 'svelte/store';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
-import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView } from './lib/app_views';
+import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView, shortcutSheetOpen } from './lib/app_views';
 import { toolkitTab } from './lib/toolkit_skills';
 import { sidebarView } from './lib/work_view';
 import { destination } from './lib/destination';
@@ -170,6 +170,17 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.click(getByTestId('tab-assets'));
     expect(getByTestId('assets-overlay')).toBeTruthy();
     expect(queryByTestId('toolkit')).toBeNull();
+  });
+
+  it('the New status bar ends on Shortcuts (step 3.17), with the rest unchanged; Classic has none', async () => {
+    const classic = render(App);
+    expect(classic.queryByTestId('footer-shortcuts')).toBeNull();
+    classic.unmount();
+    uiLayout.set('new');
+    const { getByTestId } = render(App);
+    await fireEvent.click(getByTestId('footer-shortcuts'));
+    expect(get(shortcutSheetOpen)).toBe(true);
+    shortcutSheetOpen.set(false);
   });
 
   it('Work and Sessions pick the sidebar tree and leave a fleet page', async () => {
