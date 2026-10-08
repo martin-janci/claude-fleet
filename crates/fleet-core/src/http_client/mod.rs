@@ -201,6 +201,7 @@ impl HubTransport for TcpTransport {
         body: String,
     ) -> Result<HubResponse, String> {
         let at = Endpoint::parse(url)?;
+        check_bearer(bearer)?;
         // `Accept` carries both types because the transport answers
         // SSE-framed; rmcp refuses a request that does not accept
         // `text/event-stream`.
@@ -285,6 +286,41 @@ pub fn split_response(raw: impl AsRef<[u8]>) -> Result<HubResponse, String> {
 /// Largest response head [`download_to`] reads before the body.
 const MAX_HEAD: usize = 64 * 1024;
 
+/// How long a download may go without a single byte before it is abandoned.
+/// `download_to` has no caller that bounds it as a whole (a file may
+/// legitimately take minutes), so without this a hub or proxy that stalled
+/// mid-body held the save, and its open `.part` file, forever.
+pub const DOWNLOAD_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// One read, or an error once [`DOWNLOAD_IDLE`] passes with nothing.
+async fn read_or_stall<R: tokio::io::AsyncRead + Unpin>(
+    conn: &mut R,
+    buf: &mut [u8],
+    host: &str,
+    port: u16,
+) -> Result<std::io::Result<usize>, String> {
+    use tokio::io::AsyncReadExt;
+    tokio::time::timeout(DOWNLOAD_IDLE, conn.read(buf))
+        .await
+        .map_err(|_| {
+            format!(
+                "{host}:{port} sent nothing for {}s; the download stalled",
+                DOWNLOAD_IDLE.as_secs()
+            )
+        })
+}
+
+/// A bearer token is written into a request head by hand, so one carrying a
+/// CR/LF (or any control, space or non-ASCII byte) would add headers — or a
+/// second request — of its sender's choosing. A peer hub's `/pair` answer is
+/// where a token comes from that this process did not mint.
+pub fn check_bearer(bearer: &str) -> Result<(), String> {
+    if bearer.is_empty() || bearer.len() > 4096 || !bearer.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err("the token is not one a request header can carry".to_string());
+    }
+    Ok(())
+}
+
 /// `GET url` and stream the body into `dest` — the bytes of a file download
 /// (`GET /downloads/<id>`), which may be far past [`MAX_RESPONSE`], so they
 /// are never buffered whole. Written to `<dest>.<pid>-<random>.part` and renamed into place
@@ -298,6 +334,7 @@ pub async fn download_to(
 ) -> Result<u64, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let at = Endpoint::parse(url)?;
+    check_bearer(bearer)?;
     let (host, port) = (at.host().to_string(), at.port());
     let mut conn = connect(&at).await?;
     let request = format!(
@@ -319,7 +356,9 @@ pub async fn download_to(
         if raw.len() > MAX_HEAD {
             return Err(format!("{host}:{port} sent an oversized response head"));
         }
-        let n = conn.read(&mut buf).await.map_err(io)?;
+        let n = read_or_stall(&mut conn, &mut buf, &host, port)
+            .await?
+            .map_err(io)?;
         if n == 0 {
             return Err(format!("{host}:{port} closed before answering"));
         }
@@ -378,7 +417,7 @@ pub async fn download_to(
             if chunks.finished() || expected.is_some_and(|n| got >= n) {
                 break;
             }
-            match conn.read(&mut buf).await {
+            match read_or_stall(&mut conn, &mut buf, &host, port).await? {
                 Ok(0) => break,
                 Ok(n) => rest.extend_from_slice(&buf[..n]),
                 // The rustls close without `close_notify` [`speak`] forgives:
