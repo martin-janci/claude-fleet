@@ -1,17 +1,23 @@
 <script lang="ts">
-  // Settings → Appearance (redesign step 0.3): the layout switch and the
-  // theme picker. Hand-written, not a generated page, because both are
-  // per-device prefs in localStorage rather than fleet settings. Copy
+  // Settings → Appearance (redesign step 0.3): the layout switch, the
+  // theme picker and (3.6) row density. Hand-written, not a generated
+  // page, because all three are per-device prefs in localStorage rather
+  // than fleet settings. Copy
   // follows the Settings board of the Orbit Fleet canvas. This is the one
   // theme picker: step 1.4 removed the sidebar's "theme: …" line.
   import SegmentedControl from './SegmentedControl.svelte';
-  import { uiLayout, type UiLayout } from './prefs';
+  import { uiDensity, uiLayout, type UiDensity, type UiLayout } from './prefs';
   import { applyTheme, theme, type Theme } from './theme';
 
   const layouts = [
     { id: 'classic', label: 'Classic' },
     { id: 'new', label: 'New' },
   ] as const satisfies readonly { id: UiLayout; label: string }[];
+
+  const densities = [
+    { id: 'compact', label: 'Compact' },
+    { id: 'comfortable', label: 'Comfortable' },
+  ] as const satisfies readonly { id: UiDensity; label: string }[];
 
   const themes = [
     { id: 'auto', label: 'System' },
@@ -50,6 +56,18 @@
       label="Theme"
       testidPrefix="appearance-theme-"
       onchange={(id) => applyTheme(id)} />
+  </div>
+  <div class="pref">
+    <div class="pref-text">
+      <span class="lbl">Density</span>
+      <p class="hook-desc">Compact shows one meta line per row and hides chips until hover.</p>
+    </div>
+    <SegmentedControl
+      options={densities}
+      value={$uiDensity}
+      label="Density"
+      testidPrefix="appearance-density-"
+      onchange={(id) => uiDensity.set(id)} />
   </div>
 </section>
 

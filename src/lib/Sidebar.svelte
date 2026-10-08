@@ -16,6 +16,7 @@
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
+  import { groupRows, isFlatGroupBy } from './row_groups';
   import { sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
@@ -860,6 +861,21 @@
   }
   const orphanSessions = $derived(orphansOf(treePredicate));
 
+  // ── Flat groups (redesign step 3.6): state, host or agent ──
+  // The same rows the project tree and "Other sessions" would show, in the
+  // same order, regrouped. Collapsed groups are remembered by key.
+  const flatBy = $derived(isFlatGroupBy($sidebarGroupBy) ? $sidebarGroupBy : null);
+  const flatGroups = $derived(
+    flatBy
+      ? groupRows(
+          [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions],
+          flatBy,
+          attentionOpts,
+        )
+      : [],
+  );
+  let collapsedFlat: Set<string> = $state(new Set());
+
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
   // bg-agent toggle does not.
@@ -1424,7 +1440,40 @@
         {/each}
       </ul>
     {/if}
-    {#if filtered.length > 0}
+    {#if flatBy && flatGroups.length > 0}
+      <ul class="tree flat-groups" data-testid="flat-groups" data-group-by={flatBy}>
+        {#each flatGroups as g (g.key)}
+          {@const isCollapsed = collapsedFlat.has(g.key)}
+          <li class="proj">
+            <div
+              class="proj-row"
+              data-testid="flat-group"
+              data-group={g.key}
+              role="button"
+              tabindex="0"
+              aria-expanded={!isCollapsed}
+              onclick={() => (collapsedFlat = toggleIn(collapsedFlat, g.key))}
+              onkeydown={(e) => {
+                if (!fromRowItself(e)) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  collapsedFlat = toggleIn(collapsedFlat, g.key);
+                }
+              }}
+            >
+              <span class="caret" class:collapsed={isCollapsed}>▾</span>
+              <span class="label">{g.label}</span>
+              <span class="count">{g.rows.length}</span>
+            </div>
+            {#if !isCollapsed}
+              {#each g.rows as sess (sess.id)}
+                {@render sessionRow(sess)}
+              {/each}
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {:else if !flatBy && filtered.length > 0}
       <ul class="tree">
         {#each filtered as row (row.project.id)}
           {@const projectSessions = filteredSessionsByProject.get(row.project.id) ?? []}
@@ -1518,7 +1567,7 @@
       {/if}
     {/if}
 
-    {#if orphanSessions.length > 0}
+    {#if !flatBy && orphanSessions.length > 0}
       <div class="orphan-section" data-testid="orphan-sessions">
         <div class="section-header">Other sessions ({orphanSessions.length})</div>
         {#each orphanSessions as sess (sess.id)}

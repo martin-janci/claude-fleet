@@ -129,6 +129,10 @@
       title: 'Group sessions by work: a ticket key (ABC-123) in a tag, branch or worktree name',
       testid: 'group-by-toggle',
     },
+    // Redesign step 3.6: the flat groupings, after Project and Work.
+    { id: 'state', label: 'State' },
+    { id: 'host', label: 'Host' },
+    { id: 'agent', label: 'Agent' },
   ];
 
   // ── Work filters (work graph M10.4) ──
@@ -402,7 +406,7 @@
                 onchange={(id) =>
                   id === 'work'
                     ? sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))
-                    : sidebarGroupBy.set('project')}
+                    : sidebarGroupBy.set(id)}
               />
             </div>
             <button
