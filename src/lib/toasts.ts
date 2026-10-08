@@ -2,6 +2,7 @@ import { get, writable } from 'svelte/store';
 import type { IpcError, Result } from './result';
 import { hubNextStep } from './hub';
 import { reportError } from './error_report';
+import { recordNotice } from './notifications';
 
 // Global, non-blocking notifications. Errors used to land in per-component
 // `error: string | null` state that never cleared and dropped the
@@ -123,11 +124,13 @@ export function push(opts: PushOptions): number {
       arr.map((t) => (t.id === existing.id ? { ...t, count: t.count + 1, action: action ?? t.action } : t)),
     );
     if (!existing.sticky) arm(existing.id, timeout);
+    recordNotice(existing.id, false, { kind, code, message: opts.message });
     return existing.id;
   }
   const id = nextId++;
   toasts.update((arr) => capped([...arr, { id, kind, code, message: opts.message, sticky, count: 1, action }]));
   if (!sticky) arm(id, timeout);
+  recordNotice(id, true, { kind, code, message: opts.message });
   return id;
 }
 

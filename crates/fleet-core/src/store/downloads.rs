@@ -43,6 +43,11 @@ pub struct DownloadRow {
     /// by the service, never stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// Bytes copied so far while `fetching`; filled in by the service from
+    /// the copy in flight, never stored. Absent from a hub that predates it,
+    /// and then a client shows the copy without a count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_bytes: Option<i64>,
 }
 
 /// A download to insert, in state `fetching`.
@@ -80,6 +85,7 @@ fn row(r: &rusqlite::Row<'_>) -> Result<DownloadRow> {
         ready_at: r.get(14)?,
         downloaded_at: r.get(15)?,
         expires_at: None,
+        fetched_bytes: None,
     })
 }
 
@@ -142,6 +148,12 @@ impl Store {
             self.download_changed(id);
         }
         Ok(n == 1)
+    }
+
+    /// A `fetching` row copied another slice: the row did not change, but
+    /// its `fetched_bytes` did, so clients re-read it.
+    pub fn note_download_progress(&self, id: i64) {
+        self.download_changed(id);
     }
 
     /// A `fetching` row failed with `error`.

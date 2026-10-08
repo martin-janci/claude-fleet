@@ -166,10 +166,40 @@ impl Budget {
     }
 }
 
-/// One row as a client receives it: `expires_at` filled in.
+/// One row as a client receives it: `expires_at` and, while it is being
+/// copied, `fetched_bytes` filled in.
 fn present(b: &Budget, mut row: DownloadRow) -> DownloadRow {
     row.expires_at = b.expires_at(&row);
+    if row.state == "fetching" {
+        row.fetched_bytes = Some(progress::get(row.id).unwrap_or(0) as i64);
+    }
     row
+}
+
+/// Bytes copied per download in flight, in memory: a copy lives in this
+/// process (`fail_interrupted_downloads` ends any a restart cut short), so
+/// nothing about it needs to outlive it.
+mod progress {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex};
+
+    static COPIED: LazyLock<Mutex<HashMap<i64, u64>>> = LazyLock::new(Default::default);
+
+    fn map() -> std::sync::MutexGuard<'static, HashMap<i64, u64>> {
+        COPIED.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn set(id: i64, bytes: u64) {
+        map().insert(id, bytes);
+    }
+
+    pub fn get(id: i64) -> Option<u64> {
+        map().get(&id).copied()
+    }
+
+    pub fn clear(id: i64) {
+        map().remove(&id);
+    }
 }
 
 // ---- send ------------------------------------------------------------------
@@ -436,7 +466,14 @@ pub async fn send(
 pub fn spawn_fetch(store: Arc<Mutex<Store>>, ssh: Arc<dyn SshExec>, row: DownloadRow) {
     tokio::spawn(async move {
         let id = row.id;
-        let result = fetch(&*ssh, &row).await;
+        let copied = |got: u64| {
+            progress::set(id, got);
+            if let Ok(s) = crate::ipc_error::lock(&store) {
+                s.note_download_progress(id);
+            }
+        };
+        let result = fetch_chunked(&*ssh, &row, CHUNK_BYTES, &copied).await;
+        progress::clear(id);
         let Ok(s) = crate::ipc_error::lock(&store) else {
             return;
         };
@@ -461,13 +498,16 @@ pub fn spawn_fetch(store: Arc<Mutex<Store>>, ssh: Arc<dyn SshExec>, row: Downloa
 /// Pull the bytes into `<id>.part`, then rename it to `<id>`; the SHA-256
 /// of what was written.
 pub async fn fetch(ssh: &dyn SshExec, row: &DownloadRow) -> Result<String, IpcError> {
-    fetch_chunked(ssh, row, CHUNK_BYTES).await
+    fetch_chunked(ssh, row, CHUNK_BYTES, &|_| {}).await
 }
 
+/// `copied` hears the running total after each slice (not after the last:
+/// the row turns `ready` then).
 async fn fetch_chunked(
     ssh: &dyn SshExec,
     row: &DownloadRow,
     chunk_bytes: u64,
+    copied: &(dyn Fn(u64) + Send + Sync),
 ) -> Result<String, IpcError> {
     use sha2::Digest;
     use tokio::io::AsyncWriteExt;
@@ -510,6 +550,9 @@ async fn fetch_chunked(
         f.write_all(chunk).await?;
         hash.update(chunk);
         got += chunk.len() as u64;
+        if got < size {
+            copied(got);
+        }
     }
     f.sync_all().await?;
     drop(f);
