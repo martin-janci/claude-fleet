@@ -1525,6 +1525,8 @@ const MIGRATIONS: &[Migration] = &[
         130,
         include_str!("../../migrations/130_usage_daily_account.sql"),
     ),
+    // Orbit Fleet 8.5: routines and their runs (two new tables).
+    Migration::plain(131, include_str!("../../migrations/131_routines.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
