@@ -462,6 +462,19 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
     expect(screen.getByTestId('setting-row-decide.jev.work_link').textContent).toContain('offline benchmark only until J1');
     const sm = screen.getByTestId('setting-decide-jev-status-map') as HTMLSelectElement;
     expect(Array.from(sm.querySelectorAll('option'), (o) => o.value)).toEqual(['off', 'shadow', 'assist']);
+    // Step 7.7: each use case its own row, today's budget, the breaker, the
+    // key and which orgs consent, with the way to change that consent.
+    for (const k of ['status_map', 'start_project', 'work_link']) {
+      const sel = screen.queryByTestId(`setting-decide-jev-${k.replace('_', '-')}`) as HTMLSelectElement | null;
+      expect(sel, k).not.toBeNull();
+      if (sel?.tagName === 'SELECT') expect(Array.from(sel.options, (o) => o.value)).not.toContain('auto');
+    }
+    expect(screen.getByTestId('section-Use cases').textContent).toContain('There is no auto mode');
+    const today = await screen.findByTestId('section-Today');
+    await waitFor(() => expect(today.textContent).toContain('closed'));
+    expect(today.textContent).toContain('Acme');
+    expect(today.textContent).toContain('Daily budget');
+    expect(screen.getByTestId('page-link-settings.orgs').textContent).toContain('which organisations allow Jev');
   });
 
   it('search finds a setting and opens it on its page and tab', async () => {
