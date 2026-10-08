@@ -200,7 +200,7 @@
     gap: 0.15rem;
     padding: 0.4rem 0.6rem 0.3rem;
     border-top: 1px solid var(--border);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .group-title {
     display: flex;
@@ -220,13 +220,13 @@
   .host-row:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
   .host-row.selected { background: color-mix(in srgb, var(--accent) 18%, transparent); }
   .host-row.hidden-host .alias { color: var(--fg-muted); }
-  .glyph { font-size: 0.65rem; color: var(--fg); }
+  .glyph { font-size: 11px; color: var(--fg); }
   .glyph.off { color: var(--fg-muted); }
   .alias { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .word-offline { color: var(--usage-warn); font-size: 0.7rem; }
-  .word-hidden { color: var(--fg-muted); font-size: 0.7rem; }
-  .word-agent { color: var(--accent); font-size: 0.7rem; }
+  .word-offline { color: var(--usage-warn); font-size: 11px; }
+  .word-hidden { color: var(--fg-muted); font-size: 11px; }
+  .word-agent { color: var(--accent); font-size: 11px; }
   .spacer { flex: 1; }
-  .attention { font-size: 0.75rem; cursor: help; }
+  .attention { font-size: 11px; cursor: help; }
   .counts { color: var(--fg-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 </style>

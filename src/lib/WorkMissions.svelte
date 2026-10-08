@@ -1081,7 +1081,7 @@
   .name { margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .goal { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
   .head { display: flex; justify-content: space-between; align-items: center; }
-  .badge { font-size: 0.75rem; padding: 0.05rem 0.4rem; border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; }
+  .badge { font-size: 11px; padding: 0.05rem 0.4rem; border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; }
   h4 { margin: 0.5rem 0 0; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
   .done-when li { padding: 0.1rem 0; }
   .events li { padding: 0.1rem 0; }
@@ -1091,8 +1091,8 @@
   .glyph.s-failed, .glyph.s-blocked { color: var(--danger); }
   .main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
   .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
-  .dep { font-size: 0.7rem; }
-  .dep-pick { max-width: 7rem; font-size: 0.75rem; }
+  .dep { font-size: 11px; }
+  .dep-pick { max-width: 7rem; font-size: 11px; }
   .import { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.4rem; }
   .import textarea { font-family: var(--font-mono); font-size: 12px; }
   /* The design system's Tabs (of-tabs). */
@@ -1104,19 +1104,19 @@
   .view-switch button:hover { color: var(--fg); }
   .view-switch button[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 500; }
   .wave { display: flex; flex-direction: column; gap: 0.1rem; }
-  .wave-head { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.3rem; }
-  .vbadge { font-size: 0.7rem; align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: 999px; }
+  .wave-head { font-size: 11px; color: var(--fg-muted); margin-top: 0.3rem; }
+  .vbadge { font-size: 11px; align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: 999px; }
   .vbadge.v-verified { color: #3fae5a; border-color: #3fae5a; }
   .vbadge.v-failed { color: var(--danger); border-color: var(--danger); }
-  .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: 0.75rem; }
+  .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: 11px; }
   .checks .line { font-family: var(--font-mono, monospace); }
   .checks .c-pass .glyph { color: #3fae5a; }
   .checks .c-fail .glyph { color: var(--danger); }
   .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }
   .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: 4px; }
   .muted { color: var(--fg-muted); margin: 0; }
-  .small { font-size: 0.75rem; }
-  .meta { font-size: 0.75rem; }
+  .small { font-size: 11px; }
+  .meta { font-size: 11px; }
   .notice { margin: 0; color: var(--danger); }
   .state.error p { color: var(--danger); margin: 0 0 0.3rem; }
   .hosts { border: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }

@@ -12,7 +12,8 @@ describe('Settings → Shortcuts', () => {
     const settings = screen.getByTestId('shortcut-settings');
     expect(settings.textContent).toContain('⌘,');
     expect(screen.getByTestId('shortcut-hosts').textContent).toContain('Ctrl+Shift+H');
-    expect(screen.getByTestId('shortcut-inspector').textContent).toContain('coming');
+    expect(screen.getByTestId('shortcut-inspector').textContent).not.toContain('coming');
+    expect(screen.getByTestId('shortcut-new-terminal').textContent).toContain('coming');
   });
 
   it('filters by action or chord', async () => {

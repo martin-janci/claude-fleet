@@ -48,7 +48,7 @@
   }
   .slow {
     margin: 0.2rem 0 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   @keyframes pulse {

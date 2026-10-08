@@ -178,10 +178,14 @@ impl LocalSync {
     }
 
     fn tick(self: &Arc<Self>) {
+        if !crate::service::loops::gate("local_sync", &self.store, Some(PASS_INTERVAL)) {
+            return;
+        }
         let rows = match lock(&self.store).and_then(|s| s.list_local_workspaces()) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::warn!(error = %e, "local sync: could not list links");
+                crate::service::loops::report("local_sync", Err(e), Some(PASS_INTERVAL));
                 return;
             }
         };
@@ -209,6 +213,7 @@ impl LocalSync {
             .map(|rows| rows.into_iter().map(|r| r.id).collect())
             .unwrap_or_default();
         self.due.retain(|id, _| alive.contains(id));
+        crate::service::loops::report("local_sync", Ok::<_, String>(()), Some(PASS_INTERVAL));
     }
 
     /// One pass now, waiting for a running one to finish first.

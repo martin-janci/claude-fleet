@@ -248,7 +248,7 @@
   .node.t-idle .glyph { color: var(--status-idle); }
   .text { display: flex; flex-direction: column; min-width: 0; }
   .text .title { font-size: 12px; line-height: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .text .sub { font-size: 10px; line-height: 13px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .text .sub { font-size: 11px; line-height: 14px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .chosen { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12px; padding: 6px 2px; }
   .chosen .title { font-weight: 500; }

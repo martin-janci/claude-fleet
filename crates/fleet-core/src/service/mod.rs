@@ -36,6 +36,7 @@ pub mod host_check;
 pub mod hosts;
 pub mod hub;
 pub mod local_sync;
+pub mod loops;
 pub mod messages;
 pub mod move_session;
 pub mod names;

@@ -98,7 +98,7 @@
   }
   .help {
     margin: 0.2rem 0 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     line-height: 1.4;
   }

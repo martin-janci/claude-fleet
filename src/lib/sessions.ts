@@ -384,6 +384,12 @@ export const resetTombstonesForTests = rows.resetTombstonesForTests;
  *  row as a fresh alert. */
 export const sessionsLoaded = writable<boolean>(false);
 
+/** True once the first `list_sessions` has answered, either way. Until then
+ *  the fleet is still arriving (redesign step 3.13: the empty pane shows the
+ *  Particle swarm and ⌘K says which hosts it is still hearing from); a
+ *  failed first load ends the wait too, so a loader never outlives it. */
+export const sessionsAnswered = writable<boolean>(false);
+
 // Sidebar filter — when false, background (`kind === 'bg'`) sessions are
 // hidden from the tree. Defaults to true (shown). Persisted across restarts.
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -420,6 +426,7 @@ sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 // within the configured interval, so window-focus reloads stay cheap.
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
+  sessionsAnswered.set(true);
   if (r.ok) {
     // The list owns ORDER (the backend's `ORDER BY last_activity_at DESC`);
     // events own CONTENT. Rebuilding from the current store's position would

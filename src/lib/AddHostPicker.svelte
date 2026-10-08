@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { onMount } from 'svelte';
   import { discoverHosts, addHost, type SshHost } from './hosts';
   import { probeSshAliasAbortable, type ProbePreview } from './accounts';
@@ -134,7 +135,7 @@
           disabled={!previewing.preview || adding}
           onclick={confirmAdd}
           data-testid="preview-confirm"
-        >{adding ? 'Adding…' : 'Add'}</button>
+        >{#if adding}<Loader name="comet" size={12} class="btn-loader" />{/if}{adding ? 'Adding…' : 'Add'}</button>
       </div>
     {/if}
   </div>
@@ -187,7 +188,7 @@
   }
   .preview dt {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }

@@ -281,6 +281,17 @@ describe('the panels that do not apply to a hub client', () => {
     expect(await screen.findByTestId('copy-diagnostics')).toBeInTheDocument();
   });
 
+  it('About, beside Diagnostics, opens with the Wordmark reveal (redesign 3.13)', async () => {
+    route();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const about = await screen.findByTestId('about-section');
+    const mark = await screen.findByTestId('about-wordmark');
+    expect(about.contains(mark)).toBe(true);
+    expect(mark.dataset.loader).toBe('wordmark-reveal');
+    expect(mark).toHaveAttribute('aria-label', 'Orbit Fleet');
+    expect(screen.getByTestId('about-version')).toHaveTextContent('Orbit Fleet');
+  });
+
   it('standalone is untouched: every panel is still there', async () => {
     hubStatus.set({ ...STANDALONE });
     const inv = route();

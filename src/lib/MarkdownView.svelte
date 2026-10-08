@@ -126,7 +126,7 @@
     justify-content: space-between;
     padding: 0.15rem 0.4rem 0.15rem 0.6rem;
     border-bottom: 1px solid var(--border);
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .md-lang {
@@ -137,7 +137,7 @@
     border: 1px solid transparent;
     border-radius: 4px;
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.05rem 0.45rem;
     cursor: pointer;
   }
@@ -150,7 +150,7 @@
     padding: 0.55rem 0.7rem;
     overflow-x: auto;
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.78rem;
+    font-size: 11px;
     line-height: 1.5;
     white-space: pre;
     tab-size: 4;

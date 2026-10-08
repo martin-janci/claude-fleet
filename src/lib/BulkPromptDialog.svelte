@@ -3,6 +3,7 @@
   // PromptComposer's send loop (one `send_prompt` per target, per-target
   // error/success), but the target list is fixed by the selection instead of
   // derived from a source session.
+  import Loader from './Loader.svelte';
   import { sendPrompt, type SessionRow } from './sessions';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -109,7 +110,7 @@
         onclick={send}
         data-testid="bulk-prompt-send"
       >
-        {sending ? 'Sending…' : 'Send →'}
+        {#if sending}<Loader name="comet" size={12} class="btn-loader" />{/if}{sending ? 'Sending…' : 'Send →'}
       </button>
     </div>
   </div>
@@ -138,16 +139,16 @@
   .targets li.skipped { opacity: 0.55; }
   .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
     border-radius: 3px;
   }
   .sess-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .muted { color: var(--fg-muted); font-size: 0.75rem; }
+  .muted { color: var(--fg-muted); font-size: 11px; }
   .ok { color: rgb(80, 200, 110); }
-  .err { color: var(--danger); font-size: 0.75rem; }
+  .err { color: var(--danger); font-size: 11px; }
   textarea {
     width: 100%;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

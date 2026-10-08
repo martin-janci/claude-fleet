@@ -256,7 +256,7 @@
   }
   .dot {
     color: var(--fg-muted);
-    font-size: 9px;
+    font-size: 11px;
   }
   .dot.working {
     color: var(--accent);

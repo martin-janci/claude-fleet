@@ -146,6 +146,24 @@
       "danger": {
         "level": "none"
       },
+      "default": "false",
+      "help": "Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused.",
+      "key": "automation.paused",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Pause all automation",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "true",
       "help": "Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once.",
       "key": "orchestrator.enabled",
@@ -2212,6 +2230,15 @@
       "layout": "category",
       "parent": "settings",
       "sections": [
+        {
+          "items": [
+            {
+              "key": "automation.paused",
+              "type": "field"
+            }
+          ],
+          "title": "Pause all"
+        },
         {
           "items": [
             {

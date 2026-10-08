@@ -4,6 +4,7 @@ import AppRail from './AppRail.svelte';
 import { destination } from './destination';
 import { settingsOpen } from './app_views';
 import { sidebarView } from './work_view';
+import { expectAccessible } from './a11y_check';
 
 afterEach(() => {
   destination.set('session');
@@ -37,5 +38,12 @@ describe('AppRail', () => {
     expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBeNull();
     await fireEvent.click(getByTestId('rail-work'));
     expect(onselect).toHaveBeenCalledWith('work');
+  });
+});
+
+describe('AppRail accessibility (7.2)', () => {
+  it('passes the axe and audit checks', async () => {
+    const { container } = render(AppRail, { isMac: true, onselect: () => {} });
+    await expectAccessible(container);
   });
 });

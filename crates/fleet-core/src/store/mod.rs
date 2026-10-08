@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
 mod account_usage_snapshots;
+mod aux_usage;
 pub mod backup;
 mod bench_work_link;
 mod catalog;
@@ -72,6 +73,7 @@ mod work_usage;
 mod work_view;
 
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
+pub use aux_usage::{AuxUsageRow, NewAuxUsage, AUX_ORIGIN_PLANNER, AUX_ORIGIN_SUMMARY};
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
     AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,
