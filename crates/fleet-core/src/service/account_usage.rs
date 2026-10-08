@@ -1231,6 +1231,12 @@ mod tests {
             provision_warning: None,
             auth_overrides: None,
             claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
             harnesses: None,
         }
     }

@@ -303,6 +303,11 @@ impl Store {
                     mem_avail_kb: row.mem_avail_kb,
                     uptime_secs: row.uptime_secs,
                     health_at: row.health_at,
+                    cpu_count: row.cpu_count,
+                    mem_total_kb: row.mem_total_kb,
+                    boot_at: row.boot_at,
+                    latency_ms: row.latency_ms,
+                    worktree_kb: row.worktree_kb,
                     ..before
                 } == row
             });
@@ -1175,6 +1180,12 @@ mod tests {
             provision_warning: None,
             auth_overrides: None,
             claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
             harnesses: None,
         }
     }

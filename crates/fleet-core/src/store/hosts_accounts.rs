@@ -232,7 +232,8 @@ impl Store {
         self.conn.execute(
             "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
              disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
-             health_at = ?7, auth_overrides = ?8 WHERE alias = ?9",
+             health_at = ?7, auth_overrides = ?8, cpu_count = ?9, mem_total_kb = ?10, \
+             boot_at = ?11, latency_ms = ?12 WHERE alias = ?13",
             rusqlite::params![
                 h.disk_home_free_kb,
                 h.disk_home_total_kb,
@@ -244,8 +245,30 @@ impl Store {
                 h.auth_overrides
                     .as_ref()
                     .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())),
+                h.cpu_count,
+                h.mem_total_kb,
+                h.boot_at,
+                h.latency_ms,
                 alias
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Record a worktree-size read (Orbit Fleet 4.6, migration 122). The
+    /// stamp moves on every ask so a `du` that timed out waits the full
+    /// interval before the next try; the size moves only on an answer.
+    /// No event: the reconcile pass's ping carries it.
+    pub fn set_host_worktree_size(
+        &self,
+        alias: &str,
+        kb: Option<i64>,
+        at: i64,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "UPDATE hosts SET worktree_kb = COALESCE(?1, worktree_kb), worktree_at = ?2 \
+             WHERE alias = ?3",
+            rusqlite::params![kb, at, alias],
         )?;
         Ok(())
     }
@@ -1047,6 +1070,25 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_size_moves_on_an_answer_and_its_stamp_on_every_ask() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("h", Some("h")).unwrap();
+        s.set_host_worktree_size("h", Some(9_400_000), 100).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(
+            (row.worktree_kb, row.worktree_at),
+            (Some(9_400_000), Some(100))
+        );
+        // A `du` that did not answer keeps the last size, but not its stamp.
+        s.set_host_worktree_size("h", None, 200).unwrap();
+        let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(
+            (row.worktree_kb, row.worktree_at),
+            (Some(9_400_000), Some(200))
+        );
+    }
+
+    #[test]
     fn set_host_health_writes_every_column_and_the_stamp() {
         let s = Store::open_in_memory().unwrap();
         s.insert_host("h", Some("h")).unwrap();
@@ -1057,10 +1099,20 @@ mod tests {
             load_1m: Some(5.25),
             mem_avail_kb: Some(1_234_567),
             uptime_secs: Some(144 * 86400),
+            cpu_count: Some(16),
+            mem_total_kb: Some(65_842_312),
+            boot_at: Some(1_687_558_400),
+            latency_ms: Some(18),
             auth_overrides: Some(vec!["CLAUDE_CODE_USE_BEDROCK".into()]),
         };
         s.set_host_health("h", &sample, 1_700_000_000).unwrap();
         let row = s.get_host_row("h").unwrap().unwrap();
+        assert_eq!(row.cpu_count, Some(16));
+        assert_eq!(row.mem_total_kb, Some(65_842_312));
+        assert_eq!(row.boot_at, Some(1_687_558_400));
+        assert_eq!(row.latency_ms, Some(18));
+        let ping = crate::store::HostHealth::of(&row);
+        assert_eq!((ping.cpu_count, ping.latency_ms), (Some(16), Some(18)));
         assert_eq!(row.disk_home_free_kb, Some(3_600_000));
         assert_eq!(row.disk_home_total_kb, Some(150_000_000));
         assert_eq!(row.disk_tmp_free_kb, Some(5_900_000));

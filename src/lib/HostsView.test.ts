@@ -31,6 +31,7 @@ import {
 } from './hosts_fixture';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { uiLayout } from './prefs';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
@@ -79,6 +80,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  uiLayout.set('classic');
 });
 
 function mount(props: Partial<{ preselect: string | null; clock: () => number }> = {}) {
@@ -850,5 +852,93 @@ describe('HostsView: a hub contract skew', () => {
     await fireEvent.input(filter, { target: { value: 'zzz-no-such-host' } });
     await tick();
     expect(screen.getByTestId('hosts-detail-empty').textContent).toBe('Select a host.');
+  });
+});
+
+// Orbit Fleet 4.6: under Layout: New the view opens on the Hosts table
+// (Accounts board → Hosts). Classic keeps the grouped list, unchanged.
+describe('HostsView: the Hosts table (Layout: New)', () => {
+  const table = () => screen.getByTestId('hosts-table');
+  const tableAliases = () => screen.getAllByTestId('hosts-table-row').map((r) => r.dataset.alias);
+  const cell = (alias: string, id: string) =>
+    within(screen.getAllByTestId('hosts-table-row').find((r) => r.dataset.alias === alias)!).getByTestId(id);
+
+  it('Classic never shows the table', async () => {
+    uiLayout.set('classic');
+    mount();
+    await tick();
+    expect(screen.queryByTestId('hosts-table')).toBeNull();
+    expect(list()).toBeTruthy();
+  });
+
+  it('opens on a flat table: local first, every host once, the board columns filled', async () => {
+    uiLayout.set('new');
+    hosts.update((hs) =>
+      hs.map((h) =>
+        h.alias === 'mefistos'
+          ? { ...h, latency_ms: 18, cpu_count: 16, mem_total_kb: 64 * 1024 * 1024, worktree_kb: 9 * 1024 * 1024 }
+          : h,
+      ),
+    );
+    mount();
+    await tick();
+    expect(screen.queryByTestId('hosts-list')).toBeNull();
+    expect(tableAliases()[0]).toBe('local');
+    expect(new Set(tableAliases())).toEqual(new Set(get(hosts).map((h) => h.alias)));
+    expect(cell('local', 'hosts-table-connection').textContent).toBe('local');
+    expect(cell('mefistos', 'hosts-table-connection').textContent).toBe('SSH · 18 ms');
+    expect(cell('claude-fleet-htz', 'hosts-table-connection').textContent).toBe('offline');
+    expect(cell('mefistos', 'hosts-table-machine').textContent).toBe('16 CPU · 64 GB RAM · worktrees 9.0 GB');
+    expect(cell('mefistos', 'hosts-table-accounts').textContent).toBe('admin-janci');
+    expect(cell('local', 'hosts-table-disk').textContent).toMatch(/ of /);
+    expect(document.activeElement).toBe(table());
+  });
+
+  it('Open shows the detail; Esc goes back to the table, and Esc there closes', async () => {
+    uiLayout.set('new');
+    const v = mount();
+    await tick();
+    const row = screen.getAllByTestId('hosts-table-row').find((r) => r.dataset.alias === 'mefistos')!;
+    await fireEvent.click(within(row).getByTestId('hosts-table-open'));
+    await tick();
+    await tick();
+    expect(detailAlias()).toBe('mefistos');
+    expect(list()).toBeTruthy();
+    await key(detail(), 'Escape');
+    expect(document.activeElement).toBe(list());
+    await key(list(), 'Escape');
+    await tick();
+    expect(v.onClose).not.toHaveBeenCalled();
+    expect(table()).toBeTruthy();
+    await key(table(), 'Escape');
+    expect(v.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('j/k and Home move the table selection, Enter opens it, and n/s still act on it', async () => {
+    uiLayout.set('new');
+    const v = mount();
+    await tick();
+    // The offline host needs attention, so it is selected, and it sorts last.
+    expect(table().getAttribute('aria-activedescendant')).toBe('hosts-table-row-claude-fleet-htz');
+    await key(table(), 'k');
+    expect(table().getAttribute('aria-activedescendant')).toBe('hosts-table-row-mefistos');
+    await key(table(), 'Home');
+    expect(table().getAttribute('aria-activedescendant')).toBe('hosts-table-row-local');
+    await key(table(), 'n');
+    expect(v.onNewSession).toHaveBeenCalledWith('local');
+    await key(table(), 'Enter');
+    await tick();
+    expect(detailAlias()).toBe('local');
+    await fireEvent.click(screen.getByTestId('hosts-back-to-table'));
+    await tick();
+    expect(table()).toBeTruthy();
+  });
+
+  it('a preselected host opens straight in its detail', async () => {
+    uiLayout.set('new');
+    mount({ preselect: 'mefistos' });
+    await tick();
+    expect(detailAlias()).toBe('mefistos');
+    expect(screen.getByTestId('hosts-back-to-table')).toBeTruthy();
   });
 });

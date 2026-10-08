@@ -2700,6 +2700,9 @@ impl TmuxExec for VersionsTmux {
     async fn host_health(&self) -> Option<crate::tmux::HostHealthSample> {
         self.health.clone()
     }
+    async fn round_trip_ms(&self) -> Option<i64> {
+        self.health.as_ref().map(|_| 18)
+    }
 }
 
 /// Deps whose remote host `h` answers `versions` when asked; every other
@@ -2833,6 +2836,7 @@ async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
         mem_avail_kb: Some(2_000_000),
         uptime_secs: Some(57 * 86400),
         auth_overrides: Some(vec!["ANTHROPIC_API_KEY".into()]),
+        ..Default::default()
     };
     reconcile_sessions_with(&store, &versions_health_deps(None, Some(sample.clone())))
         .await
@@ -2847,6 +2851,11 @@ async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
         Some(vec!["ANTHROPIC_API_KEY".to_string()])
     );
     assert!(row.health_at.is_some());
+    // Orbit Fleet 4.6: the round trip is timed and stored with the sample,
+    // and a host with no worktrees measures 0 without running `du`.
+    assert_eq!(row.latency_ms, Some(18));
+    assert_eq!(row.worktree_kb, Some(0));
+    assert!(row.worktree_at.is_some());
 
     // A second identical pass changes only the stamps and the sample,
     // which is a ping (carrying the sample), not a full-row probe event.
@@ -2864,6 +2873,58 @@ async fn reconcile_writes_the_health_sample_every_pass_and_pings_it() {
     let seen = bus.take();
     assert!(seen.iter().any(|e| e == "host:pinged:h"), "{seen:?}");
     assert!(!seen.iter().any(|e| e == "host:probed:h"), "{seen:?}");
+}
+
+#[test]
+fn the_worktree_size_script_quotes_every_path_and_sums_one_line() {
+    use super::reconcile::{parse_worktree_size, worktree_size_script};
+    assert_eq!(worktree_size_script(&[]), None);
+    assert_eq!(worktree_size_script(&[""]), None);
+    let s = worktree_size_script(&["/w/a b", "~/wt/x'y"]).unwrap();
+    assert!(s.contains("'/w/a b'"), "{s}");
+    assert!(s.contains("\"$HOME\"/'wt/x'\\''y'"), "{s}");
+    assert_eq!(
+        parse_worktree_size("noise\nwtkb=9400000\n"),
+        Some(9_400_000)
+    );
+    assert_eq!(parse_worktree_size("wtkb=\n"), None);
+    assert_eq!(parse_worktree_size(""), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn the_worktree_size_script_measures_real_directories() {
+    use super::reconcile::{parse_worktree_size, worktree_size_script};
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::write(a.join("f"), vec![0u8; 64 * 1024]).unwrap();
+    let a = a.to_string_lossy().into_owned();
+    let gone = dir.path().join("gone").to_string_lossy().into_owned();
+    let script = worktree_size_script(&[&a, &gone]).unwrap();
+    let out = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .output()
+        .unwrap();
+    let kb = parse_worktree_size(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    assert!(
+        kb >= 64,
+        "a missing path adds nothing, a real one its size: {kb}"
+    );
+}
+
+#[test]
+fn a_worktree_size_is_due_once_per_interval() {
+    use super::reconcile::{worktree_size_due, WORKTREE_SIZE_REFRESH_SECS};
+    assert!(worktree_size_due(None, 1_000));
+    assert!(!worktree_size_due(
+        Some(1_000),
+        1_000 + WORKTREE_SIZE_REFRESH_SECS - 1
+    ));
+    assert!(worktree_size_due(
+        Some(1_000),
+        1_000 + WORKTREE_SIZE_REFRESH_SECS
+    ));
 }
 
 fn host_row_of(store: &Mutex<Store>, alias: &str) -> HostRow {
@@ -3292,6 +3353,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         versions: None,
         health: None,
         started_at: now_unix(),
+        worktree_kb: None,
     };
     // 2. `new_session` creates the tmux session and runs its own
     //    single-host reconcile, which upserts + stamps the row.
@@ -3342,6 +3404,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         versions: None,
         health: None,
         started_at: now_unix() + 5,
+        worktree_kb: None,
     };
     let mut s = store.lock().unwrap();
     let projects = s.list_projects().unwrap();
@@ -3865,6 +3928,7 @@ fn reconcile_linking(
         versions: None,
         health: None,
         started_at: now_unix(),
+        worktree_kb: None,
     };
     // Two ticks: the second must keep the link, not null it.
     reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
@@ -6073,6 +6137,7 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
         versions: None,
         health: None,
         started_at: 1000,
+        worktree_kb: None,
     };
     let mut s = store.lock().unwrap();
     let projects = s.list_projects().unwrap();
@@ -6550,6 +6615,7 @@ fn pair_pass(
         versions: None,
         health: None,
         started_at: now_unix(),
+        worktree_kb: None,
     };
     let projects = s.list_projects().unwrap();
     reconcile_write_one_host(s, &probe, &projects).unwrap();
@@ -6722,6 +6788,7 @@ fn vps_probe(
         versions: None,
         health: None,
         started_at: now_unix(),
+        worktree_kb: None,
     }
 }
 
