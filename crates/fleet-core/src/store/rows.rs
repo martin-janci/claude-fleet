@@ -416,7 +416,7 @@ fn agent_claude() -> String {
     AGENT_CLAUDE.to_string()
 }
 
-/// `sessions.turn_outcome` (migration 129): every value its `CHECK` admits.
+/// `sessions.turn_outcome` (migration 130): every value its `CHECK` admits.
 pub const TURN_OUTCOMES: [&str; 5] = ["finished", "asked", "stuck", "working", "unsure"];
 
 /// `decision_runs.subject_kind` of a run about one session: its
@@ -1007,6 +1007,20 @@ pub struct DayDelta {
     pub day: i64,
     pub totals: UsageTotals,
     pub backfill: bool,
+    /// The model that spent this slice (`usage_daily_account`, step 4.2);
+    /// `None` when the transcript line carried none.
+    pub model: Option<String>,
+}
+
+/// One account's LIVE spend on one model over a window, summed from
+/// `usage_daily_account` (migration 130, redesign step 4.2). `''` names an
+/// unknown account (a session whose login fleet has not read yet) or a
+/// transcript line with no model.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AccountModelCost {
+    pub account_uuid: String,
+    pub model: String,
+    pub totals: UsageTotals,
 }
 
 /// One usage pass's result for a session, applied by `Store::apply_usage`.

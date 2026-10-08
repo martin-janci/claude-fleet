@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { inboxRows, notWaiting, notWaitingText } from './inbox';
+import { inboxRows, nextInInbox, notWaiting, notWaitingText } from './inbox';
 import { attentionState, countNeedsYou } from './attention';
 import { session } from './hosts_fixture';
 
@@ -29,5 +29,17 @@ describe('inbox', () => {
     expect(n).toEqual({ working: 1, idle: 2, done: 0, paused: 1 });
     expect(notWaitingText(n)).toBe('1 running · 2 idle · 1 paused');
     expect(notWaitingText({ working: 0, idle: 0, done: 0, paused: 0 })).toBe('');
+  });
+});
+
+describe('nextInInbox (redesign 5.9)', () => {
+  const row = (id: number) => ({ id }) as unknown as import('./sessions').SessionRow;
+  it('takes the next row in order, wraps round, and never the one just answered', () => {
+    const q = [row(1), row(2), row(3)];
+    expect(nextInInbox(q, 2)?.id).toBe(3);
+    expect(nextInInbox(q, 3)?.id).toBe(1);
+    expect(nextInInbox(q, 9)?.id).toBe(1);
+    expect(nextInInbox([row(4)], 4)).toBeNull();
+    expect(nextInInbox([], 4)).toBeNull();
   });
 });

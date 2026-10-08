@@ -1518,10 +1518,17 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/129_session_turn_outcome.sql"),
         already_applied: Some(sessions_has_turn_outcome),
     },
+    // Orbit Fleet 4.2, cost per account and per model:
+    // `usage_daily_account` and its index. New objects only, `IF NOT
+    // EXISTS`, safe to re-run.
+    Migration::plain(
+        130,
+        include_str!("../../migrations/130_usage_daily_account.sql"),
+    ),
     // Orbit Fleet 4.9: the add-host wizard's saved drafts (`host_setups`)
     // and the fleet-agent install jobs (`agent_installs`). New tables only,
     // `IF NOT EXISTS`, safe to re-run.
-    Migration::plain(130, include_str!("../../migrations/130_host_setup.sql")),
+    Migration::plain(131, include_str!("../../migrations/131_host_setup.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
