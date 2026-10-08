@@ -142,7 +142,7 @@ describe('formatting', () => {
 });
 
 describe('resources on a paired desktop', () => {
-  it('every resource but the company’s and debug devices names a command the hub reasons explain: its update, else its create or delete', async () => {
+  it('every resource but the company’s, debug devices and linked hubs names a command the hub reasons explain: its update, else its create or delete', async () => {
     const { resourceBlock } = await import('../hub');
     const remote = {
       remote: true,
@@ -159,8 +159,9 @@ describe('resources on a paired desktop', () => {
     // Org administration phase B: orgs, devices and people route to the
     // hub's `org_admin`, which decides per device (a trusted full one
     // changes them), so a paired desktop edits them like a standalone one.
-    // Debug devices route to the hub's `debug_devices` the same way.
-    const routed = new Set(['org', 'device', 'person', 'debug_device']);
+    // Debug devices route to the hub's `debug_devices` the same way, and
+    // linked hubs (11.5) to `link_peer` / `unlink_peer`.
+    const routed = new Set(['org', 'device', 'person', 'debug_device', 'peer_link']);
     for (const r of bundle.resources) {
       const reason = resourceBlock(r, remote);
       if (routed.has(r.id)) expect(reason, r.id).toBeNull();

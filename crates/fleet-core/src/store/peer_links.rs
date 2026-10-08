@@ -79,6 +79,15 @@ pub struct PeerLinkSummary {
     pub last_error: Option<String>,
     pub pending: i64,
     pub revoked_at: Option<i64>,
+    /// Round trip of this side's last exchange that did not park, in ms
+    /// (migration 132): a dialer's only. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<i64>,
+    /// Messages carried either way today (UTC) and since migration 132.
+    #[serde(default)]
+    pub messages_today: i64,
+    #[serde(default)]
+    pub messages_total: i64,
 }
 
 /// One outbound row waiting for (or handed to) a peer.
@@ -430,10 +439,12 @@ impl Store {
             "SELECT id, fleet_id, role, url, state, last_exchange_at, last_error, revoked_at, \
                     (SELECT COUNT(*) FROM session_messages m \
                        JOIN participants p ON p.id = m.to_participant_id \
-                      WHERE p.peer_link_id = peer_links.id AND m.peer_state = 'pending') \
+                      WHERE p.peer_link_id = peer_links.id AND m.peer_state = 'pending'), \
+                    latency_ms, CASE WHEN msgs_day = ?1 THEN msgs_today ELSE 0 END, msgs_total \
              FROM peer_links ORDER BY id ASC",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let today = now_unix().div_euclid(86_400);
+        let rows = stmt.query_map([today], |r| {
             Ok(PeerLinkSummary {
                 id: r.get(0)?,
                 fleet_id: r.get(1)?,
@@ -444,6 +455,9 @@ impl Store {
                 last_error: r.get(6)?,
                 revoked_at: r.get(7)?,
                 pending: r.get(8)?,
+                latency_ms: r.get(9)?,
+                messages_today: r.get(10)?,
+                messages_total: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -553,6 +567,29 @@ impl Store {
             rusqlite::params![after, pending_rejects, now, id, token],
         )?;
         Ok(n > 0)
+    }
+
+    /// Count `carried` messages on link `id` at `now` (either way, one
+    /// successful exchange's worth), and when this side timed the exchange,
+    /// its round trip. Liveness for the Federation page only: nothing reads
+    /// it to decide anything.
+    pub fn record_peer_traffic(
+        &self,
+        id: i64,
+        carried: usize,
+        latency_ms: Option<i64>,
+        now: i64,
+    ) -> Result<(), IpcError> {
+        let day = now.div_euclid(86_400);
+        self.conn.execute(
+            "UPDATE peer_links SET \
+               msgs_today = CASE WHEN msgs_day = ?2 THEN msgs_today + ?3 ELSE ?3 END, \
+               msgs_day = ?2, msgs_total = msgs_total + ?3, \
+               latency_ms = COALESCE(?4, latency_ms) \
+             WHERE id = ?1 AND revoked_at IS NULL",
+            rusqlite::params![id, day, carried as i64, latency_ms],
+        )?;
+        Ok(())
     }
 
     /// Revoke link `id`: stamps `revoked_at`, revokes its listener client
@@ -1549,6 +1586,44 @@ mod tests {
             Some(7),
             "a SUCCESSFUL exchange stamps it"
         );
+    }
+
+    /// 11.5's Federation page: a link counts what it carried today and in
+    /// all, today's count starts over on a new UTC day, and a parked long
+    /// poll (no latency) keeps the last measured one.
+    #[test]
+    fn peer_traffic_counts_today_and_in_all_and_keeps_the_last_latency() {
+        let s = Store::open_in_memory().unwrap();
+        let link = s.insert_dialer_link("https://b.example", "t").unwrap();
+        let row = |s: &Store| {
+            s.peer_link_summaries()
+                .unwrap()
+                .into_iter()
+                .find(|r| r.id == link)
+                .unwrap()
+        };
+        let r = row(&s);
+        assert_eq!(
+            (r.latency_ms, r.messages_today, r.messages_total),
+            (None, 0, 0)
+        );
+
+        let yesterday = now_unix() - 86_400;
+        s.record_peer_traffic(link, 5, Some(40), yesterday).unwrap();
+        let r = row(&s);
+        assert_eq!(r.messages_today, 0, "yesterday's count is not today's");
+        assert_eq!((r.messages_total, r.latency_ms), (5, Some(40)));
+
+        let now = now_unix();
+        s.record_peer_traffic(link, 2, Some(25), now).unwrap();
+        s.record_peer_traffic(link, 1, None, now).unwrap();
+        let r = row(&s);
+        assert_eq!((r.messages_today, r.messages_total), (3, 8));
+        assert_eq!(r.latency_ms, Some(25), "a parked poll measures nothing");
+
+        s.revoke_peer_link(link, now).unwrap();
+        s.record_peer_traffic(link, 4, Some(1), now).unwrap();
+        assert_eq!(row(&s).messages_total, 8, "a removed link counts nothing");
     }
 
     /// G14c: a live LISTENER link has no `state` of its own that can go

@@ -51,13 +51,14 @@ pub struct ActivityProbe {
 
 /// PURE: the probe for a captured pane tail.
 pub fn probe_from_tail(tail: &str) -> ActivityProbe {
-    let intel = pane_intel::analyze(tail);
+    let agent = crate::agent_adapter::claude();
+    let intel = agent.analyze_pane(tail);
     ActivityProbe {
         claude_status: intel.derived_status.map(|s| s.as_str().to_string()),
         current_activity: intel.activity,
         stuck_kind: intel.stuck.map(|k| k.as_str().to_string()),
         waiting_for: intel.waiting_for.map(|w| w.as_str().to_string()),
-        spinner: pane_intel::spinner_line(tail),
+        spinner: agent.spinner_line(tail),
         pending_input: intel.pending_input,
     }
 }

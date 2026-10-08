@@ -12,7 +12,7 @@
 // each control renders.
 import type { SessionFacetId, WorkFacetId } from './filter_facets';
 import type { SidebarGroupBy } from './sessions';
-import type { WorkLayout } from './work_view';
+import type { WorkGroupBy } from './work_view';
 
 /** The panel's headings, in order. */
 export const FILTER_SECTIONS = ['Saved view', 'Quick', 'Scope', 'Time', 'Work', 'Include'] as const;
@@ -58,6 +58,8 @@ export const WORK_FILTER_SCHEMA: Record<WorkControlId, FilterControl> = {
   org: { label: 'Organisation', place: 'Scope', testid: 'work-filter-org' },
   tracker: { label: 'Tracker', place: 'Work', testid: 'work-filter-tracker' },
   status: { label: 'Status', place: 'Work', testid: 'work-filter-status' },
+  status_name: { label: 'Tracker column', place: 'Work', testid: 'work-filter-column', when: 'a tracker names its columns' },
+  assignee: { label: 'Assignee', place: 'Work', testid: 'work-filter-assignee', when: 'a task has an assignee' },
   has: { label: 'Sessions', place: 'Work', testid: 'work-filter-has' },
   archived: { label: 'Archived tasks', place: 'Include', testid: 'work-filter-archived' },
 };
@@ -84,9 +86,15 @@ export const SESSION_GROUPS: readonly GroupOption<SidebarGroupBy>[] = [
   { id: 'agent', label: 'Agent' },
 ];
 
-/** The Work view's groupings: its List (by status) and Grouped (organisation
- *  → group) layouts. Step 6.2 adds person, mission, account and repo. */
-export const WORK_GROUPS: readonly GroupOption<WorkLayout>[] = [
+/** The Work view's groupings: its List layout (by status), or its Grouped
+ *  layout with each org's sections by `filters.group_by` (redesign 6.2). */
+export type WorkGroupChoice = 'list' | WorkGroupBy;
+export const WORK_GROUPS: readonly GroupOption<WorkGroupChoice>[] = [
   { id: 'list', label: 'Status', title: 'By status: To do, Doing, Done' },
-  { id: 'grouped', label: 'Organisation', title: 'Organisation → group' },
+  { id: 'group', label: 'Group', title: 'Organisation → group (a person, a rule, a tracker container, a repo or a key)' },
+  { id: 'org', label: 'Organisation', title: 'One section per organisation' },
+  { id: 'person', label: 'Person', title: 'Organisation → the person it is assigned to' },
+  { id: 'mission', label: 'Mission', title: 'Organisation → its mission' },
+  { id: 'account', label: 'Account', title: 'Organisation → the account its sessions run on' },
+  { id: 'repo', label: 'Repo', title: 'Organisation → its repo' },
 ];

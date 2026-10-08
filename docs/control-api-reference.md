@@ -167,6 +167,12 @@ Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
+### `link_peer`
+
+Link this hub to another fleet's hub: redeem a peer code minted there (fleet-hub pair --mode peer) against its https URL. Answers the new link; it connects within seconds. The master, or the hub owner's trusted full device.
+
+Parameters: `code`, `url`
+
 ### `list_accounts`
 
 The cached Claude accounts seen across hosts.
@@ -489,6 +495,12 @@ Truncate a session's transcript into a new conversation: "fork" starts a new ses
 
 Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
+### `routines`
+
+Routines: a saved prompt that starts a session on a cron schedule, a session event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; save {routine, routine_id?}: the whole routine; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+
+Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
+
 ### `run_prompt`
 
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
@@ -666,6 +678,12 @@ Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 Mark a session viewed now: the turns it has finished read as seen. Returns the row.
 
 Parameters: `session_id`
+
+### `unlink_peer`
+
+Remove a link to another fleet's hub by its id: messages waiting for it fail back to their senders. The master, or the hub owner's trusted full device.
+
+Parameters: `id`
 
 ### `update_admin`
 
@@ -861,6 +879,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::set_org_setting`
 - `commands::orgs::set_org_member`
 - `commands::orgs::remove_org_member`
+- `commands::orgs::org_member_grants`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`
 - `commands::org_devices::list_devices`
@@ -925,6 +944,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::forms::get_form`
 - `commands::forms::answer_form`
 - `commands::forms::decline_form`
+- `commands::federation::list_peer_links`
+- `commands::federation::link_peer_hub`
+- `commands::federation::unlink_peer_hub`
 - `commands::debug_devices::list_debug_devices`
 - `commands::debug_devices::scan_debug_devices`
 - `commands::debug_devices::update_debug_device`

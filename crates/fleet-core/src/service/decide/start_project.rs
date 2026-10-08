@@ -110,7 +110,7 @@ impl SuggestedProject {
 }
 
 /// PURE: a confidence in whole percent.
-fn pct(c: Option<f64>) -> Option<u8> {
+pub(super) fn pct(c: Option<f64>) -> Option<u8> {
     c.map(|c| (c.clamp(0.0, 1.0) * 100.0).round() as u8)
 }
 
@@ -194,7 +194,7 @@ pub fn subject_id(fp_key: &Secret, item_id: Option<i64>, key: &str) -> String {
 
 /// A run that sent a request and got an answer the envelope checked (or
 /// found wanting): asking again on the same input would repeat it.
-fn decided(r: &DecisionRunRow) -> bool {
+pub(super) fn decided(r: &DecisionRunRow) -> bool {
     r.called
         && matches!(
             r.fallback.as_deref(),

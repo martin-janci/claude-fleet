@@ -15,6 +15,7 @@ import type { Descriptor } from './pages/pages';
 import type { AdminNeed } from './pages/resources';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import type { Pairing } from './devices';
 import { readPref, writePref } from './prefs';
 import { sessions, type SessionRow } from './sessions';
 import { projects, type ProjectTreeRow } from './projects';
@@ -82,7 +83,7 @@ export interface OrgDetail extends OrgRow {
   /** Redesign 11.1, for its admins: what they should look at. */
   needs_admin?: AdminNeed[];
   /** Phase D: who is in the company, for its people and the hub's owner. */
-  members?: { person_id: number; name: string; display_name?: string; role: string }[];
+  members?: OrgMember[];
   /** Phase D: the caller's own role in it. */
   my_role?: 'admin' | 'member' | 'viewer';
   /** Phase D: this company owns the hub. */
@@ -90,6 +91,45 @@ export interface OrgDetail extends OrgRow {
   /** Phase D: its admins see the unclaimed count on its hosts. */
   admins_see_unclaimed?: boolean;
 }
+
+/** One member of an org, as its page lists them. */
+export interface OrgMember {
+  person_id: number;
+  name: string;
+  display_name?: string;
+  role: string;
+  /** Redesign 11.2: when they joined (absent from an older hub). */
+  added_at?: number;
+  /** Redesign 11.2: since when an org share reaches them; absent for a
+   *  viewer, who receives none. */
+  shares_since?: number;
+  /** Redesign 11.2, for whoever administers the org: their devices. */
+  devices?: string[];
+}
+
+/** How many live shares TO a member stand on the org's sessions. */
+export interface MemberGrants {
+  watch: number;
+  drive: number;
+}
+
+/** What happens to those shares when the member leaves: taken back, each
+ *  Drive narrowed to Watch, or left as they are. */
+export type GrantsOnRemove = 'revoke' | 'narrow' | 'keep';
+
+export function orgMemberGrants(orgId: number, personId: number): Promise<Result<MemberGrants>> {
+  return invokeCmd<MemberGrants>('org_member_grants', { args: { org_id: orgId, person_id: personId } });
+}
+
+/** Mint a one-time pairing code for a member's new device, fenced to the
+ *  org and theirs. A standalone desktop refuses: a code is the hub's. */
+export function pairMemberDevice(orgId: number, person: string, device: string): Promise<Result<Pairing>> {
+  return invokeCmd<Pairing>('pair_device', { args: { device, mode: 'full', org_id: orgId, person } });
+}
+
+/** A member's pairing in progress on an org's page. Kept here, not in the
+ *  editor, because the editor is rebuilt on every re-read of the list. */
+export const memberPairing = writable<{ org_id: number; person: string; pairing?: Pairing } | null>(null);
 
 /** One per-org setting on an org's page: the setting described with the
  *  fleet's value, and the org's own when it set one. */
