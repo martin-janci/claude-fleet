@@ -2229,6 +2229,7 @@
             }
           ]
         ],
+        "busy": "counter-orbit",
         "command": "link_peer_hub",
         "envelope": "args",
         "id": "peer_link.add",
@@ -2327,6 +2328,13 @@
           "label": "Address",
           "max": 512,
           "type": "text"
+        },
+        {
+          "help": "Messages carried today against those still queued, while the queue drains.",
+          "id": "sync",
+          "label": "Syncing",
+          "type": "sync",
+          "unit": "messages"
         },
         {
           "help": "The round trip of the last exchange this hub dialed.",
@@ -3506,6 +3514,24 @@
         "type": "choice"
       },
       "label": "Jev: sibling repository",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.quick_answer",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: quick answer",
       "widgets": [
         "select",
         "radio",

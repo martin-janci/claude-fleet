@@ -1067,6 +1067,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    ToolPolicy {
+        name: "repo_branch_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_range_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // assets.rs — asset catalog: `list_assets` reads the catalog + cached
     // inventory. `scan_assets` is read-only ON THE HOSTS — like
     // `refresh_projects` it re-reads external state and refreshes the cache

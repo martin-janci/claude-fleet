@@ -594,6 +594,8 @@ pub fn run() {
             commands::files::repo_file,
             commands::files::repo_diff,
             commands::files::repo_blame,
+            commands::files::repo_branch_diff,
+            commands::files::repo_range_diff,
             commands::upload::upload_to_session,
             commands::upload::pick_attachments,
             commands::upload::attachment_preview,

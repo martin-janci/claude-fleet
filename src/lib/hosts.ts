@@ -77,6 +77,9 @@ export interface HostRow {
   /** Disk fleet's worktrees hold on the host, and when that was last asked. */
   worktree_kb?: number | null;
   worktree_at?: number | null;
+  /** Which agent CLIs the host has on its PATH (Orbit Fleet 12.4), in the
+   *  health checklist's order; null when never sampled. Absent from an older hub. */
+  agents_on_path?: string[] | null;
 }
 
 /** One login profile on a host. */
@@ -103,6 +106,8 @@ export interface HostHealth {
   boot_at?: number | null;
   latency_ms?: number | null;
   worktree_kb?: number | null;
+  /** Orbit Fleet 12.4; absent from an older hub's ping. */
+  agents_on_path?: string[] | null;
 }
 
 export interface SshHost {

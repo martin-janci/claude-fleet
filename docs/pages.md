@@ -232,6 +232,10 @@ type declares:
   - `money`, micro-USD shown as dollars, and `money_series`, a
     `[{ day, cost_micros }]` list shown as a bar chart with a table toggle;
     an absent value leaves either out (the caller may not see spend);
+  - `sync`, a transfer in progress (`{ done, total, both_ways, since? }`,
+    a hub link's): a Constellation with the real count ("412 of 1 280
+    messages · 18 s") while `total` is above `done`, a Counter-orbit while
+    both ends trade with nothing queued; absent while idle, and left out;
   - `items`: a list changed through its own `remove` and `add` actions,
     shown by a closed formatter (`plain`, `field`, `org_rule`, `device`,
     `member`, or `admin_need`, which lists each need on its own line with
@@ -249,7 +253,9 @@ type declares:
   `text`, `secret` (a password input, never kept), `color` or `options`;
   `variants` limits an action to records whose `variant_by` field holds one
   of the listed values (Jira asks an email and a token, Asana a token); a
-  `report` action shows the command's `{ ok, error }` as a toast.
+  `report` action shows the command's `{ ok, error }` as a toast, and a
+  `busy` action shows that loader beside its form while the command runs
+  (`counter-orbit` when Link a hub talks to the other hub).
 
 Every action names an **existing desktop command** and binds each argument
 to one of: a record field, the sub-item or its field, a form param, or

@@ -737,6 +737,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "repo_branches" => fx.t.repo_branches(ext, p!()).await,
         "repo_commit" => fx.t.repo_commit(ext, p!()).await,
         "repo_commit_diff" => fx.t.repo_commit_diff(ext, p!()).await,
+        "repo_branch_diff" => fx.t.repo_branch_diff(ext, p!()).await,
+        "repo_range_diff" => fx.t.repo_range_diff(ext, p!()).await,
         // ---- session_ops.rs -----------------------------------------------
         "list_sessions" => fx.t.list_sessions(ext, p!()).await,
         "related_sessions" => fx.t.related_sessions(ext, p!()).await,
@@ -1360,6 +1362,13 @@ async fn run_matrix() {
         "repo_commit_diff",
         Reach::Read,
         |fx, _| json!({ "session_id": fx.row, "hash": "HEAD", "path": "README.md" }),
+    )
+    .await;
+    m.gated("repo_branch_diff", Reach::Read, row).await;
+    m.gated(
+        "repo_range_diff",
+        Reach::Read,
+        |fx, _| json!({ "session_id": fx.row, "path": "README.md", "range": "base" }),
     )
     .await;
 

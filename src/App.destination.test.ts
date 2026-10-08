@@ -8,14 +8,16 @@ import { get } from 'svelte/store';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
-import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView } from './lib/app_views';
+import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView, shortcutSheetOpen } from './lib/app_views';
 import { toolkitTab } from './lib/toolkit_skills';
 import { sidebarView } from './lib/work_view';
 import { destination } from './lib/destination';
 import { uiLayout } from './lib/prefs';
+import { controlTab } from './lib/control';
+import { todayOpen } from './lib/today';
 import { sessionActionRequest } from './lib/session_actions';
 
-const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay'];
+const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay', 'control-overlay'];
 
 beforeEach(() => {
   onboardingDismissed.set(true);
@@ -26,6 +28,8 @@ afterEach(() => {
   uiLayout.set('classic');
   sidebarView.set('sessions');
   settingsOpen.set(false);
+  controlTab.set('chat');
+  todayOpen.set(false);
 });
 
 function terminalSlot(container: HTMLElement): Element {
@@ -122,7 +126,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     const ids = Array.from(getByTestId('rail').querySelectorAll('[data-testid^="rail-"]'), (e) =>
       e.getAttribute('data-testid'),
     );
-    expect(ids).toEqual(['rail-inbox', 'rail-sessions', 'rail-work', 'rail-accounts', 'rail-toolkit', 'rail-settings']);
+    expect(ids).toEqual(['rail-control', 'rail-inbox', 'rail-sessions', 'rail-work', 'rail-accounts', 'rail-toolkit', 'rail-settings']);
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
   });
 
@@ -168,6 +172,17 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(queryByTestId('toolkit')).toBeNull();
   });
 
+  it('the New status bar ends on Shortcuts (step 3.17), with the rest unchanged; Classic has none', async () => {
+    const classic = render(App);
+    expect(classic.queryByTestId('footer-shortcuts')).toBeNull();
+    classic.unmount();
+    uiLayout.set('new');
+    const { getByTestId } = render(App);
+    await fireEvent.click(getByTestId('footer-shortcuts'));
+    expect(get(shortcutSheetOpen)).toBe(true);
+    shortcutSheetOpen.set(false);
+  });
+
   it('Work and Sessions pick the sidebar tree and leave a fleet page', async () => {
     uiLayout.set('new');
     const { getByTestId } = render(App);
@@ -181,7 +196,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
   });
 
-  it('Inbox (step 3.3) shows the Inbox list with its Today tab; Classic reads it as Sessions', async () => {
+  it('Inbox (step 3.3) shows the Inbox list, with no Today tab since 9.1; Classic reads it as Sessions', async () => {
     uiLayout.set('new');
     const { getByTestId, queryByTestId } = render(App);
     await fireEvent.click(getByTestId('rail-accounts'));
@@ -190,7 +205,8 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     expect(get(destination)).toBe('session');
     expect(getByTestId('rail-inbox').getAttribute('aria-current')).toBe('page');
     expect(getByTestId('inbox')).toBeTruthy();
-    expect(getByTestId('inbox-tabs')).toBeTruthy();
+    expect(getByTestId('inbox-title')).toBeTruthy();
+    expect(queryByTestId('inbox-tab-today')).toBeNull();
     // The way to everything else.
     await fireEvent.click(getByTestId('inbox-all-sessions'));
     expect(get(sidebarView)).toBe('sessions');
@@ -217,6 +233,55 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     uiLayout.set('classic');
     await waitFor(() => expect(openOverlays(container)).toEqual([]));
     expect(queryByTestId('rail')).toBeNull();
+    expect(get(destination)).toBe('session');
+  });
+});
+
+describe('App: Control (step 9.1)', () => {
+  it('the rail opens Control over a mounted terminal, with the agent in place of its sheet', async () => {
+    uiLayout.set('new');
+    const { container, getByTestId, queryByTestId } = render(App);
+    const term = terminalSlot(container);
+    // The New layout has no floating agent button: the rail is the way in.
+    expect(container.querySelector('.agent-fab')).toBeNull();
+    await fireEvent.click(getByTestId('rail-control'));
+    expect(openOverlays(container)).toEqual(['control-overlay']);
+    expect(getByTestId('rail-control').getAttribute('aria-current')).toBe('page');
+    expect(getByTestId('control-tab-chat').getAttribute('aria-selected')).toBe('true');
+    expect(getByTestId('control-agent')).toBeTruthy();
+    expect(queryByTestId('agent-panel')).toBeNull();
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(get(destination)).toBe('session');
+    expect(terminalSlot(container)).toBe(term);
+  });
+
+  it('⌘E opens and closes Control; ⌘⇧T opens its Today tab', async () => {
+    uiLayout.set('new');
+    const { container, getByTestId } = render(App);
+    await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    expect(get(destination)).toBe('control');
+    expect(get(controlTab)).toBe('chat');
+    await fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    expect(get(controlTab)).toBe('today');
+    await waitFor(() => expect(getByTestId('control-tab-today').getAttribute('aria-selected')).toBe('true'));
+    // Today moved here: the column no longer opens Today over Details.
+    expect(get(todayOpen)).toBe(false);
+    await fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    expect(get(destination)).toBe('session');
+    await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    await fireEvent.keyDown(window, { key: 'e', metaKey: true });
+    expect(get(destination)).toBe('session');
+    expect(openOverlays(container)).toEqual([]);
+  });
+
+  it('Classic keeps ⌘⇧T over Details, and switching to Classic leaves Control', async () => {
+    uiLayout.set('new');
+    const { container, getByTestId } = render(App);
+    await fireEvent.click(getByTestId('rail-control'));
+    uiLayout.set('classic');
+    await waitFor(() => expect(openOverlays(container)).toEqual([]));
+    await fireEvent.keyDown(window, { key: 'T', ctrlKey: true, shiftKey: true });
+    expect(get(todayOpen)).toBe(true);
     expect(get(destination)).toBe('session');
   });
 });

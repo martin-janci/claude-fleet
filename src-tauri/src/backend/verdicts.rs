@@ -902,6 +902,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
     ("repo_blame", Verdict::Routed { tool: "repo_blame" }),
     (
+        "repo_branch_diff",
+        Verdict::Routed {
+            tool: "repo_branch_diff",
+        },
+    ),
+    (
+        "repo_range_diff",
+        Verdict::Routed {
+            tool: "repo_range_diff",
+        },
+    ),
+    (
         "upload_to_session",
         Verdict::SameInBoth {
             why: "the same story as `pty_open`: the bytes are on this machine and so is the \

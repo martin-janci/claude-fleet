@@ -423,6 +423,12 @@ Blame of one worktree file as runs of lines: {path, hunks: [{start, lines, hash,
 
 Parameters: `path`, `session_id`
 
+### `repo_branch_diff`
+
+What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles}.
+
+Parameters: `session_id`
+
 ### `repo_branches`
 
 Local + remote branches of a session's worktree, with ahead/behind and `merged` (the base branch contains the tip).
@@ -464,6 +470,12 @@ Parameters: `path`, `session_id`
 Commit log (branch graph) of a session's worktree, newest first, with parents + ref decorations; `skip` pages back.
 
 Parameters: `all`, `limit`, `session_id`, `skip`
+
+### `repo_range_diff`
+
+One file's diff over a session's unpushed commits (range `unpushed`) or against the base branch (range `base`): {path, diff, binary, truncated}.
+
+Parameters: `path`, `range`, `session_id`
 
 ### `repo_tree`
 
@@ -981,6 +993,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::files::repo_file`
 - `commands::files::repo_diff`
 - `commands::files::repo_blame`
+- `commands::files::repo_branch_diff`
+- `commands::files::repo_range_diff`
 - `commands::upload::upload_to_session`
 - `commands::upload::pick_attachments`
 - `commands::upload::attachment_preview`
