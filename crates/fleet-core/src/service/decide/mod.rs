@@ -36,6 +36,9 @@
 #[cfg(feature = "nl-detect")]
 pub mod bench;
 pub mod haiku;
+pub mod host_placement;
+#[cfg(test)]
+mod host_placement_tests;
 pub mod jev;
 pub mod start_project;
 #[cfg(test)]
@@ -80,16 +83,25 @@ pub enum Feature {
     WorkLink,
     /// Pre-selecting the repository of a task's first start (K1).
     StartProject,
+    /// Pre-selecting the host of a project's new session when no rule or
+    /// number decides (N5, redesign step 4.11).
+    HostPlacement,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 3] = [Feature::StatusMap, Feature::WorkLink, Feature::StartProject];
+    pub const ALL: [Feature; 4] = [
+        Feature::StatusMap,
+        Feature::WorkLink,
+        Feature::StartProject,
+        Feature::HostPlacement,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Feature::StatusMap => "status_map",
             Feature::WorkLink => "work_link",
             Feature::StartProject => "start_project",
+            Feature::HostPlacement => "host_placement",
         }
     }
 
@@ -103,6 +115,7 @@ impl Feature {
             Feature::StatusMap => settings::DECIDE_JEV_STATUS_MAP,
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
+            Feature::HostPlacement => settings::DECIDE_JEV_HOST_PLACEMENT,
         }
     }
 }

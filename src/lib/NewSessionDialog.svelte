@@ -40,7 +40,8 @@
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
   import ProposedBy from './ProposedBy.svelte';
-  import type { ProposalLike } from './ai_proposal';
+  import { preselect, type ProposalLike } from './ai_proposal';
+  import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
   import { openNewSessionPicker } from './switcher_request';
 
   let {
@@ -142,6 +143,47 @@
   $effect(() => {
     writePref('last-host', chosenHost);
   });
+
+  // Jev N5 host placement (redesign step 4.11, New layout): with no host
+  // the project's rule keeps (the one the dialog was opened on, or the one
+  // remembered for this project), the decision model may propose one of the
+  // online hosts under their limit. Off by default; a hub client is refused
+  // and keeps today's default. A person's pick always wins, and the proposal
+  // only ever lands while nobody has picked yet.
+  const hostByRule = untrack(() => [initialHost, memory?.host].some(usableHost));
+  let hostPicked = false;
+  let hostProposed = $state<ProposalLike | null>(null);
+  // Whether a proposal was shown: the start then answers it.
+  let hostProposalShown = false;
+  let hostBeforeProposal: string | null = null;
+  onMount(() => {
+    if (hostByRule || autostart || $uiLayout !== 'new') return;
+    void proposeHostPlacement(project.project.id).then((r) => {
+      if (destroyed || hostPicked || !r.ok || !r.value) return;
+      const p = hostProposal(r.value);
+      const alias = preselect('host', p, HOST_PLACEMENT_FLOOR);
+      if (!alias || !usableHost(alias)) return;
+      hostBeforeProposal = chosenHost;
+      chosenHost = alias;
+      hostProposed = p;
+      hostProposalShown = true;
+    });
+  });
+  function pickHost(alias: string) {
+    hostPicked = true;
+    hostProposed = null;
+    chosenHost = alias;
+  }
+  function changeProposedHost() {
+    if (hostBeforeProposal) chosenHost = hostBeforeProposal;
+    hostPicked = true;
+    hostProposed = null;
+  }
+  /** Jev N5's follow-up: the host a person started on answers the proposal
+   *  they were shown (best effort; local-only, off by default). */
+  function answerHostProposal(host: string) {
+    if (hostProposalShown) void recordHostPlacement(project.project.id, host);
+  }
 
   // "work" runs Claude Code in the pane; "shell" runs a plain login shell.
   let chosenKind = $state<'work' | 'shell'>(untrack(() => memory?.kind ?? 'work'));
@@ -885,7 +927,10 @@
     const extra = shownSiblings(alsoIn, siblings);
     if (extra.length > 0) {
       await submitMulti(t, submittedHost, extra);
-      if (!error) remember(submittedHost, submittedWorktreeId);
+      if (!error) {
+        remember(submittedHost, submittedWorktreeId);
+        answerHostProposal(submittedHost);
+      }
       return;
     }
     busy = true;
@@ -918,6 +963,7 @@
       return;
     }
     remember(submittedHost, submittedWorktreeId);
+    answerHostProposal(submittedHost);
     onCreate(r.value);
   }
 
@@ -1007,6 +1053,7 @@
       return;
     }
     remember(submittedHost, submittedWorktreeId);
+    answerHostProposal(submittedHost);
     onCreate(r.value);
   }
 
@@ -1331,10 +1378,19 @@
       {locale}
       {timeZone}
       onpick={(alias) => {
-        chosenHost = alias;
+        pickHost(alias);
         nameOverride = null;
       }}
     />
+    {#if $uiLayout === 'new' && hostProposed && hostProposed.value === chosenHost}
+      <ProposedBy
+        proposal={hostProposed}
+        field="host"
+        floor={HOST_PLACEMENT_FLOOR}
+        testid="new-session-host-proposed"
+        onchange={changeProposedHost}
+      />
+    {/if}
 
     <!-- Not a <label>: the picker is a listbox, which a label cannot name
          (it names itself with ariaLabel). -->

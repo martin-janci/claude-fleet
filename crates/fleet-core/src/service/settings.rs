@@ -532,6 +532,9 @@ pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
 /// `start_project`'s mode (pre-selecting the repository of a task's first
 /// start, K1).
 pub const DECIDE_JEV_START_PROJECT: &str = "decide.jev.start_project";
+/// `host_placement`'s mode (pre-selecting the host of a project's new
+/// session when no rule or number decides, N5).
+pub const DECIDE_JEV_HOST_PLACEMENT: &str = "decide.jev.host_placement";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1266,6 +1269,15 @@ pub const SPECS: &[Spec] = &[
         Kind::Choice(DECIDE_MODES),
         "Jev: start repository",
         "Pre-selecting the repository of a task's first start. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_HOST_PLACEMENT,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: session host",
+        "Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests.",
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
@@ -2417,6 +2429,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_STATUS_MAP, None), "off");
         assert_eq!(resolve(DECIDE_JEV_WORK_LINK, None), "off");
         assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
         assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");
         // `auto` is not offered yet (D36), nor is a free-text model.

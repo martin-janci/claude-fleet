@@ -15,6 +15,10 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::account_limits::{self, CheckAccountHeadroomArgs, Headroom};
 use fleet_core::service::account_usage::{AccountUsageSnapshot, UsageCache};
 use fleet_core::service::account_usage_poll;
+use fleet_core::service::decide::host_placement::{
+    self, ProposeHostArgs, RecordHostStartArgs, SuggestedHost,
+};
+use fleet_core::service::decide::DecideCtx;
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{Store, UsageSnapshotRow};
 use serde::Deserialize;
@@ -90,4 +94,39 @@ pub fn check_account_headroom(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     account_limits::check_account_headroom(&args, &store, &cache, now)
+}
+
+/// The decision model's host for a new session of a project (redesign step
+/// 4.11, Jev N5 `host_placement`): `Some` only in `assist` when two or more
+/// hosts are left after the limits and the offline ones. Off by default.
+/// Refused in remote mode: the hub owns the decision model and the usage.
+#[tauri::command]
+pub async fn propose_host_placement(
+    args: ProposeHostArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    cache: State<'_, Arc<Mutex<UsageCache>>>,
+) -> Result<Option<SuggestedHost>, IpcError> {
+    backend.refuse_local_only("propose_host_placement")?;
+    let ctx = DecideCtx::jev(Arc::clone(&store));
+    host_placement::propose(&ctx, &cache, &args).await
+}
+
+/// After a person's start of a project landed on a host: marks the decision
+/// model's host proposal confirmed or corrected (best effort, never fails a
+/// start). Refused in remote mode like the proposal.
+#[tauri::command]
+pub fn record_host_placement(
+    args: RecordHostStartArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<bool, IpcError> {
+    backend.refuse_local_only("record_host_placement")?;
+    let s = fleet_core::ipc_error::lock(&store)?;
+    host_placement::record_start(
+        &s,
+        args.project_id,
+        &args.host_alias,
+        fleet_core::store::now_unix(),
+    )
 }

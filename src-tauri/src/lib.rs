@@ -617,6 +617,8 @@ pub fn run() {
             commands::account_usage::refresh_account_usage,
             commands::account_usage::account_usage_history,
             commands::account_usage::check_account_headroom,
+            commands::account_usage::propose_host_placement,
+            commands::account_usage::record_host_placement,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
             commands::mcp::install_fleet_hook,

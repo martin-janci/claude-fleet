@@ -2003,6 +2003,43 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Per host, what the N5 host placement weighs (redesign step 4.11): the
+    /// live sessions there (ghosts excluded, as [`Self::unclaimed_counts_by_host`]
+    /// does), the sessions `project_id` started there since `since`, and
+    /// whether the project has a worktree row there.
+    pub fn host_placement_counts(
+        &self,
+        project_id: i64,
+        since: i64,
+    ) -> Result<std::collections::BTreeMap<String, (i64, i64, bool)>, crate::ipc_error::IpcError>
+    {
+        let mut out: std::collections::BTreeMap<String, (i64, i64, bool)> = Default::default();
+        let mut st = self.conn.prepare(
+            "SELECT host_alias, SUM(status != 'ghost'), \
+                    SUM(project_id = ?1 AND created_at >= ?2) \
+               FROM sessions GROUP BY host_alias",
+        )?;
+        let rows = st.query_map(rusqlite::params![project_id, since], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            ))
+        })?;
+        for row in rows {
+            let (host, live, recent) = row?;
+            out.insert(host, (live, recent, false));
+        }
+        let mut st = self
+            .conn
+            .prepare("SELECT DISTINCT host_alias FROM worktrees WHERE project_id = ?1")?;
+        let hosts = st.query_map([project_id], |r| r.get::<_, String>(0))?;
+        for h in hosts {
+            out.entry(h?).or_default().2 = true;
+        }
+        Ok(out)
+    }
+
     /// The one live row on `host_alias` whose last-seen pane is `pane_id`.
     /// `None` when there is none or more than one (a stale pane id after a
     /// tmux server restart shared with a new row).
