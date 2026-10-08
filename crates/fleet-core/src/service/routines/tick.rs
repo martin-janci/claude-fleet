@@ -160,17 +160,31 @@ fn refusal(s: &Store, r: &RoutineRow, now: i64) -> Result<Option<String>, IpcErr
     Ok(None)
 }
 
+/// Close a run and record what its own facts say it came to (step 8.10).
+fn close(
+    s: &Store,
+    id: i64,
+    state: &str,
+    reason: Option<&str>,
+    cost_micros: i64,
+    now: i64,
+) -> Result<(), IpcError> {
+    s.finish_routine_run(id, state, reason, cost_micros, now)?;
+    super::outcome::on_close(s, id, now)
+}
+
 /// Close the open runs whose session finished a turn, failed, went away or
 /// went quiet for [`RUN_STALE_SECS`]; refresh the others' cost, and fail
 /// one past its run budget and pause its routine.
 pub fn settle(s: &Store, now: i64) -> Result<(), IpcError> {
     for run in s.running_routine_runs()? {
         let Some(sid) = run.session_id else {
-            s.finish_routine_run(run.id, "failed", Some("it started no session"), 0, now)?;
+            close(s, run.id, "failed", Some("it started no session"), 0, now)?;
             continue;
         };
         let Some(row) = s.get_session_by_id(sid)? else {
-            s.finish_routine_run(
+            close(
+                s,
                 run.id,
                 "failed",
                 Some("its session was removed before its turn finished"),
@@ -181,9 +195,10 @@ pub fn settle(s: &Store, now: i64) -> Result<(), IpcError> {
         };
         let cost = row.usage.usage_cost_micros;
         if s.session_event_since(sid, "turn_done", 0)? {
-            s.finish_routine_run(run.id, "done", None, cost, now)?;
+            close(s, run.id, "done", None, cost, now)?;
         } else if s.session_event_since(sid, "stop_failure", 0)? {
-            s.finish_routine_run(
+            close(
+                s,
                 run.id,
                 "failed",
                 Some("its turn ended in an error"),
@@ -191,7 +206,7 @@ pub fn settle(s: &Store, now: i64) -> Result<(), IpcError> {
                 now,
             )?;
         } else if row.lost_at.is_some() {
-            s.finish_routine_run(run.id, "failed", Some("its session was lost"), cost, now)?;
+            close(s, run.id, "failed", Some("its session was lost"), cost, now)?;
         } else if let Some(budget) = s
             .get_routine(run.routine_id)?
             .and_then(|r| r.budget_run_micros)
@@ -202,7 +217,7 @@ pub fn settle(s: &Store, now: i64) -> Result<(), IpcError> {
                 usd(cost),
                 usd(budget)
             );
-            s.finish_routine_run(run.id, "failed", Some(&why), cost, now)?;
+            close(s, run.id, "failed", Some(&why), cost, now)?;
             s.set_routine_enabled(
                 run.routine_id,
                 false,
@@ -210,7 +225,8 @@ pub fn settle(s: &Store, now: i64) -> Result<(), IpcError> {
                 None,
             )?;
         } else if now - run.started_at > RUN_STALE_SECS {
-            s.finish_routine_run(
+            close(
+                s,
                 run.id,
                 "failed",
                 Some("no turn finished in 6 hours"),
