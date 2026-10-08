@@ -3967,6 +3967,49 @@
       "shape": "account_usage"
     },
     {
+      "columns": [
+        {
+          "id": "device",
+          "label": "Device",
+          "ty": "text"
+        },
+        {
+          "id": "part",
+          "label": "Part",
+          "ty": "text"
+        },
+        {
+          "id": "version",
+          "label": "Version",
+          "ty": "text"
+        },
+        {
+          "id": "update",
+          "label": "Update",
+          "ty": "text"
+        },
+        {
+          "id": "offers",
+          "label": "Offered",
+          "ty": "text"
+        },
+        {
+          "id": "reported_at",
+          "label": "Reported",
+          "ty": "time"
+        }
+      ],
+      "help": "The hub, every host's agent, each desktop and the phone: the version each runs and what the hub would tell it now (`update_status`).",
+      "id": "updates.targets",
+      "label": "What runs where",
+      "live": {
+        "command": "list_update_targets",
+        "event": "update"
+      },
+      "params": [],
+      "shape": "rows"
+    },
+    {
       "fields": [
         {
           "id": "input_tokens",

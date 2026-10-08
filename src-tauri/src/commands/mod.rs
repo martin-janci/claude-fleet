@@ -31,6 +31,7 @@ pub mod sessions;
 pub mod tasks;
 pub mod trackers;
 pub mod tray;
+pub mod updates;
 pub mod upload;
 pub mod voice;
 pub mod work;
