@@ -147,6 +147,14 @@
         },
         {
           "type": "field",
+          "key": "accounts.pause_at",
+          "when": {
+            "key": "usage.enabled",
+            "truthy": true
+          }
+        },
+        {
+          "type": "field",
           "key": "usage.prices_json",
           "when": {
             "key": "usage.enabled",

@@ -1904,3 +1904,59 @@ describe('NewSessionDialog accessibility (7.2)', () => {
     await expectAccessible(container);
   });
 });
+
+// Redesign step 4.4: a start on an account past `accounts.pause_at` asks
+// first and offers the login with the most headroom.
+describe('NewSessionDialog limit handling', () => {
+  const over = {
+    pause_at_pct: 90,
+    chosen: { profile: null, account_uuid: 'acc-own', used_pct: 95 },
+    over: true,
+    suggestion: { profile: 'spare', account_uuid: 'acc-spare', used_pct: 30 },
+    logins: [],
+  };
+  const created = () => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'new_session');
+
+  function answer(headroom: unknown) {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_account_headroom') return headroom;
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  }
+
+  it('asks before starting over the line, and starts on the suggested login', async () => {
+    answer(over);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+    expect(screen.getByTestId('limit-ask').textContent).toContain('95% of its');
+    expect(created()).toHaveLength(0);
+    expect(screen.getByTestId('limit-use-suggestion').textContent).toContain('spare');
+    await fireEvent.click(screen.getByTestId('limit-use-suggestion'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect((created()[0][1] as any).args.profile).toBe('spare');
+  });
+
+  it('Start anyway keeps the chosen login', async () => {
+    answer(over);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('limit-start-anyway'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect((created()[0][1] as any).args.profile).toBeNull();
+  });
+
+  it('under the line, or with no answer, starts straight away', async () => {
+    answer({ ...over, over: false, suggestion: null });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect(screen.queryByTestId('limit-ask')).toBeNull();
+  });
+});

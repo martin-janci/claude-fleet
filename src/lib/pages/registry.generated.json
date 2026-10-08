@@ -790,6 +790,26 @@
       "danger": {
         "level": "none"
       },
+      "default": "90",
+      "help": "Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom.",
+      "key": "accounts.pause_at",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "Ask before starting at",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "percent",
+      "value": "90"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "{}",
       "help": "Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only.",
       "key": "usage.prices_json",
@@ -2523,6 +2543,14 @@
             },
             {
               "key": "usage.interval_secs",
+              "type": "field",
+              "when": {
+                "key": "usage.enabled",
+                "truthy": true
+              }
+            },
+            {
+              "key": "accounts.pause_at",
               "type": "field",
               "when": {
                 "key": "usage.enabled",
