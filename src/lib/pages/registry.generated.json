@@ -5437,6 +5437,123 @@
                 "from": "record",
                 "name": "id"
               }
+            ],
+            [
+              "note",
+              {
+                "from": "param",
+                "name": "note"
+              }
+            ]
+          ],
+          "command": "claim_debug_device",
+          "envelope": "args",
+          "id": "debug_device.claim",
+          "label": "Claim",
+          "params": [
+            {
+              "label": "For (optional)",
+              "max": 200,
+              "name": "note",
+              "placeholder": "testing the login flow",
+              "required": false,
+              "type": "text"
+            }
+          ],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ],
+            [
+              "path",
+              {
+                "from": "param",
+                "name": "path"
+              }
+            ],
+            [
+              "host",
+              {
+                "from": "param",
+                "name": "host"
+              }
+            ]
+          ],
+          "command": "install_debug_device",
+          "envelope": "args",
+          "id": "debug_device.install",
+          "label": "Install app…",
+          "params": [
+            {
+              "label": "App (.apk, .app or .ipa)",
+              "max": 1024,
+              "name": "path",
+              "placeholder": "~/app/build/outputs/apk/debug/app-debug.apk",
+              "required": true,
+              "type": "text"
+            },
+            {
+              "label": "On host (optional; the device's own when empty)",
+              "name": "host",
+              "required": false,
+              "source": "hosts",
+              "type": "options"
+            }
+          ],
+          "report": false,
+          "result": "output"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "debug_device_logs",
+          "envelope": "args",
+          "id": "debug_device.logs",
+          "label": "Logs",
+          "params": [],
+          "report": false,
+          "result": "output"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "debug_device_screenshot",
+          "envelope": "args",
+          "id": "debug_device.screenshot",
+          "label": "Screenshot",
+          "params": [],
+          "report": false,
+          "result": "image"
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
             ]
           ],
           "command": "release_debug_device",
