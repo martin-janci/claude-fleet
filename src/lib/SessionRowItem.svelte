@@ -641,11 +641,11 @@
            Read-only — name and status chip only, no actions. Checked before
            the ghost branch: a ghosted external row must not offer
            Recreate / Dismiss either. -->
-      <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+      <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
       <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
       <SessionStatusChip {sess} brief />
     {:else if sess.status === 'ghost'}
-      <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
+      <span class="status-dot status-ghost" title="ghost — session lost" role="img" aria-label="Status: ghost, session lost"></span>
       <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
       <span class="sess-name" title={sess.tmux_name}>{
         $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
@@ -676,7 +676,7 @@
     {:else}
       <div class="sess-lines">
         <div class="sess-line1">
-          <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+          <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
           {#if relatedCount > 0}
             <span
               class="related-badge"
@@ -1129,10 +1129,13 @@
     flex-shrink: 0;
     background: var(--fg-muted);
   }
+  /* Colour never carries the state alone (7.2): the dot is labelled, and
+     each state has its own shape. Running is a filled disc, frozen a ring,
+     orphan a square, ghost a dashed ring. */
   .status-dot.status-running { background: rgb(80, 200, 110); }
-  .status-dot.status-frozen { background: rgb(140, 180, 240); }
-  .status-dot.status-orphan { background: rgb(220, 130, 130); }
-  .status-dot.status-ghost { background: rgb(160, 120, 200); opacity: 0.55; }
+  .status-dot.status-frozen { background: transparent; box-shadow: inset 0 0 0 1.5px rgb(140, 180, 240); }
+  .status-dot.status-orphan { background: rgb(220, 130, 130); border-radius: 1px; }
+  .status-dot.status-ghost { background: transparent; border: 1.5px dashed rgb(160, 120, 200); box-sizing: border-box; opacity: 0.8; }
   .lost-at {
     font-size: 0.7em;
     opacity: 0.6;

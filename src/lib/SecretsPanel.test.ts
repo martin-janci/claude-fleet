@@ -5,6 +5,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import SecretsPanel from './SecretsPanel.svelte';
 import { hosts } from './hosts';
+import { expectAccessible } from './a11y_check';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -89,5 +90,14 @@ describe('SecretsPanel', () => {
     await fireEvent.click(screen.getByTestId('secrets-add-name-submit'));
 
     expect(screen.getByTestId('secret-row-ANTHROPIC_KEY')).toBeTruthy();
+  });
+});
+
+describe('SecretsPanel accessibility (7.2)', () => {
+  it('passes the axe and audit checks', async () => {
+    byCmd({ catalog_list_secrets: [{ name: 'GH_TOKEN', host_alias: null, updated_at: 1 }] });
+    const { container } = render(SecretsPanel, { names: ['NPM_TOKEN'], onclose: () => {} });
+    await screen.findByTestId('secret-row-GH_TOKEN');
+    await expectAccessible(container);
   });
 });

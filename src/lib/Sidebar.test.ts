@@ -80,6 +80,7 @@ import { trackers } from './trackers';
 import { switcherRequest } from './switcher_request';
 import { addProjectRequest } from './app_views';
 import { newSessionRequest, clearNewSessionRequest } from './new_session_request';
+import { expectAccessible } from './a11y_check';
 
 /** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
 async function openFilters() {
@@ -3299,5 +3300,16 @@ describe('Inbox (redesign step 3.3)', () => {
     expect(screen.getByTestId('inbox-tab-today').getAttribute('aria-selected')).toBe('true');
     await fireEvent.click(screen.getByTestId('inbox-tab-inbox'));
     expect(get(todayOpen)).toBe(false);
+  });
+});
+
+describe('Sidebar accessibility (7.2)', () => {
+  it('passes the axe and audit checks; a project row says whether it is open', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(1, 'dev-b'), sessionFor(2, 'dev-c')]);
+    const { container } = render(Sidebar);
+    await tick(); await tick();
+    const projRows = await screen.findAllByTestId('proj-row');
+    for (const r of projRows) expect(r.getAttribute('aria-expanded')).toBe('true');
+    await expectAccessible(container);
   });
 });
