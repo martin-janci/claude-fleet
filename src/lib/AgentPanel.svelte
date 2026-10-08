@@ -340,7 +340,7 @@
   .who {
     margin-right: auto;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
@@ -373,7 +373,7 @@
     border-radius: 999px;
     background: var(--bg);
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.15rem 0.6rem;
     cursor: pointer;
   }

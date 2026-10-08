@@ -158,7 +158,7 @@
                   disabled={busy}
                   aria-label={`${removeAction.label}: ${nameOf(m)}`}
                   data-testid="item-remove-members"
-                  onclick={() => void askRemove(m)}>Remove</button>
+                  onclick={() => void askRemove(m)}>Remove…</button>
               {/if}
             </td>
           {/if}

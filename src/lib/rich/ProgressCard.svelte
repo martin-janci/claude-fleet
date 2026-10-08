@@ -101,7 +101,7 @@
     border-radius: 999px;
     border: 1px solid var(--tone);
     color: var(--tone);
-    font-size: 0.7rem;
+    font-size: 11px;
     white-space: nowrap;
   }
   .count {
@@ -123,7 +123,7 @@
   .muted,
   .moved {
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
     margin: 0;
   }
   .moved { margin: 0.2em 0 0.5em; }

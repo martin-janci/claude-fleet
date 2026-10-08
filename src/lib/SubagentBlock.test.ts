@@ -80,15 +80,15 @@ describe('SubagentBlock', () => {
 
   it('shows a status word in the header', () => {
     const { unmount } = render(SubagentBlock, { item: item(), nowMs: 0, live: false });
-    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('done');
+    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('Done');
     unmount();
     render(SubagentBlock, { item: item({ error: true }), nowMs: 0, live: false });
-    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('failed');
+    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('Failed');
   });
 
   it('a subagent that has not reported reads as running', () => {
     render(SubagentBlock, { item: item({ done: false, ended_at: null, result: null }), nowMs: 0, live: true });
-    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('running');
+    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('Working');
   });
 
   it('an unfinished background agent reads as running outside the live turn', () => {
@@ -101,7 +101,7 @@ describe('SubagentBlock', () => {
       live: false,
       onOpen: () => {},
     });
-    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('running');
+    expect(screen.getByTestId('conv-subagent-status').textContent).toBe('Working');
   });
 
   it('an unfinished foreground call outside the live turn still gets no word', () => {

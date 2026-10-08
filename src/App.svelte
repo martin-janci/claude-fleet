@@ -33,6 +33,8 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
+  import Toolkit from './lib/Toolkit.svelte';
+  import { toolkitTab } from './lib/toolkit_skills';
   import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
   import type { RailId } from './lib/rail';
@@ -95,6 +97,7 @@
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
+  import StatusBarMark from './lib/StatusBarMark.svelte';
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
@@ -708,7 +711,15 @@
     if (!$selectedSession) return;
     goTo('files');
   }
+  // Every Assets entry point (the Classic tab, the sidebar, the quick
+  // switcher) opens Toolkit's Assets tab in the New layout (step 3.16).
   function showAssets() {
+    toolkitTab.set('assets');
+    goTo('assets');
+  }
+  // The rail's Toolkit reopens the tab it showed last.
+  function showToolkit() {
+    closeHosts();
     goTo('assets');
   }
   function showAccounts() {
@@ -726,6 +737,7 @@
       sidebarView.set(id);
       if (hostsMode || accountsMode || assetsMode) showSession();
     } else if (id === 'accounts') showAccounts();
+    else if (id === 'toolkit') showToolkit();
     else if (id === 'settings') settingsOpen.set(true);
   }
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
@@ -1276,7 +1288,11 @@
       {/if}
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <AssetsPanel visible={assetsMode} />
+          {#if newLayout}
+            <Toolkit visible={assetsMode} />
+          {:else}
+            <AssetsPanel visible={assetsMode} />
+          {/if}
         </div>
       {/if}
       {#if accountsMode}
@@ -1319,6 +1335,7 @@
 {/if}
 
 <footer class="status">
+  <StatusBarMark />
   {#if healthError}
     <span class="err" data-testid="health-error">ipc error: {healthError}</span>
   {:else if bootstrapError}
@@ -1336,7 +1353,7 @@
       data-testid="footer-downloads"
       title="Files sessions sent to your devices"
       onclick={() => (showDownloads = true)}
-      >⤓ Downloads{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
+      >⤓ Downloads…{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
     >
     {#if trackersLine}
       <!-- Work graph M12.4: the tracker roll-up, re-read by TrackerAttention. -->
@@ -1419,7 +1436,7 @@
     padding: 0 0.75rem;
     background: var(--bg-pane);
     border-top: 1px solid var(--border);
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     display: flex;
     align-items: center;
@@ -1528,7 +1545,7 @@
     border-radius: 5px 5px 0 0;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.74rem;
+    font-size: 11px;
     padding: 0.25rem 0.8rem;
   }
   .view-tab:hover:not(:disabled) { color: var(--fg); }
@@ -1564,7 +1581,7 @@
     border-radius: 999px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.1rem 0.6rem;
   }
   .subtab:hover:not(:disabled) { color: var(--fg); }
@@ -1588,7 +1605,7 @@
   }
   .hosts-tab kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     margin-left: 0.25rem;
   }

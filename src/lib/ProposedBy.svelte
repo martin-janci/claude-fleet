@@ -70,7 +70,7 @@
   }
   .pill::before {
     content: '\2726';
-    font-size: 10px;
+    font-size: 11px;
   }
   .pct {
     font-variant-numeric: tabular-nums;

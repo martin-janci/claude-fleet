@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import * as sessionsModule from './sessions';
 
@@ -13,6 +13,7 @@ import { hosts } from './hosts';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
+import { uiLayout } from './prefs';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -1902,5 +1903,151 @@ describe('NewSessionDialog accessibility (7.2)', () => {
     const group = screen.getByRole('group', { name: 'Type' });
     expect(group.querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
     await expectAccessible(container);
+  });
+});
+
+// Redesign step 4.4: a start on an account past `accounts.pause_at` asks
+// first and offers the login with the most headroom.
+describe('NewSessionDialog limit handling', () => {
+  const over = {
+    pause_at_pct: 90,
+    chosen: { profile: null, account_uuid: 'acc-own', used_pct: 95 },
+    over: true,
+    suggestion: { profile: 'spare', account_uuid: 'acc-spare', used_pct: 30 },
+    logins: [],
+  };
+  const created = () => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'new_session');
+
+  function answer(headroom: unknown) {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_account_headroom') return headroom;
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  }
+
+  it('asks before starting over the line, and starts on the suggested login', async () => {
+    answer(over);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+    expect(screen.getByTestId('limit-ask').textContent).toContain('95% of its');
+    expect(created()).toHaveLength(0);
+    expect(screen.getByTestId('limit-use-suggestion').textContent).toContain('spare');
+    await fireEvent.click(screen.getByTestId('limit-use-suggestion'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect((created()[0][1] as any).args.profile).toBe('spare');
+  });
+
+  it('Start anyway keeps the chosen login', async () => {
+    answer(over);
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(screen.getByTestId('limit-ask')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('limit-start-anyway'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect((created()[0][1] as any).args.profile).toBeNull();
+  });
+
+  it('under the line, or with no answer, starts straight away', async () => {
+    answer({ ...over, over: false, suggestion: null });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(created()).toHaveLength(1));
+    expect(screen.queryByTestId('limit-ask')).toBeNull();
+  });
+});
+
+// Redesign step 4.5 (New layout): the agent picker, the account picker with
+// live usage defaulting to headroom, and "Run: in background".
+describe('NewSessionDialog in the New layout', () => {
+  const logins = {
+    pause_at_pct: 90,
+    chosen: null,
+    over: false,
+    suggestion: null,
+    logins: [
+      { profile: null, account_uuid: 'acc-own', used_pct: 80 },
+      { profile: 'spare', account_uuid: 'acc-spare', used_pct: 20 },
+      { profile: 'fresh', account_uuid: 'acc-fresh', used_pct: null },
+    ],
+  };
+  const calls = (cmd: string) => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === cmd);
+
+  beforeEach(() => {
+    uiLayout.set('new');
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'check_account_headroom') return logins;
+      if (cmd === 'new_session') return { id: 1 };
+      if (cmd === 'new_bg_session') return { claude_session_id: null, session: null };
+      if (cmd === 'list_sessions') return [];
+      return null;
+    });
+  });
+  afterEach(() => uiLayout.set('classic'));
+
+  it('offers Claude Code and Shell, with Codex and Agy shown as coming', async () => {
+    const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    await fireEvent.click(screen.getByTestId('run-background'));
+    await expectAccessible(container);
+    expect(screen.getByRole('group', { name: 'Agent' })).toBeTruthy();
+    expect(screen.getByTestId('kind-work').textContent).toContain('Claude Code');
+    expect((screen.getByTestId('agent-codex') as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId('agent-agy') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('defaults the account to the login with the most headroom and starts on it', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    const sel = screen.getByTestId('launch-account') as HTMLSelectElement;
+    await vi.waitFor(() => expect(sel.value).toBe('spare'));
+    expect(sel.textContent).toContain('20% used');
+    expect(sel.textContent).toContain('no reading');
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.profile).toBe('spare');
+  });
+
+  it('a pick sticks, and Other profile brings back the name field', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    const sel = screen.getByTestId('launch-account') as HTMLSelectElement;
+    await fireEvent.change(sel, { target: { value: '' } });
+    expect(sel.value).toBe('');
+    await fireEvent.change(sel, { target: { value: '\u0000other' } });
+    expect(screen.queryByTestId('launch-account')).toBeNull();
+    expect(screen.getByTestId('launch-profile')).toBeTruthy();
+  });
+
+  it('Run: in background starts a supervised session with its prompt', async () => {
+    const onCancel = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    await fireEvent.click(screen.getByTestId('run-background'));
+    expect(screen.queryByTestId('launch-model')).toBeNull();
+    const btn = screen.getByTestId('create-btn') as HTMLButtonElement;
+    expect(btn.textContent).toBe('Start in background');
+    expect(btn.disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId('bg-prompt'), { target: { value: 'fix the flaky test' } });
+    await fireEvent.click(btn);
+    await vi.waitFor(() => expect(calls('new_bg_session')).toHaveLength(1));
+    expect((calls('new_bg_session')[0][1] as any).args.prompt).toBe('fix the flaky test');
+    expect(calls('new_session')).toHaveLength(0);
+    await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
+  });
+
+  it('the Classic layout keeps Type, the profile field and no Run row', async () => {
+    uiLayout.set('classic');
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    expect(screen.getByTestId('kind-work').textContent?.trim()).toBe('Claude');
+    expect(screen.queryByTestId('agent-codex')).toBeNull();
+    expect(screen.getByTestId('launch-profile')).toBeTruthy();
+    expect(screen.queryByTestId('run-background')).toBeNull();
   });
 });

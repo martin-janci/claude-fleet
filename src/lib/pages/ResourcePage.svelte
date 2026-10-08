@@ -308,7 +308,7 @@
     border: 1px solid var(--border);
   }
   .badge {
-    font-size: 0.66rem;
+    font-size: 11px;
     padding: 0 0.35rem;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
@@ -324,11 +324,11 @@
     margin-bottom: 0.6rem;
   }
   .err {
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--usage-crit);
   }
   .notice {
-    font-size: 0.78rem;
+    font-size: 11px;
     margin: 0 0 0.5rem;
     padding: 0.4rem 0.6rem;
     border-radius: var(--radius-sm);

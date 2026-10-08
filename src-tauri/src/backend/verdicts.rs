@@ -768,6 +768,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("get_form", Verdict::Routed { tool: "ask" }),
     ("answer_form", Verdict::Routed { tool: "ask" }),
     ("decline_form", Verdict::Routed { tool: "ask" }),
+    ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "list_debug_devices",
         Verdict::Routed {
@@ -1050,6 +1051,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
                       it keeps no history; read usage on the hub",
+        },
+    ),
+    (
+        "check_account_headroom",
+        Verdict::LocalOnly {
+            instead: "this app does not poll account usage while a hub owns the fleet, so \
+                      it cannot tell which account has headroom; start the session as usual",
         },
     ),
     (

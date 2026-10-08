@@ -93,7 +93,7 @@
     flex-wrap: wrap;
   }
   code {
-    font-size: 0.75rem;
+    font-size: 11px;
     word-break: break-all;
   }
 </style>

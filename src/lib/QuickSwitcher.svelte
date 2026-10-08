@@ -1059,7 +1059,7 @@
   }
   .mode-chip {
     flex: 0 0 auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     font-weight: 600;
     padding: 0.15rem 0.5rem;
     border-radius: var(--radius-sm);
@@ -1109,13 +1109,13 @@
     gap: var(--space-2);
     padding: var(--space-1) var(--space-3);
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .hint {
     display: flex;
     flex-wrap: wrap;
     gap: 0.8rem;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
 </style>

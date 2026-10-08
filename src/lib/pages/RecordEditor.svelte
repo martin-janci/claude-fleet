@@ -414,7 +414,7 @@
   }
   h6 {
     margin: 0 0 0.35rem;
-    font-size: 0.72rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -460,7 +460,7 @@
     gap: 0.25rem;
   }
   .chip {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.05rem 0.45rem;
     border-radius: var(--radius-pill);
     border: 1px solid var(--border);
@@ -489,7 +489,7 @@
   }
   .help {
     margin: 0.2rem 0 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     line-height: 1.4;
   }
@@ -509,7 +509,7 @@
   }
   .tile-label,
   .tile-sub {
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .tile-value {
@@ -543,7 +543,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.7rem;
+    font-size: 11px;
     font-weight: 700;
     border: 1px solid var(--border);
     color: var(--fg-muted);
@@ -553,11 +553,11 @@
     color: var(--usage-warn);
   }
   .need-detail {
-    font-size: 0.74rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .notice {
-    font-size: 0.78rem;
+    font-size: 11px;
     margin: 0.2rem 0;
     padding: 0.4rem 0.6rem;
     border-radius: var(--radius-sm);
