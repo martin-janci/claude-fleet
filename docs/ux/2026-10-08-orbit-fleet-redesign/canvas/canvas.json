@@ -537,6 +537,70 @@
    "h": 900,
    "title": "Mobile · Errors and recovery",
    "expand": "fill"
+  },
+  "MobileSessionsTools.dc.html": {
+   "x": 0,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Search, bulk, Today",
+   "expand": "fill"
+  },
+  "MobileTidyTickets.dc.html": {
+   "x": 1520,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Tidy and tickets",
+   "expand": "fill"
+  },
+  "MobileMissions.dc.html": {
+   "x": 3040,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Missions and background agents",
+   "expand": "fill"
+  },
+  "MobileSessionFiles.dc.html": {
+   "x": 4560,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Session Files tab",
+   "expand": "fill"
+  },
+  "MobileSessionExtras.dc.html": {
+   "x": 6080,
+   "y": 17280,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Terminals, send later, find, menu",
+   "expand": "fill"
+  },
+  "MobileOrgsSettings.dc.html": {
+   "x": 0,
+   "y": 18300,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Organisations and hub settings",
+   "expand": "fill"
+  },
+  "MobileFullscreenLoaders.dc.html": {
+   "x": 1520,
+   "y": 18300,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Full-screen loaders",
+   "expand": "fill"
+  },
+  "MobileLight.dc.html": {
+   "x": 3040,
+   "y": 18300,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Light theme",
+   "expand": "fill"
   }
  },
  "order": [
@@ -605,7 +669,15 @@
   "MobileMore.dc.html",
   "MobileSettings.dc.html",
   "MobileStates.dc.html",
-  "MobileRecovery.dc.html"
+  "MobileRecovery.dc.html",
+  "MobileSessionsTools.dc.html",
+  "MobileTidyTickets.dc.html",
+  "MobileMissions.dc.html",
+  "MobileSessionFiles.dc.html",
+  "MobileSessionExtras.dc.html",
+  "MobileOrgsSettings.dc.html",
+  "MobileFullscreenLoaders.dc.html",
+  "MobileLight.dc.html"
  ],
  "notes": {
   "title": {

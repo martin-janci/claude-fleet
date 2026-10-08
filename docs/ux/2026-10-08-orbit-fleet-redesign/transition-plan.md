@@ -2,7 +2,7 @@
 
 Oct 8, 2026 · @Martin
 
-Orbit Fleet gets from 0.5.4 to the redesigned app in 15 milestones and about 156 PR-sized steps, and nothing a user can do today is lost on the way. The new layout grows behind a Classic/New switch; New becomes the default at M7, once every function of today has a home there, and features the code lacks (routines, Control, terminals 0..N, more agents, org screens) follow after. AI runs through all of it in one way: a rule first, Jev for quick closed choices, an LLM for drafts, and always a proposal a person confirms. The Orbit Fleet design manual is the source for tokens, components, rail order, copy and chords, and the steps run in 13 parallel lanes over 9 waves (see Task graph and parallel work). One decision is needed before work starts: whether accounts go before the session workspace.
+Orbit Fleet gets from 0.5.4 to the redesigned app in 15 milestones and about 160 PR-sized steps, and nothing a user can do today is lost on the way. The new layout grows behind a Classic/New switch; New becomes the default at M7, once every function of today has a home there, and features the code lacks (routines, Control, terminals 0..N, more agents, org screens) follow after. AI runs through all of it in one way: a rule first, Jev for quick closed choices, an LLM for drafts, and always a proposal a person confirms. The Orbit Fleet design manual is the source for tokens, components, rail order, copy and chords, and the steps run in 13 parallel lanes over 9 waves (see Task graph and parallel work). One decision is needed before work starts: whether accounts go before the session workspace.
 
 **Changes in this version.** The Orbit Fleet design manual is folded in: six new steps (0.9 component kit, 0.10 phone tokens, 3.16 Toolkit, 3.17 header and brand, 6.11 Add project, 7.8 copy pass), wizards generated in the chat with the kit and loaders (10.12), the manual's rail order and chords in 3.2, 3.5, 5.3, 5.5 and 5.6, tokens from its snapshot in 0.5, Today moving to Control in 9.1, an eighth ground rule, two new decisions, a table of design changes, and a task graph with lanes, waves and the critical path, and M14, the phone app redesign from the Mobile app boards.
 
@@ -231,7 +231,7 @@ The Startup board (step 3.15) and the Loaders in wizards and chats board (Loader
 
 ## Milestones and steps
 
-Fifteen milestones, about 156 PR-sized steps: 18 AI steps from the AI map, 12 loader steps, 7 from the design manual and wizards in chat, and 13 for the phone app redesign (M14) among them. Milestones 0 to 7 bring today's functions into the new shell and end with New as the default; 8 to 13 add what does not exist yet. Steps in one milestone can run in parallel unless the Needs column says otherwise, and the task graph after M13 shows which steps across milestones can run at once. Every step is in `martin-janci/claude-fleet` unless it says phone (`fleet-mobile`).
+Fifteen milestones, about 160 PR-sized steps: 18 AI steps from the AI map, 12 loader steps, 7 from the design manual and wizards in chat, and 17 for the phone app redesign (M14) among them. Milestones 0 to 7 bring today's functions into the new shell and end with New as the default; 8 to 13 add what does not exist yet. Steps in one milestone can run in parallel unless the Needs column says otherwise, and the task graph after M13 shows which steps across milestones can run at once. Every step is in `martin-janci/claude-fleet` unless it says phone (`fleet-mobile`).
 
 A step is done when: `scripts/verify.sh full` passes; its parity checklist is filled; the shortcut freeze test is green; any `REGEN_*` file it touches is regenerated; a contract change has its golden file and phone PR; and the screen matches its canvas board in both themes.
 
@@ -456,23 +456,27 @@ The data model is ready from 2.1; each agent needs an adapter before it is offer
 
 ### M14 · The phone app redesign (fleet-mobile)
 
-The Mobile app row on the canvas (MobileNav, MobileSession, MobileControl, MobileNewSession, MobileWork, MobileMore, MobileSettings, MobileStates, MobileRecovery) and the manual's "On the phone" section. Every step is in `fleet-mobile`, behind its own Classic/New switch, and each carries the parity rows from the mobile analysis notes (`/mnt/project-files/mobile-redesign/`). The bottom bar changes from Sessions, Work, Files, Hosts, Settings to Inbox, Sessions, Control, Work, More; nothing is removed, only moved.
+The Mobile app row on the canvas (MobileNav, MobileSession, MobileControl, MobileNewSession, MobileWork, MobileMore, MobileSettings, MobileStates, MobileRecovery, MobileSessionsTools, MobileTidyTickets, MobileMissions, MobileSessionFiles, MobileSessionExtras, MobileOrgsSettings, MobileFullscreenLoaders, MobileLight) and the manual's "On the phone" section. Every step is in `fleet-mobile`, behind its own Classic/New switch, and each carries the parity rows from the mobile analysis notes (`/mnt/project-files/mobile-redesign/`). The bottom bar changes from Sessions, Work, Files, Hosts, Settings to Inbox, Sessions, Control, Work, More; nothing is removed, only moved.
 
 | # | Step | Layer | Migration or contract | Needs | Verified by |
 | --- | --- | --- | --- | --- | --- |
 | 14.1 | Phone kit in Compose: BottomBar, PhoneRow, BottomSheet and the phone tokens from the manual (touch-min 48, phone-gutter 16, phone-bar-h 56, tab-bar-h 72, phone-row-min 72, radius-sheet 22, radius-phone-card 14), with the six status words and dark theme first | Phone | none | 0.10 | Compose previews of each component in both themes; the drift test from 0.10 covers the new tokens |
 | 14.2 | New navigation behind a phone layout switch (Classic or New, like the desktop): bottom bar Inbox, Sessions, Control, Work, More; only Inbox carries a badge; one New session button; Control replaces the agent button; Files, Hosts and Settings move into More and the session | Phone | none | 14.1, 2.7 | Parity checklist from the mobile analysis notes for the nav; every old destination opens from New |
-| 14.3 | Inbox and Sessions: Needs you sorted by when it asked; Sessions grouped by host; the filters sheet keeps filters and grouping; PhoneRow with dot, title, age and what it waits on; Orbit pull to refresh from 10.11 | Phone | none | 14.2 | UI test that grouping and filters survive a restart; row parity from analysis-sessions.md |
-| 14.4 | One session: conversation, permission question card (Approve never pre-selected), the agent tab named after the agent, Details sheet, and a Files tab that replaces the worktree browser (Changes, History, Files, diff, commit, file) | Phone | none | 14.2, 2.7 | Parity rows of analysis-session.md Part A; the never-list test covers the question card |
+| 14.3 | Inbox and Sessions: Needs you sorted by when it asked; Sessions grouped by host; the filters sheet keeps filters and grouping; PhoneRow with dot, title, age and what it waits on; Orbit pull to refresh from 10.11; search, bulk select with a per-row outcome and Retry, and Today (MobileSessionsTools) | Phone | none | 14.2 | UI test that grouping and filters survive a restart; row parity from analysis-sessions.md |
+| 14.4 | One session: conversation, permission question card (Approve never pre-selected), the agent tab named after the agent, Details sheet, and a Files tab that replaces the worktree browser (Changes, History, Files, diff with line numbers, commit, rendered file; MobileSessionFiles) | Phone | none | 14.2, 2.7 | Parity rows of analysis-session.md Part A; the never-list test covers the question card |
 | 14.5 | Recovery on the phone: failed-session card, "Not sent" keeping the text with Retry, the repair result, and Move with no host pre-selected | Phone | none | 14.4 | UI tests for each state on the MobileRecovery board |
 | 14.6 | New session as a three-step wizard (Where, Project, Review) that ends in the Pulse sequence on the new row; worktree, ticket, several projects, branch validation and the multi-start confirm and result all kept | Phone | none | 14.2 | Parity rows of analysis-session.md Part B; Start stays disabled on an invalid branch |
 | 14.7 | Control on the phone: the coordinator chat, ChatForm as a bottom sheet (fleet.form/1, nothing runs until the last button), mission detail | Phone | none | 14.2, 9.8, 10.12 | A form from Control renders as a sheet and validates against the schema; Decline sends the note back |
 | 14.8 | Lock-screen notifications for Needs you with no Approve action; tapping opens the question card in the session | Phone | none | 14.4 | Test that no notification action approves anything; the deep link lands on the card |
 | 14.9 | Work: My work with session status words, task detail, To review with the cross-org warning, and drafted summaries marked "Drafted · source · Regenerate · Clear" | Phone | none | 14.2, 6.7 | Parity rows of analysis-work-hosts-settings.md for Work |
 | 14.10 | More: Hosts with Signal lost and the host recovery plan, Accounts with quota meters, and Files (downloads) with the Progress ring | Phone | none | 14.2, 4.10 | Parity rows for Hosts and Files; quota meters show their numbers |
-| 14.11 | Settings and pairing: settings in the desktop groups plus "This phone"; QR-first pairing with the Orbit mark, paste for the code, a notification-permission step, re-pair that keeps the hub address, and a signed-out banner that says why | Phone | none (who and when for a removed phone ride lane A's next contract bump if the hub lacks them; inferred) | 14.1 | Parity rows for pairing and settings; pairing works with QR and with a typed code |
-| 14.12 | Phone states: offline banner, Gravity well while reconnecting, skeleton only after 400 ms | Phone | none | 14.1 | UI tests for offline and reconnect; no loader under 400 ms |
-| 14.13 | Phone parity sign-off: the analysis checklists 100%, Martin uses New on the phone for a week, New becomes the default; the old navigation goes one release later | Phone | none | 14.1–14.12 | Checklist and Martin's OK |
+| 14.11 | Settings and pairing: settings in the desktop groups plus "This phone"; QR-first pairing with the Orbit mark, paste for the code, a notification-permission step, re-pair that keeps the hub address, and a signed-out banner that says why; after pairing, a full-screen Hex field while the fleet check runs (MobileFullscreenLoaders) | Phone | none (who and when for a removed phone ride lane A's next contract bump if the hub lacks them; inferred) | 14.1 | Parity rows for pairing and settings; pairing works with QR and with a typed code |
+| 14.12 | Phone states: offline banner, Gravity well while reconnecting, skeleton only after 400 ms; the full-screen loaders from MobileFullscreenLoaders: Hex field for the fleet check after a repair, Radar while adding a host, Galaxy for the first import, each with what it is doing and Cancel | Phone | none | 14.1 | UI tests for offline and reconnect; no loader under 400 ms |
+| 14.14 | Session extras (MobileSessionExtras): shell terminals 0..N with a key bar (Esc, Tab, Ctrl, arrows), Send later, find in the conversation, and the full session ⋮ menu with every Details action | Phone | none | 14.4 | Parity rows of analysis-session.md for the ⋮ menu; a terminal survives switching tabs; Send later fires once at its time |
+| 14.15 | Tidy and tickets (MobileTidyTickets): Tidy with nothing pre-ticked and rule suggestions marked "Suggested by rule", the Tidy result with Undo and Retry, the Tickets list, and one ticket with its tasks as a sheet | Phone | none | 14.9 | Test that Tidy opens with nothing ticked; Undo restores every row the result lists |
+| 14.16 | Missions on the phone (MobileMissions): missions list, the spend ask as a card with Approve and Deny (never pre-selected), the background agent screen, and Pause all | Phone | none | 14.2, 9.8, 8.6 | A spend ask approves only on a tap; Pause all stops every routine and mission the desktop shows as active |
+| 14.17 | Organisations and AI settings (MobileOrgsSettings): an organisation with its budget meter, Automation, Decisions (Jev) with off, shadow and assist, and a proposed change arriving as an Inbox item | Phone | none | 14.11, 11.1, 8.4 | Parity rows for organisations; the Jev mode never offers auto; a proposed change only applies after a tap |
+| 14.13 | Phone parity sign-off: the analysis checklists 100%, Martin uses New on the phone for a week, New becomes the default; the old navigation goes one release later | Phone | none | 14.1–14.12, 14.14–14.17 | Checklist and Martin's OK; every screen checked in light against MobileLight (Inbox, question card, My work, More) |
 
 ## Design changes from the design manual
 
@@ -495,11 +499,11 @@ The Orbit Fleet design manual (https://claude.ai/artifact/RecYyvBJYdXVpLC1oD4bpb
 | motion.md: startup sequence and loader map | Loader kit, startup and every placement | 0.8, 3.15 and the loader steps |
 | AddProject board: GitHub, URL, folder, new | Add project dialog with four sources | 6.11 |
 | ChatForm component and the "Wizards built in chat" board: wizards that Control or an agent generates in the chat | One form spec per wizard, rendered as a dialog or as a chat form with the kit and its inline loaders | 10.12 |
-| "On the phone": BottomBar, PhoneRow, BottomSheet and the phone tokens; the Mobile app boards | The fleet-mobile redesign behind its own switch | 14.1–14.13 |
+| "On the phone": BottomBar, PhoneRow, BottomSheet and the phone tokens; the Mobile app boards | The fleet-mobile redesign behind its own switch | 14.1–14.17 |
 
 ## Task graph and parallel work
 
-All 156 steps form one dependency graph: the Needs column, plus three edges the tables imply (9.1 needs 3.3, 2.6 needs 2.8, 13.1 needs 7.6), and 7.5 waits on every M3 to M6 step outside the AI, phone and loader sets. The graph splits into 13 lanes, each with one owner (a person or an agent), and 9 waves: every step in a wave can start once the earlier waves it needs have merged. Up to 9 steps can run at once in one lane and wave, so the plan scales to as many parallel agents as there are reviewers. Lane M works in fleet-mobile, so it never shares a file with the desktop lanes.
+All 160 steps form one dependency graph: the Needs column, plus three edges the tables imply (9.1 needs 3.3, 2.6 needs 2.8, 13.1 needs 7.6), and 7.5 waits on every M3 to M6 step outside the AI, phone and loader sets. The graph splits into 13 lanes, each with one owner (a person or an agent), and 9 waves: every step in a wave can start once the earlier waves it needs have merged. Up to 9 steps can run at once in one lane and wave, so the plan scales to as many parallel agents as there are reviewers. Lane M works in fleet-mobile, so it never shares a file with the desktop lanes.
 
 ![Task graph: 13 lanes × 9 waves, critical path boxed](images/task-graph.svg)
 
@@ -519,7 +523,7 @@ All 156 steps form one dependency graph: the Needs column, plus three edges the 
 | J · Orgs, sharing, federation | admin screens, people, sharing, federation | 11.3, 11.6, 11.1, 11.4, 11.5, 11.9, 11.2, 11.8, 11.7 |
 | K · Conversation and onboarding | chat cards, forms, wizards in chat, tour, empty and offline states | 10.2, 10.7, 10.3, 10.4, 10.6, 10.1, 10.12, 10.5 |
 | L · Quiet the noise | Classic fixes that ship in the first week | 1.3, 1.6, 1.7, 1.8, 1.1, 1.4, 1.9, 1.2, 1.5 |
-| M · Phone redesign (fleet-mobile) | the new phone navigation and screens from the Mobile app boards | 14.1, 14.11, 14.12, 14.2, 14.3, 14.4, 14.6, 14.9, 14.5, 14.8, 14.10, 14.7, 14.13 |
+| M · Phone redesign (fleet-mobile) | the new phone navigation and screens from the Mobile app boards | 14.1, 14.11, 14.12, 14.2, 14.17, 14.3, 14.4, 14.6, 14.9, 14.5, 14.8, 14.10, 14.14, 14.15, 14.7, 14.16, 14.13 |
 
 ### Waves
 
@@ -529,10 +533,10 @@ All 156 steps form one dependency graph: the Needs column, plus three edges the 
 | W1 | 0.6, 0.7, 0.10, 1.1, 1.4, 1.9, 2.4, 2.8, 3.1, 3.6, 3.8, 3.9, 4.2, 5.3, 6.7, 7.1, 7.2, 7.3, 8.3, 10.3, 10.4, 10.6, 10.8, 12.1 | 24 |
 | W2 | 0.8, 0.9, 1.2, 1.5, 2.6, 3.2, 3.3, 3.4, 3.5, 3.7, 3.10, 3.11, 4.1, 4.6, 5.4, 5.9, 5.10, 7.4, 7.7, 7.8, 10.1, 11.1, 11.4, 11.5, 11.9, 12.2, 12.3, 14.1 | 28 |
 | W3 | 2.7, 3.12, 3.13, 3.14, 3.16, 3.17, 4.3, 4.7, 4.12, 5.1, 5.5, 5.8, 5.11, 6.1, 6.2, 6.6, 6.8, 6.11, 8.4, 9.1, 10.9, 10.11, 11.2, 11.8, 11.12, 14.11, 14.12 | 27 |
-| W4 | 3.15, 4.4, 4.9, 5.6, 5.13, 6.9, 8.8, 8.11, 9.2, 9.4, 11.7, 12.4, 14.2 | 13 |
+| W4 | 3.15, 4.4, 4.9, 5.6, 5.13, 6.9, 8.8, 8.11, 9.2, 9.4, 11.7, 12.4, 14.2, 14.17 | 14 |
 | W5 | 4.5, 4.10, 4.11, 4.13, 5.12, 5.14, 8.5, 9.3, 9.5, 9.6, 9.7, 9.10, 9.12, 11.10, 14.3, 14.4, 14.6, 14.9 | 18 |
-| W6 | 6.10, 7.5, 8.6, 8.7, 8.9, 8.10, 9.8, 9.9, 9.11, 9.13, 10.12, 11.11, 14.5, 14.8, 14.10 | 15 |
-| W7 | 7.6, 10.5, 14.7 | 3 |
+| W6 | 6.10, 7.5, 8.6, 8.7, 8.9, 8.10, 9.8, 9.9, 9.11, 9.13, 10.12, 11.11, 14.5, 14.8, 14.10, 14.14, 14.15 | 17 |
+| W7 | 7.6, 10.5, 14.7, 14.16 | 4 |
 | W8 | 10.10, 13.1, 14.13 | 3 |
 
 ### Critical path and unblockers
