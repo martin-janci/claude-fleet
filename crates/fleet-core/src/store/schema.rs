@@ -569,6 +569,16 @@ fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 121.
+fn sessions_has_agent(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'agent'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 113.
 fn sessions_has_claude_profile(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1410,6 +1420,13 @@ const MIGRATIONS: &[Migration] = &[
     // Debug devices: `debug_devices`, `debug_device_scans` and a host-delete
     // trigger. New objects only, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(120, include_str!("../../migrations/120_debug_devices.sql")),
+    // Orbit Fleet 2.1: which agent runs in a session (one ADD COLUMN,
+    // guarded, a shell backfill, and the row-version trigger re-issued).
+    Migration {
+        version: 121,
+        sql: include_str!("../../migrations/121_session_agent.sql"),
+        already_applied: Some(sessions_has_agent),
+    },
     // Orbit Fleet 4.6, the Hosts page: CPU, total memory, boot time,
     // latency and worktree size on `hosts` (six ADD COLUMNs, guarded on the
     // last).
@@ -2845,6 +2862,47 @@ mod tests {
             1,
             "no second personal row"
         );
+    }
+
+    /// 121 on a database stopped at 120: every row gets an agent, a shell
+    /// session's is `shell`, the row-version trigger watches the column,
+    /// and a re-run (the column already there) changes nothing.
+    #[test]
+    fn migration_121_gives_every_session_an_agent() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let work = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        let shell = old
+            .upsert_session("sh", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(&format!(
+                "UPDATE sessions SET kind = 'shell' WHERE id = {shell};\
+                 DROP TRIGGER sessions_row_version_bump;\
+                 ALTER TABLE sessions DROP COLUMN agent;\
+                 DELETE FROM schema_version WHERE version >= 121;"
+            ))
+            .unwrap();
+        old.migrate().expect("121 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let agent = |id| old.get_session_by_id(id).unwrap().unwrap().agent;
+        assert_eq!(
+            (agent(work), agent(shell)),
+            ("claude".into(), "shell".into())
+        );
+        let version = |id| old.get_session_by_id(id).unwrap().unwrap().row_version;
+        let before = version(work);
+        old.conn
+            .execute("UPDATE sessions SET agent = 'codex' WHERE id = ?1", [work])
+            .unwrap();
+        assert_eq!(version(work), before + 1, "the trigger watches agent");
+        old.conn
+            .execute_batch("DELETE FROM schema_version WHERE version >= 121;")
+            .unwrap();
+        old.migrate().expect("re-running 121 is safe");
+        assert_eq!(agent(work), "codex", "a re-run does not backfill again");
     }
 
     /// 091 on a database stopped at 090: existing host_layers rows and managed

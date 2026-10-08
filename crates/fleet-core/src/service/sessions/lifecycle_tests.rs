@@ -199,6 +199,7 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         model: None,
         effort: None,
         profile: None,
+        agent: None,
         owner_person_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
@@ -228,6 +229,7 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         model: None,
         effort: None,
         profile: None,
+        agent: None,
         owner_person_id: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
@@ -818,6 +820,7 @@ fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
         model: None,
         effort: None,
         profile: None,
+        agent: None,
         owner_person_id: None,
     }
 }
@@ -1303,6 +1306,7 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         model: None,
         effort: None,
         profile: None,
+        agent: None,
         owner_person_id: None,
     };
 
@@ -1731,4 +1735,61 @@ fn restart_session_asks_its_guard_and_creates_a_gone_session() {
         body.contains("restart_unrepaired("),
         "restart_session must create a tmux session a reboot took, not only respawn"
     );
+}
+
+/// Redesign 2.1: `agent` folds into `kind`, so the rest of the create path
+/// reads a shell session from `kind` alone and the row stores what it runs.
+#[test]
+fn the_agent_settles_against_the_kind() {
+    use crate::ipc_error::codes::{E_INVALID, E_UNSUPPORTED};
+    let settle = |agent: Option<&str>, kind: Option<&str>| {
+        let mut args = args_named("dev-z", None);
+        args.agent = agent.map(str::to_string);
+        args.kind = kind.map(str::to_string);
+        normalize_launch(&mut args)
+            .map(|()| (args.agent, args.kind))
+            .ok()
+    };
+    let ok =
+        |a: Option<&str>, k: Option<&str>| Some((a.map(str::to_string), k.map(str::to_string)));
+    // No agent: the kind decides, and the row's agent follows it.
+    assert_eq!(settle(None, None), ok(None, None));
+    assert_eq!(settle(Some("  "), Some("work")), ok(None, Some("work")));
+    assert_eq!(settle(None, Some("shell")), ok(None, Some("shell")));
+    // agent shell IS a shell session.
+    assert_eq!(
+        settle(Some(" shell "), None),
+        ok(Some("shell"), Some("shell"))
+    );
+    assert_eq!(
+        settle(Some("shell"), Some("shell")),
+        ok(Some("shell"), Some("shell"))
+    );
+    assert_eq!(
+        settle(Some("claude"), Some("review")),
+        ok(Some("claude"), Some("review"))
+    );
+    // Contradictions are invalid, reserved agents unsupported, others invalid.
+    for (agent, kind, code) in [
+        ("shell", Some("work"), E_INVALID),
+        ("claude", Some("shell"), E_INVALID),
+        ("codex", None, E_UNSUPPORTED),
+        ("agy", Some("work"), E_UNSUPPORTED),
+        ("gemini", None, E_INVALID),
+        ("Claude", None, E_INVALID),
+    ] {
+        let mut args = args_named("dev-z", None);
+        args.agent = Some(agent.into());
+        args.kind = kind.map(str::to_string);
+        assert_eq!(
+            normalize_launch(&mut args).unwrap_err().code,
+            code,
+            "{agent} {kind:?}"
+        );
+    }
+    // An agent shell still refuses Claude-only launch options.
+    let mut args = args_named("dev-z", None);
+    args.agent = Some("shell".into());
+    args.effort = Some("high".into());
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
 }
