@@ -1,0 +1,122 @@
+import { describe, it, expect } from 'vitest';
+import {
+  accountSummaries,
+  historyPoints,
+  HISTORY_SPAN_SECS,
+  loginsFor,
+  peakUsed,
+  planLabel,
+  sparkPath,
+  type UsageSnapshotRow,
+} from './accounts_page';
+import {
+  ADMIN,
+  GMAIL,
+  HOUR,
+  NOW,
+  SPARE,
+  WORK,
+  fleetAccounts,
+  fleetHosts,
+  fleetUsage,
+  host,
+  session,
+} from './hosts_fixture';
+
+function row(at: number, five: number | null, week: number | null): UsageSnapshotRow {
+  return {
+    account_uuid: ADMIN.uuid,
+    fetched_at: at,
+    usage: {
+      five_hour: five === null ? null : { utilization: five, resets_at: null },
+      seven_day: week === null ? null : { utilization: week, resets_at: null },
+      seven_day_opus: null,
+      seven_day_sonnet: null,
+    },
+    subscription: 'max',
+    source_host: null,
+  };
+}
+
+describe('accounts page helpers', () => {
+  it('names the plan from the usage answer, else the seat tier', () => {
+    expect(planLabel('max')).toBe('Max');
+    expect(planLabel(null, 'pro')).toBe('Pro');
+    expect(planLabel('', null)).toBeNull();
+  });
+
+  it('lists the host logins and profile logins of an account', () => {
+    const hosts = [
+      host('zeta', { account_uuid: ADMIN.uuid }),
+      host('alpha', {
+        account_uuid: WORK.uuid,
+        claude_profiles: [
+          { name: 'admin', account_uuid: ADMIN.uuid },
+          { name: 'other', account_uuid: GMAIL.uuid },
+        ],
+      }),
+    ];
+    expect(loginsFor(ADMIN.uuid, hosts)).toEqual([
+      { host: 'alpha', profile: 'admin' },
+      { host: 'zeta', profile: null },
+    ]);
+  });
+
+  it('summarises every known account with its usage, logins and sessions', () => {
+    const sessions = [
+      session('mefistos', 'a', { account_uuid: ADMIN.uuid }),
+      session('mefistos', 'b', { account_uuid: ADMIN.uuid }),
+      session('local', 'c', { account_uuid: GMAIL.uuid }),
+    ];
+    const list = accountSummaries(fleetAccounts(), fleetHosts(), sessions, fleetUsage());
+    expect(list).toHaveLength(4);
+    const admin = list.find((a) => a.uuid === ADMIN.uuid)!;
+    expect(admin.plan).toBe('Max');
+    expect(admin.sessions.map((s) => s.tmux_name)).toEqual(['a', 'b']);
+    expect(admin.logins.map((l) => l.host)).toEqual(['claude-fleet-oci', 'mefistos']);
+    const spare = list.find((a) => a.uuid === SPARE.uuid)!;
+    expect(spare.logins).toEqual([]);
+    expect(spare.usage?.usage).toBeNull();
+  });
+
+  it('keeps a window’s history inside its span, oldest first', () => {
+    const rows = [
+      row(NOW - HISTORY_SPAN_SECS['5h'] - 1, 90, 10),
+      row(NOW - 2 * HOUR, 30, 20),
+      row(NOW - HOUR, null, 25),
+      row(NOW, 60, 30),
+    ];
+    expect(historyPoints(rows, '5h', NOW)).toEqual([
+      { at: NOW - 2 * HOUR, used: 30 },
+      { at: NOW, used: 60 },
+    ]);
+    expect(historyPoints(rows, 'weekly', NOW).map((p) => p.used)).toEqual([10, 20, 25, 30]);
+  });
+
+  it('draws a path only from two points, with 100% used at the top', () => {
+    const span = HISTORY_SPAN_SECS['5h'];
+    expect(sparkPath([{ at: NOW, used: 10 }], '5h', NOW, 100, 50)).toBe('');
+    expect(
+      sparkPath(
+        [
+          { at: NOW - span, used: 0 },
+          { at: NOW, used: 100 },
+        ],
+        '5h',
+        NOW,
+        100,
+        50,
+      ),
+    ).toBe('M0.0 50.0 L100.0 0.0');
+  });
+
+  it('reports the peak use', () => {
+    expect(peakUsed([])).toBeNull();
+    expect(
+      peakUsed([
+        { at: 1, used: 12.4 },
+        { at: 2, used: 91.6 },
+      ]),
+    ).toBe(92);
+  });
+});
