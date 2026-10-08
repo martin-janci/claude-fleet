@@ -992,7 +992,7 @@
     color: var(--fg-muted);
     font-size: 0.65rem;
     width: 0.7rem;
-    transition: transform 0.1s ease;
+    transition: transform var(--dur-fast) ease;
   }
   .caret.open {
     transform: rotate(90deg);

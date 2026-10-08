@@ -70,8 +70,21 @@
   import { workKeyFor, worktreeBranchById } from './work_keys';
   import { settingsOpen } from './app_views';
   import { push, pushError } from './toasts';
-  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubActionBlocked, hubStatus, ownsTheFleet } from './hub';
   import { hubConnection } from './hub_connection';
+  import {
+    commandRows,
+    keepsKind,
+    paletteCommands,
+    runCommand,
+    runSetting,
+    settingRow,
+    splitPrefix,
+  } from './commands';
+  import { descriptors, loadDescriptors } from './pages/pages';
+  import { splitCommand } from './pages/settings_nl';
+  import { settingsWritable } from './pages/review';
+  import { sessionView } from './prefs';
 
   let {
     // Injectable for tests; defaults to the real platform.
@@ -142,12 +155,24 @@
     ),
   );
   const ticketRows = $derived(ticketEntries(tickets, ticketBadges));
+  // Step 3.9: `>` commands, `#` tasks and tickets, `@` hosts.
+  const prefix = $derived(splitPrefix(query));
   const lookupRow = $derived(
     lookupEntry(
-      query,
+      prefix.rest,
       new Set(ticketRows.map((e) => (e.ticket?.key ?? '').toUpperCase())),
     ),
   );
+  // Settings in plain words ("set recent work to 3 days"): the registry is
+  // loaded the first time a query reads like a command.
+  const canWriteSettings = $derived(ownsTheFleet($hubStatus) && $settingsWritable);
+  const settingChange = $derived(settingRow(prefix.rest, $descriptors.values(), canWriteSettings));
+  let descriptorsAsked = false;
+  $effect(() => {
+    if (!open || descriptorsAsked || !canWriteSettings || !splitCommand(prefix.rest)) return;
+    descriptorsAsked = true;
+    if (untrack(() => $descriptors.size) === 0) void loadDescriptors();
+  });
   // Work graph M5: the sidebar's org scope narrows ⌘K too (one
   // `rowMatches` for both, so they never disagree).
   const trackerOrg = $derived(new Map($trackers.map((t) => [t.id, t.org_id ?? null])));
@@ -157,6 +182,8 @@
         ...buildEntries($sessions, $projects, $hosts),
         ...assetEntries($catalog),
         ...commandEntries(),
+        ...commandRows(paletteCommands({ selected: $selectedSession, sessionView: $sessionView }), isMac),
+        ...(settingChange ? [settingChange] : []),
         ...ticketRows,
         ...(lookupRow ? [lookupRow] : []),
       ],
@@ -166,9 +193,10 @@
     ),
   );
   // Normal ⌘K drops picker-hidden projects from its empty-query list, so
-  // both surfaces agree on what is hidden; a query still finds them.
+  // both surfaces agree on what is hidden; a query still finds them. A
+  // prefix keeps only its own kind of row.
   const visibleEntries = $derived(
-    query.trim()
+    (prefix.rest.trim()
       ? entries
       : entries.filter(
           (e) =>
@@ -179,9 +207,14 @@
               $projectPicks.get(pickKey(e.project.project.owner, e.project.project.repo)),
               nowSec(),
             ),
-        ),
+        )
+    )
+      .filter((e) => keepsKind(prefix.mode, e.kind))
+      // Palette commands wait for a query or `>`: the empty ⌘K stays the
+      // list of sessions it has always been.
+      .filter((e) => !e.action || prefix.mode === 'commands' || prefix.rest.trim() !== ''),
   );
-  const ranked: SwitcherEntry[] = $derived(rankEntries(visibleEntries, query, $recentSessions));
+  const ranked: SwitcherEntry[] = $derived(rankEntries(visibleEntries, prefix.rest, $recentSessions));
   const items: PickerItem[] = $derived(
     ranked.map((e) => ({
       key: e.key,
@@ -201,8 +234,10 @@
                 : e.kind === 'asset'
                   ? 'Assets'
                   : e.kind === 'command'
-                    ? 'Commands'
-                    : 'Projects',
+                    ? (e.section ?? 'Commands')
+                    : e.kind === 'setting'
+                      ? 'Settings'
+                      : 'Projects',
       testid: `switcher-${e.kind}`,
     })),
   );
@@ -603,6 +638,16 @@
       const command = e.command;
       hide();
       void tick().then(() => requestAssetsView({ command }));
+    } else if (e.kind === 'command' && e.action) {
+      const id = e.action;
+      const ctx = { selected: $selectedSession, sessionView: $sessionView };
+      hide();
+      // After the switcher has unmounted, so a view it opens gets the focus.
+      void tick().then(() => runCommand(id, ctx));
+    } else if (e.kind === 'setting' && e.setting) {
+      const setting = e.setting;
+      hide();
+      void tick().then(() => runSetting(setting));
     } else if (e.kind === 'host' && e.host) {
       const alias = e.host.alias;
       hide();
@@ -888,6 +933,7 @@
         <span>↑↓ move</span>
         <span>↵ attach / open</span>
         <span>{modKey}↵ new session named “{query.trim() || '…'}” (on a ticket: start it)</span>
+        <span>&gt; commands · # tasks · @ hosts</span>
         <span>esc / {chord} close</span>
       {/if}
     </div>

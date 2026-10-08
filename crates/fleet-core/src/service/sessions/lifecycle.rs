@@ -1681,6 +1681,31 @@ pub(super) async fn rename_session_with(
         })
 }
 
+/// `touch_session_viewed`: the session a person is looking at.
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "TouchSessionViewedParams")]
+pub struct TouchSessionViewedArgs {
+    /// The session on screen.
+    pub session_id: i64,
+}
+
+/// Record that a person is looking at the session now (migration 125), so
+/// every turn that has ended reads as seen (`done_unread` clears). Answers
+/// the row as it now stands; a call that moves nothing still answers it.
+pub fn touch_session_viewed(
+    args: TouchSessionViewedArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    let s = lock(store)?;
+    s.touch_session_viewed(args.session_id, now_unix())?;
+    s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", args.session_id),
+        )
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SetFriendlyNameArgs {
     pub host_alias: String,

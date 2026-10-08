@@ -179,6 +179,28 @@ impl FleetTools {
         ok_json(&row)
     }
 
+    #[tool(description = "Mark a session viewed now: the turns it has \
+        finished read as seen. Returns the row.")]
+    pub(super) async fn touch_session_viewed(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::TouchSessionViewedArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        // `drive`: the stamp is on the ROW, one for everybody, so a watcher
+        // looking must not clear what the owner has not yet seen. A watcher's
+        // client is refused and simply keeps its own view of the row.
+        self.resolve_target_row(
+            &caller,
+            Some(args.session_id),
+            None,
+            None,
+            Reach::Drive,
+            "the session viewed",
+        )?;
+        let row = sessions::touch_session_viewed(args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
     #[tool(description = "Restart a tmux session in place (kill and \
         recreate): for a wedged Claude REPL whose tmux and worktree are \
         fine; cheaper than recreate_session. Returns the updated row.")]

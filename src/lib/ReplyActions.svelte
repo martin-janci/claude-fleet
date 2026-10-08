@@ -250,7 +250,7 @@
     gap: 2px;
     align-items: center;
     opacity: 0.6;
-    transition: opacity 120ms ease;
+    transition: opacity var(--dur-fast) ease;
   }
   /* The whole turn wakes the row, not just the row itself: the pointer is
      on the reply, and a keyboard user tabbing in lands on a button. */

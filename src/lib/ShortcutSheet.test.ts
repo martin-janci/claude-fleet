@@ -1,7 +1,10 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { tick } from 'svelte';
 import ShortcutSheet from './ShortcutSheet.svelte';
+import { shortcutSheetOpen } from './app_views';
+
+afterEach(() => shortcutSheetOpen.set(false));
 
 // Redesign step 3.8: the `?` sheet lists the registry.
 describe('ShortcutSheet', () => {

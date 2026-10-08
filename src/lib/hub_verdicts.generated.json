@@ -259,6 +259,7 @@
     "summarize_past_work",
     "switch_session_work",
     "tidy_apply",
+    "touch_session_viewed",
     "unarchive_session_work",
     "undo_work_accept",
     "unlink_session_work",

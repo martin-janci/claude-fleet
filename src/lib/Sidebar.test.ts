@@ -3021,6 +3021,94 @@ describe('the per-host unclaimed count', () => {
   });
 });
 
+describe('Sidebar: a mass loss folds into one row (redesign 1.1)', () => {
+  function lostOn(host: string, n: number, blocked = true): SessionRow[] {
+    return Array.from({ length: n }, (_, i) => ({
+      ...sessionFor(1, `${host}-lost-${i}`),
+      host_alias: host,
+      lost_at: 50,
+      claude_session_id: `c-${host}-${i}`,
+      claude_status: blocked ? ('blocked' as const) : null,
+    }));
+  }
+
+  it('shows "12 stopped on trn" instead of twelve rows, and keeps them out of the badge', async () => {
+    const waiting = { ...sessionFor(2, 'dev-waiting'), claude_status: 'blocked' as const };
+    mockBackend(fakeProjects, [...lostOn('trn', 12), waiting]);
+    render(Sidebar);
+    await tick(); await tick();
+    const fold = screen.getByTestId('lost-fold');
+    expect(within(fold).getByTestId('lost-fold-toggle')).toHaveTextContent('12 stopped on trn');
+    expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
+    // Only the live waiting session is in the tree and in the count.
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    expect(screen.getByTestId('needs-you-filter')).toHaveTextContent('Needs you 1');
+  });
+
+  it('the fold expands to its rows, so every stopped session is still one click away', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 3));
+    render(Sidebar);
+    await tick(); await tick();
+    const toggle = screen.getByTestId('lost-fold-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+    await fireEvent.click(toggle);
+    await tick();
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const rows = within(screen.getByTestId('lost-fold')).getAllByTestId('sess-row');
+    expect(rows.map((r) => r.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining('trn-lost-0'), expect.stringContaining('trn-lost-2')]),
+    );
+  });
+
+  it('two lost rows are not a mass loss and stay where they are', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 2));
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('lost-fold')).toBeNull();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  it('Restore plans with restore_host_sessions, confirms, then restores the fold', async () => {
+    const lost = lostOn('trn', 3);
+    mockBackend(fakeProjects, lost);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    const calls: { dry_run: boolean; session_ids: number[] | null }[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (c: string, x?: unknown) => {
+      if (c === 'restore_host_sessions') {
+        const a = (x as { args: { host_alias: string; dry_run: boolean; session_ids: number[] | null } }).args;
+        calls.push({ dry_run: a.dry_run, session_ids: a.session_ids });
+        const plan = lost.map((s) => ({
+          session_id: s.id,
+          tmux_name: s.tmux_name,
+          cwd: null,
+          claude_session_id: s.claude_session_id,
+          friendly_name: null,
+          action: 'restore',
+          reason: null,
+        }));
+        return {
+          host_alias: a.host_alias,
+          dry_run: a.dry_run,
+          plan,
+          results: a.dry_run ? [] : lost.map((s) => ({ session_id: s.id, tmux_name: s.tmux_name, ok: true, error: null })),
+        };
+      }
+      return base(c, x);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('lost-fold-restore'));
+    const confirm = await screen.findByTestId('lost-fold-confirm');
+    expect(screen.getByTestId('confirm-dialog')).toHaveTextContent('trn-lost-1');
+    expect(calls).toEqual([{ dry_run: true, session_ids: lost.map((s) => s.id) }]);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({ dry_run: false, session_ids: lost.map((s) => s.id) });
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 sessions on trn.')).toBe(true));
+  });
+});
+
 describe('Group by state, host or agent (redesign step 3.6)', () => {
   beforeEach(() => sidebarGroupBy.set('project'));
 

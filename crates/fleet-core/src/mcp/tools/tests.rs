@@ -2410,9 +2410,10 @@ fn router_sum_serves_every_tool() {
     // claim tools (T12) + the New session picker's `project_picks` /
     // `set_project_pick` + org administration's `org_admin` (phase B) +
     // chat forms' `ask` + debug devices' `debug_devices` + Lost and found's
-    // `adopt_session` + the Files tab's `repo_blame` + Send prompt's
-    // `queue_prompt` / `queued_prompts`.
-    assert_eq!(served, 123);
+    // `adopt_session` + the Files tab's `repo_blame` + the redesign's
+    // `touch_session_viewed` (step 2.3) + Send prompt's `queue_prompt` /
+    // `queued_prompts` (step 5.10).
+    assert_eq!(served, 124);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3943,9 +3944,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// `adopt_session` tool, +557 bytes).
     /// Measured at 86,625 on 2026-10-08 after merging `main` (86,158) into
     /// the Files tab's `repo_blame` and `repo_branches`' `merged` note.
-    /// Measured at 87,540 on 2026-10-08 after step 5.10's queued prompts
-    /// (`queue_prompt` and `queued_prompts`) on top of it.
-    const BUDGET_BYTES: usize = 87_640;
+    /// Measured at 86,933 on 2026-10-08 after the redesign's
+    /// `touch_session_viewed` (step 2.3, +308 bytes over main's 86,625).
+    /// Measured at 87,848 on 2026-10-08 after step 5.10's queued prompts
+    /// (`queue_prompt` and `queued_prompts`) on top of main's 86,933.
+    const BUDGET_BYTES: usize = 87_948;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10072,6 +10075,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("safe_kill_session", &["Own"]),
     ("set_friendly_name", &["Drive"]),
     ("spawn_review", &["Own"]),
+    ("touch_session_viewed", &["Drive"]),
     // forms.rs
     // `list` and `get` and `wait` read the form's session; `answer` and
     // `decline` drive it.

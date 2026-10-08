@@ -2034,6 +2034,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
         NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
         RestoreHostSessionsArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+        TouchSessionViewedArgs,
     };
 
     vec![
@@ -2367,6 +2368,20 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         tmux_name: "demo".into(),
                         friendly_name: "the demo".into(),
                     },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "touch_session_viewed",
+            "touch_session_viewed",
+            json!({ "session_id": 7 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::touch_session_viewed(
+                    b,
+                    TouchSessionViewedArgs { session_id: 7 },
                     s,
                 ))
                 .map(|_| ())
