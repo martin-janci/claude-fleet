@@ -23,6 +23,9 @@
   import BranchList from './BranchList.svelte';
   import RemoteToolbar from './RemoteToolbar.svelte';
   import BranchPushBar from './BranchPushBar.svelte';
+  import GoToFile from './GoToFile.svelte';
+  import { matchShortcut } from './shortcuts';
+  import { detectMac } from './terminal_keys';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import PromptDialog from './PromptDialog.svelte';
   import { validateBranchName } from './branch-slug';
@@ -356,10 +359,32 @@
     focusLine = null;
   }
 
+  // Go to file (⌥⌘P / Ctrl+Alt+P): the panel only exists on the Files tab,
+  // so the chord does nothing anywhere else. The picker opens at once and
+  // fills when the tree arrives.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  let goToOpen = $state(false);
+  function onWindowKeydown(e: KeyboardEvent): void {
+    if (goToOpen || e.defaultPrevented || worktreeGone) return;
+    if (matchShortcut('global', e, isMac) !== 'go-to-file') return;
+    e.preventDefault();
+    if (!treeLoaded) void loadTree();
+    goToOpen = true;
+  }
+  function goToFile(path: string): void {
+    goToOpen = false;
+    if (mode !== 'tree') onMode('tree');
+    selectedPath = path;
+    selectedRange = null;
+    focusLine = null;
+  }
+
   function onResize(delta: number): void {
     listPx = Math.max(160, Math.min(560, listPx + delta));
   }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="panel-wrap">
   <!-- Shared mode toggle header, always visible -->
@@ -484,6 +509,10 @@
     </div>
   {/if}
 </div>
+
+{#if goToOpen}
+  <GoToFile entries={tree?.entries ?? []} loading={tree === null} onpick={goToFile} onclose={() => (goToOpen = false)} />
+{/if}
 
 {#if dialog?.kind === 'checkout-branch'}
   {@const name = dialog.name}
