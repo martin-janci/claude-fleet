@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { checklistRows, needsReprovision, type HostCheck } from './host_check';
+import { checklistLoaderText, checklistRows, needsReprovision, type HostCheck } from './host_check';
 import type { AssetInventoryRow } from './assets';
 import { host } from './hosts_fixture';
 
@@ -108,5 +108,13 @@ describe('host health checklist', () => {
   it('a stale provisioning asks for a re-provision too', () => {
     const h = host('mercury', { provision_stale: true });
     expect(needsReprovision(rows({ host: h }), h)).toBe(true);
+  });
+});
+
+describe('checklistLoaderText (4.13)', () => {
+  it('names what runs, re-provisioning first', () => {
+    expect(checklistLoaderText('mercury', false, false)).toBeNull();
+    expect(checklistLoaderText('mercury', true, false)).toMatch(/^Checking mercury/);
+    expect(checklistLoaderText('mercury', true, true)).toMatch(/^Re-provisioning mercury/);
   });
 });

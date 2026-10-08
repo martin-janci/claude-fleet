@@ -11,60 +11,25 @@
   // against agents on the MCP side, not against code running in the desktop
   // itself — the desktop is the trusted party here, by design. Do not expose
   // `mcp_confirm` to anything less trusted than this window.
+  //
+  // The queue is shared with Control's confirm cards (redesign step 9.2,
+  // `confirms.ts`): in the New layout the operator's own requests are
+  // answered as cards in its transcript while one is on screen, and this
+  // dialog shows everything else.
   import { onMount } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import Modal from './Modal.svelte';
-  import {
-    mcpConfirm,
-    mcpPendingConfirms,
-    MCP_CONFIRM_EVENT,
-    type ConfirmRequest,
-  } from './mcp';
-  import { pushError } from './toasts';
+  import { answerConfirm, answering, dialogConfirms, startConfirmQueue } from './confirms';
 
-  let queue = $state<ConfirmRequest[]>([]);
-  let busy = $state(false);
+  const queue = $derived($dialogConfirms);
   const current = $derived(queue[0] ?? null);
-
-  function enqueue(req: ConfirmRequest) {
-    if (queue.some((q) => q.nonce === req.nonce)) return;
-    queue = [...queue, req];
-  }
+  const busy = $derived(current !== null && $answering.has(current.nonce));
 
   async function answer(approved: boolean) {
     if (!current || busy) return;
-    busy = true;
-    const nonce = current.nonce;
-    const r = await mcpConfirm(nonce, approved);
-    busy = false;
-    // A verdict that never reached the backend must not look like one that
-    // did: keep the request queued and say so. Silently dropping a failed
-    // DENY would leave the user believing they refused the agent.
-    if (!r.ok) {
-      pushError(r.error, `${approved ? 'Approving' : 'Denying'} ${current?.tool ?? 'the call'} failed`);
-      return;
-    }
-    queue = queue.filter((q) => q.nonce !== nonce);
+    await answerConfirm(current.nonce, approved);
   }
 
-  onMount(() => {
-    let unlisten: UnlistenFn | null = null;
-    let disposed = false;
-    // Requests raised before this view mounted (e.g. after a reload).
-    void mcpPendingConfirms().then((r) => {
-      if (r.ok && Array.isArray(r.value)) {
-        for (const p of r.value) enqueue({ ...p, summary: '', caller: '' });
-      }
-    });
-    void listen<ConfirmRequest>(MCP_CONFIRM_EVENT, (e) => enqueue(e.payload)).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  });
+  onMount(() => startConfirmQueue());
 </script>
 
 {#if current}

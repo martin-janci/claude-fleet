@@ -570,6 +570,9 @@ pub struct AddProjectParams {
 pub struct ListGithubReposParams {
     /// Host whose `gh` login lists the repositories.
     pub host_alias: String,
+    /// A GitHub user or organisation to list instead of the login's own.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -1003,6 +1006,14 @@ pub struct SettingHistoryParams {
     /// Newest first, 1-100; 20 when unset.
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AnswerMcpConfirmParams {
+    /// The confirm_nonce the waiting call was handed.
+    pub nonce: String,
+    /// true runs the call on its retry; false refuses it.
+    pub approved: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

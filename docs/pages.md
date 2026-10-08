@@ -208,6 +208,13 @@ The renderer lives in `src/lib/pages/`:
 - `Tabs.svelte` and `Disclosure.svelte`, tabs and collapsible sections;
 - `SettingsNav.svelte`, the page list and search.
 
+A section with `"matrix": true` shows its fields as one grid
+(`MatrixSection.svelte`): a row per option, a column per field, a checkbox
+in each cell, as Settings → Notifications does with Desktop, Phone and
+Sound. Every field must be a `choice_set` setting over the same options,
+with no `widget`, and there must be at least two of them. A resource page
+has no matrix.
+
 Its tests run against `src/lib/pages/registry.generated.json`. That file holds
 exactly what `list_pages` and `describe_fleet_settings` answer on a fresh
 store, so it is never a hand copy. It is regenerated with the other page docs.

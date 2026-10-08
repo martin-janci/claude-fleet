@@ -1126,9 +1126,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",
-        Verdict::LocalOnly {
-            instead: "this app does not poll account usage while a hub owns the fleet, so \
-                      the cache is empty; read usage on the hub",
+        Verdict::Routed {
+            tool: "account_usage",
         },
     ),
     (
@@ -1150,6 +1149,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
                       it cannot tell which account has headroom; start the session as usual",
+        },
+    ),
+    (
+        "propose_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model and the account usage are the hub's while it owns \
+                      the fleet; pick the host as usual",
+        },
+    ),
+    (
+        "record_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model's runs are recorded on the hub that owns the fleet; \
+                      nothing to record here",
         },
     ),
     (
@@ -1209,17 +1222,19 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       the hub",
         },
     ),
+    // Redesign step 9.2: the operator's calls that wait for a person wait in
+    // the queue of the server they reached, which on a hub-backed desktop is
+    // the hub's. The owner's device lists and answers it there.
     (
         "mcp_confirm",
-        Verdict::SameInBoth {
-            why: "answers this process's own confirm queue, which is empty in remote mode — \
-                  answering nothing is correct",
+        Verdict::Routed {
+            tool: "answer_mcp_confirm",
         },
     ),
     (
         "mcp_pending_confirms",
-        Verdict::SameInBoth {
-            why: "the same queue, the same reason",
+        Verdict::Routed {
+            tool: "mcp_confirms",
         },
     ),
     // ── the UX agent's operator session ─────────────────────────────────────

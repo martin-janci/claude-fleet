@@ -1,4 +1,4 @@
-//! `aux_usage` (migration 127, redesign 8.2): what fleet's own `claude -p`
+//! `aux_usage` (migration 128, redesign 8.2): what fleet's own `claude -p`
 //! runs cost, each with its origin. See `service::work::orchestrate` (the
 //! planner) and `service::work::summary`.
 

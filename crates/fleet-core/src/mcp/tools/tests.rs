@@ -166,8 +166,8 @@ fn a_listed_row_carries_why_it_needs_a_person_and_nothing_when_it_does_not() {
 
     assert_eq!(
         json(blocked_row).get("needs_attention"),
-        Some(&serde_json::json!({ "reason": "waiting", "since": 1 })),
-        "the reason and since are on the row"
+        Some(&serde_json::json!({ "reason": "waiting", "since": 1, "state": "action_required" })),
+        "the reason, since and state are on the row"
     );
     assert!(
         json(calm_row).get("needs_attention").is_none(),
@@ -7784,6 +7784,95 @@ async fn an_operator_summary_is_confirm_gated_and_refused_on_a_hub() {
     assert!(e.message.contains("no approver"), "{}", e.message);
 }
 
+/// Redesign step 9.2: on a hub the operator's start waits in the hub's own
+/// queue, and the owner's paired device lists it (`mcp_confirms`) and
+/// answers it (`answer_mcp_confirm`); each move tells the devices
+/// `confirm:changed`. The operator itself can do neither.
+#[tokio::test]
+async fn a_paired_device_lists_and_answers_the_operators_waiting_start() {
+    use crate::service::work::WorkLinkArgs;
+    let bus = Arc::new(crate::events::RecordingEventBus::new());
+    let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    let t = guarded_tools(s, true);
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let phone = client_caller("phone", TokenMode::Full);
+    let start = |nonce: Option<String>| WorkLinkArgs {
+        action: "start".into(),
+        item_id: Some(9_999),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+    let nonce = confirm_nonce_of(
+        &t.work_link(Extension(op.clone()), Parameters(start(None)))
+            .await
+            .unwrap_err(),
+    );
+
+    let listed = result_json(&t.mcp_confirms(Extension(phone.clone())).await.unwrap());
+    let row = &listed.as_array().unwrap()[0];
+    assert_eq!(row["nonce"], nonce.as_str());
+    assert_eq!(row["operator"], true);
+    assert_eq!(row["caller"], "client:ux-agent");
+    assert!(row["asked_at"].as_i64().unwrap() > 0);
+
+    for e in [
+        t.mcp_confirms(Extension(op.clone())).await.unwrap_err(),
+        t.answer_mcp_confirm(
+            Extension(op.clone()),
+            Parameters(AnswerMcpConfirmParams {
+                nonce: nonce.clone(),
+                approved: true,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    ] {
+        assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    }
+
+    bus.take();
+    let answered = t
+        .answer_mcp_confirm(
+            Extension(phone.clone()),
+            Parameters(AnswerMcpConfirmParams {
+                nonce: nonce.clone(),
+                approved: true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&answered), true);
+    assert_eq!(bus.names(), vec!["confirm:changed"]);
+    assert_eq!(
+        result_json(&t.mcp_confirms(Extension(phone.clone())).await.unwrap()),
+        serde_json::json!([])
+    );
+    // Approved: the retry passes the gate (and the unknown item refuses).
+    let after = t
+        .work_link(Extension(op), Parameters(start(Some(nonce.clone()))))
+        .await
+        .unwrap_err();
+    assert!(after.message.starts_with("E_NOTFOUND"), "{}", after.message);
+
+    // A second answer finds nothing and says so, without a frame.
+    bus.take();
+    let again = t
+        .answer_mcp_confirm(
+            Extension(phone),
+            Parameters(AnswerMcpConfirmParams {
+                nonce,
+                approved: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&again), false);
+    assert!(bus.names().is_empty());
+}
+
 #[tokio::test]
 async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
     let (s, pid, on_b) = two_host_store();
@@ -8741,6 +8830,7 @@ async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "-oProxyCommand=x".into(),
+                owner: None,
             }),
         )
         .await
@@ -9179,6 +9269,7 @@ async fn list_github_repos_returns_what_gh_lists_on_the_host() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "hostb".into(),
+                owner: None,
             }),
         )
         .await
@@ -9261,6 +9352,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
                 Extension(who.clone()),
                 Parameters(ListGithubReposParams {
                     host_alias: "hostb".into(),
+                    owner: None,
                 }),
             )
             .await
@@ -9271,6 +9363,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
             Extension(who),
             Parameters(ListGithubReposParams {
                 host_alias: "hosta".into(),
+                owner: None,
             }),
         )
         .await
@@ -9302,6 +9395,7 @@ async fn add_project_and_list_github_repos_refuse_an_unregistered_host() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "not-a-fleet-host".into(),
+                owner: None,
             }),
         )
         .await
