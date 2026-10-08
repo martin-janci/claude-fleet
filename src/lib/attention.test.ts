@@ -11,6 +11,7 @@ import {
   displayName,
   formatElapsed,
   isClaudeStatus,
+  isUnread,
   isStuckKind,
   needsYou,
   newlyStuck,
@@ -279,10 +280,35 @@ describe('triage rank', () => {
     expect(classify(row({ idle_since: 0 }), { idleSecs: 0, now: 10_000 })).toBe('idle');
   });
 
-  it('leaves done_unread empty until A2 lands last_viewed_at', () => {
-    for (const s of [row({ last_stop_at: 9_999 }), row({ last_turn_at: 9_999 }), row()]) {
-      expect(classify(s, opts)).not.toBe('done_unread');
-    }
+  it('done_unread: a finished turn nobody has viewed (redesign 2.3)', () => {
+    const done = { claude_status: 'idle' as const, last_stop_at: 9_000 };
+    // Viewed before the turn ended, or never viewed since fleet started it.
+    expect(classify(row({ ...done, last_viewed_at: 8_000 }), opts)).toBe('done_unread');
+    expect(classify(row({ ...done, started_at: 5_000 }), opts)).toBe('done_unread');
+    expect(classify(row({ ...done, claude_status: 'completed', last_viewed_at: 1 }), opts)).toBe(
+      'done_unread',
+    );
+    // Viewed since (the same second counts as seen).
+    expect(classify(row({ ...done, last_viewed_at: 9_000 }), opts)).not.toBe('done_unread');
+    // A row fleet only found on a host has no stamp to compare: never unread.
+    expect(classify(row(done), opts)).not.toBe('done_unread');
+    // Still working, or a dead row: not "done".
+    expect(classify(row({ ...done, claude_status: 'working', last_viewed_at: 1 }), opts)).toBe(
+      'working',
+    );
+    expect(classify(row({ ...done, status: 'ghost', last_viewed_at: 1 }), opts)).toBe('lifecycle');
+    // A failing CI is the more urgent reason for the same row.
+    expect(classify(row({ ...done, ci_status: 'failing', last_viewed_at: 1 }), opts)).toBe(
+      'ci_failing',
+    );
+  });
+
+  it('isUnread compares the last turn with the last view, else the start', () => {
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: 9, started_at: null })).toBe(true);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: 10, started_at: 1 })).toBe(false);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: null, started_at: 5 })).toBe(true);
+    expect(isUnread({ last_stop_at: null, last_viewed_at: null, started_at: 5 })).toBe(false);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: undefined, started_at: null })).toBe(false);
   });
 
   it('needsYou covers every bucket above working, and nothing below', () => {

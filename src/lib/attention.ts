@@ -124,12 +124,11 @@ export interface AttentionOptions {
  *  "Needs you" queue, the project sort below, later the quick switcher and the
  *  digest — so those orderings cannot drift apart.
  *
- *  Two buckets are reachable but stay empty until Wave 1 A2 lands its columns:
- *   - `waiting` is driven by `claude_status === 'blocked'` alone. A2's
- *     `waiting_for` will separate a permission prompt from a question and let
- *     the age weighting apply per kind.
- *   - `done_unread` needs `last_viewed_at` and its `touch_session_viewed`
- *     writer, so nothing matches it today. */
+ *  `waiting` is driven by `claude_status === 'blocked'` (or a pending form)
+ *  alone. A2's `waiting_for` will separate a permission prompt from a
+ *  question and let the age weighting apply per kind. `done_unread` reads
+ *  `last_viewed_at` (redesign 2.3), which `session_viewed.ts` stamps while a
+ *  session is on screen. */
 export const TRIAGE_BUCKETS = [
   'waiting',
   'stuck',
@@ -234,9 +233,21 @@ function isWaiting(s: SessionRow): boolean {
   return s.claude_status === 'blocked' || s.pending_form != null;
 }
 
-/** A2: needs `last_viewed_at`, so nothing is done-unread yet. */
-function isDoneUnread(_s: SessionRow): boolean {
-  return false;
+/** A turn ended after the session was last viewed (redesign 2.3, migration
+ *  123) — or, for a session fleet started and nobody has opened yet, after
+ *  it started. A row reconcile found on a host has neither stamp and is
+ *  never unread. Seconds on both sides: a turn that ends in the second it
+ *  is viewed counts as seen. */
+export function isUnread(s: Pick<SessionRow, 'last_viewed_at' | 'started_at' | 'last_stop_at'>): boolean {
+  const seen = s.last_viewed_at ?? s.started_at;
+  return seen != null && s.last_stop_at != null && s.last_stop_at > seen;
+}
+
+/** Done and unread: the last turn finished (the session is idle) on a live
+ *  row nobody has looked at since. */
+function isDoneUnread(s: SessionRow): boolean {
+  if (s.status === 'ghost' || s.lost_at !== null) return false;
+  return isIdleStatus(s.claude_status) && isUnread(s);
 }
 
 function isLifecycleBroken(s: SessionRow): boolean {
