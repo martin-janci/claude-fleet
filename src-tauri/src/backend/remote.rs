@@ -825,6 +825,14 @@ impl HubBackend {
         self.route("set_quick_replies", &args).await
     }
 
+    /// `commands::prs::list_pull_requests`.
+    pub async fn list_pull_requests(
+        &self,
+        args: &fleet_core::service::prs::PrsArgs,
+    ) -> Result<fleet_core::service::prs::PrList, IpcError> {
+        self.route("list_pull_requests", args).await
+    }
+
     /// `commands::downloads::list_downloads`.
     pub async fn list_downloads(
         &self,

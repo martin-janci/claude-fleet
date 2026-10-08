@@ -97,6 +97,7 @@
   import { hubStatus, loadHubStatus } from './lib/hub';
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
+  import StatusBarMark from './lib/StatusBarMark.svelte';
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
@@ -1334,6 +1335,7 @@
 {/if}
 
 <footer class="status">
+  <StatusBarMark />
   {#if healthError}
     <span class="err" data-testid="health-error">ipc error: {healthError}</span>
   {:else if bootstrapError}
@@ -1351,7 +1353,7 @@
       data-testid="footer-downloads"
       title="Files sessions sent to your devices"
       onclick={() => (showDownloads = true)}
-      >⤓ Downloads{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
+      >⤓ Downloads…{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
     >
     {#if trackersLine}
       <!-- Work graph M12.4: the tracker roll-up, re-read by TrackerAttention. -->
@@ -1434,7 +1436,7 @@
     padding: 0 0.75rem;
     background: var(--bg-pane);
     border-top: 1px solid var(--border);
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     display: flex;
     align-items: center;
@@ -1543,7 +1545,7 @@
     border-radius: 5px 5px 0 0;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.74rem;
+    font-size: 11px;
     padding: 0.25rem 0.8rem;
   }
   .view-tab:hover:not(:disabled) { color: var(--fg); }
@@ -1579,7 +1581,7 @@
     border-radius: 999px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.1rem 0.6rem;
   }
   .subtab:hover:not(:disabled) { color: var(--fg); }
@@ -1603,7 +1605,7 @@
   }
   .hosts-tab kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     margin-left: 0.25rem;
   }

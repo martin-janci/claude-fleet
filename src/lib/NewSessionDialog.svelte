@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { listHostWorktrees, projects, type ProjectTreeRow, type WorktreeRow } from './projects';
   import { extractWorkKey, keyFromTicketUrl, workKeyFor, worktreeBranchById } from './work_keys';
   import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
@@ -15,6 +15,8 @@
   import PickerList from './PickerList.svelte';
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
+  import { accountByUuid, accountLabel } from './accounts';
+  import { checkAccountHeadroom, loginLabel, usedText, type Headroom, type HostLogin } from './account_limits';
   import { push, pushError } from './toasts';
   import type { PickerItem } from './PickerList.svelte';
   import {
@@ -156,6 +158,34 @@
   // The chosen host's known profiles, offered as suggestions; a new name
   // is still accepted (the session asks for its /login).
   const hostProfiles = $derived($hosts.find((h) => h.alias === chosenHost)?.claude_profiles ?? []);
+  // Limit handling (redesign step 4.4): a start on an account past
+  // `accounts.pause_at` asks first and offers the login with headroom.
+  // Cleared when the host or the profile changes, so an answer never
+  // carries over to a different login.
+  let limitAsk = $state<Headroom | null>(null);
+  let limitConfirmed = $state(false);
+  $effect(() => {
+    void chosenHost;
+    void chosenProfile;
+    untrack(() => {
+      limitAsk = null;
+      limitConfirmed = false;
+    });
+  });
+  const accountName = (uuid: string) => accountLabel($accountByUuid.get(uuid));
+  function useLogin(l: HostLogin) {
+    chosenProfile = l.profile ?? '';
+    // The effect above clears the flags on the profile change; confirm after it.
+    void tick().then(() => {
+      limitConfirmed = true;
+      void submit();
+    });
+  }
+  function startAnyway() {
+    limitConfirmed = true;
+    limitAsk = null;
+    void submit();
+  }
   const profileInvalid = $derived(
     chosenProfile.trim() !== '' && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(chosenProfile.trim()),
   );
@@ -853,6 +883,17 @@
     // current when the response lands.
     const submittedHost = chosenHost;
     const submittedWorktreeId = inNewMode ? null : chosenWorktreeId;
+    if (chosenKind === 'work' && !limitConfirmed) {
+      busy = true;
+      const h = await checkAccountHeadroom(submittedHost, chosenProfile.trim() || null);
+      busy = false;
+      // No answer (a hub client, an unknown host): start as before.
+      if (h.ok && h.value?.over) {
+        limitAsk = h.value;
+        return;
+      }
+    }
+    limitAsk = null;
     busy = true;
     error = null;
     createController = new AbortController();
@@ -1201,6 +1242,21 @@
 
   <div class="actions">
     <span class="hint">↵ create · Ctrl/⌘R re-roll</span>
+    {#if limitAsk && limitAsk.chosen}
+      <div class="limit-ask" role="alert" data-testid="limit-ask">
+        <span
+          >{accountName(limitAsk.chosen.account_uuid)} is at {Math.round(limitAsk.chosen.used_pct ?? 0)}% of its
+          limit (this asks from {limitAsk.pause_at_pct}%).</span
+        >
+        {#if limitAsk.suggestion}
+          {@const s = limitAsk.suggestion}
+          <button class="primary" data-testid="limit-use-suggestion" onclick={() => useLogin(s)}
+            >Use {loginLabel(s, accountName)} · {usedText(s)}</button
+          >
+        {/if}
+        <button data-testid="limit-start-anyway" onclick={startAnyway}>Start anyway</button>
+      </div>
+    {/if}
     <button onclick={onCancel} disabled={busy}>Cancel</button>
     {#if hubCreateNote}
       <span class="hub-create-note" data-testid="hub-create-note" title={hubCreateNote}>{hubCreateNote}</span>
@@ -1222,6 +1278,18 @@
 </Modal>
 
 <style>
+  .limit-ask {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--usage-warn) 45%, transparent);
+    border-radius: 4px;
+    color: var(--fg);
+    font-size: 0.8rem;
+  }
   /* The dialog owns its height budget: the field stack scrolls, the
      Create/Cancel row is pinned, so no number of worktrees or hosts can push
      the buttons off-screen. Modal's body caps at 85vh and adds 1rem padding
@@ -1248,7 +1316,7 @@
      scrolls instead of squeezing them toward zero. :global so it reaches
      PickerList's root too. */
   .fields > :global(*) { flex-shrink: 0; }
-  label, .field-label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
+  label, .field-label { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;
     padding: 0.3rem 0.4rem;
@@ -1261,7 +1329,7 @@
   .name-row { display: flex; gap: 0.3rem; }
   .work-note {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .work-note .dup { color: var(--fg); }
@@ -1298,7 +1366,7 @@
     min-width: 0;
   }
   .kind-pick {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
@@ -1309,16 +1377,16 @@
   .kind-pick.active { color: var(--fg); border-color: var(--accent); }
   .preview {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
+  .preview .k { text-transform: uppercase; font-size: 11px; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
-  .wt-status { font-size: 0.72rem; color: var(--fg-muted); margin: 0 0 0.2rem; }
+  .wt-status { font-size: 11px; color: var(--fg-muted); margin: 0 0 0.2rem; }
   .wt-status.err { color: var(--danger); }
   .actions {
     display: flex;
@@ -1329,8 +1397,8 @@
     padding-top: 0.2rem;
     border-top: 1px solid var(--border);
   }
-  .actions .hint { margin-right: auto; font-size: 0.68rem; color: var(--fg-muted); }
-  .hub-create-note { font-size: 0.68rem; color: var(--fg-muted); text-align: right; }
+  .actions .hint { margin-right: auto; font-size: 11px; color: var(--fg-muted); }
+  .hub-create-note { font-size: 11px; color: var(--fg-muted); text-align: right; }
   .actions button {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
@@ -1356,12 +1424,12 @@
   .brief {
     font: inherit;
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
   }
   .small {
-    font-size: 0.7rem;
+    font-size: 11px;
   }
 </style>

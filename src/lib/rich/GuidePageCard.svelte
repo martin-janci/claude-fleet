@@ -81,7 +81,7 @@
     position: absolute;
     top: 0.65rem;
     right: 0.8rem;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .done, .muted {
     margin: 0;

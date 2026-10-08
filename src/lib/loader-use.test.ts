@@ -26,11 +26,16 @@ function loaderUses(file: string, src: string): LoaderUse[] {
   return out;
 }
 
-/** A Comet, or the Orbit (the default) at 16 px. Names must be literal. */
+/** The 16 px marks: the Orbit, and the four the tray and status bar use
+ *  for how the app stands (redesign step 3.14): Breathe, Chase, Halo,
+ *  Signal lost. */
+const MARKS_16 = new Set(['orbit', 'breathe', 'chase', 'halo', 'signal-lost']);
+
+/** A Comet, or a 16 px mark (the Orbit by default). Names must be literal. */
 function allowedInline(tag: string): boolean {
   const name = tag.match(/\bname="([^"]+)"/)?.[1] ?? (/\bname=/.test(tag) ? null : 'orbit');
   if (name === 'comet') return true;
-  return name === 'orbit' && /\bsize=\{16\}/.test(tag);
+  return name !== null && MARKS_16.has(name) && /\bsize=\{16\}/.test(tag);
 }
 
 describe('loader use', () => {
@@ -52,6 +57,10 @@ describe('loader use', () => {
     expect(allowedInline('<Loader />')).toBe(false);
     expect(allowedInline('<Loader name="dot-wave" />')).toBe(false);
     expect(allowedInline('<Loader name={pick} />')).toBe(false);
+    expect(allowedInline('<Loader name="breathe" size={16} />')).toBe(true);
+    expect(allowedInline('<Loader name="signal-lost" size={16} delay={0} />')).toBe(true);
+    expect(allowedInline('<Loader name="halo" size={24} />')).toBe(false);
+    expect(allowedInline('<Loader name="gravity-well" size={16} />')).toBe(false);
   });
 
   it('every row, button and status-bar loader in the app is a Comet or the 16 px Orbit', () => {

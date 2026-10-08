@@ -181,7 +181,7 @@
   }
   h5 {
     margin: 0 0 0.35rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -231,7 +231,7 @@
     text-decoration: underline dotted;
   }
   .key {
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .diff {
@@ -253,7 +253,7 @@
   .meta,
   .note {
     margin: 0.2rem 0 0;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .meta {
     color: var(--fg-muted);
