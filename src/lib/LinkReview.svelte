@@ -2,8 +2,8 @@
   // Work graph M4.4: link suggestions, decided in bulk, and the Undo of an
   // automatic link.
   //
-  // - An attention pill "N link suggestions · Review" (only when there are
-  //   any) opens a sheet listing each session's top suggestion with its
+  // - A segment of the sidebar's attention line, "N links to review" (only
+  //   when there are any; redesign 1.2), opens a sheet listing each session's top suggestion with its
   //   why. j/k (or ↓/↑) move, y (or ↵) confirms, n (or ⌫) rejects — sticky,
   //   never suggested again. Deciding one brings that session's next
   //   suggestion, if it has one, through the row update; a toast says what
@@ -206,11 +206,11 @@
 
 {#if pending.length > 0}
   <button
-    class="pill review-pill"
+    class="al-seg"
     data-testid="link-review-pill"
     title="Sessions fleet thinks are working on a ticket: confirm or reject each (j/k, y/n)"
     onclick={() => void openSheet()}
-  >{pending.length} link suggestion{pending.length === 1 ? '' : 's'} · Review</button>
+  >{pending.length} link{pending.length === 1 ? '' : 's'} to review</button>
 {/if}
 
 {#if open}
@@ -226,7 +226,7 @@
     <div class="review-head">
       <span>Link suggestions</span>
       <span class="hint">j/k move · y confirm · n not this · esc close</span>
-      <button class="pill" data-testid="link-review-close" onclick={closeSheet}>close</button>
+      <button class="btn btn--quiet" data-testid="link-review-close" onclick={closeSheet}>Close</button>
     </div>
     {#if blocked}<p class="hint" role="note">{blocked}</p>{/if}
     {#if !blocked && notMine > 0}
@@ -254,9 +254,9 @@
           <span class="name">{rowName(r)}</span>
           <span class="key">{sg.key ?? sg.title}?</span>
           <span class="why">{workWhy({ ...sg, state: 'suggested' })}{(sg.suggestions ?? 1) > 1 ? ` · ${sg.suggestions} suggestions` : ''}</span>
-          <button class="pill" data-testid="link-review-yes" disabled={busy || mine !== null} title={mine ?? ''}
+          <button class="btn btn--quiet is-bounded" data-testid="link-review-yes" disabled={busy || mine !== null} title={mine ?? ''}
             onclick={(e) => { e.stopPropagation(); void decideAt(i, true); }}>Confirm</button>
-          <button class="pill" data-testid="link-review-no" disabled={busy || mine !== null} title={mine ?? ''}
+          <button class="btn btn--quiet" data-testid="link-review-no" disabled={busy || mine !== null} title={mine ?? ''}
             onclick={(e) => { e.stopPropagation(); void decideAt(i, false); }}>Not this</button>
         </div>
       {/if}
@@ -265,11 +265,30 @@
 {/if}
 
 <style>
-  .review-pill {
-    margin: 0.2rem 0.5rem;
+  /* A segment of the attention line (SidebarFilters' .attention-line). */
+  .al-seg {
+    order: 0;
+    border: none;
+    background: none;
+    padding: 0.1rem 0.15rem;
+    font: inherit;
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+  .al-seg:hover {
+    color: var(--fg);
+    text-decoration: underline;
+  }
+  .al-seg:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
   }
   .review-sheet {
-    margin: 0.25rem 0.5rem;
+    order: 1;
+    flex: 1 0 100%;
+    box-sizing: border-box;
+    margin: 0.25rem 0;
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.3rem;
