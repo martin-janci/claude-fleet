@@ -251,6 +251,7 @@
     "undo_work_accept",
     "unlink_session_work",
     "update_debug_device",
+    "update_device",
     "update_org",
     "verify_work_item",
     "work_lookup",

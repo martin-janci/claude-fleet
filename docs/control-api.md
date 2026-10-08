@@ -860,15 +860,17 @@ Index by area (names only; see the reference for details):
   trust, org, person, catalog grants, `this_device`; never a peer link or an
   updater token), `pair_device { device, mode: full|readonly, trusted, org,
   person, ttl_s }` (a one-time code, its URL and the URL's QR as rows of
-  `1` / `0`), `revoke_device`, `set_device_trust`, `bind_device { device,
+  `1` / `0`), `revoke_device`, `set_device_trust`, `rename_device { device,
+  name }` (its grants, catalogs and person follow it), `set_device_mode {
+  device, mode: full|readonly }`, `bind_device { device,
   org }` (no org unbinds), `set_device_person { device, person }` (created
   when new) and `grant_catalog { device, catalog, on }`. People:
   `list_people`, `rename_person { person_id, name, display_name }` and
   `disable_person` (revokes their devices and the shares made to them;
   never the owner). Any of the owner's `full` devices lists (a readonly
   device is refused the tool, which is not readonly); a change needs a
-  **trusted `full`** device, and none may revoke, untrust, bind, hand over
-  or take a grant from the device the call comes through.
+  **trusted `full`** device, and none may revoke, untrust, make read-only,
+  bind, hand over or take a grant from the device the call comes through.
 
   **Phase D — members and an org admin.** The row is `Access::Device` (a
   person's device, bound to an org or not), and the tool decides the
