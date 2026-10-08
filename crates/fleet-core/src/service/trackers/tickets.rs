@@ -668,6 +668,10 @@ pub struct StartArgs {
     /// value a caller could set would be a way to start a session in somebody
     /// else's name.
     pub owner: Option<i64>,
+    /// Who or what is starting it (migration 124): a mission's run, an
+    /// agent's token, the operator. `None` = a person, recorded with
+    /// `owner`. Never on the wire, for `owner`'s reason.
+    pub origin: Option<crate::store::SessionOrigin>,
 }
 
 /// Where a start lands and what it is called.
@@ -703,6 +707,10 @@ pub struct StartPlan {
     /// be able to name an owner.
     #[serde(skip)]
     pub owner: Option<i64>,
+    /// Who or what starts it ([`StartArgs::origin`]). `#[serde(skip)]` for
+    /// `owner`'s reason: a plan a client hands back must not name a mission.
+    #[serde(skip)]
+    pub origin: Option<crate::store::SessionOrigin>,
 }
 
 /// `slug(key + " " + title)`: lower case, `[a-z0-9-]`, runs collapsed, at
@@ -1117,6 +1125,7 @@ pub fn plan_resolved(
         parallel: args.parallel,
         decider: args.decider,
         owner: args.owner,
+        origin: args.origin.clone(),
     })
 }
 
@@ -1390,6 +1399,8 @@ where
         effort: None,
         profile: None,
         agent: None,
+        // Who or what started it (migration 124); `None` = a person.
+        origin: plan.origin.clone(),
         // Whose the started session is (multi-user M1, T5): the caller who
         // asked for the start (`StartArgs::owner`, filled from `Caller` at
         // the tool), and the hub's own person only for a path that genuinely

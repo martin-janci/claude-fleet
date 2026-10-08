@@ -39,4 +39,4 @@ CREATE INDEX IF NOT EXISTS idx_pull_requests_state_updated
 CREATE INDEX IF NOT EXISTS idx_pull_requests_session
   ON pull_requests (session_id);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (124);
+INSERT OR IGNORE INTO schema_version (version) VALUES (125);

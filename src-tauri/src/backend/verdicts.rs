@@ -805,6 +805,30 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "claim_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "install_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "debug_device_logs",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "debug_device_screenshot",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::Routed {
             tool: "set_setting",

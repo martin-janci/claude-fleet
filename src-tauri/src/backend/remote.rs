@@ -351,6 +351,13 @@ impl HubBackend {
     /// Not `pub`, for the same reason as [`Self::call`]: only
     /// [`Self::route_text`] calls it from outside this module.
     pub(super) async fn call_text(&self, tool: &str, args: Value) -> Result<String, IpcError> {
+        Ok(first_text(&self.call_result(tool, args).await?))
+    }
+
+    /// Call one tool and return its whole `result` (every content block),
+    /// for the one tool that answers an image (`debug_devices` screenshot).
+    /// [`Self::call_text`] is this, narrowed to the first text block.
+    pub(super) async fn call_result(&self, tool: &str, args: Value) -> Result<Value, IpcError> {
         // The three refusals that happen before a socket is opened, in this
         // order. "This launch cannot use the hub at all"
         // ([`Self::unavailable_error`]) comes first: it is about the
@@ -417,12 +424,12 @@ impl HubBackend {
                         format!("{} did not answer: {}", self.cfg.base_url, self.redact(&e)),
                     )
                 })?;
-        self.read_response(tool, response)
+        self.read_result(tool, response)
     }
 
-    /// Turn one answered request into the tool's result text or an
-    /// [`IpcError`]. Pure, so every branch is a unit test.
-    fn read_response(&self, tool: &str, response: HubResponse) -> Result<String, IpcError> {
+    /// Turn one answered request into the tool's `result` (its content
+    /// blocks) or an [`IpcError`]. Pure, so every branch is a unit test.
+    fn read_result(&self, tool: &str, response: HubResponse) -> Result<Value, IpcError> {
         let body = response.body;
         match response.status {
             200 => {}
@@ -515,13 +522,7 @@ impl HubBackend {
             return Err(self.tool_error(tool, result));
         }
 
-        Ok(result
-            .get("content")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("text"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string())
+        Ok(result.clone())
     }
 
     /// Rebuild the `IpcError` the service layer raised on the other side.
@@ -619,6 +620,40 @@ impl HubBackend {
         self.call_text(tool, arguments(command, args)?).await
     }
 
+    /// [`Self::route`] for a tool that answers an image block: the first
+    /// text block (the tool's caption) and the image's MIME type and
+    /// base64 data. `E_PARSE` when the answer carries no image.
+    pub async fn route_image<A: serde::Serialize>(
+        &self,
+        command: &str,
+        args: &A,
+    ) -> Result<HubImage, IpcError> {
+        let tool = self.tool_for(command)?;
+        let result = self.call_result(tool, arguments(command, args)?).await?;
+        let image = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|blocks| {
+                blocks
+                    .iter()
+                    .find(|b| b.get("type").and_then(Value::as_str) == Some("image"))
+            })
+            .ok_or_else(|| {
+                IpcError::new(
+                    codes::E_PARSE,
+                    format!("{tool} on {} answered no image", self.cfg.base_url),
+                )
+            })?;
+        let field = |k: &str| image.get(k).and_then(Value::as_str).map(str::to_string);
+        Ok(HubImage {
+            caption: first_text(&result),
+            mime: field("mimeType")
+                .or_else(|| field("mime_type"))
+                .unwrap_or_else(|| "image/png".into()),
+            data: field("data").unwrap_or_default(),
+        })
+    }
+
     /// The hub tool `command` routes to.
     ///
     /// **It fails closed**, for the same reason
@@ -656,6 +691,27 @@ fn arguments<A: serde::Serialize>(command: &str, args: &A) -> Result<Value, IpcE
             format!("{command}'s arguments could not be encoded for the hub: {e}"),
         )
     })
+}
+
+/// An image a hub tool answered ([`HubBackend::route_image`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubImage {
+    /// The tool's first text block.
+    pub caption: String,
+    pub mime: String,
+    /// Base64, as the MCP image block carries it.
+    pub data: String,
+}
+
+/// A tool result's first text block: the tool's JSON, or its prose.
+fn first_text(result: &Value) -> String {
+    result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// `E_` followed by upper-case ASCII, digits or `_` — the shape every code in

@@ -38,6 +38,13 @@ you can:
 - give it a **label** (what sessions call it: `{ device: "bench pixel" }`);
 - turn on **Shared**, so sessions on the other hosts of its host's org may use
   it (off by default: only its own host's sessions do);
+- **Claim** it while you test by hand, with an optional note on what for
+  (sessions then get `E_CONFLICT` until the claim lapses or is released);
+- **Install app…**: an `.apk`, `.app` or `.ipa` by its path on the device's
+  own host, or on another host you pick (copied across first); the install's
+  output is shown;
+- **Logs**: its last 200 log lines, shown on the page (cut when longer);
+- **Screenshot**: the screen as it is now, shown on the page;
 - **Release claim** when a session holds it and should not;
 - **Start** / **Stop** an emulator or simulator;
 - **Forget** it.

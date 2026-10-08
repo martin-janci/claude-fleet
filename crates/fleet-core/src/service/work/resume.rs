@@ -930,6 +930,7 @@ pub fn resume_session_args(
         effort: None,
         profile: None,
         agent: None,
+        origin: None,
         owner_person_id,
     })
 }
@@ -2095,6 +2096,7 @@ mod tests {
         });
         let plan = crate::service::trackers::tickets::StartPlan {
             owner: None,
+            origin: None,
             key: "ABC-1".into(),
             title: String::new(),
             item_id: None,

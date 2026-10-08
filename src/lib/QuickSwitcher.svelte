@@ -27,6 +27,8 @@
   import { parseRepoUrl } from './repo_url';
   import Modal from './Modal.svelte';
   import PickerList, { optionId } from './PickerList.svelte';
+  import AccountPill from './AccountPill.svelte';
+  import { uiLayout } from './prefs';
   import type { PickerItem } from './PickerList.svelte';
   import { sessions, type SessionRow } from './sessions';
   import { projects } from './projects';
@@ -841,6 +843,7 @@
         ongroupclick={mode === 'new' ? onGroupClick : undefined}
         oncontext={mode === 'new' ? (k) => openMenu(k, 'main') : undefined}
         rowActions={mode === 'new' ? actions : undefined}
+        rowTrail={mode !== 'new' && $uiLayout === 'new' ? accountTrail : undefined}
       />
       {#if menu && entryOf(menu.key)}
         {@const e = entryOf(menu.key)!}
@@ -890,6 +893,14 @@
     </div>
   </Modal>
 {/if}
+
+<!-- Redesign 4.3, New layout only: a session row carries its account. -->
+{#snippet accountTrail(item: PickerItem)}
+  {@const uuid = ranked.find((e) => e.key === item.key)?.session?.account_uuid}
+  {#if uuid}
+    <AccountPill {uuid} testid="switcher-account-pill" onopen={hide} />
+  {/if}
+{/snippet}
 
 <!-- Hover actions on a project row: a mouse convenience (aria-hidden, not
      focusable); the keys and the actions menu are the accessible path. -->
