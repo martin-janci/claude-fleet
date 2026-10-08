@@ -209,6 +209,23 @@ export async function startWork(args: StartWorkArgs): Promise<Result<SessionRow>
   return r;
 }
 
+/** What Cancel start undid (task → session P-6). */
+export interface AbandonOutcome {
+  session_id: number;
+  worktree_removed: boolean;
+  branch_deleted: boolean;
+}
+
+/** Cancel a start nobody has worked in yet: end the session, remove the
+ *  checkout and branch the start made. `E_DIRTY` (details.reason) when it
+ *  was not a start, the checkout is not the start's own, or it has work in
+ *  it — nothing is touched then. */
+export async function abandonStart(sessionId: number): Promise<Result<AbandonOutcome>> {
+  const r = await invokeCmd<AbandonOutcome>('abandon_start', { args: { session_id: sessionId } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
 export interface AddTrackerOptions {
   name?: string;
   /** jira | github | asana | linear | jira_dc; the hub infers it from the URL

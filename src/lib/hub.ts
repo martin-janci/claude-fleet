@@ -357,6 +357,7 @@ export const ROUTED_ACTIONS = [
   'set_work_project_trust',
   'start_work',
   'start_work_multi',
+  'abandon_start',
   'request_work_handover',
   'summarize_past_work',
   'tidy_apply',
@@ -364,6 +365,10 @@ export const ROUTED_ACTIONS = [
   'dismiss_reopened',
   'name_session_work',
   'rename_work_item',
+  // The board: a native item's status, set by dragging its card.
+  'set_work_status',
+  // Task editing: a native item's title, notes and assignees.
+  'edit_work_item',
   // The Work view (work graph M14): every write is `work_link { … }` on the
   // hub, so a paired desktop sends them while the link is up.
   'set_primary_work',

@@ -2956,3 +2956,115 @@ async fn a_proposal_previews_as_a_conflict() {
     .unwrap_err();
     assert_eq!(e.message, "accept the proposal first");
 }
+
+/// Task → session P-5 / P-6: a start writes its first progress steps on
+/// the new session's timeline — what it made, in which checkout, and
+/// whether a brief follows — and that record is what lets the start be
+/// cancelled: a checkout the start made can go, a reused one never.
+#[tokio::test]
+async fn a_start_records_its_steps_and_only_its_own_checkout_may_be_cancelled() {
+    use crate::service::work::abandon::plan_abandon;
+    let fx = Fx::new();
+    let args = StartArgs {
+        reference: Some("ABC-3".into()),
+        project_id: Some(fx.pid),
+        host_alias: Some("hosta".into()),
+        with_brief: true,
+        ..Default::default()
+    };
+    let plan = plan_start(&fx.store, &args, &OrgScope::All, &fx.net())
+        .await
+        .unwrap();
+    assert_eq!(plan.worktree_id, None, "a fresh key gets a new checkout");
+    let branch = plan.branch.clone();
+    let store = Arc::clone(&fx.store);
+    let (row, queued) = start_with(
+        &fx.store,
+        &plan,
+        Some("brief".into()),
+        &OrgScope::All,
+        move |a| {
+            let s = store.lock().unwrap();
+            let wt = s
+                .upsert_worktree_on(
+                    &a.host_alias,
+                    a.project_id,
+                    a.new_worktree.as_deref().unwrap(),
+                    "/p/acme/app/.worktrees/abc-3",
+                    a.new_worktree.as_deref(),
+                )
+                .unwrap();
+            let id = s
+                .upsert_session(
+                    "started",
+                    &a.host_alias,
+                    Some(a.project_id),
+                    Some(wt),
+                    1,
+                    1,
+                    "running",
+                    None,
+                )
+                .unwrap();
+            std::future::ready(Ok(s.get_session_by_id(id).unwrap().unwrap()))
+        },
+    )
+    .await
+    .unwrap();
+    assert!(queued);
+    let s = fx.store.lock().unwrap();
+    let ev = s
+        .newest_session_event_of(row.id, &[START_SPAWNED])
+        .unwrap()
+        .expect("start_spawned");
+    let spawned: StartSpawned = serde_json::from_str(ev.detail.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        spawned,
+        StartSpawned {
+            key: "ABC-3".into(),
+            worktree_id: row.worktree_id,
+            new_worktree: true,
+            branch: Some(branch.clone()),
+            brief: true,
+        }
+    );
+    assert!(s
+        .newest_session_event_of(row.id, &[WORKTREE_READY])
+        .unwrap()
+        .is_some());
+    let p = plan_abandon(&s, row.id).expect("the start's own checkout may go");
+    assert_eq!(p.branch, branch);
+    assert_eq!(p.worktree_path, "/p/acme/app/.worktrees/abc-3");
+    assert_eq!(p.project_base, "/p/acme/app");
+
+    // The same session, its record saying the checkout was reused.
+    let reused = StartSpawned {
+        new_worktree: false,
+        ..spawned
+    };
+    s.insert_session_event(
+        row.id,
+        START_SPAWNED,
+        Some(&serde_json::to_string(&reused).unwrap()),
+    )
+    .unwrap();
+    let e = plan_abandon(&s, row.id).unwrap_err();
+    assert_eq!(e.code, codes::E_DIRTY);
+    assert_eq!(e.details.unwrap()["reason"], "checkout_not_the_starts");
+
+    // A session no start made.
+    let other = s
+        .upsert_session(
+            "by-hand",
+            "hosta",
+            Some(fx.pid),
+            row.worktree_id,
+            1,
+            1,
+            "running",
+            None,
+        )
+        .unwrap();
+    let e = plan_abandon(&s, other).unwrap_err();
+    assert_eq!(e.details.unwrap()["reason"], "not_a_start");
+}

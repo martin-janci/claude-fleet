@@ -36,6 +36,7 @@
   import { sessionIdBlocked } from './share';
   import { hubConnection } from './hub_connection';
   import WorkPlaceDialog from './WorkPlaceDialog.svelte';
+  import EditTaskDialog from './EditTaskDialog.svelte';
   import WorkOrgDialog from './WorkOrgDialog.svelte';
   import WorkRuleEditor from './WorkRuleEditor.svelte';
   import TaskWorkSections from './TaskWorkSections.svelte';
@@ -71,6 +72,7 @@
   }: { taskId: string; onclose?: () => void; closeLabel?: string; debounceMs?: number } = $props();
 
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
+  const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
   const placeBlocked = $derived(hubActionBlocked('place_work', $hubStatus, $hubConnection));
   const orgBlocked = $derived(hubActionBlocked('assign_work_org', $hubStatus, $hubConnection));
   const ruleBlocked = $derived(hubActionBlocked('save_work_rule', $hubStatus, $hubConnection));
@@ -86,6 +88,7 @@
   let existingSession = $state<number | null>(null);
   let acting = $state(false);
   let placing = $state(false);
+  let editing = $state(false);
   let assigning = $state(false);
   let ruleDraft = $state<WorkRuleDraft | null>(null);
   /** The start popover's preview while it is open (task → session §2.2). */
@@ -310,6 +313,16 @@
       <span class="title" class:unavailable={task?.unavailable}>{task ? task.title || (task.key ? '' : task.task_id) : 'Task'}</span>
     </h2>
     <div class="head-actions">
+      {#if task?.kind === 'local' && task.item_id != null}
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-task-edit"
+          disabled={editBlocked !== null}
+          title={editBlocked ?? 'Edit the title, description, status and assignees'}
+          onclick={() => (editing = true)}>Edit</button
+        >
+      {/if}
       <button class="btn btn--quiet" type="button" disabled={loading} data-testid="work-task-refresh" onclick={() => void load(taskId)}
         >Refresh</button
       >
@@ -545,6 +558,10 @@
     {#if detail}<TaskWorkSections {detail} part="steps" />{/if}
   {/if}
 </section>
+
+{#if editing && task}
+  <EditTaskDialog taskId={task.task_id} onclose={() => (editing = false)} ondone={() => void load(taskId)} />
+{/if}
 
 {#if placing && task}
   <WorkPlaceDialog

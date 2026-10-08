@@ -525,6 +525,48 @@ export async function createWorkTask(input: {
   return r;
 }
 
+/** The statuses a person may give a native item (`blocked` is a session's
+ *  state, never an item's). */
+export type WorkItemStatus = 'todo' | 'in_progress' | 'done';
+
+/** A person's status for a native item: final over the derived one
+ *  (sprints design 2026-09-28 §2). A tracker's ticket is refused,
+ *  `E_INVALID`, naming it: its status is its tracker's. */
+export async function setWorkStatus(itemId: number, status: WorkItemStatus): Promise<Result<WorkItemRow>> {
+  const r = await invokeCmd<WorkItemRow>('set_work_status', { args: { item_id: itemId, status } });
+  if (r.ok) bumpWorkChanged();
+  return r;
+}
+
+/** A person's edit of a native item: each field left out stays as it is;
+ *  `notes: ''` and `assignees: []` clear them. A tracker's ticket is
+ *  refused, `E_INVALID`, naming it: its text is its tracker's. */
+export async function editWorkItem(
+  itemId: number,
+  edit: { title?: string; notes?: string; assignees?: string[] },
+): Promise<Result<WorkItemRow>> {
+  const args: Record<string, unknown> = { item_id: itemId };
+  if (edit.title !== undefined) args.title = edit.title.trim();
+  if (edit.notes !== undefined) args.notes = edit.notes;
+  if (edit.assignees !== undefined) args.assignees = edit.assignees;
+  const r = await invokeCmd<WorkItemRow>('edit_work_item', { args });
+  if (r.ok) {
+    if (edit.title !== undefined) patchWorkItemTitle(itemId, r.value.title);
+    bumpWorkChanged();
+  }
+  return r;
+}
+
+/** Assignees typed as one line: split on commas, trimmed, empty ones and
+ *  repeats (case-insensitive) dropped, as the backend stores them. */
+export function parseAssignees(raw: string): string[] {
+  const out: string[] = [];
+  for (const a of raw.split(',').map((x) => x.trim())) {
+    if (a && !out.some((o) => o.toLowerCase() === a.toLowerCase())) out.push(a);
+  }
+  return out;
+}
+
 /** A person accepts or rejects an agent's proposed subtask. */
 export async function decideWorkProposal(itemId: number, accept: boolean): Promise<Result<WorkItemRow>> {
   const r = await invokeCmd<WorkItemRow>(accept ? 'accept_work_proposal' : 'reject_work_proposal', {

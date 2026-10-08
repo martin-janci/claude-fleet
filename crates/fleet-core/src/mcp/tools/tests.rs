@@ -3920,13 +3920,18 @@ fn the_served_definition_budget_stays_bounded() {
     /// { mission_start | mission_plan | mission_grant | mission_revoke |
     /// retry | card_decide | missions_pause_all }` and their arguments,
     /// +1,137 bytes).
+    /// Measured at 81,951 on 2026-10-08 after task editing (`work_link
+    /// { edit }` and its `assignees` argument, +257 bytes).
     /// Measured at 81,648 on 2026-10-08 after merging `main` (80,099) into
     /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
     /// sides' sum).
     /// Measured at 83,243 on 2026-10-08 after merging `main` (81,694) into
     /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
     /// sides' sum).
-    const BUDGET_BYTES: usize = 83_343;
+    /// Measured at 83,534 on 2026-10-08 after merging `main` (81,951, task
+    /// editing) into chat forms (the `ask` tool): 34 bytes above the two
+    /// sides' sum.
+    const BUDGET_BYTES: usize = 83_634;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10812,6 +10817,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `require_drive_on_item_sessions`, the same gate and level as `name`'s
     // rename half.
     ("work_link", "set_status", &["Drive"]),
+    // Task editing: the text the owner's sidebar shows for their own row,
+    // behind `set_status`'s gate.
+    ("work_link", "edit", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),
@@ -10834,6 +10842,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     ("work_link", "summarize", &["Own"]),
     // Kills are `Own`, the UI-only bookkeeping items `Drive`, per item.
     ("work_link", "tidy_apply", &["Drive", "Own"]),
+    // Cancelling a start KILLS its session (task → session P-6): the kill's
+    // tier, as `kill_session` and tidy-up's kills take.
+    ("work_link", "abandon_start", &["Own"]),
     // The WRITE is a task's group; the ANSWER is the task, and
     // `WorkTask.sessions: Vec<TaskLink>` is every link of it with its name,
     // host, branch and live `claude_status`. The row used to read "a task's

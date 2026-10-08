@@ -18,13 +18,15 @@
   // Layout (design 2026-09-29): **List** (the default) is `TaskList` — every
   // task by status, To do / Doing / Done, from its own read; **Grouped** is
   // the org → group tree below, unchanged. The header is the same for both.
+  // **Board** is not a third layout here: it opens `WorkBoard` over the
+  // terminal (it needs the width), and this sidebar keeps its layout.
   import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
   import { selectedSession, selectSessionExplicitly } from './selection';
   import { providerInfo, unavailableLabel } from './trackers';
   import { timeAgo } from './session_status';
-  import { workViewChordLabel } from './app_views';
+  import { workBoardOpen, workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
   import { facetSentence, workFacets } from './filter_facets';
@@ -580,6 +582,15 @@
             data-testid="work-layout-grouped"
             title="Organisation → group"
             onclick={() => workLayout.set('grouped')}>Grouped</button
+          >
+          <button
+            class="btn btn--chip btn--toggle"
+            type="button"
+            aria-pressed={$workBoardOpen}
+            class:is-active={$workBoardOpen}
+            data-testid="work-layout-board"
+            title="A board of these tasks by status, beside the terminal"
+            onclick={() => workBoardOpen.update((v) => !v)}>Board</button
           >
         </div>
       {/if}

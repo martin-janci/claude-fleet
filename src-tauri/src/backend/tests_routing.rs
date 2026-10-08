@@ -884,6 +884,47 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // The board (sprints design 2026-09-28 §6c).
+        (
+            "set_work_status",
+            "work_link",
+            json!({ "session_id": null, "action": "set_status", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "status": "in_progress" }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::set_work_status(
+                    b,
+                    commands::work::SetWorkStatusArgs {
+                        item_id: 9,
+                        status: "in_progress".into(),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Task editing.
+        (
+            "edit_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "edit", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "title": "Fix login",
+                    "notes": "", "assignees": ["Ana"] }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::edit_work_item(
+                    b,
+                    commands::work::EditWorkItemArgs {
+                        item_id: 9,
+                        title: Some("Fix login".into()),
+                        notes: Some(String::new()),
+                        assignees: Some(vec!["Ana".into()]),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "accept_work_proposal",
             "work_link",
@@ -2176,6 +2217,22 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         ..Default::default()
                     },
                     s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "abandon_start",
+            "work_link",
+            json!({ "session_id": 7, "action": "abandon_start", "key": null, "item_id": null,
+                    "link_id": null, "source": null }),
+            r#"{"session_id":7,"worktree_removed":true,"branch_deleted":true}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::trackers::routed::abandon_start(
+                    b,
+                    commands::trackers::AbandonStartArgs { session_id: 7 },
+                    s,
+                    ssh,
                 ))
                 .map(|_| ())
             }),

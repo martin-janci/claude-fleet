@@ -20,6 +20,7 @@
   import { copyText } from './clipboard';
   import { startWork } from './trackers';
   import StartPopover from './StartPopover.svelte';
+  import StartProgressStrip from './StartProgressStrip.svelte';
   import AttachPicker from './AttachPicker.svelte';
   import { operatorRow } from './operator';
   import type { AttachTarget, Attached } from './attach';
@@ -63,6 +64,8 @@
   let menuOpen = $state(false);
   let popover = $state<StartPreview | null>(null);
   let attaching = $state(false);
+  /** The session the last Start made: its progress shows under the button. */
+  let progressFor = $state<number | null>(null);
   /** The last attach, undoable for a while (spec §2.4). */
   let undo = $state<{ text: string; run: Attached['undo'] } | null>(null);
   let undoTimer: ReturnType<typeof setTimeout> | undefined;
@@ -122,6 +125,7 @@
   function started(row: SessionRow) {
     popover = null;
     error = null;
+    progressFor = row.id;
     selectSessionExplicitly(row);
   }
 
@@ -307,6 +311,11 @@
     </span>
   {/if}
   {#if error}<span class="err" role="alert" data-testid="work-button-error">{error}</span>{/if}
+  {#if progressFor != null}
+    {#key progressFor}
+      <StartProgressStrip sessionId={progressFor} onclose={() => (progressFor = null)} />
+    {/key}
+  {/if}
   {#if undo}
     <span class="undo" role="status" data-testid="work-button-undo-notice"
       >{undo.text}{#if undo.run}

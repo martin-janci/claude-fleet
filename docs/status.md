@@ -184,9 +184,18 @@ history kept on removal and close, adoption from a tracker's sprint or
 version and its withdrawal), `Caps.versions` with Jira `fixVersions`,
 GitHub milestones and Linear project milestones (E8's default), and the MCP
 actions (`work { buckets | bucket }`, `work_link { bucket_add |
-bucket_remove }`, six `work_admin` bucket actions). No UI yet: the Work
-view's Sprint / Release axis, bulk assignment and the sprint board are not
-built, nor are epics for local items (phase 4). E9–E11 run on their
+bucket_remove }`, six `work_admin` bucket actions). The board (§6c) is
+built as a first cut: the Work view's *Board* button opens `WorkBoard` over
+the terminal, To do / Doing / Done from one `work_tree` read with the Work
+view's filters, a native card dragged (pointer events, or ← →) to set its
+status through `set_work_status` → `work_link { set_status }`, a tracker's
+card refused on the card (E11), each card with its live session and host.
+A native task is edited (title, description, status, assignees) from its
+card's ✎ or E, the List row's ✎ and the task page's *Edit*:
+`EditTaskDialog` writes `edit_work_item` → `work_link { edit }` and
+`set_work_status`; a tracker's ticket stays its tracker's to edit.
+It is not yet scoped to a sprint: the Work view's Sprint / Release axis and
+bulk assignment are not built, nor are epics for local items (phase 4). E9–E11 run on their
 defaults.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for
@@ -237,7 +246,7 @@ shadow slots in Mode B and the mission loop, K4 last. K1 is built, off
 popover pre-selects Jev's repository in assist; K2–K5 are not built.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
-recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed.
+recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed, A3 in part.
 The operator never accepts or rejects a proposal and is never a detection
 or classification-nudge subject (`operator::is_operator_session`,
 `detect::subject_state`). `work_link { preview_start }`
@@ -267,6 +276,18 @@ person; the plan becomes a task (`work_link create`, the plan in `notes`)
 with proposed subtasks a person accepts. An operator born before C0 gets
 it at its next birth. Not yet: plan rows, decision rows, the worker
 catalog copy (C1).
+A3 (part): a start writes its steps to the new session's timeline
+(P-5): `start_spawned` (detail: `tickets::StartSpawned` JSON),
+`worktree_ready`, `repl_ready` (`seed::REPL_READY`) and `handover_started`,
+which is the spec's `brief_sent`. The Work button shows them as a strip
+(`StartProgressStrip.svelte`, `start_progress.ts`) with "Waiting for you"
+on a trust dialog and **Cancel start** until the brief is in.
+`work_link { abandon_start }` (`work::abandon`, P-6, `Reach::Own`, confirmed
+like a kill) refuses `E_DIRTY` unless the newest `start_spawned` made the
+session's checkout and `git status` and the branch's own commits are both
+empty; then it records `start_abandoned`, kills the session, runs `git
+worktree remove` (no `--force`) and `git branch -d`. Not yet in A3: J7
+multi-repo in the popover, the empty states.
 
 Orchestration projects (spec
 `docs/superpowers/specs/2026-10-07-autonomous-orchestration-projects-design.md`,

@@ -57,6 +57,52 @@ fn job_title(prompt: &str) -> String {
         .collect()
 }
 
+/// Most people one local item names as its assignees.
+pub const ASSIGNEES_MAX: usize = 10;
+/// Longest assignee name, in characters.
+pub const ASSIGNEE_MAX_CHARS: usize = 80;
+
+/// A person's edit of a local item: each field `None` is left as it is.
+/// `notes: Some("")` and `assignees: Some(&[])` clear them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ItemEdit<'a> {
+    pub title: Option<&'a str>,
+    pub notes: Option<&'a str>,
+    pub assignees: Option<&'a [String]>,
+}
+
+/// Assignees a person typed: trimmed, empty ones dropped, each name once
+/// (first spelling wins, compared case-insensitively), at most
+/// [`ASSIGNEES_MAX`] of at most [`ASSIGNEE_MAX_CHARS`] characters, no
+/// control character.
+pub fn validate_assignees(raw: &[String]) -> Result<Vec<String>, IpcError> {
+    let mut out: Vec<String> = Vec::new();
+    for a in raw.iter().map(|a| a.trim()).filter(|a| !a.is_empty()) {
+        if a.chars().count() > ASSIGNEE_MAX_CHARS {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("an assignee is longer than {ASSIGNEE_MAX_CHARS} characters"),
+            ));
+        }
+        if a.chars().any(char::is_control) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "an assignee must not contain control characters",
+            ));
+        }
+        if !out.iter().any(|o| o.to_lowercase() == a.to_lowercase()) {
+            out.push(a.to_string());
+        }
+    }
+    if out.len() > ASSIGNEES_MAX {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!("at most {ASSIGNEES_MAX} assignees"),
+        ));
+    }
+    Ok(out)
+}
+
 /// An agent's proposed subtask.
 #[derive(Debug, Clone, Copy)]
 pub struct Proposal<'a> {
@@ -394,6 +440,72 @@ impl Store {
         )?;
         self.get_work_item(item_id)?
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after update"))
+    }
+
+    /// A person edits a LOCAL item's title, notes and assignees (task
+    /// editing). `None` when `item_id` is not a local item: a tracker's
+    /// ticket is its tracker's to edit. A job mirror's notes are its
+    /// dispatch prompt ([`Self::create_agent_task_item`]), so editing them
+    /// is `E_INVALID`. Nothing changed answers the row as it is, unwritten.
+    pub fn edit_local_item(
+        &self,
+        item_id: i64,
+        edit: &ItemEdit<'_>,
+    ) -> Result<Option<WorkItemRow>, IpcError> {
+        let title = edit.title.map(validate_local_work_title).transpose()?;
+        let assignees = edit.assignees.map(validate_assignees).transpose()?;
+        let Some(before) = self.get_work_item(item_id)? else {
+            return Ok(None);
+        };
+        if before.source != "local" {
+            return Ok(None);
+        }
+        let notes = edit.notes.map(|n| {
+            let n = n.trim();
+            (!n.is_empty()).then(|| cut_brief(n))
+        });
+        if notes.is_some() && before.origin.as_deref() == Some("agent") {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a delegated job's notes are its prompt and cannot be edited",
+            ));
+        }
+        let title = title.filter(|t| *t != before.title);
+        let notes = notes.filter(|n| *n != before.notes);
+        let assignees = assignees.filter(|a| *a != before.assignees);
+        if title.is_none() && notes.is_none() && assignees.is_none() {
+            return Ok(Some(before));
+        }
+        self.conn.execute(
+            "UPDATE work_items SET title = COALESCE(?1, title), \
+                    notes = CASE WHEN ?2 THEN ?3 ELSE notes END, \
+                    assignees = CASE WHEN ?4 THEN ?5 ELSE assignees END, \
+                    updated_at = ?6 \
+              WHERE id = ?7 AND source = 'local'",
+            rusqlite::params![
+                title,
+                notes.is_some(),
+                notes.clone().flatten(),
+                assignees.is_some(),
+                assignees
+                    .as_ref()
+                    .filter(|a| !a.is_empty())
+                    .and_then(|a| serde_json::to_string(a).ok()),
+                now_unix(),
+                item_id
+            ],
+        )?;
+        // A title shows as a row's primary work and as its top suggestion,
+        // as for a rename; notes and assignees show on the item alone.
+        self.emit_work_item(
+            item_id,
+            super::tracker_items::SessionChange {
+                primary: title.is_some(),
+                suggested: title.is_some(),
+                rejected: false,
+            },
+        )?;
+        self.get_work_item(item_id)
     }
 
     /// Every native child of `parent_id`, proposals included, oldest first.

@@ -17,6 +17,12 @@
 //! Shared work context (design 2026-09-29): `create_work_task` →
 //! `work_link { create }`, and `accept_work_proposal` /
 //! `reject_work_proposal` → `work_link { accept | reject }`.
+//!
+//! The board (sprints design 2026-09-28 §6c): `set_work_status` →
+//! `work_link { set_status }`, a person's status for a native item.
+//!
+//! Task editing: `edit_work_item` → `work_link { edit }`, a person's
+//! title, notes and assignees for a native item.
 
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
@@ -227,6 +233,45 @@ pub async fn create_work_task(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<WorkItemRow, IpcError> {
     routed::create_work_task(&backend, args, &store).await
+}
+
+/// A person's status for a native item (`todo` | `in_progress` | `done`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkStatusArgs {
+    pub item_id: i64,
+    pub status: String,
+}
+
+/// A person's edit of a native item; a field left out stays as it is.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EditWorkItemArgs {
+    pub item_id: i64,
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `""` clears.
+    #[serde(default)]
+    pub notes: Option<String>,
+    /// `[]` clears.
+    #[serde(default)]
+    pub assignees: Option<Vec<String>>,
+}
+
+#[tauri::command]
+pub async fn edit_work_item(
+    args: EditWorkItemArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::edit_work_item(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_status(
+    args: SetWorkStatusArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<WorkItemRow, IpcError> {
+    routed::set_work_status(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -615,6 +660,55 @@ pub(crate) mod routed {
             None => {
                 work::local::create_task(&args, store, &fleet_core::service::orgs::OrgScope::All)
             }
+        }
+    }
+
+    /// `work_link { set_status }`: a tracker item is refused by the
+    /// service (its status is its tracker's), naming the ticket.
+    pub async fn set_work_status(
+        backend: &FleetBackend,
+        args: SetWorkStatusArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "set_status".into(),
+            item_id: Some(args.item_id),
+            status: Some(args.status),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_status", &args).await,
+            None => work::status::set_status(
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+                args.item_id.unwrap_or_default(),
+                args.status.as_deref().unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// `work_link { edit }`: a tracker item is refused by the service (its
+    /// text is its tracker's), naming the ticket.
+    pub async fn edit_work_item(
+        backend: &FleetBackend,
+        args: EditWorkItemArgs,
+        store: &Mutex<Store>,
+    ) -> Result<WorkItemRow, IpcError> {
+        let args = WorkLinkArgs {
+            action: "edit".into(),
+            item_id: Some(args.item_id),
+            title: args.title,
+            notes: args.notes,
+            assignees: args.assignees,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("edit_work_item", &args).await,
+            None => work::local::edit_local_item(
+                &args,
+                store,
+                &fleet_core::service::orgs::OrgScope::All,
+            ),
         }
     }
 

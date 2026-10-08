@@ -1402,17 +1402,68 @@ where
             .or_else(|| crate::service::sessions::hub_personal_owner(store)),
     };
     let row = spawn(args).await?;
-    match link_started(store, plan, brief, view, &row) {
-        Ok((linked, queued)) => Ok(StartOutcome {
+    let outcome = match link_started(store, plan, brief, view, &row) {
+        Ok((linked, queued)) => StartOutcome {
             row: linked.unwrap_or(row),
             queued,
             warning: None,
-        }),
-        Err(e) => Ok(StartOutcome {
+        },
+        Err(e) => StartOutcome {
             row,
             queued: false,
             warning: Some(e),
-        }),
+        },
+    };
+    record_start_steps(store, plan, &outcome.row, outcome.queued);
+    Ok(outcome)
+}
+
+/// The timeline kind for a session a start has just made (task → session
+/// P-5). Its detail is a [`StartSpawned`]: what `abandon_start` (P-6)
+/// reads to know the checkout is the start's own.
+pub const START_SPAWNED: &str = "start_spawned";
+/// The start's checkout is in place (P-5); its detail is the branch.
+pub const WORKTREE_READY: &str = "worktree_ready";
+
+/// The detail of a [`START_SPAWNED`] event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartSpawned {
+    pub key: String,
+    /// The session's checkout, when it has one.
+    #[serde(default)]
+    pub worktree_id: Option<i64>,
+    /// Whether this start created that checkout (and its branch), rather
+    /// than reusing one.
+    #[serde(default)]
+    pub new_worktree: bool,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Whether a brief was queued, so the start prompt will be typed and
+    /// `repl_ready` / `handover_started` will follow; without one the
+    /// start's progress ends here.
+    #[serde(default)]
+    pub brief: bool,
+}
+
+/// Write a fresh start's first progress steps on its timeline: the session
+/// exists (`start_spawned`) in its checkout (`worktree_ready`). Best-effort,
+/// like every timeline write: a start never fails over its progress strip.
+fn record_start_steps(store: &Mutex<Store>, plan: &StartPlan, row: &SessionRow, brief: bool) {
+    let new_worktree = plan.worktree_id.is_none() && row.worktree_id.is_some();
+    let detail = StartSpawned {
+        key: plan.key.clone(),
+        worktree_id: row.worktree_id,
+        new_worktree,
+        branch: row.worktree_id.map(|_| plan.branch.clone()),
+        brief,
+    };
+    let Ok(s) = store.lock() else {
+        return;
+    };
+    let json = serde_json::to_string(&detail).unwrap_or_default();
+    let _ = s.insert_session_event(row.id, START_SPAWNED, Some(&json));
+    if row.worktree_id.is_some() {
+        let _ = s.insert_session_event(row.id, WORKTREE_READY, Some(&plan.branch));
     }
 }
 

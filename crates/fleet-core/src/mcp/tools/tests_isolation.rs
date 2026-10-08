@@ -1175,6 +1175,39 @@ async fn run_matrix(isolate: bool) {
             .unwrap();
         assert!(ev.is_some(), "{who:?}: no request recorded");
     };
+    // Cancelling a start (task → session P-6) kills the session, so it is
+    // fenced as a kill. None of these sessions was made by a start, so a
+    // caller past the fences meets the service's own refusal (`E_DIRTY`,
+    // `not_a_start`) — never another host's or org's session named.
+    // `Reach::Own`: a host token that does not own the session is refused
+    // even on its own host, as a kill is.
+    let past_fences = |who: Who, a: &Answer| {
+        is_code(who, a, "E_DIRTY", "cancel a session no start made");
+        assert!(format!("{a:?}").contains("not_a_start"), "{who:?}: {a:?}");
+    };
+    m.row(
+        "work_link",
+        "abandon_start",
+        |fx, who| {
+            let sid = match who {
+                Who::HostNone => fx.s_n,
+                _ => fx.s_a,
+            };
+            json!({ "action": "abandon_start", "session_id": sid })
+        },
+        move |_fx, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB => is_code(who, a, "E_FORBIDDEN", "another host's session"),
+                Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's session"),
+                Who::HostA | Who::HostNone => is_code(who, a, "E_FORBIDDEN", "not its own"),
+                _ => past_fences(who, a),
+            }
+        },
+    )
+    .await;
     m.row(
         "work_link",
         "handover",
@@ -2547,6 +2580,53 @@ async fn run_matrix(isolate: bool) {
         "work_link",
         "set_status",
         |fx, _| json!({ "action": "set_status", "item_id": fx.item_b, "status": "done" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    is_code(who, a, "E_NOTFOUND", "another org's ticket")
+                }
+                _ => is_code(who, a, "E_INVALID", "a ticket"),
+            }
+        },
+    )
+    .await;
+    // Task editing: `set_status`'s fences — host A's own local item edited
+    // by whoever may see it, another host's answering as unknown, a
+    // ticket refused for who sees it.
+    let unknown_item_edit = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "edit", "item_id": 999_999, "notes": "n" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "edit",
+        move |_, _| json!({ "action": "edit", "item_id": local_a, "notes": "edited notes" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_edit, &local_a.to_string(), "999999")
+                }
+                _ => assert!(
+                    text(a).contains("\"notes\":\"edited notes\""),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "edit",
+        |fx, _| json!({ "action": "edit", "item_id": fx.item_b, "title": "Hijack" }),
         |_, who, a| {
             if readonly_refused(who, a) {
                 return;

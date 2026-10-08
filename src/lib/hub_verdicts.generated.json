@@ -50,6 +50,7 @@
     "work_retention_sweep"
   ],
   "routed": [
+    "abandon_start",
     "accept_work_proposal",
     "accept_work_proposals",
     "ack_work_link",
@@ -129,6 +130,7 @@
     "discover_lost_sessions",
     "dismiss_ghost_session",
     "dismiss_reopened",
+    "edit_work_item",
     "ensure_operator",
     "get_fleet_settings",
     "get_form",
@@ -229,6 +231,7 @@
     "set_work_done_when",
     "set_work_hold",
     "set_work_project_trust",
+    "set_work_status",
     "setting_history",
     "setting_proposals",
     "spawn_review",

@@ -1,6 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { task } from './work_view_fixture';
-import { DONE_WINDOW_SECS, displayTitle, groupTasksByStatus } from './task_list';
+import { link, task } from './work_view_fixture';
+import {
+  DONE_WINDOW_SECS,
+  boardColumnOf,
+  boardLiveSession,
+  boardMoveRefusal,
+  displayTitle,
+  groupTasksByStatus,
+  groupTasksForBoard,
+} from './task_list';
 
 const NOW = 1_790_700_000;
 
@@ -50,5 +58,60 @@ describe('displayTitle', () => {
     expect(displayTitle(task({ title: 'Login', key: 'ABC-1' }))).toBe('Login');
     expect(displayTitle(task({ title: '', key: 'ABC-1' }))).toBe('ABC-1');
     expect(displayTitle(task({ title: '', key: null, task_id: 'ref:x' }))).toBe('ref:x');
+  });
+});
+
+describe('the board', () => {
+  const idle = { active: 0, ended: 0, suggested: 0 };
+
+  it('places a card by its status, not its sessions; only a bare key follows its sessions', () => {
+    // A tracker ticket in To do with a live session stays in To do (E11).
+    expect(boardColumnOf(task({ status_category: 'todo', counts: { active: 1, ended: 0, suggested: 0 } }))).toBe('todo');
+    expect(boardColumnOf(task({ status_category: 'in_progress', counts: idle }))).toBe('doing');
+    expect(boardColumnOf(task({ status_category: 'done' }))).toBe('done');
+    expect(boardColumnOf(task({ kind: 'ref', status_category: null, counts: { active: 1, ended: 0, suggested: 0 } }))).toBe('doing');
+    expect(boardColumnOf(task({ kind: 'ref', status_category: null, counts: idle }))).toBe('todo');
+  });
+
+  it('hides old Done cards but keeps the ones moved here, and honours a pending move', () => {
+    const old = NOW - DONE_WINDOW_SECS - 1;
+    const cols = groupTasksForBoard(
+      [
+        task({ task_id: 'item:1', status_category: 'done', last_activity_at: old }),
+        task({ task_id: 'item:2', status_category: 'todo', last_activity_at: old }),
+        task({ task_id: 'item:3', status_category: 'done', last_activity_at: old }),
+        task({ task_id: 'item:4', status_category: 'todo', last_activity_at: NOW }),
+        task({ task_id: 'item:5', parent_task_id: 'item:4', status_category: 'done' }),
+      ],
+      NOW,
+      new Map([['item:2', 'done']]),
+      new Set(['item:2', 'item:3']),
+    );
+    expect(cols.done.map((n) => n.task.task_id)).toEqual(['item:2', 'item:3']);
+    expect(cols.doneHidden).toBe(1);
+    expect(cols.todo.map((n) => n.task.task_id)).toEqual(['item:4']);
+    expect(cols.todo[0].children.map((c) => c.task_id)).toEqual(['item:5']);
+  });
+
+  it('only a native item moves; a ticket names its tracker, a key says why', () => {
+    expect(boardMoveRefusal(task({ kind: 'local', item_id: 3 }))).toBeNull();
+    expect(boardMoveRefusal(task({ key: 'ABC-12', tracker_name: 'Jira (acme)' }))).toBe(
+      "ABC-12's status belongs to Jira (acme). Change it there.",
+    );
+    expect(boardMoveRefusal(task({ kind: 'ref', item_id: null, key: 'LOC-1' }))).toContain('bare key');
+  });
+
+  it('shows the primary live session and its host, never a suggestion or a past one', () => {
+    expect(
+      boardLiveSession(
+        task({
+          sessions: [
+            link({ primary: false, session_id: 8, name: 'second', host: 'b' }),
+            link({ primary: true, session_id: 7, name: 'first', host: 'a' }),
+          ],
+        }),
+      ),
+    ).toEqual({ name: 'first', host: 'a' });
+    expect(boardLiveSession(task({ sessions: [link({ state: 'suggested' }), link({ state: 'ended', session_id: null })] }))).toBeNull();
   });
 });

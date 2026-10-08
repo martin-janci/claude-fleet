@@ -1,0 +1,177 @@
+// The task board (sprints design 2026-09-28 §6c): one `work_tree` read with
+// the Work view's filters (archived on, status off), columns by status, a
+// native card moved by drag or ← →, a tracker card refused on the card.
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { tick } from 'svelte';
+import { get } from 'svelte/store';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+import { invoke } from '@tauri-apps/api/core';
+import WorkBoard from './WorkBoard.svelte';
+import { link, task } from './work_view_fixture';
+import { selectedTaskId, sidebarView, workViewFilters, type WorkTreePage } from './work_view';
+
+const NOW = Math.floor(Date.now() / 1000);
+const page = (): WorkTreePage => ({
+  tasks: [
+    task({
+      task_id: 'item:1',
+      item_id: 1,
+      key: 'TASK-1',
+      title: 'Write notes',
+      kind: 'local',
+      origin: 'manual',
+      status_category: 'todo',
+      status_name: null,
+      counts: { active: 0, ended: 0, suggested: 0 },
+      sessions: [],
+      last_activity_at: NOW,
+    }),
+    task({
+      task_id: 'item:12',
+      item_id: 12,
+      key: 'ABC-12',
+      title: 'Login fails',
+      status_category: 'in_progress',
+      sessions: [link({ name: 'abc-12 login', host: 'mefistos' })],
+      last_activity_at: NOW,
+    }),
+  ],
+  groups: [],
+  orgs: [],
+  trackers: [],
+  total: 2,
+  next_cursor: null,
+});
+const flush = async () => {
+  for (let i = 0; i < 6; i++) {
+    await Promise.resolve();
+    await tick();
+  }
+};
+const calls = (cmd: string) => (invoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === cmd);
+const column = (c: string) => screen.getByTestId(`work-board-column-${c}`);
+const card = (title: string) =>
+  screen.getAllByTestId('work-board-card').find((el) => el.textContent?.includes(title)) as HTMLElement;
+
+let setStatus: (args: { item_id: number; status: string }) => unknown;
+
+beforeEach(() => {
+  workViewFilters.set({ tracker: 1, status: 'done' });
+  setStatus = (a) => ({ id: a.item_id, source: 'local', key: 'TASK-1', title: 'Write notes', status_category: a.status });
+  (invoke as ReturnType<typeof vi.fn>).mockReset();
+  (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, payload?: { args: never }) => {
+    if (cmd === 'work_tree') return page();
+    if (cmd === 'set_work_status') return setStatus(payload!.args);
+    return null;
+  });
+});
+
+describe('WorkBoard', () => {
+  it('reads with the filters, archived on and the status filter off', async () => {
+    render(WorkBoard);
+    await flush();
+    const f = (calls('work_tree')[0][1] as { args: { filters: Record<string, unknown> } }).args.filters;
+    expect(f.tracker).toBe(1);
+    expect(f.archived).toBe(true);
+    expect(f.status).toBeUndefined();
+  });
+
+  it('puts each card in its status column and shows the live session and host', async () => {
+    render(WorkBoard);
+    await flush();
+    expect(column('todo').textContent).toContain('Write notes');
+    expect(column('doing').textContent).toContain('Login fails');
+    expect(column('doing').querySelector('[data-testid="work-board-live"]')?.textContent).toContain(
+      'abc-12 login · mefistos',
+    );
+  });
+
+  it('dragging a native card to Doing sets its status and moves it at once', async () => {
+    const elementFromPoint = vi.fn();
+    Object.defineProperty(document, 'elementFromPoint', { value: elementFromPoint, configurable: true });
+    render(WorkBoard);
+    await flush();
+    elementFromPoint.mockReturnValue(column('doing'));
+    const c = card('Write notes');
+    await fireEvent.pointerDown(c, { button: 0, clientX: 10, clientY: 10 });
+    await fireEvent.pointerMove(window, { clientX: 300, clientY: 20 });
+    await fireEvent.pointerUp(window, { clientX: 300, clientY: 20 });
+    await flush();
+    expect(calls('set_work_status')[0][1]).toEqual({ args: { item_id: 1, status: 'in_progress' } });
+    expect(column('doing').textContent).toContain('Write notes');
+    // The click that ends a drag does not open the task.
+    selectedTaskId.set(null);
+    await fireEvent.click(c);
+    expect(get(selectedTaskId)).toBeNull();
+  });
+
+  it('a tracker card is refused on the card, and nothing is sent', async () => {
+    render(WorkBoard);
+    await flush();
+    const c = card('Login fails');
+    await fireEvent.keyDown(c, { key: 'ArrowRight' });
+    await flush();
+    expect(calls('set_work_status')).toHaveLength(0);
+    expect(screen.getByTestId('work-board-card-error').textContent).toBe(
+      "ABC-12's status belongs to Jira (acme). Change it there.",
+    );
+    expect(column('doing').textContent).toContain('Login fails');
+  });
+
+  it('← → move a focused native card; a failed write puts it back and says why', async () => {
+    setStatus = () => {
+      throw { code: 'E_NOTFOUND', message: 'work item 1 not found' };
+    };
+    render(WorkBoard);
+    await flush();
+    await fireEvent.keyDown(card('Write notes'), { key: 'ArrowRight' });
+    await flush();
+    expect(calls('set_work_status')[0][1]).toEqual({ args: { item_id: 1, status: 'in_progress' } });
+    expect(column('todo').textContent).toContain('Write notes');
+    expect(screen.getByTestId('work-board-card-error').textContent).toContain('not found');
+  });
+
+  it('a click opens the task in the Work view', async () => {
+    sidebarView.set('sessions');
+    render(WorkBoard);
+    await flush();
+    await fireEvent.click(card('Write notes'));
+    expect(get(selectedTaskId)).toBe('item:1');
+    expect(get(sidebarView)).toBe('work');
+  });
+
+  it('closes from its button', async () => {
+    const onclose = vi.fn();
+    render(WorkBoard, { onclose });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-board-close'));
+    expect(onclose).toHaveBeenCalledOnce();
+  });
+});
+
+describe('WorkBoard editing', () => {
+  it("opens the edit dialog from a native card's ✎ or E, and offers none on a ticket", async () => {
+    render(WorkBoard, { props: { debounceMs: 0 } });
+    await flush();
+    const edits = screen.getAllByTestId('work-board-card-edit');
+    expect(edits).toHaveLength(1);
+    expect(edits[0].getAttribute('aria-label')).toBe('Edit Write notes');
+    await fireEvent.click(edits[0]);
+    await flush();
+    expect(screen.getByTestId('edit-task-dialog')).toBeTruthy();
+    expect(calls('work_task')).toEqual([['work_task', { args: { task_id: 'item:1' } }]]);
+  });
+
+  it('E on a focused tracker card opens nothing', async () => {
+    render(WorkBoard, { props: { debounceMs: 0 } });
+    await flush();
+    await fireEvent.keyDown(card('Login fails'), { key: 'e' });
+    await flush();
+    expect(screen.queryByTestId('edit-task-dialog')).toBeNull();
+    await fireEvent.keyDown(card('Write notes'), { key: 'e' });
+    await flush();
+    expect(screen.getByTestId('edit-task-dialog')).toBeTruthy();
+  });
+});

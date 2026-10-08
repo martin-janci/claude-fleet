@@ -99,13 +99,24 @@ const SETTLE: u32 = 2;
 pub struct SeedEvents {
     pub waiting: &'static str,
     pub started: &'static str,
+    /// Written once, when the REPL has settled and the prompt is about to
+    /// be typed; `None` writes nothing.
+    pub ready: Option<&'static str>,
 }
 
 /// The work graph's start prompt (`work::resume`, `trackers::tickets`).
+/// `repl_ready` and `handover_started` are two of the start's progress
+/// steps (task → session P-5): the desktop's progress strip reads them, and
+/// `handover_started` is the spec's `brief_sent` — the hook took the prompt
+/// that delivers the brief.
 pub const HANDOVER: SeedEvents = SeedEvents {
     waiting: "handover_waiting",
     started: "handover_started",
+    ready: Some(REPL_READY),
 };
+
+/// The timeline kind for a start whose REPL is up (task → session P-5).
+pub const REPL_READY: &str = "repl_ready";
 
 /// How [`wait_for_repl`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +145,8 @@ pub(crate) trait SeedPane: Send + Sync {
     fn ack_state(&self) -> Option<PromptAckState>;
     /// A `waiting` (`started == false`) or `started` outcome.
     fn event(&self, started: bool, detail: Option<&str>);
+    /// The REPL has settled and the prompt is about to be typed.
+    fn ready(&self) {}
 }
 
 /// The production [`SeedPane`]: the session's tmux pane and its row.
@@ -222,6 +235,14 @@ impl SeedPane for LivePane<'_> {
             let _ = s.insert_session_event(self.session_id, kind, detail);
         }
     }
+    fn ready(&self) {
+        let Some(kind) = self.events.and_then(|e| e.ready) else {
+            return;
+        };
+        if let Ok(s) = self.store.lock() {
+            let _ = s.insert_session_event(self.session_id, kind, None);
+        }
+    }
 }
 
 /// Seed `row` with `prompt` in the background ([`BACKGROUND`]), the
@@ -282,6 +303,7 @@ pub(crate) async fn seed(pane: &dyn SeedPane, prompt: &str, t: &SeedTimings) -> 
     if await_repl(pane, t).await != ReplWait::Ready {
         return false;
     }
+    pane.ready();
     let before = pane.ack_state();
     if let Err(e) = pane.type_prompt(prompt).await {
         pane.event(false, Some(&format!("send failed: {}", e.code)));
@@ -496,6 +518,8 @@ mod tests {
         captures_at_type: Mutex<Option<usize>>,
         seq: Mutex<i64>,
         events: Mutex<Vec<String>>,
+        /// The number of sends made when each `ready` was reported.
+        readies: Mutex<Vec<usize>>,
     }
 
     impl Scripted {
@@ -510,6 +534,7 @@ mod tests {
                 captures_at_type: Mutex::new(None),
                 seq: Mutex::new(0),
                 events: Mutex::new(Vec::new()),
+                readies: Mutex::new(Vec::new()),
             }
         }
         fn send(&self, what: &'static str) {
@@ -573,6 +598,25 @@ mod tests {
             };
             self.events.lock().unwrap().push(e);
         }
+        fn ready(&self) {
+            let sent = self.sends.lock().unwrap().len();
+            self.readies.lock().unwrap().push(sent);
+        }
+    }
+
+    /// Task → session P-5: the start's `repl_ready` step is reported once,
+    /// after the trust dialog and before the prompt is typed; a REPL that
+    /// never comes up reports none.
+    #[tokio::test(start_paused = true)]
+    async fn the_repl_is_reported_ready_once_before_the_prompt_is_typed() {
+        let pane = Scripted::new(&["", TRUST, READY], &[READY], &[0]);
+        seed(&pane, PROMPT, &BACKGROUND).await;
+        assert_eq!(*pane.readies.lock().unwrap(), [0]);
+
+        let stuck = Scripted::new(&[TRUST], &[READY], &[0]);
+        seed(&stuck, PROMPT, &FOREGROUND).await;
+        assert!(stuck.readies.lock().unwrap().is_empty());
+        assert_eq!(HANDOVER.ready, Some(REPL_READY));
     }
 
     /// The trust dialog holds the prompt back, never drops it: once the
