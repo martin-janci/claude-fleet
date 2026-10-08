@@ -1961,6 +1961,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
+      "key": "decide.jev.control_route",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: Control routing",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3321,6 +3361,11 @@
             {
               "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
               "key": "decide.jev.duplicate",
+              "type": "field"
+            },
+            {
+              "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead.",
+              "key": "decide.jev.control_route",
               "type": "field"
             },
             {

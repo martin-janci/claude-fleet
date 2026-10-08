@@ -1029,6 +1029,21 @@ pub struct ControlHandoffsParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlRouteParams {
+    /// propose | follow
+    pub action: String,
+    /// propose: the message just sent in Control.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// follow: the run the receipt came from.
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    /// follow: the option kept or picked (m<id>, s<id>, control).
+    #[serde(default)]
+    pub chosen: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct AnswerMcpConfirmParams {
     /// The confirm_nonce the waiting call was handed.
     pub nonce: String,

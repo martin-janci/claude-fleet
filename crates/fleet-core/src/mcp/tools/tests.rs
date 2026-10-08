@@ -7876,6 +7876,42 @@ async fn a_paired_device_lists_and_answers_the_operators_waiting_start() {
     assert!(bus.names().is_empty());
 }
 
+/// Redesign step 9.9: `control_route` answers `none` while the feature is
+/// off, refuses the operator, and checks its action.
+#[tokio::test]
+async fn control_route_is_the_persons_and_quiet_by_default() {
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let phone = client_caller("phone", TokenMode::Full);
+    let p = |action: &str| ControlRouteParams {
+        action: action.into(),
+        text: Some("how is the federation handshake doing".into()),
+        run_id: None,
+        chosen: None,
+    };
+    let r = t
+        .control_route(Extension(phone.clone()), Parameters(p("propose")))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&r)["outcome"], "none");
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let e = t
+        .control_route(Extension(op), Parameters(p("propose")))
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    for bad in ["follow", "route"] {
+        let e = t
+            .control_route(Extension(phone.clone()), Parameters(p(bad)))
+            .await
+            .unwrap_err();
+        assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+    }
+}
+
 #[tokio::test]
 async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
     let (s, pid, on_b) = two_host_store();

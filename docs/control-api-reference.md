@@ -93,6 +93,12 @@ What the agent handed on, newest first: prompts and tasks sent to sessions, new 
 
 Parameters: `limit`
 
+### `control_route`
+
+Where a message just sent in Control goes (propose {text}), or record the person's pick (follow {run_id, chosen}).
+
+Parameters: `action`, `chosen`, `run_id`, `text`
+
 ### `debug_devices`
 
 Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it.
@@ -1118,6 +1124,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
+- `commands::operator::control_route_propose`
+- `commands::operator::control_route_follow`
 - `commands::hub::hub_status`
 - `commands::hub::hub_pair`
 - `commands::hub::hub_disconnect`

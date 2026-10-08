@@ -2533,6 +2533,35 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "control_route_propose",
+            "control_route",
+            json!({ "action": "propose", "text": "how is the federation handshake doing" }),
+            r#"{"outcome":"none","targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_route_propose(
+                    b,
+                    s,
+                    "how is the federation handshake doing".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "control_route_follow",
+            "control_route",
+            json!({ "action": "follow", "run_id": 7, "chosen": "m3" }),
+            "true",
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_route_follow(
+                    b,
+                    s,
+                    7,
+                    "m3".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "mcp_confirm",
             "answer_mcp_confirm",
             json!({ "nonce": "n", "approved": true }),

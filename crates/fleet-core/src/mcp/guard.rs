@@ -447,6 +447,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Redesign step 9.9 (Jev K2): the owner's device asks where a message
+    // sent in Control goes and records the pick. Not the master's budget;
+    // a run is recorded, so not readonly.
+    ToolPolicy {
+        name: "control_route",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "answer_mcp_confirm",
         access: Access::PersonDevice,
