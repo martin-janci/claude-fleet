@@ -345,6 +345,10 @@ export const ROUTED_ACTIONS = [
   'restart_session',
   'rewind_conversation',
   'spawn_review',
+  // Send prompt's "when idle" (step 5.10): queue, list, take back.
+  'queue_prompt',
+  'queued_prompts',
+  'cancel_queued_prompt',
   'recreate_session',
   // `restore_host_sessions` batches `recreate_session` over a host's lost
   // rows and is `routed` in `verdicts.rs` like it — it was missing here, so

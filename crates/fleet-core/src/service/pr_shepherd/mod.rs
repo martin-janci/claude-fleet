@@ -4,7 +4,7 @@
 //! `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`.
 //!
 //! **Nothing happens without a person's rule.** A project with no row in
-//! `pr_shepherd_rules` (migration 133) is never looked at, and only a person
+//! `pr_shepherd_rules` (migration 134) is never looked at, and only a person
 //! writes that row (`fleet-hub shepherd grant`). The rule's level says how
 //! far the shepherd goes:
 //!

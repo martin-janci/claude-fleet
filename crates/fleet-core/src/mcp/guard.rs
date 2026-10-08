@@ -717,6 +717,22 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Typed later, when the session is idle: a pane write like send_prompt.
+    ToolPolicy {
+        name: "queue_prompt",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Lists a session's waiting prompts, or takes one back (`cancel`).
+    ToolPolicy {
+        name: "queued_prompts",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "broadcast_prompt",
         access: Access::Client,

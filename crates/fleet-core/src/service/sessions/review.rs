@@ -69,12 +69,17 @@ pub async fn spawn_review(
     //    A review runs Claude Code — same pane command as any "work" session.
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
-    let claude_id = uuid::Uuid::new_v4().to_string();
+    let agent = crate::agent_adapter::claude();
+    let claude_id = agent.mint_conversation_id();
     let tmux = exec_for(&source.host_alias, ssh);
     tmux.new_session(
         &review_name,
         std::path::Path::new(&cwd),
-        &crate::tmux::pane_command_for(Some(&claude_id), &review_name),
+        &agent.launch_command(
+            Some(&claude_id),
+            &review_name,
+            &crate::tmux::ClaudeLaunch::default(),
+        ),
     )
     .await?;
 

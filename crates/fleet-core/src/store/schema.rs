@@ -1544,10 +1544,17 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/132_peer_link_traffic.sql"),
         already_applied: Some(peer_links_has_msgs_total),
     },
+    // Orbit Fleet 5.10, Send prompt: `deferred_prompts`, prompts typed in
+    // once a busy session is idle. New objects only, `IF NOT EXISTS`, safe
+    // to re-run.
+    Migration::plain(
+        133,
+        include_str!("../../migrations/133_deferred_prompts.sql"),
+    ),
     // PR shepherd: a person's standing rule per project and one row per
     // problem the shepherd saw on a session's PR (two CREATE TABLE IF NOT
     // EXISTS, idempotent as written).
-    Migration::plain(133, include_str!("../../migrations/133_pr_shepherd.sql")),
+    Migration::plain(134, include_str!("../../migrations/134_pr_shepherd.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -16,7 +16,7 @@ import { pauseAllMissions } from './missions';
 import { sessionView } from './prefs';
 import type { SessionView } from './session_view';
 import { theme, cycleTheme, type Theme } from './theme';
-import { todayOpen } from './today';
+import { openToday } from './control';
 import { toggleSidebarView } from './work_view';
 import { pendingInputFor, type AnswerView } from './pending_input';
 import { sendAnswer } from './answer_send';
@@ -215,7 +215,7 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       requestHostsView();
       return;
     case 'app.today':
-      todayOpen.set(true);
+      openToday();
       return;
     case 'app.work-view':
       toggleSidebarView();
