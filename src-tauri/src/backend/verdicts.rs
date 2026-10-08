@@ -1052,6 +1052,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "check_account_headroom",
+        Verdict::LocalOnly {
+            instead: "this app does not poll account usage while a hub owns the fleet, so \
+                      it cannot tell which account has headroom; start the session as usual",
+        },
+    ),
+    (
         "refresh_account_usage",
         Verdict::LocalOnly {
             instead: "it reads the account's usage over this machine's SSH connection to the \
