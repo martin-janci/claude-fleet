@@ -52,6 +52,7 @@
   import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
+  import ShortcutSheet from './lib/ShortcutSheet.svelte';
   import NewSessionDialog from './lib/NewSessionDialog.svelte';
   import { newSessionRequest, clearNewSessionRequest } from './lib/new_session_request';
   import { push, pushError } from './lib/toasts';
@@ -920,6 +921,7 @@
      here. Since redesign 1.9 this is the only mount: a project row's `+` and
      Add project publish the same request. -->
 <QuickSwitcher />
+<ShortcutSheet />
 {#if $newSessionRequest}
   <NewSessionDialog
     project={$newSessionRequest.project}

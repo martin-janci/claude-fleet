@@ -12,6 +12,7 @@
 // exists (or a single-scope fleet) reads as "all", never as a filter nobody
 // can see.
 import type { Descriptor } from './pages/pages';
+import type { AdminNeed } from './pages/resources';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import { readPref, writePref } from './prefs';
@@ -76,6 +77,10 @@ export interface OrgDetail extends OrgRow {
   budget_daily_usd?: number;
   budget_monthly_usd?: number;
   over_budget?: ('daily' | 'monthly')[];
+  /** Redesign 11.1, with the spend: each of the last 14 UTC days, today last. */
+  spend_series?: { day: string; cost_micros: number }[];
+  /** Redesign 11.1, for its admins: what they should look at. */
+  needs_admin?: AdminNeed[];
   /** Phase D: who is in the company, for its people and the hub's owner. */
   members?: { person_id: number; name: string; display_name?: string; role: string }[];
   /** Phase D: the caller's own role in it. */

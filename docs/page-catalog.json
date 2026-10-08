@@ -177,7 +177,12 @@
         {
           "help": "Its live sessions that you can see.",
           "id": "session_count",
-          "label": "Sessions",
+          "label": "Live sessions",
+          "sub": {
+            "field": "needs_you",
+            "text": "need you",
+            "type": "count"
+          },
           "type": "count"
         },
         {
@@ -190,6 +195,10 @@
           "help": "Estimated cost of its sessions today (UTC). Shown when you can see every session.",
           "id": "spent_today_micros",
           "label": "Spent today",
+          "sub": {
+            "field": "budget_daily_usd",
+            "type": "budget"
+          },
           "type": "money"
         },
         {
@@ -202,16 +211,26 @@
           "help": "Estimated cost of its sessions this calendar month (UTC).",
           "id": "spent_month_micros",
           "label": "This month",
+          "sub": {
+            "field": "budget_monthly_usd",
+            "type": "budget"
+          },
           "type": "money"
         },
         {
+          "help": "Estimated cost of its sessions on each of the last 14 days (UTC), today last.",
+          "id": "spend_series",
+          "label": "Last 14 days",
+          "type": "money_series"
+        },
+        {
           "add": [],
-          "help": "The budgets it has reached. Fleet only warns; it never stops a session.",
-          "id": "over_budget",
+          "help": "What its admins should look at: a budget at 80% or past it (Fleet only warns; it never stops a session), a device that may prompt but is not trusted yet (trust it in Settings → Devices), sessions on its hosts nobody has claimed.",
+          "id": "needs_admin",
           "item_label": {
-            "type": "plain"
+            "type": "admin_need"
           },
-          "label": "Over budget",
+          "label": "Needs an admin",
           "type": "items"
         },
         {

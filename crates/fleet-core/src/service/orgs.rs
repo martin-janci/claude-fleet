@@ -989,6 +989,14 @@ pub struct OrgDetail {
     /// `daily` / `monthly`: the budgets it has reached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub over_budget: Vec<crate::service::org_spend::Period>,
+    /// Redesign 11.1, with the spend above: its live spend on each of the
+    /// last 14 UTC days, today last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_series: Option<Vec<crate::service::org_spend::SpendDay>>,
+    /// Redesign 11.1, for whoever administers it: what its admins should
+    /// look at (`service::org_needs`). Absent for anyone else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_admin: Option<Vec<crate::service::org_needs::AdminNeed>>,
     /// Phase D: who is in the company, with their roles — for the fleet's
     /// administrator and for the org's own people. Absent for anyone else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1337,8 +1345,11 @@ fn org_details_locked(
     let owner = s.personal_owner_id()?;
     // An org admin sees their own org's spend (phases A–C, for that org);
     // the fleet's administrator every org's, when they see every session.
+    let now = crate::service::catalog::now_secs();
     let spend = (any_admin && (!admin || crate::service::org_spend::sees_all_spend(s, view)))
-        .then(|| crate::service::org_spend::spend_by_org(s, crate::service::catalog::now_secs()));
+        .then(|| crate::service::org_spend::spend_by_org(s, now));
+    // Read once, and only when an org's admin is told the count.
+    let mut unclaimed: Option<BTreeMap<String, i64>> = None;
     let mut out = Vec::new();
     for o in s.list_orgs()? {
         if !scope.sees_org(Some(o.id)) {
@@ -1350,7 +1361,45 @@ fn org_details_locked(
         let members = (admin || my_role.is_some())
             .then(|| org_member_list(s, o.id))
             .transpose()?;
+        // The devices fenced to it, as its administrators are shown them.
+        let org_clients: Option<Vec<&crate::store::ClientTokenRow>> =
+            clients.as_ref().filter(|_| administers).map(|cs| {
+                cs.iter()
+                    .filter(|c| c.org_id == Some(o.id))
+                    .filter(|c| admin || !(c.person_id.is_some() && c.person_id == owner))
+                    .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
+                    .collect()
+            });
+        let mut needs_admin = administers.then(Vec::new);
+        if let (Some(needs), Some(cs)) = (needs_admin.as_mut(), org_clients.as_ref()) {
+            use crate::service::org_needs::AdminNeed;
+            needs.extend(
+                cs.iter()
+                    .filter(|c| c.trusted_at.is_none() && c.mode == "full")
+                    .map(|c| AdminNeed::UntrustedDevice {
+                        device: c.name.clone(),
+                        paired_at: c.created_at,
+                    }),
+            );
+        }
+        if let Some(needs) = needs_admin.as_mut() {
+            if view.sees_unclaimed_count(Some(o.id)) {
+                let counts = unclaimed
+                    .get_or_insert_with(|| s.unclaimed_counts_by_host().unwrap_or_default());
+                for h in hosts.iter().filter(|h| h.org_id == Some(o.id)) {
+                    let count = counts.get(&h.alias).copied().unwrap_or(0);
+                    if count > 0 {
+                        needs.push(crate::service::org_needs::AdminNeed::UnclaimedSessions {
+                            host: h.alias.clone(),
+                            count: count as usize,
+                        });
+                    }
+                }
+            }
+        }
         let mut d = OrgDetail {
+            needs_admin,
+            spend_series: None,
             members,
             my_role,
             catalogs: catalogs
@@ -1360,11 +1409,8 @@ fn org_details_locked(
                 .collect(),
             session_count,
             needs_you,
-            devices: clients.as_ref().filter(|_| administers).map(|cs| {
+            devices: org_clients.as_ref().map(|cs| {
                 cs.iter()
-                    .filter(|c| c.org_id == Some(o.id))
-                    .filter(|c| admin || !(c.person_id.is_some() && c.person_id == owner))
-                    .filter(|c| crate::store::machine_token_kind(&c.mode).is_none())
                     .map(|c| OrgDevice {
                         name: c.name.clone(),
                         mode: c.mode.clone(),
@@ -1411,6 +1457,16 @@ fn org_details_locked(
                 .into_iter()
                 .map(|(p, ..)| p)
                 .collect();
+            d.spend_series = Some(os::series(s, d.org.id, now));
+            if let Some(needs) = d.needs_admin.as_mut() {
+                let found = crate::service::org_needs::budget_needs(
+                    got,
+                    (daily, monthly),
+                    now.div_euclid(86_400),
+                );
+                // Budgets first: they are the org's own, the rest are things in it.
+                needs.splice(0..0, found);
+            }
         }
         out.push(d);
     }

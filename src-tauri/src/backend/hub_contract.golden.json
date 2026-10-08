@@ -12,11 +12,21 @@
       "seat_tier",
       "uuid"
     ],
+    "BlameHunk": [
+      "author",
+      "hash",
+      "lines",
+      "start",
+      "summary",
+      "time",
+      "uncommitted"
+    ],
     "Branch": [
       "ahead",
       "behind",
       "isCurrent",
       "isRemote",
+      "merged",
       "name",
       "tipHash",
       "upstream"
@@ -218,6 +228,11 @@
       "work_suggested",
       "worktree_id",
       "worktree_key"
+    ],
+    "FileBlame": [
+      "hunks",
+      "path",
+      "truncated"
     ],
     "FileContent": [
       "binary",

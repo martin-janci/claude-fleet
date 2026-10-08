@@ -3,25 +3,7 @@
   // chord in the shortcut registry (`shortcuts.ts`, step 0.3), Mac beside
   // Windows and Linux, grouped by where it works. Read-only: the registry is
   // the one source, so this list cannot drift from what the keys do.
-  import { SHORTCUTS, bindingsFor, formatBinding, type Scope, type Shortcut } from './shortcuts';
-
-  const SCOPE_TITLE: Record<Scope, string> = {
-    global: 'Everywhere',
-    terminal: 'Terminal',
-    conversation: 'Conversation',
-    switcher: 'Quick switcher',
-    'switcher-new': 'Quick switcher, New session',
-    'new-session-dialog': 'New session',
-    hosts: 'Accounts & hosts',
-    assets: 'Assets',
-    'task-list': 'Task list',
-    'work-review': 'Work review',
-    'link-review': 'Link review',
-    'tidy-review': 'Tidy up',
-    'work-board': 'Work board',
-    'session-row': 'Session row',
-    'question-card': 'Question card',
-  };
+  import { SCOPE_TITLES, SHORTCUTS, bindingsFor, formatBinding, type Scope, type Shortcut } from './shortcuts';
 
   let query = $state('');
 
@@ -55,7 +37,7 @@
     bind:value={query} />
   {#each groups as g (g.scope)}
     <table class="keys" data-testid={`shortcuts-scope-${g.scope}`}>
-      <caption>{SCOPE_TITLE[g.scope]}</caption>
+      <caption>{SCOPE_TITLES[g.scope]}</caption>
       <thead>
         <tr><th scope="col">Action</th><th scope="col">Mac</th><th scope="col">Windows · Linux</th></tr>
       </thead>
