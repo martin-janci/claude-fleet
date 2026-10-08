@@ -298,10 +298,6 @@ const FRAMES = ['Modal', 'DialogSheet'];
  *  them. `selfGated` names the store a self-gated dialog's local flag follows
  *  (`ShareSheet`'s `id` is `$shareSheetFor`), for the ones whose `{#if}` reads
  *  a local. */
-/** The frames a dialog renders: `Modal`, or `DialogSheet` (step 5.10's one
- *  dialog pattern, itself a `Modal`). */
-const FRAMES = ['Modal', 'DialogSheet'];
-
 export function indexDialogs(
   svelte: Record<string, string>,
   ts: Record<string, string>,
