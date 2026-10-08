@@ -332,8 +332,9 @@
       else inFlight.delete(id);
     }
     // Drop a stale response: either a newer fetch has started, or the
-    // session prop moved on while this one was in flight.
-    if (mine !== seq || session.id !== id) return;
+    // session prop moved on while this one was in flight (or went: the panel
+    // is torn down when the selection empties, its prop reading null).
+    if (mine !== seq || session?.id !== id) return;
     loading = false;
     if (r.ok) {
       // Stamped on success only: a failed read on a quiet session is retried
@@ -371,7 +372,7 @@
     const id = session.id;
     const mine = ++listSeq;
     const r = await listConversations(id);
-    if (mine !== listSeq || session.id !== id) return;
+    if (mine !== listSeq || session?.id !== id) return;
     // A failed (or malformed) read keeps the list we had.
     if (r.ok && Array.isArray(r.value)) conversations = r.value;
   }
@@ -982,7 +983,7 @@
     } finally {
       probing = false;
     }
-    if (session.id !== id || mine !== probeSeq) return;
+    if (session?.id !== id || mine !== probeSeq) return;
     if (!r.ok) {
       // A permanent refusal stops the loop instead of being repeated every
       // 2 s per open panel for as long as the panel is open. A transient one
@@ -1413,7 +1414,7 @@
     const id = session.id;
     const r = await sendPrompt(session.host_alias, session.tmux_name, '');
     sending = false;
-    if (session.id !== id) return;
+    if (session?.id !== id) return;
     if (!r.ok) sendError = r.error.message;
   }
 
