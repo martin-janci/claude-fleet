@@ -2409,8 +2409,9 @@ fn router_sum_serves_every_tool() {
     // claim tools (T12) + the New session picker's `project_picks` /
     // `set_project_pick` + org administration's `org_admin` (phase B) +
     // chat forms' `ask` + debug devices' `debug_devices` + Lost and found's
-    // `adopt_session`.
-    assert_eq!(served, 120);
+    // `adopt_session` + the fleet-agent install job's `install_agent` /
+    // `agent_installs` (Orbit Fleet 4.9).
+    assert_eq!(served, 122);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3939,7 +3940,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// `debug_devices` tool, one entry by `action`, +1,967 bytes).
     /// Measured at 86,158 on 2026-10-08 after Lost and found's adopt (the
     /// `adopt_session` tool, +557 bytes).
-    const BUDGET_BYTES: usize = 86_258;
+    /// Measured at 87,101 on 2026-10-08 after the fleet-agent install job
+    /// (Orbit Fleet 4.9: `install_agent` and `agent_installs`, +943 bytes).
+    const BUDGET_BYTES: usize = 87_201;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

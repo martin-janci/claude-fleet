@@ -986,6 +986,38 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "list_host_setups",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "save_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "discard_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "run_host_setup_check",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
         "hide_host",
         Verdict::LocalOnly {
             instead: "hiding a host is fleet administration, which the hub reserves for its \

@@ -1441,6 +1441,10 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/123_host_probe_facts.sql"),
         already_applied: Some(hosts_has_worktree_at),
     },
+    // Orbit Fleet 4.9: the add-host wizard's saved drafts (`host_setups`)
+    // and the fleet-agent install jobs (`agent_installs`). New tables only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(126, include_str!("../../migrations/126_host_setup.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

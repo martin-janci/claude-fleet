@@ -35,6 +35,7 @@
     type HostRowInfo,
   } from './hosts_view';
   import AddHostPicker from './AddHostPicker.svelte';
+  import AddHostWizard from './AddHostWizard.svelte';
   import HostsList from './HostsList.svelte';
   import HostDetail from './HostDetail.svelte';
   import HostsTable from './HostsTable.svelte';
@@ -562,7 +563,10 @@
   {/if}
 </section>
 
-{#if showAddPicker}
+{#if showAddPicker && newLayout}
+  <!-- Layout: New gets the add-host wizard (4.9); Classic keeps the picker. -->
+  <AddHostWizard onClose={() => (showAddPicker = false)} {onNewSession} />
+{:else if showAddPicker}
   <AddHostPicker onClose={() => (showAddPicker = false)} />
 {/if}
 

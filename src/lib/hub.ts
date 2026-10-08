@@ -154,6 +154,14 @@ const REASONS = {
     'host discovery reads this machine’s SSH config, and a paired client does not administer the fleet anyway',
   check_host:
     'the health checklist reads a host’s settings over this app’s own SSH, and this desktop is a paired client',
+  list_host_setups:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  save_host_setup:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  discard_host_setup:
+    'the add-host wizard adds hosts from this machine’s SSH config, and a paired client does not administer the fleet',
+  run_host_setup_check:
+    'the add-host wizard checks a host over this app’s own SSH, and a paired client does not administer the fleet',
   provision_hosts:
     'provisioning rewrites every host’s hook block to report to whichever app ran it, and this desktop is a paired client',
   install_fleet_hook:
