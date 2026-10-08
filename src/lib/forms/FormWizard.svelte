@@ -2,6 +2,7 @@
   // One chat form, step by step. The field markup is FlowView's; what is
   // asked follows the answers (form_model.ts). A secret is cleared once
   // sent and never prefilled.
+  import { untrack } from 'svelte';
   import { stepProblems, visibleSteps } from './form_model';
   import type { FieldProblem, FormField, FormSpec, Values } from './forms';
 
@@ -11,13 +12,17 @@
     disabled = false,
     serverProblems = [],
     onsubmit,
+    onunplaced,
   }: {
     spec: FormSpec;
     busy?: boolean;
     disabled?: boolean;
     serverProblems?: FieldProblem[];
     onsubmit: (values: Values) => void;
+    /** Server problems whose field is on no visible step (nowhere to show them). */
+    onunplaced?: (problems: FieldProblem[]) => void;
   } = $props();
+  const uid = $props.id();
 
   function defaults(s: FormSpec): Values {
     const out: Values = {};
@@ -36,6 +41,20 @@
   const last = $derived(index >= steps.length - 1);
   const ready = $derived(stepProblems(spec, Math.min(index, steps.length - 1), values).length === 0);
   const problemOf = (name: string) => serverProblems.find((p) => p.field === name)?.problem ?? null;
+
+  // A problem on another step is invisible where the user stands: go to the
+  // first visible step that holds one. Only a new problem list moves the
+  // wizard, never the user's own typing (hence untrack).
+  $effect(() => {
+    const probs = serverProblems;
+    if (probs.length === 0) return;
+    untrack(() => {
+      const names = new Set(probs.map((p) => p.field));
+      const at = steps.findIndex((s) => s.fields.some((f) => names.has(f.name)));
+      if (at >= 0) index = at;
+      else onunplaced?.(probs);
+    });
+  });
 
   function set(name: string, v: unknown) {
     values = { ...values, [name]: v };
@@ -96,10 +115,10 @@
             </label>
           {/each}
         {:else}
-          <label for={`form-${f.name}`}>{f.label}{f.required ? ' *' : ''}</label>
+          <label for={`${uid}-${f.name}`}>{f.label}{f.required ? ' *' : ''}</label>
           {#if f.type === 'select'}
             <select
-              id={`form-${f.name}`}
+              id={`${uid}-${f.name}`}
               data-testid={`form-field-${f.name}`}
               value={str(f)}
               disabled={off}
@@ -109,7 +128,7 @@
             </select>
           {:else if f.type === 'textarea'}
             <textarea
-              id={`form-${f.name}`}
+              id={`${uid}-${f.name}`}
               rows="3"
               placeholder={f.placeholder ?? ''}
               data-testid={`form-field-${f.name}`}
@@ -118,7 +137,7 @@
               oninput={(e) => set(f.name, (e.currentTarget as HTMLTextAreaElement).value)}></textarea>
           {:else if f.type === 'number'}
             <input
-              id={`form-${f.name}`}
+              id={`${uid}-${f.name}`}
               type="number"
               min={f.min}
               max={f.max}
@@ -132,7 +151,7 @@
               }} />
           {:else}
             <input
-              id={`form-${f.name}`}
+              id={`${uid}-${f.name}`}
               type={f.type === 'secret' ? 'password' : 'text'}
               autocomplete="off"
               spellcheck="false"

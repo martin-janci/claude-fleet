@@ -79,11 +79,64 @@ describe('FormCard', () => {
     await fireEvent.click(screen.getByTestId('form-next'));
     await fireEvent.input(screen.getByTestId('form-field-pw'), { target: { value: 'hunter2' } });
     await fireEvent.click(screen.getByTestId('form-submit'));
-    expect(await screen.findByTestId('form-problem-pw')).toHaveTextContent('is too weak');
-    // still mounted, and the secret that was sent is gone from the field
-    expect((screen.getByTestId('form-field-pw') as HTMLInputElement).value).toBe('');
-    await fireEvent.click(screen.getByTestId('form-back'));
+    // the wizard goes to the first step with a problem
     expect(await screen.findByTestId('form-problem-env')).toHaveTextContent('must be one of the options');
+    await fireEvent.click(screen.getByTestId('form-next'));
+    // still mounted, the other problem shown, and the secret that was sent is gone
+    expect(screen.getByTestId('form-problem-pw')).toHaveTextContent('is too weak');
+    expect((screen.getByTestId('form-field-pw') as HTMLInputElement).value).toBe('');
+  });
+
+  it('moves to the step a server problem belongs to', async () => {
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_form') return view();
+      throw { code: 'E_INVALID', message: 'env: bad', details: { problems: [{ field: 'env', problem: 'must be one of the options' }] } };
+    });
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    await fireEvent.change(await screen.findByTestId('form-field-env'), { target: { value: 'stg' } });
+    await fireEvent.click(screen.getByTestId('form-field-extra'));
+    await fireEvent.click(screen.getByTestId('form-next'));
+    await fireEvent.input(screen.getByTestId('form-field-pw'), { target: { value: 'hunter2' } });
+    expect(screen.getByTestId('form-step-title')).toHaveTextContent('More');
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    expect(await screen.findByTestId('form-problem-env')).toHaveTextContent('must be one of the options');
+    expect(screen.getByTestId('form-step-title')).toHaveTextContent('Target');
+  });
+
+  it('shows a problem for a field that is not on screen in form-error', async () => {
+    inv.mockImplementation(async (cmd: string) => {
+      if (cmd === 'get_form') return view();
+      throw { code: 'E_INVALID', message: 'x', details: { problems: [{ field: 'ghost', problem: 'is not a field of this form' }] } };
+    });
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    await fireEvent.change(await screen.findByTestId('form-field-env'), { target: { value: 'stg' } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    expect(await screen.findByTestId('form-error')).toHaveTextContent('ghost: is not a field of this form');
+  });
+
+  it('starts clean when it is pointed at another form', async () => {
+    inv.mockImplementation(async (cmd: string, args?: { formId?: string }) => {
+      if (cmd === 'get_form') return view({ form_id: args?.formId ?? 'f_a' });
+      throw { code: 'E_INVALID', message: 'x', details: { problems: [{ field: 'env', problem: 'must be one of the options' }] } };
+    });
+    const { rerender } = render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    await fireEvent.change(await screen.findByTestId('form-field-env'), { target: { value: 'stg' } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    await screen.findByTestId('form-problem-env');
+    await fireEvent.click(screen.getByTestId('form-decline'));
+    await rerender({ formId: 'f_b', sessionName: 'dev', blocked: null });
+    await screen.findByTestId('form-field-env');
+    expect(screen.queryByTestId('form-problem-env')).toBeNull();
+    expect(screen.queryByTestId('form-decline-note')).toBeNull();
+  });
+
+  it('gives each card its own input ids', async () => {
+    inv.mockImplementation(async () => view());
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    render(FormCard, { props: { formId: 'f_b', sessionName: 'dev', blocked: null } });
+    await waitFor(() => expect(screen.getAllByTestId('form-field-env')).toHaveLength(2));
+    const [a, b] = screen.getAllByTestId('form-field-env');
+    expect(a.id).not.toBe(b.id);
   });
 
   it('declines with a reason', async () => {

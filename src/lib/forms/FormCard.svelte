@@ -31,6 +31,10 @@
     const id = formId;
     form = null;
     error = null;
+    problems = [];
+    declining = false;
+    note = '';
+    busy = false;
     void getForm(id).then((r) => {
       if (id !== formId) return;
       if (r.ok) form = r.value;
@@ -101,6 +105,7 @@
           {busy}
           disabled={blocked !== null}
           serverProblems={problems}
+          onunplaced={(ps) => (error = ps.map((p) => `${p.field}: ${p.problem}`).join('; '))}
           onsubmit={submit} />
         {#if blocked === null}
           {#if declining}
