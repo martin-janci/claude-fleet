@@ -131,6 +131,10 @@ pub enum HookKind {
     Http,
     /// Events that accept only command / mcp_tool handlers (SessionStart).
     Command,
+    /// The worker guard (orchestration §7.2): a shell prefilter that posts
+    /// only a command naming a person's step, synchronously, and prints the
+    /// hub's answer ([`guard_command`]).
+    Guard,
 }
 
 /// The hook events fleet installs, with their matcher and installation kind.
@@ -153,6 +157,7 @@ pub const FLEET_HOOK_EVENTS: &[(&str, &str, HookKind)] = &[
     ("SessionStart", "", HookKind::Command),
     ("PreCompact", "", HookKind::Http),
     ("PostCompact", "", HookKind::Http),
+    ("PreToolUse", "Bash", HookKind::Guard),
 ];
 
 /// A token- and URL-free rendering of what `provision_hook` installs:
@@ -165,10 +170,12 @@ pub fn hook_shape() -> String {
         let k = match kind {
             HookKind::Http => "http",
             HookKind::Command => "command",
+            HookKind::Guard => "guard",
         };
         s.push_str(&format!("{event}|{matcher}|{k};"));
     }
     s.push_str(&session_start_command("<hook_url>"));
+    s.push_str(&guard_command("<hook_url>"));
     s
 }
 
@@ -245,6 +252,42 @@ fn command_hook_entry(hook_url: &str, sync: bool) -> serde_json::Value {
         "command": session_start_command(hook_url),
         "async": true,
         "timeout": HOOK_TIMEOUT_SECS
+    })
+}
+
+/// Whole-request cap of the worker guard's post (seconds): the most a
+/// guarded command waits on a hub that is slow. A hub that is down answers
+/// nothing within the 1 s connect, and the command runs.
+pub const GUARD_MAX_SECS: u32 = 3;
+
+/// What a command must mention for the guard to ask the hub at all: the
+/// tools `orchestrate::guard` reads. Everything else costs one `case`, no
+/// network.
+const GUARD_PREFILTER: &str = "*'gh pr '*|*'git '*push*|*'jira '*|*'acli '*|*'asana '*|*'linear '*";
+
+/// The worker guard's `PreToolUse(Bash)` command (orchestration §7.2): read
+/// the hook body, and only when it mentions a tool the guard reads, post it
+/// synchronously and print the hub's answer, which Claude Code reads as the
+/// permission decision. Bounded and `|| true`: a hub that is down or
+/// erroring prints nothing and the command runs (the remote's branch
+/// protection stays the backstop).
+pub fn guard_command(hook_url: &str) -> String {
+    format!(
+        "input=$(cat); case \"$input\" in {GUARD_PREFILTER}) printf '%s' \"$input\" | \
+         curl -sf --connect-timeout {SYNC_START_CONNECT_SECS} -m {GUARD_MAX_SECS} -X POST \
+         -H @\"$HOME/.claude/{HOOK_HEADERS_FILE}\" \
+         -H \"X-Fleet-Pane: ${{TMUX_PANE:-}}\" \
+         -H 'Content-Type: application/json' \
+         --data-binary @- {} || true;; esac",
+        crate::shell::quote(hook_url)
+    )
+}
+
+fn guard_hook_entry(hook_url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "command",
+        "command": guard_command(hook_url),
+        "timeout": GUARD_MAX_SECS + 1
     })
 }
 
@@ -353,6 +396,7 @@ pub fn merge_hook_into_settings_json_with(
         let entry = match kind {
             HookKind::Http => hook_entry(hook_url, token),
             HookKind::Command => command_hook_entry(hook_url, sync_start),
+            HookKind::Guard => guard_hook_entry(hook_url),
         };
         arr.as_array_mut().unwrap().push(serde_json::json!({
             "matcher": matcher,
@@ -799,10 +843,12 @@ mod tests {
             "SessionStart",
             "PreCompact",
             "PostCompact",
+            "PreToolUse",
         ] {
             assert_eq!(v["hooks"][ev].as_array().unwrap().len(), 1, "{ev}");
         }
-        assert_eq!(FLEET_HOOK_EVENTS.len(), 9);
+        assert_eq!(FLEET_HOOK_EVENTS.len(), 10);
+        assert_eq!(v["hooks"]["PreToolUse"][0]["matcher"], "Bash");
         assert_eq!(
             v["hooks"]["SessionEnd"][0]["matcher"],
             "logout|prompt_input_exit|other|clear|resume"
@@ -837,6 +883,73 @@ mod tests {
             merge_hook_into_settings_json(user, "http://127.0.0.1:4180/hook", "t").unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
         assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
+    }
+
+    /// The worker guard's command, run by a real `sh` on a hook body: a
+    /// command that names no guarded tool never reaches curl, and one that
+    /// does, against a hub that is down, prints nothing and lets it run.
+    #[test]
+    #[cfg(unix)]
+    fn the_guard_asks_only_about_a_persons_steps_and_fails_open() {
+        let run = |cmd: &str| {
+            let body = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": { "command": cmd },
+            })
+            .to_string();
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("curl.log");
+            // A `curl` on PATH that records it was called and fails, as a
+            // hub that is down would.
+            std::fs::write(
+                dir.path().join("curl"),
+                format!(
+                    "#!/bin/sh\ncat >/dev/null; echo called >> {}\nexit 7\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.path().join("curl"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            let path = format!(
+                "{}:{}",
+                dir.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            let mut child = crate::proc::std_command("sh")
+                .args(["-c", &guard_command("http://127.0.0.1:9/hook")])
+                .env("PATH", path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(body.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            assert!(
+                out.status.success(),
+                "{cmd}: the hook never fails the command"
+            );
+            assert!(
+                out.stdout.is_empty(),
+                "{cmd}: a hub that is down says nothing"
+            );
+            log.exists()
+        };
+        assert!(!run("cargo test"), "no guarded tool: no network");
+        assert!(!run("git status"));
+        assert!(run("gh pr merge 12"));
+        assert!(run("git push origin main"));
     }
 
     #[test]

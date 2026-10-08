@@ -178,6 +178,46 @@ impl Store {
         Ok(())
     }
 
+    /// Wake every mission whose member `session_id` works on — as a run's
+    /// worker or through a confirmed link (a best-effort caller: its PR's
+    /// checks moved).
+    pub fn wake_session_missions(&self, session_id: i64) -> Result<usize, IpcError> {
+        Ok(wake_session_missions_in_tx(&self.conn, session_id)?)
+    }
+
+    /// Whether `session_id` is a worker of a live mission: a run of one of
+    /// its members, while the mission is active or paused (the worker
+    /// guard's scope, orchestration §7.2).
+    pub fn is_mission_worker(&self, session_id: i64) -> Result<bool, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT 1 FROM tasks t \
+                 JOIN work_items i ON i.id = t.work_item_id \
+                 JOIN orchestration_projects p ON p.id = i.orchestration_project_id \
+                 WHERE t.worker_session_id = ?1 AND p.state IN ('active', 'paused') LIMIT 1",
+                [session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// The branch `session_id` is on, as the PR probe last read it, else
+    /// its worktree's.
+    pub fn session_branch(&self, session_id: i64) -> Result<Option<String>, IpcError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT COALESCE(s.current_branch, w.branch) FROM sessions s \
+                 LEFT JOIN worktrees w ON w.id = s.worktree_id WHERE s.id = ?1",
+                [session_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// The active missions whose wake is due at `now`, or that have none
     /// yet (just activated, or the store was restarted), oldest wake first.
     pub fn missions_due(&self, now: i64) -> Result<Vec<i64>, IpcError> {
@@ -449,3 +489,23 @@ impl Store {
 
 #[cfg(test)]
 mod tests;
+
+/// [`Store::wake_session_missions`] on a caller's connection — reconcile's
+/// transaction, where a session's `ci_status` is seen to move.
+pub(super) fn wake_session_missions_in_tx(
+    conn: &rusqlite::Connection,
+    session_id: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE orchestration_projects SET next_wake_at = ?1 \
+         WHERE state = 'active' AND (next_wake_at IS NULL OR next_wake_at > ?1) \
+           AND id IN ( \
+             SELECT i.orchestration_project_id FROM work_items i \
+             WHERE i.orchestration_project_id IS NOT NULL AND i.id IN ( \
+               SELECT work_item_id FROM tasks WHERE worker_session_id = ?2 \
+               UNION SELECT l.item_id FROM work_links l \
+                 JOIN participants p ON p.id = l.participant_id \
+                 WHERE p.session_id = ?2 AND l.state = 'confirmed' AND l.ended_at IS NULL))",
+        rusqlite::params![now_unix(), session_id],
+    )
+}

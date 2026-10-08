@@ -656,6 +656,14 @@ impl Store {
             self.adopt_tracker_item(tracker_id, id, after.iteration.as_deref(), &meta.versions)?;
             self.emit_work_item(id, session_change)?;
         }
+        // A mission's member moved on the tracker: its loop looks now, not
+        // at its next timer (orchestration O8). Best-effort: the item is
+        // stored either way.
+        if status_change.is_some() {
+            if let Err(e) = self.wake_item_mission(id) {
+                tracing::debug!(item_id = id, error = %e.message, "[work] mission wake failed");
+            }
+        }
         Ok(UpsertOutcome {
             id,
             changed,
