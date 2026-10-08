@@ -121,7 +121,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     const ids = Array.from(getByTestId('rail').querySelectorAll('[data-testid^="rail-"]'), (e) =>
       e.getAttribute('data-testid'),
     );
-    expect(ids).toEqual(['rail-sessions', 'rail-work', 'rail-accounts', 'rail-settings']);
+    expect(ids).toEqual(['rail-inbox', 'rail-sessions', 'rail-work', 'rail-accounts', 'rail-settings']);
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
   });
 
@@ -129,12 +129,13 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     uiLayout.set('new');
     const { container, getByTestId } = render(App);
     const term = terminalSlot(container);
-    await fireEvent.click(getByTestId('tab-hosts'));
-    expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
+    // The New layout's tab bar has no Hosts tab (step 3.5): ⌘I and the rail.
+    requestHostsView();
+    await waitFor(() => expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page'));
     await fireEvent.click(getByTestId('rail-accounts'));
     expect(openOverlays(container)).toEqual(['accounts-overlay']);
     expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
-    expect(getByTestId('tab-session').classList.contains('active')).toBe(false);
+    expect(getByTestId('stab-agent').getAttribute('aria-selected')).toBe('false');
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(get(destination)).toBe('session');
     expect(terminalSlot(container)).toBe(term);
@@ -151,6 +152,27 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.click(getByTestId('rail-sessions'));
     expect(get(sidebarView)).toBe('sessions');
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
+  });
+
+  it('Inbox (step 3.3) shows the Inbox list with its Today tab; Classic reads it as Sessions', async () => {
+    uiLayout.set('new');
+    const { getByTestId, queryByTestId } = render(App);
+    await fireEvent.click(getByTestId('rail-accounts'));
+    await fireEvent.click(getByTestId('rail-inbox'));
+    expect(get(sidebarView)).toBe('inbox');
+    expect(get(destination)).toBe('session');
+    expect(getByTestId('rail-inbox').getAttribute('aria-current')).toBe('page');
+    expect(getByTestId('inbox')).toBeTruthy();
+    expect(getByTestId('inbox-tabs')).toBeTruthy();
+    // The way to everything else.
+    await fireEvent.click(getByTestId('inbox-all-sessions'));
+    expect(get(sidebarView)).toBe('sessions');
+    expect(queryByTestId('inbox')).toBeNull();
+    expect(getByTestId('sidebar-view-sessions').textContent).toContain('All sessions');
+    // Classic has no Inbox: it falls back to the Sessions list.
+    sidebarView.set('inbox');
+    uiLayout.set('classic');
+    await waitFor(() => expect(get(sidebarView)).toBe('sessions'));
   });
 
   it('Settings opens the Settings dialog', async () => {

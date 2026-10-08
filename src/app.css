@@ -133,6 +133,9 @@
   --control-h-lg: 28px;
   --header-h: 44px;
   --rail-w: 68px;
+  /* The New layout's inspector beside the session (step 3.5). */
+  --inspector-min: 280px;
+  --inspector-max: 320px;
   --list-w: 340px;
   --settings-nav-w: 240px;
   --prose-max: 720px;

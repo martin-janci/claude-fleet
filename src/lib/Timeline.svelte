@@ -2,7 +2,6 @@
   // Read-only session event timeline (Q9). Renders the `session_events`
   // rows the backend already records (status changes, prompts, stuck,
   // kills, repairs, …) newest first, with filter chips.
-  import ListLoading from './ListLoading.svelte';
   import { untrack } from 'svelte';
   import {
     sessionHistory,
@@ -16,6 +15,7 @@
     type SessionEvent,
   } from './timeline';
   import { onTimelineEvent } from './live_events';
+  import Skeleton from './states/Skeleton.svelte';
 
   // Matches the backend's SESSION_EVENTS_CAP (store/rows.rs): the pushed-event
   // list is capped the same way the fetched one is.
@@ -124,7 +124,7 @@
   </div>
 
   {#if loading}
-    <ListLoading />
+    <Skeleton />
   {:else if error}
     <p class="err" data-testid="timeline-error">{error}</p>
   {:else if shown.length === 0}

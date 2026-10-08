@@ -11,10 +11,12 @@
 //
 // Classic reads this store with no visible change; the New layout's rail
 // (step 3.2, `AppRail.svelte`) writes the same store. `accounts` (step 4.1)
-// is reachable only from the rail, so only in the New layout.
+// is reachable only from the rail, so only in the New layout. `details`
+// (step 3.5) is the New layout's Details tab: the session's details in the
+// right column, in place of the inspector beside it.
 import { derived, writable, type Readable } from 'svelte/store';
 
-export type Destination = 'session' | 'files' | 'hosts' | 'assets' | 'board' | 'accounts';
+export type Destination = 'session' | 'files' | 'hosts' | 'assets' | 'board' | 'accounts' | 'details';
 
 export const DESTINATIONS: readonly Destination[] = [
   'session',
@@ -23,6 +25,7 @@ export const DESTINATIONS: readonly Destination[] = [
   'assets',
   'board',
   'accounts',
+  'details',
 ];
 
 export const destination = writable<Destination>('session');

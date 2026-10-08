@@ -3,7 +3,6 @@
   // delete the rules that put similar tasks under a group. Enabling a rule
   // (or editing one) goes through the editor's preview; disabling and
   // deleting only take tasks back to where fleet would put them anyway.
-  import ListLoading from './ListLoading.svelte';
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import WorkRuleEditor from './WorkRuleEditor.svelte';
@@ -21,6 +20,7 @@
     type WorkRuleDraft,
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
+  import Skeleton from './states/Skeleton.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -145,7 +145,7 @@
     {#if error}
       <p class="err" role="alert" data-testid="rules-error">{error}</p>
     {:else if !loaded}
-      <ListLoading />
+      <Skeleton />
     {:else if rules.length === 0}
       <p class="muted" data-testid="rules-empty">No rules yet. “Place in group…” on a task offers one for similar tasks.</p>
     {:else}

@@ -1,0 +1,70 @@
+// The Inbox (Orbit Fleet redesign step 3.3): only the sessions that raise
+// the Needs you badge, worst first, and one quiet line counting the rest.
+//
+// "Needs you" is the attention model's answer (step 0.4, `attention.ts`):
+// Action required, Failed and Blocked. The badge, the rail's count, the
+// Inbox and Today's "Needs you" (`service/work/today.rs`) all ask that one
+// table, so they list the same sessions. A lost or ghost row (Paused) and a
+// finished turn (Done) are not in it; the line below the list counts them.
+import { derived } from 'svelte/store';
+import {
+  attentionState,
+  byTriage,
+  countNeedsYou,
+  countsTowardBadge,
+  type AttentionOptions,
+} from './attention';
+import { effectiveHostFilter } from './hosts';
+import { attentionIdleMinutes } from './notify';
+import { effectiveScope, scopeOf } from './orgs';
+import { sessions, showBgAgents, type SessionRow } from './sessions';
+import { sessionVisible } from './sidebar_index';
+
+/** The rows that need you, worst first (`byTriage`). */
+export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
+  return byTriage(
+    rows.filter((s) => countsTowardBadge(attentionState(s, opts))),
+    opts,
+  );
+}
+
+/** Everything the Inbox leaves out, by state. */
+export interface NotWaiting {
+  working: number;
+  idle: number;
+  done: number;
+  paused: number;
+}
+
+export function notWaiting(rows: readonly SessionRow[], opts: AttentionOptions): NotWaiting {
+  const n: NotWaiting = { working: 0, idle: 0, done: 0, paused: 0 };
+  for (const s of rows) {
+    const st = attentionState(s, opts);
+    if (st === 'working') n.working++;
+    else if (st === 'idle') n.idle++;
+    else if (st === 'done') n.done++;
+    else if (st === 'paused') n.paused++;
+  }
+  return n;
+}
+
+/** "6 running · 9 idle · 2 done": the parts that are not zero. */
+export function notWaitingText(n: NotWaiting): string {
+  const parts: string[] = [];
+  if (n.working) parts.push(`${n.working} running`);
+  if (n.idle) parts.push(`${n.idle} idle`);
+  if (n.done) parts.push(`${n.done} done`);
+  if (n.paused) parts.push(`${n.paused} paused`);
+  return parts.join(' · ');
+}
+
+/** The rail's Inbox count: the Needs you pill's number, under the same host,
+ *  background-agent and organisation filters. */
+export const inboxCount = derived(
+  [sessions, effectiveHostFilter, showBgAgents, effectiveScope, scopeOf, attentionIdleMinutes],
+  ([$sessions, $host, $bg, $scope, $of, $idle]) => {
+    const scope = $scope === 'all' ? null : { id: $scope, of: $of };
+    const visible = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope));
+    return countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) });
+  },
+);

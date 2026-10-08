@@ -1184,8 +1184,11 @@ export function groupSessionLinks<T extends Pick<WorkTaskLink, 'state' | 'primar
 // Stores
 
 /** Which tree the sidebar shows. */
-export type SidebarView = 'sessions' | 'work';
-const isSidebarView = (v: unknown): v is SidebarView => v === 'sessions' || v === 'work';
+/** `inbox` is the New layout's Inbox (redesign step 3.3): the Sessions list
+ *  narrowed to what needs you. Classic has no Inbox, and reads it as
+ *  `sessions`. */
+export type SidebarView = 'sessions' | 'work' | 'inbox';
+const isSidebarView = (v: unknown): v is SidebarView => v === 'sessions' || v === 'work' || v === 'inbox';
 export const sidebarView = writable<SidebarView>(readPref('sidebar.view', 'sessions', isSidebarView));
 sidebarView.subscribe((v) => writePref('sidebar.view', v));
 

@@ -2,6 +2,7 @@
   import Inspector from './Inspector.svelte';
   import { PERSONAL, hostProvenance, type ResolutionView } from './assets_workspace';
   import { olderHubWords } from './assets_cards';
+  import Skeleton from './states/Skeleton.svelte';
 
   /** A host in the Inspector (spec, Workspace shell; R18): what it receives,
    *  and for every asset the layer that brought it and the catalog it came
@@ -50,7 +51,7 @@
 <Inspector eyebrow="Host" title={alias} tabs={TABS} active={tab} onchange={(id) => (tab = id)} testid="host-inspector">
   <div class="pad">
     {#if loading}
-      <p class="muted">Loading…</p>
+      <Skeleton />
     {:else if problem}
       <p class="muted" data-testid="host-prov-error">{problem}</p>
     {:else if view}

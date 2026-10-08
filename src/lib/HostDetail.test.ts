@@ -719,3 +719,19 @@ describe('HostDetail Codex assets (F3a)', () => {
     expect(sel.title).toContain('https://hub.example');
   });
 });
+
+describe('an offline host (states kit, step 10.6)', () => {
+  it('says so in its own pane, with Try again running the probe', async () => {
+    const onreprobe = vi.fn();
+    mount('mercury', { host: host('mercury', { reachable: false, last_pinged_at: NOW - 360 }), onreprobe, now: NOW });
+    const off = screen.getByTestId('host-offline-state');
+    expect(off.textContent).toContain('last answered 6 m ago');
+    await fireEvent.click(screen.getByTestId('host-offline-try'));
+    expect(onreprobe).toHaveBeenCalledOnce();
+  });
+
+  it('a reachable host shows no offline state', () => {
+    mount('mercury', { host: host('mercury', { reachable: true }) });
+    expect(screen.queryByTestId('host-offline-state')).toBeNull();
+  });
+});

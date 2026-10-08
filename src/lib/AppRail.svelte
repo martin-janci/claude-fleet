@@ -10,6 +10,7 @@
   import { settingsOpen } from './app_views';
   import { currentRailItem, visibleRailItems, type RailId, type RailItem } from './rail';
   import { shortcutLabel } from './shortcuts';
+  import { inboxCount } from './inbox';
 
   interface Props {
     isMac: boolean;
@@ -66,6 +67,11 @@
   >
     {@render icon(item.id)}
     <span>{item.label}</span>
+    {#if item.id === 'inbox' && $inboxCount > 0}
+      <span class="count count-badge count-badge--hot" data-testid="inbox-rail-count" title="{$inboxCount} need you"
+        >{$inboxCount}</span
+      >
+    {/if}
   </button>
 {/snippet}
 
@@ -94,6 +100,7 @@
     overflow: hidden;
   }
   .item {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -125,6 +132,12 @@
     stroke: currentColor;
     stroke-width: 1.5;
     flex: none;
+  }
+  /* The Inbox's Needs you count (0.7's hot count badge) on the icon's corner. */
+  .count {
+    position: absolute;
+    top: 3px;
+    right: 6px;
   }
   .grow {
     flex: 1 1 auto;

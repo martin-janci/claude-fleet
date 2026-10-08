@@ -7,6 +7,7 @@
   import type { AccountUsageSnapshot } from './account_usage_store';
   import AccountNickname from './AccountNickname.svelte';
   import EmbedSlot from './pages/EmbedSlot.svelte';
+  import EmptyState from './states/EmptyState.svelte';
   import { hubStatus, hubBlock } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import type { HostGroup, HostRowInfo } from './hosts_view';
@@ -153,7 +154,15 @@
         {/each}
       </div>
     {:else}
-      <p class="empty" data-testid="hosts-empty">{filter ? `No host matches “${filter}”.` : (hubSkewEmptyMessage ?? 'No hosts yet.')}</p>
+      {#if filter}
+        <EmptyState
+          kind="none"
+          testid="hosts-empty"
+          title={`No host matches “${filter}”.`}
+          actions={[{ label: 'Clear the filter', onclick: () => (filter = ''), testid: 'hosts-clear-filter' }]} />
+      {:else}
+        <EmptyState kind={hubSkewEmptyMessage ? 'calm' : 'first'} testid="hosts-empty" title={hubSkewEmptyMessage ?? 'No hosts yet.'} />
+      {/if}
     {/each}
   </div>
 </div>
@@ -220,5 +229,4 @@
   .spacer { flex: 1; }
   .attention { font-size: 0.75rem; cursor: help; }
   .counts { color: var(--fg-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .empty { margin: 0.6rem; font-size: 0.8rem; color: var(--fg-muted); }
 </style>
