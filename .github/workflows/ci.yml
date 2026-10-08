@@ -237,6 +237,7 @@ jobs:
         run: |
           git fetch --quiet --depth=1 origin main:refs/remotes/origin/main || true
           bash scripts/check-migration-numbers-test.sh
+          bash scripts/renumber-migrations-test.sh
           scripts/check-migration-numbers.sh
 
   # tools/ag (the agent launcher) against fake claude/codex binaries. macOS

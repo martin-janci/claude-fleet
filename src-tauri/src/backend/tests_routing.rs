@@ -379,7 +379,7 @@ fn routed_read_cases() -> Vec<Case> {
 fn routed_read_cases_but_org_admin() -> Vec<Case> {
     use fleet_core::service::repo::SessionIdArgs;
     use fleet_core::service::repo_read::{
-        RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
+        DiffRange, RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs, RepoRangeDiffArgs,
     };
     use fleet_core::service::worktrees::ListHostWorktreesArgs;
 
@@ -428,6 +428,19 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
         (
+            "list_account_usage",
+            "account_usage",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                block_on(commands::account_usage::routed::list_account_usage(
+                    b, s, &cache,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_projects",
             "list_projects",
             json!({ "summary": false }),
@@ -467,6 +480,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     commands::projects::ListGithubReposArgs {
                         host_alias: "trn".into(),
+                        owner: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_github_repos",
+            "list_github_repos",
+            json!({ "host_alias": "trn", "owner": "papaya-pos" }),
+            r#"[{"name_with_owner":"papaya-pos/receipts","is_private":true}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::projects::routed::list_github_repos(
+                    b,
+                    commands::projects::ListGithubReposArgs {
+                        host_alias: "trn".into(),
+                        owner: Some("papaya-pos".into()),
                     },
                     s,
                     h,
@@ -733,6 +765,16 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     },
                 ))
                 .map(|_| ())
+            }),
+        ),
+        (
+            "mcp_pending_confirms",
+            "mcp_confirms",
+            json!({}),
+            r#"[{"nonce":"n","tool":"kill_session","summary":"","caller":"client:ux-agent","operator":true,"asked_at":1}]"#,
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_pending_confirms(b, &guards)).map(|_| ())
             }),
         ),
         (
@@ -1253,6 +1295,40 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::files::routed::repo_changes(
                     b,
                     SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_branch_diff",
+            "repo_branch_diff",
+            json!({ "session_id": 7 }),
+            r#"{"branch":"feat","upstream":null,"unpushed":[],"unpushedFiles":[],"truncated":false,"base":"origin/main","aheadOfBase":2,"baseFiles":[]}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_branch_diff(
+                    b,
+                    SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_range_diff",
+            "repo_range_diff",
+            json!({ "session_id": 7, "path": "src/lib.rs", "range": "base" }),
+            r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_range_diff(
+                    b,
+                    RepoRangeDiffArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                        range: DiffRange::Base,
+                    },
                     s,
                     h,
                 ))
@@ -2346,6 +2422,22 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     "f_a".into(),
                     Some("later".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "mcp_confirm",
+            "answer_mcp_confirm",
+            json!({ "nonce": "n", "approved": true }),
+            "true",
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_confirm(
+                    b,
+                    &guards,
+                    "n".into(),
+                    true,
                 ))
                 .map(|_| ())
             }),

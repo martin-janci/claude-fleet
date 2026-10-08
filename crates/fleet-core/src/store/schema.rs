@@ -570,6 +570,15 @@ fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 129.
+fn grants_have_profile(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orchestration_grants') WHERE name = 'profile'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn sessions_has_turn_outcome(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'turn_outcome'",
@@ -651,6 +660,16 @@ fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 117.
+/// `already_applied` guard of migration 134.
+fn hosts_has_agents_on_path(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'agents_on_path'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'worktree_at'",
@@ -1550,6 +1569,34 @@ const MIGRATIONS: &[Migration] = &[
     Migration::plain(
         133,
         include_str!("../../migrations/133_deferred_prompts.sql"),
+    ),
+    // Orbit Fleet 12.4: which agent CLIs a host has on its PATH (one ADD
+    // COLUMN, guarded).
+    Migration {
+        version: 134,
+        sql: include_str!("../../migrations/134_host_agents_on_path.sql"),
+        already_applied: Some(hosts_has_agents_on_path),
+    },
+    // Orbit Fleet 4.9: the add-host wizard's saved drafts (`host_setups`)
+    // and the fleet-agent install jobs (`agent_installs`). New tables only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(135, include_str!("../../migrations/135_host_setup.sql")),
+    // PR shepherd: a person's standing rule per project and one row per
+    // problem the shepherd saw on a session's PR (two CREATE TABLE IF NOT
+    // EXISTS, idempotent as written).
+    Migration::plain(136, include_str!("../../migrations/136_pr_shepherd.sql")),
+    // Orbit Fleet 8.7: a mission grant names its login (one ADD COLUMN,
+    // guarded).
+    Migration {
+        version: 137,
+        sql: include_str!("../../migrations/137_grant_profile.sql"),
+        already_applied: Some(grants_have_profile),
+    },
+    // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
+    // new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        138,
+        include_str!("../../migrations/138_usage_daily_person.sql"),
     ),
 ];
 

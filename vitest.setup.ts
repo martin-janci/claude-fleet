@@ -77,6 +77,10 @@ vi.mock('@tauri-apps/api/core', () => ({
     // Plain text, not JSON (the watcher's read-only pane snapshot).
     if (cmd === 'capture_session') return '';
     if (cmd === 'send_prompt') return null;
+    // The fleet agent's status, which Control (redesign step 9.1) reads when
+    // it opens: blocked on the control API being off, which is the state a
+    // fresh install is in and the one that starts nothing.
+    if (cmd === 'operator_status') return { ready: false, session: null, blocked: 'no_mcp' };
     if (cmd === 'spawn_review') return null;
     if (cmd === 'mcp_status' || cmd === 'mcp_configure')
       return {

@@ -196,7 +196,14 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListGithubReposParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("list_github_repos", &format!("host={}", p.host_alias));
+        audit(
+            "list_github_repos",
+            &format!(
+                "host={} owner={}",
+                p.host_alias,
+                p.owner.as_deref().unwrap_or("-")
+            ),
+        );
         // `gh repo list` runs with the host's own GitHub login: a per-host
         // token reads only its own host's, an org-bound client only its
         // org's hosts'.
@@ -205,9 +212,14 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             require_bound_client_sees_host(&s, &caller, &p.host_alias)?;
         }
-        let repos = add_project::list_github_repos_with(&p.host_alias, &self.store, &*self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
+        let repos = add_project::list_github_repos_with(
+            &p.host_alias,
+            p.owner.as_deref(),
+            &self.store,
+            &*self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         ok_json(&repos)
     }
 
@@ -717,6 +729,58 @@ impl FleetTools {
             "the session whose worktree to read",
         )?;
         let v = repo_read::repo_commit_diff(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "What a session's branch carries: the commits no \
+        remote has and the files they change, and the files it changes \
+        against the base branch: {branch, upstream, unpushed, unpushedFiles, \
+        truncated, base, aheadOfBase, baseFiles}.")]
+    pub(super) async fn repo_branch_diff(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<repo::SessionIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_branch_diff",
+            &format!("session_id={}", args.session_id),
+        );
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
+        let v = repo_read::repo_branch_diff(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "One file's diff over a session's unpushed commits \
+        (range `unpushed`) or against the base branch (range `base`): {path, \
+        diff, binary, truncated}.")]
+    pub(super) async fn repo_range_diff(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<repo_read::RepoRangeDiffArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_range_diff",
+            &format!(
+                "session_id={} path={} range={:?}",
+                args.session_id, args.path, args.range
+            ),
+        );
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
+        let v = repo_read::repo_range_diff(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
         ok_json(&v)

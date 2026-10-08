@@ -120,9 +120,9 @@ impl Reason {
 /// counts only the first three. The table is shared with the desktop
 /// through `src/lib/attention_states.json`, which both test suites check.
 ///
-/// Not on the wire yet: hub contract 11 (step 2.6) carries the state beside
-/// the reason. `Blocked` has three reasons since step 2.4, decided from
-/// [`Facts`] about the fleet rather than from the row alone.
+/// On the wire since hub contract 11 (step 2.6): [`Attention::state`] rides
+/// beside the reason. `Blocked` has three reasons since step 2.4, decided
+/// from [`Facts`] about the fleet rather than from the row alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -311,6 +311,10 @@ pub struct Attention {
     /// `last_activity_at`, which is always present, so a client can always
     /// draw an age.
     pub since: i64,
+    /// The attention state [`Self::reason`] puts the session in (hub
+    /// contract 11, step 2.6), so a client reads "Needs you · Blocked"
+    /// without carrying the reason→state table itself.
+    pub state: State,
 }
 
 /// [`needs_attention_with`] at [`DEFAULT_CONTEXT_RED_PCT`]. Callers with a
@@ -386,6 +390,7 @@ pub fn needs_attention_in(
     Some(Attention {
         reason,
         since: since_for(row, reason),
+        state: reason.state(),
     })
 }
 
@@ -610,7 +615,8 @@ mod tests {
             needs_attention(&r).unwrap(),
             Attention {
                 reason: Reason::StaleWorking,
-                since: 50
+                since: 50,
+                state: State::ActionRequired,
             }
         );
 
@@ -823,7 +829,8 @@ mod tests {
             a,
             Attention {
                 reason: Reason::AccountLimit,
-                since: 70
+                since: 70,
+                state: State::Blocked,
             }
         );
         r.claude_status = Some("working".into());
@@ -904,6 +911,7 @@ mod tests {
             latency_ms: None,
             worktree_kb: None,
             worktree_at: None,
+            agents_on_path: None,
             harnesses: None,
         };
         let snap = |uuid: &str, status: UsageOutcomeKind, five: f64, week: f64, resets: i64| {

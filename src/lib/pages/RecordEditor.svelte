@@ -12,6 +12,7 @@
   import OrgMembers from './OrgMembers.svelte';
   import type { OrgMember } from '../orgs';
   import Chart from './Chart.svelte';
+  import Loader from '../Loader.svelte';
   import type { OrgSettingRow } from '../orgs';
   import type { TrackerRow } from '../trackers';
   import { evalCondition, type Section } from './pages';
@@ -29,9 +30,13 @@
     itemLabel,
     itemsOf,
     needLine,
+    personSpendName,
+    type PersonSpend,
     recordValues,
     subLine,
+    syncLine,
     type AdminNeed,
+    type SyncProgress,
     titleOf,
     type ActionSpec,
     type FieldSpec,
@@ -87,7 +92,7 @@
   const saved = $derived(
     Object.fromEntries(
       resource.fields
-        .filter((f) => f.type !== 'items' && f.type !== 'settings' && f.type !== 'money_series')
+        .filter((f) => f.type !== 'items' && f.type !== 'settings' && f.type !== 'money_series' && f.type !== 'sync')
         .map((f) => [f.id, fieldValue(f, record)]),
     ),
   ) as Record<string, FieldValue>;
@@ -231,7 +236,7 @@
           <!-- A list the record does not carry at all is not known here (a
                hub too old for it, or a list only the operator is shown):
                left out, rather than shown as empty. -->
-          {#if f && !(['items', 'money', 'money_series', 'settings'].includes(f.type) && record[f.id] === undefined)}
+          {#if f && !(['items', 'money', 'money_series', 'settings', 'sync'].includes(f.type) && record[f.id] == null)}
             <div class="field" class:changed={changed.includes(f)} data-testid={`record-field-${f.id}`}>
               <span class="label" id={`rf-${f.id}`}>{f.label}</span>
               <div class="control">
@@ -248,6 +253,38 @@
                       <li class="none">Nothing needs an admin.</li>
                     {/each}
                   </ul>
+                {:else if f.type === 'sync'}
+                  <!-- 11.12: a Constellation with the real count while a
+                       queue drains; a Counter-orbit while both ends trade. -->
+                  {@const s = record[f.id] as unknown as SyncProgress}
+                  <div class="sync" data-testid={`sync-${f.id}`}>
+                    {#if s.total > s.done}
+                      <Loader name="constellation" size={56} label={`${f.label}: ${syncLine(f.unit, s, now())}`} testid={`sync-loader-${f.id}`} />
+                      <span class="value" data-testid={`sync-count-${f.id}`}>{syncLine(f.unit, s, now())}</span>
+                    {:else}
+                      <Loader name="counter-orbit" size={32} label="Both hubs are trading" testid={`sync-loader-${f.id}`} />
+                      <span class="value" data-testid={`sync-count-${f.id}`}>Trading both ways</span>
+                    {/if}
+                  </div>
+                {:else if f.type === 'items' && f.item_label.type === 'person_spend'}
+                  <table class="by-person" aria-labelledby={`rf-${f.id}`}>
+                    <thead>
+                      <tr><th scope="col">Person</th><th scope="col">Today</th><th scope="col">7 days</th><th scope="col">Month</th></tr>
+                    </thead>
+                    <tbody>
+                      {#each itemsOf(f, record) as it, n (n)}
+                        {@const p = it as PersonSpend}
+                        <tr data-testid={`item-${f.id}`}>
+                          <td>{personSpendName(p)}</td>
+                          <td>{dollars(p.today_micros)}</td>
+                          <td>{dollars(p.week_micros)}</td>
+                          <td>{dollars(p.month_micros)}</td>
+                        </tr>
+                      {:else}
+                        <tr><td class="none" colspan="4">Nothing spent this month.</td></tr>
+                      {/each}
+                    </tbody>
+                  </table>
                 {:else if f.type === 'money_series'}
                   <div class="series">
                     <Chart
@@ -587,5 +624,32 @@
   .apply span {
     margin-right: auto;
     color: var(--fg-muted);
+  }
+  .sync {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .by-person {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+  }
+  .by-person th {
+    text-align: left;
+    font-weight: 500;
+    font-size: 0.8rem;
+    color: var(--fg-muted);
+    border-bottom: 1px solid var(--border);
+    padding: 0.2rem 0.4rem;
+  }
+  .by-person td {
+    padding: 0.25rem 0.4rem;
+    border-bottom: 1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+  }
+  .by-person th:not(:first-child),
+  .by-person td:not(:first-child) {
+    text-align: right;
   }
 </style>

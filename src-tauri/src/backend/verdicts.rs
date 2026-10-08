@@ -908,6 +908,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
     ("repo_blame", Verdict::Routed { tool: "repo_blame" }),
     (
+        "repo_branch_diff",
+        Verdict::Routed {
+            tool: "repo_branch_diff",
+        },
+    ),
+    (
+        "repo_range_diff",
+        Verdict::Routed {
+            tool: "repo_range_diff",
+        },
+    ),
+    (
         "upload_to_session",
         Verdict::SameInBoth {
             why: "the same story as `pty_open`: the bytes are on this machine and so is the \
@@ -1072,6 +1084,38 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "list_host_setups",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "save_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "discard_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "run_host_setup_check",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
         "hide_host",
         Verdict::LocalOnly {
             instead: "hiding a host is fleet administration, which the hub reserves for its \
@@ -1088,9 +1132,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",
-        Verdict::LocalOnly {
-            instead: "this app does not poll account usage while a hub owns the fleet, so \
-                      the cache is empty; read usage on the hub",
+        Verdict::Routed {
+            tool: "account_usage",
         },
     ),
     (
@@ -1171,17 +1214,19 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       the hub",
         },
     ),
+    // Redesign step 9.2: the operator's calls that wait for a person wait in
+    // the queue of the server they reached, which on a hub-backed desktop is
+    // the hub's. The owner's device lists and answers it there.
     (
         "mcp_confirm",
-        Verdict::SameInBoth {
-            why: "answers this process's own confirm queue, which is empty in remote mode — \
-                  answering nothing is correct",
+        Verdict::Routed {
+            tool: "answer_mcp_confirm",
         },
     ),
     (
         "mcp_pending_confirms",
-        Verdict::SameInBoth {
-            why: "the same queue, the same reason",
+        Verdict::Routed {
+            tool: "mcp_confirms",
         },
     ),
     // ── the UX agent's operator session ─────────────────────────────────────

@@ -123,10 +123,12 @@ pub struct McpGuards {
     /// one write path. Like the confirmations it outlives a server restart,
     /// so a code minted before a port change is still good.
     pub pairings: Arc<PendingPairings>,
-    /// Someone can answer a confirmation here (the desktop's dialog). A hub
-    /// has no approver: a call that MUST be confirmed there — the
-    /// operator's starts and kills (work graph M9.7) — is refused outright
-    /// rather than handed a nonce nobody can approve.
+    /// Someone can answer a confirmation here: the desktop's dialog and
+    /// Control's cards, or — on a hub — the owner's paired device through
+    /// `answer_mcp_confirm` (redesign step 9.2). A server built
+    /// [`Self::without_approver`] refuses a call that MUST be confirmed —
+    /// the operator's starts and kills (work graph M9.7) — outright rather
+    /// than handing out a nonce nobody can approve.
     pub approver: bool,
 }
 

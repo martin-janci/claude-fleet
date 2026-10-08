@@ -4,18 +4,26 @@
     repoBlame,
     repoDiff,
     repoFile,
+    repoRangeDiff,
     blameGutter,
     canBlame,
     hasDiff,
     type FileBlame,
     type FileContent,
     type FileDiff,
+    type DiffRange,
   } from './files';
   import { timeAgo } from './session_status';
   import { repoCommitDiff } from './history';
   import DiffView from './DiffView.svelte';
   import { highlight, langForPath } from './highlight';
   import { sendFile } from './downloads';
+  import { uiLayout, sessionView } from './prefs';
+  import { copyText } from './clipboard';
+  import { insertIntoComposer } from './conversation';
+  import { goTo } from './destination';
+  import { accessOf } from './access';
+  import { editorBlockedReason, openSessionInEditor } from './editor';
 
   let {
     session,
@@ -23,6 +31,7 @@
     status,
     reloadKey,
     commit = null,
+    range = null,
     focusLine = null,
   }: {
     session: SessionRow;
@@ -32,6 +41,9 @@
     reloadKey: number;
     /** When set, show this file's diff *within* the commit, not the worktree. */
     commit?: string | null;
+    /** When set, show this file's diff over a committed range of the
+     *  branch (not pushed, or against its base), not the worktree. */
+    range?: DiffRange | null;
     /** 1-based line to show and highlight in the File view (a path clicked
      *  in the Conversation tab); null for none. */
     focusLine?: number | null;
@@ -49,7 +61,7 @@
   // a different session never serves stale content.
   const diffCache = new Map<string, FileDiff>();
   const fileCache = new Map<string, FileContent>();
-  const cacheKey = (sid: number, p: string) => `${sid}:${reloadKey}:${commit ?? 'wt'}:${p}`;
+  const cacheKey = (sid: number, p: string) => `${sid}:${reloadKey}:${commit ?? range ?? 'wt'}:${p}`;
 
   // Cap each cache: a long session-hopping run could otherwise pin many
   // large (up to 512 KiB) file bodies in memory for the panel's lifetime.
@@ -75,11 +87,14 @@
 
   // When the selected file changes, pick a sensible default view: a changed
   // (non-untracked) file opens on its Diff; anything else on its content.
+  // A committed range row counts as another file: the same path picked
+  // under "not pushed" after the worktree row reopens on its Diff.
   let lastPath: string | null = null;
   $effect(() => {
-    if (path !== lastPath) {
-      lastPath = path;
-      view = commit ? 'diff' : canDiff ? 'diff' : 'file';
+    const key = path === null ? null : `${range ?? 'wt'}:${path}`;
+    if (key !== lastPath) {
+      lastPath = key;
+      view = commit || range ? 'diff' : canDiff ? 'diff' : 'file';
     }
   });
 
@@ -129,7 +144,9 @@
       loading = true;
       const r = commit
         ? await repoCommitDiff(sid, commit, p)
-        : await repoDiff(sid, p);
+        : range
+          ? await repoRangeDiff(sid, p, range)
+          : await repoDiff(sid, p);
       // A newer load (selection, view flip, or session switch) superseded us.
       if (token !== loadSeq) return;
       loading = false;
@@ -214,6 +231,25 @@
       : [],
   );
   const gutter = $derived(showBlame && blame ? blameGutter(blame.hunks, hlLines.length) : []);
+
+  // The new layout's viewer actions (redesign step 5.6, Files board): the
+  // path to the clipboard, the path into this session's composer, and the
+  // worktree in VS Code (the 5.5 command, with its reasons).
+  let copied = $state(false);
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(copiedTimer));
+  async function copyPath(p: string): Promise<void> {
+    if (!(await copyText(p))) return;
+    copied = true;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copied = false), 1_500);
+  }
+  function mention(p: string): void {
+    insertIntoComposer(session.id, `@${p}`);
+    sessionView.set('conversation');
+    goTo('session');
+  }
+  const editorBlocked = $derived(editorBlockedReason(session, $accessOf(session)));
 </script>
 
 <div class="viewer" data-testid="file-viewer">
@@ -252,6 +288,29 @@
           title="Copy this file to Downloads, for your phone and this window"
           onclick={() => path && void sendFile(session.id, path)}>⤓ Send to downloads</button
         >
+      {/if}
+      {#if $uiLayout === 'new'}
+        {@const p = path}
+        <div class="actions" role="group" aria-label="File actions">
+          <button type="button" class="act" data-testid="viewer-copy-path" onclick={() => void copyPath(p)}
+            >{copied ? 'Copied' : 'Copy path'}</button
+          >
+          <button
+            type="button"
+            class="act"
+            data-testid="viewer-mention"
+            title="Add @{p} to this session's message"
+            onclick={() => mention(p)}>Mention in chat</button
+          >
+          <button
+            type="button"
+            class="act"
+            data-testid="viewer-open-editor"
+            disabled={editorBlocked !== null}
+            title={editorBlocked ?? 'Open this worktree in VS Code'}
+            onclick={() => void openSessionInEditor(session)}>Open in VS Code</button
+          >
+        </div>
       {/if}
     </header>
 
@@ -347,6 +406,28 @@
     white-space: nowrap;
     direction: rtl;
     text-align: left;
+  }
+  .actions {
+    display: flex;
+    gap: 0.3rem;
+    margin-left: auto;
+  }
+  .act {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0.15rem 0.55rem;
+    white-space: nowrap;
+  }
+  .act:hover:not(:disabled) {
+    color: var(--fg);
+  }
+  .act:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .send {
     margin-left: 0.5rem;

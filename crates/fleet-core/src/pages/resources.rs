@@ -114,6 +114,18 @@ pub struct ActionSpec {
     /// formatter, instead of only re-reading the list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<ResultView>,
+    /// The loader shown beside the form while the command runs, for a
+    /// command that takes a while (linking two hubs exchanges keys).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub busy: Option<BusyLoader>,
+}
+
+/// A loader an action shows while it runs: a closed set from the loader kit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BusyLoader {
+    /// Two hubs talking to each other.
+    CounterOrbit,
 }
 
 /// How an action's answer is shown: a closed set the renderer implements.
@@ -149,6 +161,7 @@ impl ActionSpec {
             variants: &[],
             report: false,
             result: None,
+            busy: None,
         }
     }
     pub const fn params(self, params: &'static [ParamSpec]) -> Self {
@@ -172,6 +185,12 @@ impl ActionSpec {
     pub const fn result(self, view: ResultView) -> Self {
         ActionSpec {
             result: Some(view),
+            ..self
+        }
+    }
+    pub const fn busy(self, loader: BusyLoader) -> Self {
+        ActionSpec {
+            busy: Some(loader),
             ..self
         }
     }
@@ -225,6 +244,15 @@ pub enum FieldKind {
     /// shown as bars with each day's amount; never edited. An absent value
     /// leaves the field out, as for `money`.
     MoneySeries,
+    /// A transfer in progress, `{ done, total, both_ways, since? }` in the
+    /// record (Orbit Fleet 11.12, a hub link's sync): while `total` is above
+    /// `done`, a Constellation with the real count ("412 of 1 280 messages ·
+    /// 18 s", `since` being when the transfer last moved); while the two
+    /// ends trade both ways with nothing queued, a Counter-orbit. Never
+    /// edited; an absent value (idle) leaves the field out.
+    Sync {
+        unit: &'static str,
+    },
     /// The record's per-org settings (`OrgSetting` rows: the setting
     /// described with the fleet's value, and the record's own): each one
     /// shown as a settings row that inherits the fleet's value or takes its
@@ -261,6 +289,10 @@ pub enum ItemLabel {
     /// One of an org's "Needs an admin" (`service::org_needs::AdminNeed`):
     /// what it is in a line, then why or when, listed rather than chipped.
     AdminNeed,
+    /// One person's share of an org's spend (`service::org_spend::
+    /// PersonSpend`): a table row of who, then today, 7 days and the month
+    /// in dollars; nobody's reads "Routines, missions and unclaimed".
+    PersonSpend,
 }
 
 /// A line under a field's value where its section shows tiles: a closed
@@ -512,6 +544,12 @@ const ORG: ResourceType = ResourceType {
             "Last 14 days",
             "Estimated cost of its sessions on each of the last 14 days (UTC), today last.",
             FieldKind::MoneySeries,
+        ),
+        FieldSpec::new(
+            "spend_by_person",
+            "By person",
+            "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
+            FieldKind::Items { item_label: ItemLabel::PersonSpend, remove: None, add: &[] },
         ),
         FieldSpec::new(
             "needs_admin",
@@ -1075,6 +1113,7 @@ const PEER_LINK: ResourceType = ResourceType {
         FieldSpec::new("state", "State", "How the last exchange went.", FieldKind::Choice { options: PEER_STATES }).badge(Badge::Label),
         FieldSpec::new("role", "Direction", "Which hub opens the connection: this one dials out, or the other dials in.", FieldKind::Choice { options: PEER_ROLES }),
         FieldSpec::new("url", "Address", "The hub this one dials; a link the other side dials has none.", FieldKind::Text { max: 512 }),
+        FieldSpec::new("sync", "Syncing", "Messages carried today against those still queued, while the queue drains.", FieldKind::Sync { unit: "messages" }),
         FieldSpec::new("latency", "Latency", "The round trip of the last exchange this hub dialed.", FieldKind::Text { max: 32 }),
         FieldSpec::new("messages_today", "Messages today", "Carried either way since midnight (UTC).", FieldKind::Count),
         FieldSpec::new("messages_total", "Messages in all", "Carried either way since the link was made.", FieldKind::Count),
@@ -1086,7 +1125,8 @@ const PEER_LINK: ResourceType = ResourceType {
         ActionSpec::new("peer_link.add", "Link a hub", "link_peer_hub", &[("url", Bind::Param("url")), ("code", Bind::Param("code"))]).params(&[
             param("url", "Hub address", text(512, "https://hub.example.com"), true),
             param("code", "Link code", ParamKind::Secret, true),
-        ]),
+        ])
+        .busy(BusyLoader::CounterOrbit),
     ),
     update: None,
     delete: Some(

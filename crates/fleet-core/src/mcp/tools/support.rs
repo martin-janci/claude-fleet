@@ -1476,21 +1476,30 @@ impl SessionWithController {
             is_controller,
             row,
             crate::service::attention::DEFAULT_CONTEXT_RED_PCT,
+            &crate::service::attention::Facts::default(),
         )
     }
 
     /// [`Self::new`] at the store's `health.context_red_pct`
     /// (`service::health::context_red_pct`), which every caller holding the
     /// store should pass so `context_full` and `fleet_health.context_red`
-    /// agree.
+    /// agree — with the store's [`Store::attention_facts`], so the three
+    /// `Blocked` reasons agree with `/events` (step 2.6).
+    ///
+    /// [`Store::attention_facts`]: crate::store::Store::attention_facts
     pub(super) fn with_threshold(
         is_controller: bool,
         row: crate::store::SessionRow,
         context_red_pct: f64,
+        facts: &crate::service::attention::Facts,
     ) -> Self {
         Self {
             is_controller,
-            needs_attention: crate::service::attention::needs_attention_with(&row, context_red_pct),
+            needs_attention: crate::service::attention::needs_attention_in(
+                &row,
+                context_red_pct,
+                facts,
+            ),
             row,
         }
     }
@@ -1806,7 +1815,7 @@ impl FleetTools {
                 ConfirmState::Unknown => {} // expired / replayed — issue a fresh one
             }
         }
-        let req = confirms.request(tool, summary, &caller.label());
+        let req = confirms.request_from(tool, summary, &caller.label(), caller.is_operator());
         (self.guards.notify)(&req);
         Err(mcp_err(
             codes::E_CONFIRM_REQUIRED,
