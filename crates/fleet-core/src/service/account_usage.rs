@@ -534,7 +534,7 @@ fn window_of(v: Option<&serde_json::Value>) -> Option<Window> {
 }
 
 /// RFC 3339 (`2026-02-06T22:00:00+00:00`, `…00.123Z`) → unix seconds.
-fn parse_rfc3339(s: &str) -> Option<i64> {
+pub(crate) fn parse_rfc3339(s: &str) -> Option<i64> {
     let s = s.trim();
     if !s.is_ascii() || s.len() < 20 {
         return None;

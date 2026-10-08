@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import { getAsset, deleteAsset, lintAsset, type AssetDetail, type LintReport, type WriteResult } from './assets';
   import type { HostRow } from './hosts';
@@ -205,12 +206,12 @@
           onclick={() => onsync?.({ kind: detail?.asset.kind, name: detail?.asset.name })}
           data-testid="asset-sync"
         >Sync this asset</button>
-        <button class="sync-btn" onclick={() => (showAuthorDialog = true)} disabled={authorBlocked !== null} title={authorBlocked ?? ''} data-testid="asset-open-session">Open in session</button>
-        <button class="sync-btn" onclick={toggleLint} data-testid="asset-lint">{lintBusy ? 'Linting…' : 'Lint'}</button>
+        <button class="sync-btn" onclick={() => (showAuthorDialog = true)} disabled={authorBlocked !== null} title={authorBlocked ?? ''} data-testid="asset-open-session">Open in session…</button>
+        <button class="sync-btn" onclick={toggleLint} data-testid="asset-lint">{#if lintBusy}<Loader name="comet" size={12} class="btn-loader" />{/if}{lintBusy ? 'Linting…' : 'Lint'}</button>
         {#if !editing}
           <button class="sync-btn" onclick={() => { editing = true; onsection?.('source'); }} data-testid="asset-edit">Edit</button>
         {/if}
-        <button class="sync-btn danger" onclick={() => (showDeleteConfirm = true)} data-testid="asset-delete">Delete</button>
+        <button class="sync-btn danger" onclick={() => (showDeleteConfirm = true)} data-testid="asset-delete">Delete…</button>
       </div>
     </div>
     {#if showLint}
@@ -327,7 +328,7 @@
   .lint-summary { margin: 0 0 4px; font-weight: 600; }
   .lint-error { color: var(--usage-crit); margin: 2px 0; font-size: 12px; }
   .lint-warn { color: var(--usage-warn); margin: 2px 0; font-size: 12px; }
-  .cell-sync { margin-left: 6px; font-size: 10px; padding: 0 4px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--accent); cursor: pointer; }
+  .cell-sync { margin-left: 6px; font-size: 11px; padding: 0 4px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--accent); cursor: pointer; }
   h3 { margin: 0 0 4px; font-size: 15px; font-family: ui-monospace, monospace; }
   .kind, .ver { color: var(--fg-muted); font-size: 11px; font-family: system-ui; }
   h4 { margin: 14px 0 6px; font-size: 11px; text-transform: uppercase; color: var(--fg-muted); }

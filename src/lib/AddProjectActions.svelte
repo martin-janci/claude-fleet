@@ -61,5 +61,5 @@
   }
   .actions button.primary { border-color: var(--accent); }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
-  .note { margin: 0; font-size: 0.75rem; color: var(--fg-muted); text-align: right; }
+  .note { margin: 0; font-size: 11px; color: var(--fg-muted); text-align: right; }
 </style>

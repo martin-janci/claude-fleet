@@ -140,7 +140,7 @@
 </div>
 
 <style>
-  .graph { font-size: 0.78rem; }
+  .graph { font-size: 11px; }
   .crow {
     display: flex;
     align-items: center;
@@ -177,12 +177,12 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .author, .date { flex: 0 0 auto; color: var(--fg-muted); font-size: 0.72rem; }
+  .author, .date { flex: 0 0 auto; color: var(--fg-muted); font-size: 11px; }
   .ref {
     flex: 0 0 auto;
     border-radius: 3px;
     padding: 0 0.3rem;
-    font-size: 0.66rem;
+    font-size: 11px;
     font-family: var(--mono, monospace);
   }
   .ref.branch { background: color-mix(in srgb, #3fb950 30%, transparent); color: #3fb950; }
@@ -196,7 +196,7 @@
     border-radius: 3px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0 0.3rem;
   }
   .actions button:hover { color: var(--fg); border-color: var(--accent); }

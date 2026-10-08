@@ -10,6 +10,7 @@ import { DEFAULT_REVIEW_PROMPT, type SessionRow } from './sessions';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
+import { expectAccessible } from './a11y_check';
 
 const source: SessionRow = {
   id: 1, tmux_name: 'dev-source', host_alias: 'local',
@@ -141,5 +142,13 @@ describe('ReviewDialog access gate (multi-user M1)', () => {
     render(ReviewDialog, { props: { source: theirs, onClose: () => {} } });
     await tick();
     expect(start().disabled).toBe(false);
+  });
+});
+
+describe('ReviewDialog accessibility (7.2)', () => {
+  it('passes the axe and audit checks', async () => {
+    const { container } = render(ReviewDialog, { props: { source, onClose: () => {} } });
+    await tick();
+    await expectAccessible(container);
   });
 });

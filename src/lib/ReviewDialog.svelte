@@ -56,8 +56,8 @@
     <p class="muted">Spawns a claude review session in this session's worktree, seeded with the prompt below. Reviews the worktree's current state.</p>
 
     <section class="prompt-section">
-      <h4>Review prompt</h4>
-      <textarea bind:value={prompt} rows="10" data-testid="review-textarea"></textarea>
+      <h4 id="review-prompt-h">Review prompt</h4>
+      <textarea bind:value={prompt} rows="10" aria-labelledby="review-prompt-h" data-testid="review-textarea"></textarea>
     </section>
 
     {#if spawnBlocked}
@@ -89,9 +89,9 @@
   }
   .dialog { display: flex; flex-direction: column; gap: 0.7rem; }
   .dialog h3 { margin: 0; font-size: 1rem; }
-  .dialog h4 { margin: 0 0 0.3rem 0; font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .dialog h4 { margin: 0 0 0.3rem 0; font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; }
   .src { margin: 0; display: flex; gap: 0.4rem; align-items: center; }
-  .host-badge { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.7rem; color: var(--fg-muted); border: 1px solid var(--border); padding: 0.05rem 0.3rem; border-radius: 3px; }
+  .host-badge { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--fg-muted); border: 1px solid var(--border); padding: 0.05rem 0.3rem; border-radius: 3px; }
   .sess-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
   .muted { color: var(--fg-muted); font-size: 0.8rem; margin: 0; }
   .prompt-section textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; padding: 0.5rem; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: 4px; resize: vertical; min-height: 8rem; }

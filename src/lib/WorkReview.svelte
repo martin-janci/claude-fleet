@@ -25,7 +25,7 @@
     type WorkRef,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import {
     ackWorkLink,
     conflictNotice,
@@ -563,7 +563,7 @@
             >
             {#if it.confidence != null}<span class="conf" class:conf--high={isHighConfidence(it)} title="Confidence from detection" data-testid="work-review-confidence">{it.confidence}%</span>{/if}
             {#if it.strength}<span class="muted">· {it.strength}{#if it.rule}&nbsp;{it.rule}{/if}</span>{/if}
-            {#if it.created_at}<span class="muted">· {timeAgo(it.created_at)}</span>{/if}
+            {#if it.created_at}<span class="muted">· {shortAge(it.created_at)}</span>{/if}
           </div>
           {#each it.why ?? [] as w, wi (wi)}
             <p class="why" data-testid="work-review-why">{w}</p>
@@ -665,7 +665,7 @@
     flex-wrap: wrap;
   }
   .kind {
-    font-size: 0.68rem;
+    font-size: 11px;
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0 0.35rem;
@@ -692,12 +692,12 @@
   .why {
     margin: 0.1rem 0 0 1.4rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .fail {
     margin: 0.1rem 0 0 1.4rem;
     color: var(--usage-crit, #c62828);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .actions {
     margin: 0.25rem 0 0 1.4rem;

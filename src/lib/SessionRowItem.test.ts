@@ -7,6 +7,7 @@ import { host, session } from './hosts_fixture';
 import { hubStatus, STANDALONE } from './hub';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 import type { SessionRow } from './sessions';
+import { expectAccessible } from './a11y_check';
 
 // Built from the shared fixture rather than a hand-written literal: this
 // file's own copy fell behind `SessionRow` twice (`model`, the context block,
@@ -237,5 +238,22 @@ describe('SessionRowItem action gate (multi-user M1)', () => {
     await tick();
     expect(dis('work-menu')).toBe(true);
     expect(screen.getByTestId('work-menu').title).toMatch(/belongs to someone else/i);
+  });
+});
+
+describe('SessionRowItem accessibility (7.2)', () => {
+  it('passes the axe and audit checks, live and ghost', async () => {
+    for (const status of ['running', 'ghost'] as const) {
+      const { container, unmount } = render(SessionRowItem, { props: baseProps({ ...sampleSession, status }) });
+      await tick();
+      await expectAccessible(container);
+      unmount();
+    }
+  });
+
+  it('says the status in words: the dot is a labelled image', async () => {
+    render(SessionRowItem, { props: baseProps({ ...sampleSession, status: 'running' }) });
+    await tick();
+    expect(screen.getByRole('img', { name: 'Status: running' })).toBeTruthy();
   });
 });
