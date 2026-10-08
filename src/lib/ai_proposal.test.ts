@@ -1,0 +1,139 @@
+// Redesign step 3.11: the never-decides list and when a proposal may
+// pre-select anything.
+import { readFileSync } from 'node:fs';
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, vi } from 'vitest';
+import ProposedBy from './ProposedBy.svelte';
+import DraftField from './DraftField.svelte';
+import {
+  NEVER_DECIDES,
+  draftedBy,
+  neverDecides,
+  preselect,
+  proposedByLabel,
+  type ProposalLike,
+} from './ai_proposal';
+
+const jev = (value: string, confidence_pct: number | null = 90): ProposalLike => ({
+  value,
+  source: 'jev',
+  reason: 'same repo, 2 idle slots',
+  confidence_pct,
+});
+
+describe('where AI never decides', () => {
+  // The plan names these; a proposal must never reach one of them.
+  const named = [
+    'approve_push',
+    'approve_permission',
+    'share',
+    'role',
+    'assign_org',
+    'mission_autonomy',
+    'verified',
+    'force_kill',
+    'priority',
+  ];
+
+  it.each(named)('%s is on the list', (target) => {
+    expect(neverDecides(target)).toBe(true);
+  });
+
+  it.each(NEVER_DECIDES.map((r) => r.target))('a sure proposal never pre-selects %s', (target) => {
+    expect(preselect(target, jev('approve', 100))).toBeNull();
+    expect(preselect(target, { value: 'approve', source: 'rule' })).toBeNull();
+  });
+
+  it.each(NEVER_DECIDES.map((r) => r.target))('ProposedBy shows nothing for %s', (target) => {
+    render(ProposedBy, { proposal: jev('x', 100), field: target });
+    expect(screen.queryByTestId('proposed-by')).toBeNull();
+  });
+
+  it('each row says why, and no target is listed twice', () => {
+    const targets = NEVER_DECIDES.map((r) => r.target);
+    expect(new Set(targets).size).toBe(targets.length);
+    for (const r of NEVER_DECIDES) expect(r.why.length).toBeGreaterThan(0);
+  });
+});
+
+describe('preselect', () => {
+  it('pre-selects a sure answer for an allowed target', () => {
+    expect(preselect('project', jev('p3'))).toBe('p3');
+  });
+  it('leaves the field empty on unsure, under the floor or with no confidence', () => {
+    expect(preselect('project', jev('unsure'))).toBeNull();
+    expect(preselect('project', jev('p3', 49))).toBeNull();
+    expect(preselect('project', jev('p3', 70), 80)).toBeNull();
+    expect(preselect('project', jev('p3', null))).toBeNull();
+    expect(preselect('project', null)).toBeNull();
+  });
+  it('a rule needs no confidence', () => {
+    expect(preselect('project', { value: 'p3', source: 'rule' })).toBe('p3');
+  });
+  it('labels each source and words a draft origin', () => {
+    expect(proposedByLabel('jev')).toBe('Proposed by Jev');
+    expect(draftedBy('haiku', 'mercury', 'from 3 changed files')).toBe(
+      'by haiku on mercury · from 3 changed files',
+    );
+    expect(draftedBy(null, null, 'from the last 3 turns')).toBe('from the last 3 turns');
+  });
+});
+
+describe('ProposedBy', () => {
+  it('shows the pill, the reason and Change, and Change calls back', async () => {
+    const onchange = vi.fn();
+    render(ProposedBy, { proposal: jev('p3', 82), field: 'project', onchange });
+    const row = screen.getByTestId('proposed-by');
+    expect(row.textContent).toContain('Proposed by Jev');
+    expect(row.textContent).toContain('same repo, 2 idle slots');
+    expect(row.textContent).toContain('82%');
+    await fireEvent.click(screen.getByTestId('proposed-by-change'));
+    expect(onchange).toHaveBeenCalledOnce();
+  });
+  it('shows nothing under the floor', () => {
+    render(ProposedBy, { proposal: jev('p3', 40), field: 'project' });
+    expect(screen.queryByTestId('proposed-by')).toBeNull();
+  });
+});
+
+describe('DraftField', () => {
+  it('names the model and host, keeps the ring until edited, and Clear empties it', async () => {
+    const onclear = vi.fn();
+    render(DraftField, {
+      value: 'Fix the pairing flake',
+      label: 'Summary',
+      model: 'haiku',
+      host: 'mercury',
+      from: 'from 3 changed files',
+      onregenerate: () => {},
+      onclear,
+    });
+    const input = screen.getByTestId('draft-field-input') as HTMLTextAreaElement;
+    expect(input.classList.contains('ai-pre')).toBe(true);
+    expect(screen.getByTestId('draft-field-meta').textContent).toContain(
+      'by haiku on mercury · from 3 changed files',
+    );
+    await fireEvent.input(input, { target: { value: 'Fix the pairing flake for good' } });
+    expect(input.classList.contains('ai-pre')).toBe(false);
+    await fireEvent.click(screen.getByTestId('draft-field-clear'));
+    expect(input.value).toBe('');
+    expect(onclear).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('draft-field-meta')).toBeNull();
+  });
+  it('says it is drafting and disables Regenerate while busy', () => {
+    render(DraftField, { value: '', label: 'Summary', busy: true, onregenerate: () => {} });
+    expect(screen.getByTestId('draft-field-busy').textContent).toBe('Drafting…');
+    expect((screen.getByTestId('draft-field-regenerate') as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe('the ai-pre token', () => {
+  const css = readFileSync('src/app.css', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  it('is an alias for --accent in every theme block, light and dark', () => {
+    expect(css.match(/--ai-pre:\s*var\(--accent\);/g)?.length).toBe(4);
+  });
+  it('controls.css draws the ring from it', () => {
+    const controls = readFileSync('src/lib/controls.css', 'utf8');
+    expect(controls).toMatch(/\.ai-pre\s*\{[^}]*var\(--ai-pre\)/);
+  });
+});

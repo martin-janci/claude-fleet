@@ -364,6 +364,22 @@ pub struct SessionRow {
     /// serialised, so a client can tell a Claude row from an old hub's.
     #[serde(default = "agent_claude")]
     pub agent: String,
+    /// Who or what started the session (migration 124): one of
+    /// [`ORIGINS`], or `None` for a row fleet did not start (found on a
+    /// host by reconcile, or older than the column). See [`SessionOrigin`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// What [`SessionRow::origin`] points at, as text: a person id, a
+    /// session id, a mission id (migration 124 lists which). `None` when
+    /// the origin has nothing to point at, or is itself `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_ref: Option<String>,
+    /// When a person last looked at the session (migration 125), unix
+    /// seconds: `touch_session_viewed`. A turn that ended after it
+    /// (`last_stop_at`) is unread. `None` for a row nobody has opened since
+    /// fleet found it; a session fleet started counts from `started_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_viewed_at: Option<i64>,
     /// The form this session's agent asked and is waiting on. `serde(default)`
     /// so an older hub's row (without it) still parses.
     #[serde(default)]
@@ -387,6 +403,77 @@ pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, "codex", "agy", AGENT_SHELL];
 /// before migration 121, whose sessions all run Claude Code.
 fn agent_claude() -> String {
     AGENT_CLAUDE.to_string()
+}
+
+/// `sessions.origin` (migration 124): every value its `CHECK` admits.
+pub const ORIGINS: [&str; 6] = [
+    "person",
+    "operator",
+    "mission",
+    "background",
+    "token",
+    "routine",
+];
+
+/// Who or what started a session, as `finalize_new_session` and the other
+/// start paths record it (`sessions.origin` / `origin_ref`, migration 124).
+///
+/// Never read from a request: like `owner_person_id` it follows from the
+/// connection or from the code path that starts the session, so a client
+/// cannot label its own session as a mission's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOrigin {
+    /// One of [`ORIGINS`].
+    pub origin: &'static str,
+    pub origin_ref: Option<String>,
+}
+
+impl SessionOrigin {
+    /// A person started it, from the desktop, the phone or the master token.
+    /// `None` when the hub cannot say who that person is.
+    pub fn person(person_id: Option<i64>) -> Self {
+        Self::with("person", person_id)
+    }
+
+    /// The operator (the UX agent) started it; its own session's id.
+    pub fn operator(operator_session: Option<i64>) -> Self {
+        Self::with("operator", operator_session)
+    }
+
+    /// A mission's run started it.
+    pub fn mission(mission_id: i64) -> Self {
+        Self::with("mission", Some(mission_id))
+    }
+
+    /// A `claude --bg` agent, launched for `requester` when one is named.
+    pub fn background(requester: Option<i64>) -> Self {
+        Self::with("background", requester)
+    }
+
+    /// A per-host token started it: an agent in the session whose pane the
+    /// request proved, or a script on the host (`None`).
+    pub fn token(proven_session: Option<i64>) -> Self {
+        Self::with("token", proven_session)
+    }
+
+    /// The origin a row records, to carry it onto another row (a move).
+    /// `None` for a row with no origin, or one this build does not know.
+    pub fn of_row(row: &SessionRow) -> Option<Self> {
+        let origin = ORIGINS
+            .iter()
+            .find(|o| Some(**o) == row.origin.as_deref())?;
+        Some(Self {
+            origin,
+            origin_ref: row.origin_ref.clone(),
+        })
+    }
+
+    fn with(origin: &'static str, id: Option<i64>) -> Self {
+        Self {
+            origin,
+            origin_ref: id.map(|i| i.to_string()),
+        }
+    }
 }
 
 /// `sessions.visibility` (migration 100): private to its owner, and to the
@@ -543,7 +630,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile, \
      (SELECT json_object('form_id', f.form_id, 'title', json_extract(f.spec, '$.title')) \
         FROM form_requests f WHERE f.session_id = sessions.id AND f.state = 'pending') \
-       AS pending_form, agent"
+       AS pending_form, agent, origin, origin_ref, last_viewed_at"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -657,6 +744,9 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
             .get::<_, Option<String>>(67)?
             .and_then(|j| serde_json::from_str(&j).ok()),
         agent: row.get(68)?,
+        origin: row.get(69)?,
+        origin_ref: row.get(70)?,
+        last_viewed_at: row.get(71)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -1294,8 +1384,14 @@ pub struct SessionEvent {
 pub struct HostTokenRow {
     pub host_alias: String,
     pub token: String,
+    /// When the host's first token was minted.
     pub created_at: i64,
     pub mode: String,
+    /// The last request this token authenticated (migration 126), stamped
+    /// at most once a minute; `None` never since.
+    pub last_used_at: Option<i64>,
+    /// When a fresh token last replaced the host's (migration 126).
+    pub rotated_at: Option<i64>,
 }
 
 /// One paired client token (migration 032): a phone, a laptop browser. Unlike

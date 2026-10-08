@@ -392,8 +392,32 @@ fn check_section(
     if section.items.is_empty() {
         cx.bad(at, "a section needs at least one item");
     }
+    if section.tiles {
+        check_tiles(cx, at, section);
+    }
     for (i, item) in section.items.iter().enumerate() {
         check_item(cx, &format!("{at} › item {}", i + 1), page, item, placed);
+    }
+}
+
+/// A `tiles` section shows a record's numbers: only on a `master_detail`
+/// page, and only its `count` and `money` fields.
+fn check_tiles(cx: &mut Ctx, at: &str, section: &Section) {
+    use super::resources::FieldKind;
+    let Some(res) = cx.resource else {
+        cx.bad(at, "only a master_detail page's section shows tiles");
+        return;
+    };
+    for item in &section.items {
+        let tile = match item {
+            Item::Field { key, .. } => res
+                .field(key)
+                .is_none_or(|f| matches!(f.kind, FieldKind::Count | FieldKind::Money)),
+            _ => false,
+        };
+        if !tile {
+            cx.bad(at, "a tiles section holds count and money fields only");
+        }
     }
 }
 

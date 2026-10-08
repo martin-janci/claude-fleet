@@ -427,7 +427,7 @@ describe('new_session and repair_session route now, so their buttons stay enable
   });
 });
 
-// #147: the git-write panel. None of the ten git-write commands
+// #147: the git-write panel. None of the eleven git-write commands
 // (checkout/branch/stage/commit/fetch/pull/push) has a hub tool
 // (`commands/mutate.rs`) — a remote client must not stage or commit under a
 // running agent. `FilesPanel` computes one reason (`hubBlock('repo_write',
@@ -443,6 +443,7 @@ describe('the git-write panel on a hub client', () => {
     ahead: 0,
     behind: 0,
     tipHash: 'abc123',
+    merged: true,
   };
   const commit = {
     hash: 'abc123',
@@ -517,12 +518,14 @@ describe('the git-write panel on a hub client', () => {
         onCheckout: vi.fn(),
         onDelete: vi.fn(),
         onNew: vi.fn(),
+        onDeleteMerged: vi.fn(),
         writeBlocked: REASON,
       },
     });
     expect(screen.getByText('+ New branch')).toBeDisabled();
     expect(screen.getByText('Checkout')).toBeDisabled();
     expect(screen.getByText('Delete')).toBeDisabled();
+    expect(screen.getByTestId('delete-merged')).toBeDisabled();
   });
 
   it('CommitGraph disables its create-branch and checkout-commit actions, with the reason', () => {

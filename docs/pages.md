@@ -229,8 +229,13 @@ type declares:
   - `time`, a unix time shown as "5 min ago";
   - `count`, a whole number the backend counts, shown and never edited (an
     absent value reads `0`);
+  - `money`, micro-USD shown as dollars, and `money_series`, a
+    `[{ day, cost_micros }]` list shown as a bar chart with a table toggle;
+    an absent value leaves either out (the caller may not see spend);
   - `items`: a list changed through its own `remove` and `add` actions,
-    shown by a closed formatter (`plain`, `field`, `org_rule`, `device`).
+    shown by a closed formatter (`plain`, `field`, `org_rule`, `device`,
+    `member`, or `admin_need`, which lists each need on its own line with
+    why or when).
     A record that carries no such key at all (an older hub, or a list only
     the operator is shown) leaves the field out rather than showing it
     empty;
@@ -253,7 +258,10 @@ unchanged. On a paired desktop the list routes to the hub, and the page is
 read-only with that command's reason.
 
 A `master_detail` page names its resource and lays out one record's fields
-in sections, each field exactly once:
+in sections, each field exactly once. A section with `"tiles": true` holds
+only `count` and `money` fields and shows them as tiles: the label, the
+value, and the field's `sub` line (`budget`: "82% of $750" from a budget in
+whole USD; `count`: "2 need you"), as the org overview does:
 
 ```json
 { "spec": "fleet.page/1", "id": "settings.orgs", "title": "Organisations",

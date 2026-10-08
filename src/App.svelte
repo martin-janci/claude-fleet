@@ -52,6 +52,7 @@
   import { dispatchTimelineEvents, dispatchConversationsChanged } from './lib/live_events';
   import Toasts from './lib/Toasts.svelte';
   import QuickSwitcher from './lib/QuickSwitcher.svelte';
+  import ShortcutSheet from './lib/ShortcutSheet.svelte';
   import NewSessionDialog from './lib/NewSessionDialog.svelte';
   import { newSessionRequest, clearNewSessionRequest } from './lib/new_session_request';
   import { push, pushError } from './lib/toasts';
@@ -548,6 +549,10 @@
   $effect(() => {
     if ($uiLayout !== 'new') untrack(() => leave('accounts'));
   });
+  // Classic has no Inbox (step 3.3): it shows the Sessions list instead.
+  $effect(() => {
+    if ($uiLayout !== 'new' && $sidebarView === 'inbox') untrack(() => sidebarView.set('sessions'));
+  });
 
   // Files mode swaps the center + terminal region for the worktree file
   // viewer. The Files tab needs a selected session (the worktree to browse);
@@ -694,12 +699,12 @@
     closeHosts();
     goTo('accounts');
   }
-  // The New layout's rail (step 3.2). Sessions and Work pick the sidebar's
-  // tree, as ⌘⇧W does, and bring back the Session tab from a fleet page
-  // (Accounts, Hosts, Assets); over a session (Files, the board) they leave
-  // the right column alone.
+  // The New layout's rail (step 3.2). Inbox (3.3), Sessions and Work pick
+  // the sidebar's list, as ⌘⇧W does, and bring back the Session tab from a
+  // fleet page (Accounts, Hosts, Assets); over a session (Files, the board)
+  // they leave the right column alone.
   function onRailSelect(id: RailId) {
-    if (id === 'sessions' || id === 'work') {
+    if (id === 'inbox' || id === 'sessions' || id === 'work') {
       sidebarCollapsed = false;
       sidebarView.set(id);
       if (hostsMode || accountsMode || assetsMode) showSession();
@@ -920,6 +925,7 @@
      here. Since redesign 1.9 this is the only mount: a project row's `+` and
      Add project publish the same request. -->
 <QuickSwitcher />
+<ShortcutSheet />
 {#if $newSessionRequest}
   <NewSessionDialog
     project={$newSessionRequest.project}
@@ -927,6 +933,7 @@
     initialHost={$newSessionRequest.initialHost}
     ticket={$newSessionRequest.ticket}
     autostart={$newSessionRequest.autostart}
+    proposal={$newSessionRequest.proposal}
     onCreate={(s) => {
       clearNewSessionRequest();
       selectSessionExplicitly(s);

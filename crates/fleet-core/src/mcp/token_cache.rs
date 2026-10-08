@@ -60,6 +60,9 @@ pub struct TokenCache {
     snapshot: Mutex<Snapshot>,
     /// Per client id, when `authorize` last stamped its `last_seen_at`.
     touched: Mutex<HashMap<i64, i64>>,
+    /// Per host alias, when `authorize` last stamped its token's
+    /// `last_used_at` (Orbit Fleet 11.4).
+    touched_hosts: Mutex<HashMap<String, i64>>,
     /// The hub's personal owner (multi-user M1), once it has been read.
     /// `None` means "not known yet, ask again" — never "this hub has none",
     /// which is why the module docs above forbid caching a `None`.
@@ -75,6 +78,7 @@ impl TokenCache {
             pool,
             snapshot: Mutex::new(snapshot),
             touched: Mutex::new(HashMap::new()),
+            touched_hosts: Mutex::new(HashMap::new()),
             owner: Mutex::new(None),
         })
     }
@@ -169,6 +173,26 @@ impl TokenCache {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&id);
+    }
+
+    /// [`Self::touch_due`] for a host token, by alias.
+    pub fn host_touch_due(&self, alias: &str, now: i64) -> bool {
+        let mut t = self.touched_hosts.lock().unwrap_or_else(|p| p.into_inner());
+        match t.get(alias) {
+            Some(&at) if now - at < TOUCH_INTERVAL_SECS => false,
+            _ => {
+                t.insert(alias.to_string(), now);
+                true
+            }
+        }
+    }
+
+    /// [`Self::untouch`] for a host token, by alias.
+    pub fn host_untouch(&self, alias: &str) {
+        self.touched_hosts
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(alias);
     }
 }
 

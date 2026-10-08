@@ -11,6 +11,7 @@ import {
   displayName,
   formatElapsed,
   isClaudeStatus,
+  isUnread,
   isStuckKind,
   needsYou,
   newlyStuck,
@@ -30,6 +31,7 @@ import {
   stuckMessage,
   stuckSnapshot,
   worstSeverityByProject,
+  type AttentionFacts,
 } from './attention';
 import { CLAUDE_STATUSES, STUCK_KINDS, type SessionRow } from './sessions';
 import attentionTable from './attention_states.json';
@@ -279,14 +281,39 @@ describe('triage rank', () => {
     expect(classify(row({ idle_since: 0 }), { idleSecs: 0, now: 10_000 })).toBe('idle');
   });
 
-  it('leaves done_unread empty until A2 lands last_viewed_at', () => {
-    for (const s of [row({ last_stop_at: 9_999 }), row({ last_turn_at: 9_999 }), row()]) {
-      expect(classify(s, opts)).not.toBe('done_unread');
-    }
+  it('done_unread: a finished turn nobody has viewed (redesign 2.3)', () => {
+    const done = { claude_status: 'idle' as const, last_stop_at: 9_000 };
+    // Viewed before the turn ended, or never viewed since fleet started it.
+    expect(classify(row({ ...done, last_viewed_at: 8_000 }), opts)).toBe('done_unread');
+    expect(classify(row({ ...done, started_at: 5_000 }), opts)).toBe('done_unread');
+    expect(classify(row({ ...done, claude_status: 'completed', last_viewed_at: 1 }), opts)).toBe(
+      'done_unread',
+    );
+    // Viewed since (the same second counts as seen).
+    expect(classify(row({ ...done, last_viewed_at: 9_000 }), opts)).not.toBe('done_unread');
+    // A row fleet only found on a host has no stamp to compare: never unread.
+    expect(classify(row(done), opts)).not.toBe('done_unread');
+    // Still working, or a dead row: not "done".
+    expect(classify(row({ ...done, claude_status: 'working', last_viewed_at: 1 }), opts)).toBe(
+      'working',
+    );
+    expect(classify(row({ ...done, status: 'ghost', last_viewed_at: 1 }), opts)).toBe('lifecycle');
+    // A failing CI is the more urgent reason for the same row.
+    expect(classify(row({ ...done, ci_status: 'failing', last_viewed_at: 1 }), opts)).toBe(
+      'ci_failing',
+    );
+  });
+
+  it('isUnread compares the last turn with the last view, else the start', () => {
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: 9, started_at: null })).toBe(true);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: 10, started_at: 1 })).toBe(false);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: null, started_at: 5 })).toBe(true);
+    expect(isUnread({ last_stop_at: null, last_viewed_at: null, started_at: 5 })).toBe(false);
+    expect(isUnread({ last_stop_at: 10, last_viewed_at: undefined, started_at: null })).toBe(false);
   });
 
   it('needsYou covers every bucket above working, and nothing below', () => {
-    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 10));
+    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 13));
     expect(needsYou(row({ claude_status: 'blocked' }), opts)).toBe(true);
     expect(needsYou(row({ stuck_kind: 'oom' }), opts)).toBe(true);
     expect(needsYou(row({ idle_since: 0 }), opts)).toBe(true);
@@ -302,7 +329,7 @@ describe('triage rank', () => {
   // agree, read NEEDS_YOU_COUNTED_BUCKETS before changing it.
   it('counts narrower than it filters: idle_long and lifecycle are shown, not counted', () => {
     expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual(
-      [...TRIAGE_BUCKETS].slice(0, 9).filter((b) => b !== 'done_unread' && b !== 'lifecycle'),
+      [...TRIAGE_BUCKETS].slice(0, 12).filter((b) => b !== 'done_unread' && b !== 'lifecycle'),
     );
     const idleRows = Array.from({ length: 6 }, () => row({ idle_since: 0 }));
     const blocked = row({ claude_status: 'blocked' });
@@ -372,10 +399,16 @@ describe('the seven attention states (shared fixture with attention.rs)', () => 
 
   for (const c of attentionTable.cases) {
     it(c.name, () => {
-      const r = row({ claude_status: 'working', last_activity_at: 100, ...(c.row as Partial<SessionRow>) });
-      expect(classify(r, opts)).toBe(c.bucket);
-      expect(attentionState(r, opts)).toBe(c.state);
-      expect(countNeedsYou([r], opts)).toBe(c.counted ? 1 : 0);
+      const r = row({
+        claude_status: 'working',
+        last_activity_at: 100,
+        host_alias: 'alpha',
+        ...(c.row as Partial<SessionRow>),
+      });
+      const o = { ...opts, facts: (c as { facts?: AttentionFacts }).facts };
+      expect(classify(r, o)).toBe(c.bucket);
+      expect(attentionState(r, o)).toBe(c.state);
+      expect(countNeedsYou([r], o)).toBe(c.counted ? 1 : 0);
     });
   }
 });

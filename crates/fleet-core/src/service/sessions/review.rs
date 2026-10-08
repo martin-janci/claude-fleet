@@ -21,6 +21,13 @@ pub struct SpawnReviewArgs {
     #[serde(skip)]
     #[schemars(skip)]
     pub call_id: Option<u64>,
+    /// Who asked for the review (migration 124), set in Rust by the MCP
+    /// tool from its connection and never read from a request. `None` = a
+    /// person: the review is recorded as the SOURCE owner's start, as its
+    /// ownership is.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub origin: Option<crate::store::SessionOrigin>,
 }
 
 pub async fn spawn_review(
@@ -106,6 +113,13 @@ pub async fn spawn_review(
         // read and somebody else could claim. An unowned source leaves the
         // review unclaimed too, which is the right answer, not an error.
         s.claim_if_unclaimed(row.id, source.owner_person_id)?;
+        s.set_session_origin(
+            row.id,
+            &args
+                .origin
+                .clone()
+                .unwrap_or_else(|| crate::store::SessionOrigin::person(source.owner_person_id)),
+        )?;
         let _ = s.set_claude_session_id(row.id, &claude_id);
         let _ = s.set_started_at(row.id, now_unix());
         row.id

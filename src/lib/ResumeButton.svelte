@@ -3,12 +3,14 @@
   // when the hub says that is possible, and otherwise opens the resume
   // dialog; ▾ always opens it (every mode, its reason, the brief preview).
   // The tooltip names where it would land from the link's own snapshot.
+  // The New layout says "Continue", the word every task start uses (6.6).
   import ResumeDialog from './ResumeDialog.svelte';
   import { linkSessionId, resumeWork, workResumePlan, type WorkLink } from './work';
   import { selectSessionExplicitly } from './selection';
   import { sessions } from './sessions';
   import { sessionIdBlocked } from './share';
   import { pushError } from './toasts';
+  import { uiLayout } from './prefs';
 
   let {
     workKey,
@@ -78,7 +80,7 @@
     disabled={busy || shareBlocked !== null}
     title={shareBlocked ?? (where ? `Continue the last conversation on ${where}` : 'Continue the last conversation')}
     data-testid="resume-quick"
-    onclick={quick}>{busy ? '…' : 'Resume'}</button
+    onclick={quick}>{busy ? '…' : $uiLayout === 'new' ? 'Continue' : 'Resume'}</button
   ><button
     type="button"
     class="more"

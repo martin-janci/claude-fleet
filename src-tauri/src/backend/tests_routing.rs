@@ -1251,6 +1251,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "repo_blame",
+            "repo_blame",
+            json!({ "session_id": 7, "path": "src/lib.rs" }),
+            r#"{"path":"src/lib.rs","hunks":[],"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_blame(
+                    b,
+                    RepoFileArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // The simple `(b, s, _)` shape: `operator_status` needs neither ssh
         // nor a cancellation registry, unlike `ensure_operator` below.
         (
@@ -1575,6 +1593,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             effort: None,
             profile: None,
             agent: None,
+            origin: None,
             owner_person_id: Some(42),
         },
         &st,
@@ -2001,6 +2020,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
         NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
         RestoreHostSessionsArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+        TouchSessionViewedArgs,
     };
 
     vec![
@@ -2334,6 +2354,20 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         tmux_name: "demo".into(),
                         friendly_name: "the demo".into(),
                     },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "touch_session_viewed",
+            "touch_session_viewed",
+            json!({ "session_id": 7 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::touch_session_viewed(
+                    b,
+                    TouchSessionViewedArgs { session_id: 7 },
                     s,
                 ))
                 .map(|_| ())
@@ -2787,6 +2821,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         source_session_id: 7,
                         prompt: "review it".into(),
                         call_id: None,
+                        origin: None,
                     },
                     s,
                     h,
@@ -2810,6 +2845,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         source_session_id: 7,
                         prompt: "review it".into(),
                         call_id: Some(123),
+                        origin: None,
                     },
                     s,
                     h,
@@ -3181,6 +3217,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         effort: Some("high".into()),
                         profile: Some("work".into()),
                         agent: Some("claude".into()),
+                        origin: None,
                         // Set, and absent from the asserted JSON above: whose
                         // a session is follows from the CONNECTION, never from
                         // an argument a client could choose (multi-user M1,

@@ -5,7 +5,7 @@
   // no activity in the tooltip, no inactive chip and no spinner.
   import { isInactiveAgent, type SessionRow } from './sessions';
   import { claudeStatusColor, claudeStatusLabel, stuckKindLabel, STUCK_COLOR } from './attention';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import Loader from './Loader.svelte';
 
   let { sess, brief = false }: { sess: SessionRow; brief?: boolean } = $props();
 
@@ -32,7 +32,7 @@
     data-testid="claude-chip"
     style="background: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 13%, transparent); color: {claudeStatusColor(sess.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 27%, transparent);"
     title="Claude: {sess.claude_status}{activity}"
-  >{#if !brief && sess.claude_status === 'working'}<SpiralLoader size={10} class="chip-spiral" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
+  >{#if !brief && sess.claude_status === 'working'}<Loader name="comet" size={12} class="chip-loader" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
 {/if}
 
 <style>
@@ -44,7 +44,7 @@
     flex-shrink: 0;
     white-space: nowrap;
   }
-  .claude-chip :global(.chip-spiral) {
+  .claude-chip :global(.chip-loader) {
     margin-right: 0.2rem;
     vertical-align: -1px;
   }

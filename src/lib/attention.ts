@@ -117,6 +117,23 @@ export interface AttentionOptions {
   idleSecs: number;
   /** Unix seconds "now" (injected so tests are deterministic). */
   now: number;
+  /** What the fleet knows beyond the row (step 2.4); none when absent. */
+  facts?: AttentionFacts;
+}
+
+/** A usage window at its limit. Mirrors `attention::Limit`. */
+export interface AttentionLimit {
+  window: 'five_hour' | 'weekly';
+  resets_at: number | null;
+}
+
+/** Mirrors `attention::Facts` (step 2.4): which hosts are down and which
+ *  accounts are at a limit or have no usable login. The three Blocked
+ *  buckets come from here; `attention_facts.ts` builds it from the stores. */
+export interface AttentionFacts {
+  down_hosts?: readonly string[];
+  limited_accounts?: Readonly<Record<string, AttentionLimit>>;
+  uncredentialed_accounts?: readonly string[];
 }
 
 /** Triage buckets, most urgent first. `classify()` puts a row in exactly one,
@@ -124,15 +141,17 @@ export interface AttentionOptions {
  *  "Needs you" queue, the project sort below, later the quick switcher and the
  *  digest — so those orderings cannot drift apart.
  *
- *  Two buckets are reachable but stay empty until Wave 1 A2 lands its columns:
- *   - `waiting` is driven by `claude_status === 'blocked'` alone. A2's
- *     `waiting_for` will separate a permission prompt from a question and let
- *     the age weighting apply per kind.
- *   - `done_unread` needs `last_viewed_at` and its `touch_session_viewed`
- *     writer, so nothing matches it today. */
+ *  `waiting` is driven by `claude_status === 'blocked'` (or a pending form)
+ *  alone. A2's `waiting_for` will separate a permission prompt from a
+ *  question and let the age weighting apply per kind. `done_unread` reads
+ *  `last_viewed_at` (redesign 2.3), which `session_viewed.ts` stamps while a
+ *  session is on screen. */
 export const TRIAGE_BUCKETS = [
   'waiting',
   'stuck',
+  'host_down',
+  'account_limit',
+  'no_credentials',
   'stop_failed',
   'failed',
   'context_full',
@@ -151,7 +170,9 @@ export type TriageBucket = (typeof TRIAGE_BUCKETS)[number];
  *  only surface for the operator-configured idle nudge, so leaving it out
  *  would delete that reach and reduce `attentionIdleMinutes` to a sort knob.
  *  `working` and `idle` are never in it. */
-export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 10);
+export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.filter(
+  (b) => b !== 'working' && b !== 'idle',
+);
 
 // ── the seven attention states (redesign step 0.4) ──
 
@@ -234,9 +255,21 @@ function isWaiting(s: SessionRow): boolean {
   return s.claude_status === 'blocked' || s.pending_form != null;
 }
 
-/** A2: needs `last_viewed_at`, so nothing is done-unread yet. */
-function isDoneUnread(_s: SessionRow): boolean {
-  return false;
+/** A turn ended after the session was last viewed (redesign 2.3, migration
+ *  123) — or, for a session fleet started and nobody has opened yet, after
+ *  it started. A row reconcile found on a host has neither stamp and is
+ *  never unread. Seconds on both sides: a turn that ends in the second it
+ *  is viewed counts as seen. */
+export function isUnread(s: Pick<SessionRow, 'last_viewed_at' | 'started_at' | 'last_stop_at'>): boolean {
+  const seen = s.last_viewed_at ?? s.started_at;
+  return seen != null && s.last_stop_at != null && s.last_stop_at > seen;
+}
+
+/** Done and unread: the last turn finished (the session is idle) on a live
+ *  row nobody has looked at since. */
+function isDoneUnread(s: SessionRow): boolean {
+  if (s.status === 'ghost' || s.lost_at !== null) return false;
+  return isIdleStatus(s.claude_status) && isUnread(s);
 }
 
 function isLifecycleBroken(s: SessionRow): boolean {
@@ -260,9 +293,13 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (s.kind === 'shell') return 'idle';
   if (isWaiting(s)) return 'waiting';
   if (s.stuck_kind) return 'stuck';
-  if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
   // A dead row keeps its last context reading; a lost one reads `lifecycle`.
   const live = s.status !== 'ghost' && s.lost_at === null;
+  // Step 2.4: Blocked on something outside the session. Live rows only: a
+  // host's mass loss is one Restore row, not a badge per session.
+  const blocked = live ? blockedBy(s, opts) : null;
+  if (blocked) return blocked;
+  if (s.claude_status === 'failed') return s.kind === 'bg' ? 'failed' : 'stop_failed';
   if (live && contextLevel(s.context_pct) === 'crit') return 'context_full';
   if (live && (s.stale_working_at ?? null) !== null) return 'stale_working';
   if (s.ci_status === 'failing' && isIdleStatus(s.claude_status)) return 'ci_failing';
@@ -271,6 +308,20 @@ export function classify(s: SessionRow, opts: AttentionOptions): TriageBucket {
   if (isIdleLong(s, opts)) return 'idle_long';
   if (s.claude_status === 'working') return 'working';
   return 'idle';
+}
+
+/** The Blocked bucket the fleet's facts put a live row in, if any: its host
+ *  is down; or, while it is not working, its account is at a limit that has
+ *  not reset yet ("Paused · limit"), or has no usable login. */
+function blockedBy(s: SessionRow, opts: AttentionOptions): TriageBucket | null {
+  const f = opts.facts;
+  if (!f) return null;
+  if (f.down_hosts?.includes(s.host_alias)) return 'host_down';
+  if (s.claude_status === 'working' || !s.account_uuid) return null;
+  const limit = f.limited_accounts?.[s.account_uuid];
+  if (limit && (limit.resets_at == null || limit.resets_at > opts.now)) return 'account_limit';
+  if (f.uncredentialed_accounts?.includes(s.account_uuid)) return 'no_credentials';
+  return null;
 }
 
 function isIdleStatus(status: ClaudeStatus | null): boolean {
@@ -292,7 +343,11 @@ function bucketSince(s: SessionRow, bucket: TriageBucket): number {
     case 'stale_working':
       return s.stale_working_at ?? s.last_activity_at;
     case 'ci_failing':
+    case 'account_limit':
+    case 'no_credentials':
       return s.idle_since ?? s.last_activity_at;
+    case 'host_down':
+      return s.last_activity_at;
     case 'lifecycle':
       return s.lost_at ?? s.safe_kill_requested_at ?? s.last_activity_at;
     case 'done_unread':

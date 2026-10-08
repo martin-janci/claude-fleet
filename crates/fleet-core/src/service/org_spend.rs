@@ -75,6 +75,51 @@ pub fn spend_by_org(s: &Store, now: i64) -> BTreeMap<i64, OrgSpend> {
     out
 }
 
+/// How many UTC days an org's spend series covers, today last.
+pub const SERIES_DAYS: i64 = 14;
+
+/// One day of an org's spend series.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpendDay {
+    /// `YYYY-MM-DD` (UTC).
+    pub day: String,
+    pub cost_micros: i64,
+}
+
+/// Org `org`'s live spend on each of the last [`SERIES_DAYS`] UTC days at
+/// `now`, oldest first and today last; a day it spent nothing reads `0`.
+pub fn series(s: &Store, org: i64, now: i64) -> Vec<SpendDay> {
+    let today = now.div_euclid(SECS_PER_DAY);
+    let first = today - (SERIES_DAYS - 1);
+    let got = s.org_live_cost_by_day(org, first).unwrap_or_default();
+    (first..=today)
+        .map(|d| SpendDay {
+            day: crate::service::usage::day_string(d),
+            cost_micros: got.get(&d).copied().unwrap_or(0),
+        })
+        .collect()
+}
+
+/// How many days the calendar month of `day` has.
+pub fn days_in_month(day: i64) -> i64 {
+    let start = month_start_day(day);
+    month_start_day(start + 31) - start
+}
+
+/// The day of the month (1-based) on which `spent` so far this month,
+/// carried on at its average daily pace, reaches `budget` — `None` when
+/// nothing is spent yet, when it is already reached, or when the month ends
+/// first. `today` is a UTC day number.
+pub fn pace_day(today: i64, spent: i64, budget: i64) -> Option<i64> {
+    let elapsed = today - month_start_day(today) + 1;
+    if spent <= 0 || spent >= budget {
+        return None;
+    }
+    // Days at `spent / elapsed` a day until `budget`, rounded up.
+    let needed = (budget as i128 * elapsed as i128 + spent as i128 - 1) / spent as i128;
+    (needed <= days_in_month(today) as i128).then_some(needed as i64)
+}
+
 /// Org `org`'s budgets in whole USD, `(daily, monthly)`; `0` is none.
 pub fn budgets(s: &Store, org: i64) -> (u64, u64) {
     let read = |key: &str| {

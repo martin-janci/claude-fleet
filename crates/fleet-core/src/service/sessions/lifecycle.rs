@@ -64,6 +64,13 @@ pub struct NewSessionArgs {
     /// `None` / empty = Claude Code, or a shell for `kind: "shell"`.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Who or what is starting the session (migration 124): set by the
+    /// caller in Rust, like `owner_person_id` and for the same reason never
+    /// read from the request, so a client cannot label its own session a
+    /// mission's. `None` = a person: `finalize_new_session` records
+    /// [`SessionOrigin::person`] with `owner_person_id`.
+    #[serde(skip_deserializing)]
+    pub origin: Option<crate::store::SessionOrigin>,
     /// Whose session this is to be (multi-user M1, T5): the `people` row the
     /// new row is owned by, and therefore `private` to. `None` leaves it
     /// `unclaimed` — the safe holding state (spec §4.3), never "everybody's".
@@ -1133,6 +1140,10 @@ pub(super) async fn new_session_inner(
         claude_id.as_deref(),
         is_shell,
         args.owner_person_id,
+        &args
+            .origin
+            .clone()
+            .unwrap_or_else(|| crate::store::SessionOrigin::person(args.owner_person_id)),
     )
 }
 
@@ -1179,9 +1190,11 @@ pub(super) fn link_new_session_worktree(
 /// so the returned row is the row as of the last write (the frontend merges
 /// it optimistically and orders it by `row_version`). Soft-fails the
 /// cosmetic writes (`started_at`, friendly name, claude id) with a warning;
-/// the `kind` tag, the OWNERSHIP claim and the final read are hard failures.
-// Eight arguments: the row's identity, the three values to write and now the
-// owner. Grouping them into a struct would mean a type whose only purpose is
+/// the `kind` tag, the OWNERSHIP claim and the final read are hard failures,
+/// and so is the origin (migration 124): the origin chip is how a person
+/// tells their own start from a mission's or an agent's.
+// Nine arguments: the row's identity, the three values to write, the owner
+// and the origin. Grouping them into a struct would mean a type whose only purpose is
 // this one call, and every one of them is already named at the single call
 // site.
 #[allow(clippy::too_many_arguments)]
@@ -1194,6 +1207,7 @@ pub(super) fn finalize_new_session(
     claude_id: Option<&str>,
     is_shell: bool,
     owner: Option<i64>,
+    origin: &crate::store::SessionOrigin,
 ) -> Result<SessionRow, IpcError> {
     // Ownership (multi-user M1, T5), and a HARD failure — alone among the
     // writes here, which are all soft because "the session is live either
@@ -1233,6 +1247,7 @@ pub(super) fn finalize_new_session(
     // enough to be stamped its owner by the next pass. A smaller, loud,
     // proof-gated window replaces a silent deterministic one.
     s.claim_if_unclaimed(row_id, owner)?;
+    s.set_session_origin(row_id, origin)?;
     // PROD-5: the fleet created this session now.
     if let Err(e) = s.set_started_at(row_id, now_unix()) {
         tracing::warn!(session = %name, error = %e, "[new_session] storing started_at failed");
@@ -1664,6 +1679,31 @@ pub(super) async fn rename_session_with(
                 ),
             )
         })
+}
+
+/// `touch_session_viewed`: the session a person is looking at.
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "TouchSessionViewedParams")]
+pub struct TouchSessionViewedArgs {
+    /// The session on screen.
+    pub session_id: i64,
+}
+
+/// Record that a person is looking at the session now (migration 125), so
+/// every turn that has ended reads as seen (`done_unread` clears). Answers
+/// the row as it now stands; a call that moves nothing still answers it.
+pub fn touch_session_viewed(
+    args: TouchSessionViewedArgs,
+    store: &Mutex<Store>,
+) -> Result<SessionRow, IpcError> {
+    let s = lock(store)?;
+    s.touch_session_viewed(args.session_id, now_unix())?;
+    s.get_session_by_id(args.session_id)?.ok_or_else(|| {
+        IpcError::new(
+            codes::E_NOTFOUND,
+            format!("session {} not found", args.session_id),
+        )
+    })
 }
 
 #[derive(Serialize, Deserialize)]

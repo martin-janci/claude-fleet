@@ -29,7 +29,8 @@ impl Store {
     /// runs through a SQL string comparison.
     pub fn list_host_tokens(&self) -> Result<Vec<HostTokenRow>, crate::ipc_error::IpcError> {
         let mut stmt = self.conn.prepare(
-            "SELECT host_alias, token, created_at, mode FROM host_tokens ORDER BY host_alias",
+            "SELECT host_alias, token, created_at, mode, last_used_at, rotated_at \
+             FROM host_tokens ORDER BY host_alias",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(HostTokenRow {
@@ -37,6 +38,8 @@ impl Store {
                 token: row.get(1)?,
                 created_at: row.get(2)?,
                 mode: row.get(3)?,
+                last_used_at: row.get(4)?,
+                rotated_at: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -54,19 +57,51 @@ impl Store {
     }
 
     /// Insert or replace a host's token, keeping its mode when the row
-    /// already exists. `created_at` is stamped now.
+    /// already exists. A new row's `created_at` is stamped now; replacing an
+    /// existing row's token with a different one keeps `created_at` and
+    /// stamps `rotated_at` instead (writing the same token back changes
+    /// nothing), and `last_used_at` starts over, since the new token has
+    /// not been used yet.
     pub fn upsert_host_token(
         &self,
         host_alias: &str,
         token: &str,
     ) -> Result<(), crate::ipc_error::IpcError> {
-        let at = now_unix();
+        self.upsert_host_token_at(host_alias, token, now_unix())
+    }
+
+    /// [`Self::upsert_host_token`] at `at` (unix seconds).
+    pub fn upsert_host_token_at(
+        &self,
+        host_alias: &str,
+        token: &str,
+        at: i64,
+    ) -> Result<(), crate::ipc_error::IpcError> {
         self.conn.execute(
             "INSERT INTO host_tokens (host_alias, token, created_at, mode) \
                  VALUES (?1, ?2, ?3, 'full') \
                  ON CONFLICT(host_alias) DO UPDATE SET \
-                   token = excluded.token, created_at = excluded.created_at",
+                   rotated_at = excluded.created_at, last_used_at = NULL, \
+                   token = excluded.token \
+                 WHERE host_tokens.token IS NOT excluded.token",
             rusqlite::params![host_alias, token, at],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp `last_used_at` on `host_alias`'s token at `now`, but only when
+    /// the stored value is unset or more than 60 seconds stale, so a busy
+    /// host writes at most once a minute. Liveness only: it does not move
+    /// `auth_epoch` (migration 126).
+    pub fn touch_host_token(
+        &self,
+        host_alias: &str,
+        now: i64,
+    ) -> Result<(), crate::ipc_error::IpcError> {
+        self.conn.execute(
+            "UPDATE host_tokens SET last_used_at = ?2 \
+             WHERE host_alias = ?1 AND (last_used_at IS NULL OR last_used_at <= ?2 - 60)",
+            rusqlite::params![host_alias, now],
         )?;
         Ok(())
     }
@@ -978,6 +1013,61 @@ mod tests {
         let all = s.list_host_tokens().unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].host_alias, "local", "alias-ordered");
+    }
+
+    /// Orbit Fleet 11.4, the rotate test: a rotation keeps when the host's
+    /// first token was minted, says when it was replaced, and starts "last
+    /// used" over; writing the same token back is no rotation. Use is
+    /// stamped at most once a minute and never moves the auth epoch, which
+    /// a rotation does.
+    #[test]
+    fn a_rotation_keeps_created_stamps_rotated_and_use_is_liveness_only() {
+        let s = Store::open_in_memory().expect("open");
+        s.upsert_host_token_at("mercury", "tok-1", 1_000).unwrap();
+        let row = s.get_host_token("mercury").unwrap().unwrap();
+        assert_eq!(
+            (row.created_at, row.rotated_at, row.last_used_at),
+            (1_000, None, None)
+        );
+
+        let epoch = s.auth_epoch().unwrap();
+        s.touch_host_token("mercury", 2_000).unwrap();
+        s.touch_host_token("mercury", 2_030).unwrap(); // inside the minute: ignored
+        assert_eq!(
+            s.get_host_token("mercury").unwrap().unwrap().last_used_at,
+            Some(2_000)
+        );
+        s.touch_host_token("mercury", 2_100).unwrap();
+        assert_eq!(
+            s.get_host_token("mercury").unwrap().unwrap().last_used_at,
+            Some(2_100)
+        );
+        assert_eq!(
+            s.auth_epoch().unwrap(),
+            epoch,
+            "liveness rebuilds no token cache"
+        );
+
+        s.upsert_host_token_at("mercury", "tok-1", 3_000).unwrap();
+        let same = s.get_host_token("mercury").unwrap().unwrap();
+        assert_eq!(
+            (same.rotated_at, same.last_used_at),
+            (None, Some(2_100)),
+            "the same token is no rotation"
+        );
+        assert_eq!(s.auth_epoch().unwrap(), epoch);
+
+        s.upsert_host_token_at("mercury", "tok-2", 4_000).unwrap();
+        let row = s.get_host_token("mercury").unwrap().unwrap();
+        assert_eq!(row.token, "tok-2");
+        assert_eq!(
+            (row.created_at, row.rotated_at, row.last_used_at),
+            (1_000, Some(4_000), None)
+        );
+        assert!(
+            s.auth_epoch().unwrap() > epoch,
+            "a rotation changes what a token resolves to"
+        );
     }
 
     #[test]

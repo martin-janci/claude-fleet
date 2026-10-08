@@ -253,7 +253,5 @@
   .chosen { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12px; padding: 6px 2px; }
   .chosen .title { font-weight: 500; }
 
-  @media (prefers-reduced-motion: no-preference) {
-    .node, .edge { transition: opacity 120ms ease; }
-  }
+  .node, .edge { transition: opacity var(--dur-fast) ease; }
 </style>

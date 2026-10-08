@@ -65,13 +65,29 @@
     trackers,
     providerInfo,
     showProviderBadges,
+    keyFamily,
     type TicketRow,
   } from './trackers';
+  import { previewStartWork, projectProposal } from './start_preview';
+  import { preselect, type ProposalLike } from './ai_proposal';
   import { workKeyFor, worktreeBranchById } from './work_keys';
   import { settingsOpen } from './app_views';
   import { push, pushError } from './toasts';
-  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubActionBlocked, hubStatus, ownsTheFleet } from './hub';
   import { hubConnection } from './hub_connection';
+  import {
+    commandRows,
+    keepsKind,
+    paletteCommands,
+    runCommand,
+    runSetting,
+    settingRow,
+    splitPrefix,
+  } from './commands';
+  import { descriptors, loadDescriptors } from './pages/pages';
+  import { splitCommand } from './pages/settings_nl';
+  import { settingsWritable } from './pages/review';
+  import { sessionView } from './prefs';
 
   let {
     // Injectable for tests; defaults to the real platform.
@@ -88,6 +104,8 @@
   // dialog's preselected host), the folds the person toggled, and the
   // actions menu.
   let preferredHost = $state<string | null>(null);
+  /** The ticket a project pick starts (the dialog's Change, redesign 3.12). */
+  let pendingTicket = $state<TicketRow | null>(null);
   let toggled = $state<ReadonlySet<string>>(new Set());
   // Re-rank triggers besides the query: open, the person's own actions, folds.
   let seq = $state(0);
@@ -142,12 +160,24 @@
     ),
   );
   const ticketRows = $derived(ticketEntries(tickets, ticketBadges));
+  // Step 3.9: `>` commands, `#` tasks and tickets, `@` hosts.
+  const prefix = $derived(splitPrefix(query));
   const lookupRow = $derived(
     lookupEntry(
-      query,
+      prefix.rest,
       new Set(ticketRows.map((e) => (e.ticket?.key ?? '').toUpperCase())),
     ),
   );
+  // Settings in plain words ("set recent work to 3 days"): the registry is
+  // loaded the first time a query reads like a command.
+  const canWriteSettings = $derived(ownsTheFleet($hubStatus) && $settingsWritable);
+  const settingChange = $derived(settingRow(prefix.rest, $descriptors.values(), canWriteSettings));
+  let descriptorsAsked = false;
+  $effect(() => {
+    if (!open || descriptorsAsked || !canWriteSettings || !splitCommand(prefix.rest)) return;
+    descriptorsAsked = true;
+    if (untrack(() => $descriptors.size) === 0) void loadDescriptors();
+  });
   // Work graph M5: the sidebar's org scope narrows ⌘K too (one
   // `rowMatches` for both, so they never disagree).
   const trackerOrg = $derived(new Map($trackers.map((t) => [t.id, t.org_id ?? null])));
@@ -157,6 +187,8 @@
         ...buildEntries($sessions, $projects, $hosts),
         ...assetEntries($catalog),
         ...commandEntries(),
+        ...commandRows(paletteCommands({ selected: $selectedSession, sessionView: $sessionView }), isMac),
+        ...(settingChange ? [settingChange] : []),
         ...ticketRows,
         ...(lookupRow ? [lookupRow] : []),
       ],
@@ -166,9 +198,10 @@
     ),
   );
   // Normal ⌘K drops picker-hidden projects from its empty-query list, so
-  // both surfaces agree on what is hidden; a query still finds them.
+  // both surfaces agree on what is hidden; a query still finds them. A
+  // prefix keeps only its own kind of row.
   const visibleEntries = $derived(
-    query.trim()
+    (prefix.rest.trim()
       ? entries
       : entries.filter(
           (e) =>
@@ -179,9 +212,14 @@
               $projectPicks.get(pickKey(e.project.project.owner, e.project.project.repo)),
               nowSec(),
             ),
-        ),
+        )
+    )
+      .filter((e) => keepsKind(prefix.mode, e.kind))
+      // Palette commands wait for a query or `>`: the empty ⌘K stays the
+      // list of sessions it has always been.
+      .filter((e) => !e.action || prefix.mode === 'commands' || prefix.rest.trim() !== ''),
   );
-  const ranked: SwitcherEntry[] = $derived(rankEntries(visibleEntries, query, $recentSessions));
+  const ranked: SwitcherEntry[] = $derived(rankEntries(visibleEntries, prefix.rest, $recentSessions));
   const items: PickerItem[] = $derived(
     ranked.map((e) => ({
       key: e.key,
@@ -201,8 +239,10 @@
                 : e.kind === 'asset'
                   ? 'Assets'
                   : e.kind === 'command'
-                    ? 'Commands'
-                    : 'Projects',
+                    ? (e.section ?? 'Commands')
+                    : e.kind === 'setting'
+                      ? 'Settings'
+                      : 'Projects',
       testid: `switcher-${e.kind}`,
     })),
   );
@@ -339,11 +379,12 @@
     }
   });
 
-  function show(next: 'switch' | 'new' = 'switch', host: string | null = null) {
+  function show(next: 'switch' | 'new' = 'switch', host: string | null = null, ticket: TicketRow | null = null) {
     query = '';
     activeKey = null;
     mode = next;
     preferredHost = host;
+    pendingTicket = ticket;
     toggled = new Set();
     menu = null;
     // Undo belongs to this open: a ⌘Z an hour later never reverts a pin.
@@ -364,7 +405,7 @@
   const unsubReq = switcherRequest.subscribe((r) => {
     if (!r) return;
     switcherRequest.set(null);
-    show('new', r.host ?? null);
+    show('new', r.host ?? null, r.ticket ?? null);
   });
   const unsubHost = newSessionHostRequest.subscribe((h) => {
     if (h === null) return;
@@ -499,7 +540,13 @@
   }
   function pickProject(e: Entry, autostart = false) {
     recordPick(e.key);
-    requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, autostart });
+    const t = pendingTicket;
+    if (t) {
+      // The person chose the repository for a ticket start: the ticket stays.
+      requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, ...ticketName(t), ticket: t });
+    } else {
+      requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, autostart });
+    }
     hide();
   }
   function toggleFold(sectionKey: string) {
@@ -570,7 +617,7 @@
       return;
     }
     const w = workEntryOf(key);
-    if (w?.ticket) openTicket(w.ticket);
+    if (w?.ticket) void openTicket(w.ticket);
     else if (w?.lookup) void lookupThenOpen(w.lookup);
   }
 
@@ -592,7 +639,7 @@
       requestNewSession({ project: e.project });
       hide();
     } else if (e.kind === 'ticket' && e.ticket) {
-      openTicket(e.ticket);
+      void openTicket(e.ticket);
     } else if (e.kind === 'lookup' && e.lookup) {
       void lookupThenOpen(e.lookup);
     } else if (e.kind === 'asset' && e.asset) {
@@ -603,6 +650,16 @@
       const command = e.command;
       hide();
       void tick().then(() => requestAssetsView({ command }));
+    } else if (e.kind === 'command' && e.action) {
+      const id = e.action;
+      const ctx = { selected: $selectedSession, sessionView: $sessionView };
+      hide();
+      // After the switcher has unmounted, so a view it opens gets the focus.
+      void tick().then(() => runCommand(id, ctx));
+    } else if (e.kind === 'setting' && e.setting) {
+      const setting = e.setting;
+      hide();
+      void tick().then(() => runSetting(setting));
     } else if (e.kind === 'host' && e.host) {
       const alias = e.host.alias;
       hide();
@@ -618,8 +675,9 @@
     const ids = t.live_session_ids ?? [];
     return $sessions.find((s) => ids.includes(s.id) && s.status !== 'ghost') ?? null;
   }
+  const ticketName = (t: TicketRow) => ({ initialName: t.title ? `${t.key ?? ''} ${t.title}` : (t.key ?? '') });
   /** Enter on a ticket: jump to its live session, else the dialog, prefilled. */
-  function openTicket(t: TicketRow) {
+  async function openTicket(t: TicketRow) {
     const live = liveSessionOf(t);
     if (live) {
       selectSessionExplicitly(live);
@@ -628,23 +686,36 @@
     }
     const key = t.key ?? '';
     const place = placeForTicket(key, $sessions, $projects, (s) => workKeyFor(s, branchById)?.key ?? null);
-    const project = place?.project ?? contextProject(ranked, $selectedSession, $projects);
+    const fresh = $uiLayout === 'new';
+    // Redesign 3.12 (K1): a rule (earlier work on the key's family) beats
+    // Jev; with neither, the dialog opens on the context project as before.
+    let proposal: ProposalLike | null = null;
+    let project = place?.project ?? null;
+    if (place && fresh) {
+      proposal = { value: String(place.project.project.id), source: 'rule', reason: `${keyFamily(key)} work runs here` };
+    } else if (!place && fresh && t.id != null) {
+      hide();
+      const r = await previewStartWork({ item_id: t.id, with_brief: true });
+      const jev = r.ok ? projectProposal(r.value) : null;
+      const id = preselect('project', jev);
+      const hit = id == null ? undefined : $projects.find((p) => p.project.id === Number(id));
+      if (hit) {
+        project = hit;
+        proposal = jev;
+      }
+    }
+    project ??= contextProject(ranked, $selectedSession, $projects);
     if (!project) {
       push({ kind: 'info', message: 'No projects yet — refresh the sidebar first.' });
       return;
     }
-    requestNewSession({
-      project,
-      initialName: t.title ? `${key} ${t.title}` : key,
-      initialHost: place?.host,
-      ticket: t,
-    });
+    requestNewSession({ project, ...ticketName(t), initialHost: place?.host, ticket: t, proposal });
     hide();
   }
   async function lookupThenOpen(reference: string) {
     const r = await workLookup(reference);
     if (r.ok) {
-      openTicket(r.value);
+      void openTicket(r.value);
       return;
     }
     const d = r.error.details as { site_url?: string; provider?: string } | null | undefined;
@@ -686,7 +757,7 @@
     }
     if (r.error.code === 'E_AMBIGUOUS' && e.ticket) {
       // No project to default to: the dialog asks.
-      openTicket(e.ticket);
+      void openTicket(e.ticket);
       return;
     }
     pushError(r.error, 'Start work failed');
@@ -823,7 +894,9 @@
         }}
         onkeydown={onInputKeydown}
         placeholder={mode === 'new'
-          ? 'project or ticket…'
+          ? pendingTicket
+            ? `Repository for ${pendingTicket.key ?? 'this ticket'}…`
+            : 'project or ticket…'
           : 'Jump to a session, host, ticket or asset… (name, key, project, host, branch, status, or paste a ticket URL)'}
         autocomplete="off"
         spellcheck="false"
@@ -888,6 +961,7 @@
         <span>↑↓ move</span>
         <span>↵ attach / open</span>
         <span>{modKey}↵ new session named “{query.trim() || '…'}” (on a ticket: start it)</span>
+        <span>&gt; commands · # tasks · @ hosts</span>
         <span>esc / {chord} close</span>
       {/if}
     </div>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { hosts } from './hosts';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import Loader from './Loader.svelte';
   import { projects, refreshProjects } from './projects';
   import { sessions, hasNoPane } from './sessions';
   import { mcpStatus, mcpConfigure, mcpClientConfig, maskToken, provisionHosts, type McpStatus } from './mcp';
@@ -139,7 +139,7 @@
         disabled={busy !== null}
       >
         <span class="ic {step.status}" aria-hidden="true"
-          >{#if step.status === 'done'}✓{:else if busy === step.id}<SpiralLoader size={11} />{/if}</span
+          >{#if step.status === 'done'}✓{:else if busy === step.id}<Loader name="comet" size={12} />{/if}</span
         >
         <span class="body">
           <span class="label">
@@ -214,7 +214,7 @@
     display: block;
     height: 100%;
     background: var(--accent);
-    transition: width 0.2s;
+    transition: width var(--dur-base);
   }
   .step {
     display: flex;

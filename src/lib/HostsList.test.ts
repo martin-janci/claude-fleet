@@ -132,3 +132,14 @@ describe('HostsList: a hub contract skew', () => {
     expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
   });
 });
+
+describe('the states kit (step 10.6)', () => {
+  it('a filter that matches nothing offers the way out', async () => {
+    mount({ hosts: [], filter: 'nope' });
+    const empty = screen.getByTestId('hosts-empty');
+    expect(empty.dataset.kind).toBe('none');
+    await fireEvent.click(screen.getByTestId('hosts-clear-filter'));
+    expect((screen.getByTestId('hosts-filter') as HTMLInputElement).value).toBe('');
+    expect(screen.getByTestId('hosts-empty').textContent).toContain('No hosts yet');
+  });
+});

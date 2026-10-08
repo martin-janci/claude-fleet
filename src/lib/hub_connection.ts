@@ -45,14 +45,22 @@ export async function startHubConnection(): Promise<void> {
   if (r.ok && r.value) hubConnection.set(r.value);
 }
 
-/** The banner's sentence, or null when there is nothing to say. */
-export function connectionBanner(c: HubConnection, url: string | null): string | null {
+/** The banner's Retry now: try the hub again at once instead of after the
+ *  backoff. Its answer is the next `hub:connection` event. */
+export async function retryHubNow(): Promise<void> {
+  await invokeCmd<null>('hub_retry_now');
+}
+
+/** The banner's sentence, or null when there is nothing to say. `live`:
+ *  the banner counts the wait down beside it, so the sentence leaves it out. */
+export function connectionBanner(c: HubConnection, url: string | null, opts: { live?: boolean } = {}): string | null {
   const hub = url ?? 'the hub';
+  const wait = (secs: number) => (opts.live ? '' : `, next try in ${secs} s`);
   switch (c.state) {
     case 'reconnecting':
-      return `Lost the live connection to ${hub}; what you see may be out of date. Reconnecting — attempt ${c.attempt}, next try in ${c.retry_in_secs} s (${c.reason}).`;
+      return `Lost the live connection to ${hub}; what you see may be out of date. Reconnecting — attempt ${c.attempt}${wait(c.retry_in_secs)} (${c.reason}).`;
     case 'offline':
-      return `Cannot reach ${hub}; what you see may be out of date. Retrying — attempt ${c.attempt}, next try in ${c.retry_in_secs} s (${c.reason}).`;
+      return `Cannot reach ${hub}; what you see may be out of date. Retrying — attempt ${c.attempt}${wait(c.retry_in_secs)} (${c.reason}).`;
     case 'hub_too_old':
       return `${hub}'s wire contract is revision ${c.hub_contract}, older than the ${c.min_contract} this app requires; what you see may be out of date. Update the hub.`;
     case 'hub_too_new':

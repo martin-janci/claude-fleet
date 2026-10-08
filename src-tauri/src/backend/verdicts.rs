@@ -111,7 +111,7 @@ const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its s
      the fleet's administrator; set the windows with set_setting and read the status on the \
      hub";
 
-/// The ten git-write commands of the Files tab, likewise.
+/// The eleven git-write commands of the Files tab, likewise.
 const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
@@ -242,6 +242,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "set_session_friendly_name",
         Verdict::Routed {
             tool: "set_friendly_name",
+        },
+    ),
+    (
+        "touch_session_viewed",
+        Verdict::Routed {
+            tool: "touch_session_viewed",
         },
     ),
     (
@@ -852,6 +858,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_tree", Verdict::Routed { tool: "repo_tree" }),
     ("repo_file", Verdict::Routed { tool: "repo_file" }),
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
+    ("repo_blame", Verdict::Routed { tool: "repo_blame" }),
     (
         "upload_to_session",
         Verdict::SameInBoth {
@@ -914,6 +921,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "repo_delete_branch",
+        Verdict::LocalOnly {
+            instead: NO_GIT_WRITE_TOOL,
+        },
+    ),
+    (
+        "repo_delete_merged_branches",
         Verdict::LocalOnly {
             instead: NO_GIT_WRITE_TOOL,
         },
@@ -1152,6 +1165,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "forgets this machine's own token and setting. It revokes nothing on the \
                   hub: only an operator can, and a paired client is refused revoke_client by \
                   design",
+        },
+    ),
+    (
+        "hub_retry_now",
+        Verdict::SameInBoth {
+            why: "cuts THIS process's wait before it reconnects to the hub. It is the \
+                  banner's Retry now, pressed exactly when the hub cannot be reached",
         },
     ),
     (

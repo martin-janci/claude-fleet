@@ -30,7 +30,10 @@
 //! set it. What this module answers is the states that need no knob to
 //! recognise; a client is free to add its own idle rule on top.
 
-use crate::store::SessionRow;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::service::account_usage::{AccountUsageSnapshot, UsageOutcomeKind};
+use crate::store::{HostRow, SessionRow};
 
 /// Why a session needs a person. The order is the urgency order, and it is
 /// the same order the desktop's `TRIAGE_BUCKETS` uses, so the two cannot
@@ -44,6 +47,17 @@ pub enum Reason {
     /// Wedged in a way the REPL will not leave on its own — an auth menu, a
     /// reconnect, an OOM. `stuck_kind` says which.
     Stuck,
+    /// The session's host does not answer (step 2.4). Nothing in the session
+    /// can move until it does; the row's last status is stale meanwhile.
+    HostDown,
+    /// The session's account is at a usage limit and the session is not
+    /// working: shown as "Paused · limit" (step 2.4), with Switch account and
+    /// Wait (step 4.4).
+    AccountLimit,
+    /// The session's account has no usable login (no credentials file, an
+    /// expired login or a rejected token) and the session is not working
+    /// (step 2.4): sign in again.
+    NoCredentials,
     /// The last turn ended in an API error (a `StopFailure`: rate limit,
     /// auth, …); the `stop_failure` timeline entry says which. Re-prompt.
     StopFailed,
@@ -70,6 +84,9 @@ impl Reason {
         match self {
             Reason::Waiting => "waiting",
             Reason::Stuck => "stuck",
+            Reason::HostDown => "host_down",
+            Reason::AccountLimit => "account_limit",
+            Reason::NoCredentials => "no_credentials",
             Reason::StopFailed => "stop_failed",
             Reason::Failed => "failed",
             Reason::ContextFull => "context_full",
@@ -88,6 +105,8 @@ impl Reason {
                 State::ActionRequired
             }
             Reason::StopFailed | Reason::Failed | Reason::CiFailing => State::Failed,
+            // Waiting on something outside the session (step 2.4).
+            Reason::HostDown | Reason::AccountLimit | Reason::NoCredentials => State::Blocked,
             // A ghost, a lost row or a pending safe kill: nobody can answer
             // it, so it leaves the badge (step 1.1 folds a mass loss into one
             // Restore row instead).
@@ -102,7 +121,8 @@ impl Reason {
 /// through `src/lib/attention_states.json`, which both test suites check.
 ///
 /// Not on the wire yet: hub contract 11 (step 2.6) carries the state beside
-/// the reason, and `Blocked` gets its first reasons in step 2.4.
+/// the reason. `Blocked` has three reasons since step 2.4, decided from
+/// [`Facts`] about the fleet rather than from the row alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum State {
@@ -148,12 +168,15 @@ impl State {
 }
 
 /// Every triage bucket, in the desktop's `TRIAGE_BUCKETS` order, and its
-/// state. The hub decides the eight [`Reason`]s; `done_unread`, `idle_long`,
+/// state. The hub decides the eleven [`Reason`]s; `done_unread`, `idle_long`,
 /// `working` and `idle` are the desktop's own buckets, listed so the whole
 /// map lives in one table.
-pub const BUCKET_STATES: [(&str, State); 12] = [
+pub const BUCKET_STATES: [(&str, State); 15] = [
     ("waiting", State::ActionRequired),
     ("stuck", State::ActionRequired),
+    ("host_down", State::Blocked),
+    ("account_limit", State::Blocked),
+    ("no_credentials", State::Blocked),
     ("stop_failed", State::Failed),
     ("failed", State::Failed),
     ("context_full", State::ActionRequired),
@@ -169,7 +192,12 @@ pub const BUCKET_STATES: [(&str, State); 12] = [
 /// A session's attention state: its [`Reason`]'s state when it needs a
 /// person, else `Working` or `Idle` from `claude_status`.
 pub fn state_with(row: &SessionRow, context_red_pct: f64) -> State {
-    match needs_attention_with(row, context_red_pct) {
+    state_in(row, context_red_pct, &Facts::default())
+}
+
+/// [`state_with`], with what is known about the fleet (step 2.4).
+pub fn state_in(row: &SessionRow, context_red_pct: f64, facts: &Facts) -> State {
+    match needs_attention_in(row, context_red_pct, facts) {
         Some(a) => a.reason.state(),
         // A shell has no agent in it, whatever its status column says.
         None if row.kind != "shell" && row.claude_status.as_deref() == Some("working") => {
@@ -183,6 +211,97 @@ pub fn state_with(row: &SessionRow, context_red_pct: f64) -> State {
 /// `health.context_red_pct`: `fleet_health.context_red`, `context_full`
 /// here and the desktop's chip all count from the same number.
 pub const DEFAULT_CONTEXT_RED_PCT: f64 = 85.0;
+
+/// What the fleet knows beyond a session's own row (step 2.4): which hosts
+/// are down, and which accounts are at a limit or have no usable login. The
+/// three `Blocked` reasons come from here; with the default (nothing known)
+/// the classification is exactly the row-only one.
+///
+/// Built by [`Facts::from_fleet`]; the shared fixture spells it in JSON.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Facts {
+    /// Aliases of hosts that were pinged and did not answer.
+    pub down_hosts: BTreeSet<String>,
+    /// Accounts at a usage limit, by uuid.
+    pub limited_accounts: BTreeMap<String, Limit>,
+    /// Accounts whose login is gone, expired or rejected, by uuid.
+    pub uncredentialed_accounts: BTreeSet<String>,
+}
+
+/// A usage window at its limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Limit {
+    pub window: LimitWindow,
+    /// When the window resets (unix seconds), when known.
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitWindow {
+    FiveHour,
+    Weekly,
+}
+
+impl Facts {
+    /// The facts the host rows and the usage snapshots hold at `now`.
+    ///
+    /// A host is down once a ping said so (`reachable` false with a
+    /// `last_pinged_at`); one never pinged is unknown, not down. An account
+    /// is at its limit when its 5-hour or weekly window is fully used and
+    /// has not reset yet (the weekly one wins: it is the longer wait). A
+    /// login counts as gone on `no_credentials`, `login_expired` and
+    /// `token_rejected`; an expired access token refreshes by itself.
+    pub fn from_fleet(hosts: &[HostRow], usage: &[AccountUsageSnapshot], now: i64) -> Facts {
+        let down_hosts = hosts
+            .iter()
+            .filter(|h| !h.reachable && h.last_pinged_at.is_some())
+            .map(|h| h.alias.clone())
+            .collect();
+        let mut limited_accounts = BTreeMap::new();
+        let mut uncredentialed_accounts = BTreeSet::new();
+        for snap in usage {
+            if matches!(
+                snap.status,
+                UsageOutcomeKind::NoCredentials
+                    | UsageOutcomeKind::LoginExpired
+                    | UsageOutcomeKind::TokenRejected
+            ) {
+                uncredentialed_accounts.insert(snap.account_uuid.clone());
+            }
+            let Some(u) = &snap.usage else { continue };
+            let at_limit = |w: &crate::service::account_usage::Window| {
+                w.utilization >= 100.0 && w.resets_at.is_none_or(|at| at > now)
+            };
+            let limit = u
+                .seven_day
+                .as_ref()
+                .filter(|w| at_limit(w))
+                .map(|w| (LimitWindow::Weekly, w))
+                .or_else(|| {
+                    u.five_hour
+                        .as_ref()
+                        .filter(|w| at_limit(w))
+                        .map(|w| (LimitWindow::FiveHour, w))
+                });
+            if let Some((window, w)) = limit {
+                limited_accounts.insert(
+                    snap.account_uuid.clone(),
+                    Limit {
+                        window,
+                        resets_at: w.resets_at,
+                    },
+                );
+            }
+        }
+        Facts {
+            down_hosts,
+            limited_accounts,
+            uncredentialed_accounts,
+        }
+    }
+}
 
 /// A session that needs a person, and since when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -212,6 +331,19 @@ pub fn needs_attention(row: &SessionRow) -> Option<Attention> {
 /// as needing a person offers an action that does not exist. Nor does a
 /// `shell`: there is no Claude in it.
 pub fn needs_attention_with(row: &SessionRow, context_red_pct: f64) -> Option<Attention> {
+    needs_attention_in(row, context_red_pct, &Facts::default())
+}
+
+/// [`needs_attention_with`], with what is known about the fleet: a live
+/// session on a down host, or one that is not working on an account at its
+/// limit or without a login, is `Blocked` (step 2.4). A dead row (ghost or
+/// lost) keeps `Lifecycle`: a host's mass loss is one Restore row, not a
+/// badge per session.
+pub fn needs_attention_in(
+    row: &SessionRow,
+    context_red_pct: f64,
+    facts: &Facts,
+) -> Option<Attention> {
     if row.kind == "external" || row.kind == "shell" {
         return None;
     }
@@ -219,6 +351,8 @@ pub fn needs_attention_with(row: &SessionRow, context_red_pct: f64) -> Option<At
     // A dead row keeps its last context reading; only a live one can act on
     // it (or on a stale stamp) — a lost one reads `Lifecycle`.
     let live = row.status != "ghost" && row.lost_at.is_none();
+    let working = row.claude_status.as_deref() == Some("working");
+    let account = row.account_uuid.as_deref();
     let idle = row
         .claude_status
         .as_deref()
@@ -227,6 +361,13 @@ pub fn needs_attention_with(row: &SessionRow, context_red_pct: f64) -> Option<At
         Reason::Waiting
     } else if row.stuck_kind.is_some() {
         Reason::Stuck
+    } else if live && facts.down_hosts.contains(&row.host_alias) {
+        Reason::HostDown
+    } else if live && !working && account.is_some_and(|a| facts.limited_accounts.contains_key(a)) {
+        Reason::AccountLimit
+    } else if live && !working && account.is_some_and(|a| facts.uncredentialed_accounts.contains(a))
+    {
+        Reason::NoCredentials
     } else if failed && !crate::store::has_no_pane(&row.kind) {
         Reason::StopFailed
     } else if failed {
@@ -262,7 +403,9 @@ fn since_for(row: &SessionRow, reason: Reason) -> i64 {
         Reason::StopFailed => row.last_stop_at.unwrap_or(row.last_activity_at),
         Reason::ContextFull => row.context.context_at.unwrap_or(row.last_activity_at),
         Reason::StaleWorking => row.stale_working_at.unwrap_or(row.last_activity_at),
-        Reason::CiFailing => row.idle_since.unwrap_or(row.last_activity_at),
+        Reason::CiFailing | Reason::AccountLimit | Reason::NoCredentials => {
+            row.idle_since.unwrap_or(row.last_activity_at)
+        }
         Reason::Lifecycle => row
             .lost_at
             .or(row.safe_kill_requested_at)
@@ -325,6 +468,9 @@ mod tests {
             visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
             claude_profile: None,
             agent: crate::store::AGENT_CLAUDE.into(),
+            origin: None,
+            origin_ref: None,
+            last_viewed_at: None,
             pending_form: None,
             parent_session_id: None,
             tags: Vec::new(),
@@ -530,6 +676,9 @@ mod tests {
         for r in [
             Reason::Waiting,
             Reason::Stuck,
+            Reason::HostDown,
+            Reason::AccountLimit,
+            Reason::NoCredentials,
             Reason::StopFailed,
             Reason::Failed,
             Reason::ContextFull,
@@ -593,6 +742,9 @@ mod tests {
         let reasons = [
             Reason::Waiting,
             Reason::Stuck,
+            Reason::HostDown,
+            Reason::AccountLimit,
+            Reason::NoCredentials,
             Reason::StopFailed,
             Reason::Failed,
             Reason::ContextFull,
@@ -613,7 +765,13 @@ mod tests {
                 v[k] = val.clone();
             }
             let r: SessionRow = serde_json::from_value(v).unwrap_or_else(|e| panic!("{name}: {e}"));
-            let state = state_with(&r, DEFAULT_CONTEXT_RED_PCT);
+            let facts: Facts = case
+                .get("facts")
+                .map(|f| {
+                    serde_json::from_value(f.clone()).unwrap_or_else(|e| panic!("{name}: {e}"))
+                })
+                .unwrap_or_default();
+            let state = state_in(&r, DEFAULT_CONTEXT_RED_PCT, &facts);
             assert_eq!(state.as_str(), case["state"].as_str().unwrap(), "{name}");
             assert_eq!(
                 state.counts_toward_badge(),
@@ -622,7 +780,7 @@ mod tests {
             );
             // Where the hub decides the bucket, it is the same one.
             let reason =
-                needs_attention_with(&r, DEFAULT_CONTEXT_RED_PCT).map(|a| a.reason.as_str());
+                needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &facts).map(|a| a.reason.as_str());
             let bucket = case["bucket"].as_str().unwrap();
             if reasons.iter().any(|r| r.as_str() == bucket) {
                 assert_eq!(reason, Some(bucket), "{name}");
@@ -630,5 +788,184 @@ mod tests {
                 assert_eq!(reason, None, "{name}");
             }
         }
+    }
+
+    fn limited(uuid: &str) -> Facts {
+        let mut f = Facts::default();
+        f.limited_accounts.insert(
+            uuid.into(),
+            Limit {
+                window: LimitWindow::Weekly,
+                resets_at: Some(5_000),
+            },
+        );
+        f
+    }
+
+    /// Step 2.4: the three Blocked reasons, each from a fact about the fleet.
+    #[test]
+    fn a_down_host_a_limited_account_and_a_lost_login_block_a_live_session() {
+        let mut down = Facts::default();
+        down.down_hosts.insert("alpha".into());
+        let r = row();
+        let a = needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &down).unwrap();
+        assert_eq!(a.reason, Reason::HostDown);
+        assert_eq!(a.reason.state(), State::Blocked);
+
+        let mut r = row();
+        r.account_uuid = Some("acc".into());
+        r.claude_status = Some("idle".into());
+        r.idle_since = Some(70);
+        let a = needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &limited("acc")).unwrap();
+        assert_eq!(
+            a,
+            Attention {
+                reason: Reason::AccountLimit,
+                since: 70
+            }
+        );
+        r.claude_status = Some("working".into());
+        assert_eq!(
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &limited("acc")),
+            None,
+            "a working session is not paused by its account's limit yet"
+        );
+
+        let mut gone = Facts::default();
+        gone.uncredentialed_accounts.insert("acc".into());
+        r.claude_status = Some("failed".into());
+        assert_eq!(
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &gone)
+                .unwrap()
+                .reason,
+            Reason::NoCredentials,
+            "a turn that failed on a lost login reads as the login"
+        );
+    }
+
+    #[test]
+    fn a_dead_row_on_a_down_host_keeps_lifecycle_and_a_question_still_wins() {
+        let mut down = Facts::default();
+        down.down_hosts.insert("alpha".into());
+        let mut r = row();
+        r.lost_at = Some(10);
+        assert_eq!(
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &down)
+                .unwrap()
+                .reason,
+            Reason::Lifecycle
+        );
+        let mut r = row();
+        r.claude_status = Some("blocked".into());
+        assert_eq!(
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &down)
+                .unwrap()
+                .reason,
+            Reason::Waiting
+        );
+    }
+
+    #[test]
+    fn facts_come_from_pinged_hosts_and_the_usage_snapshots() {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let host = |alias: &str, reachable: bool, pinged: Option<i64>| HostRow {
+            alias: alias.into(),
+            ssh_alias: None,
+            reachable,
+            claude_version: None,
+            tmux_version: None,
+            hidden: false,
+            last_pinged_at: pinged,
+            account_uuid: None,
+            provisioned: false,
+            transport: "ssh".into(),
+            org_id: None,
+            claude_version_at: None,
+            disk_home_free_kb: None,
+            disk_home_total_kb: None,
+            disk_tmp_free_kb: None,
+            load_1m: None,
+            mem_avail_kb: None,
+            uptime_secs: None,
+            health_at: None,
+            last_hook_at: None,
+            agent_version: None,
+            provisioned_at: None,
+            provision_stale: false,
+            unclaimed_sessions: None,
+            provision_warning: None,
+            auth_overrides: None,
+            claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
+            harnesses: None,
+        };
+        let snap = |uuid: &str, status: UsageOutcomeKind, five: f64, week: f64, resets: i64| {
+            AccountUsageSnapshot {
+                account_uuid: uuid.into(),
+                usage: Some(AccountUsage {
+                    five_hour: Some(Window {
+                        utilization: five,
+                        resets_at: Some(resets),
+                    }),
+                    seven_day: Some(Window {
+                        utilization: week,
+                        resets_at: Some(resets + 100),
+                    }),
+                    seven_day_opus: None,
+                    seven_day_sonnet: None,
+                }),
+                subscription: None,
+                fetched_at: Some(900),
+                source_host: None,
+                status,
+                detail: None,
+                next_try_at: 0,
+            }
+        };
+        let f = Facts::from_fleet(
+            &[
+                host("up", true, Some(1)),
+                host("down", false, Some(1)),
+                host("new", false, None),
+            ],
+            &[
+                snap("five", UsageOutcomeKind::Ok, 100.0, 40.0, 2_000),
+                snap("both", UsageOutcomeKind::Ok, 100.0, 100.0, 2_000),
+                snap("reset", UsageOutcomeKind::Ok, 100.0, 10.0, 500),
+                snap("fine", UsageOutcomeKind::Ok, 80.0, 99.0, 2_000),
+                snap("gone", UsageOutcomeKind::LoginExpired, 0.0, 0.0, 2_000),
+                snap(
+                    "refresh",
+                    UsageOutcomeKind::AccessTokenExpired,
+                    0.0,
+                    0.0,
+                    2_000,
+                ),
+            ],
+            1_000,
+        );
+        assert_eq!(f.down_hosts.iter().collect::<Vec<_>>(), ["down"]);
+        assert_eq!(
+            f.limited_accounts.get("five"),
+            Some(&Limit {
+                window: LimitWindow::FiveHour,
+                resets_at: Some(2_000)
+            })
+        );
+        assert_eq!(f.limited_accounts["both"].window, LimitWindow::Weekly);
+        assert!(
+            !f.limited_accounts.contains_key("reset"),
+            "a window already reset"
+        );
+        assert!(!f.limited_accounts.contains_key("fine"));
+        assert_eq!(
+            f.uncredentialed_accounts.iter().collect::<Vec<_>>(),
+            ["gone"]
+        );
     }
 }
