@@ -1494,6 +1494,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/126_host_token_use.sql"),
         already_applied: Some(host_tokens_has_rotated_at),
     },
+    // Orbit Fleet 8.2: `aux_usage`, the cost of fleet's own `claude -p`
+    // runs. A new table and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(127, include_str!("../../migrations/127_aux_usage.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -102,6 +102,7 @@ struct SummaryPlan {
     claude_session_id: String,
     stored_path: Option<String>,
     model: String,
+    org_id: Option<i64>,
 }
 
 /// PURE: the one command the summary runs on the host. Every value is
@@ -120,7 +121,7 @@ pub fn summary_script(
     }
     let candidates = super::resume::transcript_candidates(stored_path, claude_session_id)?;
     let claude = format!(
-        "claude -p --resume {} --fork-session --model {} {} {}",
+        "claude -p --resume {} --fork-session --model {} --output-format json {} {}",
         quote(claude_session_id),
         quote(model),
         claude_print::isolation_flags(),
@@ -343,7 +344,32 @@ fn plan(
         // Org administration phase C: the org the work was done for may
         // pick its own model (its account pays).
         model: settings::get_string_for(s, settings::WORK_SUMMARY_MODEL, org_id),
+        org_id,
     })
+}
+
+/// Book a summary run in `aux_usage`. A failed write is logged, never the
+/// summary's error.
+fn book(
+    store: &Mutex<Store>,
+    p: &SummaryPlan,
+    usage: Option<&crate::service::claude_print::Envelope>,
+) {
+    let row = crate::store::NewAuxUsage {
+        origin: crate::store::AUX_ORIGIN_SUMMARY,
+        host_alias: p.host.clone(),
+        model: p.model.clone(),
+        mission_id: None,
+        org_id: p.org_id,
+        claude_session_id: Some(p.claude_session_id.clone()),
+        input_tokens: usage.and_then(|u| u.input_tokens),
+        output_tokens: usage.and_then(|u| u.output_tokens),
+        cost_micros: usage.and_then(|u| u.cost_microusd).unwrap_or(0),
+        at: crate::store::now_unix(),
+    };
+    if let Err(e) = lock(store).and_then(|s| s.insert_aux_usage(&row)) {
+        tracing::warn!(error = %e.message, "[summary] cost not booked");
+    }
 }
 
 /// Summarise past work `link_id` of `key` (`work_link { action: summarize }`).
@@ -404,6 +430,24 @@ pub async fn summarize(
                 codes::E_CLAUDE_CLI,
                 format!("the summary run failed: {}", last_error_line(&out.stderr)),
             ))
+        }
+    };
+    // Redesign 8.2: the run is booked with its cost, whatever it said.
+    let text = match crate::service::claude_print::parse_envelope(&text) {
+        Some(env) => {
+            book(store, &p, Some(&env));
+            if env.is_error || env.result.trim().is_empty() {
+                return Err(IpcError::new(
+                    codes::E_CLAUDE_CLI,
+                    "the summary run failed: claude answered with an error",
+                ));
+            }
+            env.result
+        }
+        // No envelope (a cut reply, an older `claude`): the text itself.
+        None => {
+            book(store, &p, None);
+            text
         }
     };
     let (body, truncated) = clean_summary(&text);
