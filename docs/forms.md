@@ -184,6 +184,14 @@ spec renders two ways:
   small Atom, what is being read, each field once its name, type and label
   are whole; `partial_spec.ts`); once whole it is the wizard.
 
+Choices only known when a wizard opens (the fleet's hosts, an owner's
+repositories) replace the file's example options through `withChoices`; a
+choice left with none leaves the form with the option that led to it.
+`add_project` is a chat wizard only: 6.11's dialog keeps its GitHub browser,
+which a form cannot hold. Its run (`add_project_wizard.ts`) adds each
+repository in turn, stops at the first failure and says what was added, and
+never creates a repository on GitHub (that needs the dialog's confirmation).
+
 Either way nothing runs until the last step's button is pressed: the
 button carries a Comet while it runs, the card then shrinks to one line,
 and a Pulse says what is starting. Never a modal over the chat or a

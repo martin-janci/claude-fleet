@@ -7,8 +7,9 @@
 import type { LoaderName } from '../loader-kit.generated';
 import type { FormSpec } from './forms';
 import linkHub from './wizards/link_hub.json';
+import addProject from './wizards/add_project.json';
 
-export type WizardId = 'link_hub';
+export type WizardId = 'link_hub' | 'add_project';
 
 export interface Wizard {
   id: WizardId;
@@ -22,4 +23,36 @@ export interface Wizard {
 
 export const WIZARDS: Record<WizardId, Wizard> = {
   link_hub: { id: 'link_hub', spec: linkHub as FormSpec, sending: 'Pairing…', loader: 'counter-orbit' },
+  // In the chat only: 6.11's dialog keeps its GitHub browser (owner picker,
+  // "already in fleet"), which a form cannot hold.
+  add_project: { id: 'add_project', spec: addProject as FormSpec, sending: 'Adding…', loader: 'comet' },
 };
+
+/** `spec` with the choices only known when it opens (the fleet's hosts, a
+ *  GitHub owner's repositories) in place of the file's example options. A
+ *  choice given no options leaves the form, with the option and the step
+ *  that lead to it: Add project with no repositories to offer has no From
+ *  GitHub. */
+export function withChoices(spec: FormSpec, choices: Record<string, [string, string][]>): FormSpec {
+  const empty = (name: string) => choices[name]?.length === 0;
+  // A step left with no field goes; so does the option that led to it.
+  const gone = new Set<string>();
+  const steps = spec.steps.flatMap((s) => {
+    const fields = s.fields.filter((f) => !empty(f.name));
+    if (fields.length > 0) return [{ ...s, fields }];
+    if (s.when?.field !== undefined && typeof s.when.eq === 'string') gone.add(`${s.when.field}=${s.when.eq}`);
+    return [];
+  });
+  return {
+    ...spec,
+    steps: steps.map((s) => ({
+      ...s,
+      fields: s.fields.map((f) => {
+        if (!f.options) return f;
+        const options = choices[f.name] ?? f.options.filter(([v]) => !gone.has(`${f.name}=${v}`));
+        const kept = f.value === undefined || options.some(([v]) => v === f.value);
+        return { ...f, options, value: kept ? f.value : undefined };
+      }),
+    })),
+  };
+}
