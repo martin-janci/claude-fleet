@@ -687,6 +687,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
     let r = match tool {
         // ---- lifecycle.rs -------------------------------------------------
         "kill_session" => fx.t.kill_session(ext, p!()).await,
+        "shell_terminals" => fx.t.shell_terminals(ext, p!()).await,
         "safe_kill_session" => fx.t.safe_kill_session(ext, p!()).await,
         "rename_session" => fx.t.rename_session(ext, p!()).await,
         "set_friendly_name" => fx.t.set_friendly_name(ext, p!()).await,
@@ -941,6 +942,7 @@ async fn run_matrix() {
     m.gated("safe_kill_session", Reach::Own, row).await;
     m.gated("restart_session", Reach::Own, row).await;
     m.gated("recreate_session", Reach::Own, row).await;
+    m.gated("shell_terminals", Reach::Own, row).await;
     m.gated(
         "move_session",
         Reach::Own,
@@ -1892,7 +1894,7 @@ async fn a_driver_is_refused_every_owner_only_tool() {
 fn own_tier_args(fx: &Fx, tool: &str) -> Value {
     match tool {
         "kill_session" | "safe_kill_session" | "restart_session" | "recreate_session"
-        | "session_access" => json!({ "session_id": fx.row }),
+        | "session_access" | "shell_terminals" => json!({ "session_id": fx.row }),
         "move_session" => {
             json!({ "session_id": fx.row, "target_host_alias": FAR, "dry_run": true })
         }

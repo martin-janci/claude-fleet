@@ -213,8 +213,12 @@ describe('shortcut registry', () => {
     expect(md).toContain(`| ${mac('new-terminal')} | New terminal (${other('new-terminal')})`);
     expect(md).toContain(`| ${mac('next-terminal')} | Next terminal`);
     expect(md).toContain(`| ${mac('go-to-file')} | Go to file, Files tab only (${other('go-to-file')})`);
-    for (const id of ['new-terminal', 'next-terminal', 'go-to-file']) {
+    for (const id of ['go-to-file']) {
       expect(SHORTCUTS.find((s) => s.id === id)?.status).toBe('planned');
+    }
+    // Wired by step 5.3 (TerminalView).
+    for (const id of ['new-terminal', 'next-terminal']) {
+      expect(SHORTCUTS.find((s) => s.id === id)?.status).toBe('live');
     }
     // Step 3.5 wired the inspector, 5.5 Open in VS Code.
     expect(SHORTCUTS.find((s) => s.id === 'inspector')?.status).toBe('live');

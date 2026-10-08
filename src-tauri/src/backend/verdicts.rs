@@ -201,6 +201,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "shell_terminals",
+        Verdict::Routed {
+            tool: "shell_terminals",
+        },
+    ),
+    (
         "safe_kill_session",
         Verdict::Routed {
             tool: "safe_kill_session",

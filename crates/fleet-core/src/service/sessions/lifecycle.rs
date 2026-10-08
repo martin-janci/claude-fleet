@@ -1563,6 +1563,9 @@ pub(super) async fn kill_session_with(
     }
     let tmux = (deps.exec)(&args.host_alias);
     tmux.kill_session(&args.name).await?;
+    // Its shell terminals (step 5.3) go with it. Best-effort: a terminal
+    // left behind is no session row, only a stray tmux session.
+    super::terminals::close_all_after_kill(&*tmux, &args.name).await;
     // Task G: record the kill before reconcile reaps the row. Best-effort.
     // Then ghost the row as fleet's OWN kill (`lost_reason='killed'`)
     // before the reconcile below probes the host: tmux exits with its last
@@ -1665,6 +1668,8 @@ pub(super) async fn rename_session_with(
         }
         return Err(e);
     }
+    // Its shell terminals (step 5.3) follow it to the new name.
+    super::terminals::rename_after_rename(tmux, &args.old_name, &args.new_name).await;
     reconcile_one_host(store, ssh, &args.host_alias).await?;
     let s = lock(store)?;
     // `new_name` is validated verbatim (no padding), so look it up as-is —

@@ -611,6 +611,14 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     // lifecycle.rs
+    // Opens or closes a shell beside a session (step 5.3): never the agent.
+    ToolPolicy {
+        name: "shell_terminals",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "kill_session",
         access: Access::Client,

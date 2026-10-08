@@ -339,6 +339,8 @@ export const ROUTED_ACTIONS = [
   'answer_form',
   'decline_form',
   'kill_session',
+  // A session's shell terminals (step 5.3).
+  'shell_terminals',
   'safe_kill_session',
   'rename_session',
   'set_friendly_name',

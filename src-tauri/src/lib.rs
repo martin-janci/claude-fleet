@@ -405,6 +405,7 @@ pub fn run() {
             commands::sessions::list_sessions,
             commands::sessions::new_session,
             commands::sessions::kill_session,
+            commands::sessions::shell_terminals,
             commands::sessions::safe_kill_session,
             commands::sessions::inspect_safe_kill,
             commands::sessions::discard_kill_session,
