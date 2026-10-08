@@ -17,6 +17,7 @@
   import type { Values } from '../forms/forms';
   import Markdown from '../MarkdownView.svelte';
   import ErrorCard from './ErrorCard.svelte';
+  import GuidePageCard from './GuidePageCard.svelte';
   import ProgressCard from './ProgressCard.svelte';
   import ReportCard from './ReportCard.svelte';
   import ResultsCard from './ResultsCard.svelte';
@@ -100,6 +101,8 @@
       {/each}
     </ol>
   </section>
+{:else if block.kind === 'guide' && block.page}
+  <GuidePageCard pageId={block.page} />
 {:else if block.kind === 'guide'}
   <section class="card" data-testid="rich-guide" aria-label={block.title}>
     <strong>{block.title}</strong>

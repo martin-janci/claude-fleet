@@ -84,11 +84,19 @@ pub enum BlockKind {
         intro: Option<String>,
         steps: Vec<TutorialStep>,
     },
-    /// Reference material in folding sections.
+    /// Reference material in folding sections, or with `page` a guide
+    /// fleet already has (a `fleet.page/1` page of layout `guide`), drawn
+    /// as Settings draws it; the other keys are then ignored.
     Guide {
-        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<String>,
+        /// Required without `page`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         intro: Option<String>,
+        /// Required without `page`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         sections: Vec<GuideSection>,
     },
     Callout {
@@ -317,6 +325,9 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
                 p.str(s, "code", at, false, 8000);
                 p.str(s, "lang", at, false, 20);
             });
+        }
+        "guide" if !matches!(o.get("page"), None | Some(Value::Null)) => {
+            p.key(o, "page", "");
         }
         "guide" => {
             p.str(o, "title", "", true, 120);
@@ -721,7 +732,8 @@ impl Problems {
         }
     }
 
-    /// A progress `id` or an error `code`: a key, never prose.
+    /// A progress `id`, an error `code` or a guide's `page`: a key, never
+    /// prose.
     fn key(&mut self, o: &Map<String, Value>, name: &str, at: &str) {
         if let Some(v) = self.str(o, name, at, true, KEY_MAX) {
             let ok = v
