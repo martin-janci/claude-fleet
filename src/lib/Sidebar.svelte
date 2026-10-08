@@ -101,6 +101,7 @@
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { attentionFacts } from './attention_facts';
+  import { snapshotRows } from './motion_catalog';
   import { push, pushError } from './toasts';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
@@ -930,6 +931,13 @@
     $sidebarView === 'inbox' ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions] : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
+  // Redesign step 7.4: a row whose state moves it to another group is a new
+  // element there; snapshot every row's place before the groups re-render so
+  // the new one slides from where the old one was (motion_catalog.slideIn).
+  $effect.pre(() => {
+    void [flatGroups, workGroups, inboxList, orphanSessions];
+    untrack(() => snapshotRows(sidebarEl));
+  });
   const inboxRestText = $derived(notWaitingText(notWaiting(inboxPool, attentionOpts)));
 
   // Interactive Claude sessions running entirely outside fleet (Claude
@@ -2021,10 +2029,10 @@
     vertical-align: middle;
   }
   .work-dot.dot-progress {
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
   }
   .work-dot.dot-done {
-    background: var(--ok, #22c55e);
+    background: var(--status-done);
   }
   .work-title {
     margin-left: 0.4rem;
@@ -2049,7 +2057,7 @@
   }
   .work-reopened {
     font-size: 11px;
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
     white-space: nowrap;
   }
   .archived-wrap {
@@ -2098,7 +2106,7 @@
   }
   .past-purged {
     font-size: 11px;
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
   .purge-work {
     margin: 0.5rem 0 0;
@@ -2218,7 +2226,7 @@
   .purge-btn {
     opacity: 0;
     transition: opacity var(--dur-base);
-    color: var(--color-error, #f44336);
+    color: var(--danger);
   }
   /* UX-04: `.icon-btn:disabled { opacity: 0.6 }` outranks `opacity: 0` here,
      so before this rule the purge button was INVISIBLE exactly when it
