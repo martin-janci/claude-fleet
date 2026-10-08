@@ -2406,8 +2406,9 @@ fn router_sum_serves_every_tool() {
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
     // claim tools (T12) + the New session picker's `project_picks` /
     // `set_project_pick` + org administration's `org_admin` (phase B) +
-    // chat forms' `ask` + debug devices' `debug_devices`.
-    assert_eq!(served, 119);
+    // chat forms' `ask` + debug devices' `debug_devices` + Lost and found's
+    // `adopt_session`.
+    assert_eq!(served, 120);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3934,7 +3935,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// sides' sum.
     /// Measured at 85,601 on 2026-10-08 after debug devices (the
     /// `debug_devices` tool, one entry by `action`, +1,967 bytes).
-    const BUDGET_BYTES: usize = 85_701;
+    /// Measured at 86,158 on 2026-10-08 after Lost and found's adopt (the
+    /// `adopt_session` tool, +557 bytes).
+    const BUDGET_BYTES: usize = 86_258;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10121,6 +10124,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // session_ops.rs
     ("capture_session", &["Read"]),
     ("dismiss_ghost_session", &["Drive"]),
+    ("adopt_session", &["Own"]),
     // Its `requester_session_id` is `dispatch_task`'s by another name: the
     // new row is stamped `parent_session_id`, so it shows in that session's
     // Conversations panel, and `inherit_worker_work` copies its work links.

@@ -41,8 +41,8 @@ use fleet_core::service::safe_kill::{
     self, DiscardKillSessionArgs, InspectSafeKillArgs, SafeKillInspection, SafeKillSessionArgs,
 };
 use fleet_core::service::sessions::{
-    self, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, LostCandidate,
-    NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
+    self, AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
+    LostCandidate, NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
     RestoreHostSessionsArgs, RestoreReport, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
 };
 use fleet_core::ssh::SshClient;
@@ -233,6 +233,16 @@ pub async fn dismiss_ghost_session(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<(), IpcError> {
     routed::dismiss_ghost_session(&backend, args, &store).await
+}
+
+/// Adopt a live tmux session fleet did not start (Lost and found, step 4.8).
+#[tauri::command]
+pub async fn adopt_session(
+    args: AdoptSessionArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<SessionRow, IpcError> {
+    routed::adopt_session(&backend, args, &store).await
 }
 
 /// Remove an inactive background agent (`kind='bg'`, not working) from the
@@ -787,6 +797,23 @@ pub(crate) mod routed {
                 Ok(())
             }
             None => sessions::dismiss_ghost_session(args, store),
+        }
+    }
+
+    pub async fn adopt_session(
+        backend: &FleetBackend,
+        mut args: AdoptSessionArgs,
+        store: &Mutex<Store>,
+    ) -> Result<SessionRow, IpcError> {
+        match backend.hub() {
+            // The hub makes the connection's own person the owner; the field
+            // is `skip_deserializing`, so it is never on the wire.
+            Some(hub) => hub.route("adopt_session", &args).await,
+            // Standalone: the person behind the window, as in `new_session`.
+            None => {
+                args.owner_person_id = fleet_core::service::sessions::hub_personal_owner(store);
+                sessions::adopt_session(args, store)
+            }
         }
     }
 

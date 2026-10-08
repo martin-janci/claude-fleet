@@ -816,6 +816,39 @@ impl FleetTools {
         ok_json(&serde_json::json!({ "dismissed": session_id }))
     }
 
+    #[tool(description = "Adopt a live tmux session fleet did not start \
+        (started_at null: someone ran tmux by hand on the host). Fleet runs \
+        it from now on: started_at is set and the caller becomes its owner \
+        when it has none. The pane is untouched. Errors with \
+        E_INVALID_STATE for a row fleet already runs, a lost one (use \
+        restore_host_sessions) or one with no pane (bg, external).")]
+    pub(super) async fn adopt_session(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(mut args): Parameters<sessions::AdoptSessionArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("adopt_session", &format!("session_id={}", args.session_id));
+        self.resolve_target(
+            &caller,
+            Some(args.session_id),
+            None,
+            None,
+            // `own`: it takes ownership of the row, which is the claim's
+            // reach, and `resolve_target` keeps an unclaimed row this caller
+            // may not see answering exactly like a missing one.
+            Reach::Own,
+            "the session to adopt",
+        )?;
+        // Whose it becomes follows from the connection, never the request
+        // (the field is `skip_deserializing`), as in `new_session`.
+        args.owner_person_id = {
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            super::fleet::owner_for(&caller, &s)
+        };
+        let row = sessions::adopt_session(args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
     #[tool(description = "Launch a supervised headless (background) Claude \
         session on a host with an initial prompt, which becomes its default \
         friendly name. Returns the claude_session_id AND the fleet row \
