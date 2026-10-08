@@ -52,12 +52,12 @@
     gap: 0.4rem;
   }
   .dropped {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .dismiss-all {
     font: inherit;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.15rem 0.45rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -101,14 +101,14 @@
   .code {
     flex: 0 0 auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.05rem 0.3rem;
     border-radius: 3px;
     background: var(--bg-pane);
     color: var(--fg-muted);
   }
   .msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-  .count { color: var(--fg-muted); font-size: 0.7rem; }
+  .count { color: var(--fg-muted); font-size: 11px; }
   .action {
     flex: 0 0 auto;
     background: transparent;
@@ -116,7 +116,7 @@
     border-radius: 4px;
     color: var(--accent);
     cursor: pointer;
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0 0.4rem;
   }
   .action:hover { border-color: var(--accent); }

@@ -163,7 +163,7 @@
   }
   h5 {
     margin: 0 0 0.35rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -209,11 +209,11 @@
   }
   .key,
   .meta {
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .tag {
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0 0.35rem;
     border-radius: var(--radius-sm);
     background: var(--bg);
@@ -225,7 +225,7 @@
   .note,
   .empty {
     margin: 0.2rem 0 0;
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   .empty,
   .note {
@@ -247,7 +247,7 @@
   .preview {
     margin: 0.2rem 0 0.2rem 1.1rem;
     padding: 0;
-    font-size: 0.78rem;
+    font-size: 11px;
     line-height: 1.45;
   }
   .preview ul {

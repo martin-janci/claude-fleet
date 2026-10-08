@@ -90,11 +90,11 @@
   }
   .details summary {
     cursor: pointer;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .details code {
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .actions {
     display: flex;

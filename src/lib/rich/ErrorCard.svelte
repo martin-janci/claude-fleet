@@ -61,7 +61,7 @@
     gap: 0.5rem;
   }
   .code {
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--usage-crit);
     white-space: nowrap;
   }
@@ -75,7 +75,7 @@
     padding: 0.4rem 0.5rem;
     max-height: 14rem;
     overflow: auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     background: var(--bg);
     border-radius: 4px;
     white-space: pre-wrap;
@@ -104,10 +104,10 @@
   .option:hover:not(:disabled) { background: var(--control-bg-hover, var(--bg)); border-color: var(--accent); }
   .option:disabled { opacity: 0.6; cursor: default; }
   .option-label { font-weight: 600; }
-  .hint { font-size: 0.72rem; color: var(--fg-muted); }
+  .hint { font-size: 11px; color: var(--fg-muted); }
   .note {
     margin: 0;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
 </style>

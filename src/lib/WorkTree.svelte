@@ -884,7 +884,7 @@
     background: var(--accent-soft);
     color: var(--fg);
     font: inherit;
-    font-size: 0.7rem;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
     align-self: center;
@@ -990,7 +990,7 @@
   }
   .caret {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     width: 0.7rem;
     transition: transform var(--dur-fast) ease;
   }
@@ -1005,11 +1005,11 @@
   .count {
     margin-left: auto;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .source {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .tasks {
     padding-left: 0.6rem;
@@ -1025,7 +1025,7 @@
     box-shadow: inset 2px 0 0 var(--accent);
   }
   .tbadge {
-    font-size: 0.65rem;
+    font-size: 11px;
     border: 1px solid var(--border);
     border-radius: 3px;
     padding: 0 0.2rem;
@@ -1054,7 +1054,7 @@
   }
   .needs {
     color: var(--usage-crit, #c62828);
-    font-size: 0.6rem;
+    font-size: 11px;
   }
   .review {
     font-weight: 700;
@@ -1066,7 +1066,7 @@
     gap: 0 0.4rem;
     padding-left: 1.6rem;
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   /* Each fact wraps as a whole in a narrow sidebar, never mid-phrase. */
   .task-meta > span {
@@ -1112,7 +1112,7 @@
   .ended,
   .sr {
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .occ.more {
     color: var(--fg-muted);
@@ -1154,7 +1154,7 @@
   }
   .refresh-error {
     margin: 0.2rem 0.4rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--usage-warn, #b45309);
   }
   .error {

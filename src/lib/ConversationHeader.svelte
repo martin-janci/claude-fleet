@@ -443,7 +443,7 @@
   .caret {
     flex: 0 0 auto;
     color: var(--fg-muted);
-    font-size: 9px;
+    font-size: 11px;
   }
   .dot {
     flex: 0 0 auto;
@@ -495,7 +495,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--fg-muted);
-    font-size: 0.74rem;
+    font-size: 11px;
   }
   .facts,
   .find-inline {
@@ -579,7 +579,7 @@
     background: none;
     color: var(--fg);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: 11px;
     text-align: left;
     cursor: pointer;
   }
@@ -610,7 +610,7 @@
   }
   .bg-group {
     padding: 0.3rem 0.65rem 0.15rem;
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -622,7 +622,7 @@
   }
   .bg-item-status {
     margin-left: auto;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .bg-item-status[data-status='running'] {

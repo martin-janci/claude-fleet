@@ -48,7 +48,7 @@
   }
   .preview {
     margin-top: 0.4rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   ul {
