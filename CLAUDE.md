@@ -212,6 +212,10 @@ metadata* / *Declarative pages*): after editing a settings `SPECS` row,
 editing a page spec or the widget catalog,
 `REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current`.
 
+`docs/form-spec.schema.json` (chat forms, `docs/forms.md`) is generated from
+the Rust form model, same rule: after editing `crates/fleet-core/src/pages/forms.rs`,
+`REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`.
+
 ## Architecture
 
 Read [`docs/architecture.md`](docs/architecture.md) before changing a subsystem you have not touched in this session — frontend stores and row events, the service/store/SSH layers, settings metadata and declarative pages, client access, hub client mode (adding a desktop command), the assets catalog, downloads, voice: it names the files, the invariants and the `REGEN_*` commands.

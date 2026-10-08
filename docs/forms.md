@@ -20,6 +20,8 @@ back as the result of the agent's tool call. The design is
   person has not answered yet: call `ask { wait: form_id }` again.
 - `ask { cancel: form_id }` withdraws it. Only the asking session or the
   master token cancels.
+- If the agent is aborted while it waits, its form stays pending: it expires
+  after 24 h, or is cancelled when the session is killed.
 
 Results: `answered` (with `answers`, `secrets`, `answered_by`), `pending`,
 `declined` (with the person's `note`), `cancelled`, `expired` (24 h).
@@ -53,7 +55,7 @@ The JSON Schema is `docs/form-spec.schema.json`; the validator is
 }
 ```
 
-### 2.1 Top level
+### Top level
 
 | Key | Required | Meaning |
 |---|---|---|
@@ -67,7 +69,7 @@ A step has `title` (required, unique within the form), `intro`, `when`
 and `fields` (≥ 1). One step is a plain form; the wizard chrome (Back /
 Next, *Step 2 of 4*) appears from two visible steps on.
 
-### 2.2 Fields
+### Fields
 
 Every field has `name` (`[a-z][a-z0-9_]*`, ≤ 40 chars, unique across the
 **whole** form), `type`, `label` (≤ 200 chars), and optionally `help`
@@ -87,7 +89,7 @@ A `required` bool means "must be on" (a consent box). A `required`
 multiselect needs at least one value. A `value` must be valid for its
 field (an option value, inside min/max, …).
 
-### 2.3 Conditions
+### Conditions
 
 `when` on a step or a field uses the page condition forms with `field` in
 place of `key`:
@@ -102,7 +104,7 @@ or earlier in the same step), never a `secret`. `eq` / `in` values must
 be values that field can take. A hidden step or field is not asked, not
 validated and not in the answers.
 
-### 2.4 Limits and validation
+### Limits and validation
 
 At most 12 steps, 40 fields, 50 options per select, 16 KiB of JSON.
 Unknown keys are refused. The validator is `crates/fleet-core/src/pages/forms.rs`
@@ -120,7 +122,12 @@ the TypeScript validators both run them (the Rust test reads them with
 
 A `secret` field's value never reaches the agent or any log. It is written
 to `~/.cache/claude-fleet/forms/<form_id>/<field>` on the session's host
-(0600); the result's `secrets` maps the field to that path. Read it, use
+(0600); the result's `secrets` maps the field to that path. A secret is at
+most 2000 characters. The control API's audit row for an `ask { answer,
+values }` call records only the number of fields (`values=<N fields>`),
+never a name or a value; the MCP transport's own debug-level request logging
+(rmcp, off by default) would show call arguments, as it would for every
+other secret-carrying call, so leave it off. Read it, use
 it, delete it: the agent cleans up its own files. Fleet removes the
 directory too, once the session is a ghost or deleted, or a week after the
 answer.
@@ -128,9 +135,12 @@ answer.
 The answer records, durably and before the first file is written, that
 secrets may be on the host (`secrets_on_host`). The tick sweep removes the
 directory of every such form whose session is a ghost or deleted, or whose
-answer is a week old, and retries a failed removal on a later tick. Per pass it skips a
-host after one failure (the rest of that host's forms wait for the next
-pass) and removes at most 20 directories, so a slow fleet cannot stretch
+answer is a week old, and retries a failed removal on a later tick. A host
+that does not answer is skipped for 10 minutes after its first failure, then
+20, 40 and so on up to 6 hours (in memory: a restart tries every host once
+more), so an unreachable host does not cost a timeout on every tick; a form
+whose host has been removed is marked swept, there being nothing to reach.
+Per pass at most 20 directories are removed, so a slow fleet cannot stretch
 the tick. A form with secrets outlives its session's deletion (a trigger
 cancels it if it was pending, clears its answers and keeps the row under
 the negated session id, so a recycled session id never inherits it); a

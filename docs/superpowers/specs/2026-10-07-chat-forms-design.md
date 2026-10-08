@@ -1,7 +1,7 @@
 # Chat forms: an agent asks, a person fills a form, the answers come back
 
 Date: 2026-10-07
-Status: design approved by the owner, not built.
+Status: built (part 1), see docs/forms.md.
 Repos: `claude-fleet` (this spec), `fleet-mobile` (its renderer, own plan)
 
 This is part 1 of two. Part 2 puts the same form format into guide steps
@@ -155,7 +155,7 @@ the `claude-fleet-control` skill.
 { "status": "answered", "form_id": "f_7Kq2…",
   "answers": { "name": "my-app", "kind": "web", "db": true, "engine": "pg" },
   "secrets": { "db_pass": "/home/u/.cache/claude-fleet/forms/f_7Kq2…/db_pass" },
-  "answered_by": "martin (desktop)",
+  "answered_by": "phone (device)",
   "note": "Delete each secret file once you have used it." }
 ```
 
@@ -185,6 +185,10 @@ number of times, until its row is deleted (7 days); then `E_NOTFOUND`.
   holds a `drive` grant. **A per-host token never may**, nor a `readonly`
   token: `E_FORBIDDEN`. This keeps any agent from filling its own or
   another session's form.
+  `answered_by` is `<client> (device)` for a paired device, `you (desktop)`
+  for a standalone desktop and `the control API` for the master token.
+  A `readonly` token cannot call `ask` at all (it is not on the read-only
+  allow-list), not even `list` or `get`.
 - **Who may list / get:** whoever may read the session.
 - **`answer` validates again** on the server: required, types, option
   values, min/max/integer, `max_len`, hidden fields dropped. Errors come
@@ -217,8 +221,12 @@ A new migration (number taken from `origin/main` when it is written;
 - A partial index keeps "one pending per session" cheap to check.
 - The reconcile tick marks a pending form older than 24 h `expired` and
   deletes rows decided more than 7 days ago.
-- A killed session's pending form becomes `cancelled` (`record_kill`);
-  a deleted session row takes its forms with it (`ON DELETE CASCADE`).
+- A killed session's pending form becomes `cancelled` (`record_kill`).
+  A deleted session row is handled by an `AFTER DELETE` trigger, not a
+  cascade: a form with `secrets_on_host = 1` survives under the negated
+  session id (`-id`, so a recycled id never inherits it), its answers and
+  `why` cleared and a pending one cancelled, until the sweep has removed
+  its directory (§5); every other form is deleted with the session.
 - An unfinished draft lives only in the UI component; nothing is stored
   until `answer`.
 - Every change goes through the store, wakes `form_notify()`, bumps the
@@ -246,8 +254,11 @@ The reconcile tick removes a form's directory from its host once the form
 no longer needs it: its session is gone (ghost or deleted) or it was
 decided more than 7 days ago. A row with secrets on a host carries
 `secrets_on_host = 1` until that removal succeeds, so an unreachable host
-is retried on a later tick. The result's `note` asks the agent to delete
-each file after use.
+is retried on a later tick. The retry is per host and in memory: after a
+failure a host is skipped for 10 minutes, doubling per consecutive failure
+up to 6 hours, so a down host does not cost its timeout on every tick; a
+form whose host row is gone is marked swept at once (nothing to reach). The
+result's `note` asks the agent to delete each file after use.
 
 ## 6. Events, rows and attention
 
