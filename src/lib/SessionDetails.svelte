@@ -31,6 +31,7 @@
   import ReviewDialog from './ReviewDialog.svelte';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import KillDialog from './KillDialog.svelte';
   import TasksPanel from './TasksPanel.svelte';
   import TicketCard from './TicketCard.svelte';
   import LocalWorkspaceCard from './LocalWorkspaceCard.svelte';
@@ -1043,17 +1044,16 @@
 {/if}
 
 {#if confirmingKill}
-  <ConfirmDialog
-    title="Kill session?"
-    confirmLabel="Kill"
-    danger
-    onconfirm={doKill}
+  <KillDialog
+    targets={[session]}
+    onkill={doKill}
+    oncleaned={(removed) => {
+      confirmingKill = false;
+      if (removed.length > 0) clearSelection();
+    }}
     oncancel={cancelKill}
     confirmTestId="confirm-kill-details"
-  >
-    This will kill the tmux session <code>{session.tmux_name}</code> on
-    <code>{session.host_alias}</code> and lose any running claude state inside it. Continue?
-  </ConfirmDialog>
+  />
 {/if}
 
 {#if confirmingSafeKill}

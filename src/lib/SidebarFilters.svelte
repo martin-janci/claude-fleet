@@ -75,6 +75,10 @@
     selectedCount,
     onBulkSend,
     onBulkKill,
+    onBulkCleanUp,
+    onBulkArchive,
+    bulkArchiveBlocked = null,
+    bulkCleanUpBlocked = null,
     clearSelected,
   }: {
     /** Which list the sidebar shows under this chrome (work graph M14). In
@@ -97,6 +101,12 @@
     selectedCount: number;
     onBulkSend: () => void;
     onBulkKill: () => void;
+    /** Clean up: commit and push, then remove (redesign step 1.7). */
+    onBulkCleanUp?: () => void;
+    /** Archive into the work's Done, with Undo (step 1.7). */
+    onBulkArchive?: () => void;
+    bulkArchiveBlocked?: string | null;
+    bulkCleanUpBlocked?: string | null;
     clearSelected: () => void;
   } = $props();
   const sessionsList = $derived(listView !== 'work');
@@ -579,6 +589,24 @@
         title={bulkSendBlocked ?? ''}
         onclick={() => onBulkSend()}
       >→ Send prompt</button>
+      {#if onBulkArchive}
+        <button
+          class="btn btn--chip"
+          data-testid="bulk-archive"
+          disabled={bulkArchiveBlocked !== null}
+          title={bulkArchiveBlocked ?? 'Move the selected sessions into their work’s Done; they keep running'}
+          onclick={() => onBulkArchive()}
+        >Archive</button>
+      {/if}
+      {#if onBulkCleanUp}
+        <button
+          class="btn btn--chip"
+          data-testid="bulk-cleanup"
+          disabled={bulkCleanUpBlocked !== null}
+          title={bulkCleanUpBlocked ?? 'Commit and push each session’s work, then remove it'}
+          onclick={() => onBulkCleanUp()}
+        >Clean up</button>
+      {/if}
       <button
         class="btn btn--chip btn--crit"
         data-testid="bulk-kill"
