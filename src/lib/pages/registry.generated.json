@@ -1721,6 +1721,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests.",
+      "key": "decide.jev.sibling_repos",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: sibling repository",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -2845,6 +2885,11 @@
             {
               "hint": "Pre-selects the repository when a task's first start has none; you still press Start.",
               "key": "decide.jev.start_project",
+              "type": "field"
+            },
+            {
+              "hint": "Pre-ticks the other repository a ticket start also needs; you still press Start.",
+              "key": "decide.jev.sibling_repos",
               "type": "field"
             },
             {
