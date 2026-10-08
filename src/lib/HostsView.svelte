@@ -439,7 +439,7 @@
       data-testid="hosts-add"
       disabled={addHostBlocked !== null}
       title={addHostBlocked ?? ''}
-      onclick={() => (showAddPicker = true)}>+ Add host</button>
+      onclick={() => (showAddPicker = true)}>+ Add host…</button>
     <button
       type="button"
       class="head-btn"

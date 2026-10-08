@@ -113,6 +113,12 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `usage.interval_secs` | `300` | seconds, `0` = off | Seconds between usage passes, one batched read per host. |
 | `usage.prices_json` | `{}` | JSON map: model → USD per million tokens | Per-model prices for the estimated cost, in USD per million tokens (input, output, cache_write, cache_read). {} uses the built-in prices only. |
 
+## accounts
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `accounts.pause_at` | `90` | 50–100% | Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom. |
+
 ## Error reports
 
 | Setting | Default | Range | What it does |

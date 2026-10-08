@@ -1109,7 +1109,7 @@
     gap: var(--space-2);
     padding: var(--space-1) var(--space-3);
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .hint {
     display: flex;
