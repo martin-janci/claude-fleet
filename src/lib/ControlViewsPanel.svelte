@@ -4,7 +4,9 @@
   session in focus, Pull requests, Library once 9.7 lands, Today briefing),
   "+" to turn them on and off and reorder them, ⤢ to open the view where it
   lives, ✕ to close the column. Tasks, Missions, Hosts and usage are links to
-  where they live, not copies.
+  where they live, not copies. A session opened from Needs you shows its
+  conversation here (step 9.5, board MCSession): "‹" or Esc goes back, ⤢
+  opens the full session.
 -->
 <script lang="ts">
   import { selectSessionExplicitly, selectedSession } from './selection';
@@ -16,6 +18,7 @@
   import type { SessionRow } from './sessions';
   import WorkPrs from './WorkPrs.svelte';
   import TodayView from './TodayView.svelte';
+  import ConversationPanel from './ConversationPanel.svelte';
   import {
     CONTROL_VIEWS,
     ELSEWHERE,
@@ -34,6 +37,9 @@
   const active = $derived($controlViews.active);
   const activeDef = $derived(CONTROL_VIEWS.find((v) => v.id === active)!);
   let menuOpen = $state(false);
+  /** The view a session was opened from (9.5): "‹" and Esc go back to it. */
+  let from = $state<ControlViewId | null>(null);
+  const fromDef = $derived(from ? CONTROL_VIEWS.find((v) => v.id === from) : undefined);
 
   const landed = CONTROL_VIEWS.filter((v) => v.landed);
 
@@ -52,12 +58,28 @@
 
   /** A Needs you row puts that session in focus, here in the panel. */
   function openRow(s: SessionRow) {
+    from = active;
     selectSessionExplicitly(s);
     selectView('session');
   }
+
+  function back() {
+    if (!from) return;
+    selectView(from);
+    from = null;
+  }
+
+  // Esc returns to the view the session was opened from, unless something
+  // inside (the composer's menus, a card) already took the key.
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || e.defaultPrevented || active !== 'session' || !from) return;
+    e.preventDefault();
+    back();
+  }
 </script>
 
-<aside class="views" aria-label="Views" data-testid="control-views">
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<aside class="views" aria-label="Views" data-testid="control-views" onkeydown={onKeydown}>
   <div class="strip">
     <div class="tabs" role="tablist" aria-label="Views">
       {#each shown as v (v.id)}
@@ -68,7 +90,10 @@
           aria-selected={v.id === active}
           title={v.label}
           data-testid="control-view-tab-{v.id}"
-          onclick={() => selectView(v.id)}
+          onclick={() => {
+            from = null;
+            selectView(v.id);
+          }}
         >
           <span aria-hidden="true">{v.glyph}</span>
           {#if v.id === active}<span class="name">{v.label}</span>{:else}<span class="sr">{v.label}</span>{/if}
@@ -166,12 +191,24 @@
     {:else if active === 'session'}
       {#if $selectedSession}
         <div class="focus" data-testid="control-session-focus">
-          <p class="row-name">{displayName($selectedSession, true)}</p>
-          <p class="row-why">{claudeStatusLabel($selectedSession.claude_status)} · {$selectedSession.host_alias}</p>
-          {#if $selectedSession.last_prompt}<p class="prompt">{promptPreview($selectedSession.last_prompt, 160)}</p>{/if}
+          <div class="focus-head">
+            {#if fromDef}
+              <button type="button" class="icon back" data-testid="control-session-back" title="Back to {fromDef.label} (Esc)" onclick={back}
+                >‹ {fromDef.label}{#if from === 'needs-you' && $needsYouList.length > 0}{' '}<span class="count">{$needsYouList.length}</span>{/if}</button
+              >
+            {/if}
+            <p class="row-name">{displayName($selectedSession, true)}</p>
+            <p class="row-why">
+              {claudeStatusLabel($selectedSession.claude_status)} · {$selectedSession.host_alias}{#if $selectedSession.pr_url}{' '}· {$selectedSession.pr_url.replace(/^.*\/pull\//, 'PR #')}{/if}
+            </p>
+            {#if $selectedSession.last_prompt}<p class="prompt">{promptPreview($selectedSession.last_prompt, 160)}</p>{/if}
+          </div>
+          <div class="conv">
+            <ConversationPanel session={$selectedSession} visible={true} />
+          </div>
         </div>
       {:else}
-        <p class="empty">No session in focus. Pick one in Sessions or the Inbox.</p>
+        <p class="empty">No session in focus. Pick one in Needs you, Sessions or the Inbox.</p>
       {/if}
     {:else if active === 'prs'}
       <WorkPrs />
@@ -327,10 +364,26 @@
     grid-row: 1;
   }
   .focus {
-    padding: var(--space-3);
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
   }
-  .focus p {
+  .focus-head {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+  }
+  .focus-head p {
     margin: 0 0 var(--space-1);
+  }
+  .back {
+    margin: 0 0 var(--space-1) calc(-1 * var(--space-1));
+  }
+  .conv {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   .empty {
     padding: var(--space-3);

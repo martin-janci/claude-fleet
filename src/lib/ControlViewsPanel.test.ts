@@ -45,6 +45,25 @@ describe('ControlViewsPanel (step 9.4)', () => {
     expect(getByTestId('control-session-focus').textContent).toContain('Fix the login bug');
   });
 
+  it('the session opens here with its conversation; ‹ and Esc go back, ⤢ opens it in full (step 9.5)', async () => {
+    destination.set('control');
+    const { getByTestId, queryByTestId } = render(ControlViewsPanel);
+    await fireEvent.click(getByTestId('control-needs-you-row'));
+    expect(getByTestId('control-session-back').textContent).toContain('Needs you');
+    await fireEvent.click(getByTestId('control-session-back'));
+    expect(get(controlViews).active).toBe('needs-you');
+    expect(queryByTestId('control-session-focus')).toBeNull();
+
+    await fireEvent.click(getByTestId('control-needs-you-row'));
+    await fireEvent.keyDown(getByTestId('control-session-focus'), { key: 'Escape' });
+    expect(get(controlViews).active).toBe('needs-you');
+
+    await fireEvent.click(getByTestId('control-needs-you-row'));
+    await fireEvent.click(getByTestId('control-views-expand'));
+    expect(get(destination)).toBe('session');
+    expect(get(selectedSession)?.id).toBe(asking.id);
+  });
+
   it('"+" turns a view off and links out to where the others live', async () => {
     const { getByTestId, queryByTestId } = render(ControlViewsPanel);
     await fireEvent.click(getByTestId('control-views-add'));
