@@ -141,6 +141,7 @@
     "grant_device_catalog",
     "grant_mission",
     "health_check",
+    "import_mission_plan",
     "kill_session",
     "link_session_work",
     "list_accounts",

@@ -17,6 +17,7 @@ pub mod local;
 pub mod missions;
 pub mod nudge;
 pub mod orchestrate;
+pub mod plan_import;
 pub mod recognize;
 pub mod report;
 pub mod resolve;
@@ -288,6 +289,10 @@ pub struct WorkLinkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "array_schema")]
     pub tree: Option<Vec<crate::store::TreeEntry>>,
+    /// mission_import: [{step, title, lane?, needs?, status?}]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "array_schema")]
+    pub plan: Option<Vec<plan_import::PlanRow>>,
     /// done_when: the item's condition lines (`[]` clears them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_when: Option<Vec<String>>,
@@ -515,6 +520,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "mission_repo",
     "mission_item",
     "mission_delete",
+    "mission_import",
     "dep",
     "hold",
     "propose_tree",
@@ -597,6 +603,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_mission_repo", "work_link", "mission_repo"),
     ("set_mission_item", "work_link", "mission_item"),
     ("delete_mission", "work_link", "mission_delete"),
+    ("import_mission_plan", "work_link", "mission_import"),
     // Orchestration O2: the mission graph.
     ("set_work_dep", "work_link", "dep"),
     ("set_work_hold", "work_link", "hold"),

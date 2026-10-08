@@ -458,6 +458,7 @@ pub fn run() {
             commands::missions::set_mission_state,
             commands::missions::set_mission_repo,
             commands::missions::set_mission_item,
+            commands::missions::import_mission_plan,
             commands::missions::delete_mission,
             commands::missions::set_work_dep,
             commands::missions::set_work_hold,

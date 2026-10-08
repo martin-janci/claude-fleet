@@ -14,6 +14,7 @@
   import { readPref, uiLayout, writePref } from './prefs';
   import MissionGraph from './MissionGraph.svelte';
   import { defaultLaneBy, type LaneBy } from './mission_graph';
+  import { PLAN_IMPORT_MAX_ROWS, importLine, importMissionPlan, parsePlan } from './plan_import';
   import { hosts } from './hosts';
   import { timeAgo } from './session_status';
   import { createWorkTask, onWorkChangedDebounced } from './work';
@@ -133,6 +134,28 @@
   const laneBy = $derived(
     laneOverride && laneOverride.mission === mission?.id ? laneOverride.by : detail ? defaultLaneBy(detail) : 'none',
   );
+  // Import plan: a markdown step table read into the mission's tasks.
+  let importOpen = $state(false);
+  let importText = $state('');
+  let importResult = $state<string | null>(null);
+  let importUnknown = $state<string[]>([]);
+  const parsed = $derived(importText.trim() ? parsePlan(importText) : null);
+  const parsedLanes = $derived(parsed ? new Set(parsed.rows.map((r) => r.lane).filter(Boolean)).size : 0);
+  const parsedLinks = $derived(parsed ? parsed.rows.reduce((n, r) => n + (r.needs?.length ?? 0), 0) : 0);
+  const importBlocked = $derived(!!hubActionBlocked('import_mission_plan', $hubStatus, $hubConnection));
+
+  async function runImport() {
+    if (!mission || !parsed || parsed.rows.length === 0) return;
+    const out = await act(importMissionPlan(mission.id, parsed.rows));
+    if (out) {
+      importResult = importLine(out);
+      importUnknown = out.unknown_needs ?? [];
+      importText = '';
+      importOpen = false;
+      if ($uiLayout === 'new') tasksView = 'graph';
+    }
+  }
+
   function repoName(id: number): string | null {
     const own = (mission?.repos ?? []).find((r) => r.project_id === id);
     if (own) return own.name;
@@ -325,6 +348,10 @@
     confirmDelete = false;
     notice = null;
     plannerFailure = null;
+    importOpen = false;
+    importText = '';
+    importResult = null;
+    importUnknown = [];
     await loadDetail(id);
   }
 
@@ -466,8 +493,8 @@
       </div>
       <h3 class="name">{mission.name}</h3>
       <p class="meta muted">
-        {#if mission.mode === 'continuous'}Continuous{#if wakeLabel(mission.policy?.wake_every_secs)}, wakes {wakeLabel(mission.policy?.wake_every_secs)}{/if} · {/if}L{mission.level} asked
-        · {mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL} at once
+        {#if mission.mode === 'plan'}<span data-testid="mission-plan-mode">Plan, tracked here and not run by fleet</span>{:else}{#if mission.mode === 'continuous'}Continuous{#if wakeLabel(mission.policy?.wake_every_secs)}, wakes {wakeLabel(mission.policy?.wake_every_secs)}{/if} · {/if}L{mission.level} asked
+        · {mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL} at once{/if}
         {#if progressLabel(mission)} · {progressLabel(mission)}{/if}
         · updated {timeAgo(mission.updated_at)}
       </p>
@@ -494,6 +521,7 @@
             <select bind:value={editMode}>
               <option value="finite">Finite</option>
               <option value="continuous">Continuous</option>
+              <option value="plan">Plan (tracked, not run)</option>
             </select></label
           >
           <label class="field inline"
@@ -670,6 +698,48 @@
       {/if}
 
       <h4>Tasks</h4>
+      {#if mayChange}
+        <div class="import" data-testid="mission-import">
+          {#if !importOpen}
+            <button class="btn btn--quiet" type="button" disabled={busy || importBlocked} data-testid="mission-import-open" onclick={() => (importOpen = true)}
+              >Import plan…</button
+            >
+          {:else}
+            <p class="muted small">
+              Paste a markdown plan. Fleet reads its step tables (#, Step, Needs, and Lane or Status when there) and a Lanes table
+              (Lane, Steps in order). Each step becomes a task here; importing again updates them.
+            </p>
+            <textarea rows="6" bind:value={importText} placeholder={'| # | Step | Needs |\n|---|---|---|\n| 1.1 | Schema | — |\n| 1.2 | API | 1.1 |'} data-testid="mission-import-text"
+            ></textarea>
+            {#if parsed}
+              <p class="muted small" data-testid="mission-import-preview">
+                {parsed.rows.length} steps · {parsedLanes} lanes · {parsedLinks} links
+                {#if parsed.rows.length > PLAN_IMPORT_MAX_ROWS} · at most {PLAN_IMPORT_MAX_ROWS} at once{/if}
+              </p>
+              {#each parsed.notes as n (n)}<p class="muted small">{n}</p>{/each}
+            {/if}
+            <span class="row">
+              <button
+                class="btn"
+                type="button"
+                disabled={busy || importBlocked || !parsed || parsed.rows.length === 0 || parsed.rows.length > PLAN_IMPORT_MAX_ROWS}
+                data-testid="mission-import-run"
+                onclick={() => void runImport()}>Import {parsed?.rows.length ?? 0} steps</button
+              >
+              <button class="btn btn--quiet" type="button" onclick={() => ((importOpen = false), (importText = ''))}>Cancel</button>
+            </span>
+            {#if mission.mode !== 'plan'}
+              <p class="muted small">A {mission.mode} mission holds 30 tasks; make it a Plan to hold up to 200.</p>
+            {/if}
+          {/if}
+          {#if importResult}
+            <p class="muted small" role="status" data-testid="mission-import-result">{importResult}</p>
+          {/if}
+          {#if importUnknown.length > 0}
+            <p class="muted small" data-testid="mission-import-unknown">Needs that name no step: {importUnknown.join(', ')}</p>
+          {/if}
+        </div>
+      {/if}
       {#if mayChange && proposals.length > 0}
         <div class="row proposals" data-testid="mission-proposals">
           <span>{proposals.length} proposed {proposals.length === 1 ? 'task waits' : 'tasks wait'} for you.</span>
@@ -1023,6 +1093,8 @@
   .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
   .dep { font-size: 0.7rem; }
   .dep-pick { max-width: 7rem; font-size: 0.75rem; }
+  .import { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.4rem; }
+  .import textarea { font-family: var(--font-mono); font-size: 12px; }
   /* The design system's Tabs (of-tabs). */
   .view-switch { display: flex; gap: 20px; border-bottom: 1px solid var(--border); margin-bottom: 0.4rem; }
   .view-switch button {

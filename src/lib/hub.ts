@@ -416,6 +416,8 @@ export const ROUTED_ACTIONS = [
   // Orchestration O1: the Missions tab's writes.
   'save_mission',
   'set_mission_state',
+  // The Missions tab's Import plan.
+  'import_mission_plan',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

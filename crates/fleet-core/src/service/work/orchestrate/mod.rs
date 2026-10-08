@@ -166,7 +166,7 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
 /// The plan a mission's detail carries: `None` for a draft or a finished
 /// one.
 pub fn plan_for(s: &Store, m: &MissionRow) -> Result<Option<MissionPlan>, IpcError> {
-    if !matches!(m.state.as_str(), "active" | "paused") {
+    if !matches!(m.state.as_str(), "active" | "paused") || !crate::store::mode_runs_loop(&m.mode) {
         return Ok(None);
     }
     let a = autonomy(s, m, now_unix())?;
@@ -177,6 +177,21 @@ pub fn plan_for(s: &Store, m: &MissionRow) -> Result<Option<MissionPlan>, IpcErr
         counts: s.mission_task_counts(m.id)?,
         autonomy: a,
     }))
+}
+
+/// Refuse the loop's own acts (Start wave, the planner, a grant) on a
+/// `plan` mission: people and their own sessions work a plan through.
+fn not_a_plan(m: &MissionRow) -> Result<(), IpcError> {
+    if crate::store::mode_runs_loop(&m.mode) {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_INVALID_STATE,
+        format!(
+            "{} is a plan: fleet tracks it but does not run it; make it finite to run it",
+            m.name
+        ),
+    ))
 }
 
 /// Who takes a step.
@@ -421,6 +436,7 @@ pub async fn start(
     let (m, steps) = {
         let s = lock(&deps.store)?;
         let m = changeable(&s, scope, id)?;
+        not_a_plan(&m)?;
         if m.state != "active" {
             return Err(IpcError::new(
                 codes::E_INVALID_STATE,
@@ -1041,6 +1057,7 @@ pub async fn plan_now(
         let s = lock(&deps.store)?;
         changeable(&s, scope, id)?
     };
+    not_a_plan(&m)?;
     if !matches!(m.state.as_str(), "draft" | "active" | "paused") {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
@@ -1092,6 +1109,7 @@ pub fn grant(
     });
     let s = lock(store)?;
     let m = changeable(&s, scope, id)?;
+    not_a_plan(&m)?;
     if crate::store::MISSION_FINAL_STATES.contains(&m.state.as_str()) {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
@@ -1261,7 +1279,7 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
         };
         let a = autonomy(&s, &m, now)?;
         let counts = s.mission_task_counts(id)?;
-        if !a.enabled || m.state != "active" {
+        if !a.enabled || m.state != "active" || !crate::store::mode_runs_loop(&m.mode) {
             s.release_mission_lease(id, Some(now + IDLE_RECHECK_SECS), Some(now))?;
             return Ok(());
         }

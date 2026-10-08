@@ -3939,7 +3939,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// `debug_devices` tool, one entry by `action`, +1,967 bytes).
     /// Measured at 86,158 on 2026-10-08 after Lost and found's adopt (the
     /// `adopt_session` tool, +557 bytes).
-    const BUDGET_BYTES: usize = 86_258;
+    /// Measured at 86,398 on 2026-10-08 after plan import (`work_link
+    /// { mission_import }` and its `plan` argument, +240 bytes).
+    const BUDGET_BYTES: usize = 86_498;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -11109,6 +11111,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "work_link",
         "mission_delete",
         "a draft or finished mission; its items stay",
+    ),
+    (
+        "work_link",
+        "mission_import",
+        "a plan's steps as new local tasks under the mission's root, by its \
+         owner or an org admin; it touches no session",
     ),
     (
         "work_link",

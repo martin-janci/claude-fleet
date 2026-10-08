@@ -235,6 +235,40 @@ describe('WorkMissions', () => {
     });
   });
 
+  it('imports a pasted plan, says what it did and names the needs it could not place', async () => {
+    current = mission({ mode: 'plan' });
+    handlers.import_mission_plan = () => ({
+      created: 2,
+      updated: 0,
+      unchanged: 0,
+      deps_added: 1,
+      deps_removed: 0,
+      unknown_needs: ['1.2 needs 9.9'],
+    });
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    expect(screen.getByTestId('mission-plan-mode').textContent).toContain('not run by fleet');
+    await fireEvent.click(screen.getByTestId('mission-import-open'));
+    await fireEvent.input(screen.getByTestId('mission-import-text'), {
+      target: { value: '| # | Step | Needs | Lane |\n|---|---|---|---|\n| 1.1 | Schema | | A |\n| 1.2 | API | 1.1, 9.9 | B |' },
+    });
+    await flush();
+    expect(screen.getByTestId('mission-import-preview').textContent).toContain('2 steps · 2 lanes · 2 links');
+    await fireEvent.click(screen.getByTestId('mission-import-run'));
+    await flush();
+    expect(calls('import_mission_plan')[0]).toEqual({
+      mission_id: 4,
+      plan: [
+        { step: '1.1', title: 'Schema', lane: 'A' },
+        { step: '1.2', title: 'API', lane: 'B', needs: ['1.1', '9.9'] },
+      ],
+    });
+    expect(screen.getByTestId('mission-import-result').textContent).toBe('Imported: 2 added, 1 link added.');
+    expect(screen.getByTestId('mission-import-unknown').textContent).toContain('1.2 needs 9.9');
+  });
+
   it('accepts every proposal at once and can undo it', async () => {
     handlers.work_mission = () => ({
       mission: current,
