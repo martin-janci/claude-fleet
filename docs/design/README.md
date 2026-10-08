@@ -33,3 +33,21 @@ A loader appears only after 400 ms and keeps its box until then. Reduced and
 Off motion turn every loop into one 2.4 s fade. Inside a row, a button or the
 status bar only the Comet or the 16 px Orbit may be used
 (`src/lib/loader-use.test.ts`).
+
+## Component kit
+
+`src/lib/kit/` is the manual's component kit in Svelte: Button, Kbd,
+StatusChip (with StatusDot and Count), Banner, QuestionCard, SessionRow,
+ListFilters, Rail, AppHeader, StatusBar, Tabs, KeyValue, Meter, OrbitMark and
+Icon (the 16-unit, 1.5 px set). They render the manual's `of-` classes, whose
+CSS, `src/lib/kit/of.generated.css`, is `bundle.css` verbatim (up to its AI
+section, which lands with AISuggestion in 3.11). After the manual's
+bundle.css changes, regenerate (the run fails on purpose; run it again):
+
+```bash
+REGEN_KIT=1 pnpm exec vitest run src/lib/kit/kit.test.ts
+```
+
+`kit.test.ts` measures every piece of text each component renders, in every
+state and both themes, against 4.5:1. Three pairs from the manual fall short
+and are pinned in `KNOWN_SHORTFALLS` until the manual fixes them.

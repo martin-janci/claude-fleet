@@ -31,6 +31,7 @@ import {
   stuckMessage,
   stuckSnapshot,
   worstSeverityByProject,
+  type AttentionFacts,
 } from './attention';
 import { CLAUDE_STATUSES, STUCK_KINDS, type SessionRow } from './sessions';
 import attentionTable from './attention_states.json';
@@ -312,7 +313,7 @@ describe('triage rank', () => {
   });
 
   it('needsYou covers every bucket above working, and nothing below', () => {
-    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 10));
+    expect([...NEEDS_YOU_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 13));
     expect(needsYou(row({ claude_status: 'blocked' }), opts)).toBe(true);
     expect(needsYou(row({ stuck_kind: 'oom' }), opts)).toBe(true);
     expect(needsYou(row({ idle_since: 0 }), opts)).toBe(true);
@@ -328,7 +329,7 @@ describe('triage rank', () => {
   // agree, read NEEDS_YOU_COUNTED_BUCKETS before changing it.
   it('counts narrower than it filters: idle_long and lifecycle are shown, not counted', () => {
     expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual(
-      [...TRIAGE_BUCKETS].slice(0, 9).filter((b) => b !== 'done_unread' && b !== 'lifecycle'),
+      [...TRIAGE_BUCKETS].slice(0, 12).filter((b) => b !== 'done_unread' && b !== 'lifecycle'),
     );
     const idleRows = Array.from({ length: 6 }, () => row({ idle_since: 0 }));
     const blocked = row({ claude_status: 'blocked' });
@@ -398,10 +399,16 @@ describe('the seven attention states (shared fixture with attention.rs)', () => 
 
   for (const c of attentionTable.cases) {
     it(c.name, () => {
-      const r = row({ claude_status: 'working', last_activity_at: 100, ...(c.row as Partial<SessionRow>) });
-      expect(classify(r, opts)).toBe(c.bucket);
-      expect(attentionState(r, opts)).toBe(c.state);
-      expect(countNeedsYou([r], opts)).toBe(c.counted ? 1 : 0);
+      const r = row({
+        claude_status: 'working',
+        last_activity_at: 100,
+        host_alias: 'alpha',
+        ...(c.row as Partial<SessionRow>),
+      });
+      const o = { ...opts, facts: (c as { facts?: AttentionFacts }).facts };
+      expect(classify(r, o)).toBe(c.bucket);
+      expect(attentionState(r, o)).toBe(c.state);
+      expect(countNeedsYou([r], o)).toBe(c.counted ? 1 : 0);
     });
   }
 });

@@ -231,6 +231,12 @@ pub struct HostTokenInfo {
     /// `full` | `readonly`.
     pub mode: String,
     pub created_at: i64,
+    /// The last request the token authenticated, at minute grain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
+    /// When a fresh token last replaced the host's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotated_at: Option<i64>,
     /// Set only by `rotate_host_token`: a non-fatal re-provision warning,
     /// e.g. a WSL distribution whose hooks cannot reach the desktop.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,6 +249,8 @@ impl From<fleet_core::store::HostTokenRow> for HostTokenInfo {
             host_alias: r.host_alias,
             mode: r.mode,
             created_at: r.created_at,
+            last_used_at: r.last_used_at,
+            rotated_at: r.rotated_at,
             warning: None,
         }
     }
@@ -433,6 +441,8 @@ mod tests {
             token: "s3cret".into(),
             created_at: 7,
             mode: "readonly".into(),
+            last_used_at: Some(9),
+            rotated_at: None,
         });
         let json = serde_json::to_string(&info).unwrap();
         assert!(!json.contains("s3cret"), "{json}");
@@ -442,6 +452,8 @@ mod tests {
                 host_alias: "mefistos".into(),
                 mode: "readonly".into(),
                 created_at: 7,
+                last_used_at: Some(9),
+                rotated_at: None,
                 warning: None,
             }
         );
@@ -458,6 +470,8 @@ mod tests {
                 token: "s3cret".into(),
                 created_at: 7,
                 mode: "full".into(),
+                last_used_at: None,
+                rotated_at: Some(8),
             })
         };
         let v = serde_json::to_value(&info).unwrap();

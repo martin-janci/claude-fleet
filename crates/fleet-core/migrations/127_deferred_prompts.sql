@@ -25,4 +25,4 @@ CREATE INDEX IF NOT EXISTS deferred_prompts_pending
   ON deferred_prompts (session_id, id)
   WHERE delivered_at IS NULL AND failed_at IS NULL AND cancelled_at IS NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (126);
+INSERT OR IGNORE INTO schema_version (version) VALUES (127);
