@@ -111,8 +111,11 @@ describe('the filter schema', () => {
     });
     expect(all.length).toBe(10);
     for (const f of all) expect(SESSION_FILTER_SCHEMA[f.id], f.id).toBeTruthy();
-    const work = workFacets({ org: 1, tracker: 1, status: 'open', mine: true, has: 'active', review: true, query: 'x' });
-    expect(work.length).toBe(7);
+    const work = workFacets({
+      org: 1, tracker: 1, status: 'open', status_name: 'QA Review', mine: true, assignee: 'Ana', has: 'active',
+      review: true, query: 'x',
+    });
+    expect(work.length).toBe(9);
     for (const f of work) expect(WORK_FILTER_SCHEMA[f.id], f.id).toBeTruthy();
   });
 
@@ -193,7 +196,7 @@ describe('Work: the Filters section (New layout)', () => {
   const wTrackers = [{ id: 1, name: 'Jira (acme)', provider: 'jira', state: 'ok', org_id: 1 }];
 
   it('is one row while closed, with the same shape as the Sessions list', async () => {
-    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers });
+    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] });
     await flush();
     expect(screen.getByTestId('filters-section').children).toHaveLength(1);
     const rowEl = screen.getByTestId('filters-row');
@@ -205,7 +208,7 @@ describe('Work: the Filters section (New layout)', () => {
   });
 
   it('holds every 0.5.4 facet and the saved views under the schema’s headings', async () => {
-    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers });
+    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] });
     await flush();
     await fireEvent.click(screen.getByTestId('work-filters-open'));
     const panel = screen.getByTestId('work-filter-panel');
@@ -218,12 +221,32 @@ describe('Work: the Filters section (New layout)', () => {
     expect(screen.getByTestId('work-active-filters').textContent).toContain('Assigned to me');
   });
 
-  it('Group switches List (by status) and Grouped (by organisation)', async () => {
-    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers });
+  it('a named assignee and a tracker column (step 6.2) are chips that join the strip', async () => {
+    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    await fireEvent.click(screen.getByTestId('work-filter-assignee-ana novak'));
+    await fireEvent.click(screen.getByTestId('work-filter-column-qa review'));
+    expect(get(workViewFilters)).toMatchObject({ assignee: 'Ana Novak', status_name: 'QA Review' });
+    const strip = screen.getByTestId('work-active-filters').textContent ?? '';
+    expect(strip).toContain('Assignee: Ana Novak');
+    expect(strip).toContain('Column: QA Review');
+    await fireEvent.click(screen.getByTestId('work-filter-assignee-any'));
+    expect(get(workViewFilters).assignee).toBeUndefined();
+  });
+
+  it('Group picks List, or Grouped with each org by group, org, person, mission, account or repo', async () => {
+    render(WorkFiltersBar, { orgs: wOrgs, trackers: wTrackers, people: ['Ana Novak', 'Ben'], columns: ['QA Review'] });
     await flush();
     const sel = screen.getByTestId('work-group-select') as HTMLSelectElement;
     expect(Array.from(sel.options).map((o) => o.value)).toEqual(WORK_GROUPS.map((g) => g.id));
-    await fireEvent.change(sel, { target: { value: 'grouped' } });
+    await fireEvent.change(sel, { target: { value: 'person' } });
     expect(get(workLayout)).toBe('grouped');
+    expect(get(workViewFilters).group_by).toBe('person');
+    // The task's own group is the default, so it is not sent.
+    await fireEvent.change(sel, { target: { value: 'group' } });
+    expect(get(workViewFilters).group_by).toBeUndefined();
+    await fireEvent.change(sel, { target: { value: 'list' } });
+    expect(get(workLayout)).toBe('list');
   });
 });

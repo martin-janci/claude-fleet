@@ -11,6 +11,7 @@
 #![allow(clippy::double_must_use)]
 
 pub mod agent;
+pub mod agent_adapter;
 pub mod app_version;
 pub mod cancel;
 pub mod claude_agents;

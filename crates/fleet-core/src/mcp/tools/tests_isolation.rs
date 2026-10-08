@@ -2901,6 +2901,27 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // A plan's steps into B's mission: tasks under its root, for whoever
+    // may change it; unknown to whoever may not see it.
+    m.row(
+        "work_link",
+        "mission_import",
+        move |_, _| {
+            json!({ "action": "mission_import", "mission_id": mission_b,
+                    "plan": [{ "step": "1.1", "title": "Schema", "lane": "A" }] })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_ok(who, a, "mission_import"),
+            }
+        },
+    )
+    .await;
     // B's mission is active by now: deleting it is refused to whoever may
     // change it, and unknown to whoever may not see it.
     m.row(

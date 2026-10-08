@@ -9,6 +9,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
 import { hosts } from './hosts';
+import { uiLayout } from './prefs';
 import {
   doneWhenRows,
   eventSentence,
@@ -176,6 +177,96 @@ describe('WorkMissions', () => {
     await fireEvent.click(screen.getByTestId('mission-dep-remove'));
     await flush();
     expect(calls('set_work_dep')[0]).toEqual({ item_id: 12, depends_on: 11, on: false });
+  });
+
+  describe('task graph', () => {
+    const graphDetail = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), { ...item(11, 'Schema'), status_category: 'done' }, item(12, 'API'), item(13, 'UI')],
+      graph: {
+        nodes: [
+          { item_id: 10, state: 'ready', wave: 1 },
+          { item_id: 11, state: 'done', wave: 1 },
+          { item_id: 12, state: 'running', wave: 2, depends_on: [11] },
+          { item_id: 13, state: 'waiting', wave: 3, depends_on: [12], waiting_for: [12] },
+        ],
+        waves: 3,
+      },
+      events: [],
+      may_change: true,
+    });
+
+    async function open() {
+      handlers.work_mission = graphDetail;
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('stays out of the Classic layout', async () => {
+      uiLayout.set('classic');
+      await open();
+      expect(screen.queryByTestId('mission-view-graph')).toBeNull();
+      expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
+    });
+
+    it('draws lanes × waves with progress and the critical path in the New layout', async () => {
+      uiLayout.set('new');
+      try {
+        await open();
+        await fireEvent.click(screen.getByTestId('mission-view-graph'));
+        await flush();
+        expect(screen.queryAllByTestId('mission-wave')).toHaveLength(0);
+        expect(screen.getByTestId('mission-graph-progress').textContent).toBe('1 of 4 done · 25%');
+        expect(screen.getAllByTestId('mission-graph-wave')).toHaveLength(3);
+        expect(screen.getAllByTestId('mission-graph-node')).toHaveLength(4);
+        expect(screen.getByTestId('mission-graph-critical').textContent).toContain('2 tasks');
+        const api = screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('API'))!;
+        expect(api.getAttribute('aria-label')).toContain('on the critical path');
+        await fireEvent.click(screen.getAllByTestId('mission-graph-node').find((n) => n.textContent?.includes('UI'))!);
+        expect(screen.getByTestId('mission-graph-chosen').textContent).toContain('waits for API');
+        await fireEvent.click(screen.getByTestId('mission-view-list'));
+        await flush();
+        expect(screen.getAllByTestId('mission-wave')).toHaveLength(3);
+      } finally {
+        uiLayout.set('classic');
+      }
+    });
+  });
+
+  it('imports a pasted plan, says what it did and names the needs it could not place', async () => {
+    current = mission({ mode: 'plan' });
+    handlers.import_mission_plan = () => ({
+      created: 2,
+      updated: 0,
+      unchanged: 0,
+      deps_added: 1,
+      deps_removed: 0,
+      unknown_needs: ['1.2 needs 9.9'],
+    });
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    expect(screen.getByTestId('mission-plan-mode').textContent).toContain('not run by fleet');
+    await fireEvent.click(screen.getByTestId('mission-import-open'));
+    await fireEvent.input(screen.getByTestId('mission-import-text'), {
+      target: { value: '| # | Step | Needs | Lane |\n|---|---|---|---|\n| 1.1 | Schema | | A |\n| 1.2 | API | 1.1, 9.9 | B |' },
+    });
+    await flush();
+    expect(screen.getByTestId('mission-import-preview').textContent).toContain('2 steps · 2 lanes · 2 links');
+    await fireEvent.click(screen.getByTestId('mission-import-run'));
+    await flush();
+    expect(calls('import_mission_plan')[0]).toEqual({
+      mission_id: 4,
+      plan: [
+        { step: '1.1', title: 'Schema', lane: 'A' },
+        { step: '1.2', title: 'API', lane: 'B', needs: ['1.1', '9.9'] },
+      ],
+    });
+    expect(screen.getByTestId('mission-import-result').textContent).toBe('Imported: 2 added, 1 link added.');
+    expect(screen.getByTestId('mission-import-unknown').textContent).toContain('1.2 needs 9.9');
   });
 
   it('accepts every proposal at once and can undo it', async () => {

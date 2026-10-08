@@ -66,6 +66,18 @@ export const droppedToasts = writable<number>(0);
 
 let nextId = 1;
 const timers = new Map<number, ReturnType<typeof setTimeout>>();
+/** When each running timer fires (ms since epoch), for `holdToast`. */
+const deadlines = new Map<number, number>();
+/** What was left on a held timer, for `releaseToast`. */
+const held = new Map<number, number>();
+
+/**
+ * Each auto-dismissing toast's current countdown: its length, and an arm
+ * count that changes whenever it restarts (a dedup push), so the timer bar
+ * (redesign step 7.4) restarts with it. Sticky toasts have no entry.
+ */
+export const toastCountdowns = writable<Record<number, { ms: number; arm: number }>>({});
+let armSeq = 0;
 
 function clearTimer(id: number): void {
   const t = timers.get(id);
@@ -73,6 +85,13 @@ function clearTimer(id: number): void {
     clearTimeout(t);
     timers.delete(id);
   }
+  deadlines.delete(id);
+  held.delete(id);
+  toastCountdowns.update((c) => {
+    if (!(id in c)) return c;
+    const { [id]: _gone, ...rest } = c;
+    return rest;
+  });
 }
 
 /**
@@ -137,10 +156,38 @@ export function push(opts: PushOptions): number {
 function arm(id: number, ms: number): void {
   const prev = timers.get(id);
   if (prev) clearTimeout(prev);
+  held.delete(id);
   timers.set(
     id,
     setTimeout(() => dismiss(id), ms),
   );
+  deadlines.set(id, Date.now() + ms);
+  const seq = ++armSeq;
+  toastCountdowns.update((c) => ({ ...c, [id]: { ms, arm: seq } }));
+}
+
+/**
+ * Stop a toast's countdown while the pointer or focus is on it (the Motion
+ * board: "stays 6 s, longer on hover"). A sticky toast has nothing to hold.
+ */
+export function holdToast(id: number): void {
+  const t = timers.get(id);
+  if (!t) return;
+  clearTimeout(t);
+  timers.delete(id);
+  held.set(id, Math.max(0, (deadlines.get(id) ?? Date.now()) - Date.now()));
+}
+
+/** Resume a held countdown with the time it had left. */
+export function releaseToast(id: number): void {
+  const left = held.get(id);
+  if (left === undefined) return;
+  held.delete(id);
+  timers.set(
+    id,
+    setTimeout(() => dismiss(id), left),
+  );
+  deadlines.set(id, Date.now() + left);
 }
 
 export function dismiss(id: number): void {
@@ -161,6 +208,9 @@ export function runToastAction(id: number): void {
 export function clearToasts(): void {
   for (const t of timers.values()) clearTimeout(t);
   timers.clear();
+  deadlines.clear();
+  held.clear();
+  toastCountdowns.set({});
   toasts.set([]);
   droppedToasts.set(0);
 }

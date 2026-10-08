@@ -40,12 +40,18 @@ pub mod host_placement;
 #[cfg(test)]
 mod host_placement_tests;
 pub mod jev;
+pub mod sibling_repos;
+#[cfg(test)]
+mod sibling_repos_tests;
 pub mod start_project;
 #[cfg(test)]
 mod start_project_tests;
 pub mod status_map;
 #[cfg(test)]
 mod tests;
+pub mod work_link;
+#[cfg(test)]
+mod work_link_tests;
 
 pub use jev::{
     Answer, BackendError, DecisionBackend, JevBackend, JevRequest, JevResponse, NoulCriteria,
@@ -83,6 +89,8 @@ pub enum Feature {
     WorkLink,
     /// Pre-selecting the repository of a task's first start (K1).
     StartProject,
+    /// Pre-ticking the sibling repository a ticket start also needs (N3).
+    SiblingRepos,
     /// Pre-selecting the host of a project's new session when no rule or
     /// number decides (N5, redesign step 4.11).
     HostPlacement,
@@ -93,6 +101,7 @@ impl Feature {
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
+        Feature::SiblingRepos,
         Feature::HostPlacement,
     ];
 
@@ -101,6 +110,7 @@ impl Feature {
             Feature::StatusMap => "status_map",
             Feature::WorkLink => "work_link",
             Feature::StartProject => "start_project",
+            Feature::SiblingRepos => "sibling_repos",
             Feature::HostPlacement => "host_placement",
         }
     }
@@ -115,6 +125,7 @@ impl Feature {
             Feature::StatusMap => settings::DECIDE_JEV_STATUS_MAP,
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
+            Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
             Feature::HostPlacement => settings::DECIDE_JEV_HOST_PLACEMENT,
         }
     }

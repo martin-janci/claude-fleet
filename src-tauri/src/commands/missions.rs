@@ -10,6 +10,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::graph::{self, GraphChange};
 use fleet_core::service::work::missions::{self, MissionDeleted, MissionDetail, MissionInput};
 use fleet_core::service::work::orchestrate::{self, Deps, PlanOutcome, StartOutcome, StepResult};
+use fleet_core::service::work::plan_import::{self, PlanImport, PlanRow};
 use fleet_core::service::work::verify::{self, VerifyOutcome};
 use fleet_core::service::work::{WorkArgs, WorkLinkArgs};
 use fleet_core::ssh::SshClient;
@@ -75,6 +76,14 @@ pub struct SetMissionItemArgs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeleteMissionArgs {
     pub mission_id: i64,
+}
+
+/// `import_mission_plan`: a plan's step table as the mission's tasks and
+/// edges (`service::work::plan_import`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ImportMissionPlanArgs {
+    pub mission_id: i64,
+    pub plan: Vec<PlanRow>,
 }
 
 /// `set_work_dep`: `item_id` waits for `depends_on` (`on: false` erases).
@@ -235,6 +244,15 @@ pub async fn delete_mission(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<MissionDeleted, IpcError> {
     routed::delete_mission(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn import_mission_plan(
+    args: ImportMissionPlanArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<PlanImport, IpcError> {
+    routed::import_mission_plan(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -480,6 +498,21 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("delete_mission", &wire).await,
             None => missions::delete(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn import_mission_plan(
+        backend: &FleetBackend,
+        args: ImportMissionPlanArgs,
+        store: &Mutex<Store>,
+    ) -> Result<PlanImport, IpcError> {
+        let wire = WorkLinkArgs {
+            plan: Some(args.plan),
+            ..write("mission_import", Some(args.mission_id))
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("import_mission_plan", &wire).await,
+            None => plan_import::import(&wire, store, &internal_view()),
         }
     }
 

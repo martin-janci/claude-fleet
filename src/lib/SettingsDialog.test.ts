@@ -464,7 +464,7 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
     expect(Array.from(sm.querySelectorAll('option'), (o) => o.value)).toEqual(['off', 'shadow', 'assist']);
     // Step 7.7: each use case its own row, today's budget, the breaker, the
     // key and which orgs consent, with the way to change that consent.
-    for (const k of ['status_map', 'start_project', 'work_link']) {
+    for (const k of ['status_map', 'start_project', 'sibling_repos', 'work_link']) {
       const sel = screen.queryByTestId(`setting-decide-jev-${k.replace('_', '-')}`) as HTMLSelectElement | null;
       expect(sel, k).not.toBeNull();
       if (sel?.tagName === 'SELECT') expect(Array.from(sel.options, (o) => o.value)).not.toContain('auto');

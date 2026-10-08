@@ -306,8 +306,12 @@ export async function setWorkProjectTrust(projectId: number, on: boolean): Promi
   return r.ok ? { ok: true, value: r.value?.trusted ?? [] } : r;
 }
 
+/** The rule a decision-model suggestion carries (J1 `work_link`, redesign
+ *  6.8): it keeps it after a person decides, when its source becomes theirs. */
+export const JEV_RULE = 'R12';
+
 /** Link sources detection writes; a confirmed link with one is "auto". */
-export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt', 'agent_inferred'];
+export const AUTO_SOURCES: readonly string[] = ['branch', 'pr', 'trailer', 'url', 'prompt', 'agent_inferred', 'jev'];
 
 /** A confirmed link detection made without a person (shown with a dot and
  *  offered for Undo). */
@@ -322,6 +326,7 @@ const SOURCE_LABEL: Record<string, string> = {
   url: 'ticket URL',
   prompt: 'prompt',
   agent_inferred: "Claude's guess when asked",
+  jev: 'proposed by Jev',
   manual: 'linked by you',
   started: 'started for it',
   agent: 'declared by Claude',
@@ -364,6 +369,8 @@ export function describeEvidence(e: WorkEvidence): string {
       return `mentioned ${e.text} in a prompt at ${clock(e.at)}${note}${rule}`;
     case 'agent_inferred':
       return `Claude named ${e.text} when asked at ${clock(e.at)}${rule}`;
+    case 'jev':
+      return `Jev proposed ${e.text} from the first prompt at ${clock(e.at)}${note}${rule}`;
     default:
       return `${e.signal}: ${e.text}${rule}`;
   }
@@ -375,6 +382,8 @@ export function workWhy(w: { source: string; state?: string; rule?: string | nul
   const rule = w.rule ? ` · rule ${w.rule}` : '';
   // The classification nudge's answer (M4.6) is Claude's, not a signal's.
   if (w.source === 'agent_inferred') return `${w.state === 'suggested' ? 'suggested' : 'named'} by Claude when asked${rule}`;
+  // The decision model's answer (J1, redesign 6.8) is Jev's, not a signal's.
+  if (w.source === 'jev' || w.rule === JEV_RULE) return `proposed by Jev from the first prompt${rule}`;
   return AUTO_SOURCES.includes(w.source)
     ? `${what} ${sourceLabel(w.source)}${rule}`
     : `${sourceLabel(w.source)}${rule}`;

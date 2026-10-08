@@ -285,6 +285,7 @@ fn protection_needs_you_dialog() {
         question: None,
         options: vec![],
         multi: false,
+        detail: None,
     });
     assert!(run(&[s], &cfg()).is_empty());
 }
@@ -823,6 +824,7 @@ fn idle_unlinked_exclusions_table() {
                     question: None,
                     options: vec![],
                     multi: false,
+                    detail: None,
                 });
                 s
             }),

@@ -5,6 +5,7 @@ pub mod debug_devices;
 pub mod diagnostics;
 pub mod downloads;
 pub mod editor;
+pub mod federation;
 pub mod files;
 pub mod forms;
 pub mod health;

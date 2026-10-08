@@ -1016,3 +1016,16 @@ describe('QuickSwitcher — New session mode', () => {
     expect(document.querySelector('[data-key="project:5"]')).not.toBeNull();
   });
 });
+
+describe('QuickSwitcher — the header command field (3.17)', () => {
+  it('opens the plain switcher, not New session mode', async () => {
+    switcherRequest.set(null);
+    render(QuickSwitcher);
+    const { openSwitcher } = await import('./switcher_request');
+    openSwitcher();
+    await tick();
+    expect(screen.getByTestId('switcher-input')).toBeTruthy();
+    expect(screen.queryByTestId('mode-chip')).toBeNull();
+    expect(get(switcherRequest)).toBeNull();
+  });
+});
