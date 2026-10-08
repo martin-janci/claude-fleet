@@ -1,1 +1,64 @@
-{"v": 3, "layout": "files", "createdOnFiles": {"v": 1, "at": "2026-10-08T15:20:00Z"}, "title": "Orbit Fleet", "namespace": "OrbitFleet", "libraries": [], "sections": {}, "groups": ["Logos"], "assetGroups": {"Logos": {"name": "Logos", "tile": "l", "order": ["orbit-mark.svg", "orbit-mark-light.svg", "orbit-glyph-template.svg", "icon-source.svg"], "files": {"orbit-mark.svg": {"name": "orbit-mark.svg", "blob": "6f73e5d3ef18c9b963dbb3db136657c9", "size": 490, "type": "image/svg+xml"}, "orbit-mark-light.svg": {"name": "orbit-mark-light.svg", "blob": "55bbe05505588f5b2fd80a37be516024", "size": 548, "type": "image/svg+xml"}, "orbit-glyph-template.svg": {"name": "orbit-glyph-template.svg", "blob": "4836c7ea3c523486f04783b0e511d1da", "size": 429, "type": "image/svg+xml"}, "icon-source.svg": {"name": "icon-source.svg", "blob": "2247b8e33b64dd0152636f4f20d692a5", "size": 567, "type": "image/svg+xml"}}}}, "blobs": {}, "docs": {"readme": "project/README.md", "sections": []}, "lastChange": {"by": "Martin", "at": "2026-10-08T15:45:00Z", "via": "Claude Code \u00b7 redesign canvas v24", "note": "Added ChatForm: wizards Control or an agent writes in chat (fleet.form/1)."}}
+{
+ "v": 3,
+ "layout": "files",
+ "createdOnFiles": {
+  "v": 1,
+  "at": "2026-10-08T15:20:00Z"
+ },
+ "title": "Orbit Fleet",
+ "namespace": "OrbitFleet",
+ "libraries": [],
+ "sections": {},
+ "groups": [
+  "Logos"
+ ],
+ "assetGroups": {
+  "Logos": {
+   "name": "Logos",
+   "tile": "l",
+   "order": [
+    "orbit-mark.svg",
+    "orbit-mark-light.svg",
+    "orbit-glyph-template.svg",
+    "icon-source.svg"
+   ],
+   "files": {
+    "orbit-mark.svg": {
+     "name": "orbit-mark.svg",
+     "blob": "6f73e5d3ef18c9b963dbb3db136657c9",
+     "size": 490,
+     "type": "image/svg+xml"
+    },
+    "orbit-mark-light.svg": {
+     "name": "orbit-mark-light.svg",
+     "blob": "55bbe05505588f5b2fd80a37be516024",
+     "size": 548,
+     "type": "image/svg+xml"
+    },
+    "orbit-glyph-template.svg": {
+     "name": "orbit-glyph-template.svg",
+     "blob": "4836c7ea3c523486f04783b0e511d1da",
+     "size": 429,
+     "type": "image/svg+xml"
+    },
+    "icon-source.svg": {
+     "name": "icon-source.svg",
+     "blob": "2247b8e33b64dd0152636f4f20d692a5",
+     "size": 567,
+     "type": "image/svg+xml"
+    }
+   }
+  }
+ },
+ "blobs": {},
+ "docs": {
+  "readme": "project/README.md",
+  "sections": []
+ },
+ "lastChange": {
+  "by": "Martin",
+  "at": "2026-10-08T16:40:00Z",
+  "via": "Claude Code",
+  "note": "Phone: touch-min, phone-gutter, phone-bar-h, tab-bar-h, phone-row-min, radius-sheet, radius-phone-card; BottomBar, PhoneRow, BottomSheet; README section \"On the phone\"."
+ }
+}

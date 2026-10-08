@@ -84,6 +84,52 @@ describe('App bootstrap failure', () => {
   });
 });
 
+// Redesign step 0.3: the Classic/New switch in Settings → Appearance must
+// never cost the user their place. 3.1 makes the shell read `uiLayout`; this
+// test is the guard it has to keep green.
+describe('App layout switch', () => {
+  it('keeps the selected session when the layout changes', async () => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    const original = inv.getMockImplementation() as
+      | ((cmd: string, ...rest: unknown[]) => Promise<unknown>)
+      | undefined;
+    const row = {
+      id: 7, tmux_name: 'dev-layout', host_alias: 'mefistos', project_id: null, worktree_id: null,
+      created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
+      kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
+      claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
+      current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
+      safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
+    };
+    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
+      if (cmd === 'list_sessions') return [row];
+      return original ? original(cmd, ...rest) : null;
+    });
+    localStorage.setItem('cf:pref:session.last', JSON.stringify({ host_alias: 'mefistos', tmux_name: 'dev-layout' }));
+    const { selectedSession, clearSelection } = await import('./lib/selection');
+    const { settingsOpen } = await import('./lib/app_views');
+    const { uiLayout } = await import('./lib/prefs');
+    try {
+      render(App);
+      await waitFor(() => expect(get(selectedSession)?.id).toBe(7));
+      settingsOpen.set(true);
+      await fireEvent.click(await screen.findByTestId('appearance-layout-new'));
+      expect(get(uiLayout)).toBe('new');
+      expect(get(selectedSession)?.id).toBe(7);
+      await fireEvent.click(screen.getByTestId('appearance-layout-classic'));
+      expect(get(uiLayout)).toBe('classic');
+      expect(get(selectedSession)?.id).toBe(7);
+    } finally {
+      settingsOpen.set(false);
+      uiLayout.set('classic');
+      inv.mockImplementation(original!);
+      localStorage.removeItem('cf:pref:session.last');
+      clearSelection();
+    }
+  });
+});
+
 describe('App startup order', () => {
   it('subscribes to row events before the first list resolves', async () => {
     const { invoke } = await import('@tauri-apps/api/core');

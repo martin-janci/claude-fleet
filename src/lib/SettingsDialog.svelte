@@ -35,6 +35,7 @@
   import { pushError } from './toasts';
   import Modal from './Modal.svelte';
   import McpSettings from './McpSettings.svelte';
+  import AppearanceSettings from './AppearanceSettings.svelte';
   import { loadHostTokens } from './host_actions';
   import { hostsChordLabel, requestHostsView, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
@@ -470,6 +471,8 @@
       onselect={select} />
     <div class="settings-content">
     {#if view === 'general'}
+
+    <AppearanceSettings />
 
     <section class="block hosts-line" data-testid="settings-hosts-line">
       <h4>Hosts</h4>

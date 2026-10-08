@@ -135,6 +135,12 @@
   --settings-nav-w: 240px;
   --prose-max: 720px;
   --status-h: 25px;
+  /* Phone sizes, for fleet-mobile's FleetTheme.kt and phone previews. */
+  --touch-min: 48px;
+  --phone-gutter: 16px;
+  --phone-bar-h: 56px;
+  --tab-bar-h: 72px;
+  --phone-row-min: 72px;
 
   /* ── radii ── --radius-pill is RESERVED for dots, meters and toggles. */
   --radius-xs: 3px;
@@ -143,6 +149,8 @@
   --radius-lg: 8px;
   --radius-brand: 24px;
   --radius-pill: 999px;
+  --radius-phone-card: 14px;
+  --radius-sheet: 22px;
 
   /* ── durations ── UI motion 80 to 280ms; a loader only after --loader-delay. */
   --dur-fast: 80ms;
