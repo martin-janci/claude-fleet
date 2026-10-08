@@ -3329,6 +3329,44 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "set_work_done_when",
+            "work_link",
+            json!({ "session_id": null, "action": "done_when", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "done_when": ["review"] }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_done_when(
+                    b,
+                    commands::missions::SetWorkDoneWhenArgs {
+                        item_id: 3,
+                        done_when: vec!["review".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "verify_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "verify", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "line": "review", "ok": true }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::verify_work_item(
+                    b,
+                    commands::missions::VerifyWorkItemArgs {
+                        item_id: 3,
+                        line: "review".into(),
+                        ok: true,
+                        note: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── multi-user M1 (T13): the three sharing mutations ─────────────
         //
         // `level` crosses as the string the user chose and is validated by

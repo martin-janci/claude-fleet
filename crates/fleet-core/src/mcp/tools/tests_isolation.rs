@@ -3046,6 +3046,43 @@ async fn run_matrix(isolate: bool) {
         )
         .await;
     }
+    // ── Acceptance conditions (orchestration O3) ───────────────────────
+    // Setting them is a person's plan, as an edge is; recording a check is a
+    // person's decision, as accepting is.
+    m.row(
+        "work_link",
+        "done_when",
+        move |fx, _| json!({ "action": "done_when", "item_id": fx.item_b, "done_when": ["person"] }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's item"),
+                _ => is_ok(who, a, "done_when"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "verify",
+        move |fx, _| {
+            json!({ "action": "verify", "item_id": fx.item_b, "line": "matrix: never a line", "ok": true })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                // The person reaches the item; the line is not one of its.
+                Who::Master | Who::ClientFull => is_code(who, a, "E_INVALID", "not its line"),
+                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+            }
+        },
+    )
+    .await;
     // ── idle_unlinked and keep (work graph M11.3) ──────────────────────
     // Two work sessions with their own worktrees and no work linked, idle
     // and unprompted forever: A's on h-a, B's on h-b.

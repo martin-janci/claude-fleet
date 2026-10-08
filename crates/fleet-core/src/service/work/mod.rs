@@ -15,6 +15,7 @@ pub mod local;
 pub mod missions;
 pub mod nudge;
 pub mod recognize;
+pub mod report;
 pub mod resolve;
 pub mod resume;
 pub mod retention;
@@ -28,6 +29,7 @@ pub mod summary;
 pub mod tidy;
 pub mod today;
 pub mod usage;
+pub mod verify;
 pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -280,6 +282,15 @@ pub struct WorkLinkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "array_schema")]
     pub tree: Option<Vec<crate::store::TreeEntry>>,
+    /// done_when: the item's condition lines (`[]` clears them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_when: Option<Vec<String>>,
+    /// verify: the condition line checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    /// verify: whether it is met.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -480,6 +491,8 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "propose_tree",
     "accept_many",
     "undo_accept",
+    "done_when",
+    "verify",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -550,6 +563,9 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_hold", "work_link", "hold"),
     ("accept_work_proposals", "work_link", "accept_many"),
     ("undo_work_accept", "work_link", "undo_accept"),
+    // Orchestration O3: acceptance conditions and a person's check.
+    ("set_work_done_when", "work_link", "done_when"),
+    ("verify_work_item", "work_link", "verify"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph

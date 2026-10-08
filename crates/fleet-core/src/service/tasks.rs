@@ -479,6 +479,27 @@ pub fn cancel_task(s: &Store, task_id: i64, reason: &str) -> Result<TaskRow, Ipc
 /// (kind `task_result`, best-effort) so a requester that is not polling
 /// `wait_for_task` still sees it. Returns whether this call did the flip.
 pub fn complete_task(s: &Store, task: &TaskRow, result: &str) -> Result<bool, IpcError> {
+    complete_task_reported(s, task, result, None)
+}
+
+/// [`complete_task`] with the worker's structured report (orchestration O3),
+/// stored beside the paragraph. A report's summary stands in for a paragraph
+/// that is only the opening of its JSON block.
+pub fn complete_task_reported(
+    s: &Store,
+    task: &TaskRow,
+    result: &str,
+    report: Option<&crate::store::TaskReport>,
+) -> Result<bool, IpcError> {
+    let from_report = report
+        .filter(|r| !r.summary.trim().is_empty())
+        .filter(|_| {
+            result.trim().is_empty()
+                || result.trim_start().starts_with("```")
+                || result.trim_start().starts_with('{')
+        })
+        .map(|r| r.summary.as_str());
+    let result = from_report.unwrap_or(result);
     let result = if result.trim().is_empty() {
         "(no result text after the marker)"
     } else {
@@ -487,6 +508,9 @@ pub fn complete_task(s: &Store, task: &TaskRow, result: &str) -> Result<bool, Ip
     let (row, changed) = s.finish_task(task.id, "done", Some(result), None)?;
     if !changed {
         return Ok(false);
+    }
+    if let Some(rep) = report {
+        s.set_task_report(task.id, rep)?;
     }
     if let Some(ref r) = row {
         mirror_state(s, r.id);
@@ -977,18 +1001,20 @@ pub async fn handle_stop_for_worker(
     if open.is_empty() {
         return;
     }
-    let transcript = read_worker_transcript(&ssh, &worker, stored_path, cwd).await;
+    let transcript = read_worker_transcript(&ssh, &worker, stored_path, cwd.clone()).await;
     let mut resolved = resolve_markers(&open, &[transcript.as_deref().unwrap_or("")]);
+    let mut pane: Option<String> = None;
     // The JSONL can flush AFTER Stop fires; scan the pane for the rest.
     if resolved.len() < open.len() && !worker.tmux_name.starts_with("bg:") {
         match capture_worker_pane(&ssh, &worker).await {
-            Ok(pane) => {
+            Ok(text) => {
+                let pane = &*pane.insert(text);
                 let rest: Vec<TaskRow> = open
                     .iter()
                     .filter(|t| !resolved.iter().any(|(id, _)| *id == t.id))
                     .cloned()
                     .collect();
-                resolved.extend(resolve_markers(&rest, &[&pane]));
+                resolved.extend(resolve_markers(&rest, &[pane]));
             }
             Err(e) => tracing::warn!(
                 "pane of worker {} ({}/{}) unavailable: {}",
@@ -999,16 +1025,44 @@ pub async fn handle_stop_for_worker(
             ),
         }
     }
-    let Ok(s) = store.lock() else { return };
-    for (task_id, result) in resolved {
-        let Some(task) = open.iter().find(|t| t.id == task_id) else {
-            continue;
-        };
-        match complete_task(&s, task, &result) {
-            Ok(true) => tracing::info!("task {} done (worker {})", task.id, worker.id),
-            Ok(false) => {}
-            Err(e) => tracing::warn!("completing task {} failed: {}", task.id, e.message),
+    let mut finished: Vec<TaskRow> = Vec::new();
+    {
+        let Ok(s) = store.lock() else { return };
+        let sources = [
+            transcript.as_deref().unwrap_or(""),
+            pane.as_deref().unwrap_or(""),
+        ];
+        for (task_id, result) in resolved {
+            let Some(task) = open.iter().find(|t| t.id == task_id) else {
+                continue;
+            };
+            let report = crate::service::work::report::report_in(&sources, &task.nonce);
+            match complete_task_reported(&s, task, &result, report.as_ref()) {
+                Ok(true) => {
+                    tracing::info!("task {} done (worker {})", task.id, worker.id);
+                    finished.push(task.clone());
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("completing task {} failed: {}", task.id, e.message),
+            }
         }
+    }
+    // A run's evidence, read from git in the worker's checkout once it is
+    // done (orchestration O3). After the lock: it is a host round trip.
+    let checkout = cwd.or_else(|| {
+        let s = store.lock().ok()?;
+        let wt = worker.worktree_id?;
+        s.worktree_path(wt).ok().flatten()
+    });
+    if let Some(dir) = checkout {
+        crate::service::work::report::collect_evidence(
+            &store,
+            &ssh,
+            &worker.host_alias,
+            &dir,
+            &finished,
+        )
+        .await;
     }
 }
 

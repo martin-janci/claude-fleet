@@ -1,6 +1,6 @@
 //! Tauri commands of the Work view's missions (orchestration O1,
 //! `docs/superpowers/specs/2026-10-07-autonomous-orchestration-projects-design.md`):
-//! two reads of `work` and five writes of `work_link`, each routed by command
+//! two reads of `work` and the writes of `work_link`, each routed by command
 //! name on a paired desktop and served by `service::work::missions` here.
 //! Thin wrappers, as `commands::work_view` is: the rules live in fleet-core.
 
@@ -8,6 +8,7 @@ use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::graph::{self, GraphChange};
 use fleet_core::service::work::missions::{self, MissionDeleted, MissionDetail, MissionInput};
+use fleet_core::service::work::verify::{self, VerifyOutcome};
 use fleet_core::service::work::{WorkArgs, WorkLinkArgs};
 use fleet_core::store::{MissionRow, Store, WorkItemRow};
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,23 @@ pub struct SetWorkHoldArgs {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkProposalsArgs {
     pub item_ids: Vec<i64>,
+}
+
+/// `set_work_done_when`: an item's condition lines (`[]` clears them).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetWorkDoneWhenArgs {
+    pub item_id: i64,
+    pub done_when: Vec<String>,
+}
+
+/// `verify_work_item`: a person's check of one condition line.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VerifyWorkItemArgs {
+    pub item_id: i64,
+    pub line: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// The standalone desktop's reader: one person at the keyboard, as
@@ -198,6 +216,24 @@ pub async fn undo_work_accept(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<WorkItemRow>, IpcError> {
     routed::undo_work_accept(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn set_work_done_when(
+    args: SetWorkDoneWhenArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<VerifyOutcome, IpcError> {
+    routed::set_work_done_when(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn verify_work_item(
+    args: VerifyWorkItemArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<VerifyOutcome, IpcError> {
+    routed::verify_work_item(&backend, args, &store).await
 }
 
 pub(crate) mod routed {
@@ -385,6 +421,42 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("undo_work_accept", &wire).await,
             None => graph::undo_accept(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn set_work_done_when(
+        backend: &FleetBackend,
+        args: SetWorkDoneWhenArgs,
+        store: &Mutex<Store>,
+    ) -> Result<VerifyOutcome, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "done_when".into(),
+            item_id: Some(args.item_id),
+            done_when: Some(args.done_when),
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("set_work_done_when", &wire).await,
+            None => verify::set_done_when(&wire, store, &internal_view()),
+        }
+    }
+
+    pub async fn verify_work_item(
+        backend: &FleetBackend,
+        args: VerifyWorkItemArgs,
+        store: &Mutex<Store>,
+    ) -> Result<VerifyOutcome, IpcError> {
+        let wire = WorkLinkArgs {
+            action: "verify".into(),
+            item_id: Some(args.item_id),
+            line: Some(args.line),
+            ok: Some(args.ok),
+            note: args.note,
+            ..Default::default()
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("verify_work_item", &wire).await,
+            None => verify::verify(&wire, store, &internal_view()),
         }
     }
 }

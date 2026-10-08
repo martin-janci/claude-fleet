@@ -38,6 +38,12 @@
     setWorkHold,
     undoWorkAccept,
     wavesOf,
+    attemptLine,
+    checkGlyph,
+    checkable,
+    setWorkDoneWhen,
+    verificationLabel,
+    verifyWorkItem,
     type GraphNode,
     type Mission,
     type MissionDetail,
@@ -96,6 +102,24 @@
 
   async function setDep(itemId: number, dependsOn: number, on: boolean) {
     await act(setWorkDep(itemId, dependsOn, on));
+  }
+
+  // The task whose condition lines are being edited, and their text.
+  let condsFor = $state<number | null>(null);
+  let condText = $state('');
+
+  function editConds(itemId: number) {
+    condsFor = itemId;
+    condText = (itemById.get(itemId)?.done_when ?? []).join('\n');
+  }
+
+  async function saveConds() {
+    if (condsFor == null) return;
+    if (await act(setWorkDoneWhen(condsFor, doneWhenRows(condText)))) condsFor = null;
+  }
+
+  async function check(itemId: number, line: string, ok: boolean) {
+    await act(verifyWorkItem(itemId, line, ok));
   }
 
   async function setHold(itemId: number, on: boolean) {
@@ -380,6 +404,48 @@
                     {#if (n.waiting_for ?? []).length > 0}
                       <span class="muted small" data-testid="mission-waits">waits for {(n.waiting_for ?? []).map(titleOf).join(', ')}</span>
                     {/if}
+                    {#if n.attempt}
+                      <span class="muted small" data-testid="mission-attempt" title={n.attempt.summary ?? ''}
+                        >{attemptLine(n.attempt)}</span
+                      >
+                    {/if}
+                    {#if n.verification}
+                      <span class="vbadge v-{n.verification.state}" data-testid="mission-verified"
+                        >{verificationLabel(n.verification.state)}</span
+                      >
+                      <ul class="checks" data-testid="mission-checks">
+                        {#each n.verification.checks as c (c.line)}
+                          <li class="c-{c.state}">
+                            <span class="glyph" aria-label={c.state}>{checkGlyph(c.state)}</span>
+                            <span class="line">{c.line}</span>
+                            <span class="muted small">{c.detail}</span>
+                            {#if detail?.may_change && checkable(c)}
+                              <button
+                                class="btn btn--chip"
+                                type="button"
+                                disabled={busy}
+                                data-testid="mission-check"
+                                onclick={() => void check(n.item_id, c.line, true)}>Met</button
+                              >
+                            {/if}
+                          </li>
+                        {/each}
+                      </ul>
+                    {/if}
+                    {#if condsFor === n.item_id}
+                      <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveConds())}>
+                        <textarea
+                          rows="3"
+                          placeholder={'ci\nreview\ntest:cargo test\nperson'}
+                          bind:value={condText}
+                          data-testid="mission-conds-text"
+                        ></textarea>
+                        <span class="row">
+                          <button class="btn" type="submit" disabled={busy} data-testid="mission-conds-save">Save</button>
+                          <button class="btn btn--quiet" type="button" onclick={() => (condsFor = null)}>Cancel</button>
+                        </span>
+                      </form>
+                    {/if}
                     {#if mayChange && (n.depends_on ?? []).length > 0}
                       <span class="deps">
                         {#each n.depends_on ?? [] as d (d)}
@@ -395,6 +461,17 @@
                       </span>
                     {/if}
                   </span>
+                  {#if mayChange && condsFor !== n.item_id}
+                    <button
+                      class="btn btn--quiet btn--icon"
+                      type="button"
+                      aria-label="Done when…"
+                      title="Done when: the conditions that verify this task"
+                      disabled={busy}
+                      data-testid="mission-conds"
+                      onclick={() => editConds(n.item_id)}>☑</button
+                    >
+                  {/if}
                   {#if it.id === mission.root_item_id}
                     <span class="muted small">root</span>
                   {:else if mayChange}
@@ -604,6 +681,14 @@
   .dep-pick { max-width: 7rem; font-size: 0.75rem; }
   .wave { display: flex; flex-direction: column; gap: 0.1rem; }
   .wave-head { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.3rem; }
+  .vbadge { font-size: 0.7rem; align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: 999px; }
+  .vbadge.v-verified { color: #3fae5a; border-color: #3fae5a; }
+  .vbadge.v-failed { color: #e64a4a; border-color: #e64a4a; }
+  .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: 0.75rem; }
+  .checks .line { font-family: var(--font-mono, monospace); }
+  .checks .c-pass .glyph { color: #3fae5a; }
+  .checks .c-fail .glyph { color: #e64a4a; }
+  .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }
   .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: 4px; }
   .muted { color: var(--fg-muted); margin: 0; }
   .small { font-size: 0.75rem; }

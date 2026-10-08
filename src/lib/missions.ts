@@ -62,6 +62,54 @@ export interface GraphNode {
   wave: number;
   depends_on?: number[];
   waiting_for?: number[];
+  /** Its done_when answer (O3); absent without lines. */
+  verification?: Verification | null;
+  /** Its latest attempt, when this reader may see the task. */
+  attempt?: AttemptBrief | null;
+}
+
+/** One done_when line's answer (`service::work::verify::CondCheck`). */
+export interface CondCheck {
+  line: string;
+  /** ci | review | test | person — tolerant of more. */
+  kind: string;
+  /** pass | fail | pending. */
+  state: string;
+  detail: string;
+  by?: string | null;
+  at?: number | null;
+}
+
+export interface Verification {
+  /** verified | failed | unverified. */
+  state: string;
+  checks: CondCheck[];
+}
+
+/** What git said about an attempt's checkout (`store::TaskEvidence`). */
+export interface TaskEvidence {
+  at: number;
+  head?: string | null;
+  base?: string | null;
+  commits?: { sha: string; subject: string }[];
+  commits_total?: number;
+  files?: { path: string; added?: number | null; removed?: number | null }[];
+  files_total?: number;
+  uncommitted?: number | null;
+  error?: string | null;
+}
+
+/** A node's latest attempt (`service::work::graph::AttemptBrief`). */
+export interface AttemptBrief {
+  task_id: number;
+  role?: string | null;
+  attempt?: number | null;
+  state: string;
+  /** The worker's own reported outcome. */
+  outcome?: string | null;
+  summary?: string | null;
+  error?: string | null;
+  evidence?: TaskEvidence | null;
 }
 
 export interface OutsideItem {
@@ -191,6 +239,46 @@ export function openProposals(detail: MissionDetail): number[] {
   return (detail.items ?? []).filter((i) => i.proposal_state === 'proposed').map((i) => i.id);
 }
 
+const VERIFIED_LABEL: Record<string, string> = {
+  verified: 'Verified',
+  failed: 'Not met',
+  unverified: 'Unverified',
+};
+
+/** A verification's state in words. */
+export function verificationLabel(state: string): string {
+  return VERIFIED_LABEL[state] ?? state;
+}
+
+/** A check's state as one glyph. */
+export function checkGlyph(state: string): string {
+  return state === 'pass' ? '✓' : state === 'fail' ? '✕' : '○';
+}
+
+/** May a person record a check of this line from the card? A line fleet
+ *  derives (CI, a run) is checkable too, when it is still open. */
+export function checkable(c: CondCheck): boolean {
+  return c.state !== 'pass';
+}
+
+/** An attempt in one line: `implement #2 · done · reported partial ·
+ *  3 commits, 5 files`. The report is the worker's word; the counts are git's. */
+export function attemptLine(a: AttemptBrief): string {
+  const parts = [`${a.role ?? 'run'}${a.attempt ? ` #${a.attempt}` : ''}`, a.state];
+  if (a.outcome) parts.push(`reported ${a.outcome}`);
+  const ev = a.evidence;
+  if (ev) {
+    if (ev.error) parts.push(`git: ${ev.error}`);
+    else {
+      const c = ev.commits_total ?? 0;
+      const f = ev.files_total ?? 0;
+      parts.push(`${c} commit${c === 1 ? '' : 's'}, ${f} file${f === 1 ? '' : 's'}`);
+      if (ev.uncommitted) parts.push(`${ev.uncommitted} uncommitted`);
+    }
+  }
+  return parts.join(' · ');
+}
+
 /** One log row as a sentence. */
 export function eventSentence(e: MissionEvent): string {
   const p = (e.payload ?? {}) as Record<string, unknown>;
@@ -219,6 +307,12 @@ export function eventSentence(e: MissionEvent): string {
       return `Task ${e.work_item_id ?? ''} held`;
     case 'released':
       return `Task ${e.work_item_id ?? ''} released`;
+    case 'done_when': {
+      const lines = Array.isArray(p.lines) ? (p.lines as unknown[]).length : 0;
+      return `Task ${e.work_item_id ?? ''} has ${lines} condition${lines === 1 ? '' : 's'}`;
+    }
+    case 'verify':
+      return `${String(p.line ?? '')} ${p.ok ? 'checked' : 'found not met'} on task ${e.work_item_id ?? ''}`;
     case 'digest':
       return 'Older events, summarised';
     default:
@@ -321,4 +415,22 @@ export function acceptWorkProposals(itemIds: number[]): Promise<Result<WorkItemR
 
 export function undoWorkAccept(itemIds: number[]): Promise<Result<WorkItemRow[]>> {
   return changed(invokeCmd<WorkItemRow[]>('undo_work_accept', { args: { item_ids: itemIds } }));
+}
+
+/** What `set_work_done_when` and `verify_work_item` answer. */
+export interface VerifyOutcome {
+  item_id: number;
+  changed: boolean;
+  verification?: Verification | null;
+}
+
+export function setWorkDoneWhen(itemId: number, lines: string[]): Promise<Result<VerifyOutcome>> {
+  return invokeCmd<VerifyOutcome>('set_work_done_when', { args: { item_id: itemId, done_when: lines } });
+}
+
+export function verifyWorkItem(itemId: number, line: string, ok: boolean, note?: string): Promise<Result<VerifyOutcome>> {
+  const n = note?.trim();
+  return invokeCmd<VerifyOutcome>('verify_work_item', {
+    args: { item_id: itemId, line, ok, ...(n ? { note: n } : {}) },
+  });
 }

@@ -461,6 +461,8 @@ pub fn run() {
             commands::missions::set_work_hold,
             commands::missions::accept_work_proposals,
             commands::missions::undo_work_accept,
+            commands::missions::set_work_done_when,
+            commands::missions::verify_work_item,
             commands::trackers::add_tracker,
             commands::trackers::update_tracker,
             commands::trackers::set_tracker_credential,

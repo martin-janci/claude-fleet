@@ -188,6 +188,60 @@ describe('WorkMissions', () => {
     expect(screen.queryByTestId('mission-undo-accept')).toBeNull();
   });
 
+  it('shows what an attempt left and checks a condition', async () => {
+    handlers.work_mission = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), { ...item(11, 'Schema'), done_when: ['review', 'person'] }],
+      graph: {
+        nodes: [
+          { item_id: 10, state: 'ready', wave: 1 },
+          {
+            item_id: 11,
+            state: 'done',
+            wave: 1,
+            attempt: {
+              task_id: 5,
+              role: 'implement',
+              attempt: 2,
+              state: 'done',
+              outcome: 'done',
+              evidence: { at: 1, commits_total: 3, files_total: 1 },
+            },
+            verification: {
+              state: 'unverified',
+              checks: [
+                { line: 'review', kind: 'review', state: 'pass', detail: 'the reviewer approved' },
+                { line: 'person', kind: 'person', state: 'pending', detail: 'waits for a person to check it' },
+              ],
+            },
+          },
+        ],
+        waves: 1,
+      },
+      events: [],
+      may_change: true,
+    });
+    handlers.verify_work_item = () => ({ item_id: 11, changed: true });
+    handlers.set_work_done_when = () => ({ item_id: 11, changed: true });
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    expect(screen.getByTestId('mission-attempt').textContent).toBe('implement #2 · done · reported done · 3 commits, 1 file');
+    expect(screen.getByTestId('mission-verified').textContent).toBe('Unverified');
+    // Only the open line offers a check.
+    expect(screen.getAllByTestId('mission-check')).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('mission-check'));
+    await flush();
+    expect(calls('verify_work_item')[0]).toEqual({ item_id: 11, line: 'person', ok: true });
+    await fireEvent.click(screen.getAllByTestId('mission-conds')[1]);
+    expect((screen.getByTestId('mission-conds-text') as HTMLTextAreaElement).value).toBe('review\nperson');
+    await fireEvent.input(screen.getByTestId('mission-conds-text'), { target: { value: 'review\n ci:test \n' } });
+    await fireEvent.click(screen.getByTestId('mission-conds-save'));
+    await flush();
+    expect(calls('set_work_done_when')[0]).toEqual({ item_id: 11, done_when: ['review', 'ci:test'] });
+  });
+
   it('hides the controls from someone who may only read', async () => {
     handlers.work_mission = () => ({ mission: current, items: [], events: [], may_change: false });
     render(WorkMissions);

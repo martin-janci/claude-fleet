@@ -10745,6 +10745,7 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // gate; a tree is `propose`'s, stored in the proposing session's name.
     ("work_link", "dep", &["Drive"]),
     ("work_link", "hold", &["Drive"]),
+    ("work_link", "done_when", &["Drive"]),
     ("work_link", "propose_tree", &["Drive"]),
     // The two conversation-addressed arms of the `own` tier: a resume
     // replays the whole transcript into a new session, a summary stores a
@@ -10998,6 +10999,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "work_link",
         "undo_accept",
         "the same proposals, back to proposed; refused as `accept_many` is",
+    ),
+    (
+        "work_link",
+        "verify",
+        "a person's check of a work ITEM's condition; refused outright to a \
+         per-host token and a bound client, as `accept` is",
     ),
     (
         "work_link",

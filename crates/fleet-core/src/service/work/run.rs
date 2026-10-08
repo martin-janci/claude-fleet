@@ -212,7 +212,7 @@ pub async fn run_item(
         Arc::clone(store),
         Arc::clone(ssh),
         &row,
-        tasks::with_instruction(&prompt, &task.nonce),
+        crate::service::work::report::with_run_instruction(&prompt, &task.nonce),
     );
     Ok(RunOutcome {
         task,

@@ -291,7 +291,17 @@ active mission its `running | blocked | waiting` phase. An agent proposes a
 plan with `work_link { propose_tree }`, whose proposals join the parent's
 mission; a person takes it with `accept_many` and can `undo_accept` within
 10 minutes while nothing has touched it. The Missions tab lists tasks by
-wave. No evidence or loop yet (O3–O8).
+wave. O3 is built: a run's prompt asks for a fenced JSON report after its
+done marker, stored as `tasks.result_json` (the worker's word), and when the
+run finishes fleet reads the commits and changed files from git in the
+worker's checkout into `tasks.evidence_json` (migration 117,
+`service/work/report.rs`). An item's `done_when` lines are typed (`ci[:check]`,
+`review`, `test[:command]`, `person` or free text) and checked on every read
+(`service/work/verify.rs`): CI from a fresh PR reading on the checkout's own
+commit, review and test from a separate reviewer's or tester's run, and the
+rest by a person's recorded check (`work_link { verify }`, a person's act).
+The Missions tab shows each task's last attempt and Verified / Unverified.
+No loop yet (O4–O8).
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,

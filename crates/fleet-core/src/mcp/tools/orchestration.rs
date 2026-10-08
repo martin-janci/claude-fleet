@@ -1060,6 +1060,8 @@ impl FleetTools {
         mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
         mission_delete. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
         propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \
+        done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | \
+        person | text]}; verify {item_id, line, ok, note?}: a person's check. \
         Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
@@ -1375,6 +1377,22 @@ impl FleetTools {
             let view_scope = self.view_scope(&caller)?;
             return ok_json(
                 &crate::service::work::graph::hold(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "done_when" {
+            mission_caller(&caller)?;
+            self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::verify::set_done_when(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "verify" {
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::verify::verify(&args, &self.store, &view_scope)
                     .map_err(to_mcp_err)?,
             );
         }

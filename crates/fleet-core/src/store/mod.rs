@@ -19,6 +19,7 @@ mod downloads;
 mod guides;
 mod hosts_accounts;
 mod item_deps;
+mod item_verify;
 mod layers;
 mod local_workspaces;
 mod nl_census;
@@ -41,6 +42,7 @@ mod schema;
 mod session_grants;
 mod sessions;
 mod setting_review;
+mod task_report;
 mod tasks;
 #[cfg(test)]
 mod test_support;
@@ -83,6 +85,10 @@ pub use decisions::{
 pub use downloads::{DownloadRow, NewDownload};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
+pub use item_verify::{
+    normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,
+    VERIFY_NOTE_MAX_CHARS,
+};
 pub use layers::HostLayerRow;
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
@@ -133,6 +139,10 @@ pub use sessions::PromptAckState;
 pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
     SETTING_AUDIT_KEEP,
+};
+pub use task_report::{
+    EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
+    EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,
 };
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};
