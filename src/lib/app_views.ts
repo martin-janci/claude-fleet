@@ -65,6 +65,9 @@ export function requestCloseHosts(): void {
 /** Settings dialog visibility (mounted by the Sidebar; ⌘, sets it). */
 export const settingsOpen = writable(false);
 
+/** The `?` keyboard-shortcut sheet (redesign step 3.8; ⌘K opens it too). */
+export const shortcutSheetOpen = writable(false);
+
 /** The Settings section to scroll to when the dialog opens (`work`: the
  *  work section, e.g. from a "Reconnect Jira (acme)" Attention item). The
  *  dialog clears it once it has scrolled. */

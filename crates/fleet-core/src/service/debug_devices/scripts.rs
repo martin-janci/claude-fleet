@@ -486,7 +486,7 @@ pub fn run_script(target: &Target, args: &[String]) -> String {
 }
 
 /// What a command printed, and how it ended.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RunOutput {
     pub exit_code: i32,
     pub output: String,

@@ -1,6 +1,7 @@
 //! Read-only git views of a session's worktree: changed files, the file
-//! tree, one file's content or diff, the commit log, branches, one commit's
-//! metadata and a file's diff within a commit.
+//! tree, one file's content, diff or blame, the commit log, branches (with
+//! whether each is merged into the base branch), one commit's metadata and a
+//! file's diff within a commit.
 //!
 //! The worktree root is resolved live at call time (see `service::repo`):
 //! we ask tmux for the session pane's current path, then `git rev-parse
@@ -95,6 +96,14 @@ pub struct Branch {
     pub ahead: u32,
     pub behind: u32,
     pub tip_hash: String,
+    /// The branch's tip is reachable from the base branch (`origin/HEAD`,
+    /// else `origin/main`, `origin/master`, `main`, `master`), so deleting it
+    /// loses no commit. Never set on the base itself, its local twin, a
+    /// `*/HEAD` alias or the checked-out branch. `#[serde(default)]` because
+    /// a hub built before this field omits it, and a desktop paired with one
+    /// must still read the list (as "nothing merged").
+    #[serde(default)]
+    pub merged: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,6 +135,32 @@ pub struct CommitDetail {
     pub author: String,
     pub date: String,
     pub files: Vec<ChangedFile>,
+}
+
+/// One run of consecutive lines last changed by the same commit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlameHunk {
+    /// 1-based first line of the run in the current worktree file.
+    pub start: u32,
+    /// Number of lines in the run.
+    pub lines: u32,
+    pub hash: String,
+    pub author: String,
+    /// Author time, Unix seconds.
+    pub time: i64,
+    pub summary: String,
+    /// Lines changed in the worktree and not committed yet (git's all-zero
+    /// hash).
+    pub uncommitted: bool,
+}
+
+/// `git blame` of one worktree file, as runs of lines.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileBlame {
+    pub path: String,
+    pub hunks: Vec<BlameHunk>,
+    /// More than `MAX_BLAME_LINES` lines; the hunks stop there.
+    pub truncated: bool,
 }
 
 // ─── parsers ─────────────────────────────────────────────────────────────
@@ -323,6 +358,7 @@ fn parse_branches(raw: &[u8]) -> Vec<Branch> {
             ahead,
             behind,
             tip_hash: f[1].to_string(),
+            merged: false,
         });
     }
     out
@@ -530,6 +566,99 @@ pub async fn repo_diff(
     })
 }
 
+/// Most lines `repo_blame` returns; past it the hunks stop and `truncated`
+/// is set. Matches the order of `MAX_FILE_BYTES` for ordinary source lines.
+pub const MAX_BLAME_LINES: u32 = 20_000;
+
+/// `git blame` of one worktree file — committed lines with their commit, and
+/// lines changed in the worktree as `uncommitted`. Line numbers match
+/// `repo_file`'s content. Untracked files fail with git's own message.
+pub async fn repo_blame(
+    args: RepoFileArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<FileBlame, IpcError> {
+    crate::validate::repo_rel_path(&args.path)?;
+    let (host, name) = session_target(store, args.session_id)?;
+    let out = run_git(ssh, &host, &name, &blame_body(&args.path)).await?;
+    let (hunks, truncated) = parse_blame_porcelain(&out.stdout, MAX_BLAME_LINES);
+    Ok(FileBlame {
+        path: args.path,
+        hunks,
+        truncated,
+    })
+}
+
+fn blame_body(path: &str) -> String {
+    format!("git -C \"$root\" blame --porcelain -- {}", quote(path))
+}
+
+/// Parse `git blame --porcelain`: each line is a `<hash> <orig> <final>
+/// [<count>]` header, the commit's `key value` lines the first time that
+/// commit appears, then the line itself after a TAB. Consecutive lines of
+/// one commit fold into one hunk; parsing stops after `max_lines`.
+fn parse_blame_porcelain(raw: &[u8], max_lines: u32) -> (Vec<BlameHunk>, bool) {
+    #[derive(Default, Clone)]
+    struct Meta {
+        author: String,
+        time: i64,
+        summary: String,
+    }
+    let text = String::from_utf8_lossy(raw);
+    let mut metas: std::collections::HashMap<String, Meta> = std::collections::HashMap::new();
+    let mut hunks: Vec<BlameHunk> = Vec::new();
+    // (hash, final line) of the header we are inside.
+    let mut cur: Option<(String, u32)> = None;
+    let mut seen = 0u32;
+    let mut truncated = false;
+    for line in text.split('\n') {
+        if line.starts_with('\t') {
+            let Some((hash, final_line)) = cur.take() else {
+                continue;
+            };
+            if seen == max_lines {
+                truncated = true;
+                break;
+            }
+            seen += 1;
+            let meta = metas.get(&hash).cloned().unwrap_or_default();
+            match hunks.last_mut() {
+                Some(h) if h.hash == hash && h.start + h.lines == final_line => h.lines += 1,
+                _ => hunks.push(BlameHunk {
+                    start: final_line,
+                    lines: 1,
+                    uncommitted: hash.bytes().all(|b| b == b'0'),
+                    hash,
+                    author: meta.author,
+                    time: meta.time,
+                    summary: meta.summary,
+                }),
+            }
+            continue;
+        }
+        let mut parts = line.split(' ');
+        let first = parts.next().unwrap_or("");
+        if cur.is_none() && first.len() >= 40 && first.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let final_line = parts.nth(1).and_then(|n| n.parse().ok()).unwrap_or(0);
+            metas.entry(first.to_string()).or_default();
+            cur = Some((first.to_string(), final_line));
+            continue;
+        }
+        let Some((hash, _)) = &cur else { continue };
+        let Some(m) = metas.get_mut(hash) else {
+            continue;
+        };
+        let rest = line.split_once(' ').map(|(_, v)| v).unwrap_or("");
+        match first {
+            "author" => m.author = rest.to_string(),
+            "author-time" => m.time = rest.trim().parse().unwrap_or(0),
+            "summary" => m.summary = rest.to_string(),
+            _ => {}
+        }
+    }
+    (hunks, truncated)
+}
+
 // ─── log / branches / commit ─────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -573,7 +702,22 @@ pub async fn repo_log(
     Ok(parse_log(&out.stdout))
 }
 
-/// Local + remote branches for a session's worktree.
+/// Shell that sets `$base` to the branch "merged" is measured against:
+/// `origin/HEAD`'s target, else the first of `origin/main`, `origin/master`,
+/// `main`, `master` that exists, else empty. `$base_local` is the same name
+/// without its remote (`origin/main` → `main`), so the local twin of the base
+/// is never offered for deletion. Needs `$root` (see `repo_script`). Every
+/// failing probe sits in an `if`/`||`, so `set -e` never aborts on it.
+pub(crate) const BASE_BRANCH_SH: &str = r#"base=""
+for c in "$(git -C "$root" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null || true)" origin/main origin/master main master; do
+  if [ -n "$c" ] && git -C "$root" rev-parse -q --verify "$c^{commit}" >/dev/null 2>&1; then base="$c"; break; fi
+done
+base_local="$base"
+if [ -n "$base" ] && git -C "$root" rev-parse -q --verify "refs/remotes/$base" >/dev/null 2>&1; then base_local="${base#*/}"; fi
+"#;
+
+/// Local + remote branches for a session's worktree, each flagged `merged`
+/// when the base branch already contains its tip.
 pub async fn repo_branches(
     args: SessionIdArgs,
     store: &Mutex<Store>,
@@ -583,12 +727,57 @@ pub async fn repo_branches(
     // `BRANCH_FORMAT` contains `%(refname)` etc. — the parens are shell
     // metacharacters, so it MUST be quoted or bash aborts the line with
     // "syntax error near unexpected token `('".
-    let body = format!(
-        "git -C \"$root\" for-each-ref {fmt} refs/heads refs/remotes",
+    let out = run_git(ssh, &host, &name, &branches_body()).await?;
+    Ok(parse_branches_with_merged(&out.stdout))
+}
+
+/// The branch list, an RS byte, then (when a base exists) the base's name on
+/// one line and the refs it contains, one per line.
+fn branches_body() -> String {
+    format!(
+        "git -C \"$root\" for-each-ref {fmt} refs/heads refs/remotes\n\
+         printf '\\036'\n\
+         {base}\
+         if [ -n \"$base\" ]; then\n\
+           printf '%s\\n%s\\n' \"$base\" \"$base_local\"\n\
+           git -C \"$root\" for-each-ref --merged \"$base\" {merged} refs/heads refs/remotes\n\
+         fi",
         fmt = quote(BRANCH_FORMAT),
-    );
-    let out = run_git(ssh, &host, &name, &body).await?;
-    Ok(parse_branches(&out.stdout))
+        base = BASE_BRANCH_SH,
+        merged = quote("--format=%(refname)"),
+    )
+}
+
+/// Split `branches_body`'s output and set each branch's `merged` flag.
+fn parse_branches_with_merged(raw: &[u8]) -> Vec<Branch> {
+    let (list, merged) = match raw.iter().position(|&b| b == 0x1e) {
+        Some(i) => (&raw[..i], &raw[i + 1..]),
+        None => (raw, &[][..]),
+    };
+    let mut branches = parse_branches(list);
+    let text = String::from_utf8_lossy(merged);
+    let mut lines = text.lines();
+    let (Some(base), Some(base_local)) = (lines.next(), lines.next()) else {
+        return branches;
+    };
+    let contained: std::collections::HashSet<&str> = lines.collect();
+    for b in &mut branches {
+        let refname = if b.is_remote {
+            format!("refs/remotes/{}", b.name)
+        } else {
+            format!("refs/heads/{}", b.name)
+        };
+        let is_base = if b.is_remote {
+            b.name == base
+        } else {
+            b.name == base_local || b.name == base
+        };
+        b.merged = contained.contains(refname.as_str())
+            && !is_base
+            && !b.is_current
+            && !b.name.ends_with("/HEAD");
+    }
+    branches
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -669,6 +858,99 @@ pub async fn repo_commit_diff(
         binary,
         truncated,
     })
+}
+
+/// A real git repository for the repo tests, and a way to run a service's
+/// shell body against it the way `repo_script` would (with `$root` set and
+/// `set -e`), minus the tmux lookup. Unix only: these bodies run in the
+/// host's bash, and a Windows runner's `bash` is not that shell.
+#[cfg(all(test, unix))]
+pub(crate) mod git_fixture {
+    use crate::shell::quote;
+    use std::path::Path;
+
+    pub fn git(dir: &Path, args: &[&str]) {
+        let out = crate::proc::std_command("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=Ada",
+                "-c",
+                "user.email=ada@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    pub fn commit_file(dir: &Path, file: &str, content: &str, msg: &str) {
+        std::fs::write(dir.join(file), content).unwrap();
+        git(dir, &["add", file]);
+        git(dir, &["commit", "-q", "-m", msg]);
+    }
+
+    /// Run `body` with `$root` set to `root`, as `run_git` would on a host.
+    pub fn run_body(root: &Path, body: &str) -> std::process::Output {
+        let script = format!("set -e\nroot={}\n{body}", quote(&root.to_string_lossy()));
+        let out = crate::proc::std_command("bash")
+            .arg("-c")
+            .arg(script)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "body failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    /// `origin` (bare) and a clone-like `work` repo:
+    /// - `done` merged into `main` with a merge commit, pushed;
+    /// - `old` at main's first commit (merged, local only);
+    /// - `open` one commit past main (not merged);
+    /// - `fresh` at main's tip, checked out;
+    /// - `origin/HEAD` → `origin/main`.
+    pub fn branches_repo(tmp: &Path) -> std::path::PathBuf {
+        let origin = tmp.join("origin.git");
+        let work = tmp.join("work");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        git(&origin, &["init", "-q", "--bare"]);
+        git(&work, &["init", "-q"]);
+        commit_file(&work, "a.txt", "a\n", "first");
+        git(&work, &["branch", "old"]);
+        git(&work, &["checkout", "-q", "-b", "done"]);
+        commit_file(&work, "b.txt", "b\n", "done work");
+        git(&work, &["checkout", "-q", "main"]);
+        git(
+            &work,
+            &["merge", "-q", "--no-ff", "-m", "merge done", "done"],
+        );
+        git(&work, &["checkout", "-q", "-b", "open"]);
+        commit_file(&work, "c.txt", "c\n", "open work");
+        git(&work, &["checkout", "-q", "main"]);
+        git(
+            &work,
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        );
+        git(&work, &["push", "-q", "origin", "main", "done"]);
+        git(&work, &["remote", "set-head", "origin", "main"]);
+        git(&work, &["checkout", "-q", "-b", "fresh"]);
+        work
+    }
 }
 
 #[cfg(test)]
@@ -807,5 +1089,122 @@ mod tests {
         assert_eq!(bs[1].ahead, 0);
         assert_eq!(bs[2].name, "origin/main");
         assert!(bs[2].is_remote);
+    }
+
+    #[cfg(unix)]
+    fn by_name<'a>(bs: &'a [Branch], name: &str) -> &'a Branch {
+        bs.iter()
+            .find(|b| b.name == name)
+            .unwrap_or_else(|| panic!("no branch {name} in {bs:?}"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn branches_flag_what_the_base_already_contains() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = git_fixture::branches_repo(tmp.path());
+        let out = git_fixture::run_body(&work, &branches_body());
+        let bs = parse_branches_with_merged(&out.stdout);
+
+        assert!(by_name(&bs, "done").merged, "merged with a merge commit");
+        assert!(by_name(&bs, "old").merged, "an ancestor of the base");
+        assert!(by_name(&bs, "origin/done").merged, "a remote branch too");
+        assert!(!by_name(&bs, "open").merged, "has a commit main lacks");
+        assert!(!by_name(&bs, "main").merged, "the base's local twin");
+        assert!(!by_name(&bs, "origin/main").merged, "the base itself");
+        assert!(!by_name(&bs, "origin/HEAD").merged, "an alias");
+        let fresh = by_name(&bs, "fresh");
+        assert!(
+            fresh.is_current && !fresh.merged,
+            "never the checked-out one"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn branches_without_any_base_flag_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git_fixture::git(dir, &["init", "-q", "-b", "trunk"]);
+        git_fixture::commit_file(dir, "a.txt", "a\n", "first");
+        git_fixture::git(dir, &["branch", "side"]);
+        let out = git_fixture::run_body(dir, &branches_body());
+        let bs = parse_branches_with_merged(&out.stdout);
+        assert_eq!(bs.len(), 2, "{bs:?}");
+        assert!(bs.iter().all(|b| !b.merged), "{bs:?}");
+    }
+
+    #[test]
+    fn branch_list_without_the_merged_section_still_parses() {
+        // An older hub's answer, or a body cut before the RS byte.
+        let raw = b"refs/heads/main\x1fabc\x1f*\x1f\x1f\n";
+        let bs = parse_branches_with_merged(raw);
+        assert_eq!(bs.len(), 1);
+        assert!(!bs[0].merged);
+    }
+
+    #[test]
+    fn a_branch_without_merged_on_the_wire_reads_as_not_merged() {
+        let b: Branch = serde_json::from_str(
+            r#"{"name":"x","isCurrent":false,"isRemote":false,"upstream":null,"ahead":0,"behind":0,"tipHash":"a"}"#,
+        )
+        .unwrap();
+        assert!(!b.merged);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blame_splits_a_file_into_commits_and_uncommitted_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git_fixture::git(dir, &["init", "-q"]);
+        git_fixture::commit_file(dir, "f.txt", "one\ntwo\n", "first two");
+        git_fixture::commit_file(dir, "f.txt", "one\ntwo\nthree\nfour\n", "add three, four");
+        std::fs::write(dir.join("f.txt"), "ONE\ntwo\nthree\nfour\n").unwrap();
+
+        let out = git_fixture::run_body(dir, &blame_body("f.txt"));
+        let (hunks, truncated) = parse_blame_porcelain(&out.stdout, MAX_BLAME_LINES);
+        assert!(!truncated);
+        let shape: Vec<(u32, u32, bool, &str)> = hunks
+            .iter()
+            .map(|h| (h.start, h.lines, h.uncommitted, h.summary.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (1, 1, true, "Version of f.txt from f.txt"),
+                (2, 1, false, "first two"),
+                (3, 2, false, "add three, four"),
+            ]
+        );
+        assert_eq!(hunks[1].author, "Ada");
+        assert!(hunks[1].time > 1_500_000_000, "{}", hunks[1].time);
+        assert_eq!(hunks[1].hash.len(), 40);
+        // A commit seen a second time keeps the metadata from its first
+        // appearance (porcelain prints it once).
+        let (capped, truncated) = parse_blame_porcelain(&out.stdout, 2);
+        assert!(truncated);
+        assert_eq!(capped.iter().map(|h| h.lines).sum::<u32>(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blame_of_an_untracked_file_is_git_s_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        git_fixture::git(dir, &["init", "-q"]);
+        git_fixture::commit_file(dir, "a.txt", "a\n", "first");
+        std::fs::write(dir.join("new.txt"), "n\n").unwrap();
+        let script = format!(
+            "set -e\nroot={}\n{}",
+            quote(&dir.to_string_lossy()),
+            blame_body("new.txt")
+        );
+        let out = crate::proc::std_command("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
     }
 }

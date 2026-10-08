@@ -51,8 +51,11 @@
   import { hintAnchor } from './hints';
   import { openNewSessionPicker } from './switcher_request';
   import { requestNewSession } from './new_session_request';
+  import { foldedIds, lostFolds } from './lost_fold';
+  import LostFoldRow from './LostFoldRow.svelte';
   import { setProjectPick } from './project_picks';
-  import { detectMac } from './terminal_keys';
+  import { detectMac, isEditable } from './terminal_keys';
+  import { matchShortcut } from './shortcuts';
   import {
     buildSessionsByProject,
     buildOutsideFleet,
@@ -84,12 +87,15 @@
     workFilters,
   } from './work_filters';
   import {
+    bucketState,
     ciStatusColor,
     ciStatusLabel,
     countNeedsYou,
+    countsTowardBadge,
     needsYou,
     severity,
     worstSeverityByProject,
+    type TriageBucket,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { push, pushError } from './toasts';
@@ -291,7 +297,10 @@
       const id = focus.id;
       return (s) => s.id === id;
     }
-    return triagePredicate(workPredicate);
+    // A mass loss's rows live in their fold row (redesign 1.1), not the tree.
+    const folded = foldedIdSet;
+    const unfolded: SessionPredicate = folded.size === 0 ? null : (s) => !folded.has(s.id);
+    return bothPredicates(unfolded, triagePredicate(workPredicate));
   });
 
   // What narrows the list, for the empty state (the chrome shows the same
@@ -672,8 +681,24 @@
   // countNeedsYou() classifies each row, and classify() files an external
   // (Outside fleet) row as working/idle, so a read-only row never inflates
   // the pill (spec §5).
-  const needsYouTotal = $derived(countNeedsYou(hostVisibleSessions, attentionOpts));
-  const severityByProject = $derived(worstSeverityByProject(hostVisibleSessions));
+  // Redesign 1.1: a mass loss (a host reboot, a tmux server restart) folds
+  // into one "12 stopped on trn · Restore" row per host, and its rows leave
+  // the badge and the project sort: nobody can answer a stopped pane until it
+  // is restored, so counting them would bury the sessions that do need you.
+  const lostFoldList = $derived(focus ? [] : lostFolds(hostVisibleSessions));
+  const foldedIdSet = $derived(foldedIds(lostFoldList));
+  const countedSessions = $derived(
+    foldedIdSet.size === 0 ? hostVisibleSessions : hostVisibleSessions.filter((s) => !foldedIdSet.has(s.id)),
+  );
+  let openFolds = $state<Set<string>>(new Set());
+  function toggleFold(host: string) {
+    const next = new Set(openFolds);
+    if (next.has(host)) next.delete(host);
+    else next.add(host);
+    openFolds = next;
+  }
+  const needsYouTotal = $derived(countNeedsYou(countedSessions, attentionOpts));
+  const severityByProject = $derived(worstSeverityByProject(countedSessions));
 
   // Only show projects that either match the filter directly OR have at least
   // one active session. Without sessions the sidebar would be flooded with
@@ -992,10 +1017,63 @@
 
   function onKeySession(e: KeyboardEvent, sess: SessionRow) {
     if (!fromRowItself(e)) return;
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      onSelectSession(sess);
+    // The list keys (redesign step 3.8), from the shortcut registry.
+    const key = matchShortcut('session-list', e, isMac);
+    if (!key) return;
+    e.preventDefault();
+    if (key === 'session-list.open') onSelectSession(sess);
+    else if (key === 'session-list.down') focusRowAt(rowIndexOf(sess) + 1);
+    else if (key === 'session-list.up') focusRowAt(rowIndexOf(sess) - 1);
+    else if (key === 'session-list.pick') {
+      if (!selectMode) selectMode = true;
+      toggleSelected(sess);
     }
+  }
+
+  // ── List keys from anywhere (redesign step 3.8) ──
+  // The rows as drawn, top to bottom, whatever the grouping: what j/k walk,
+  // what ⌘1–9 count and what "next needs you" searches.
+  function shownRows(): HTMLElement[] {
+    return Array.from(sidebarEl?.querySelectorAll<HTMLElement>('[data-testid="sess-row"]') ?? []);
+  }
+  function rowIndexOf(sess: SessionRow): number {
+    return shownRows().findIndex((el) => el.dataset.sessionId === String(sess.id));
+  }
+  function focusRowAt(i: number) {
+    const rows = shownRows();
+    if (i < 0 || i >= rows.length) return;
+    rows[i].focus();
+    rows[i].scrollIntoView?.({ block: 'nearest' });
+  }
+  function openRow(el: HTMLElement | undefined) {
+    const sess = el && $sessions.find((s) => String(s.id) === el.dataset.sessionId);
+    if (!el || !sess) return;
+    if ($selectedSession?.id !== sess.id) selectSessionExplicitly(sess);
+    el.focus();
+    el.scrollIntoView?.({ block: 'nearest' });
+  }
+  /** The next row after the open one (wrapping) whose state raises the
+   *  Needs you badge: Needs you, Failed or Blocked (step 0.4). */
+  function nextNeedingYou(): HTMLElement | undefined {
+    const rows = shownRows();
+    const cur = rows.findIndex((el) => el.dataset.sessionId === String($selectedSession?.id));
+    for (let step = 1; step <= rows.length; step++) {
+      const el = rows[(cur + step + rows.length) % rows.length];
+      const bucket = el.dataset.bucket as TriageBucket | undefined;
+      if (bucket && countsTowardBadge(bucketState(bucket))) return el;
+    }
+    return undefined;
+  }
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented) return;
+    const id = matchShortcut('global', e, isMac);
+    if (id !== 'next-needs-you' && id !== 'jump-n') return;
+    const target = e.target as HTMLElement | null;
+    // A modal owns the keyboard, and a field keeps its keys.
+    if (target?.closest?.('dialog') || isEditable(target)) return;
+    e.preventDefault();
+    if (id === 'next-needs-you') openRow(nextNeedingYou());
+    else openRow(shownRows()[Number(e.key) - 1]);
   }
 
   /** Same guard for the project row, which holds + New session and Purge. */
@@ -1213,6 +1291,8 @@
   }
 </script>
 
+<svelte:window onkeydown={onWindowKeydown} />
+
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
   {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false)}
     <SessionRowItem
@@ -1241,6 +1321,9 @@
       {askKill}
       orgColor={orgColorOf(sess, $orgColorById)}
     />
+  {/snippet}
+  {#snippet foldSessionRow(sess: SessionRow)}
+    {@render sessionRow(sess)}
   {/snippet}
 
   <!-- The shared chrome (Refresh, Needs you, bulk actions, Settings,
@@ -1579,6 +1662,10 @@
         {/if}
       </div>
     {/if}
+
+    {#each lostFoldList as fold (fold.host)}
+      <LostFoldRow {fold} open={openFolds.has(fold.host)} ontoggle={() => toggleFold(fold.host)} row={foldSessionRow} />
+    {/each}
 
     {#if outsideFleet.length > 0}
       <div class="orphan-section" data-testid="outside-fleet-section">

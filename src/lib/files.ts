@@ -39,6 +39,27 @@ export interface FileDiff {
   truncated: boolean;
 }
 
+/** One run of consecutive lines last changed by the same commit. */
+export interface BlameHunk {
+  /** 1-based first line in the current worktree file. */
+  start: number;
+  lines: number;
+  hash: string;
+  author: string;
+  /** Author time, Unix seconds. */
+  time: number;
+  summary: string;
+  /** Changed in the worktree and not committed yet. */
+  uncommitted: boolean;
+}
+
+/** `git blame` of one worktree file. */
+export interface FileBlame {
+  path: string;
+  hunks: BlameHunk[];
+  truncated: boolean;
+}
+
 export function repoChanges(sessionId: number): Promise<Result<ChangedFile[]>> {
   return invokeCmd<ChangedFile[]>('repo_changes', { args: { session_id: sessionId } });
 }
@@ -53,6 +74,35 @@ export function repoFile(sessionId: number, path: string): Promise<Result<FileCo
 
 export function repoDiff(sessionId: number, path: string): Promise<Result<FileDiff>> {
   return invokeCmd<FileDiff>('repo_diff', { args: { session_id: sessionId, path } });
+}
+
+export function repoBlame(sessionId: number, path: string): Promise<Result<FileBlame>> {
+  return invokeCmd<FileBlame>('repo_blame', { args: { session_id: sessionId, path } });
+}
+
+/** Blame needs the file in a commit: an untracked file has no history. */
+export function canBlame(status: string | undefined): boolean {
+  return status !== 'untracked';
+}
+
+/**
+ * One gutter entry per line (index 0 is line 1): the hunk that line belongs
+ * to, and whether it is the hunk's first line (the only one that shows its
+ * label, so a run of lines from one commit reads as one block). Lines past
+ * the blame (a truncated blame, or a file read after it) get null.
+ */
+export function blameGutter(
+  hunks: BlameHunk[],
+  lineCount: number,
+): ({ hunk: BlameHunk; first: boolean } | null)[] {
+  const out: ({ hunk: BlameHunk; first: boolean } | null)[] = new Array(lineCount).fill(null);
+  for (const h of hunks) {
+    for (let i = 0; i < h.lines; i++) {
+      const idx = h.start - 1 + i;
+      if (idx >= 0 && idx < lineCount) out[idx] = { hunk: h, first: i === 0 };
+    }
+  }
+  return out;
 }
 
 /** Statuses for which a diff against HEAD is meaningful (not untracked). */

@@ -1,0 +1,88 @@
+import { describe, it, expect } from 'vitest';
+import { approvable, commandRows, keepsKind, paletteCommands, runCommand, settingRow, splitPrefix } from './commands';
+import { applyTheme } from './theme';
+import { allDescriptors } from './pages/testing';
+import { session } from './hosts_fixture';
+import type { PendingInput } from './pending_input';
+import type { SessionRow } from './sessions';
+
+// Redesign step 3.9: the ⌘K command registry.
+
+const PERMISSION: PendingInput = {
+  kind: 'permission',
+  question: 'Push to origin?',
+  options: [
+    { n: 1, label: 'Yes', selected: true },
+    { n: 2, label: "Yes, and don't ask again", selected: false },
+    { n: 3, label: 'No', selected: false },
+  ],
+};
+const asking = (over: Partial<SessionRow> = {}) =>
+  session('mac', 'fix-flake', { claude_status: 'blocked', pending_input: PERMISSION, ...over });
+
+describe('prefixes', () => {
+  it('> commands, # tasks and tickets, @ hosts; anything else is everything', () => {
+    expect(splitPrefix('> pause')).toEqual({ mode: 'commands', rest: 'pause' });
+    expect(splitPrefix('#PD-12')).toEqual({ mode: 'work', rest: 'PD-12' });
+    expect(splitPrefix('@mac')).toEqual({ mode: 'hosts', rest: 'mac' });
+    expect(splitPrefix('blue mef')).toEqual({ mode: 'all', rest: 'blue mef' });
+    expect(keepsKind('commands', 'setting')).toBe(true);
+    expect(keepsKind('commands', 'session')).toBe(false);
+    expect(keepsKind('work', 'lookup')).toBe(true);
+    expect(keepsKind('hosts', 'host')).toBe(true);
+    expect(keepsKind('hosts', 'project')).toBe(false);
+  });
+});
+
+describe('palette commands', () => {
+  it('offers Approve only for a one-key permission dialog, naming what it presses', () => {
+    expect(approvable(asking())?.options[0].label).toBe('Yes');
+    const cmds = paletteCommands({ selected: asking(), sessionView: 'conversation' });
+    const approve = cmds.find((c) => c.id === 'session.approve');
+    expect(approve?.label).toBe('Approve: Yes');
+    expect(approve?.section).toBe('This session');
+    // A question that is not a permission, a multi-select, a ghost: no Approve.
+    expect(approvable(asking({ pending_input: { ...PERMISSION, kind: 'question' } as unknown as PendingInput }))).toBeNull();
+    expect(approvable(asking({ status: 'ghost' }))).toBeNull();
+    expect(approvable(session('mac', 'idle'))).toBeNull();
+  });
+
+  it('session commands need an open session; app commands are always there', () => {
+    const none = paletteCommands({ selected: null, sessionView: 'conversation' }).map((c) => c.id);
+    expect(none).not.toContain('session.flip-view');
+    expect(none).toEqual(expect.arrayContaining(['app.settings', 'app.hosts', 'app.pause-all', 'app.shortcuts']));
+    const flip = paletteCommands({ selected: session('mac', 'a'), sessionView: 'terminal' }).find(
+      (c) => c.id === 'session.flip-view',
+    );
+    expect(flip?.label).toBe('Show the conversation');
+  });
+
+  it('the theme command names the theme it switches to, in the sidebar toggle order', async () => {
+    applyTheme('auto');
+    const label = () => paletteCommands({ selected: null, sessionView: 'conversation' }).find((c) => c.id === 'app.theme')?.label;
+    expect(label()).toBe('Theme: light');
+    await runCommand('app.theme', { selected: null, sessionView: 'conversation' });
+    expect(label()).toBe('Theme: dark');
+    applyTheme('auto');
+  });
+
+  it("each row shows its chord from the shortcut registry, in the platform's spelling", () => {
+    const cmds = paletteCommands({ selected: null, sessionView: 'conversation' });
+    const meta = (isMac: boolean, id: string) => commandRows(cmds, isMac).find((r) => r.action === id)?.meta;
+    expect(meta(true, 'app.settings')).toBe('⌘,');
+    expect(meta(false, 'app.hosts')).toBe('Ctrl+Shift+H');
+    expect(meta(true, 'app.shortcuts')).toBe('?');
+    expect(meta(true, 'app.pause-all')).toBe('Commands');
+  });
+});
+
+describe('settings in plain words', () => {
+  it('a change this client may write becomes one row; a search does not', () => {
+    const row = settingRow('set recent work to 3 days', allDescriptors, true);
+    expect(row?.kind).toBe('setting');
+    expect(row?.setting).toMatchObject({ key: 'work.recent_days', value: '3', confirm: false });
+    expect(row?.label).toMatch(/^Set .* to /);
+    expect(settingRow('recent work', allDescriptors, true)).toBeNull();
+    expect(settingRow('set recent work to 3 days', allDescriptors, false)).toBeNull();
+  });
+});

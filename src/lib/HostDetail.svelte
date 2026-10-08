@@ -39,6 +39,7 @@
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import { isRestorable } from './lost_fold';
   import EmbedSlot from './pages/EmbedSlot.svelte';
   import { inventory } from './assets';
   import { provisionHost } from './mcp';
@@ -140,9 +141,7 @@
   // Sessions the backend marked lost (host reboot / tmux server restart) that
   // still carry a Claude conversation to resume. `bg`/`external` rows have no
   // fleet-managed tmux pane to restore into.
-  const restorable = $derived(
-    hostSessions.filter((s) => s.lost_at !== null && s.claude_session_id && s.kind !== 'bg' && s.kind !== 'external'),
-  );
+  const restorable = $derived(hostSessions.filter(isRestorable));
   /**
    * Multi-user M1 (F2b): "Restore n lost sessions…" was gated on NOTHING —
    * neither the hub's half nor the access half — and `restore_host_sessions`

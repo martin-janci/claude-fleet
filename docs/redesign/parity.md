@@ -40,7 +40,7 @@ test file (and test) that covers it today.
 | P8 | Lost and ghost sessions | Folded "5 stopped" row in their group, plus a host item with Restore | Expand the row; Hosts → Restore | 1.1 | Classic | `src/lib/Sidebar.test.ts` › a ghost row stays one line…; `src/lib/SessionRowItem.test.ts` |
 | P9 | Idle-too-long nudge | Idle group, still in the Needs you filter | Filter chip | 3.3 | Classic | `src/lib/attention.test.ts` › counts narrower than it filters |
 | P10 | Today and Copy standup | The Inbox, then a Control tab (9.1) | ⌘⇧T / Ctrl+Shift+T, unchanged | 3.3, 9.1 | Classic | `src/lib/TodayView.test.ts`, `src/lib/today.test.ts` |
-| P11 | theme: auto line | Settings → Appearance and a ⌘K command | Both | 0.3, 1.4, 3.9 | Classic | `src/lib/Sidebar.test.ts` (theme-toggle); Appearance: `src/lib/AppearanceSettings.test.ts` |
+| P11 | theme: auto line | Settings → Appearance and a ⌘K command | Both | 0.3, 1.4, 3.9 | Classic | `src/lib/Sidebar.test.ts` (theme-toggle); Appearance: `src/lib/AppearanceSettings.test.ts`; ⌘K: `src/lib/commands.test.ts` › the theme command names the theme it switches to… |
 | P12 | ✦ operator button | Rail item (Control) | ⌘E / Ctrl+Shift+E, unchanged | 9.1 | Classic | `src/lib/AgentFab.test.ts`, `src/lib/shortcuts.test.ts` |
 | P13 | Usage in the status bar | Account pills in the top bar; a click still opens that host | Click | 4.1 | Classic | `src/lib/HostsList.test.ts`, `src/lib/account_usage.test.ts` |
 | P14 | Version, Downloads, hub and tracker health | Stay in the status bar | Unchanged | 3.17 | Classic | `src/lib/downloads.test.ts`, `src/lib/app_version.test.ts` |
@@ -55,7 +55,7 @@ test file (and test) that covers it today.
 | P23 | Assets | Renamed Toolkit, same content | Click | 3.16 | Classic | `src/lib/AssetsPanel.test.ts`, `src/lib/AssetsWorkspace.test.ts` |
 | P24 | Sessions and Work filters | One engine; every facet of both kept (machine, time, tracker column, background agents, archived, saved views) | Same chips; ⌘⇧O / Ctrl+Shift+O | 3.7 | Classic | `src/lib/WorkFiltersBar.test.ts`, `src/lib/work_view_persist.test.ts`, `src/lib/Sidebar.test.ts` |
 | P25 | About 15 ways to start a session | All kept; they open the same flow | ⌘N / Ctrl+Shift+N and every existing button | 1.9, 3.12 | Classic | `src/lib/NewSessionDialog.test.ts`, `src/lib/QuickSwitcher.test.ts` |
-| P26 | Board instruction sentence | First-run hint and the ? shortcut sheet | ? | 1.4, 3.8 | Classic | `src/lib/WorkBoard.test.ts` |
+| P26 | Board instruction sentence | First-run hint and the ? shortcut sheet | ? | 1.4, 3.8 | Classic | `src/lib/WorkBoard.test.ts`, `src/lib/ShortcutSheet.test.ts` › ? opens the sheet with every live chord |
 | P27 | Every 0.5.4 shortcut | The shortcut registry, `src/lib/shortcuts.ts` | Each chord, unchanged on Mac and Linux/Windows | 0.1 | Both | `src/lib/shortcuts.test.ts` |
 | P28 | The classic layout itself | Settings → Appearance → Layout (Classic, New) until 13.1 | Settings | 0.3 | Both | `src/App.test.ts` › App layout switch |
 

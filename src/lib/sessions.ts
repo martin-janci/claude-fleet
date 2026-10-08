@@ -59,6 +59,9 @@ export interface PrEvidence {
   checks: CheckSummary;
 }
 
+/** `sessions.origin` (migration 124). */
+export type SessionOrigin = 'person' | 'operator' | 'mission' | 'background' | 'token' | 'routine';
+
 /** `sessions.agent` (migration 121). */
 export type SessionAgent = 'claude' | 'codex' | 'agy' | 'shell';
 
@@ -227,6 +230,12 @@ export interface SessionRow {
    *  or none for a plain shell (`kind: 'shell'`). Absent from a hub older
    *  than the column, whose sessions all run Claude Code. */
   agent?: SessionAgent;
+  /** Who or what started the session (migration 124); absent for a row
+   *  fleet did not start (found on a host) or one older than the column. */
+  origin?: SessionOrigin | null;
+  /** What `origin` points at: a person id (`person`), a session id
+   *  (`operator`, `background`, `token`), a mission id (`mission`). */
+  origin_ref?: string | null;
   /** A digest of the versions and ids of the session's live (non-ended)
    *  work links (work graph M14): it moves whenever any of them changes —
    *  added, removed, primary, state — a secondary link too. Absent = 0 (no

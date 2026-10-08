@@ -381,9 +381,15 @@ Repair a session workspace (the Repair workspace button): make its directory a h
 
 Parameters: `confirm_nonce`, `host_alias`, `name`, `session_id`
 
+### `repo_blame`
+
+Blame of one worktree file as runs of lines: {path, hunks: [{start, lines, hash, author, time, summary, uncommitted}], truncated}.
+
+Parameters: `path`, `session_id`
+
 ### `repo_branches`
 
-Local + remote branches of a session's worktree, with ahead/behind.
+Local + remote branches of a session's worktree, with ahead/behind and `merged` (the base branch contains the tip).
 
 Parameters: `session_id`
 
@@ -897,6 +903,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::forget_debug_device`
 - `commands::debug_devices::boot_debug_device`
 - `commands::debug_devices::shutdown_debug_device`
+- `commands::debug_devices::claim_debug_device`
+- `commands::debug_devices::install_debug_device`
+- `commands::debug_devices::debug_device_logs`
+- `commands::debug_devices::debug_device_screenshot`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
@@ -905,6 +915,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::files::repo_tree`
 - `commands::files::repo_file`
 - `commands::files::repo_diff`
+- `commands::files::repo_blame`
 - `commands::upload::upload_to_session`
 - `commands::upload::pick_attachments`
 - `commands::upload::attachment_preview`
@@ -918,6 +929,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mutate::repo_checkout_commit`
 - `commands::mutate::repo_create_branch`
 - `commands::mutate::repo_delete_branch`
+- `commands::mutate::repo_delete_merged_branches`
 - `commands::mutate::repo_stage`
 - `commands::mutate::repo_unstage`
 - `commands::mutate::repo_commit_create`
