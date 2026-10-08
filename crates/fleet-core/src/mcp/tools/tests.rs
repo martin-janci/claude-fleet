@@ -11019,6 +11019,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ),
     (
         "work_link",
+        "mission_import",
+        "a plan's steps as new local tasks under the mission's root, by its \
+         owner or an org admin; it touches no session",
+    ),
+    (
+        "work_link",
         "mission_start",
         "a mission's next steps, taken by its owner or an org admin; a run \
          goes through the start path under the caller's scope",

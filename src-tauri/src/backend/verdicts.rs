@@ -359,6 +359,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_mission_state", Verdict::Routed { tool: "work_link" }),
     ("set_mission_repo", Verdict::Routed { tool: "work_link" }),
     ("set_mission_item", Verdict::Routed { tool: "work_link" }),
+    ("import_mission_plan", Verdict::Routed { tool: "work_link" }),
     ("delete_mission", Verdict::Routed { tool: "work_link" }),
     // Orchestration O2: the mission graph's writes.
     ("set_work_dep", Verdict::Routed { tool: "work_link" }),
@@ -1061,6 +1062,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
                       the cache is empty; read usage on the hub",
+        },
+    ),
+    (
+        "account_spend",
+        Verdict::LocalOnly {
+            instead: "this app collects no usage while a hub owns the fleet, so its store \
+                      has no spend per account; read usage on the hub",
         },
     ),
     (

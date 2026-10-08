@@ -33,6 +33,11 @@
 </header>
 
 <style>
+  /* --header-h is the height it occupies, its bottom border included, so
+     the shell can subtract it (the bundle's `.of *` rule skips the root). */
+  .of-header {
+    box-sizing: border-box;
+  }
   .command {
     width: 260px;
     justify-content: space-between;

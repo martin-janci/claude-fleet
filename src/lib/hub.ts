@@ -211,6 +211,8 @@ const REASONS = {
     'it reads the account’s usage over this machine’s SSH connection to the host',
   account_usage_history:
     'this app does not poll account usage while a hub owns the fleet, so it keeps no history',
+  account_spend:
+    'this app collects no usage while a hub owns the fleet, so it has no spend per account',
   check_account_headroom:
     'this app does not poll account usage while a hub owns the fleet, so it cannot tell which account has headroom',
   set_account_nickname:
@@ -424,6 +426,8 @@ export const ROUTED_ACTIONS = [
   // Orchestration O1: the Missions tab's writes.
   'save_mission',
   'set_mission_state',
+  // The Missions tab's Import plan.
+  'import_mission_plan',
 ] as const;
 
 export type RoutedAction = (typeof ROUTED_ACTIONS)[number];

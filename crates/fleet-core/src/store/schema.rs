@@ -1518,12 +1518,19 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/129_session_turn_outcome.sql"),
         already_applied: Some(sessions_has_turn_outcome),
     },
+    // Orbit Fleet 4.2, cost per account and per model:
+    // `usage_daily_account` and its index. New objects only, `IF NOT
+    // EXISTS`, safe to re-run.
+    Migration::plain(
+        130,
+        include_str!("../../migrations/130_usage_daily_account.sql"),
+    ),
     // Orbit Fleet 5.10, Send prompt: `deferred_prompts`, prompts typed in
     // once a busy session is idle. New objects only, `IF NOT EXISTS`, safe
     // to re-run.
     Migration::plain(
-        130,
-        include_str!("../../migrations/130_deferred_prompts.sql"),
+        131,
+        include_str!("../../migrations/131_deferred_prompts.sql"),
     ),
 ];
 
