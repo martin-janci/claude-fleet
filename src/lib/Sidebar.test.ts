@@ -3,7 +3,7 @@ import { todayOpen } from './today';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
-import { readPref } from './prefs';
+import { readPref, uiLayout } from './prefs';
 
 // Three sample projects. Sessions are attached per-test so we can verify
 // the new "hide projects without sessions" behavior.
@@ -3311,5 +3311,61 @@ describe('Sidebar accessibility (7.2)', () => {
     const projRows = await screen.findAllByTestId('proj-row');
     for (const r of projRows) expect(r.getAttribute('aria-expanded')).toBe('true');
     await expectAccessible(container);
+  });
+});
+
+describe('Shared with me (redesign step 5.8)', () => {
+  const REMOTE: HubStatus = {
+    ...STANDALONE,
+    remote: true,
+    url: 'https://fleet.example.com',
+    configured_url: 'https://fleet.example.com',
+  };
+  afterEach(() => uiLayout.set('classic'));
+
+  function fleet() {
+    const mine = { ...sessionFor(1, 'dev-mine'), owner_person_id: 7 };
+    const watched = { ...sessionFor(2, 'dev-watched'), owner_person_id: 9 };
+    const driven = { ...sessionFor(null, 'dev-driven'), owner_person_id: 9 };
+    return { mine, watched, driven };
+  }
+
+  it('the New layout lifts shared sessions into their own group', async () => {
+    const { mine, watched, driven } = fleet();
+    mockBackend(fakeProjects, [mine, watched, driven]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [
+      { session_id: watched.id, level: 'watch' },
+      { session_id: driven.id, level: 'drive' },
+    ]);
+    uiLayout.set('new');
+    render(Sidebar);
+    await tick(); await tick();
+    const group = await screen.findByTestId('shared-with-me');
+    expect(within(group).getByTestId('shared-with-me-toggle').textContent).toContain('Shared with me (2)');
+    const inGroup = within(group).getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(inGroup.some((t) => t.includes('dev-watched'))).toBe(true);
+    expect(inGroup.some((t) => t.includes('dev-driven'))).toBe(true);
+    // Each row shows once: the tree and Other sessions no longer hold them.
+    const all = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(all.filter((t) => t.includes('dev-watched'))).toHaveLength(1);
+    expect(all.filter((t) => t.includes('dev-driven'))).toHaveLength(1);
+    expect(all.some((t) => t.includes('dev-mine'))).toBe(true);
+    expect(within(group).queryByText(/dev-mine/)).toBeNull();
+    await fireEvent.click(within(group).getByTestId('shared-with-me-toggle'));
+    expect(within(group).queryAllByTestId('sess-row')).toHaveLength(0);
+  });
+
+  it('Classic keeps shared sessions where they were', async () => {
+    const { mine, watched, driven } = fleet();
+    mockBackend(fakeProjects, [mine, watched, driven]);
+    hubStatus.set(REMOTE);
+    hubConnection.set({ state: 'connected' });
+    setMyGrants(7, [{ session_id: watched.id, level: 'watch' }]);
+    render(Sidebar);
+    await tick(); await tick();
+    await screen.findAllByTestId('sess-row');
+    expect(screen.queryByTestId('shared-with-me')).toBeNull();
   });
 });

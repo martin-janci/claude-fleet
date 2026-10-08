@@ -59,6 +59,7 @@ test file (and test) that covers it today.
 | P27 | Every 0.5.4 shortcut | The shortcut registry, `src/lib/shortcuts.ts` | Each chord, unchanged on Mac and Linux/Windows | 0.1 | Both | `src/lib/shortcuts.test.ts` |
 | P28 | The classic layout itself | Settings → Appearance → Layout (Classic, New) until 13.1 | Settings | 0.3 | Both | `src/App.test.ts` › App layout switch |
 | P29 | The answer card (Conversation, session row, ⌘K Approve), 1–9 and Esc | One approval card, the kit QuestionCard, with the command it approves in mono; "Answer in your own words…" dismisses and focuses the composer; after an answer the Inbox's next session opens, with Undo back | Click; 1–9; ⌘K Approve, unchanged | 5.9 | Both | `src/lib/AnswerPrompt.test.ts`, `src/lib/QuickSwitcherPalette.test.ts` (⌘K Approve); New: `src/lib/AnswerPrompt.test.ts` › the New layout draws the kit card…, `src/lib/ConversationPanel.test.ts` › card and agent tab stay in step…, › after Approve, focus moves to the next session… |
+| P30 | Sessions shared with me, mixed into the project tree; Share… in Session Details | A "Shared with me" group in the session list; Share in the session header as well as the inspector | Click the group; the header's Share button | 5.8 | Both | `src/lib/Sidebar.test.ts` › Classic keeps shared sessions where they were, `src/lib/SessionDetails.test.ts`; New: `src/lib/Sidebar.test.ts` › the New layout lifts shared sessions into their own group, `src/lib/SessionTabs.test.ts` › opens the one Share sheet… |
 
 ## Functions with no home on the boards
 
