@@ -11,6 +11,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::host_setup::{self, HostSetupCheckArgs, SaveHostSetupArgs};
 use fleet_core::service::hosts::{
     self, AddHostArgs, HideHostArgs, HostAliasArgs, MergeHostArgs, ProbePreview, ProbeSshAliasArgs,
     SetAccountNicknameArgs,
@@ -18,7 +19,7 @@ use fleet_core::service::hosts::{
 use fleet_core::service::view_scope::ViewScope;
 use fleet_core::ssh::SshClient;
 use fleet_core::ssh_config::SshHost;
-use fleet_core::store::{AccountRow, HostRow, Store};
+use fleet_core::store::{AccountRow, HostRow, HostSetupRow, SetupCheck, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
@@ -100,6 +101,63 @@ pub async fn check_host(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     Ok(fleet_core::service::host_check::check_host(&ssh, &args.alias, now).await)
+}
+
+// ---- Orbit Fleet 4.9: the add-host wizard ------------------------------
+// LocalOnly like `add_host` and `probe_ssh_alias`, which the wizard ends in
+// and replaces: a draft names an SSH alias of this machine's ~/.ssh/config,
+// and its checks SSH from here. Async so the store and SSH never run on the
+// main thread.
+
+/// The wizards someone left half-way, newest first.
+#[tauri::command]
+pub async fn list_host_setups(
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<HostSetupRow>, IpcError> {
+    backend.refuse_local_only("list_host_setups")?;
+    let s = fleet_core::ipc_error::lock(&store)?;
+    Ok(s.host_setups()?)
+}
+
+/// Save where the wizard is, so it resumes after a restart.
+#[tauri::command]
+pub async fn save_host_setup(
+    args: SaveHostSetupArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<HostSetupRow, IpcError> {
+    backend.refuse_local_only("save_host_setup")?;
+    let s = fleet_core::ipc_error::lock(&store)?;
+    host_setup::save(&s, &args)
+}
+
+/// Drop a draft: the person discarded it, or the host was added.
+#[tauri::command]
+pub async fn discard_host_setup(
+    args: ProbeSshAliasArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<bool, IpcError> {
+    backend.refuse_local_only("discard_host_setup")?;
+    let s = fleet_core::ipc_error::lock(&store)?;
+    Ok(s.delete_host_setup(&args.ssh_alias)?)
+}
+
+/// Run one live check and record its answer on the draft.
+#[tauri::command]
+pub async fn run_host_setup_check(
+    args: HostSetupCheckArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<SetupCheck, IpcError> {
+    backend.refuse_local_only("run_host_setup_check")?;
+    let accepted = ssh.agent_registry().is_some();
+    let check = host_setup::run_check(&**ssh, &args.ssh_alias, &args.key, accepted).await?;
+    let s = fleet_core::ipc_error::lock(&store)?;
+    host_setup::record(&s, &args.ssh_alias, &check)?;
+    Ok(check)
 }
 
 #[tauri::command]

@@ -299,6 +299,39 @@ impl FleetTools {
         ok_json(&row)
     }
 
+    #[tool(description = "Install fleet-agent on a host this hub reaches \
+        over SSH, then move the host onto it. Returns the job at once (see \
+        agent_installs): target, download (checked against SHA256SUMS), \
+        start (token on stdin), connect (no hello in 120 s: back on SSH). \
+        Defaults: this hub's public URL and version. Hub only.")]
+    pub(super) async fn install_agent(
+        &self,
+        Parameters(args): Parameters<agent_install::InstallAgentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("install_agent", &format!("alias={}", args.alias));
+        let ssh: Arc<dyn crate::ssh::SshExec> = self.ssh.clone();
+        let row = agent_install::start(
+            Arc::clone(&self.store),
+            ssh,
+            self.ssh.agent_registry().cloned(),
+            args,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&row)
+    }
+
+    #[tool(description = "fleet-agent install jobs, newest first: state, \
+        step, detail.")]
+    pub(super) async fn agent_installs(
+        &self,
+        Parameters(args): Parameters<agent_install::AgentInstallsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("agent_installs", "");
+        ok_json_compact(
+            &agent_install::list(&self.store, args.alias.as_deref()).map_err(to_mcp_err)?,
+        )
+    }
+
     #[tool(description = "Re-probe a host's reachability and versions. \
         Returns the host row.")]
     pub(super) async fn probe_host(
@@ -761,6 +794,43 @@ impl FleetTools {
         ok_json_compact(&out)
     }
 
+    // ---- confirmations on the owner's device (redesign step 9.2) ----
+    //
+    // A call that must wait for a person (the operator's starts and kills,
+    // M9.7) parks a nonce in `guards.confirms`. On a desktop its own dialog
+    // and Control's cards answer it; on a hub nobody was there to, so these
+    // two let the owner's paired device list and answer the hub's queue.
+    // The operator never answers its own request.
+
+    #[tool(description = "Calls waiting for your OK (the agent's starts \
+        and kills), oldest first.")]
+    pub(super) async fn mcp_confirms(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("mcp_confirms", "");
+        refuse_operator_answer(&caller)?;
+        ok_json_compact(&self.guards.confirms.pending())
+    }
+
+    #[tool(description = "Approve or deny one waiting call by its nonce; \
+        false when it was already answered or expired.")]
+    pub(super) async fn answer_mcp_confirm(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<AnswerMcpConfirmParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("answer_mcp_confirm", &format!("approved={}", p.approved));
+        refuse_operator_answer(&caller)?;
+        let answered = self.guards.confirms.resolve(&p.nonce, p.approved);
+        if answered {
+            if let Ok(s) = lock(&self.store) {
+                s.bus_confirm_changed();
+            }
+        }
+        ok_json_compact(&answered)
+    }
+
     #[tool(description = "The settings page specs, data source shapes, \
         resources and page actions a device renders.")]
     pub(super) async fn list_pages(&self) -> Result<CallToolResult, McpError> {
@@ -1120,6 +1190,21 @@ pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {
 /// proposal) is the master's, or a trusted device's (declarative pages P6):
 /// trust is the operator vouching that the device is a person's own
 /// (`fleet-hub client trust`). An agent's client proposes instead.
+/// The operator asks; a person answers. `Access::PersonDevice` already
+/// keeps the operator's token out (it has no person), and this says so
+/// where the rule matters, so a later access change cannot let the agent
+/// approve itself.
+fn refuse_operator_answer(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_operator() {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            "the agent asks for confirmation; a person answers it",
+            None,
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), McpError> {
     match who {
         SettingsWho::ControlApi => Ok(()),

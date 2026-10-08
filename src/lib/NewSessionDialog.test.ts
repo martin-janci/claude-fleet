@@ -1794,6 +1794,50 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     projects.set([]);
   });
 
+  it("New layout: Jev's proposed sibling is pre-ticked with the chip, and Untick clears it (3.12 N3)", async () => {
+    const { projects } = await import('./projects');
+    const { uiLayout } = await import('./prefs');
+    uiLayout.set('new');
+    projects.set([
+      project as never,
+      { project: { ...project.project, id: 2, repo: 'web', base_path: '/r/web' }, worktrees: [] } as never,
+    ]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
+      if (cmd === 'session_work_links')
+        return [{ id: 1, state: 'confirmed', source: 'manual', created_at: 1, ended_at: 5, snap_project_id: 2 }];
+      if (cmd === 'preview_start_work')
+        return {
+          key: 'ABC-7', title: 'Fix login', item_id: 42, missing: null, projects: [], hosts: [], conflicts: [],
+          plan: { key: 'ABC-7', title: 'Fix login', item_id: 42, project_id: 1, host_alias: 'local', branch: 'abc-7', name: 'ABC-7' },
+          suggested_sibling: { project_id: 2, confidence_pct: 81, run_id: 9 },
+        };
+      return null;
+    });
+    try {
+      render(NewSessionDialog, { props: { project, ticket, onCreate: () => {}, onCancel: () => {} } });
+      const also = (await screen.findByTestId('ticket-also-in-2')) as HTMLInputElement;
+      await vi.waitFor(() => expect(also.checked).toBe(true));
+      const chip = screen.getByTestId('ticket-also-in-proposed');
+      expect(chip.textContent).toContain('Proposed by Jev');
+      expect(chip.textContent).toContain('81%');
+      await fireEvent.click(screen.getByTestId('ticket-also-in-proposed-change'));
+      await tick();
+      expect(also.checked).toBe(false);
+      expect(screen.queryByTestId('ticket-also-in-proposed')).toBeNull();
+    } finally {
+      uiLayout.set('classic');
+      projects.set([]);
+    }
+  });
+
+  it('Classic asks no sibling proposal (3.12 N3)', async () => {
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async () => null);
+    render(NewSessionDialog, { props: { project, ticket, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((c) => c[0] === 'preview_start_work')).toBe(false);
+  });
+
   it('forgets ticked repos when the ticket changes, and never starts in one not shown (M9.6)', async () => {
     const { projects } = await import('./projects');
     projects.set([

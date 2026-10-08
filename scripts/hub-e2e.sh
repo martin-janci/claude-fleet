@@ -17,6 +17,9 @@
 # Hub C: --local-host false, plus a fleet-agent dialing it over loopback. The
 #   agent is started with `run` (never `install`: no systemd, nothing written
 #   outside $ROOT), with its own HOME and its own tmux server under $ROOT.
+# Hub I: --local-host false, installs fleet-agent on host `e2ebox` with
+#   `install_agent` (Orbit Fleet 4.9) over scripts/e2e-fake-ssh.sh, which runs
+#   the "remote" commands here under HOME=$ROOT/ihome and never systemd.
 # Hub W (work graph M10.2, only when WBIN is set): a fleet-hub built with the
 #   test-only `e2e` feature, with its own HOME and tmux server under $ROOT, a
 #   fake Jira Cloud (scripts/e2e-fake-jira.py) and a fake Claude
@@ -82,6 +85,8 @@ cleanup() {
   [ -d "${ROOT:?}/tmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/tmux" tmux kill-server 2>/dev/null
   # Hub W's own tmux server (the work-graph leg).
   [ -d "${ROOT:?}/wt" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/wt" tmux kill-server 2>/dev/null
+  # The install leg's host (e2ebox).
+  [ -d "${ROOT:?}/itmux" ] && env -u TMUX -u TMUX_PANE TMUX_TMPDIR="${ROOT:?}/itmux" tmux kill-server 2>/dev/null
   # Not pid-filed like the hubs/agent above: kill it directly if a SIGTERM
   # lands between it starting and its own explicit `kill "$EV_PID"`.
   if [ -n "$EV_PID" ]; then
@@ -978,6 +983,50 @@ check "and fails at once, not after a timeout (<5 s)" '[ "$ms" -lt 5000 ]' "took
 check "the tmux session survives the agent stopping" 'aenv tmux has-session -t agt2 2>/dev/null' "agt2 is gone"
 stop_hub c
 check "hub C SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+
+echo "== Agent install (install_agent over SSH, then the host on its agent)"
+# Hub I installs fleet-agent on host `e2ebox` the way the add-host wizard's
+# job does on a real one: the host fetches a release (a file:// directory
+# built here from $ABIN, with its SHA256SUMS), the token goes in on stdin,
+# the agent starts, the host moves onto it and the agent dials in. The "SSH"
+# is scripts/e2e-fake-ssh.sh: the remote commands run on this machine with
+# HOME=$IHOME, and FLEET_AGENT_NO_SYSTEMD keeps it to `fleet-agent run`.
+IHOME="$ROOT/ihome"; mkdir -p "$IHOME" "$ROOT/itmux"; chmod 700 "$ROOT/itmux"
+case "$(uname -m)" in aarch64|arm64) IT=aarch64-unknown-linux-gnu ;; *) IT=x86_64-unknown-linux-gnu ;; esac
+IV=$("$ABIN" --version | awk '{print $2}')
+mkdir -p "$ROOT/dist/fleet-agent-$IV-$IT"
+cp "$ABIN" "$ROOT/dist/fleet-agent-$IV-$IT/fleet-agent"
+( cd "$ROOT/dist" && tar czf "fleet-agent-$IV-$IT.tar.gz" "fleet-agent-$IV-$IT" \
+    && sha256sum "fleet-agent-$IV-$IT.tar.gz" >SHA256SUMS )
+PI=$(free_port)
+TOKI=$("$BIN" init --data-dir "$ROOT/i" --public-url "https://$PUB" --port "$PI" 2>&1 | grep -E '^[0-9a-f]{64}$')
+CLAUDE_FLEET_SSH="$(cd "$(dirname "$0")" && pwd)/e2e-fake-ssh.sh" E2E_SSH_HOME="$IHOME" E2E_SSH_TMUX="$ROOT/itmux" \
+  FLEET_AGENT_DIST="file://$ROOT/dist" start_hub i "$PI" --public-url "https://$PUB" || bad "hub I starts" "$(tail -5 "$ROOT/i.log")"
+# A field of a tool's JSON answer, however many times its quotes are escaped.
+jfield() { echo "$1" | grep -qE "$2[^a-z0-9]{1,12}$3"; }
+ib=$(tool "$PI" "$PUB" "$TOKI" add_host '{"alias":"e2ebox","ssh_alias":"e2ebox"}')
+check "add_host reaches e2ebox over the stand-in SSH" 'jfield "$ib" reachable true' "${ib:0:400}"
+ij=$(tool "$PI" "$PUB" "$TOKI" install_agent "{\"alias\":\"e2ebox\",\"hub_url\":\"http://127.0.0.1:$PI\",\"version\":\"$IV\"}")
+check "install_agent starts a job" 'jfield "$ij" state running' "${ij:0:400}"
+until_ok 750 'il=$(tool "$PI" "$PUB" "$TOKI" agent_installs "{}"); jfield "$il" state "(done|failed)"'
+[ -f "$IHOME/.config/fleet-agent/agent.pid" ] && cp "$IHOME/.config/fleet-agent/agent.pid" "$ROOT/iagent.pid"
+check "the install job ends done: downloaded, checked, started, connected" 'jfield "$il" state done' "${il:0:600} / $(tail -5 "$IHOME/.config/fleet-agent/agent.log" 2>/dev/null)"
+check "the agent runs from the release the host fetched" '[ -x "$IHOME/.local/bin/fleet-agent" ]' "$(ls -la "$IHOME/.local/bin" 2>&1)"
+check "the token file on the host is private" '[ "$(stat -c %a "$IHOME/.config/fleet-agent/token" 2>/dev/null)" = 600 ]' "$(stat -c %a "$IHOME/.config/fleet-agent/token" 2>&1)"
+ist=$(tool "$PI" "$PUB" "$TOKI" agent_status '{}')
+check "e2ebox is an agent host with its agent connected" 'jfield "$ist" alias e2ebox && jfield "$ist" connected true' "${ist:0:400}"
+ij2=$(tool "$PI" "$PUB" "$TOKI" install_agent '{"alias":"e2ebox","hub_url":"http://127.0.0.1:1"}')
+check "installing again on an agent host is refused" 'echo "$ij2" | grep -q "already an agent host"' "${ij2:0:400}"
+# Not this shell's child (nohup started it on the "host"): no `wait`.
+ipid=$(cat "$ROOT/iagent.pid" 2>/dev/null || true)
+if [ -n "$ipid" ]; then
+  kill -TERM "$ipid" 2>/dev/null
+  until_ok 75 '! kill -0 "$ipid" 2>/dev/null' || kill -KILL "$ipid" 2>/dev/null
+  rm -f "$ROOT/iagent.pid"
+fi
+stop_hub i
+check "hub I SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
+env -u TMUX -u TMUX_PANE TMUX_TMPDIR="$ROOT/itmux" tmux kill-server 2>/dev/null
 
 echo "== Two hubs linked (federation)"
 # Hub D dials, hub E listens. Both manage this machine's real (non-isolated)

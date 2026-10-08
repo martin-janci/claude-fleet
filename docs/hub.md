@@ -636,6 +636,17 @@ no reverse tunnel for it.
 
 ### Set it up
 
+**A host the hub already reaches over SSH** needs none of the steps below:
+`install_agent { alias: "laptop" }` (Orbit Fleet 4.9) runs them as one job.
+The host downloads the release for its platform and checks it against
+`SHA256SUMS`, installs `~/.local/bin/fleet-agent`, takes its token on stdin
+into `fleet-agent install --user` (no systemd: `fleet-agent run` under
+`nohup`, which does not survive a reboot), and the host moves onto the agent
+once it says hello; no hello within 120 s puts it back on SSH.
+`agent_installs` shows each job's step and outcome. `FLEET_AGENT_DIST` on the
+hub replaces the GitHub release URL (a mirror). The steps below are for a
+host the hub cannot reach.
+
 1. **Register the host as an agent host.** From an MCP client holding the
    master token:
    `add_host { alias: "laptop", ssh_alias: "laptop", transport: "agent" }`.
@@ -3174,11 +3185,12 @@ standalone exactly as before.
   setting; the marker exists for text an agent produced.
 - **Destructive confirmations are answered on the hub.** With
   `mcp.confirm_destructive` on, `kill_session`, `delete_worktree`,
-  `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`. The
-  desktop's confirmation dialog answers *its own* queue, which is empty in
-  this mode. Approve it on the hub — this window will follow: the approved
-  change arrives over the hub's event stream like any other, so there is
-  nothing to refresh.
+  `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`, and the
+  request waits in the hub's queue. The desktop's dialog and Control's
+  cards list and answer that queue (`mcp_confirms`, `answer_mcp_confirm`)
+  and follow it live through `confirm:changed`; the approved change then
+  arrives over the hub's event stream like any other. A hub older than
+  these tools has no queue to show: the dialog stays empty, as before.
 - **Fleet administration is refused.** A client is not the fleet's
   administrator, so those controls are disabled in the interface with the
   reason rather than failing at the click. *What a hub client refuses* below
@@ -3246,6 +3258,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `check_host` | the health checklist reads a host's settings over this app's own SSH; repair a host's hooks from the hub with `fleet-hub provision --host <alias>` |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
+| `discard_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
@@ -3258,6 +3271,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
 | `list_account_usage` | this app does not poll account usage while a hub owns the fleet, so the cache is empty; read usage on the hub |
+| `list_host_setups` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
@@ -3281,6 +3295,8 @@ Every command below refuses in hub client mode; the full table, with the command
 | `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
+| `run_host_setup_check` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
+| `save_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
@@ -3545,22 +3561,21 @@ deliberately.
   too; a leftover sidecar is tightened on the next open.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
-  UI confirmation dialog. A hub has no UI to show that dialog to — leave the
-  setting off (its default) on a hub; if it is on, a request needing
-  confirmation is refused (`E_CONFIRM_REQUIRED`) with no way to approve it,
-  and the hub logs a warning naming the tool and nonce. A `state.db` copied
-  from a desktop can carry it switched on; `fleet-hub serve` logs a warning
-  at startup when it is.
+  UI confirmation dialog. On a hub the request waits for the owner's paired
+  device instead (`mcp_confirms`, `answer_mcp_confirm`) and expires after
+  ten minutes unanswered; leave the setting off (its default) unless one of
+  your devices will answer. A `state.db` copied from a desktop can carry it
+  switched on; `fleet-hub serve` logs a warning at startup when it is.
 - **The operator's starts and kills.** The UX agent's operator session
   must have its session starts and restarts (`new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task` with
   `new_worker`, `restore_host_sessions` other than a `dry_run`,
   `recreate_session`, `restart_session`, `work_link` `start` / `resume`)
   and kills approved by a person, whatever
-  `mcp.confirm_destructive` says (work graph M9.7, decision D12). A hub has
-  no approver, so an operator homed on a hub-served fleet is refused those
-  calls (`E_FORBIDDEN`, "no approver") and says so; the person does them from
-  the sidebar.
+  `mcp.confirm_destructive` says (work graph M9.7, decision D12). On a hub
+  the call waits in the hub's queue until the owner approves it from a
+  paired device (redesign step 9.2: a card in Control's transcript, or the
+  dialog); the operator can neither list nor answer that queue.
 - **Rotating tokens.** `fleet-hub token regenerate` mints a fresh master
   token — reconfigure every client afterward. For host tokens, call
   `provision_hosts { rotate: true }` (from any client), which re-provisions

@@ -351,8 +351,11 @@ queue. `git merge-tree` checks the finished branches against each other and
 proposes a resolve task for a conflict (`integrate.rs`). What the loop does by
 itself is the least of the mission's level, `orchestrator.max_level`
 (default 1: a person presses every step) and a person's grant
-(`work_link { mission_grant }`: level, hours, budget, hosts); brakes pause the
-mission on a spent budget or no progress, and `missions_pause_all` pauses
+(`work_link { mission_grant }`: level, hours, budget, hosts, and the login
+`profile` its runs bill); brakes pause the mission on a spent budget or no
+progress, a run on an account at or past `accounts.pause_at` waits (one
+`account_limit` event says why) until the account is back under it, and
+`missions_pause_all` pauses
 every mission and ends its grants. `orchestrator.enabled` is the kill switch.
 A continuous mission wakes on `policy.wake_every_secs`; a finished run, a
 member's status moving on the tracker and a worker's PR checks moving each
@@ -402,6 +405,18 @@ Symlinks sync as links (their target, never followed; not on a Windows
 desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
 Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
+
+PR shepherd, step 1 of 5, is built and does nothing until a person grants a
+rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
+migration 136 (`pr_shepherd_rules`, `pr_shepherd_episodes`),
+`service/pr_shepherd/` on the reconcile tick (loop `pr_shepherd`, stopped by
+`automation.paused`). For a project with a rule it
+reads each session's `pr_evidence` and, once per conflict / behind / red CI
+on a pushed commit, records a `pr_shepherd` timeline event (`watch`) or also
+asks the session's own Claude to fix it (`nudge`; `merge` acts as `nudge`
+until the merge queue, step 3). Rules are granted only with `fleet-hub
+shepherd grant | revoke | pause-all | status`. Not built: the control API and
+Inbox card (step 2), the merge queue, Jev `pr_triage`, the UI.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
