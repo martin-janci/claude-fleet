@@ -67,6 +67,16 @@ export interface HostRow {
    *  each with the account it is logged into; account_uuid null = not logged in yet.
    *  null or absent = never read (or an older hub). */
   claude_profiles?: HostProfile[] | null;
+  /** Probe facts for the Hosts page (Orbit Fleet 4.6); all absent from an older hub. */
+  cpu_count?: number | null;
+  mem_total_kb?: number | null;
+  /** Boot time the host states, unix seconds. */
+  boot_at?: number | null;
+  /** Round trip of an empty command over SSH; null for `local` or when not timed. */
+  latency_ms?: number | null;
+  /** Disk fleet's worktrees hold on the host, and when that was last asked. */
+  worktree_kb?: number | null;
+  worktree_at?: number | null;
 }
 
 /** One login profile on a host. */
@@ -87,6 +97,12 @@ export interface HostHealth {
   health_at: number | null;
   /** Absent from an older hub's ping (the row keeps what it had). */
   auth_overrides?: string[] | null;
+  /** Orbit Fleet 4.6; absent from an older hub's ping. */
+  cpu_count?: number | null;
+  mem_total_kb?: number | null;
+  boot_at?: number | null;
+  latency_ms?: number | null;
+  worktree_kb?: number | null;
 }
 
 export interface SshHost {

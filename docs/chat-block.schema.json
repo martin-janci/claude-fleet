@@ -94,7 +94,7 @@
       ]
     },
     {
-      "description": "Reference material in folding sections.",
+      "description": "Reference material in folding sections, or with `page` a guide\nfleet already has (a `fleet.page/1` page of layout `guide`), drawn\nas Settings draws it; the other keys are then ignored.",
       "type": "object",
       "properties": {
         "intro": {
@@ -107,20 +107,29 @@
           "type": "string",
           "const": "guide"
         },
+        "page": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "sections": {
+          "description": "Required without `page`.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/GuideSection"
           }
         },
         "title": {
-          "type": "string"
+          "description": "Required without `page`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
-        "kind",
-        "title",
-        "sections"
+        "kind"
       ]
     },
     {
@@ -372,6 +381,32 @@
         "kind",
         "code",
         "title"
+      ]
+    },
+    {
+      "description": "A settings change waiting for a person: the id `set_setting` with\n`propose: true` answered. The card reads the key and both values\nfrom the proposal itself, never from the block, and applies it only\nafter a confirm.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "setting"
+        },
+        "note": {
+          "description": "What the change does, in words.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "proposal": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "kind",
+        "proposal"
       ]
     }
   ],

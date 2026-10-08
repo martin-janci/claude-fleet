@@ -39,7 +39,7 @@
   import McpSettings from './McpSettings.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import { loadHostTokens } from './host_actions';
-  import { hostsChordLabel, requestHostsView, settingsSection } from './app_views';
+  import { hostsChordLabel, requestHostsView, settingsKey, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
@@ -269,8 +269,11 @@
   onMount(() => {
     const section = $settingsSection;
     if (!section) return;
+    const key = $settingsKey;
     settingsSection.set(null);
-    select(resolveSection(section, $allPages) ?? section);
+    settingsKey.set(null);
+    // With a setting named, a page id opens the leaf that holds it.
+    select(key ? section : (resolveSection(section, $allPages) ?? section), key ?? undefined);
   });
 
   async function subscribeSettings() {
