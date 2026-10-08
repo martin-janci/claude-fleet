@@ -10,6 +10,10 @@
   // reconnecting (the banner's Gravity well is), so a screen keeps one
   // loader. The OS tray and dock (Breathe, Chase, Halo, Signal lost there
   // too) need a native tray this app does not have yet.
+  //
+  // Step 3.15: a warm start has no splash, so Breathe shows here while the
+  // list re-syncs; after a cold one, a host that had not answered yet says
+  // "still connecting" beside the mark until it does (or 20 s pass).
   import { onMount } from 'svelte';
   import Loader from './Loader.svelte';
   import { hubStatus } from './hub';
@@ -17,6 +21,8 @@
   import { sessions, sessionsAnswered } from './sessions';
   import { attentionIdleMinutes } from './notify';
   import { waitingForYou } from './waiting_count';
+  import { hosts } from './hosts';
+  import { catchingUp, catchUpLine, hostsStillConnecting, warmStart } from './startup';
 
   let nowSec = $state(Math.floor(Date.now() / 1000));
   onMount(() => {
@@ -34,7 +40,7 @@
       if ($hubConnection.state === 'connecting') return 'chase';
       if ($hubConnection.state !== 'connected') return null;
     }
-    if (!$sessionsAnswered) return null;
+    if (!$sessionsAnswered) return $warmStart ? 'breathe' : null;
     return waiting > 0 ? 'halo' : 'breathe';
   });
 
@@ -45,8 +51,11 @@
         ? 'Connecting to the hub'
         : mark === 'halo'
           ? `${waiting} ${waiting === 1 ? 'session waits' : 'sessions wait'} for you`
-          : 'Idle and connected',
+          : $sessionsAnswered
+            ? 'Idle and connected'
+            : 'Re-syncing',
   );
+  const catchUp = $derived(catchUpLine(hostsStillConnecting($hosts, $catchingUp)));
 </script>
 
 {#if mark}
@@ -62,11 +71,18 @@
     {/if}
   </span>
 {/if}
+{#if catchUp}
+  <span class="catch-up" data-testid="status-catch-up">{catchUp}</span>
+{/if}
 
 <style>
   .status-mark {
     display: inline-flex;
     align-items: center;
     flex: none;
+  }
+  .catch-up {
+    flex: none;
+    color: var(--fg-muted);
   }
 </style>
