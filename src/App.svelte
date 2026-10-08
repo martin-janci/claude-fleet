@@ -1338,7 +1338,7 @@
       data-testid="footer-downloads"
       title="Files sessions sent to your devices"
       onclick={() => (showDownloads = true)}
-      >⤓ Downloads{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
+      >⤓ Downloads…{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
     >
     {#if trackersLine}
       <!-- Work graph M12.4: the tracker roll-up, re-read by TrackerAttention. -->
