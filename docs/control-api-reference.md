@@ -643,6 +643,12 @@ Spawn a review session: a new Claude session in the source session's worktree, s
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
+### `touch_session_viewed`
+
+Mark a session viewed now: the turns it has finished read as seen. Returns the row.
+
+Parameters: `session_id`
+
 ### `update_admin`
 
 Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, or refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.
@@ -744,6 +750,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
+- `commands::sessions::touch_session_viewed`
 - `commands::work::session_work_links`
 - `commands::work::link_session_work`
 - `commands::work::reject_session_work`

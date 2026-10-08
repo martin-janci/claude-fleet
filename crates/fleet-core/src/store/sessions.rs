@@ -713,6 +713,22 @@ impl Store {
         rows.collect()
     }
 
+    /// Record that a person looked at the session at `now` (migration 125).
+    /// Never moves the stamp backwards, so a late call from a second window
+    /// cannot make a seen turn unread again. Answers whether it moved; a
+    /// move emits `session_updated` (the row's unread state changed).
+    pub fn touch_session_viewed(&self, id: i64, now: i64) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET last_viewed_at = ?1 \
+             WHERE id = ?2 AND (last_viewed_at IS NULL OR last_viewed_at < ?1)",
+            rusqlite::params![now, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Record who or what started a session (migration 124). Every start
     /// path writes it once the row exists; a restart, recreate or repair
     /// keeps the row and so keeps its origin. On the row, so this emits

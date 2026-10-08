@@ -94,10 +94,7 @@ describe('no transition uses a raw duration', () => {
   // Serial files (one open PR at a time, per the redesign plan) move onto the
   // tokens in the step that next owns them. Each entry is the exact count of
   // raw transitions left, so the list can only shrink.
-  const PENDING: Record<string, number> = {
-    'src/lib/Sidebar.svelte': 3,
-    'src/lib/ConversationPanel.svelte': 3,
-  };
+  const PENDING: Record<string, number> = {};
 
   const files = (dir: string): string[] =>
     readdirSync(dir, { recursive: true })

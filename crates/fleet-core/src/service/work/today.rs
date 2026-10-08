@@ -79,7 +79,10 @@ pub struct TodaySession {
     pub host_alias: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
-    /// waiting | stuck | failed | lifecycle, when a person is needed.
+    /// The attention reason (waiting, stuck, failed, …) when the session's
+    /// state raises the Needs you badge (step 0.4), so Today's "Needs you"
+    /// lists the same sessions as the badge and the Inbox (step 3.3). A
+    /// ghost, lost or pending-kill row (`lifecycle`, state Paused) has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<String>,
     /// idle | done, when this session is why its group is stale.
@@ -159,6 +162,7 @@ fn session_of(row: &SessionRow, now: i64, context_red_pct: f64) -> TodaySession 
         host_alias: row.host_alias.clone(),
         org_id: row.org_id,
         attention: crate::service::attention::needs_attention_with(row, context_red_pct)
+            .filter(|a| a.reason.state().counts_toward_badge())
             .map(|a| a.reason.as_str().into()),
         stale: stale_reason(row, now).map(str::to_string),
         claude_status: row.claude_status.clone(),
@@ -714,6 +718,35 @@ mod tests {
             .collect();
         assert_eq!(hosts, vec!["h"]);
         assert!(mine.since <= mine.now && mine.now - mine.since == DEFAULT_WINDOW_SECS);
+    }
+
+    #[test]
+    fn needs_you_lists_only_what_raises_the_badge() {
+        // A ghost nobody can answer (`lifecycle`, state Paused) leaves the
+        // badge and the Inbox (steps 0.4, 3.3), so Today's Needs you drops it
+        // too; a blocked session stays.
+        let mut ghost = row(1, Some("GHOST-1"));
+        ghost.status = "ghost".into();
+        ghost.claude_status = Some("idle".into());
+        let mut blocked = row(2, Some("PAY-7"));
+        blocked.claude_status = Some("blocked".into());
+        let t = digest(
+            &[ghost, blocked],
+            &[],
+            &[],
+            NOW,
+            SINCE,
+            DEFAULT_CONTEXT_RED_PCT,
+        );
+        assert_eq!(bucket_of(&t, Some("PAY-7")), vec!["waiting"]);
+        assert_eq!(bucket_of(&t, Some("GHOST-1")), vec!["in_progress"]);
+        let ghost = &t
+            .groups
+            .iter()
+            .find(|g| g.key.as_deref() == Some("GHOST-1"))
+            .unwrap()
+            .sessions[0];
+        assert_eq!(ghost.attention, None);
     }
 
     #[test]

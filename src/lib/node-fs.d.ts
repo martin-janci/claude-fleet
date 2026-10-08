@@ -1,5 +1,5 @@
-// Type shim for `node:fs`'s `readFileSync`, `existsSync` and `readdirSync`
-// (flat or recursive) — this project ships no Node
+// Type shim for `node:fs`'s `readFileSync`, `existsSync`, `writeFileSync`
+// and `readdirSync` (flat or recursive) — this project ships no Node
 // types (no `@types/node`; see `names.json.d.ts` for the same kind of
 // shim for a different gap). Vitest runs on Node and resolves the real
 // module at runtime; this only gives svelte-check a type for the one
@@ -11,4 +11,6 @@ declare module 'node:fs' {
   export function readdirSync(path: string): string[];
   /** Paths relative to `path`, every level down (Node 20.1+). */
   export function readdirSync(path: string, options: { recursive: true }): string[];
+  /** For a `REGEN_*` run that rewrites a generated file. */
+  export function writeFileSync(path: string, data: string): void;
 }

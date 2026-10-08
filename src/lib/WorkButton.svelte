@@ -14,6 +14,7 @@
   import { selectSessionExplicitly } from './selection';
   import { resumeWork } from './work';
   import { groupSessionLinks, readErrorText, type WorkTask, type WorkTaskLink } from './work_view';
+  import { uiLayout } from './prefs';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionIdBlocked } from './share';
@@ -40,7 +41,11 @@
     task,
     /** `row`: compact, in a list; `bar`: the task page's action bar. */
     variant = 'row',
-  }: { task: WorkTask; variant?: 'row' | 'bar' } = $props();
+  }: {
+    /** What the button reads of a task: a subtask passes one too (6.6). */
+    task: Pick<WorkTask, 'task_id' | 'item_id' | 'key' | 'title' | 'project_id' | 'sessions'>;
+    variant?: 'row' | 'bar';
+  } = $props();
 
   const grouped = $derived(groupSessionLinks(task.sessions ?? []));
   const liveLink = $derived(
@@ -48,6 +53,9 @@
   );
   const pastLinks = $derived(task.key ? grouped.past.filter((l) => l.resumable !== false) : []);
   const action = $derived(primaryAction({ live: liveLink !== null, resumable: pastLinks.length > 0 }));
+  /** Redesign 6.6: the New layout names the start "Start new", the same
+   *  words as ▾ and every other start point; Classic keeps "Start". */
+  const primaryLabel = $derived(action === 'start' && $uiLayout === 'new' ? 'Start new' : PRIMARY_LABEL[action]);
   const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
   /** Continue re-opens somebody's past conversation: the hub half, then the
    *  access half on the SOURCE session (`share.ts`'s `own` tier for
@@ -251,7 +259,7 @@
           : action === 'continue'
             ? `Resume the last conversation of ${pastLinks[0]?.name ?? 'the last session'}`
             : 'Start a session for this task (Alt-click to choose where)')}
-      onclick={(e) => primary(e)}>{busy ? '…' : PRIMARY_LABEL[action]}</button
+      onclick={(e) => primary(e)}>{busy ? '…' : primaryLabel}</button
     ><button
       class="btn caret"
       class:btn--primary={variant === 'bar'}

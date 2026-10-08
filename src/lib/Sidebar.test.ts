@@ -1,5 +1,7 @@
+import { sidebarView } from './work_view';
+import { todayOpen } from './today';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { readPref } from './prefs';
 
@@ -3254,5 +3256,48 @@ describe('List keys (redesign step 3.8)', () => {
       delete (navigator as unknown as Record<string, unknown>).platform;
       if (plat) Object.defineProperty(Navigator.prototype, 'platform', plat);
     }
+  });
+});
+
+describe('Inbox (redesign step 3.3)', () => {
+  afterEach(() => sidebarView.set('sessions'));
+
+  function fleet() {
+    const now = Math.floor(Date.now() / 1000);
+    return [
+      { ...sessionFor(1, 'dev-busy'), claude_status: 'working' as const, last_activity_at: now },
+      { ...sessionFor(2, 'dev-asking'), claude_status: 'blocked' as const, last_activity_at: now },
+      { ...sessionFor(null, 'dev-crashed'), claude_status: 'failed' as const, last_activity_at: now },
+    ];
+  }
+
+  it('lists only what needs you, counts the rest and links to All sessions', async () => {
+    mockBackend(fakeProjects, fleet());
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    const shown = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(shown).toHaveLength(2);
+    expect(shown.some((t) => t.includes('dev-busy'))).toBe(false);
+    expect(screen.getByTestId('inbox-head').textContent).toContain('2 need you');
+    expect(screen.getByTestId('inbox-rest').textContent).toContain('1 running');
+    // Links to review and sessions to tidy stay on the Inbox's attention line.
+    expect(screen.getByTestId('attention-line')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('inbox-all-sessions'));
+    await tick();
+    expect(get(sidebarView)).toBe('sessions');
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
+  });
+
+  it('Today is the second tab and ⌘⇧T still opens it', async () => {
+    mockBackend(fakeProjects, fleet());
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick();
+    await fireEvent.click(screen.getByTestId('inbox-tab-today'));
+    expect(get(todayOpen)).toBe(true);
+    expect(screen.getByTestId('inbox-tab-today').getAttribute('aria-selected')).toBe('true');
+    await fireEvent.click(screen.getByTestId('inbox-tab-inbox'));
+    expect(get(todayOpen)).toBe(false);
   });
 });
