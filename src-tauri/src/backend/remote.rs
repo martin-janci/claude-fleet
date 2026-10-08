@@ -1071,6 +1071,7 @@ impl HubBackend {
                 "model": args.model,
                 "effort": args.effort,
                 "profile": args.profile,
+                "agent": args.agent,
             }),
         )
         .await

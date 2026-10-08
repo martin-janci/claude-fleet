@@ -1566,6 +1566,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             model: None,
             effort: None,
             profile: None,
+            agent: None,
             owner_person_id: Some(42),
         },
         &st,
@@ -3057,6 +3058,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 "model": "opus",
                 "effort": "high",
                 "profile": "work",
+                "agent": "claude",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -3079,6 +3081,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         model: Some("opus".into()),
                         effort: Some("high".into()),
                         profile: Some("work".into()),
+                        agent: Some("claude".into()),
                         // Set, and absent from the asserted JSON above: whose
                         // a session is follows from the CONNECTION, never from
                         // an argument a client could choose (multi-user M1,

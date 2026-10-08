@@ -477,6 +477,7 @@ fn row(
         owner_person_id: None,
         visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
         claude_profile: None,
+        agent: crate::store::AGENT_CLAUDE.into(),
         pending_form: None,
         parent_session_id: None,
         tags: Vec::new(),
@@ -7477,6 +7478,7 @@ fn a_new_shell_session_refuses_a_profile() {
         model: None,
         effort: None,
         profile: Some("work".into()),
+        agent: None,
         owner_person_id: None,
     };
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, "E_INVALID");
