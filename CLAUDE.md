@@ -212,9 +212,10 @@ metadata* / *Declarative pages*): after editing a settings `SPECS` row,
 editing a page spec or the widget catalog,
 `REGEN_PAGE_DOCS=1 cargo fleet-test -- page_docs_are_current`.
 
-`docs/form-spec.schema.json` (chat forms, `docs/forms.md`) is generated from
-the Rust form model, same rule: after editing `crates/fleet-core/src/pages/forms.rs`,
-`REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`.
+`docs/form-spec.schema.json` (chat forms, `docs/forms.md`) and
+`docs/chat-block.schema.json` (chat cards, `docs/chat-blocks.md`) are generated
+from the Rust models, same rule: after editing `crates/fleet-core/src/pages/forms.rs`
+or `chat_blocks.rs`, `REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`.
 
 ## Architecture
 

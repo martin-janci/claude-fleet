@@ -11,7 +11,8 @@ it are drawn as cards instead:
   the composer. The JSON is still there under *Reported after FLEET_TASK_DONE_…*.
 - **A `fleet.ui/1` block.** A fenced ```` ```fleet-ui ```` block (or a
   ```` ```json ```` block whose object has `"spec": "fleet.ui/1"`) holding one
-  block: a tutorial, a guide, a callout, facts, choices, a form or a report.
+  block: a tutorial, a guide, a callout, facts, choices, a form, a report,
+  a job's progress, results or an error.
 
 A card is a view of the reply. Nothing is stored and nothing is sent from
 one. A card that acts (choices, a form, a follow-up) only fills the
@@ -36,6 +37,9 @@ it closes.
 | pick what you do next | `choices` |
 | fill in several values for your next turn | `form` |
 | see a run's result | `report` (or the done marker) |
+| follow a long job as it moves on | `progress` |
+| read numbers, a chart or a table you measured | `results` |
+| see what failed and pick what to do about it | `error` |
 
 A block's form is not `ask`: you do not wait for it, and its answers arrive
 as the person's next prompt. Use it when the answers can wait for the next
@@ -133,10 +137,85 @@ The task report's keys (`summary`, `outcome`, `tests_run`, `warnings`,
 way the backend reads a run's report. An unknown `outcome` is `partial`,
 and each list holds at most 20 entries of at most 500 chars.
 
+### `progress`: a long job, updated in place
+
+| Key | Required | Meaning |
+|---|---|---|
+| `id` | yes | The job: letters, digits and `. _ : -`, ≤ 64 |
+| `title` | yes | ≤ 120 chars |
+| `state` | no | `running` (default), `waiting` (on the person), `done` or `failed` |
+| `done` | no | Whole number ≥ 0 |
+| `total` | no | Whole number ≥ 1, at least `done`; leave it out while the size is unknown |
+| `unit` | no | ≤ 20 chars, after the count: `3 of 7 hosts` |
+| `steps` | no | 1–20 of `{ title, state? }`; a step's `state` is `pending` (default), `running`, `done`, `failed` or `skipped` |
+| `note` | no | Markdown, ≤ 2000 |
+
+Write the block again with the same `id` each time the job moves on. In one
+conversation the **first** card of an id shows the newest block, with
+*N updates below*; every later block of that id draws as one line pointing
+up to it. A `total` draws a meter; without one the card counts
+(`120 rows so far`). Nothing animates: a job waiting on the person is
+`waiting`, never a spinner.
+
+```json
+{ "spec": "fleet.ui/1", "kind": "progress", "id": "deploy-42",
+  "title": "Deploying to staging", "done": 3, "total": 7, "unit": "hosts",
+  "steps": [ { "title": "Build", "state": "done" }, { "title": "Push", "state": "running" }, { "title": "Restart" } ] }
+```
+
+### `results`: numbers, a chart, a table
+
+| Key | Required | Meaning |
+|---|---|---|
+| `title` | no | ≤ 120 chars |
+| `summary` | no | Markdown, ≤ 2000 |
+| `items` | yes | 1–12 items, each with a `type` |
+
+The items are the page widgets, fed from the block instead of a data source:
+
+- `{ "type": "stat", "label", "value", "ty"?, "hint"? }`: one number (or
+  text ≤ 80) in large type; `hint` (≤ 200) goes after it.
+- `{ "type": "chart", "chart", "title", "x", "y", "points" }`: one series;
+  `chart` is `line`, `bar` or `sparkline`; `x` and `y` are
+  `{ "label", "ty"? }`; `points` holds 1–200 `[x, number]` pairs, `x` text
+  or a number. *Table* shows the same numbers as text.
+- `{ "type": "table", "title"?, "columns", "rows" }`: 1–12 columns of
+  `{ "label", "ty"? }`, up to 200 rows of one cell per column (text, a
+  number, a bool or null).
+
+`ty` is a page column type and formats the value the way a page does:
+`text`, `int` (`12,500`), `tokens` (`1.2M`), `usd_micros` (`$1.83` from
+1830000), `day` or `time` (seconds since the epoch, shown as `5 min ago`).
+A stat or a numeric cell without one is an `int`.
+
+### `error`: what failed and what next
+
+| Key | Required | Meaning |
+|---|---|---|
+| `code` | yes | Letters, digits and `. _ : -`, ≤ 64: `E_SSH`, `build.failed` |
+| `title` | yes | ≤ 120 chars, what failed in plain words |
+| `body` | no | Markdown, ≤ 4000 |
+| `detail` | no | A log excerpt, ≤ 8000, drawn as code under *Details* |
+| `next` | no | 1–4 of `{ label, prompt, hint? }`, as `choices` |
+
+A next step fills the composer, as a choice does; the person presses Enter.
+
+## Checking a block
+
+`docs/chat-block.schema.json` is the JSON Schema, generated from the Rust
+model (`REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`), for
+editors, LLM structured output and fleet-mobile. The app's check is
+`checkUiBlock` in `src/lib/rich_blocks.ts`; its Rust twin is
+`crates/fleet-core/src/pages/chat_blocks.rs`, for blocks fleet writes or
+relays itself. Both run `docs/chat-block-examples/blocks.json` and report
+the same problems, in the same words and order:
+`item 1 › point 3: must be [x, number]`. At most 20 problems are reported.
+
 ## Where it lives
 
 `src/lib/rich_blocks.ts` splits a text block and checks a block.
 `src/lib/RichText.svelte` draws the segments, with the cards in
-`src/lib/rich/`. Both are frontend only: the transcript already carries
-the text, so the hub contract and the backend are unchanged. A phone or
-another client that does not know a block shows its fenced JSON.
+`src/lib/rich/`; `rich/progress_board.ts` pairs the progress cards of one
+id. The transcript already carries the text, so the hub contract is
+unchanged. A phone or another client that does not know a block shows its
+fenced JSON.

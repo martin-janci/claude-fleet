@@ -94,16 +94,46 @@ fn repo_path(rel: &str) -> std::path::PathBuf {
 
 #[test]
 fn form_docs_are_current() {
-    let schema = rmcp::schemars::schema_for!(FormSpec);
-    let text = serde_json::to_string_pretty(&schema).unwrap() + "\n";
-    let path = repo_path("docs/form-spec.schema.json");
-    if std::env::var("REGEN_FORM_DOCS").is_ok() {
-        std::fs::write(&path, &text).expect("write");
-        panic!("wrote docs/form-spec.schema.json — read the diff, then run again without REGEN_FORM_DOCS");
+    // Both generated from the Rust models; one command regenerates both.
+    let docs = [
+        (
+            "docs/form-spec.schema.json",
+            "crates/fleet-core/src/pages/forms.rs",
+            rmcp::schemars::schema_for!(FormSpec),
+        ),
+        (
+            "docs/chat-block.schema.json",
+            "crates/fleet-core/src/pages/chat_blocks.rs",
+            rmcp::schemars::schema_for!(super::chat_blocks::ChatBlock),
+        ),
+    ];
+    let regen = std::env::var("REGEN_FORM_DOCS").is_ok();
+    let mut stale = vec![];
+    for (rel, source, schema) in docs {
+        let text = serde_json::to_string_pretty(&schema).unwrap() + "\n";
+        let path = repo_path(rel);
+        if std::fs::read_to_string(&path).unwrap_or_default() == text {
+            continue;
+        }
+        if regen {
+            std::fs::write(&path, &text).expect("write");
+        }
+        stale.push(format!("{rel} (from {source})"));
+    }
+    if regen {
+        panic!(
+            "wrote {} — read the diff, then run again without REGEN_FORM_DOCS",
+            if stale.is_empty() {
+                "nothing".to_string()
+            } else {
+                stale.join(", ")
+            }
+        );
     }
     assert!(
-        std::fs::read_to_string(&path).unwrap_or_default() == text,
-        "\n\ndocs/form-spec.schema.json is out of date with crates/fleet-core/src/pages/forms.rs. Regenerate with:\n  \
-REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current\n"
+        stale.is_empty(),
+        "\n\n{} out of date. Regenerate with:\n  \
+REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current\n",
+        stale.join(", ")
     );
 }

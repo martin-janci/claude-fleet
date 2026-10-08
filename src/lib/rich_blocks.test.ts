@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import { checkUiBlock, fenced, formAnswerPrompt, markerOf, reportFromValue, splitRich, UI_MAX_BYTES } from './rich_blocks';
 
@@ -116,7 +117,7 @@ describe('checkUiBlock', () => {
   });
 
   it('names what is wrong, where', () => {
-    expect(check({ kind: 'chart' })).toEqual({ ok: false, problems: ['`kind` must be one of report, steps, guide, callout, facts, choices, form'] });
+    expect(check({ kind: 'chart' })).toEqual({ ok: false, problems: ['`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error'] });
     expect(checkUiBlock('{"spec": "fleet.ui/2", "kind": "callout", "body": "x"}')).toEqual({ ok: false, problems: ['`spec` must be "fleet.ui/1"'] });
     expect(check({ kind: 'callout', tone: 'loud', body: 'x' })).toEqual({ ok: false, problems: ['`tone` must be one of info, tip, success, warning, danger'] });
     expect(check({ kind: 'choices', options: [{ label: 'A' }] })).toEqual({ ok: false, problems: ['option 1: `prompt` is required'] });
@@ -146,5 +147,33 @@ describe('helpers', () => {
   });
   it('fenced picks a fence no backtick run inside can close', () => {
     expect(fenced('json', 'a ```` b')).toBe('`````json\na ```` b\n`````');
+  });
+});
+
+describe('the shared fleet.ui/1 cases (docs/chat-block-examples/blocks.json)', () => {
+  const doc = JSON.parse(readFileSync('docs/chat-block-examples/blocks.json', 'utf8'));
+  for (const c of doc.cases as { name: string; block: unknown; problems: string[] }[]) {
+    it(c.name, () => {
+      const r = checkUiBlock(JSON.stringify(c.block));
+      expect(r.ok ? [] : r.problems).toEqual(c.problems);
+    });
+  }
+});
+
+describe('the new kinds', () => {
+  it('defaults a progress to running and its steps to pending', () => {
+    const r = checkUiBlock(JSON.stringify({ spec: 'fleet.ui/1', kind: 'progress', id: 'a', title: 'T', steps: [{ title: 'S' }] }));
+    if (!r.ok || r.block.kind !== 'progress') throw new Error('not a progress');
+    expect(r.block.state).toBe('running');
+    expect(r.block.steps).toEqual([{ title: 'S', state: 'pending' }]);
+  });
+  it('keeps an error with no next step as an empty list', () => {
+    const r = checkUiBlock(JSON.stringify({ spec: 'fleet.ui/1', kind: 'error', code: 'E_X', title: 'T' }));
+    if (!r.ok || r.block.kind !== 'error') throw new Error('not an error');
+    expect(r.block.next).toEqual([]);
+  });
+  it('draws a results block in a reply as a card', () => {
+    const segs = splitRich(ui({ kind: 'results', items: [{ type: 'stat', label: 'p95', value: 412 }] }));
+    expect(segs.map((s) => s.t)).toEqual(['ui']);
   });
 });
