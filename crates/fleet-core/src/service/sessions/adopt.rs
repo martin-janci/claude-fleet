@@ -7,8 +7,9 @@
 //! ("since tmux created the session, fleet did not start it"), and on a hub
 //! it is `unclaimed`. Adopting is that word, given by a person: the row gets
 //! `started_at` (fleet runs it from now on), the adopter as its owner when it
-//! has none, and an `session_adopted` line on its timeline. Nothing on the
-//! host changes: the pane, its process and its tmux name stay as they are.
+//! has none, `origin = person` (the adopter, migration 124), and an
+//! `session_adopted` line on its timeline. Nothing on the host changes: the
+//! pane, its process and its tmux name stay as they are.
 //!
 //! Restore (a conversation whose pane is gone) stays `restore_host_sessions`
 //! and `discover_lost_sessions`; adopting is only for a pane that is alive.
@@ -73,6 +74,12 @@ pub fn adopt_session(args: AdoptSessionArgs, store: &Mutex<Store>) -> Result<Ses
     s.atomically(|s| {
         s.set_started_at(id, now_unix())?;
         s.claim_if_unclaimed(id, args.owner_person_id)?;
+        // A person adopting it is, from here on, who started it (migration
+        // 123): the origin chip names the adopter, as for `new_session`.
+        s.set_session_origin(
+            id,
+            &crate::store::SessionOrigin::person(args.owner_person_id),
+        )?;
         let detail = args.owner_person_id.map(|p| format!("person={p}"));
         s.insert_session_event_quietly(id, None, EVENT_ADOPTED, detail.as_deref())?;
         Ok(())
@@ -126,6 +133,11 @@ mod tests {
         let row = adopt(&store, id, Some(ada)).unwrap();
         assert!(row.started_at.is_some(), "fleet runs it from now on");
         assert_eq!(row.owner_person_id, Some(ada), "the adopter owns it");
+        assert_eq!(
+            (row.origin.as_deref(), row.origin_ref.clone()),
+            (Some("person"), Some(ada.to_string())),
+            "the adopter is who started it"
+        );
         assert!(!is_outside_fleet(&row));
         let events = lock(&store).unwrap().list_session_events(id, 10).unwrap();
         assert!(

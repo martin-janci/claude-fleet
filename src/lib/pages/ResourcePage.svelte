@@ -11,6 +11,7 @@
   import FlowView from './FlowView.svelte';
   import OrgSuggestions from '../OrgSuggestions.svelte';
   import PairingResult from './PairingResult.svelte';
+  import ActionResult, { type Shown } from './ActionResult.svelte';
   import { catalogStatuses } from '../assets_workspace';
   import { devices, type Pairing } from '../devices';
   import { hosts } from '../hosts';
@@ -59,6 +60,8 @@
   let busy = $state(false);
   /** A create whose answer is shown (`result: pairing`), until dismissed. */
   let pairing = $state<Pairing | null>(null);
+  /** A record action's answer (`result: output | image`), until dismissed. */
+  let shown = $state<Shown | null>(null);
 
   const current = $derived(records.find((r) => idOf(resource, r) === selected) ?? null);
 
@@ -91,6 +94,7 @@
     busy = false;
     if (!r.ok) pushError(r.error, `${action.label} failed`);
     else if (action.result === 'pairing') pairing = r.value as Pairing;
+    else if (action.result === 'output' || action.result === 'image') shown = resultOf(action, r.value);
     else if (action.report) {
       // `{ ok, error? }`: a test that ran and failed is not a failed call.
       const rep = r.value as { ok?: boolean; error?: string | null } | null;
@@ -100,6 +104,22 @@
     await reload();
     await afterChange(resource);
     return r.ok;
+  }
+
+  /** What `shown` holds for an action's answer, titled by the action and
+   *  the record it ran on. */
+  function resultOf(action: ActionSpec, value: unknown): Shown {
+    const title = current ? `${action.label.replace(/…$/, '')} · ${titleOf(resource, current)}` : action.label;
+    const v = (value ?? {}) as Record<string, unknown>;
+    if (action.result === 'image')
+      return { kind: 'image', title, caption: String(v.caption ?? ''), mime: String(v.mime ?? 'image/png'), data: String(v.data ?? '') };
+    return {
+      kind: 'output',
+      title,
+      output: String(v.output ?? ''),
+      exit_code: Number(v.exit_code ?? 0),
+      truncated: v.truncated === true,
+    };
   }
 
   async function create(params: Record<string, string>) {
@@ -195,6 +215,9 @@
     <div class="detail">
       {#if pairing}
         <PairingResult {pairing} onclose={() => (pairing = null)} />
+      {/if}
+      {#if shown}
+        <ActionResult {shown} onclose={() => (shown = null)} />
       {/if}
       {#if adding && resource.create_flow}
         <FlowView

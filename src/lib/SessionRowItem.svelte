@@ -26,6 +26,7 @@
   import { pendingInputFor } from './pending_input';
   import type { WorkKey } from './work_keys';
   import WorkChip from './WorkChip.svelte';
+  import AccountPill from './AccountPill.svelte';
   import {
     confirmSessionWork,
     describeEvidence,
@@ -730,6 +731,11 @@
           <span class="chips" data-testid="row-chips">
             <SessionStatusChip {sess} />
           </span>
+          {#if $uiLayout === 'new' && sess.account_uuid}
+            <!-- Redesign 4.3: the account this session runs on, on every row
+                 (outside the chip strip a Compact row hides), New layout only. -->
+            <AccountPill uuid={sess.account_uuid} />
+          {/if}
           {#if compact}
             <span class="sess-age" data-testid="sess-age" title={new Date(sess.last_activity_at * 1000).toLocaleString()}
               >{shortAge(sess.last_activity_at, nowSec)}</span
