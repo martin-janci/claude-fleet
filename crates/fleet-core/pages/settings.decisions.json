@@ -54,6 +54,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.host_placement",
+          "hint": "Pre-selects a new session's host when two or more online hosts under their limit are left; you press Create."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.quick_answer",
           "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission."
         },

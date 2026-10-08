@@ -395,6 +395,9 @@ fn check_section(
     if section.tiles {
         check_tiles(cx, at, section);
     }
+    if section.matrix {
+        check_matrix(cx, at, section);
+    }
     for (i, item) in section.items.iter().enumerate() {
         check_item(cx, &format!("{at} › item {}", i + 1), page, item, placed);
     }
@@ -418,6 +421,42 @@ fn check_tiles(cx: &mut Ctx, at: &str, section: &Section) {
         if !tile {
             cx.bad(at, "a tiles section holds count and money fields only");
         }
+    }
+}
+
+/// A `matrix` section is two or more settings fields, each a choice set over
+/// the very same options, and nothing else: the grid's rows are those
+/// options.
+fn check_matrix(cx: &mut Ctx, at: &str, section: &Section) {
+    if cx.resource.is_some() {
+        cx.bad(at, "a matrix holds settings, not a record's fields");
+        return;
+    }
+    let mut options: Option<&'static [&'static str]> = None;
+    for item in &section.items {
+        let set = match item {
+            Item::Field {
+                key, widget: None, ..
+            } => match settings::spec(key).map(|s| s.kind) {
+                Some(settings::Kind::ChoiceSet(o)) => Some(o),
+                _ => None,
+            },
+            _ => None,
+        };
+        match (set, options) {
+            (None, _) => {
+                cx.bad(at, "a matrix holds choice-set settings fields only");
+                return;
+            }
+            (Some(o), Some(first)) if o != first => {
+                cx.bad(at, "a matrix's fields choose from the same options");
+                return;
+            }
+            (Some(o), _) => options = Some(o),
+        }
+    }
+    if section.items.len() < 2 {
+        cx.bad(at, "a matrix needs at least two columns");
     }
 }
 

@@ -1,4 +1,4 @@
--- 137: `control_handoffs`, the receipts of what Control's agent (the
+-- 140: `control_handoffs`, the receipts of what Control's agent (the
 -- operator session) sent where (Orbit Fleet redesign step 9.3,
 -- docs/ux/2026-10-08-orbit-fleet-redesign/transition-plan.md). One row per
 -- successful call of the operator that handed work on: a prompt to a
@@ -30,4 +30,4 @@ CREATE TABLE IF NOT EXISTS control_handoffs (
   preview    TEXT
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (137);
+INSERT OR IGNORE INTO schema_version (version) VALUES (140);

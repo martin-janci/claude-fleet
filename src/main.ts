@@ -10,12 +10,15 @@ import { initMotion } from './lib/motion';
 import { installErrorReporting } from './lib/error_report';
 import { selectedSession } from './lib/selection';
 import { trackViewedSession } from './lib/session_viewed';
+import { trackPresence } from './lib/presence';
 import { startTraySync } from './lib/tray_state';
 
 initTheme();
 initMotion();
 installErrorReporting();
 trackViewedSession(selectedSession);
+// Who else has the open session on screen (redesign 11.7b); a hub feature.
+trackPresence(selectedSession);
 // The tray and menu-bar icon follows the fleet (redesign 3.17).
 startTraySync();
 const app = mount(App, { target: document.getElementById('app')! });

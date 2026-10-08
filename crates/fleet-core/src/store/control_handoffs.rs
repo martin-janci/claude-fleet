@@ -1,4 +1,4 @@
-//! Control's handoff receipts (`control_handoffs`, migration 137, redesign
+//! Control's handoff receipts (`control_handoffs`, migration 140, redesign
 //! steps 9.3 and 9.6): what the operator session sent where. The decision of
 //! which calls are handoffs is `service::control_handoffs`'; this is the
 //! table and the read that joins each receipt to its target's live state.

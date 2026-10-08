@@ -2,6 +2,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import {
   attentionIdleMinutes,
+  inQuietHours,
+  notificationAllowed,
+  parseQuietHours,
   notificationPermission,
   notifyStuckOs,
   notifyStuckToast,
@@ -67,5 +70,36 @@ describe('Notification API guards', () => {
     expect(await requestNotificationPermission()).toBe('granted');
     expect(FakeNotification.requestPermission).toHaveBeenCalledTimes(1);
     expect(notificationPermission()).toBe('granted');
+  });
+});
+
+describe('notifications matrix and quiet hours (11.9)', () => {
+  const base = {
+    'notify.desktop': 'needs_you,failed,blocked',
+    'notify.quiet_hours': '22:00-07:30',
+    'notify.quiet_except': 'failed',
+  };
+  const at = (h: number, m = 0) => new Date(2026, 9, 8, h, m);
+
+  it('reads a range that wraps past midnight', () => {
+    const r = parseQuietHours('22:00-07:30');
+    expect(r).toEqual([1320, 450]);
+    expect(inQuietHours(r, 23 * 60)).toBe(true);
+    expect(inQuietHours(r, 3 * 60)).toBe(true);
+    expect(inQuietHours(r, 7 * 60 + 30)).toBe(false);
+    expect(inQuietHours(r, 12 * 60)).toBe(false);
+    expect(inQuietHours(parseQuietHours('09:00-17:00'), 12 * 60)).toBe(true);
+    expect(parseQuietHours('')).toBeNull();
+    expect(parseQuietHours('08:00-08:00')).toBeNull();
+    expect(parseQuietHours('25:00-07:00')).toBeNull();
+  });
+
+  it('sends only the states a channel ticks, and only the exceptions during quiet hours', () => {
+    expect(notificationAllowed('desktop', 'blocked', base, at(12))).toBe(true);
+    expect(notificationAllowed('desktop', 'done', base, at(12))).toBe(false);
+    expect(notificationAllowed('phone', 'failed', base, at(12))).toBe(false);
+    expect(notificationAllowed('desktop', 'blocked', base, at(23))).toBe(false);
+    expect(notificationAllowed('desktop', 'failed', base, at(23))).toBe(true);
+    expect(notificationAllowed('desktop', 'blocked', { ...base, 'notify.quiet_hours': '' }, at(23))).toBe(true);
   });
 });

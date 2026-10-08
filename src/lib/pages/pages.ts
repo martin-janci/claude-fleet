@@ -83,6 +83,8 @@ export interface Section {
   advanced?: boolean;
   /** A record's `count` / `money` fields shown as tiles. */
   tiles?: boolean;
+  /** Choice-set settings over the same options shown as one grid. */
+  matrix?: boolean;
   when?: Condition;
   items: Item[];
 }
@@ -191,7 +193,8 @@ export type KindDesc =
   | { type: 'path_map' }
   | { type: 'id_set' }
   | { type: 'price_map' }
-  | { type: 'text'; max: number };
+  | { type: 'text'; max: number }
+  | { type: 'time_range' };
 
 export type Unit =
   | 'none'

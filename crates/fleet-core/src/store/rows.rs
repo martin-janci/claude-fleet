@@ -397,9 +397,11 @@ pub struct SessionRow {
     pub pending_form: Option<PendingForm>,
 }
 
-/// `sessions.agent` (migration 121): Claude Code, the default and, until the
-/// agent adapters land (redesign step 12.1), the only agent fleet launches.
+/// `sessions.agent` (migration 121): Claude Code, the default.
 pub const AGENT_CLAUDE: &str = "claude";
+
+/// `sessions.agent` (migration 121): OpenAI's Codex CLI (redesign 12.2).
+pub const AGENT_CODEX: &str = "codex";
 
 /// `sessions.agent` (migration 121): Google's Antigravity CLI (`agy`),
 /// launched through `agent_adapter::Agy` (redesign step 12.3).
@@ -409,10 +411,9 @@ pub const AGENT_AGY: &str = "agy";
 /// (`kind = 'shell'`).
 pub const AGENT_SHELL: &str = "shell";
 
-/// Every value migration 121's `CHECK` admits. `codex` and `agy` are
-/// reserved for the adapters: a row may carry them, `new_session` refuses
-/// them until fleet can launch them.
-pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, "codex", AGENT_AGY, AGENT_SHELL];
+/// Every value migration 121's `CHECK` admits. `agy` has its adapter but
+/// `new_session` refuses it until its start path is enabled.
+pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, AGENT_CODEX, AGENT_AGY, AGENT_SHELL];
 
 /// [`SessionRow::agent`] when a frame carries no `agent` key: a hub built
 /// before migration 121, whose sessions all run Claude Code.

@@ -47,7 +47,7 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
     title: 'General',
     items: [
       { id: 'appearance', label: 'Appearance', panel: 'appearance' },
-      { id: 'notifications', label: 'Notifications', panel: 'notifications' },
+      { id: 'notifications', label: 'Notifications', panel: 'notifications', page: 'settings.notifications' },
       { id: 'shortcuts', label: 'Shortcuts', panel: 'shortcuts' },
       { id: 'voice', label: 'Voice', page: 'settings.limits', section: 'Voice' },
       { id: 'downloads', label: 'Downloads', page: 'settings.limits', section: 'Downloads' },
