@@ -51,9 +51,10 @@ const GIT_PREFIX: &str = "__FLEET_GIT__\t";
 /// at 4k by `--jq` and never stored. `state` tells tidy-up a merged PR (M7).
 /// `headRefOid` … `isDraft` are result evidence's: the commit the checks
 /// describe, and what else stands between the PR and a merge.
+/// `mergedAt` is the Pull requests view's (redesign 6.4).
 const PR_FIELDS: &str =
     "url,statusCheckRollup,headRefName,title,body,closingIssuesReferences,state,\
-     headRefOid,reviewDecision,mergeStateStatus,isDraft";
+     headRefOid,reviewDecision,mergeStateStatus,isDraft,mergedAt";
 /// The fields an older `gh` without `closingIssuesReferences` (or `--jq`)
 /// still answers: the probe falls back to them.
 const PR_FIELDS_BASIC: &str = "url,statusCheckRollup";
@@ -110,7 +111,19 @@ pub struct PrEvidence {
     pub state: Option<String>,
     #[serde(default)]
     pub checks: CheckSummary,
+    /// `title`, `headRefName` and `mergedAt` (unix seconds): what the Pull
+    /// requests view lists (redesign 6.4, `pull_requests`). Absent from
+    /// readings stored before they were added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<i64>,
 }
+
+/// Most characters of a PR title kept for the Pull requests view.
+pub const PR_TITLE_MAX: usize = 200;
 
 /// The check rollup, counted (result evidence §1). `failing` is non-empty
 /// exactly when [`reduce_ci_status`] says `failing`: both read
@@ -366,6 +379,9 @@ fn evidence_from_json(v: &serde_json::Value) -> PrEvidence {
         review_decision: text("reviewDecision").map(|d| d.to_ascii_uppercase()),
         merge_state: text("mergeStateStatus").map(|m| m.to_ascii_uppercase()),
         state: text("state").map(|m| m.to_ascii_uppercase()),
+        title: text("title").map(|t| t.chars().take(PR_TITLE_MAX).collect()),
+        head_ref: text("headRefName"),
+        merged_at: text("mergedAt").and_then(|t| crate::service::account_usage::parse_rfc3339(&t)),
         draft: v.get("isDraft").and_then(|d| d.as_bool()).unwrap_or(false),
         checks: v
             .get("statusCheckRollup")
@@ -831,6 +847,26 @@ mod tests {
             !PR_FIELDS.contains(char::is_whitespace),
             "the line continuation leaves no space inside the field list"
         );
+    }
+
+    /// Redesign 6.4: what the Pull requests view lists rides the evidence.
+    #[test]
+    fn evidence_carries_the_title_head_and_merge_time() {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&full_answer(serde_json::json!([]))).unwrap();
+        v["state"] = "MERGED".into();
+        v["title"] = "x".repeat(300).into();
+        v["mergedAt"] = "2026-10-08T12:00:00Z".into();
+        let ev = pr_info_from_json(&v.to_string()).evidence.unwrap();
+        assert_eq!(ev.state.as_deref(), Some("MERGED"));
+        assert_eq!(ev.head_ref.as_deref(), Some("fix/x"));
+        assert_eq!(ev.merged_at, Some(1_791_460_800));
+        assert_eq!(ev.title.map(|t| t.chars().count()), Some(PR_TITLE_MAX));
+        // An open PR: gh answers `mergedAt` as null.
+        v["mergedAt"] = serde_json::Value::Null;
+        let ev = pr_info_from_json(&v.to_string()).evidence.unwrap();
+        assert_eq!(ev.merged_at, None);
+        assert!(PR_FIELDS.contains("mergedAt"));
     }
 
     #[test]

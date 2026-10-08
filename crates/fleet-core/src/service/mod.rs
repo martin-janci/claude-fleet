@@ -8,6 +8,7 @@
 //! `&Arc<CancellationRegistry>`) rather than `tauri::State`, so they carry no
 //! dependency on the Tauri runtime and are directly unit-testable.
 
+pub mod account_limits;
 pub mod account_usage;
 pub mod account_usage_poll;
 pub mod add_project;
@@ -58,6 +59,7 @@ pub mod project_picks;
 pub mod projects;
 pub mod prompt_origin;
 pub mod provision;
+pub mod prs;
 pub mod quick_replies;
 #[cfg(test)]
 mod reconcile_tests;

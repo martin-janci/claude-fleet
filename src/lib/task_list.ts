@@ -53,15 +53,21 @@ export function displayTitle(t: WorkTask): string {
   return t.title || t.key || t.task_id;
 }
 
-// ── The board (sprints design 2026-09-28 §6c) ──
+// ── The board (sprints design 2026-09-28 §6c; redesign 6.1) ──
 //
-// Columns by status, through the same `taskColumnOf` rule the List uses.
+// Columns come from the trackers: a ticket sits under the status name its
+// tracker reports (Jira's "In Review", an Asana section), and every one of
+// those columns belongs to one of the three statuses through the same
+// `taskColumnOf` rule the List uses. So List and Board place a task alike
+// (one mapping, shared): a column is a status, or a tracker's name for part
+// of one. A native task, and a ticket with no status name, sits in its
+// status's own column: To do, In progress, Done.
 
 export type BoardColumn = keyof StatusSections;
 export const BOARD_COLUMNS: readonly BoardColumn[] = ['todo', 'doing', 'done'];
 export const BOARD_COLUMN_LABELS: Record<BoardColumn, string> = {
   todo: 'To do',
-  doing: 'Doing',
+  doing: 'In progress',
   done: 'Done',
 };
 /** The status a person sets by moving a card into a column. */
@@ -73,19 +79,48 @@ export const BOARD_COLUMN_STATUS: Record<BoardColumn, 'todo' | 'in_progress' | '
 
 export const boardColumnOf: (t: WorkTask) => BoardColumn = taskColumnOf;
 
-export interface BoardColumns extends StatusSections {
-  /** Done tasks older than the window, left off the Done column. */
+/** One column of the board: a status's own (`id` is the status), or a
+ *  tracker's status name under it (`id` is `<status>:<name, lower case>`). */
+export interface BoardLane {
+  id: string;
+  label: string;
+  status: BoardColumn;
+}
+
+/** Names that differ only in case or spacing are one column ("To Do" is
+ *  To do). */
+const laneKey = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
+
+/** The column a task sits in: its tracker's status name when it has one,
+ *  else its status's own. */
+export function boardLaneOf(t: WorkTask): BoardLane {
+  const status = taskColumnOf(t);
+  const name = t.kind !== 'local' && t.kind !== 'ref' ? t.status_name?.trim() : '';
+  if (!name || laneKey(name) === laneKey(BOARD_COLUMN_LABELS[status])) {
+    return { id: status, label: BOARD_COLUMN_LABELS[status], status };
+  }
+  return { id: `${status}:${laneKey(name)}`, label: name, status };
+}
+
+export interface BoardColumns {
+  lanes: BoardLane[];
+  /** The cards of each lane, by `BoardLane.id`. */
+  cards: Record<string, TaskNode[]>;
+  /** Done tasks older than the window, left off the Done columns. */
   doneHidden: number;
 }
 
-/** The board's columns: top-level tasks (subtasks ride on their parent's
- *  card), newest activity first. `overrides` places a card a person just
- *  moved before the hub's answer comes back; `keep` exempts those cards
- *  from the Done window, so a card dropped on Done stays where it landed. */
+/** The board's columns: the three statuses' own, and every status name a
+ *  shown task's tracker reports, in status order (To do, In progress, Done)
+ *  and by name within one. Top-level tasks only (subtasks ride on their
+ *  parent's card), newest activity first. `overrides` places a card a person
+ *  just moved (by lane id) before the hub's answer comes back; `keep`
+ *  exempts those cards from the Done window, so a card dropped on Done stays
+ *  where it landed. */
 export function groupTasksForBoard(
   tasks: WorkTask[],
   nowSecs: number,
-  overrides: ReadonlyMap<string, BoardColumn> = new Map(),
+  overrides: ReadonlyMap<string, string> = new Map(),
   keep: ReadonlySet<string> = new Set(),
 ): BoardColumns {
   const byId = new Map(tasks.map((t) => [t.task_id, t]));
@@ -96,16 +131,36 @@ export function groupTasksForBoard(
     if (p) kids.set(p.task_id, [...(kids.get(p.task_id) ?? []), t]);
     else roots.push(t);
   }
-  const out: BoardColumns = { todo: [], doing: [], done: [], doneHidden: 0 };
+  const lanes = new Map<string, BoardLane>(
+    BOARD_COLUMNS.map((c) => [c, { id: c, label: BOARD_COLUMN_LABELS[c], status: c }]),
+  );
+  const out: BoardColumns = { lanes: [], cards: {}, doneHidden: 0 };
   for (const t of [...roots].sort(newestFirst)) {
-    const col = overrides.get(t.task_id) ?? boardColumnOf(t);
-    if (col === 'done' && !keep.has(t.task_id) && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) {
+    const own = boardLaneOf(t);
+    if (!lanes.has(own.id)) lanes.set(own.id, own);
+    const lane = lanes.get(overrides.get(t.task_id) ?? own.id) ?? lanes.get(own.id)!;
+    if (lane.status === 'done' && !keep.has(t.task_id) && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) {
       out.doneHidden++;
       continue;
     }
-    out[col].push({ task: t, children: [...(kids.get(t.task_id) ?? [])].sort(newestFirst) });
+    (out.cards[lane.id] ??= []).push({ task: t, children: [...(kids.get(t.task_id) ?? [])].sort(newestFirst) });
   }
+  const rank = (l: BoardLane) => BOARD_COLUMNS.indexOf(l.status);
+  out.lanes = [...lanes.values()].sort(
+    (a, b) => rank(a) - rank(b) || a.label.localeCompare(b.label, undefined, { sensitivity: 'base' }),
+  );
+  for (const l of out.lanes) out.cards[l.id] ??= [];
   return out;
+}
+
+/** Where ← / → takes a native card from `from`: the nearest column of
+ *  another status that way (a native task has three statuses, so a column
+ *  of its own status is no move), or `null` at the edge. */
+export function boardStep(lanes: readonly BoardLane[], from: BoardLane, dir: 1 | -1): BoardLane | null {
+  for (let i = lanes.findIndex((l) => l.id === from.id) + dir; i >= 0 && i < lanes.length; i += dir) {
+    if (lanes[i].status !== from.status) return lanes[i];
+  }
+  return null;
 }
 
 /** Why a card cannot be moved by a person, or `null` when it can: only a

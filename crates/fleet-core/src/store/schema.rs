@@ -1497,10 +1497,13 @@ const MIGRATIONS: &[Migration] = &[
     // Orbit Fleet 8.2: `aux_usage`, the cost of fleet's own `claude -p`
     // runs. A new table and indexes, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(127, include_str!("../../migrations/127_aux_usage.sql")),
+    // Pull requests (redesign 6.4): `pull_requests` and two indexes. New
+    // objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(128, include_str!("../../migrations/128_pull_requests.sql")),
     // Orbit Fleet 4.9: the add-host wizard's saved drafts (`host_setups`)
     // and the fleet-agent install jobs (`agent_installs`). New tables only,
     // `IF NOT EXISTS`, safe to re-run.
-    Migration::plain(128, include_str!("../../migrations/128_host_setup.sql")),
+    Migration::plain(129, include_str!("../../migrations/129_host_setup.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
