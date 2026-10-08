@@ -10,10 +10,10 @@ a board without leaving the repository.
 
 | Path | What it is | Live source |
 |---|---|---|
-| [`transition-plan.md`](transition-plan.md) | The plan from 0.5.4 to the redesign, A to Z. It has 15 milestones (M0 to M14, where M14 is the phone app in fleet-mobile), about 156 PR-sized steps, migrations 121 to 142, hub contract revisions 11 to 15, a task graph with 13 lanes over 9 waves, risks and decisions | [Claude Doc](https://claude.ai/artifact/FakUr921wZQNr3MVeK7vnu) |
+| [`transition-plan.md`](transition-plan.md) | The plan from 0.5.4 to the redesign, A to Z. It has 15 milestones (M0 to M14, where M14 is the phone app in fleet-mobile), about 164 PR-sized steps, migrations 121 to 142, hub contract revisions 11 to 15, a task graph with 13 lanes over 9 waves, risks and decisions | [Claude Doc](https://claude.ai/artifact/FakUr921wZQNr3MVeK7vnu) |
 | [`images/`](images) | The plan's two diagrams (roadmap and task graph) as static SVG | drawn in the doc |
 | [`design-system/`](design-system) | The Orbit Fleet design manual: [`README.md`](design-system/README.md) (content, colour, type, layout, icons), [`tokens.json`](design-system/tokens.json), [`motion.md`](design-system/motion.md), [`ai.md`](design-system/ai.md), [`keyboard.md`](design-system/keyboard.md), its "On the phone" section, and 20 components (plus the cover card; BottomBar, PhoneRow and BottomSheet are the phone's) with their `of-` classes in [`components/bundle.css`](design-system/components/bundle.css) | [Design System](https://claude.ai/artifact/RecYyvBJYdXVpLC1oD4bpb) |
-| [`canvas/`](canvas) | All 66 boards of the redesign canvas, including the 9 of the "Mobile app" row (`Mobile*.dc.html`), (`*.dc.html`) and the board layout (`canvas.json`). Each file is the board's source. The boards need the canvas runtime (`support.js`, which is not copied), so open the live canvas to see them drawn | [Design canvas](https://claude.ai/artifact/B2sVtJEZodahNG4cvRu7Pu) |
+| [`canvas/`](canvas) | All 79 boards of the redesign canvas, including the 22 of the "Mobile app" row (`Mobile*.dc.html`), (`*.dc.html`) and the board layout (`canvas.json`). Each file is the board's source. The boards need the canvas runtime (`support.js`, which is not copied), so open the live canvas to see them drawn | [Design canvas](https://claude.ai/artifact/B2sVtJEZodahNG4cvRu7Pu) |
 
 Step 0.5 of the plan makes `design-system/tokens.json` the snapshot that `src/app.css`
 and `tokens.ts` follow, and adds a drift test against it. Until that step lands,
