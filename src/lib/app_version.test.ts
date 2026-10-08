@@ -16,7 +16,9 @@ const health = (over: Partial<{ version: string; db_ready: boolean; schema_versi
 describe('versionLine', () => {
   it('standalone names one version, because there is one', () => {
     const v = versionLine({ app: '0.4.5', health: health({ version: '0.4.5' }), remote: false, hubUrl: null });
-    expect(v.text).toBe('app 0.4.5 · db: ok · schema 90');
+    // Redesign 1.4: the strip says how things are; the numbers are on hover.
+    expect(v.text).toBe('All systems OK');
+    expect(v.title.startsWith('app 0.4.5 · db: ok · schema 90.')).toBe(true);
     expect(v.title).toContain('This app owns the fleet');
     expect(v.title).toContain('No hub');
   });
@@ -25,7 +27,7 @@ describe('versionLine', () => {
     // `getVersion()` has not resolved yet (or failed). Standalone that costs
     // nothing: `health_check` did not route anywhere, so its version is ours.
     const v = versionLine({ app: null, health: health({ version: '0.4.5' }), remote: false, hubUrl: null });
-    expect(v.text).toBe('app 0.4.5 · db: ok · schema 90');
+    expect(v.title.startsWith('app 0.4.5 · db: ok · schema 90.')).toBe(true);
   });
 
   it('paired names both, and says which database the schema belongs to', () => {
@@ -37,7 +39,8 @@ describe('versionLine', () => {
     });
     // The whole point: two numbers, each labelled, in the one strip that is
     // always on screen.
-    expect(v.text).toBe('app 0.4.5 · hub 0.4.6 · db: ok · schema 90');
+    expect(v.text).toBe('All systems OK');
+    expect(v.title.startsWith('app 0.4.5 · hub 0.4.6 · db: ok · schema 90.')).toBe(true);
     expect(v.title).toContain('app 0.4.5 is this window');
     expect(v.title).toContain('hub 0.4.6 is https://fleet.rlt.sk');
     expect(v.title).toContain('schema 90');
@@ -54,23 +57,23 @@ describe('versionLine', () => {
       remote: true,
       hubUrl: null,
     });
-    expect(same.text).toBe('app 0.4.6 · hub 0.4.6 · db: ok · schema 90');
+    expect(same.title.startsWith('app 0.4.6 · hub 0.4.6 · db: ok · schema 90.')).toBe(true);
     expect(same.title).not.toContain('differ');
   });
 
   it('paired with no app version still labels the hub as the hub', () => {
     const v = versionLine({ app: null, health: health(), remote: true, hubUrl: 'https://h' });
-    expect(v.text).toBe('hub 0.4.6 · db: ok · schema 90');
+    expect(v.title.startsWith('hub 0.4.6 · db: ok · schema 90.')).toBe(true);
     expect(v.title).toContain("This app's own version could not be read");
   });
 
   it('a failed database is named on whichever side it is', () => {
-    expect(versionLine({ app: '1', health: health({ db_ready: false }), remote: false, hubUrl: null }).text).toContain(
-      'db: fail',
-    );
-    expect(versionLine({ app: '1', health: health({ db_ready: false }), remote: true, hubUrl: null }).text).toContain(
-      'db: fail',
-    );
+    const mine = versionLine({ app: '1', health: health({ db_ready: false }), remote: false, hubUrl: null });
+    expect(mine.text).toBe('Database not ready');
+    expect(mine.title).toContain('db: fail');
+    const hubs = versionLine({ app: '1', health: health({ db_ready: false }), remote: true, hubUrl: null });
+    expect(hubs.text).toBe('Database not ready');
+    expect(hubs.title).toContain('db: fail');
   });
 
   it('with no health at all it is this app and nothing else', () => {
