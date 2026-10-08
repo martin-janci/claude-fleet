@@ -5014,6 +5014,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
     assert_eq!(
         PHONE_SESSION_FIELDS,
         &[
+            "account_uuid",
             "ci_status",
             "claude_status",
             "context_pct",
@@ -6873,8 +6874,9 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
 }
 
 /// The columns no screen reads: the heaviest of these on the measured capture
-/// were `claude_session_id` (2 773 B over 56 rows) and `account_uuid`
-/// (2 160 B). Dropping them is also why a phone stops holding them at all.
+/// was `claude_session_id` (2 773 B over 56 rows). Dropping them is also why
+/// a phone stops holding them at all. (`account_uuid`, 2 160 B on that
+/// capture, came back for the phone's account chip in redesign step 4.10.)
 #[test]
 fn the_phone_view_drops_the_columns_no_screen_reads() {
     let mut rows = one_full_row();
@@ -6882,7 +6884,6 @@ fn the_phone_view_drops_the_columns_no_screen_reads() {
     let obj = rows[0].as_object().expect("row object");
     for gone in [
         "claude_session_id",
-        "account_uuid",
         "usage_cache_read_tokens",
         "usage_input_tokens",
         "context_source",
@@ -10053,6 +10054,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // because `to_addr` can name the same row by address.
     ("send_message", &["Drive"]),
     ("send_prompt", &["Drive"]),
+    ("queue_prompt", &["Drive"]),
+    ("queued_prompts", &["Drive"]),
     ("session_conversations", &["Read"]),
     ("session_history", &["Read"]),
     ("wait_for_reply", &["Read"]),

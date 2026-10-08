@@ -119,6 +119,81 @@ impl FleetTools {
         ok_json(&out)
     }
 
+    #[tool(description = "Send a prompt as a new turn when the session is \
+        idle: typed now if it is, else kept and typed once its turn ends \
+        (never into a dialog). Marked untrusted unless raw=true (master \
+        only). Returns { session_id, delivered, queued_id }.")]
+    pub(super) async fn queue_prompt(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<QueuePromptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Prompt body intentionally not logged.
+        audit("queue_prompt", &format!("session_id={}", p.session_id));
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            // `drive`, as `send_prompt`: it ends as a pane write.
+            Reach::Drive,
+            "the session to prompt",
+        )?;
+        let prompt = apply_marker(p.prompt, &marker_origin(&caller), &caller, p.raw)?;
+        let out = sessions::queue_prompt(
+            sessions::QueuePromptArgs {
+                session_id: row.id,
+                prompt,
+            },
+            &self.store,
+            &self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json(&out)
+    }
+
+    #[tool(description = "A session's prompts from queue_prompt still \
+        waiting, and any whose typing failed. cancel=<id> takes one back \
+        instead.")]
+    pub(super) async fn queued_prompts(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<QueuedPromptsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "queued_prompts",
+            &format!("session_id={} cancel={:?}", p.session_id, p.cancel),
+        );
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            // Taking a prompt back changes what the pane will get: `drive`.
+            // A list is the session's own pending input, read at `drive`
+            // too, so a watcher never reads what an owner is about to send.
+            Reach::Drive,
+            "the session whose prompts to list",
+        )?;
+        if let Some(id) = p.cancel {
+            sessions::cancel_queued_prompt(
+                sessions::CancelQueuedPromptArgs {
+                    session_id: row.id,
+                    id,
+                },
+                &self.store,
+            )
+            .map_err(to_mcp_err)?;
+        }
+        let rows = sessions::queued_prompts(
+            sessions::QueuedPromptsArgs { session_id: row.id },
+            &self.store,
+        )
+        .map_err(to_mcp_err)?;
+        ok_json(&rows)
+    }
+
     #[tool(description = "Send one prompt to every matching work session \
         (not the controller), skipping blocked or stuck ones unless \
         status=\"blocked\". Returns per-session results. Rate-limited per \

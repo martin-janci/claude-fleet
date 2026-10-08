@@ -347,8 +347,8 @@ describe('BulkPromptDialog narrows its own fan-out', () => {
     await fireEvent.input(screen.getByTestId('bulk-prompt-textarea'), { target: { value: 'ship it' } });
     await flush();
     await fireEvent.click(screen.getByTestId('bulk-prompt-send'));
-    await waitFor(() => expect(calls('send_prompt').length).toBe(1));
-    expect(calls('send_prompt')[0]!.tmux_name).toBe('dev-1');
+    await waitFor(() => expect(calls('queue_prompt').length).toBe(1));
+    expect(calls('queue_prompt')[0]!.session_id).toBe(1);
   });
 
   it('refuses to send at all when no selected session is this client’s', async () => {
@@ -365,7 +365,7 @@ describe('BulkPromptDialog narrows its own fan-out', () => {
     expect((screen.getByTestId('bulk-prompt-send') as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.click(screen.getByTestId('bulk-prompt-send'));
     await flush();
-    expect(calls('send_prompt')).toEqual([]);
+    expect(calls('queue_prompt')).toEqual([]);
   });
 
   it('the owner keeps the whole selection', async () => {

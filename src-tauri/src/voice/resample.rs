@@ -53,6 +53,27 @@ impl Converter {
     }
 }
 
+/// How loud one chunk of the relay's PCM is, 0.0–1.0: the RMS of its S16LE
+/// samples on a square-root curve, so speech reads well above the noise
+/// floor. The UI's Sonar follows it while the microphone records (redesign
+/// 5.14).
+pub fn level(pcm: &[u8]) -> f32 {
+    let n = pcm.len() / 2;
+    if n == 0 {
+        return 0.0;
+    }
+    let sum: f64 = pcm
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| {
+            let s = i16::from_le_bytes([b[0], b[1]]) as f64 / i16::MAX as f64;
+            s * s
+        })
+        .sum();
+    ((sum / n as f64).sqrt().sqrt() as f32).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,6 +81,18 @@ mod tests {
         b.chunks(2)
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect()
+    }
+
+    #[test]
+    fn level_is_zero_for_silence_and_rises_with_loudness() {
+        let pcm = |v: i16| v.to_le_bytes().repeat(100);
+        assert_eq!(level(&[]), 0.0);
+        assert_eq!(level(&pcm(0)), 0.0);
+        let quiet = level(&pcm(300));
+        let loud = level(&pcm(12_000));
+        assert!(quiet > 0.0 && quiet < loud && loud < 1.0, "{quiet} {loud}");
+        assert!((level(&pcm(i16::MAX)) - 1.0).abs() < 1e-6);
+        assert!((level(&pcm(i16::MIN)) - 1.0).abs() < 1e-3);
     }
 
     #[test]

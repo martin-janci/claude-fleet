@@ -9,17 +9,24 @@
   import { matchShortcut } from '../shortcuts';
   import { detectMac, isEditable } from '../terminal_keys';
   import { stepProblems, visibleSteps } from './form_model';
-  import type { FieldProblem, FormField, FormSpec, Values } from './forms';
+  import type { FieldProblem, FormField, FormProposal, FormSpec, Values } from './forms';
+  import ProposedBy from '../ProposedBy.svelte';
+  import { preselect } from '../ai_proposal';
+  import { QUICK_ANSWER, risky } from '../quick_answer';
 
   let {
     spec,
     busy = false,
     disabled = false,
     serverProblems = [],
+    proposal = null,
     onsubmit,
     onunplaced,
   }: {
     spec: FormSpec;
+    /** Jev's likely option for one choice (step 10.9): shown first and
+     *  pre-selected when the field is empty; never a risky option. */
+    proposal?: FormProposal | null;
     busy?: boolean;
     disabled?: boolean;
     serverProblems?: FieldProblem[];
@@ -83,6 +90,34 @@
   const off = $derived(busy || disabled);
   const str = (f: FormField) => (typeof values[f.name] === 'string' ? (values[f.name] as string) : '');
 
+  // J5 quick answer: the proposed option goes first and is pre-selected when
+  // nothing is chosen yet; "Change" puts the order back and clears it.
+  let dismissed = $state(false);
+  const proposed = $derived.by(() => {
+    if (dismissed || !proposal || preselect(QUICK_ANSWER, proposal) === null) return null;
+    const f = spec.steps.flatMap((s) => s.fields).find((x) => x.name === proposal.field);
+    const opt = f?.type === 'select' ? f.options?.find(([v]) => v === proposal.value) : undefined;
+    return opt && !risky(opt[1]) && !risky(opt[0]) ? proposal : null;
+  });
+  $effect(() => {
+    const p = proposed;
+    if (!p) return;
+    untrack(() => {
+      if (values[p.field] === undefined) set(p.field, p.value);
+    });
+  });
+  /** A field's options in the order shown: the proposed one first. */
+  function optionsOf(f: FormField): [string, string][] {
+    const all = f.options ?? [];
+    if (!proposed || proposed.field !== f.name) return all;
+    const at = all.findIndex(([v]) => v === proposed.value);
+    return at < 0 ? all : [all[at], ...all.slice(0, at), ...all.slice(at + 1)];
+  }
+  function dismissProposal(f: FormField) {
+    if (proposed && values[f.name] === proposed.value) set(f.name, undefined);
+    dismissed = true;
+  }
+
   /** A choice short enough to number: a select or multiselect of 1–9 options. */
   const numbered = (f: FormField) =>
     (f.type === 'select' || f.type === 'multiselect') && (f.options?.length ?? 0) > 0 && (f.options?.length ?? 0) <= 9;
@@ -114,7 +149,7 @@
     const target = e.target instanceof HTMLElement ? e.target : null;
     if (isEditable(target) || target?.dataset?.imeProxy !== undefined || target?.closest?.('dialog')) return;
     if (document.querySelector('[data-testid="answer-card"]:not(.compact)')) return;
-    const o = f.options?.[Number(e.key) - 1];
+    const o = optionsOf(f)[Number(e.key) - 1];
     if (!o) return;
     e.preventDefault();
     pick(f, o[0]);
@@ -162,7 +197,7 @@
         {:else if f.type === 'select' && numbered(f)}
           <span class="label" id={`${uid}-${f.name}`}>{f.label}{f.required ? ' *' : ''}</span>
           <div class="options" role="radiogroup" aria-labelledby={`${uid}-${f.name}`}>
-            {#each f.options ?? [] as [v, l], i (v)}
+            {#each optionsOf(f) as [v, l], i (v)}
               <button
                 type="button"
                 role="radio"
@@ -177,6 +212,13 @@
               </button>
             {/each}
           </div>
+          {#if proposed?.field === f.name}
+            <ProposedBy
+              proposal={proposed}
+              field={QUICK_ANSWER}
+              testid={`form-proposed-${f.name}`}
+              onchange={() => dismissProposal(f)} />
+          {/if}
         {:else}
           <label for={`${uid}-${f.name}`}>{f.label}{f.required ? ' *' : ''}</label>
           {#if f.type === 'select'}

@@ -12,4 +12,4 @@ ALTER TABLE routine_runs ADD COLUMN outcome TEXT
   CHECK (outcome IN ('did_work', 'nothing', 'failed', 'needs_person'));
 ALTER TABLE routine_runs ADD COLUMN outcome_source TEXT
   CHECK (outcome_source IN ('exit', 'rule', 'jev'));
-INSERT OR IGNORE INTO schema_version (version) VALUES (133);
+INSERT OR IGNORE INTO schema_version (version) VALUES (134);
