@@ -1001,6 +1001,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "account_usage_history",
+        Verdict::LocalOnly {
+            instead: "this app does not poll account usage while a hub owns the fleet, so \
+                      it keeps no history; read usage on the hub",
+        },
+    ),
+    (
         "refresh_account_usage",
         Verdict::LocalOnly {
             instead: "it reads the account's usage over this machine's SSH connection to the \

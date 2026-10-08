@@ -30,6 +30,7 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
+  import AccountsPage from './lib/AccountsPage.svelte';
   import WorkBoard from './lib/WorkBoard.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, applySessionEvents, sessions, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
@@ -73,7 +74,7 @@
   } from './lib/app_views';
   import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
-  import { readPref, writePref, sessionView } from './lib/prefs';
+  import { readPref, writePref, sessionView, uiLayout } from './lib/prefs';
   import { resolveSessionView, otherSessionView, type SessionView } from './lib/session_view';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
   import HintLayer from './lib/HintLayer.svelte';
@@ -482,6 +483,7 @@
   const unsubOpened = onSessionOpened(() => {
     closeHosts();
     leave('board');
+    leave('accounts');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
@@ -530,6 +532,12 @@
   const hostsMode = $derived($destination === 'hosts');
   const assetsMode = $derived($destination === 'assets');
   const boardMode = $derived($destination === 'board');
+  // The Accounts page (step 4.1) is New-layout only until the rail (3.2);
+  // switching back to Classic leaves it.
+  const accountsMode = $derived($destination === 'accounts');
+  $effect(() => {
+    if ($uiLayout !== 'new') untrack(() => leave('accounts'));
+  });
 
   // Files mode swaps the center + terminal region for the worktree file
   // viewer. The Files tab needs a selected session (the worktree to browse);
@@ -583,7 +591,7 @@
   // underneath. Unlike Files/Hosts the Session tab keeps the center
   // (Details) pane — both its views are views *of* the session. The board
   // covers the Session tab without leaving it, so its segment stays shown.
-  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode);
+  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode && !accountsMode);
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
   );
@@ -670,6 +678,9 @@
   }
   function showAssets() {
     goTo('assets');
+  }
+  function showAccounts() {
+    goTo('accounts');
   }
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
   // terminal like Assets, opened from the Work view's Board button
@@ -831,6 +842,12 @@
       leave('assets');
       return;
     }
+    // Accounts, the same rule as Assets.
+    if (accountsMode) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('accounts');
+      return;
+    }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
     // filter, close from the list). This catches only an Esc with focus lost
     // to the page or left on the right column's chrome; a dialog, an input
@@ -852,7 +869,7 @@
     const sbResizer = sidebarCollapsed ? '0px' : '4px';
     // In files mode the center pane collapses to zero — the file viewer
     // takes the whole region right of the sidebar.
-    const wide = filesMode || hostsMode || assetsMode;
+    const wide = filesMode || hostsMode || assetsMode || accountsMode;
     const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
     const centerResizer = wide || centerCollapsed ? '0px' : '4px';
     return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
@@ -936,8 +953,8 @@
     <Resizer id="sidebar" onresize={onResizeSidebar} />
   {/if}
 
-  {#if filesMode || hostsMode}
-    <!-- Center collapsed to 0 in files/hosts mode — two empty grid cells. -->
+  {#if filesMode || hostsMode || accountsMode}
+    <!-- Center collapsed to 0 in files/hosts/accounts mode — two empty grid cells. -->
     <div></div>
     <div></div>
   {:else if centerCollapsed}
@@ -1002,6 +1019,19 @@
         onclick={showAssets}
         data-testid="tab-assets">Assets</button
       >
+      {#if $uiLayout === 'new'}
+        <!-- New layout only, until the rail (step 3.2) gives Accounts its
+             own item. Fleet-scoped like Assets. -->
+        <button
+          class="view-tab"
+          class:active={accountsMode}
+          role="tab"
+          aria-selected={accountsMode}
+          title="Claude accounts: plan, usage and its history, hosts and sessions"
+          onclick={showAccounts}
+          data-testid="tab-accounts">Accounts</button
+        >
+      {/if}
       <!-- Always present so Hosts keeps its place; the segment inside it
            appears only while the Session tab owns the panel. Not a nested
            tablist — two tablists in one strip would have a screen reader
@@ -1063,7 +1093,7 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
+          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -1098,7 +1128,7 @@
             <WatchView
               session={$selectedSession}
               access={selAccess}
-              visible={!hostsMode && !assetsMode && !filesMode && !conversationMode}
+              visible={!hostsMode && !assetsMode && !accountsMode && !filesMode && !conversationMode}
             />
           {:else}
             <TerminalView />
@@ -1111,7 +1141,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={() => setSessionView('terminal')} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode} onOpenTerminal={() => setSessionView('terminal')} />
           </div>
         {/if}
       {/if}
@@ -1131,6 +1161,11 @@
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
           <AssetsPanel visible={assetsMode} />
+        </div>
+      {/if}
+      {#if accountsMode}
+        <div class="view-slot overlay" data-testid="accounts-overlay">
+          <AccountsPage />
         </div>
       {/if}
       {#if boardMode}
