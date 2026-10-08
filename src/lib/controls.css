@@ -215,7 +215,7 @@
   height: 14px;
   border-radius: 7px;
   background: var(--control-border-strong);
-  transition: background 0.12s;
+  transition: background var(--dur-fast);
 }
 .switch::after {
   content: '';
@@ -226,7 +226,7 @@
   height: 10px;
   border-radius: 50%;
   background: var(--bg);
-  transition: transform 0.12s;
+  transition: transform var(--dur-fast);
 }
 .switch-row[aria-checked='true'] .switch {
   background: var(--accent);

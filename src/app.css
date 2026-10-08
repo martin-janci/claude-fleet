@@ -405,6 +405,19 @@
   --control-fg-quiet: #a8a8a8;
 }
 
+/* Motion (src/lib/motion.ts sets data-motion from the Motion pref and the
+   OS). Reduced keeps only short fades; Off stops UI motion. Every
+   transition reads these tokens, so this is the one switch. */
+:root[data-motion='reduced'] {
+  --dur-base: var(--dur-fast);
+  --dur-slow: var(--dur-fast);
+}
+:root[data-motion='off'] {
+  --dur-fast: 0ms;
+  --dur-base: 0ms;
+  --dur-slow: 0ms;
+}
+
 /* One focus style for everything focusable, at zero specificity so any
    component that draws its own focus keeps it. */
 :where(:focus-visible) {
