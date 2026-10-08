@@ -1,5 +1,5 @@
 {
-  "_comment": "Redesign step 0.4: the one attention model. Read by src/lib/attention.ts at runtime and checked against crates/fleet-core/src/service/attention.rs by both test suites. `states` is the seven states in urgency order; `counted` marks the three the Needs you badge counts. `buckets` maps every triage bucket, in TRIAGE_BUCKETS order, to its state. `cases` are rows (overrides on a plain running work session) with the bucket, state and count both sides must agree on.",
+  "_comment": "Redesign step 0.4: the one attention model. Read by src/lib/attention.ts at runtime and checked against crates/fleet-core/src/service/attention.rs by both test suites. `states` is the seven states in urgency order; `counted` marks the three the Needs you badge counts. `buckets` maps every triage bucket, in TRIAGE_BUCKETS order, to its state. `cases` are rows (overrides on a plain running work session on host alpha), optionally with `facts` about the fleet (step 2.4: down hosts, accounts at a limit, accounts without a login), with the bucket, state and count both sides must agree on.",
   "states": [
     { "id": "action_required", "counted": true },
     { "id": "failed", "counted": true },
@@ -12,6 +12,9 @@
   "buckets": [
     ["waiting", "action_required"],
     ["stuck", "action_required"],
+    ["host_down", "blocked"],
+    ["account_limit", "blocked"],
+    ["no_credentials", "blocked"],
     ["stop_failed", "failed"],
     ["failed", "failed"],
     ["context_full", "action_required"],
@@ -40,6 +43,14 @@
     { "name": "a ghost keeps its last context but leaves the count", "row": { "status": "ghost", "context_pct": 99.0 }, "bucket": "lifecycle", "state": "paused", "counted": false },
     { "name": "a pending safe kill", "row": { "safe_kill_state": "requested", "safe_kill_requested_at": 70 }, "bucket": "lifecycle", "state": "paused", "counted": false },
     { "name": "a lost row that is blocked still counts", "row": { "lost_at": 80, "claude_status": "blocked" }, "bucket": "waiting", "state": "action_required", "counted": true },
+    { "name": "a session on a down host is blocked", "row": {}, "facts": { "down_hosts": ["alpha"] }, "bucket": "host_down", "state": "blocked", "counted": true },
+    { "name": "a lost row on a down host leaves the count", "row": { "lost_at": 80 }, "facts": { "down_hosts": ["alpha"] }, "bucket": "lifecycle", "state": "paused", "counted": false },
+    { "name": "a question on a down host is still waiting", "row": { "claude_status": "blocked" }, "facts": { "down_hosts": ["alpha"] }, "bucket": "waiting", "state": "action_required", "counted": true },
+    { "name": "an idle session on an account at its limit is paused by the limit", "row": { "claude_status": "idle", "account_uuid": "acc" }, "facts": { "limited_accounts": { "acc": { "window": "weekly", "resets_at": 5000 } } }, "bucket": "account_limit", "state": "blocked", "counted": true },
+    { "name": "a turn that failed at the limit reads as the limit", "row": { "claude_status": "failed", "account_uuid": "acc" }, "facts": { "limited_accounts": { "acc": { "window": "five_hour", "resets_at": 5000 } } }, "bucket": "account_limit", "state": "blocked", "counted": true },
+    { "name": "a working session on a limited account is still working", "row": { "account_uuid": "acc" }, "facts": { "limited_accounts": { "acc": { "window": "weekly", "resets_at": 5000 } } }, "bucket": "working", "state": "working", "counted": false },
+    { "name": "an idle session whose account lost its login", "row": { "claude_status": "idle", "account_uuid": "acc" }, "facts": { "uncredentialed_accounts": ["acc"] }, "bucket": "no_credentials", "state": "blocked", "counted": true },
+    { "name": "a session on another account is not blocked", "row": { "claude_status": "idle", "account_uuid": "other" }, "facts": { "limited_accounts": { "acc": { "window": "weekly", "resets_at": 5000 } }, "uncredentialed_accounts": ["acc"] }, "bucket": "idle", "state": "idle", "counted": false },
     { "name": "an external session never counts", "row": { "kind": "external", "claude_status": "blocked" }, "bucket": "idle", "state": "idle", "counted": false },
     { "name": "a shell never counts", "row": { "kind": "shell", "claude_status": "failed" }, "bucket": "idle", "state": "idle", "counted": false }
   ]
