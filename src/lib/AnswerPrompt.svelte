@@ -24,6 +24,9 @@
   // approve a permission dialog the user never saw — or press a digit into
   // the REPL of a session that has already moved on.
   import { sessionActivity } from './conversation';
+  import { destination } from './destination';
+  import { matchShortcut } from './shortcuts';
+  import { detectMac, isEditable } from './terminal_keys';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
@@ -193,6 +196,22 @@
     return ticked.length ? ticked.join(', ') : 'Nothing ticked';
   }
 
+  // 1–9 answer (redesign step 3.8): only the full card in the Conversation,
+  // only while the session view is showing (no overlay over it), and never
+  // while a text field, the terminal or a dialog has the keyboard. The
+  // sidebar's compact cards take no digits: there could be several.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (compact || sent !== null || busy || e.defaultPrevented || $destination !== 'session') return;
+    if (matchShortcut('question-card', e, isMac) !== 'question-card.answer') return;
+    const target = e.target as HTMLElement | null;
+    if (isEditable(target) || target?.dataset?.imeProxy !== undefined || target?.closest?.('dialog')) return;
+    const o = view.options.find((x) => x.n === Number(e.key));
+    if (!o || o.key === null || writeBlocked !== null) return;
+    e.preventDefault();
+    choose(o);
+  }
+
   /** In the sidebar this card sits inside a row that is itself a button:
    *  answering a question must not also select the session, or tick its
    *  bulk-select checkbox. The card keeps every click it handles. */
@@ -201,6 +220,8 @@
     run();
   }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="answer" class:compact data-testid="answer-card" data-kind={view.kind} role="group"
   aria-label={view.kind === 'permission' ? 'Permission request' : 'Question from Claude'}>

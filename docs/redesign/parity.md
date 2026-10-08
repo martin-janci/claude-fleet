@@ -55,7 +55,7 @@ test file (and test) that covers it today.
 | P23 | Assets | Renamed Toolkit, same content | Click | 3.16 | Classic | `src/lib/AssetsPanel.test.ts`, `src/lib/AssetsWorkspace.test.ts` |
 | P24 | Sessions and Work filters | One engine; every facet of both kept (machine, time, tracker column, background agents, archived, saved views) | Same chips; ⌘⇧O / Ctrl+Shift+O | 3.7 | Classic | `src/lib/WorkFiltersBar.test.ts`, `src/lib/work_view_persist.test.ts`, `src/lib/Sidebar.test.ts` |
 | P25 | About 15 ways to start a session | All kept; they open the same flow | ⌘N / Ctrl+Shift+N and every existing button | 1.9, 3.12 | Classic | `src/lib/NewSessionDialog.test.ts`, `src/lib/QuickSwitcher.test.ts` |
-| P26 | Board instruction sentence | First-run hint and the ? shortcut sheet | ? | 1.4, 3.8 | Classic | `src/lib/WorkBoard.test.ts` |
+| P26 | Board instruction sentence | First-run hint and the ? shortcut sheet | ? | 1.4, 3.8 | Classic | `src/lib/WorkBoard.test.ts`, `src/lib/ShortcutSheet.test.ts` › ? opens the sheet with every live chord |
 | P27 | Every 0.5.4 shortcut | The shortcut registry, `src/lib/shortcuts.ts` | Each chord, unchanged on Mac and Linux/Windows | 0.1 | Both | `src/lib/shortcuts.test.ts` |
 | P28 | The classic layout itself | Settings → Appearance → Layout (Classic, New) until 13.1 | Settings | 0.3 | Both | `src/App.test.ts` › App layout switch |
 
