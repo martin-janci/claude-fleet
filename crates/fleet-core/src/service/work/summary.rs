@@ -437,7 +437,7 @@ pub async fn summarize(
 
 /// The last non-empty stderr line, redacted and short — enough to say why
 /// without echoing a transcript.
-fn last_error_line(stderr: &[u8]) -> String {
+pub(crate) fn last_error_line(stderr: &[u8]) -> String {
     let text = String::from_utf8_lossy(stderr);
     let line = text
         .lines()

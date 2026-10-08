@@ -855,7 +855,14 @@ pub async fn run_planner(
     };
     let commands = match planner::parse_commands(&answer) {
         Ok(c) => c,
-        Err(why) => {
+        Err(mut why) => {
+            if answer.trim().is_empty() && !out.stderr.is_empty() {
+                // `claude` printed nothing: what it said went to stderr.
+                why.push_str(&format!(
+                    "; claude said: {}",
+                    crate::service::work::summary::last_error_line(&out.stderr)
+                ));
+            }
             let s = lock(&deps.store)?;
             event(
                 &s,

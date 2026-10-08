@@ -52,6 +52,40 @@ fn one_bad_command_refuses_the_whole_answer() {
 }
 
 #[test]
+fn an_array_wrapped_in_prose_or_a_fence_is_still_read() {
+    let arr = r#"[{"command":"note","text":"split by layer"},{"command":"run","item_id":3}]"#;
+    for a in [
+        format!("Here is the plan:\n{arr}"),
+        format!("Here is the plan:\n```json\n{arr}\n```\nLet me know."),
+        format!("I looked at the mission [2 items].\n\n```\n{arr}\n```"),
+        format!("{arr}\n\nThe note explains the split."),
+    ] {
+        let c = parse_commands(&a).unwrap_or_else(|e| panic!("{a}: {e}"));
+        assert_eq!(c.len(), 2, "{a}");
+    }
+    assert_eq!(
+        parse_commands("Nothing needs judgment right now: []").unwrap(),
+        vec![]
+    );
+}
+
+#[test]
+fn a_refused_answer_names_what_the_planner_said() {
+    let e = parse_commands("Credit balance is too low").unwrap_err();
+    assert!(e.contains("not a JSON array"), "{e}");
+    assert!(e.contains("Credit balance is too low"), "{e}");
+    assert!(!e.contains("line 1 column"), "{e}");
+    let e = parse_commands("  \n ").unwrap_err();
+    assert!(e.contains("empty"), "{e}");
+    let long = "x".repeat(1000);
+    let e = parse_commands(&long).unwrap_err();
+    assert!(e.chars().count() < 250, "{e}");
+    // A bracket in prose that holds no commands is not taken for the answer.
+    let e = parse_commands("see [1, 2] for details").unwrap_err();
+    assert!(e.contains("see [1, 2]"), "{e}");
+}
+
+#[test]
 fn worker_text_is_fenced_and_the_snapshot_stays_in_budget() {
     let m: MissionRow = serde_json::from_value(serde_json::json!({
         "id": 1, "name": "m", "goal": "ship it", "mode": "finite", "state": "active",
