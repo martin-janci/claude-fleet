@@ -4,6 +4,7 @@ import {
   ANSWER_MAX_DIGIT,
   answerFingerprint,
   answerKeyFor,
+  isFreeTextOption,
   pendingInputFor,
   type PendingInput,
 } from './pending_input';
@@ -171,5 +172,56 @@ describe('answerFingerprint', () => {
       options: dialog.options.map((o) => ({ ...o, selected: o.n === 2 })),
     };
     expect(answerFingerprint(moved)).toBe(answerFingerprint(dialog));
+  });
+
+  it('ignores which boxes of a multi-select are ticked', () => {
+    // Ticking a box IS answering this question; reading the next tick as
+    // "the dialog changed" is what kept a multi-select from being answered.
+    const multi: PendingInput = {
+      kind: 'input',
+      question: 'Which features do you want to enable?',
+      multi: true,
+      options: [
+        { n: 1, label: 'Auth', selected: true },
+        { n: 2, label: 'Logging', selected: false },
+      ],
+    };
+    const ticked: PendingInput = {
+      ...multi,
+      options: multi.options.map((o) => ({ ...o, checked: o.n === 2 })),
+    };
+    expect(answerFingerprint(ticked)).toBe(answerFingerprint(multi));
+  });
+});
+
+describe('multi-select', () => {
+  it('carries the multi flag and each tick into the view', () => {
+    const v = pendingInputFor({
+      rowStatus: 'blocked',
+      rowStuck: null,
+      rowPending: {
+        kind: 'input',
+        question: 'Which?',
+        multi: true,
+        options: [
+          { n: 1, label: 'A', selected: true, checked: true },
+          { n: 2, label: 'B', selected: false },
+        ],
+      },
+      probe: null,
+    });
+    expect(v?.multi).toBe(true);
+    expect(v?.options.map((o) => o.checked === true)).toEqual([true, false]);
+  });
+
+  it('is off for a dialog from a hub that does not send the flag', () => {
+    const v = pendingInputFor({ rowStatus: 'blocked', rowStuck: null, rowPending: dialog, probe: null });
+    expect(v?.multi).toBe(false);
+  });
+
+  it('knows the free-text row', () => {
+    expect(isFreeTextOption({ label: 'Type something' })).toBe(true);
+    expect(isFreeTextOption({ label: 'Type something.' })).toBe(true);
+    expect(isFreeTextOption({ label: 'Type checking' })).toBe(false);
   });
 });

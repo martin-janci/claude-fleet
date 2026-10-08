@@ -284,6 +284,7 @@ fn protection_needs_you_dialog() {
         kind: "permission".into(),
         question: None,
         options: vec![],
+        multi: false,
     });
     assert!(run(&[s], &cfg()).is_empty());
 }
@@ -821,6 +822,7 @@ fn idle_unlinked_exclusions_table() {
                     kind: "question".into(),
                     question: None,
                     options: vec![],
+                    multi: false,
                 });
                 s
             }),

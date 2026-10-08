@@ -114,7 +114,9 @@ pub(crate) fn sample_session() -> SessionRow {
                 n: 1,
                 label: "Yes".into(),
                 selected: true,
+                checked: false,
             }],
+            multi: false,
         }),
         work: Some(WorkSummary {
             link_id: 5,
