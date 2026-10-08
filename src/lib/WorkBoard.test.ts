@@ -100,8 +100,9 @@ describe('WorkBoard', () => {
     render(WorkBoard);
     await flush();
     expect(column('todo').textContent).toContain('Write notes');
-    expect(column('doing').textContent).toContain('Login fails');
-    expect(column('doing').querySelector('[data-testid="work-board-live"]')?.textContent).toContain(
+    // ABC-12 is "In Review" in Jira: that status name is its own column.
+    expect(column('doing:in review').textContent).toContain('Login fails');
+    expect(column('doing:in review').querySelector('[data-testid="work-board-live"]')?.textContent).toContain(
       'abc-12 login · mefistos',
     );
   });
@@ -135,7 +136,7 @@ describe('WorkBoard', () => {
     expect(screen.getByTestId('work-board-card-error').textContent).toBe(
       "ABC-12's status belongs to Jira (acme). Change it there.",
     );
-    expect(column('doing').textContent).toContain('Login fails');
+    expect(column('doing:in review').textContent).toContain('Login fails');
   });
 
   it('← → move a focused native card; a failed write puts it back and says why', async () => {
@@ -149,6 +150,28 @@ describe('WorkBoard', () => {
     expect(calls('set_work_status')[0][1]).toEqual({ args: { item_id: 1, status: 'in_progress' } });
     expect(column('todo').textContent).toContain('Write notes');
     expect(screen.getByTestId('work-board-card-error').textContent).toContain('not found');
+  });
+
+  it("takes its columns from the tracker's status names, and a native drop there takes that status (redesign 6.1)", async () => {
+    const elementFromPoint = vi.fn();
+    Object.defineProperty(document, 'elementFromPoint', { value: elementFromPoint, configurable: true });
+    render(WorkBoard);
+    await flush();
+    const heads = Array.from(screen.getByTestId('work-board').querySelectorAll('[data-board-column]')).map(
+      (el) => el.getAttribute('data-board-column'),
+    );
+    expect(heads).toEqual(['todo', 'doing', 'doing:in review', 'done']);
+    expect(column('doing:in review').textContent).toContain('In Review');
+    expect(screen.getByTestId('work-board-note').textContent).toContain('Columns come from the tracker');
+    elementFromPoint.mockReturnValue(column('doing:in review'));
+    await fireEvent.pointerDown(card('Write notes'), { button: 0, clientX: 10, clientY: 10 });
+    await fireEvent.pointerMove(window, { clientX: 300, clientY: 20 });
+    await fireEvent.pointerUp(window, { clientX: 300, clientY: 20 });
+    await flush();
+    // Fleet's task has three statuses: the drop sets In progress and the card
+    // sits in In progress, never in a column only Jira can put it in.
+    expect(calls('set_work_status')[0][1]).toEqual({ args: { item_id: 1, status: 'in_progress' } });
+    expect(column('doing').textContent).toContain('Write notes');
   });
 
   it('a click opens the task in the Work view', async () => {

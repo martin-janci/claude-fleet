@@ -520,6 +520,6 @@
     margin: 0;
   }
   .warn {
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
 </style>

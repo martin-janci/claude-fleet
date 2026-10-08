@@ -287,7 +287,7 @@
 
   .mcp-field .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: var(--bg-alt, rgba(127, 127, 127, 0.12));
+    background: var(--bg-sunk);
     padding: 0.1rem 0.4rem;
     border-radius: 3px;
     overflow: hidden;
@@ -305,7 +305,7 @@
   .mcp-config { font-size: 0.8rem; margin-top: 0.3rem; }
   .mcp-config summary { cursor: pointer; color: var(--fg-muted); }
   .mcp-config pre {
-    background: var(--bg-alt, rgba(127, 127, 127, 0.12));
+    background: var(--bg-sunk);
     padding: 0.5rem;
     border-radius: 4px;
     overflow: auto;
@@ -326,18 +326,18 @@
   .hook-desc {
     margin: 0;
     font-size: 12px;
-    color: var(--text-secondary, #888);
+    color: var(--fg-muted);
   }
   .hook-ok {
     margin: 0;
     font-size: 12px;
-    color: var(--color-success, #4caf50);
+    color: var(--status-done);
     white-space: pre-wrap;
   }
   .hook-err {
     margin: 0;
     font-size: 12px;
-    color: var(--color-error, #f44336);
+    color: var(--danger);
   }
 
   .provision-table {

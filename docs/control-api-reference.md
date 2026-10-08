@@ -979,6 +979,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::account_usage::list_account_usage`
 - `commands::account_usage::refresh_account_usage`
 - `commands::account_usage::account_usage_history`
+- `commands::account_usage::check_account_headroom`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`
@@ -1056,6 +1057,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_resize`
 - `pty::pty_close`
 - `pty::pty_drain`
+- `commands::editor::open_session_in_editor`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`
