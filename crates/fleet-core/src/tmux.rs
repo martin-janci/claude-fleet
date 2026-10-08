@@ -113,6 +113,13 @@ pub trait TmuxExec: Send + Sync {
         None
     }
 
+    /// How long an empty command takes to come back from the host, in ms:
+    /// the "SSH · 18 ms" on the Hosts page (Orbit Fleet 4.6). `None` = not
+    /// a remote host, or it did not answer. Only `RemoteTmux` overrides it.
+    async fn round_trip_ms(&self) -> Option<i64> {
+        None
+    }
+
     /// The host's Claude login profiles (`~/.claude-profiles/<name>`,
     /// docs/accounts.md), each with the account its `.claude.json` is
     /// logged into. `None` = could not tell (or an executor that does not
@@ -419,6 +426,18 @@ pub struct HostHealthSample {
     pub load_1m: Option<f64>,
     pub mem_avail_kb: Option<i64>,
     pub uptime_secs: Option<i64>,
+    /// Online CPUs (`getconf _NPROCESSORS_ONLN`, else `hw.ncpu`).
+    pub cpu_count: Option<i64>,
+    /// Physical memory in kB (`MemTotal`, else `hw.memsize` / 1024).
+    pub mem_total_kb: Option<i64>,
+    /// Boot time, unix seconds, as the host states it (`btime` in
+    /// `/proc/stat`, else `kern.boottime`). Steady between passes, unlike
+    /// now − uptime, so a change means the host rebooted.
+    pub boot_at: Option<i64>,
+    /// Round trip of an empty command to the host, in ms (Orbit Fleet 4.6).
+    /// Not read by the script: the probe times [`TmuxExec::round_trip_ms`]
+    /// and fills it in. `None` for `local` and whenever it was not timed.
+    pub latency_ms: Option<i64>,
     /// Which [`AUTH_OVERRIDE_VARS`] are set, by NAME only, in the probing
     /// shell or the tmux server's global environment (which every new pane
     /// inherits). Any of them outranks the host's `/login`, so a session
@@ -447,7 +466,9 @@ pub const AUTH_OVERRIDE_VARS: [&str; 7] = [
 /// (`MemAvailable` on Linux; empty on macOS, whose `vm_stat` has no single
 /// equivalent), and the uptime in seconds (`/proc/uptime`, else derived
 /// from `kern.boottime`, `{ sec = N, usec = M } <date>`; the sed anchors on
-/// `{ sec = ` because `usec = ` also contains `sec = `). Every command is `2>/dev/null` with an empty
+/// `{ sec = ` because `usec = ` also contains `sec = `), then the online CPU
+/// count, total memory in kB and the boot epoch (Orbit Fleet 4.6: `cpus=`,
+/// `memtotal=`, `bootat=`, Linux first, macOS `sysctl` second). Every command is `2>/dev/null` with an empty
 /// value on failure, so a missing tool degrades one field, never the probe.
 /// `authenv=` lists which [`AUTH_OVERRIDE_VARS`] hold a non-empty value in
 /// this shell or in `tmux show-environment -g`: `grep` matches whole lines
@@ -457,6 +478,9 @@ printf 'dftmp=%s\\n' \"$(df -Pk \"${TMPDIR:-/tmp}\" 2>/dev/null | tail -n 1)\"; 
 printf 'load=%s\\n' \"$(cat /proc/loadavg 2>/dev/null || sysctl -n vm.loadavg 2>/dev/null)\"; \
 printf 'memkb=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)\"; \
 printf 'uptime=%s\\n' \"$(cut -d. -f1 /proc/uptime 2>/dev/null || { b=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p'); [ -n \"$b\" ] && echo $(( $(date +%s) - b )); })\"; \
+printf 'cpus=%s\\n' \"$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)\"; \
+printf 'memtotal=%s\\n' \"$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || { m=$(sysctl -n hw.memsize 2>/dev/null); [ -n \"$m\" ] && echo $(( m / 1024 )); })\"; \
+printf 'bootat=%s\\n' \"$(awk '/^btime / {print $2}' /proc/stat 2>/dev/null || sysctl -n kern.boottime 2>/dev/null | sed -n 's/.*{ sec = \\([0-9]*\\),.*/\\1/p')\"; \
 printf 'authenv=%s\\n' \"$({ env; tmux show-environment -g 2>/dev/null; } | grep -E '^(CLAUDE_CODE_USE_BEDROCK|CLAUDE_CODE_USE_VERTEX|CLAUDE_CODE_USE_FOUNDRY|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_PROFILE)=.' | cut -d= -f1 | sort -u | tr '\\n' ' ')\"";
 
 /// Second field of a `df -Pk` data line is total kB, fourth is available kB.
@@ -486,6 +510,12 @@ pub fn parse_host_health(stdout: &str) -> HostHealthSample {
             h.mem_avail_kb = v.trim().parse().ok();
         } else if let Some(v) = line.strip_prefix("uptime=") {
             h.uptime_secs = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("cpus=") {
+            h.cpu_count = v.trim().parse().ok().filter(|n: &i64| *n > 0);
+        } else if let Some(v) = line.strip_prefix("memtotal=") {
+            h.mem_total_kb = v.trim().parse().ok().filter(|n: &i64| *n > 0);
+        } else if let Some(v) = line.strip_prefix("bootat=") {
+            h.boot_at = v.trim().parse().ok().filter(|n: &i64| *n > 0);
         } else if let Some(v) = line.strip_prefix("authenv=") {
             // In precedence order, and only names fleet asked about.
             let set: Vec<&str> = v.split_whitespace().collect();
@@ -890,6 +920,19 @@ pub fn parse_probe_snapshot(stdout: &str) -> Result<ProbeSnapshot, IpcError> {
 
 #[async_trait]
 impl<C: SshExec> TmuxExec for RemoteTmux<C> {
+    async fn round_trip_ms(&self) -> Option<i64> {
+        // `true` straight on the ssh command line, not through
+        // `remote_sh`'s `bash -lc`: a login shell's profile would be timed
+        // as network.
+        let budget = std::time::Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        self.client
+            .run_bounded_capped(&self.host, &["true"], budget, budget, 1024)
+            .await
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(i64::try_from(start.elapsed().as_millis()).unwrap_or(i64::MAX))
+    }
     async fn list_sessions(&self) -> Result<Vec<TmuxSession>, IpcError> {
         let script = format!("tmux list-sessions -F '{SESSIONS_FORMAT}' 2>&1");
         let output = self.remote_sh(&script).await?;
@@ -2723,8 +2766,15 @@ mod tests {
                      dftmp=tmpfs 8000000 2100000 5900000 27% /tmp\n\
                      load=5.25 4.10 3.90 1/900 12345\n\
                      memkb=1234567\n\
-                     uptime=12441600\n";
+                     uptime=12441600\n\
+                     cpus=16\n\
+                     memtotal=65842312\n\
+                     bootat=1778000000\n";
         let h = parse_host_health(linux);
+        assert_eq!(h.cpu_count, Some(16));
+        assert_eq!(h.mem_total_kb, Some(65_842_312));
+        assert_eq!(h.boot_at, Some(1_778_000_000));
+        assert_eq!(h.latency_ms, None, "the script never reports latency");
         assert_eq!(h.disk_home_total_kb, Some(157_286_400));
         assert_eq!(h.disk_home_free_kb, Some(3_600_000));
         assert_eq!(h.disk_tmp_free_kb, Some(5_900_000));
@@ -2735,8 +2785,14 @@ mod tests {
                    dftmp=\n\
                    load={ 1.62 1.80 1.91 }\n\
                    memkb=\n\
-                   uptime=86400\n";
+                   uptime=86400\n\
+                   cpus=10\n\
+                   memtotal=\n\
+                   bootat=0\n";
         let h = parse_host_health(mac);
+        assert_eq!(h.cpu_count, Some(10));
+        assert_eq!(h.mem_total_kb, None);
+        assert_eq!(h.boot_at, None, "a zero epoch is no answer");
         assert_eq!(h.disk_home_free_kb, Some(45_000_000));
         assert_eq!(h.disk_tmp_free_kb, None);
         assert_eq!(h.load_1m, Some(1.62));
@@ -2782,6 +2838,28 @@ mod tests {
         assert_eq!(
             parse_host_health(&stdout).uptime_secs,
             Some(1000),
+            "{stdout}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_health_script_reads_cpus_memory_and_boot_time_on_linux() {
+        let out = std::process::Command::new("sh")
+            .args(["-c", HOST_HEALTH_SCRIPT])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let h = parse_host_health(&stdout);
+        assert!(h.cpu_count.is_some_and(|n| n >= 1), "{stdout}");
+        assert!(h.mem_total_kb.is_some_and(|n| n > 0), "{stdout}");
+        // A boot in the past, and after 2001.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            h.boot_at.is_some_and(|b| b > 1_000_000_000 && b <= now),
             "{stdout}"
         );
     }

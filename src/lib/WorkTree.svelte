@@ -445,7 +445,7 @@
   }
 
   function selectTask(t: WorkTask) {
-    openTask(t.task_id);
+    openTask(t.task_id, t.sessions);
   }
 
   // Opening an occurrence opens its session — the same `session_id` from
@@ -454,12 +454,8 @@
   function openOccurrence(t: WorkTask, l: WorkTaskLink) {
     const row =
       l.session_id != null && l.state !== 'ended' ? $sessions.find((r) => r.id === l.session_id) : undefined;
-    if (row) {
-      selectedTaskId.set(t.task_id);
-      selectSessionExplicitly(row);
-    } else {
-      openTask(t.task_id);
-    }
+    if (row) selectSessionExplicitly(row, { task: t.task_id });
+    else openTask(t.task_id, t.sessions);
   }
 
   function occurrenceTitle(l: WorkTaskLink): string {

@@ -533,6 +533,7 @@ pub fn run() {
             commands::move_session::move_session,
             commands::resolve_move::resolve_move,
             commands::sessions::dismiss_ghost_session,
+            commands::sessions::adopt_session,
             commands::sessions::dismiss_agent_session,
             commands::sessions::new_bg_session,
             commands::sessions::purge_project,
@@ -605,6 +606,7 @@ pub fn run() {
             commands::hosts::set_account_nickname,
             commands::account_usage::list_account_usage,
             commands::account_usage::refresh_account_usage,
+            commands::account_usage::account_usage_history,
             commands::mcp::mcp_status,
             commands::mcp::mcp_configure,
             commands::mcp::install_fleet_hook,
@@ -703,7 +705,7 @@ pub fn run() {
                     }
                 }
                 if let Some(pty) = window.try_state::<Mutex<PtyState>>() {
-                    pty::close_pty(pty.inner());
+                    pty::close_all_ptys(pty.inner());
                 }
             }
         })

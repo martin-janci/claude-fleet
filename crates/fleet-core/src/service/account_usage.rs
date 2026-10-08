@@ -900,6 +900,33 @@ impl UsageCache {
         }
     }
 
+    /// Seed `account` with a last-known answer from before a restart
+    /// (`account_usage_snapshots`, redesign step 2.5), so the meters show it
+    /// at once instead of `never_fetched`. Only an account with no entry yet
+    /// is seeded, and its schedule is left alone: it is due straight away,
+    /// exactly as an unseeded account is.
+    pub fn restore(
+        &mut self,
+        account: &str,
+        usage: AccountUsage,
+        subscription: Option<String>,
+        fetched_at: i64,
+        source_host: Option<String>,
+    ) {
+        if self.entries.contains_key(account) {
+            return;
+        }
+        self.entries.insert(
+            account.to_string(),
+            AccountUsageEntry {
+                last_ok: Some((usage, subscription, fetched_at)),
+                last_outcome: Some(UsageOutcomeKind::Ok),
+                source_host,
+                ..AccountUsageEntry::default()
+            },
+        );
+    }
+
     /// What the UI needs for `account`.
     pub fn snapshot(&self, account: &str) -> AccountUsageSnapshot {
         match self.entries.get(account) {
@@ -1231,6 +1258,12 @@ mod tests {
             provision_warning: None,
             auth_overrides: None,
             claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
             harnesses: None,
         }
     }

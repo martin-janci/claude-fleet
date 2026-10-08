@@ -1,5 +1,6 @@
 {
   "local_only": [
+    "account_usage_history",
     "add_host",
     "add_tracker",
     "catalog_spawn_author_session",
@@ -57,6 +58,7 @@
     "add_org",
     "add_org_rule",
     "add_project",
+    "adopt_session",
     "answer_form",
     "assets_inventory",
     "assets_scan_hosts",

@@ -310,6 +310,8 @@ pub fn spawn_account_usage_tick(
     token: CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     let poller = Arc::new(AccountUsagePoller::new());
+    // The last-known usage from before a restart, before the first poll.
+    account_usage_poll::restore_usage(&store, &cache);
     crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(USAGE_POLL_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -346,6 +348,7 @@ pub fn spawn_account_usage_tick(
                     ssh_dyn,
                     Arc::clone(cache),
                     Arc::clone(bus),
+                    Some(Arc::clone(store)),
                 );
             }
         })

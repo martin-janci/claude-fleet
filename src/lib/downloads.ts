@@ -3,8 +3,10 @@
 // fleet (the hub when paired). The list is re-read on `download:changed`
 // (ids only) and on a hub gap; nothing is patched in place.
 
+import { revealItemInDir } from '@tauri-apps/plugin-opener';
 import { get, writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { detectMac } from './terminal_keys';
 import { push } from './toasts';
 
 export type DownloadState = 'fetching' | 'ready' | 'failed';
@@ -27,6 +29,8 @@ export interface Download {
   ready_at?: number;
   downloaded_at?: number;
   expires_at?: number;
+  /** Bytes copied so far while `fetching`. Absent from an older hub. */
+  fetched_bytes?: number;
 }
 
 export interface DownloadList {
@@ -37,6 +41,9 @@ export interface DownloadList {
 }
 
 export const downloads = writable<Download[]>([]);
+/** Where this window saved each file (id → path), for Show in Finder. Per
+ *  window: the hub records that a file was saved, not where. */
+export const savedTo = writable<Map<number, string>>(new Map());
 export const downloadBudget = writable<{ total: number; max: number } | null>(null);
 
 /** Ready files nobody has saved yet: the footer's count. */
@@ -83,17 +90,89 @@ export function noteDownloadsChanged(): void {
   }, 150);
 }
 
-/** "Send to downloads" from the file viewer. */
-export async function sendFile(sessionId: number, path: string, note?: string): Promise<void> {
+/** Ask for a copy; the new row, or null after an error toast. */
+async function requestCopy(sessionId: number, path: string, note: string | undefined, context: string): Promise<Download | null> {
   const r = await invokeCmd<Download>('send_file', {
     args: { session_id: sessionId, path, ...(note ? { note } : {}) },
   });
   if (!r.ok) {
-    push({ kind: 'error', code: r.error.code, message: `Send to downloads: ${r.error.message}` });
-    return;
+    push({ kind: 'error', code: r.error.code, message: `${context}: ${r.error.message}` });
+    return null;
   }
-  push({ kind: 'info', message: `Copying ${r.value.name}… it appears in Downloads when ready.` });
   downloads.update((rows) => [r.value, ...rows.filter((d) => d.id !== r.value.id)]);
+  return r.value;
+}
+
+/** "Send to downloads" from the file viewer. */
+export async function sendFile(sessionId: number, path: string, note?: string): Promise<void> {
+  const row = await requestCopy(sessionId, path, note, 'Send to downloads');
+  if (row) push({ kind: 'info', message: `Copying ${row.name}… it appears in Downloads when ready.` });
+}
+
+/** Copy a failed file again: the same session, path and note sent anew
+ *  (the session's host is read again, so a file that changed comes whole),
+ *  then the failed row goes. Nothing new on the hub: it is `send_file`. */
+export async function retryDownload(d: Download): Promise<boolean> {
+  if (d.session_id == null) {
+    push({ kind: 'error', message: `Retry: ${d.name} has no session to copy it from; send it again from its session.` });
+    return false;
+  }
+  const row = await requestCopy(d.session_id, d.path, d.note, 'Retry');
+  if (!row) return false;
+  await removeDownload(d.id);
+  push({ kind: 'info', message: `Copying ${row.name} again…` });
+  return true;
+}
+
+/** "Show in Finder" (Explorer, the file manager) for a file this window
+ *  saved. */
+export async function revealSaved(id: number): Promise<void> {
+  const path = get(savedTo).get(id);
+  if (!path) return;
+  try {
+    await revealItemInDir(path);
+  } catch (e) {
+    push({ kind: 'error', message: `Show the file: ${e instanceof Error ? e.message : String(e)}` });
+  }
+}
+
+/** The button's words on this platform. */
+export function revealLabel(nav: { platform?: string; userAgent?: string } | undefined = typeof navigator === 'undefined' ? undefined : navigator): string {
+  if (detectMac(nav)) return 'Show in Finder';
+  if (/Win/.test(nav?.platform ?? '') || /Windows/.test(nav?.userAgent ?? '')) return 'Show in Explorer';
+  return 'Show in folder';
+}
+
+/** First sight of each copy in flight (ms, bytes), for the time left. */
+const firstSeen = new Map<number, { at: number; bytes: number }>();
+
+/** What a copy in flight shows: `62.0 MB of 88.0 MB · 12 s left`. The time
+ *  left needs two readings a second apart; without `fetched_bytes` (an older
+ *  hub) only `copying…`. */
+export function transferText(d: Download, now = Date.now()): string {
+  const got = d.fetched_bytes;
+  if (got === undefined) return 'copying…';
+  const first = firstSeen.get(d.id);
+  if (!first) firstSeen.set(d.id, { at: now, bytes: got });
+  let left = '';
+  if (first && now - first.at >= 1000 && got > first.bytes) {
+    const rate = (got - first.bytes) / ((now - first.at) / 1000);
+    const secs = Math.ceil((d.size - got) / rate);
+    left = secs < 60 ? ` · ${secs} s left` : ` · ${Math.ceil(secs / 60)} min left`;
+  }
+  return `${fmtSize(got)} of ${fmtSize(d.size)}${left}`;
+}
+
+/** 0–1 of a copy in flight, or null when the count is unknown. */
+export function transferFraction(d: Download): number | null {
+  if (d.fetched_bytes === undefined || d.size <= 0) return null;
+  return Math.min(1, d.fetched_bytes / d.size);
+}
+
+/** Finished rows "Clear finished" removes: saved files and failed copies.
+ *  A ready file nobody saved yet stays. */
+export function finished(rows: Download[]): Download[] {
+  return rows.filter((d) => d.state === 'failed' || (d.state === 'ready' && d.downloaded_at != null));
 }
 
 /** Save a ready file through this machine's save dialog. */
@@ -104,7 +183,9 @@ export async function saveDownload(id: number): Promise<string | null> {
     return null;
   }
   if (r.value) {
-    push({ kind: 'success', message: `Saved to ${r.value}` });
+    const path = r.value;
+    savedTo.update((m) => new Map(m).set(id, path));
+    push({ kind: 'success', message: `Saved to ${path}`, action: { label: revealLabel(), run: () => void revealSaved(id) } });
     downloads.update((rows) =>
       rows.map((d) => (d.id === id ? { ...d, downloaded_at: Math.floor(Date.now() / 1000) } : d)),
     );
@@ -132,7 +213,9 @@ export function fmtSize(n: number): string {
 /** For tests: forget what was announced. */
 export function _resetDownloadsForTests(): void {
   announced.clear();
+  firstSeen.clear();
   primed = false;
+  savedTo.set(new Map());
   downloads.set([]);
   downloadBudget.set(null);
 }

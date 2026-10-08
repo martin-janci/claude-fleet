@@ -42,6 +42,7 @@
     resources = [],
     actions = [],
     focusKey = null,
+    section = null,
     readonly = false,
     remote = false,
     reason = null,
@@ -61,6 +62,9 @@
     reason?: string | null;
     /** A setting to bring into view and highlight (a search hit). */
     focusKey?: string | null;
+    /** Show only the section with this title (a Settings tree leaf, step
+     *  7.1), headed by that title, with a link to the whole page. */
+    section?: string | null;
     /** Show every field without editing (a hub client). */
     readonly?: boolean;
     /** A paired desktop (P6): the fields are the hub's, but data items,
@@ -79,18 +83,20 @@
   /** Bumped after a page action ran: every data item re-reads. */
   let dataTick = $state(0);
 
-  const tabs = $derived((page.tabs ?? []).filter((t) => evalCondition(t.when, values)));
+  /** The one section a tree leaf shows, wherever it sits (tabs included). */
+  const only = $derived(section ? sectionsOf(page).find((s) => s.section.title === section)?.section : undefined);
+  const tabs = $derived(only ? [] : (page.tabs ?? []).filter((t) => evalCondition(t.when, values)));
   let tab = $state(0);
 
   const visibleSections = $derived<Section[]>(
-    (tabs.length ? (tabs[Math.min(tab, tabs.length - 1)]?.sections ?? []) : (page.sections ?? [])).filter(
+    (only ? [only] : tabs.length ? (tabs[Math.min(tab, tabs.length - 1)]?.sections ?? []) : (page.sections ?? [])).filter(
       (s) => evalCondition(s.when, values),
     ),
   );
 
   const modifiedCount = $derived(
-    sectionsOf(page)
-      .flatMap(({ section }) => section.items)
+    (only ? [only] : sectionsOf(page).map((s) => s.section))
+      .flatMap((s) => s.items)
       .filter((i) => i.type === 'field')
       .filter((i) => {
         const d = descs.get(i.key);
@@ -144,10 +150,14 @@
 
 <div class="page" class:cards={page.layout === 'cards'} class:data={page.layout === 'data_page'} bind:this={root} data-testid={`page-${page.id}`}>
   <header>
-    <h4>{page.title}</h4>
+    <h4>{only ? only.title : page.title}</h4>
     {#if modifiedCount > 0}<span class="tag" data-testid="page-modified-count">{modifiedCount} changed</span>{/if}
   </header>
-  {#if page.intro}<p class="intro">{page.intro}</p>{/if}
+  {#if only}
+    <button type="button" class="link" data-testid="page-whole-link" onclick={() => onnavigate(page.id)}
+      >All settings in {page.title} ›</button
+    >
+  {:else if page.intro}<p class="intro">{page.intro}</p>{/if}
 
   {#if page.layout === 'data_page' && !showData}
     <p class="notice" data-testid="page-data-remote">
@@ -221,7 +231,13 @@
     </div>
   {:else if page.layout !== 'master_detail'}
   {#each shownSections as section (section.title)}
-    {#if section.collapsible || section.advanced}
+    {#if only}
+      <!-- A tree leaf: the header above is this section's title, and a
+           section of its own is never folded away. -->
+      <section class="section only" data-testid={`section-${section.title}`}>
+        {@render sectionBody(section)}
+      </section>
+    {:else if section.collapsible || section.advanced}
       <Disclosure title={section.title} open={!section.advanced} badge={section.advanced ? 'Advanced' : undefined} testid={`section-${section.title}`}>
         {@render sectionBody(section)}
       </Disclosure>

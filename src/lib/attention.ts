@@ -15,6 +15,7 @@ import {
   type SessionRow,
   type StuckKind,
 } from './sessions';
+import attentionTable from './attention_states.json';
 
 // ── status vocabulary ──
 
@@ -152,15 +153,64 @@ export type TriageBucket = (typeof TRIAGE_BUCKETS)[number];
  *  `working` and `idle` are never in it. */
 export const NEEDS_YOU_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 10);
 
-/** Buckets the "Needs you" COUNTER reports — deliberately one narrower than
- *  the filter, excluding `idle_long`.
+// ── the seven attention states (redesign step 0.4) ──
+
+/** The one attention model shared with the hub: the twelve buckets fold into
+ *  seven states, and only Action required, Failed and Blocked raise the
+ *  badge. The table is `attention_states.json`, which
+ *  `crates/fleet-core/src/service/attention.rs` checks against its own
+ *  `State` and `BUCKET_STATES`; `attention.test.ts` checks it here. */
+export type AttentionState =
+  | 'action_required'
+  | 'failed'
+  | 'blocked'
+  | 'working'
+  | 'paused'
+  | 'done'
+  | 'idle';
+
+export const ATTENTION_STATES: readonly AttentionState[] = attentionTable.states.map(
+  (s) => s.id as AttentionState,
+);
+
+const COUNTED_STATES = new Set<AttentionState>(
+  attentionTable.states.filter((s) => s.counted).map((s) => s.id as AttentionState),
+);
+
+const BUCKET_STATE = new Map<string, AttentionState>(
+  attentionTable.buckets.map(([b, st]) => [b, st as AttentionState]),
+);
+
+/** The state a triage bucket folds into. */
+export function bucketState(bucket: TriageBucket): AttentionState {
+  const st = BUCKET_STATE.get(bucket);
+  if (!st) throw new Error(`attention_states.json has no row for bucket ${bucket}`);
+  return st;
+}
+
+/** A row's attention state. */
+export function attentionState(s: SessionRow, opts: AttentionOptions): AttentionState {
+  return bucketState(classify(s, opts));
+}
+
+/** Whether a state raises the Needs you badge. */
+export function countsTowardBadge(state: AttentionState): boolean {
+  return COUNTED_STATES.has(state);
+}
+
+/** Buckets the "Needs you" COUNTER reports: the buckets whose state is
+ *  counted (step 0.4). Narrower than the filter: it leaves out `idle_long`,
+ *  and `lifecycle` (ghost, lost and pending-kill rows, which nobody can
+ *  answer) and `done_unread` (Done) since the seven-state model.
  *
  *  The divergence is intentional, not an oversight. The pill answers "which
  *  sessions need me NOW"; on a fleet of ~60 sessions most are idle, so
  *  counting them would read "Needs you (34)" and the number would stop
  *  meaning anything. The rows are still one toggle away, because the filter
  *  above does include them. Do not "reconcile" these two sets. */
-export const NEEDS_YOU_COUNTED_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.slice(0, 9);
+export const NEEDS_YOU_COUNTED_BUCKETS: readonly TriageBucket[] = TRIAGE_BUCKETS.filter((b) =>
+  countsTowardBadge(bucketState(b)),
+);
 
 const NEEDS_YOU = new Set<TriageBucket>(NEEDS_YOU_BUCKETS);
 const NEEDS_YOU_COUNTED = new Set<TriageBucket>(NEEDS_YOU_COUNTED_BUCKETS);

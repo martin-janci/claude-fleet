@@ -19,6 +19,12 @@ Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local hos
 
 Parameters: `confirm_nonce`, `host_alias`, `source`
 
+### `adopt_session`
+
+Adopt a live tmux session fleet did not start (started_at null: someone ran tmux by hand on the host). Fleet runs it from now on: started_at is set and the caller becomes its owner when it has none. The pane is untouched. Errors with E_INVALID_STATE for a row fleet already runs, a lost one (use restore_host_sessions) or one with no pane (bg, external).
+
+Parameters: `session_id`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
@@ -857,6 +863,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::move_session::move_session`
 - `commands::resolve_move::resolve_move`
 - `commands::sessions::dismiss_ghost_session`
+- `commands::sessions::adopt_session`
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::purge_project`
@@ -929,6 +936,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::set_account_nickname`
 - `commands::account_usage::list_account_usage`
 - `commands::account_usage::refresh_account_usage`
+- `commands::account_usage::account_usage_history`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`

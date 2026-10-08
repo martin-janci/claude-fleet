@@ -1471,7 +1471,9 @@ describe('Sidebar triage (W2 Track D)', () => {
     render(Sidebar);
     await tick(); await tick();
     const pill = screen.getByTestId('needs-you-filter');
-    expect(pill).toHaveTextContent('Needs you 4');
+    // Redesign 0.4: the safe-kill and ghost rows (Paused) stay in the queue
+    // but leave the count; stuck and failed still raise it.
+    expect(pill).toHaveTextContent('Needs you 2');
     await fireEvent.click(pill);
     await tick();
     const names = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');

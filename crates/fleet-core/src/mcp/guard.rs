@@ -564,6 +564,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "adopt_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
         name: "new_bg_session",
         access: Access::Client,
         readonly: false,
