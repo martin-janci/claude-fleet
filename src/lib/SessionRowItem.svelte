@@ -49,6 +49,7 @@
   import SessionStatusChip from './SessionStatusChip.svelte';
   import SessionRowDetails from './SessionRowDetails.svelte';
   import SessionRowMeta from './SessionRowMeta.svelte';
+  import LimitActions from './LimitActions.svelte';
   import { COMPACT_ROW_PX, uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
@@ -967,6 +968,13 @@
             {promptText}
             reason={blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u)))}
           />
+          {#if triage.bucket === 'account_limit'}
+            <LimitActions
+              {sess}
+              resetsAt={$attentionFacts?.limited_accounts?.[sess.account_uuid ?? '']?.resets_at ?? null}
+              accountName={(u) => accountLabel($accountByUuid.get(u))}
+            />
+          {/if}
         {:else if $showRowDetails}
           <SessionRowDetails {sess} {nowSec} {secondaryName} />
         {/if}
@@ -1029,7 +1037,7 @@
 
   .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
@@ -1038,7 +1046,7 @@
   }
 
   .related-badge {
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0.05rem 0.3rem;
@@ -1046,12 +1054,12 @@
     flex-shrink: 0;
   }
 
-  .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
-  .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
-  .bg-badge { font-size: 0.7rem; margin-left: 0.2rem; }
+  .review-badge { font-size: 11px; margin-left: 0.2rem; }
+  .shell-badge { font-size: 11px; margin-left: 0.2rem; color: var(--fg-muted); }
+  .bg-badge { font-size: 11px; margin-left: 0.2rem; }
 
   .err { color: var(--danger); font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
-  .inline-err { padding-left: 1.6rem; font-size: 0.75rem; }
+  .inline-err { padding-left: 1.6rem; font-size: 11px; }
 
   .sess-row {
     display: flex;
@@ -1137,7 +1145,7 @@
   .status-dot.status-orphan { background: rgb(220, 130, 130); border-radius: 1px; }
   .status-dot.status-ghost { background: transparent; border: 1.5px dashed rgb(160, 120, 200); box-sizing: border-box; opacity: 0.8; }
   .lost-at {
-    font-size: 0.7em;
+    font-size: 11px;
     opacity: 0.6;
     margin-left: auto;
     padding-right: 0.25rem;
@@ -1159,9 +1167,9 @@
   .lw-dot.tone-conflict,
   .lw-dot.tone-error { background: var(--usage-crit); }
   .lw-dot.tone-idle { border: 1.5px solid var(--fg-muted); box-sizing: border-box; }
-  .lw-changes { font-size: 0.65rem; color: var(--usage-warn); }
+  .lw-changes { font-size: 11px; color: var(--usage-warn); }
   .privacy-chip {
-    font-size: 0.6rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 0.05rem 0.28rem;
@@ -1172,7 +1180,7 @@
     white-space: nowrap;
   }
   .form-chip {
-    font-size: 0.6rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 0.05rem 0.28rem;
@@ -1188,7 +1196,7 @@
     flex-direction: column;
     gap: 0.3rem;
     width: 100%;
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .why-link {
     display: flex;
@@ -1223,7 +1231,7 @@
     flex-wrap: wrap;
     gap: 0.3rem;
     align-items: center;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--warn, #f59e0b);
   }
   .work-menu {
@@ -1236,11 +1244,11 @@
   .work-input {
     flex: 1 1 8rem;
     min-width: 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.1rem 0.3rem;
   }
   .work-btn {
-    font-size: 0.65rem;
+    font-size: 11px;
     padding: 0.05rem 0.35rem;
     white-space: nowrap;
   }
@@ -1261,7 +1269,7 @@
   }
   .sess-age {
     flex-shrink: 0;
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     font-variant-numeric: tabular-nums;
   }

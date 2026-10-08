@@ -15,6 +15,9 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import ActiveFilters from './ActiveFilters.svelte';
+  import FiltersSection from './FiltersSection.svelte';
+  import { WORK_GROUPS } from './filter_schema';
+  import { uiLayout } from './prefs';
   import FilterChipGroup from './FilterChipGroup.svelte';
   import { withoutWorkFacet, workFacets, type WorkFacetId } from './filter_facets';
   import {
@@ -29,6 +32,7 @@
     saveWorkView,
     STATUS_FILTER_LABELS,
     STATUS_FILTERS,
+    workLayout,
     workViewFilters,
     workViews,
     type ConflictNotice,
@@ -103,8 +107,12 @@
     }),
   );
   // The strip and the badge carry what the panel holds; search and the two
-  // toggles show their state on screen already.
-  const stripFacets = $derived(facets.filter((x) => x.id !== 'query' && x.id !== 'mine' && x.id !== 'review'));
+  // toggles show their state on screen already. In the New layout (step
+  // 3.7) the toggles are in the panel, so they join the strip.
+  const newLayout = $derived($uiLayout === 'new');
+  const stripFacets = $derived(
+    facets.filter((x) => x.id !== 'query' && (newLayout || (x.id !== 'mine' && x.id !== 'review'))),
+  );
   const panelCount = $derived(stripFacets.length);
   let panelOpen = $state(false);
   let filtersBtn: HTMLButtonElement | undefined = $state();
@@ -235,7 +243,7 @@
   });
 </script>
 
-<div class="work-filters" data-testid="work-filters">
+{#snippet viewsBlock()}
   <div class="row views">
     <select
       class="view-select"
@@ -293,6 +301,146 @@
       <button class="btn btn--quiet" type="button" onclick={() => (naming = false)}>Cancel</button>
     </form>
   {/if}
+{/snippet}
+
+{#snippet toggleChips()}
+    <button
+      class="btn btn--chip btn--toggle"
+      type="button"
+      aria-pressed={!!f.mine}
+      data-testid="work-filter-mine"
+      title="Assigned to me in its tracker"
+      onclick={() => set({ mine: !f.mine })}>Assigned to me</button
+    >
+    <button
+      class="btn btn--chip btn--toggle"
+      type="button"
+      aria-pressed={!!f.review}
+      data-testid="work-filter-review"
+      title="Only tasks with something to review"
+      onclick={() => set({ review: !f.review })}>To review</button
+    >
+{/snippet}
+
+{#snippet orgChips()}
+        <FilterChipGroup
+          label="Organisation"
+          value={orgValue(f.org)}
+          options={[
+            { id: '', label: 'Any' },
+            ...orgs.map((o) => ({ id: String(o.id), label: o.name })),
+            { id: 'none', label: 'Unassigned' },
+          ]}
+          testidFor={(id) => `work-filter-org-${id === '' ? 'any' : id}`}
+          onchange={onOrg}
+        />
+{/snippet}
+
+{#snippet trackerChips()}
+        <FilterChipGroup
+          label="Tracker"
+          value={f.tracker === undefined ? '' : String(f.tracker)}
+          options={[
+            { id: '', label: 'Any' },
+            ...trackers.map((t) => ({ id: String(t.id), label: t.name })),
+            { id: 'local', label: 'Local work', title: 'Work named in fleet, with no tracker' },
+            { id: 'ref', label: 'Bare keys', title: 'A key (ABC-123) no tracker claims' },
+          ]}
+          testidFor={(id) => `work-filter-tracker-${id === '' ? 'any' : id}`}
+          onchange={onTracker}
+        />
+{/snippet}
+
+{#snippet statusChips()}
+        <FilterChipGroup
+          label="Status"
+          value={f.status ?? 'any'}
+          options={STATUS_FILTERS.map((s) => ({ id: s, label: STATUS_FILTER_LABELS[s] }))}
+          testidFor={(id) => `work-filter-status-${id}`}
+          onchange={(id) => set({ status: id })}
+        />
+{/snippet}
+
+{#snippet hasChips()}
+        <FilterChipGroup
+          label="Sessions"
+          value={f.has ?? 'any'}
+          options={HAS_FILTERS.map((h) => ({ id: h, label: HAS_FILTER_LABELS[h] }))}
+          testidFor={(id) => `work-filter-has-${id}`}
+          onchange={(id) => set({ has: id })}
+        />
+{/snippet}
+
+{#snippet archivedSwitch()}
+        <button
+          type="button"
+          class="switch-row"
+          role="switch"
+          aria-checked={!!f.archived}
+          data-testid="work-filter-archived"
+          disabled={listLayout}
+          title={listLayout ? 'In List view, Done shows them' : 'Done tasks, and tasks whose sessions are all archived, with nothing running'}
+          onclick={() => set({ archived: !f.archived })}
+        >
+          <span>Archived tasks</span><span class="switch" aria-hidden="true"></span>
+        </button>
+{/snippet}
+
+{#snippet newPanel()}
+  <section>
+    <h3>Saved view</h3>
+    {@render viewsBlock()}
+  </section>
+  <section>
+    <h3>Quick</h3>
+    <div class="row toggles">{@render toggleChips()}</div>
+  </section>
+  <section data-testid="work-filter-org">
+    <h3>Scope</h3>
+    {@render orgChips()}
+  </section>
+  <section>
+    <h3>Work</h3>
+    <div data-testid="work-filter-tracker">{@render trackerChips()}</div>
+    <div data-testid="work-filter-status">{@render statusChips()}</div>
+    <div data-testid="work-filter-has">{@render hasChips()}</div>
+  </section>
+  <section>
+    <h3>Include</h3>
+    {@render archivedSwitch()}
+  </section>
+{/snippet}
+
+<div class="work-filters" data-testid="work-filters">
+  {#if newLayout}
+    <!-- The New layout (step 3.7): the Sessions list's Filters section, one
+         row while closed; saved views and the two toggles join the panel. -->
+    <FiltersSection
+      {search}
+      onsearch={onSearch}
+      searchLabel="Search tasks"
+      placeholder="Search key or title…"
+      searchTestid="work-search"
+      count={panelCount}
+      filtersTitle="Filter by saved view, organisation, tracker, status and sessions"
+      filtersTestid="work-filters-open"
+      panelId="work-filter-panel"
+      panelLabel="Work filters"
+      panelTestid="work-filter-panel"
+      clearTestid="work-filter-panel-clear"
+      doneTestid="work-filters-done"
+      groupValue={$workLayout}
+      groupOptions={WORK_GROUPS}
+      ongroup={(id) => workLayout.set(id)}
+      groupTestid="work-group-select"
+      onclearall={clearAll}
+      bind:open={panelOpen}
+      bind:filtersBtn
+      panel={newPanel}
+    />
+  {:else}
+  {@render viewsBlock()}
+  {/if}
   {#if notice}
     <p class="notice" role="status" data-testid="work-view-notice">
       {#if typeof notice === 'string'}{notice}{:else}<WorkConflictNotice notice={notice} onreload={() => void loadViews()} />{/if}
@@ -301,6 +449,7 @@
     <p class="notice muted" data-testid="work-views-error">Saved views: {viewsError}</p>
   {/if}
 
+  {#if !newLayout}
   <div class="row">
     <input
       class="search"
@@ -326,24 +475,8 @@
       <span aria-hidden="true">⏷</span> Filters{#if panelCount > 0}<span class="badge">{panelCount}</span>{/if}
     </button>
   </div>
-  <div class="row toggles">
-    <button
-      class="btn btn--chip btn--toggle"
-      type="button"
-      aria-pressed={!!f.mine}
-      data-testid="work-filter-mine"
-      title="Assigned to me in its tracker"
-      onclick={() => set({ mine: !f.mine })}>Assigned to me</button
-    >
-    <button
-      class="btn btn--chip btn--toggle"
-      type="button"
-      aria-pressed={!!f.review}
-      data-testid="work-filter-review"
-      title="Only tasks with something to review"
-      onclick={() => set({ review: !f.review })}>To review</button
-    >
-  </div>
+  <div class="row toggles">{@render toggleChips()}</div>
+  {/if}
 
   <ActiveFilters
     facets={stripFacets}
@@ -354,67 +487,13 @@
     emptyFocus={() => filtersBtn}
   />
 
-  {#if panelOpen}
+  {#if panelOpen && !newLayout}
     <div class="panel" id="work-filter-panel" role="group" aria-label="Work filters" data-testid="work-filter-panel">
-      <section data-testid="work-filter-org">
-        <FilterChipGroup
-          label="Organisation"
-          value={orgValue(f.org)}
-          options={[
-            { id: '', label: 'Any' },
-            ...orgs.map((o) => ({ id: String(o.id), label: o.name })),
-            { id: 'none', label: 'Unassigned' },
-          ]}
-          testidFor={(id) => `work-filter-org-${id === '' ? 'any' : id}`}
-          onchange={onOrg}
-        />
-      </section>
-      <section data-testid="work-filter-tracker">
-        <FilterChipGroup
-          label="Tracker"
-          value={f.tracker === undefined ? '' : String(f.tracker)}
-          options={[
-            { id: '', label: 'Any' },
-            ...trackers.map((t) => ({ id: String(t.id), label: t.name })),
-            { id: 'local', label: 'Local work', title: 'Work named in fleet, with no tracker' },
-            { id: 'ref', label: 'Bare keys', title: 'A key (ABC-123) no tracker claims' },
-          ]}
-          testidFor={(id) => `work-filter-tracker-${id === '' ? 'any' : id}`}
-          onchange={onTracker}
-        />
-      </section>
-      <section data-testid="work-filter-status">
-        <FilterChipGroup
-          label="Status"
-          value={f.status ?? 'any'}
-          options={STATUS_FILTERS.map((s) => ({ id: s, label: STATUS_FILTER_LABELS[s] }))}
-          testidFor={(id) => `work-filter-status-${id}`}
-          onchange={(id) => set({ status: id })}
-        />
-      </section>
-      <section data-testid="work-filter-has">
-        <FilterChipGroup
-          label="Sessions"
-          value={f.has ?? 'any'}
-          options={HAS_FILTERS.map((h) => ({ id: h, label: HAS_FILTER_LABELS[h] }))}
-          testidFor={(id) => `work-filter-has-${id}`}
-          onchange={(id) => set({ has: id })}
-        />
-      </section>
-      <section>
-        <button
-          type="button"
-          class="switch-row"
-          role="switch"
-          aria-checked={!!f.archived}
-          data-testid="work-filter-archived"
-          disabled={listLayout}
-          title={listLayout ? 'In List view, Done shows them' : 'Done tasks, and tasks whose sessions are all archived, with nothing running'}
-          onclick={() => set({ archived: !f.archived })}
-        >
-          <span>Archived tasks</span><span class="switch" aria-hidden="true"></span>
-        </button>
-      </section>
+      <section data-testid="work-filter-org">{@render orgChips()}</section>
+      <section data-testid="work-filter-tracker">{@render trackerChips()}</section>
+      <section data-testid="work-filter-status">{@render statusChips()}</section>
+      <section data-testid="work-filter-has">{@render hasChips()}</section>
+      <section>{@render archivedSwitch()}</section>
       <div class="panel-foot">
         {#if panelCount > 0}
           <button type="button" class="btn btn--quiet" data-testid="work-filter-panel-clear" onclick={clearAll}>Clear all</button>

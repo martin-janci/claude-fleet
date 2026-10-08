@@ -30,6 +30,7 @@
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter, effectiveHostFilter, hosts } from './hosts';
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
+  import { moveToHeadroom } from './account_limits';
   import {
     effectiveScope,
     scopeFilter,
@@ -526,6 +527,25 @@
     });
   }
   const bulkArchiveBlocked = $derived(archiveBlocked(selectedRows));
+  /** Bulk Switch account (step 4.4): each selected row this person may
+   *  restart and whose account is past `accounts.pause_at` resumes under the
+   *  login on its host with the most headroom; the rest stay as they are. */
+  const bulkMoveTargets = $derived(bulkTargets(selectedRows, 'restart_session', $sessionBlocked));
+  const bulkMoveAccountBlocked = $derived(
+    hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
+      (selectedRows.length > 0 && bulkMoveTargets.length === 0 ? 'None of the selected sessions is yours to restart.' : null),
+  );
+  async function bulkMoveAccount() {
+    const r = await moveToHeadroom(bulkMoveTargets, restartSession);
+    clearSelected();
+    const parts = [
+      r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
+      r.stayed > 0 ? `${r.stayed} still under the line` : '',
+      r.nowhere > 0 ? `${r.nowhere} with no other login that has room` : '',
+      r.failed > 0 ? `${r.failed} failed` : '',
+    ].filter(Boolean);
+    push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
+  }
   /** Clean up's targets: the rows this person may Safe remove (`own`). */
   const bulkCleanUpTargets = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
   const bulkCleanUpBlocked = $derived(
@@ -1358,6 +1378,8 @@
     onBulkKill={() => ((bulkKillMode = 'kill'), (bulkKillOpen = true))}
     onBulkCleanUp={() => ((bulkKillMode = 'cleanup'), (bulkKillOpen = true))}
     onBulkArchive={() => void bulkArchive()}
+    onBulkMoveAccount={() => void bulkMoveAccount()}
+    {bulkMoveAccountBlocked}
     {bulkArchiveBlocked}
     {bulkCleanUpBlocked}
     {clearSelected}
@@ -1965,7 +1987,7 @@
   }
   .caret {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     width: 0.7rem;
     text-align: center;
     transition: transform var(--dur-fast) ease;
@@ -2007,7 +2029,7 @@
   .work-title {
     margin-left: 0.4rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -2016,7 +2038,7 @@
     align-items: center;
     gap: 0.3rem;
     padding: 0.1rem 0.5rem 0.1rem 1.6rem;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     cursor: pointer;
   }
@@ -2026,7 +2048,7 @@
     opacity: 0.6;
   }
   .work-reopened {
-    font-size: 0.68rem;
+    font-size: 11px;
     color: var(--accent, #3b82f6);
     white-space: nowrap;
   }
@@ -2038,7 +2060,7 @@
     position: absolute;
     right: 0.5rem;
     top: 0.15rem;
-    font-size: 0.62rem;
+    font-size: 11px;
     padding: 0 0.3rem;
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -2052,7 +2074,7 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.15rem 0.5rem 0.15rem 1.6rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     opacity: 0.85;
   }
@@ -2070,24 +2092,24 @@
     text-overflow: ellipsis;
   }
   .past-note {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .past-purged {
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--danger, #e5534b);
   }
   .purge-work {
     margin: 0.5rem 0 0;
   }
   .work-pr {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .count {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     padding: 0.05rem 0.4rem;
     border-radius: 999px;
@@ -2125,7 +2147,7 @@
   .unclaimed-note {
     margin: 0 0 0.25rem;
     padding: 0 0.4rem;
-    font-size: 0.68rem;
+    font-size: 11px;
     line-height: 1.4;
     color: var(--fg-muted);
   }
@@ -2135,11 +2157,11 @@
     justify-content: space-between;
     gap: 0.5rem;
     padding: 0.5rem 0.6rem;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .inbox-rest .muted { color: var(--fg-muted); }
   .section-header {
-    font-size: 0.65rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -2157,7 +2179,7 @@
   }
   .section-toggle .caret {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     width: 0.7rem;
     text-align: center;
     transition: transform var(--dur-fast) ease;

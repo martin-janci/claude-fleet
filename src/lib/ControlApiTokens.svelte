@@ -110,11 +110,11 @@
             <td class="act">
               {#if row.kind === 'host'}
                 <button type="button" class="hook-btn" disabled={busy} data-testid={`token-rotate-${row.name}`} onclick={() => (asking = row)}
-                  >Rotate</button
+                  >Rotate…</button
                 >
               {:else if !row.self}
                 <button type="button" class="hook-btn" disabled={busy} data-testid={`token-revoke-${row.name}`} onclick={() => (asking = row)}
-                  >Revoke</button
+                  >Revoke…</button
                 >
               {/if}
             </td>
@@ -153,7 +153,7 @@
     text-align: left;
     font-weight: 500;
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.25rem 0.5rem 0.25rem 0;
     border-bottom: 1px solid var(--border);
   }
@@ -172,7 +172,7 @@
   }
   .rotated {
     display: block;
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .act {
     text-align: right;

@@ -91,3 +91,12 @@
 .btn-loader {
   margin-right: 0.35em;
 }
+
+/* Signal lost never loops (redesign step 3.14): it drifts once and rests
+ * there. The board loops it for review; a lost hub shown as a loop would be
+ * a loop of hope. Reduced and Off motion get their one fade, and stop too. */
+.ofl.ofl-name-signal-lost *,
+.ofl.ofl-name-signal-lost.ofl--still * {
+  animation-iteration-count: 1 !important;
+  animation-fill-mode: forwards !important;
+}

@@ -21,6 +21,7 @@ pub mod org_devices;
 pub mod orgs;
 pub mod pages;
 pub mod projects;
+pub mod prs;
 pub mod quick_replies;
 pub mod resolve_move;
 pub mod sessions;

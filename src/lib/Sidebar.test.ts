@@ -1284,7 +1284,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     await tick(); await tick();
     const chips = screen.getAllByTestId('stuck-chip');
     expect(chips).toHaveLength(1);
-    expect(chips[0]).toHaveTextContent('stuck: press Enter');
+    expect(chips[0]).toHaveTextContent('Failed · press Enter');
     // The stuck row shows no claude chip; the healthy one does.
     const rows = screen.getAllByTestId('sess-row');
     const stuckRow = rows.find((r) => r.getAttribute('data-stuck') === 'press_enter')!;
@@ -1650,7 +1650,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     const row = screen.getByTestId('sess-row');
     const line1 = row.querySelector('.sess-line1')!;
     expect(line1.querySelector('.sess-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
-    expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('working');
+    expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('Working');
     const details = screen.getByTestId('sess-details');
     expect(details.querySelector('[data-testid="host-badge"]')).toHaveTextContent('local');
     // The tmux name already ends in "--fix-login" — showing the worktree
@@ -1797,7 +1797,7 @@ describe('Outside fleet group', () => {
     await tick(); await tick();
 
     const chip = screen.getByTestId('inactive-chip');
-    expect(chip).toHaveTextContent('inactive');
+    expect(chip).toHaveTextContent('Idle · process ended');
     expect(screen.queryByTestId('claude-chip')).toBeNull();
 
     const removeBtn = screen.getByTestId('remove-from-list');

@@ -467,7 +467,7 @@
           onclick={() => requestRemoveResource(r.rel_path)}
           disabled={resourceBusy === r.rel_path}
           data-testid={`editor-resource-remove-${r.rel_path}`}
-        >Remove</button>
+        >Remove…</button>
       </div>
     {/each}
     {#if resources.length === 0}<p class="muted">No resources.</p>{/if}

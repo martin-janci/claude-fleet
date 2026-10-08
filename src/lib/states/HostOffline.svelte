@@ -3,6 +3,7 @@
   // never as a window-wide error. What happened, how long ago, what it means
   // for the sessions there, and the next step.
   import { sinceWords } from './states';
+  import Loader from '../Loader.svelte';
 
   let {
     alias,
@@ -38,8 +39,10 @@
 
 <div class="host-offline" role="status" data-testid="host-offline-state" data-alias={alias}>
   <p class="head">
-    <span class="dot" aria-hidden="true">○</span>
-    <strong>{alias}</strong> is offline{#if since}<span class="muted"> · last answered {since} ago</span>{/if}
+    <!-- Redesign step 3.14: the kit's Signal lost, which drifts once and
+         rests (loader-kit.css): an offline host is not something to wait on. -->
+    <Loader name="signal-lost" size={20} delay={0} testid="host-offline-mark" />
+    <span><strong>{alias}</strong> is offline{#if since}<span class="muted"> · last answered {since} ago</span>{/if}</span>
   </p>
   <p class="body">
     {#if reason}{reason}. {/if}{#if sessions}Its {sessions === 1 ? 'session is' : `${sessions} sessions are`} probably still running in tmux and reattach when the host is back.{:else}Sessions there reattach when the host is back.{/if}
@@ -79,22 +82,25 @@
     background: color-mix(in srgb, var(--usage-warn) 7%, transparent);
     font-size: 0.82rem;
   }
-  .head, .body {
+  .head,
+  .body {
     margin: 0;
   }
-  .dot {
-    color: var(--usage-warn);
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
   }
   .muted, .body {
     color: var(--fg-muted);
   }
   .details summary {
     cursor: pointer;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .details code {
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .actions {
     display: flex;

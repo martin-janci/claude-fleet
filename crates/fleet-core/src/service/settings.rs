@@ -411,6 +411,10 @@ pub const MOVE_MAX_SESSION_STATE_MB: &str =
 pub const MOVE_WAIT_MAX_MINS: &str = "move.wait_max_mins";
 
 /// Collect per-session token usage from Claude transcripts (Wave 5 G1).
+/// Percent used of an account's tighter window at which starting a session
+/// on it asks first and offers the login with headroom (redesign step 4.4,
+/// `service::account_limits`).
+pub const ACCOUNTS_PAUSE_AT: &str = "accounts.pause_at";
 pub const USAGE_ENABLED: &str = "usage.enabled";
 /// Seconds between usage passes (one batched script per host). `0` stops
 /// collection.
@@ -918,6 +922,14 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .zero("off")
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        ACCOUNTS_PAUSE_AT,
+        "90",
+        Kind::Int { min: 50, max: 100 },
+        "Ask before starting at",
+        "Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom.",
+    )
+    .unit(Unit::Percent),
     Spec::new(
         USAGE_PRICES_JSON,
         "{}",

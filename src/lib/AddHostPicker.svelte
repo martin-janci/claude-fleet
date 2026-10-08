@@ -188,7 +188,7 @@
   }
   .preview dt {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
