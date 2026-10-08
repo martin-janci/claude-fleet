@@ -3021,77 +3021,6 @@ describe('the per-host unclaimed count', () => {
   });
 });
 
-describe('Group by state, host or agent (redesign step 3.6)', () => {
-  beforeEach(() => sidebarGroupBy.set('project'));
-
-  function fleet() {
-    const now = Math.floor(Date.now() / 1000);
-    return [
-      { ...sessionFor(1, 'dev-a'), claude_status: 'working' as const, last_activity_at: now },
-      { ...sessionFor(2, 'dev-b'), host_alias: 'nas', claude_status: 'blocked' as const, last_activity_at: now },
-      { ...sessionFor(null, 'dev-orphan'), host_alias: 'nas', agent: 'codex' as const, last_activity_at: now },
-    ];
-  }
-
-  it('the menu offers State, Host and Agent after Project and Work', async () => {
-    mockBackend(fakeProjects, fleet());
-    render(Sidebar);
-    await tick(); await tick();
-    await openViewOptions();
-    const group = screen.getByRole('group', { name: 'Group by' });
-    expect(within(group).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
-      'Project', 'Work', 'State', 'Host', 'Agent',
-    ]);
-    await fireEvent.click(screen.getByTestId('group-by-host'));
-    await tick();
-    expect(get(sidebarGroupBy)).toBe('host');
-    const isStr = (v: unknown): v is string => typeof v === 'string';
-    expect(readPref('sidebar.group', 'unset', isStr)).toBe('host');
-    sidebarGroupBy.set('project');
-  });
-
-  it('state groups hold the same rows as the project tree, orphans included', async () => {
-    mockBackend(fakeProjects, fleet());
-    render(Sidebar);
-    await tick(); await tick();
-    const projectMode = screen.getAllByTestId('sess-row').map((r) => r.dataset.sessionId).sort();
-    expect(projectMode).toHaveLength(3);
-
-    sidebarGroupBy.set('state');
-    await tick();
-    expect(screen.queryAllByTestId('proj-row')).toHaveLength(0);
-    expect(screen.queryByTestId('orphan-sessions')).toBeNull();
-    const headers = screen.getAllByTestId('flat-group');
-    expect(headers.map((h) => h.dataset.group)).toEqual(['state:action_required', 'state:working', 'state:idle']);
-    expect(headers[0]).toHaveTextContent('Needs you');
-    expect(headers[0]).toHaveTextContent('1');
-    expect(screen.getAllByTestId('sess-row').map((r) => r.dataset.sessionId).sort()).toEqual(projectMode);
-    sidebarGroupBy.set('project');
-  });
-
-  it('host and agent groups, and a header collapses its rows', async () => {
-    mockBackend(fakeProjects, fleet());
-    render(Sidebar);
-    await tick(); await tick();
-    sidebarGroupBy.set('host');
-    await tick();
-    let headers = screen.getAllByTestId('flat-group');
-    expect(headers.map((h) => h.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['▾ local 1', '▾ nas 2']);
-
-    await fireEvent.click(headers[1]);
-    await tick();
-    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
-    expect(headers[1].getAttribute('aria-expanded')).toBe('false');
-
-    sidebarGroupBy.set('agent');
-    await tick();
-    headers = screen.getAllByTestId('flat-group');
-    expect(headers.map((h) => h.dataset.group)).toEqual(['agent:claude', 'agent:codex']);
-    expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
-    sidebarGroupBy.set('project');
-  });
-});
-
 describe('Sidebar: a mass loss folds into one row (redesign 1.1)', () => {
   function lostOn(host: string, n: number, blocked = true): SessionRow[] {
     return Array.from({ length: n }, (_, i) => ({
@@ -3177,5 +3106,76 @@ describe('Sidebar: a mass loss folds into one row (redesign 1.1)', () => {
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[1]).toEqual({ dry_run: false, session_ids: lost.map((s) => s.id) });
     await waitFor(() => expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 sessions on trn.')).toBe(true));
+  });
+});
+
+describe('Group by state, host or agent (redesign step 3.6)', () => {
+  beforeEach(() => sidebarGroupBy.set('project'));
+
+  function fleet() {
+    const now = Math.floor(Date.now() / 1000);
+    return [
+      { ...sessionFor(1, 'dev-a'), claude_status: 'working' as const, last_activity_at: now },
+      { ...sessionFor(2, 'dev-b'), host_alias: 'nas', claude_status: 'blocked' as const, last_activity_at: now },
+      { ...sessionFor(null, 'dev-orphan'), host_alias: 'nas', agent: 'codex' as const, last_activity_at: now },
+    ];
+  }
+
+  it('the menu offers State, Host and Agent after Project and Work', async () => {
+    mockBackend(fakeProjects, fleet());
+    render(Sidebar);
+    await tick(); await tick();
+    await openViewOptions();
+    const group = screen.getByRole('group', { name: 'Group by' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent?.trim())).toEqual([
+      'Project', 'Work', 'State', 'Host', 'Agent',
+    ]);
+    await fireEvent.click(screen.getByTestId('group-by-host'));
+    await tick();
+    expect(get(sidebarGroupBy)).toBe('host');
+    const isStr = (v: unknown): v is string => typeof v === 'string';
+    expect(readPref('sidebar.group', 'unset', isStr)).toBe('host');
+    sidebarGroupBy.set('project');
+  });
+
+  it('state groups hold the same rows as the project tree, orphans included', async () => {
+    mockBackend(fakeProjects, fleet());
+    render(Sidebar);
+    await tick(); await tick();
+    const projectMode = screen.getAllByTestId('sess-row').map((r) => r.dataset.sessionId).sort();
+    expect(projectMode).toHaveLength(3);
+
+    sidebarGroupBy.set('state');
+    await tick();
+    expect(screen.queryAllByTestId('proj-row')).toHaveLength(0);
+    expect(screen.queryByTestId('orphan-sessions')).toBeNull();
+    const headers = screen.getAllByTestId('flat-group');
+    expect(headers.map((h) => h.dataset.group)).toEqual(['state:action_required', 'state:working', 'state:idle']);
+    expect(headers[0]).toHaveTextContent('Needs you');
+    expect(headers[0]).toHaveTextContent('1');
+    expect(screen.getAllByTestId('sess-row').map((r) => r.dataset.sessionId).sort()).toEqual(projectMode);
+    sidebarGroupBy.set('project');
+  });
+
+  it('host and agent groups, and a header collapses its rows', async () => {
+    mockBackend(fakeProjects, fleet());
+    render(Sidebar);
+    await tick(); await tick();
+    sidebarGroupBy.set('host');
+    await tick();
+    let headers = screen.getAllByTestId('flat-group');
+    expect(headers.map((h) => h.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['▾ local 1', '▾ nas 2']);
+
+    await fireEvent.click(headers[1]);
+    await tick();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    expect(headers[1].getAttribute('aria-expanded')).toBe('false');
+
+    sidebarGroupBy.set('agent');
+    await tick();
+    headers = screen.getAllByTestId('flat-group');
+    expect(headers.map((h) => h.dataset.group)).toEqual(['agent:claude', 'agent:codex']);
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
+    sidebarGroupBy.set('project');
   });
 });
