@@ -1293,9 +1293,9 @@
   }
   .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
   .wt-status { font-size: 0.72rem; color: var(--fg-muted); margin: 0 0 0.2rem; }
-  .wt-status.err { color: #e64a4a; }
+  .wt-status.err { color: var(--danger); }
   .actions {
     display: flex;
     gap: 0.4rem;

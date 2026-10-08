@@ -21,7 +21,7 @@
       <span
         class="verdict"
         data-testid="pr-result-verdict"
-        style="color: {verdictColor(result.verdict)}; border-color: {verdictColor(result.verdict)}55;"
+        style="color: {verdictColor(result.verdict)}; border-color: color-mix(in srgb, {verdictColor(result.verdict)} 33%, transparent);"
       >{verdictLabel(result.verdict)}</span>
       {#if result.commit}<code class="sha" title={result.commit}>{shortSha(result.commit)}</code>{/if}
       {#if result.checked_at != null}

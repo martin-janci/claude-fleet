@@ -219,9 +219,9 @@
   }
   .field textarea { resize: vertical; min-height: 5rem; }
   .field textarea:disabled { opacity: 0.6; }
-  .field input[aria-invalid='true'] { border-color: #e64a4a; }
+  .field input[aria-invalid='true'] { border-color: var(--danger); }
   .note { font-size: 0.8rem; color: var(--fg-muted); margin: 0; }
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
     font-size: 0.85rem;

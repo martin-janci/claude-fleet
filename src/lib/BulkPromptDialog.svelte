@@ -147,7 +147,7 @@
   .sess-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .muted { color: var(--fg-muted); font-size: 0.75rem; }
   .ok { color: rgb(80, 200, 110); }
-  .err { color: #e64a4a; font-size: 0.75rem; }
+  .err { color: var(--danger); font-size: 0.75rem; }
   textarea {
     width: 100%;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

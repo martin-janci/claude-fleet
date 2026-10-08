@@ -575,7 +575,7 @@
     margin: 0;
   }
   .hint.err {
-    color: #e64a4a;
+    color: var(--danger);
   }
   .gone {
     flex: 1 1 auto;

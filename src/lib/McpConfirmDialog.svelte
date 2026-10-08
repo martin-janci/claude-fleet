@@ -121,5 +121,5 @@
   }
   .actions button:disabled { opacity: 0.5; cursor: default; }
   .approve:hover:not(:disabled) { border-color: var(--accent); }
-  .deny:hover:not(:disabled) { color: #e64a4a; border-color: #e64a4a; }
+  .deny:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
 </style>

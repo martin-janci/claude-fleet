@@ -1072,7 +1072,7 @@
     color: var(--fg-muted);
   }
 
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
 
   .project-base-row { margin-bottom: 0.3rem; }
   .project-base-row .mcp-field { margin-bottom: 0.1rem; }
@@ -1101,7 +1101,7 @@
   }
   /* Same tie, for the invalid-path message: .hook-desc's muted colour used to
      beat the .err red the class:err toggle asks for. */
-  .project-preview.err { color: #e64a4a; }
+  .project-preview.err { color: var(--danger); }
   .layout-select {
     background: transparent;
     border: 1px solid var(--border);

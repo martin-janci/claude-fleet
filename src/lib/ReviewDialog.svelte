@@ -95,7 +95,7 @@
   .sess-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; }
   .muted { color: var(--fg-muted); font-size: 0.8rem; margin: 0; }
   .prompt-section textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; padding: 0.5rem; border: 1px solid var(--border); background: var(--bg-pane); color: var(--fg); border-radius: 4px; resize: vertical; min-height: 8rem; }
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button { font-size: 0.85rem; padding: 0.3rem 0.8rem; border: 1px solid var(--border); background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer; }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }

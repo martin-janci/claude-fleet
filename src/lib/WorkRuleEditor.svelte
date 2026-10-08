@@ -247,6 +247,6 @@
   .preview li { display: flex; gap: 0.4rem; flex-wrap: wrap; }
   .task { overflow-wrap: anywhere; }
   .muted { color: var(--fg-muted); margin: 0; }
-  .err { color: #e64a4a; margin: 0; }
+  .err { color: var(--danger); margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
 </style>

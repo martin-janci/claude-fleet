@@ -1647,10 +1647,10 @@
   }
   .err {
     flex: 0 0 auto;
-    color: #e64a4a;
+    color: var(--danger);
     font-size: 0.8rem;
     padding: 0.3rem 0.6rem;
-    border-top: 1px solid #e64a4a;
+    border-top: 1px solid var(--danger);
   }
   .ctx-backdrop {
     position: fixed;

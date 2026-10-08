@@ -427,5 +427,5 @@
   }
   .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
 </style>
