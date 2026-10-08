@@ -6,8 +6,10 @@
 //   asks a run for. Normalised exactly as `report_from_value` does there.
 // - A `fleet.ui/1` block: a fenced ```fleet-ui block (or a ```json block
 //   whose object says `"spec": "fleet.ui/1"`) holding one display block —
-//   report, steps, guide, callout, facts, choices or form. docs/chat-blocks.md
-//   is the format.
+//   report, steps, guide, callout, facts, choices, form, progress, results
+//   or error. docs/chat-blocks.md is the format; the Rust twin of the check
+//   is crates/fleet-core/src/pages/chat_blocks.rs, and both run
+//   docs/chat-block-examples/blocks.json.
 //
 // Everything here is data from an untrusted transcript: nothing is ever
 // interpreted as HTML, and a block that does not check out falls back to the
@@ -59,6 +61,32 @@ export interface UiChoice {
   hint?: string;
 }
 
+export const PROGRESS_STATES = ['running', 'waiting', 'done', 'failed'] as const;
+export type ProgressState = (typeof PROGRESS_STATES)[number];
+export const PROGRESS_STEP_STATES = ['pending', 'running', 'done', 'failed', 'skipped'] as const;
+export type ProgressStepState = (typeof PROGRESS_STEP_STATES)[number];
+export interface ProgressStep {
+  title: string;
+  state: ProgressStepState;
+}
+
+/** A value's type in a results card: the page data sources' column types
+ *  (pages.ts `ColType`), formatted by the same `formatCell`. */
+export const RESULT_TYPES = ['text', 'int', 'tokens', 'usd_micros', 'day', 'time'] as const;
+export type ResultType = (typeof RESULT_TYPES)[number];
+export interface ResultAxis {
+  label: string;
+  ty?: ResultType;
+}
+export type ResultCell = string | number | boolean | null;
+export const RESULT_CHARTS = ['line', 'bar', 'sparkline'] as const;
+export type ResultChart = (typeof RESULT_CHARTS)[number];
+export type ResultItem =
+  | { type: 'stat'; label: string; value: number | string; ty?: ResultType; hint?: string }
+  | { type: 'chart'; chart: ResultChart; title: string; x: ResultAxis; y: ResultAxis; points: [string | number, number][] }
+  | { type: 'table'; title?: string; columns: ResultAxis[]; rows: ResultCell[][] };
+export const RESULT_ITEM_TYPES = ['stat', 'chart', 'table'] as const;
+
 export type UiBlock =
   | ({ kind: 'report'; title?: string } & TaskReport)
   | { kind: 'steps'; title: string; intro?: string; steps: UiStep[] }
@@ -66,10 +94,28 @@ export type UiBlock =
   | { kind: 'callout'; tone: Tone; title?: string; body: string }
   | { kind: 'facts'; title?: string; items: [string, string][] }
   | { kind: 'choices'; title?: string; question?: string; options: UiChoice[] }
-  | { kind: 'form'; form: FormSpec };
+  | { kind: 'form'; form: FormSpec }
+  /** A long job's state. Blocks with the same `id` in one conversation are
+   *  one card that updates in place (`rich/progress_board.ts`). */
+  | {
+      kind: 'progress';
+      id: string;
+      title: string;
+      state: ProgressState;
+      done?: number;
+      total?: number;
+      unit?: string;
+      steps?: ProgressStep[];
+      note?: string;
+    }
+  | { kind: 'results'; title?: string; summary?: string; items: ResultItem[] }
+  | { kind: 'error'; code: string; title: string; body?: string; detail?: string; next: UiChoice[] };
 
 export type UiKind = UiBlock['kind'];
-export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form'];
+export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error'];
+/** A progress `id` and an error `code`: a key, never prose. */
+const KEY_RE = /^[A-Za-z0-9_.:-]+$/;
+const KEY_MAX = 64;
 
 export type RichSegment =
   | { t: 'md'; source: string }
@@ -315,6 +361,131 @@ function each<T>(items: unknown[], p: Problems, where: string, f: (o: Record<str
   });
 }
 
+function num(
+  o: Record<string, unknown>,
+  key: string,
+  p: Problems,
+  where: string,
+  opts: { min: number },
+): number | undefined {
+  const v = o[key];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'number' || !Number.isFinite(v)) {
+    p.add(where, `\`${key}\` must be a number`);
+    return undefined;
+  }
+  if (!Number.isInteger(v)) p.add(where, `\`${key}\` must be a whole number`);
+  else if (v < opts.min) p.add(where, `\`${key}\` must be at least ${opts.min}`);
+  return v;
+}
+
+function oneOf<T extends string>(
+  o: Record<string, unknown>,
+  key: string,
+  p: Problems,
+  where: string,
+  allowed: readonly T[],
+  fallback?: T,
+): T | undefined {
+  const v = o[key] ?? fallback;
+  if (v === undefined) {
+    p.add(where, `\`${key}\` is required`);
+    return undefined;
+  }
+  if (typeof v !== 'string' || !(allowed as readonly string[]).includes(v)) {
+    p.add(where, `\`${key}\` must be one of ${allowed.join(', ')}`);
+    return undefined;
+  }
+  return v as T;
+}
+
+function key(o: Record<string, unknown>, name: string, p: Problems, where: string): string {
+  const v = str(o, name, p, where, { required: true, max: KEY_MAX }) ?? '';
+  if (v !== '' && !KEY_RE.test(v)) p.add(where, `\`${name}\` must be letters, digits and . _ : -`);
+  return v;
+}
+
+/** Only when the key is there: an optional list. */
+function optArr(o: Record<string, unknown>, k: string, p: Problems, where: string, min: number, max: number): unknown[] | undefined {
+  return o[k] === undefined || o[k] === null ? undefined : arr(o, k, p, where, min, max);
+}
+
+function axis(v: unknown, p: Problems, where: string): ResultAxis {
+  if (!isObject(v)) {
+    p.add(where, 'must be an object');
+    return { label: '' };
+  }
+  return {
+    label: str(v, 'label', p, where, { required: true, max: 80 }) ?? '',
+    ty: v.ty === undefined || v.ty === null ? undefined : oneOf(v, 'ty', p, where, RESULT_TYPES),
+  };
+}
+
+const isCell = (c: unknown): c is ResultCell =>
+  c === null || typeof c === 'string' || typeof c === 'boolean' || (typeof c === 'number' && Number.isFinite(c));
+
+function choice(o: Record<string, unknown>, p: Problems, at: string): UiChoice {
+  return {
+    label: str(o, 'label', p, at, { required: true, max: 80 }) ?? '',
+    prompt: str(o, 'prompt', p, at, { required: true, max: 4000 }) ?? '',
+    hint: str(o, 'hint', p, at, { max: 200 }),
+  };
+}
+
+function resultItem(o: Record<string, unknown>, p: Problems, at: string): ResultItem | null {
+  switch (o.type) {
+    case 'stat': {
+      const label = str(o, 'label', p, at, { required: true, max: 80 }) ?? '';
+      const v = o.value;
+      let value: number | string = '';
+      if (typeof v === 'number' && Number.isFinite(v)) value = v;
+      else if (typeof v === 'string' && [...v].length <= 80) value = v;
+      else p.add(at, '`value` must be a number or text of at most 80 characters');
+      const ty = o.ty === undefined || o.ty === null ? undefined : oneOf(o, 'ty', p, at, RESULT_TYPES);
+      return { type: 'stat', label, value, ty, hint: str(o, 'hint', p, at, { max: 200 }) };
+    }
+    case 'chart': {
+      const chart = oneOf(o, 'chart', p, at, RESULT_CHARTS) ?? 'bar';
+      const title = str(o, 'title', p, at, { required: true, max: 120 }) ?? '';
+      const x = axis(o.x, p, `${at} › x`);
+      const y = axis(o.y, p, `${at} › y`);
+      const points = arr(o, 'points', p, at, 1, 200).flatMap((pt, k): [string | number, number][] => {
+        if (
+          Array.isArray(pt) &&
+          pt.length === 2 &&
+          (typeof pt[0] === 'string' || (typeof pt[0] === 'number' && Number.isFinite(pt[0]))) &&
+          typeof pt[1] === 'number' &&
+          Number.isFinite(pt[1])
+        )
+          return [[pt[0], pt[1]]];
+        p.add(`${at} › point ${k + 1}`, 'must be [x, number]');
+        return [];
+      });
+      return { type: 'chart', chart, title, x, y, points };
+    }
+    case 'table': {
+      const title = str(o, 'title', p, at, { max: 120 });
+      const columns = arr(o, 'columns', p, at, 1, 12).map((c, k) => axis(c, p, `${at} › column ${k + 1}`));
+      const rows = arr(o, 'rows', p, at, 0, 200).flatMap((r, k): ResultCell[][] => {
+        const rat = `${at} › row ${k + 1}`;
+        if (!Array.isArray(r)) {
+          p.add(rat, 'must be a list');
+          return [];
+        }
+        if (r.length !== columns.length) p.add(rat, `has ${r.length} cells for ${columns.length} columns`);
+        r.forEach((c, j) => {
+          if (!isCell(c)) p.add(rat, `cell ${j + 1} must be text, a number, a bool or null`);
+        });
+        return [r as ResultCell[]];
+      });
+      return { type: 'table', title, columns, rows };
+    }
+    default:
+      p.add(at, `\`type\` must be one of ${RESULT_ITEM_TYPES.join(', ')}`);
+      return null;
+  }
+}
+
 const FIELD_TYPES_SHOWN = new Set(['text', 'textarea', 'number', 'bool', 'select', 'multiselect']);
 const NAME_RE = /^[a-z][a-z0-9_]{0,39}$/;
 
@@ -436,17 +607,46 @@ export function checkUiBlock(raw: string): Check {
       break;
     }
     case 'choices': {
-      const options = each(arr(v, 'options', p, '', 1, 8), p, 'option', (o, at) => ({
-        label: str(o, 'label', p, at, { required: true, max: 80 }) ?? '',
-        prompt: str(o, 'prompt', p, at, { required: true, max: 4000 }) ?? '',
-        hint: str(o, 'hint', p, at, { max: 200 }),
-      }));
+      const options = each(arr(v, 'options', p, '', 1, 8), p, 'option', (o, at) => choice(o, p, at));
       block = { kind: 'choices', title: str(v, 'title', p, '', { max: 120 }), question: str(v, 'question', p, '', { max: 500 }), options };
       break;
     }
     case 'form': {
       const form = checkForm(v.form, p);
       if (form) block = { kind: 'form', form };
+      break;
+    }
+    case 'progress': {
+      const id = key(v, 'id', p, '');
+      const title = str(v, 'title', p, '', { required: true, max: 120 }) ?? '';
+      const state = oneOf(v, 'state', p, '', PROGRESS_STATES, 'running') ?? 'running';
+      const done = num(v, 'done', p, '', { min: 0 });
+      const total = num(v, 'total', p, '', { min: 1 });
+      if (done !== undefined && total !== undefined && done > total) p.add('', '`done` is more than `total`');
+      const stepList = optArr(v, 'steps', p, '', 1, 20);
+      const steps =
+        stepList &&
+        each(stepList, p, 'step', (s, at) => ({
+          title: str(s, 'title', p, at, { required: true, max: 200 }) ?? '',
+          state: oneOf(s, 'state', p, at, PROGRESS_STEP_STATES, 'pending') ?? 'pending',
+        }));
+      block = { kind: 'progress', id, title, state, done, total, unit: str(v, 'unit', p, '', { max: 20 }), steps, note: str(v, 'note', p, '', { max: 2000 }) };
+      break;
+    }
+    case 'results': {
+      const title = str(v, 'title', p, '', { max: 120 });
+      const summary = str(v, 'summary', p, '', { max: 2000 });
+      const items = each(arr(v, 'items', p, '', 1, 12), p, 'item', (o, at) => resultItem(o, p, at)).filter(
+        (x): x is ResultItem => x !== null,
+      );
+      block = { kind: 'results', title, summary, items };
+      break;
+    }
+    case 'error': {
+      const code = key(v, 'code', p, '');
+      const title = str(v, 'title', p, '', { required: true, max: 120 }) ?? '';
+      const next = each(optArr(v, 'next', p, '', 1, 4) ?? [], p, 'next', (o, at) => choice(o, p, at));
+      block = { kind: 'error', code, title, body: str(v, 'body', p, '', { max: 4000 }), detail: str(v, 'detail', p, '', { max: 8000 }), next };
       break;
     }
   }

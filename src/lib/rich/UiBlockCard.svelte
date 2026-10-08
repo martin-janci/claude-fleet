@@ -9,14 +9,17 @@
 
 <script lang="ts">
   // One fleet.ui/1 block (docs/chat-blocks.md). Display kinds draw from the
-  // block alone; `choices` and `form` put text in the session's composer and
+  // block alone; `choices`, `form` and an error's next steps put text in the session's composer and
   // never send it, so the person reads and presses Enter themselves.
   import { blockKey, fenced, formAnswerPrompt, type UiBlock } from '../rich_blocks';
   import { insertIntoComposer } from '../conversation';
   import FormWizard from '../forms/FormWizard.svelte';
   import type { Values } from '../forms/forms';
   import Markdown from '../MarkdownView.svelte';
+  import ErrorCard from './ErrorCard.svelte';
+  import ProgressCard from './ProgressCard.svelte';
   import ReportCard from './ReportCard.svelte';
+  import ResultsCard from './ResultsCard.svelte';
 
   let { block, raw, sessionId = null }: { block: UiBlock; raw: string; sessionId?: number | null } = $props();
 
@@ -137,6 +140,12 @@
       <p class="note">{sessionId === null ? 'This form fills the composer of a running session.' : 'Submitting puts the answers in the composer; nothing is sent until you press Enter.'}</p>
     {/if}
   </section>
+{:else if block.kind === 'progress'}
+  <ProgressCard {block} />
+{:else if block.kind === 'results'}
+  <ResultsCard {block} />
+{:else if block.kind === 'error'}
+  <ErrorCard {block} onfill={fill} canFill={sessionId !== null} />
 {/if}
 
 <style>

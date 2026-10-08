@@ -16,6 +16,7 @@
 
 pub mod actions;
 pub mod catalog;
+pub mod chat_blocks;
 pub mod flows;
 pub mod forms;
 pub mod model;
@@ -23,6 +24,8 @@ pub mod resources;
 pub mod sources;
 pub mod validate;
 
+#[cfg(test)]
+mod chat_blocks_tests;
 #[cfg(test)]
 mod forms_tests;
 #[cfg(test)]
