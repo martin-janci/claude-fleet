@@ -132,8 +132,10 @@ impl Store {
         rows.collect()
     }
 
-    /// Finish a PENDING form. `false` when it was no longer pending (the
-    /// caller lost a race: answered elsewhere, withdrawn, expired).
+    /// Finish a PENDING form. A finish may raise `secrets_on_host`, never
+    /// lower it: only `mark_form_swept` does, once the files are gone.
+    /// Returns `false` when it was no longer pending (the caller lost a
+    /// race: answered elsewhere, withdrawn, expired).
     pub fn finish_form(&self, form_id: &str, f: &FormFinish<'_>) -> Result<bool> {
         let Some(current) = self.form(form_id)? else {
             return Ok(false);
@@ -141,7 +143,7 @@ impl Store {
         let n = self.conn.execute(
             "UPDATE form_requests
                 SET state = ?2, answers = ?3, note = ?4, answered_by = ?5,
-                    secrets_on_host = ?6, decided_at = ?7
+                    secrets_on_host = MAX(secrets_on_host, ?6), decided_at = ?7
               WHERE form_id = ?1 AND state = 'pending'",
             rusqlite::params![
                 form_id,
@@ -371,6 +373,28 @@ mod tests {
             !s.form("f_m").unwrap().unwrap().secrets_on_host,
             "decided: untouched"
         );
+    }
+
+    #[test]
+    fn a_finish_never_lowers_the_secrets_marker() {
+        let (s, _) = store_with_recorder();
+        let sid = seed(&s);
+        s.insert_form(&new("f_k", sid)).unwrap();
+        s.mark_form_secrets_pending("f_k").unwrap();
+        let declined = FormFinish {
+            state: "declined",
+            answers: None,
+            note: None,
+            answered_by: Some("ada"),
+            secrets_on_host: false,
+        };
+        assert!(s.finish_form("f_k", &declined).unwrap());
+        assert!(
+            s.form("f_k").unwrap().unwrap().secrets_on_host,
+            "still marked"
+        );
+        s.mark_form_swept("f_k").unwrap();
+        assert!(!s.form("f_k").unwrap().unwrap().secrets_on_host);
     }
 
     #[test]
