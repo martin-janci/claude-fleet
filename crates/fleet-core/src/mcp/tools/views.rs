@@ -85,6 +85,11 @@ use serde_json::Value;
 ///   org filter for a session with no work, which carries no `org_id` of its
 ///   own. An id only; the names come from `work { action: orgs }`. Absent
 ///   for a session no org claims. Added for fleet-mobile's M8.6.
+/// * `account_uuid` — the Claude account the session runs under: the row's
+///   account chip and a paused row's "Paused · limit on <account>". A uuid
+///   only; the labels come from `list_accounts`. Dropped by the first cut as
+///   a column no screen read (~39 B a row); added back for the redesign's
+///   step 4.10 on the phone.
 ///
 /// Added 2026-09-23 when fleet-mobile's pager (its PR #19) began reading
 /// them: the first cut of this view was taken against the list screen alone.
@@ -94,6 +99,7 @@ use serde_json::Value;
 /// dropping an entry is a deliberate edit rather than a silent regression on
 /// a phone that then draws a blank column.
 pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
+    "account_uuid",
     "ci_status",
     "claude_status",
     "context_pct",
