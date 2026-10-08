@@ -3230,7 +3230,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 289 commands, 198 route to a hub tool, 1 routes except for one argument shape, 48 refuse, and 42 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 298 commands, 207 route to a hub tool, 1 routes except for one argument shape, 48 refuse, and 42 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

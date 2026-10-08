@@ -24,13 +24,24 @@ use std::sync::Mutex;
 /// * `running` — a run of it is queued or running.
 /// * `failed` — its latest run failed and nothing runs it now.
 /// * `held` — a person stopped it.
+/// * `verifying` — its implementation finished and it is not done yet: its
+///   done_when is being checked (orchestration O3), or it waits to close.
 /// * `doing` — in progress outside a run (a person or a session on it).
 /// * `blocked` — it waits for something that failed, for something outside
 ///   the mission, or for something this caller cannot see.
 /// * `waiting` — it waits for work that is still coming.
 /// * `ready` — none of the above: it may start.
-pub const NODE_STATES: [&str; 10] = [
-    "done", "proposed", "rejected", "running", "failed", "held", "doing", "blocked", "waiting",
+pub const NODE_STATES: [&str; 11] = [
+    "done",
+    "proposed",
+    "rejected",
+    "running",
+    "failed",
+    "verifying",
+    "held",
+    "doing",
+    "blocked",
+    "waiting",
     "ready",
 ];
 
@@ -48,6 +59,56 @@ pub struct GraphNode {
     /// The ones not done yet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub waiting_for: Vec<i64>,
+    /// Its done_when answer (orchestration O3), absent without lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<super::verify::Verification>,
+    /// Its latest attempt, when the caller may see that task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<AttemptBrief>,
+}
+
+/// A node's latest attempt, in brief: what the worker said and what git
+/// showed (orchestration O3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttemptBrief {
+    pub task_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    pub state: String,
+    /// The worker's reported outcome; absent without a report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<crate::store::TaskEvidence>,
+}
+
+/// Longest summary a brief carries.
+const BRIEF_SUMMARY_MAX_CHARS: usize = 300;
+
+fn brief(t: &crate::store::TaskRow) -> AttemptBrief {
+    let summary = t
+        .report
+        .as_ref()
+        .map(|r| r.summary.clone())
+        .filter(|x| !x.is_empty())
+        .or_else(|| t.result.clone())
+        .map(|x| x.chars().take(BRIEF_SUMMARY_MAX_CHARS).collect());
+    AttemptBrief {
+        task_id: t.id,
+        role: t.role.clone(),
+        attempt: t.attempt,
+        state: t.state.clone(),
+        outcome: t.report.as_ref().map(|r| r.outcome.clone()),
+        summary,
+        error: t.error.clone(),
+        evidence: t.evidence.clone(),
+    }
 }
 
 /// An item outside the mission that a member waits for, as far as the
@@ -96,6 +157,10 @@ pub fn build(
     scope: &ViewScope,
     items: &[WorkItemRow],
 ) -> Result<MissionGraph, IpcError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let ids: Vec<i64> = items.iter().map(|i| i.id).collect();
     let members: HashMap<i64, &WorkItemRow> = items.iter().map(|i| (i.id, i)).collect();
     let edges = s.item_deps(&ids)?;
@@ -122,12 +187,25 @@ pub fn build(
     }
     // Each member's own state, before what it waits for is weighed.
     let mut own: HashMap<i64, &'static str> = HashMap::new();
+    let mut latest: HashMap<i64, AttemptBrief> = HashMap::new();
     for i in items {
         let tasks = s.tasks_for_item(i.id)?;
+        if let Some(t) = tasks.first() {
+            if crate::service::tasks::task_visible_in_scope(s, t, scope)? {
+                latest.insert(i.id, brief(t));
+            }
+        }
         let open = tasks
             .iter()
             .any(|t| matches!(t.state.as_str(), "queued" | "running"));
-        let failed = tasks.first().is_some_and(|t| t.state == "failed");
+        // The latest implementation attempt decides between failed and
+        // implemented; a review or test run's verdict is its done_when's.
+        let latest_impl = tasks
+            .iter()
+            .find(|t| matches!(t.role.as_deref(), None | Some("implement")));
+        let failed =
+            latest_impl.is_some_and(crate::service::work::orchestrate::steps::attempt_failed);
+        let implemented = latest_impl.is_some_and(|t| t.state == "done") && !failed;
         let st = if i.status_category == "done" {
             "done"
         } else if i.proposal_state.as_deref() == Some("proposed") {
@@ -138,6 +216,8 @@ pub fn build(
             "running"
         } else if failed {
             "failed"
+        } else if implemented {
+            "verifying"
         } else if i.held_at.is_some() {
             "held"
         } else if i.status_category == "in_progress" {
@@ -174,6 +254,8 @@ pub fn build(
             item_id: i.id,
             state: state.to_string(),
             wave: 0,
+            verification: super::verify::verification(s, i, now)?,
+            attempt: latest.remove(&i.id),
             // A hidden outside item is not named to this caller.
             depends_on: on
                 .iter()
@@ -238,7 +320,7 @@ pub fn build(
 }
 
 /// Who an event says acted.
-fn actor(scope: &ViewScope) -> String {
+pub(super) fn actor(scope: &ViewScope) -> String {
     match scope.person {
         Some(p) => format!("person:{p}"),
         None => "fleet".into(),
@@ -246,7 +328,7 @@ fn actor(scope: &ViewScope) -> String {
 }
 
 /// The item, if `scope` may see it; else exactly an unknown id.
-fn visible_item(s: &Store, scope: &ViewScope, id: i64) -> Result<WorkItemRow, IpcError> {
+pub(super) fn visible_item(s: &Store, scope: &ViewScope, id: i64) -> Result<WorkItemRow, IpcError> {
     match s.get_work_item(id)? {
         Some(i) if item_visible(&scope.org, s, &i)? => Ok(i),
         _ => Err(orgs::not_found("work item", id)),
@@ -256,7 +338,11 @@ fn visible_item(s: &Store, scope: &ViewScope, id: i64) -> Result<WorkItemRow, Ip
 /// Refuse a change to `item` when it belongs to a mission `scope` may not
 /// change: one it cannot see answers as an unknown item, one it may only
 /// read is `E_FORBIDDEN`.
-fn require_mission_change(s: &Store, scope: &ViewScope, item: i64) -> Result<(), IpcError> {
+pub(super) fn require_mission_change(
+    s: &Store,
+    scope: &ViewScope,
+    item: i64,
+) -> Result<(), IpcError> {
     let Some(m) = s.item_mission(item)? else {
         return Ok(());
     };
@@ -355,7 +441,7 @@ fn item_ids(args: &WorkLinkArgs) -> Result<&[i64], IpcError> {
 
 /// The refusal a scoped caller gets for a person's decision, before any row
 /// is reached.
-fn person_decides(scope: &ViewScope) -> Result<(), IpcError> {
+pub(super) fn person_decides(scope: &ViewScope) -> Result<(), IpcError> {
     // This is the org boundary, not a privacy fence: deciding proposals is a
     // PERSON's act by design (an agent never accepts its own), the rule of
     // `local::decide`, so every scoped caller is refused outright and no row

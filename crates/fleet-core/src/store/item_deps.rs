@@ -113,7 +113,12 @@ impl Store {
             rusqlite::params![item_id, depends_on, source, now_unix()],
         )? == 1;
         if added {
-            self.log_item_event(item_id, "dep_added", actor, Some(depends_on))?;
+            self.log_item_event(
+                item_id,
+                "dep_added",
+                actor,
+                Some(serde_json::json!({ "depends_on": depends_on })),
+            )?;
         }
         tx.commit()?;
         Ok(added)
@@ -132,7 +137,12 @@ impl Store {
             rusqlite::params![item_id, depends_on],
         )? == 1;
         if removed {
-            self.log_item_event(item_id, "dep_removed", actor, Some(depends_on))?;
+            self.log_item_event(
+                item_id,
+                "dep_removed",
+                actor,
+                Some(serde_json::json!({ "depends_on": depends_on })),
+            )?;
         }
         tx.commit()?;
         Ok(removed)
@@ -192,12 +202,12 @@ impl Store {
 
     /// Log `kind` about `item_id` in its mission's log, when it has one.
     /// Runs inside the caller's transaction.
-    fn log_item_event(
+    pub(super) fn log_item_event(
         &self,
         item_id: i64,
         kind: &str,
         actor: &str,
-        depends_on: Option<i64>,
+        payload: Option<serde_json::Value>,
     ) -> Result<(), IpcError> {
         let mission: Option<i64> = self
             .conn
@@ -215,7 +225,7 @@ impl Store {
                     kind,
                     actor,
                     work_item_id: Some(item_id),
-                    payload: depends_on.map(|d| serde_json::json!({ "depends_on": d })),
+                    payload,
                     ..Default::default()
                 },
             )?;

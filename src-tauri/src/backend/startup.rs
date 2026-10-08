@@ -67,6 +67,9 @@ pub trait FleetTasks {
     /// Assets S1a: rescan stale hosts' assets. Fleet-owning, like the
     /// tracker sync: a paired desktop must not run it.
     fn start_catalog_scan_tick(&self);
+    /// The missions' loop (orchestration O4–O8). Fleet-owning, like the
+    /// tracker sync: a paired desktop's missions are the hub's to run.
+    fn start_mission_tick(&self);
     /// Local workspace sync: a pass every few seconds for each enabled link.
     /// It reaches hosts over this process's own SSH, so a paired desktop
     /// (whose commands for it are `LocalOnly`) does not run it.
@@ -138,6 +141,7 @@ pub fn start_background_tasks(backend: &Backend, tasks: &dyn FleetTasks) {
             tasks.start_account_usage_tick();
             tasks.start_tracker_sync();
             tasks.start_catalog_scan_tick();
+            tasks.start_mission_tick();
             tasks.start_local_sync_tick();
         }
     }

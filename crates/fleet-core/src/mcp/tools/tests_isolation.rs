@@ -3046,6 +3046,162 @@ async fn run_matrix(isolate: bool) {
         )
         .await;
     }
+    // ── Acceptance conditions (orchestration O3) ───────────────────────
+    // Setting them is a person's plan, as an edge is; recording a check is a
+    // person's decision, as accepting is.
+    m.row(
+        "work_link",
+        "done_when",
+        move |fx, _| json!({ "action": "done_when", "item_id": fx.item_b, "done_when": ["person"] }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's item"),
+                _ => is_ok(who, a, "done_when"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "verify",
+        move |fx, _| {
+            json!({ "action": "verify", "item_id": fx.item_b, "line": "matrix: never a line", "ok": true })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                // The person reaches the item; the line is not one of its.
+                Who::Master | Who::ClientFull => is_code(who, a, "E_INVALID", "not its line"),
+                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+            }
+        },
+    )
+    .await;
+    // ── The mission loop (orchestration O4–O6) ─────────────────────────
+    // Taking a step, asking the planner and ending a grant are a person's
+    // plan, fenced by the mission; signing a grant and deciding a card are a
+    // person's decision, refused to every scoped caller before any row.
+    m.row(
+        "work_link",
+        "mission_start",
+        move |_, _| json!({ "action": "mission_start", "mission_id": mission_b, "step": "run:999999" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_code(who, a, "E_INVALID_STATE", "not a next step"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "mission_grant",
+        move |_, _| json!({ "action": "mission_grant", "mission_id": mission_b, "level": 2, "hours": 1 }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::Master | Who::ClientFull => is_ok(who, a, "mission_grant"),
+                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "mission_revoke",
+        move |_, _| json!({ "action": "mission_revoke", "mission_id": mission_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_ok(who, a, "mission_revoke"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "card_decide",
+        |_, _| json!({ "action": "card_decide", "card_id": 999_999, "ok": true }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::Master | Who::ClientFull => is_code(who, a, "E_NOTFOUND", "no such card"),
+                _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+            }
+        },
+    )
+    .await;
+    // A's ticket is in no mission: the retry is refused once the item is
+    // seen, and the item is unknown to whoever may not see it.
+    m.row(
+        "work_link",
+        "retry",
+        |fx, _| json!({ "action": "retry", "item_id": fx.item_a }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's item"),
+                _ => is_code(who, a, "E_INVALID_STATE", "in no mission"),
+            }
+        },
+    )
+    .await;
+    // B's mission has no worker yet, so its planner has no host to run on.
+    m.row(
+        "work_link",
+        "mission_plan",
+        move |_, _| json!({ "action": "mission_plan", "mission_id": mission_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_code(who, a, "E_INVALID_STATE", "no host for the planner"),
+            }
+        },
+    )
+    .await;
+    // Last of the loop's rows: it pauses B's mission for the rows after.
+    m.row(
+        "work_link",
+        "missions_pause_all",
+        |_, _| json!({ "action": "missions_pause_all" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                _ => is_ok(who, a, "missions_pause_all"),
+            }
+        },
+    )
+    .await;
     // ── idle_unlinked and keep (work graph M11.3) ──────────────────────
     // Two work sessions with their own worktrees and no work linked, idle
     // and unprompted forever: A's on h-a, B's on h-b.

@@ -296,7 +296,38 @@ active mission its `running | blocked | waiting` phase. An agent proposes a
 plan with `work_link { propose_tree }`, whose proposals join the parent's
 mission; a person takes it with `accept_many` and can `undo_accept` within
 10 minutes while nothing has touched it. The Missions tab lists tasks by
-wave. No evidence or loop yet (O3–O8).
+wave. O3 is built: a run's prompt asks for a fenced JSON report after its
+done marker, stored as `tasks.result_json` (the worker's word), and when the
+run finishes fleet reads the commits and changed files from git in the
+worker's checkout into `tasks.evidence_json` (migration 117,
+`service/work/report.rs`). An item's `done_when` lines are typed (`ci[:check]`,
+`review`, `test[:command]`, `person` or free text) and checked on every read
+(`service/work/verify.rs`): CI from a fresh PR reading on the checkout's own
+commit, review and test from a separate reviewer's or tester's run, and the
+rest by a person's recorded check (`work_link { verify }`, a person's act).
+The Missions tab shows each task's last attempt and Verified / Unverified.
+O4–O8 are built: each active mission has a loop (`service/work/orchestrate/`)
+that the hub runs, or a standalone desktop, on a 20 s tick, one mission at a
+time under a lease (migration 118). Its deterministic steps (`steps.rs`) run
+ready tasks within `policy.max_parallel`, retry a failure once with the error
+in the prompt, ask a person when the same error comes back, start review and
+test runs for `review` / `test:` lines, close a verified task and complete a
+finite mission whose checks all hold. A locked `claude -p` planner
+(`planner.rs`, no tools, worker text fenced as untrusted, all or nothing,
+at most `policy.max_planner_runs_per_hour`) breaks a goal down and decides
+what a failure needs; its commands become cards in the mission's confirm
+queue. `git merge-tree` checks the finished branches against each other and
+proposes a resolve task for a conflict (`integrate.rs`). What the loop does by
+itself is the least of the mission's level, `orchestrator.max_level`
+(default 1: a person presses every step) and a person's grant
+(`work_link { mission_grant }`: level, hours, budget, hosts); brakes pause the
+mission on a spent budget or no progress, and `missions_pause_all` pauses
+every mission and ends its grants. `orchestrator.enabled` is the kill switch.
+A continuous mission wakes on `policy.wake_every_secs`, and every finished
+run wakes its mission. The Missions tab has Start wave, the next steps, the
+cards, the grant and Pause all. Not built yet: a PreToolUse guard that stops
+a worker's command outside its grant, wakes from tracker and CI events, and
+the phone's missions view.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
