@@ -245,6 +245,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "touch_session_viewed",
+        Verdict::Routed {
+            tool: "touch_session_viewed",
+        },
+    ),
+    (
         "session_history",
         Verdict::Routed {
             tool: "session_history",

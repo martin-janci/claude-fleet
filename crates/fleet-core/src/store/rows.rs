@@ -374,6 +374,12 @@ pub struct SessionRow {
     /// the origin has nothing to point at, or is itself `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_ref: Option<String>,
+    /// When a person last looked at the session (migration 125), unix
+    /// seconds: `touch_session_viewed`. A turn that ended after it
+    /// (`last_stop_at`) is unread. `None` for a row nobody has opened since
+    /// fleet found it; a session fleet started counts from `started_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_viewed_at: Option<i64>,
     /// The form this session's agent asked and is waiting on. `serde(default)`
     /// so an older hub's row (without it) still parses.
     #[serde(default)]
@@ -624,7 +630,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile, \
      (SELECT json_object('form_id', f.form_id, 'title', json_extract(f.spec, '$.title')) \
         FROM form_requests f WHERE f.session_id = sessions.id AND f.state = 'pending') \
-       AS pending_form, agent, origin, origin_ref"
+       AS pending_form, agent, origin, origin_ref, last_viewed_at"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -740,6 +746,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         agent: row.get(68)?,
         origin: row.get(69)?,
         origin_ref: row.get(70)?,
+        last_viewed_at: row.get(71)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).

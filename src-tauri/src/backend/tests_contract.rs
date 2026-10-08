@@ -100,6 +100,8 @@ pub(crate) fn sample_session() -> SessionRow {
         // Some, so the golden pins both names the origin chip reads.
         origin: Some("mission".into()),
         origin_ref: Some("7".into()),
+        // Some, so the golden pins the name the unread state reads.
+        last_viewed_at: Some(1_700_000_100),
         pending_form: Some(fleet_core::store::PendingForm {
             form_id: "f_x".into(),
             title: "T".into(),
@@ -1033,11 +1035,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty-eight keys nothing else would notice losing. Its list is a literal
+/// sixty-nine keys nothing else would notice losing. Its list is a literal
 /// here, not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty_eight() {
+fn a_session_rows_wire_names_are_these_exact_sixty_nine() {
     let expected = [
         "account_uuid",
         "agent",
@@ -1064,6 +1066,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_eight() {
         "last_prompt",
         "last_stop_at",
         "last_turn_at",
+        "last_viewed_at",
         "lost_at",
         "lost_reason",
         "model",
@@ -1109,7 +1112,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_eight() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 68, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 69, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

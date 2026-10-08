@@ -1897,3 +1897,29 @@ async fn a_failed_reclone_reports_git_setup() {
     assert_eq!(err.code, crate::ipc_error::codes::E_GIT_SETUP);
     assert!(err.message.contains("Permission denied"), "{}", err.message);
 }
+
+/// Step 2.3: viewing stamps the row and answers it; an unknown id is
+/// NOTFOUND, not a silent success.
+#[test]
+fn touching_a_session_marks_it_viewed() {
+    use super::lifecycle::{touch_session_viewed, TouchSessionViewedArgs};
+    let store = Mutex::new(crate::store::Store::open_in_memory().unwrap());
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("h").unwrap();
+        s.upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap()
+    };
+    let row = touch_session_viewed(TouchSessionViewedArgs { session_id: id }, &store).unwrap();
+    assert!(row.last_viewed_at.is_some_and(|t| t > 1_600_000_000));
+    let missing = touch_session_viewed(
+        TouchSessionViewedArgs {
+            session_id: id + 99,
+        },
+        &store,
+    );
+    assert_eq!(
+        missing.err().map(|e| e.code),
+        Some(crate::ipc_error::codes::E_NOTFOUND.to_string())
+    );
+}
