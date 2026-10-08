@@ -1793,3 +1793,76 @@ fn the_agent_settles_against_the_kind() {
     args.effort = Some("high".into());
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
 }
+
+/// Recreate on a remote host whose checkout was deleted clones it back into
+/// the root the repair resolved, without a worktree step: the repair that
+/// runs next re-adds the worktree from its branch on origin.
+#[tokio::test]
+async fn recreate_reclones_a_missing_remote_checkout_into_the_resolved_root() {
+    use super::lifecycle::reclone_project_root;
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("trn").unwrap();
+    let pid = s.upsert_project("o", "pos-frontend", "/repo").unwrap();
+    let wt = "/home/dev/projects/github.com/o/pos-frontend/.worktrees/feat";
+    let wid = s
+        .upsert_worktree_on("trn", pid, "feat", wt, Some("feat"))
+        .unwrap();
+    let sid = s
+        .upsert_session(
+            "dev-pos--feat",
+            "trn",
+            Some(pid),
+            Some(wid),
+            1,
+            1,
+            "lost",
+            None,
+        )
+        .unwrap();
+    let store = Mutex::new(s);
+    let fake = FakeSsh::new();
+    fake.with_home("/home/dev")
+        .on(Match::script_contains("git clone"), Reply::ok(""));
+
+    reclone_project_root(&store, &fake, sid).await.unwrap();
+
+    let script = fake
+        .calls_for("trn")
+        .into_iter()
+        .filter_map(|c| c.script())
+        .find(|sc| sc.contains("git clone"))
+        .expect("a clone script ran");
+    assert!(
+        script.contains("git clone 'git@github.com:o/pos-frontend.git'"),
+        "{script}"
+    );
+    assert!(
+        script.contains("if [ ! -d '/home/dev/projects/github.com/o/pos-frontend'/.git ]"),
+        "{script}"
+    );
+    assert!(!script.contains("worktree add"), "{script}");
+}
+
+/// A failed clone (no access to origin) surfaces git's stderr as
+/// `E_GIT_SETUP`, so the user sees why Recreate could not restore it.
+#[tokio::test]
+async fn a_failed_reclone_reports_git_setup() {
+    use super::lifecycle::reclone_project_root;
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("trn").unwrap();
+    let pid = s.upsert_project("o", "r", "/repo").unwrap();
+    let sid = s
+        .upsert_session("dev-r", "trn", Some(pid), None, 1, 1, "lost", None)
+        .unwrap();
+    let store = Mutex::new(s);
+    let fake = FakeSsh::new();
+    fake.with_home("/home/dev").on(
+        Match::script_contains("git clone"),
+        Reply::fail(128, "Permission denied (publickey).\n"),
+    );
+    let err = reclone_project_root(&store, &fake, sid).await.unwrap_err();
+    assert_eq!(err.code, crate::ipc_error::codes::E_GIT_SETUP);
+    assert!(err.message.contains("Permission denied"), "{}", err.message);
+}

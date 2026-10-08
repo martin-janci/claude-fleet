@@ -430,8 +430,10 @@ Cases that are reported rather than fixed:
   workspace** may fix (see above).
 
 - `E_REPO_MISSING` — the project's main checkout is missing or is not a git
-  repository. It is never faked with `mkdir`; restore or re-clone it (a new
-  session on a remote host clones automatically).
+  repository. It is never faked with `mkdir`; restore or re-clone it. On a
+  remote host a new session and **Recreate** clone it from origin
+  automatically when the directory is absent or empty; a directory that
+  exists with other content is left alone and still refused.
 - `E_BRANCH_CHECKED_OUT` — the worktree's branch is checked out in the main
   checkout. Switch the main checkout to another branch, then repair again.
 - `E_WORKSPACE_LOCKED` — the worktree is `git worktree lock`ed and its

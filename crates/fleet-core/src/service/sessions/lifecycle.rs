@@ -2073,6 +2073,21 @@ pub async fn recreate_session(
         Err(e) if e.code == codes::E_NOREPO => {
             resolve_cwd_source(cwd_src, &sess.host_alias, ssh).await?
         }
+        // The checkout itself is gone on a remote host: clone it back the
+        // way a new session there would, then repair again (a worktree row
+        // is re-added from its branch on origin). Locally the checkout is
+        // the user's own, so the refusal stands.
+        Err(e) if e.code == codes::E_REPO_MISSING && sess.host_alias != "local" => {
+            reclone_project_root(store, &**ssh, sess.id).await?;
+            crate::service::repair::ensure_session_workspace(
+                sess.id,
+                crate::service::repair::Entry::Recreate,
+                store,
+                ssh,
+            )
+            .await?
+            .cwd
+        }
         Err(e) => return Err(e),
     };
 
@@ -2108,6 +2123,42 @@ pub async fn recreate_session(
         row
     };
     Ok(row)
+}
+
+/// Clone a remote session's missing project checkout back to the root the
+/// repair resolved for it ([`ensure_remote_project`] without a worktree).
+/// The clone step only runs when `<root>/.git` is absent, and it never
+/// replaces a non-empty directory (`rmdir`), so a root that exists but is
+/// not a usable checkout fails here rather than being overwritten.
+pub(super) async fn reclone_project_root(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    session_id: i64,
+) -> Result<(), IpcError> {
+    let (spec, _) = crate::service::repair::spec_for_session_with(store, ssh, session_id).await?;
+    let project_id = spec
+        .project_id
+        .ok_or_else(|| IpcError::new(codes::E_NOREPO, "session has no project to clone"))?;
+    let (owner, repo) = {
+        let s = lock(store)?;
+        fetch_owner_repo(&s, project_id)?
+    };
+    tracing::info!(
+        session_id,
+        host = %spec.host_alias,
+        root = %spec.project_root,
+        "recreate: project checkout missing, cloning {owner}/{repo}"
+    );
+    ensure_remote_project(
+        ssh,
+        &spec.host_alias,
+        &owner,
+        &repo,
+        &spec.project_root,
+        None,
+        CancellationToken::new(),
+    )
+    .await
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
