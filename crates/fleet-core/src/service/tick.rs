@@ -193,6 +193,11 @@ pub fn spawn_reconcile_tick(
     };
     tracing::info!("reconcile tick enabled every {}s", period.as_secs());
 
+    // J5 quick answer: after each pass, new agent questions are asked about
+    // in a task of their own (off by default; one short lock when off).
+    let quick = service::decide::quick_answer::QuickAnswerTrigger::new(
+        service::decide::DecideCtx::jev(std::sync::Arc::clone(&store)),
+    );
     Some(crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         // Drop missed ticks rather than firing them back-to-back after a slow
@@ -200,13 +205,16 @@ pub fn spawn_reconcile_tick(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         run_cancellable_tick(ticker, token, || {
             let store = &store;
+            let quick = &quick;
             let ssh = &ssh;
             async move {
                 let stats = tick_stats();
                 let started = stats.begin(unix_now());
                 let outcome = service::sessions::reconcile_now(store, ssh).await;
                 match &outcome {
-                    Ok(true) => {}
+                    Ok(true) => {
+                        quick.after_pass();
+                    }
                     Ok(false) => {
                         tracing::debug!("a reconcile pass is already running; skipping tick")
                     }

@@ -4,12 +4,14 @@
     repoBlame,
     repoDiff,
     repoFile,
+    repoRangeDiff,
     blameGutter,
     canBlame,
     hasDiff,
     type FileBlame,
     type FileContent,
     type FileDiff,
+    type DiffRange,
   } from './files';
   import { timeAgo } from './session_status';
   import { repoCommitDiff } from './history';
@@ -23,6 +25,7 @@
     status,
     reloadKey,
     commit = null,
+    range = null,
     focusLine = null,
   }: {
     session: SessionRow;
@@ -32,6 +35,9 @@
     reloadKey: number;
     /** When set, show this file's diff *within* the commit, not the worktree. */
     commit?: string | null;
+    /** When set, show this file's diff over a committed range of the
+     *  branch (not pushed, or against its base), not the worktree. */
+    range?: DiffRange | null;
     /** 1-based line to show and highlight in the File view (a path clicked
      *  in the Conversation tab); null for none. */
     focusLine?: number | null;
@@ -49,7 +55,7 @@
   // a different session never serves stale content.
   const diffCache = new Map<string, FileDiff>();
   const fileCache = new Map<string, FileContent>();
-  const cacheKey = (sid: number, p: string) => `${sid}:${reloadKey}:${commit ?? 'wt'}:${p}`;
+  const cacheKey = (sid: number, p: string) => `${sid}:${reloadKey}:${commit ?? range ?? 'wt'}:${p}`;
 
   // Cap each cache: a long session-hopping run could otherwise pin many
   // large (up to 512 KiB) file bodies in memory for the panel's lifetime.
@@ -75,11 +81,14 @@
 
   // When the selected file changes, pick a sensible default view: a changed
   // (non-untracked) file opens on its Diff; anything else on its content.
+  // A committed range row counts as another file: the same path picked
+  // under "not pushed" after the worktree row reopens on its Diff.
   let lastPath: string | null = null;
   $effect(() => {
-    if (path !== lastPath) {
-      lastPath = path;
-      view = commit ? 'diff' : canDiff ? 'diff' : 'file';
+    const key = path === null ? null : `${range ?? 'wt'}:${path}`;
+    if (key !== lastPath) {
+      lastPath = key;
+      view = commit || range ? 'diff' : canDiff ? 'diff' : 'file';
     }
   });
 
@@ -129,7 +138,9 @@
       loading = true;
       const r = commit
         ? await repoCommitDiff(sid, commit, p)
-        : await repoDiff(sid, p);
+        : range
+          ? await repoRangeDiff(sid, p, range)
+          : await repoDiff(sid, p);
       // A newer load (selection, view flip, or session switch) superseded us.
       if (token !== loadSeq) return;
       loading = false;

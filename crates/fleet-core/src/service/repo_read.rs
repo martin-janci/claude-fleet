@@ -860,6 +860,191 @@ pub async fn repo_commit_diff(
     })
 }
 
+// ─── what the branch carries (redesign 5.6) ──────────────────────────────
+
+/// Most unpushed commits `repo_branch_diff` lists; past it `truncated` is set.
+pub const MAX_UNPUSHED: u32 = 200;
+
+/// What a session's branch carries that is not on the remote yet, and what
+/// it changes against the base branch: the Files tab's Changed section shows
+/// both under the worktree's own changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchDiff {
+    /// The checked-out branch; `None` when HEAD is detached.
+    pub branch: Option<String>,
+    /// Its upstream (`origin/feat`); `None` when it was never pushed.
+    pub upstream: Option<String>,
+    /// Commits no remote has, newest first: `@{u}..HEAD`, or with no
+    /// upstream every commit on HEAD that no remote-tracking ref contains.
+    pub unpushed: Vec<Commit>,
+    /// The files those commits change, as one diff from where they start.
+    pub unpushed_files: Vec<ChangedFile>,
+    /// More than `MAX_UNPUSHED` unpushed commits; the list stops there.
+    pub truncated: bool,
+    /// The base branch (`origin/HEAD`'s target, else `origin/main`,
+    /// `origin/master`, `main`, `master`); `None` without one.
+    pub base: Option<String>,
+    /// Commits on HEAD since it left the base (`merge-base..HEAD`).
+    pub ahead_of_base: u32,
+    /// The files HEAD changes against its merge base with the base branch.
+    pub base_files: Vec<ChangedFile>,
+}
+
+/// Shell that sets `$up` (HEAD's upstream, or empty), `$from` (where the
+/// unpushed commits start: `$up`'s merge base with HEAD, the parent of the
+/// oldest commit no remote has, the empty tree when that is the root
+/// commit, or empty when nothing is unpushed) and `$mb` (HEAD's merge base
+/// with `$base`, or empty). Needs `$root` and `BASE_BRANCH_SH` before it,
+/// and a born HEAD. Every probe that may fail sits in an `if` or `||`.
+const RANGE_SH: &str = r#"up="$(git -C "$root" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+from=""
+if [ -n "$up" ]; then
+  from="$(git -C "$root" merge-base "$up" HEAD 2>/dev/null || true)"
+else
+  first="$(git -C "$root" rev-list --reverse HEAD --not --remotes | head -n 1)"
+  if [ -n "$first" ]; then
+    if git -C "$root" rev-parse -q --verify "$first^" >/dev/null 2>&1; then from="$first^"
+    else from="$(git -C "$root" hash-object -t tree /dev/null)"; fi
+  fi
+fi
+mb=""
+if [ -n "$base" ]; then mb="$(git -C "$root" merge-base "$base" HEAD 2>/dev/null || true)"; fi
+"#;
+
+/// Group separator between `branch_diff_body`'s sections (the log's own
+/// records start with RS, so RS cannot split them).
+const GS: u8 = 0x1d;
+
+/// Five GS-separated sections: `branch\nupstream\nbase\n`, the unpushed log
+/// (`LOG_FORMAT`), their name-status, the count ahead of the base, and the
+/// base diff's name-status. An unborn HEAD prints the header and empties.
+fn branch_diff_body() -> String {
+    format!(
+        "{base}\
+         br=\"$(git -C \"$root\" symbolic-ref -q --short HEAD || true)\"\n\
+         if ! git -C \"$root\" rev-parse -q --verify HEAD >/dev/null 2>&1; then\n\
+           printf '%s\\n\\n%s\\n\\035\\035\\035\\035' \"$br\" \"$base\"; exit 0\n\
+         fi\n\
+         {range}\
+         printf '%s\\n%s\\n%s\\n\\035' \"$br\" \"$up\" \"$base\"\n\
+         if [ -n \"$up\" ]; then\n\
+           git -C \"$root\" log --date=iso-strict {fmt} --max-count={max} \"$up..HEAD\"\n\
+         else\n\
+           git -C \"$root\" log --date=iso-strict {fmt} --max-count={max} HEAD --not --remotes\n\
+         fi\n\
+         printf '\\035'\n\
+         if [ -n \"$from\" ]; then git -C \"$root\" diff --name-status -z \"$from\" HEAD; fi\n\
+         printf '\\035'\n\
+         if [ -n \"$mb\" ]; then git -C \"$root\" rev-list --count \"$mb..HEAD\"; else echo 0; fi\n\
+         printf '\\035'\n\
+         if [ -n \"$mb\" ]; then git -C \"$root\" diff --name-status -z \"$mb\" HEAD; fi",
+        base = BASE_BRANCH_SH,
+        range = RANGE_SH,
+        fmt = quote(LOG_FORMAT),
+        max = MAX_UNPUSHED + 1,
+    )
+}
+
+fn parse_branch_diff(raw: &[u8]) -> BranchDiff {
+    let mut parts = raw.split(|&b| b == GS);
+    let head = String::from_utf8_lossy(parts.next().unwrap_or(&[])).into_owned();
+    let mut lines = head.lines();
+    let opt = |l: Option<&str>| {
+        l.map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let branch = opt(lines.next());
+    let upstream = opt(lines.next());
+    let base = opt(lines.next());
+    let mut unpushed = parse_log(parts.next().unwrap_or(&[]));
+    let truncated = unpushed.len() > MAX_UNPUSHED as usize;
+    unpushed.truncate(MAX_UNPUSHED as usize);
+    let unpushed_files = parse_name_status_z(parts.next().unwrap_or(&[]));
+    let ahead_of_base = String::from_utf8_lossy(parts.next().unwrap_or(&[]))
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    let base_files = parse_name_status_z(parts.next().unwrap_or(&[]));
+    BranchDiff {
+        branch,
+        upstream,
+        unpushed,
+        unpushed_files,
+        truncated,
+        base,
+        ahead_of_base,
+        base_files,
+    }
+}
+
+/// What the session's branch has not pushed, and what it changes against
+/// the base branch.
+pub async fn repo_branch_diff(
+    args: SessionIdArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<BranchDiff, IpcError> {
+    let (host, name) = session_target(store, args.session_id)?;
+    let out = run_git(ssh, &host, &name, &branch_diff_body()).await?;
+    Ok(parse_branch_diff(&out.stdout))
+}
+
+/// Which of `BranchDiff`'s two ranges a file diff is taken over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+#[serde(rename_all = "lowercase")]
+pub enum DiffRange {
+    /// From where the unpushed commits start to HEAD.
+    Unpushed,
+    /// From HEAD's merge base with the base branch to HEAD.
+    Base,
+}
+
+#[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars", rename = "RepoRangeDiffParams")]
+pub struct RepoRangeDiffArgs {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Worktree-relative file path.
+    pub path: String,
+    /// `unpushed` or `base`.
+    pub range: DiffRange,
+}
+
+fn range_diff_body(range: DiffRange, path: &str) -> String {
+    let from = match range {
+        DiffRange::Unpushed => "$from",
+        DiffRange::Base => "$mb",
+    };
+    format!(
+        "{base}{range_sh}if [ -n \"{from}\" ]; then git -C \"$root\" diff \"{from}\" HEAD -- {p}; fi",
+        base = BASE_BRANCH_SH,
+        range_sh = RANGE_SH,
+        p = quote(path),
+    )
+}
+
+/// One file's diff over the unpushed commits or against the base branch.
+/// Empty when the range is (nothing unpushed, no base).
+pub async fn repo_range_diff(
+    args: RepoRangeDiffArgs,
+    store: &Mutex<Store>,
+    ssh: &Arc<SshClient>,
+) -> Result<FileDiff, IpcError> {
+    crate::validate::repo_rel_path(&args.path)?;
+    let (host, name) = session_target(store, args.session_id)?;
+    let out = run_git(ssh, &host, &name, &range_diff_body(args.range, &args.path)).await?;
+    let (diff, binary, truncated) = diff_from_bytes(&out.stdout);
+    Ok(FileDiff {
+        path: args.path,
+        diff,
+        binary,
+        truncated,
+    })
+}
+
 /// A real git repository for the repo tests, and a way to run a service's
 /// shell body against it the way `repo_script` would (with `$root` set and
 /// `set -e`), minus the tmux lookup. Unix only: these bodies run in the
@@ -1206,5 +1391,137 @@ mod tests {
             .output()
             .unwrap();
         assert!(!out.status.success());
+    }
+}
+
+/// Redesign 5.6: the plan's "repo tests on a branch two commits ahead".
+#[cfg(all(test, unix))]
+mod branch_diff_tests {
+    use super::git_fixture::{commit_file, git, run_body};
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// `origin` with `main` pushed (`origin/HEAD` → `origin/main`), and
+    /// `feat` two commits ahead of it: `x.txt`, then `y.txt`.
+    fn two_ahead(tmp: &Path) -> PathBuf {
+        let origin = tmp.join("origin.git");
+        let work = tmp.join("work");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        git(&origin, &["init", "-q", "--bare"]);
+        git(&work, &["init", "-q"]);
+        commit_file(&work, "a.txt", "a\n", "first");
+        git(
+            &work,
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        );
+        git(&work, &["push", "-q", "origin", "main"]);
+        git(&work, &["remote", "set-head", "origin", "main"]);
+        git(&work, &["checkout", "-q", "-b", "feat"]);
+        commit_file(&work, "x.txt", "x\n", "add x");
+        commit_file(&work, "y.txt", "y\n", "add y");
+        work
+    }
+
+    fn diff_of(work: &Path) -> BranchDiff {
+        parse_branch_diff(&run_body(work, &branch_diff_body()).stdout)
+    }
+
+    fn paths(files: &[ChangedFile]) -> Vec<&str> {
+        files.iter().map(|f| f.path.as_str()).collect()
+    }
+
+    #[test]
+    fn a_branch_never_pushed_has_every_commit_unpushed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = two_ahead(tmp.path());
+        let d = diff_of(&work);
+        assert_eq!(d.branch.as_deref(), Some("feat"));
+        assert_eq!(d.upstream, None);
+        assert_eq!(
+            d.unpushed
+                .iter()
+                .map(|c| c.subject.as_str())
+                .collect::<Vec<_>>(),
+            ["add y", "add x"]
+        );
+        assert_eq!(paths(&d.unpushed_files), ["x.txt", "y.txt"]);
+        assert!(!d.truncated);
+        assert_eq!(d.base.as_deref(), Some("origin/main"));
+        assert_eq!(d.ahead_of_base, 2);
+        assert_eq!(paths(&d.base_files), ["x.txt", "y.txt"]);
+        assert!(d.base_files.iter().all(|f| f.status == "added"));
+    }
+
+    #[test]
+    fn a_pushed_branch_lists_only_what_follows_its_upstream() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = two_ahead(tmp.path());
+        git(
+            &work,
+            &["push", "-q", "-u", "origin", "HEAD~1:refs/heads/feat"],
+        );
+        git(&work, &["branch", "-q", "--set-upstream-to=origin/feat"]);
+        let d = diff_of(&work);
+        assert_eq!(d.upstream.as_deref(), Some("origin/feat"));
+        assert_eq!(d.unpushed.len(), 1);
+        assert_eq!(d.unpushed[0].subject, "add y");
+        assert_eq!(paths(&d.unpushed_files), ["y.txt"]);
+        // Against the base it is still both commits.
+        assert_eq!(d.ahead_of_base, 2);
+        assert_eq!(paths(&d.base_files), ["x.txt", "y.txt"]);
+    }
+
+    #[test]
+    fn a_branch_in_step_with_its_remote_and_base_carries_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = two_ahead(tmp.path());
+        git(&work, &["checkout", "-q", "main"]);
+        git(&work, &["branch", "-q", "--set-upstream-to=origin/main"]);
+        let d = diff_of(&work);
+        assert_eq!(d.branch.as_deref(), Some("main"));
+        assert!(d.unpushed.is_empty() && d.unpushed_files.is_empty());
+        assert_eq!(d.ahead_of_base, 0);
+        assert!(d.base_files.is_empty());
+    }
+
+    #[test]
+    fn an_unborn_head_answers_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        git(tmp.path(), &["init", "-q"]);
+        let d = diff_of(tmp.path());
+        assert_eq!(d.branch.as_deref(), Some("main"));
+        assert!(d.unpushed.is_empty() && d.base_files.is_empty());
+        assert_eq!(d.ahead_of_base, 0);
+    }
+
+    #[test]
+    fn a_range_diff_covers_its_range_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let work = two_ahead(tmp.path());
+        git(
+            &work,
+            &["push", "-q", "-u", "origin", "HEAD~1:refs/heads/feat"],
+        );
+        git(&work, &["branch", "-q", "--set-upstream-to=origin/feat"]);
+        let diff = |range, path| {
+            String::from_utf8(run_body(&work, &range_diff_body(range, path)).stdout).unwrap()
+        };
+        assert!(diff(DiffRange::Unpushed, "y.txt").contains("+y"));
+        assert_eq!(diff(DiffRange::Unpushed, "x.txt"), "", "x is pushed");
+        assert!(diff(DiffRange::Base, "x.txt").contains("+x"));
+        // A path with a shell metacharacter stays one argument.
+        assert_eq!(diff(DiffRange::Base, "a b;$(true).txt"), "");
+    }
+
+    #[test]
+    fn the_range_parses_in_lowercase() {
+        let a: RepoRangeDiffArgs =
+            serde_json::from_str(r#"{"session_id":1,"path":"a","range":"base"}"#).unwrap();
+        assert_eq!(a.range, DiffRange::Base);
+        assert!(serde_json::from_str::<RepoRangeDiffArgs>(
+            r#"{"session_id":1,"path":"a","range":"x"}"#
+        )
+        .is_err());
     }
 }

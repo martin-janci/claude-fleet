@@ -39,4 +39,4 @@ CREATE TABLE IF NOT EXISTS pr_shepherd_episodes (
 CREATE INDEX IF NOT EXISTS pr_shepherd_episodes_at
   ON pr_shepherd_episodes (session_id, at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (134);
+INSERT OR IGNORE INTO schema_version (version) VALUES (136);
