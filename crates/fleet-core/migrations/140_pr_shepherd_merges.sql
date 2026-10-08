@@ -15,4 +15,4 @@ CREATE TABLE IF NOT EXISTS pr_shepherd_merges (
 CREATE INDEX IF NOT EXISTS pr_shepherd_merges_project
   ON pr_shepherd_merges (project_id, at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (138);
+INSERT OR IGNORE INTO schema_version (version) VALUES (140);

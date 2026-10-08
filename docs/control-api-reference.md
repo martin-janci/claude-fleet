@@ -7,6 +7,10 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ## MCP tools
 
+### `account_usage`
+
+Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
+
 ### `add_host`
 
 Register a host. transport "ssh" (default) is probed first and persisted only if reachable; "agent" (a host the hub cannot reach; it runs fleet-agent and dials in) is persisted unprobed, unreachable until its agent connects (token: `fleet-hub agent-token <alias>` on the hub). Returns the host row.
@@ -217,7 +221,7 @@ Parameters: `limit`, `session_id`
 
 Repositories gh on the host can see, for choosing what to clone with add_project.
 
-Parameters: `host_alias`
+Parameters: `host_alias`, `owner`
 
 ### `list_host_worktrees`
 
@@ -613,6 +617,12 @@ Lower a person's or org's grant on your session from drive to watch (owner only)
 
 Parameters: `org`, `person`, `session_id`
 
+### `session_presence`
+
+Presence: report that you have a session open (again every heartbeat_secs; leaving: true when you close it) and read who else has. The owner sees everyone; others see the owner and themselves. Returns { session_id, viewers: [{ person_id, name, device?, since, you? }], heartbeat_secs }.
+
+Parameters: `leaving`, `session_id`
+
 ### `session_share`
 
 Share a session you OWN with a person, or an org you are in (its members from now), at watch (read) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
@@ -994,6 +1004,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
+- `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
@@ -1045,6 +1056,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::account_usage::account_usage_history`
 - `commands::account_usage::account_spend`
 - `commands::account_usage::check_account_headroom`
+- `commands::account_usage::propose_host_placement`
+- `commands::account_usage::record_host_placement`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`

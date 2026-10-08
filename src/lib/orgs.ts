@@ -12,7 +12,7 @@
 // exists (or a single-scope fleet) reads as "all", never as a filter nobody
 // can see.
 import type { Descriptor } from './pages/pages';
-import type { AdminNeed } from './pages/resources';
+import type { AdminNeed, PersonSpend } from './pages/resources';
 import { writable, derived, get } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { Pairing } from './devices';
@@ -80,6 +80,9 @@ export interface OrgDetail extends OrgRow {
   over_budget?: ('daily' | 'monthly')[];
   /** Redesign 11.1, with the spend: each of the last 14 UTC days, today last. */
   spend_series?: { day: string; cost_micros: number }[];
+  /** Redesign 11.8, all or nothing: the spend by person, to an admin who
+   *  sees every session. */
+  spend_by_person?: PersonSpend[];
   /** Redesign 11.1, for its admins: what they should look at. */
   needs_admin?: AdminNeed[];
   /** Phase D: who is in the company, for its people and the hub's owner. */
@@ -105,6 +108,22 @@ export interface OrgMember {
   shares_since?: number;
   /** Redesign 11.2, for whoever administers the org: their devices. */
   devices?: string[];
+  /** Redesign 11.7c: their live sessions in this org (absent when none, or
+   *  from an older hub). */
+  live_sessions?: number;
+  /** Of those, how many you may not open: shown as existing, never named. */
+  private_sessions?: number;
+}
+
+/** A member's live sessions in words (redesign 11.7c), or '—' for none. A
+ *  private one is only counted: you see that it exists, not what it is. */
+export function memberSessionsWord(m: Pick<OrgMember, 'live_sessions' | 'private_sessions'>): string {
+  const live = m.live_sessions ?? 0;
+  const priv = Math.min(m.private_sessions ?? 0, live);
+  if (live === 0) return '—';
+  if (priv === 0) return `${live} live`;
+  if (priv === live) return `${live} live, private`;
+  return `${live} live, ${priv} private`;
 }
 
 /** How many live shares TO a member stand on the org's sessions. */

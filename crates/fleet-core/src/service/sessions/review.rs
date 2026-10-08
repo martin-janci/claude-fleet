@@ -70,7 +70,10 @@ pub async fn spawn_review(
     let short = format!("{:x}", now_unix() & 0xfffff);
     let review_name = format!("{}--review-{}", source.tmux_name, short);
     let agent = crate::agent_adapter::claude();
-    let claude_id = agent.mint_conversation_id();
+    // Claude Code always mints one; the fallback is the same mint.
+    let claude_id = agent
+        .mint_conversation_id()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let tmux = exec_for(&source.host_alias, ssh);
     tmux.new_session(
         &review_name,

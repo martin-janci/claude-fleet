@@ -63,6 +63,7 @@ pub(crate) fn range_text(spec: &Spec) -> String {
         Kind::IdSet => "JSON array of ids".to_string(),
         Kind::PriceMap => "JSON map: model → USD per million tokens".to_string(),
         Kind::Text { max } => format!("text, up to {max} characters"),
+        Kind::TimeRange => "a daily time range `HH:MM-HH:MM`, or empty for none".to_string(),
     };
     match spec.zero {
         Some(zero) => format!("{base}, `0` = {zero}"),

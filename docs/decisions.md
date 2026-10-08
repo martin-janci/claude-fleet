@@ -435,6 +435,35 @@ Code: `service/decide/work_link.rs`, `work_link_subject` in
 `service/hooks.rs`, `on_jev_proposal` in `service/work/detect.rs`; card J1
 in the test map.
 
+## `host_placement` — the host of a project's new session (N5)
+
+Host choice goes by rules and numbers first. The New session dialog keeps the
+host it remembers for the project (or the one it was opened on), and the
+numbers drop every host that is offline or hidden, outside the project's
+organisation, or whose own account is past `accounts.pause_at`. Only when
+the dialog has no host to keep and two or more hosts are left is Jev asked
+one Choice over them (or `unsure`). One host left, or none, asks nothing.
+
+- **What is sent.** The project's `owner/repo` and, per candidate, bucketed
+  numbers: this project's starts there in the last 30 days, whether it is
+  checked out there, live sessions, free disk and account use (to a tenth)
+  and latency (to 50 ms). Host aliases are the options.
+- **Shadow.** Asked off the dialog's path and only recorded, with the first
+  candidate (`local` first, then by alias) as the baseline.
+- **Assist.** The dialog waits for the one call and pre-selects the host with
+  *Proposed by Jev (N%)* (New layout). You still press Create; picking
+  another host is yours. A host over its limit or offline is never proposed.
+- **Asked once per input.** Re-opening the dialog on the same numbers reuses
+  the decided run for 7 days.
+- **Follow-up.** Your start marks the proposal you were shown `confirmed` or
+  `corrected`; a shadow answer nobody saw marks nothing.
+- **What is recorded.** Subject `project_start` `project:<id>`; options are
+  `h:<alias>`.
+- **Paired desktop.** `propose_host_placement` and `record_host_placement`
+  are local-only: the hub owns the decision model.
+
+Code: `service/decide/host_placement.rs`; redesign step 4.11.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
@@ -446,6 +475,7 @@ in the test map.
 | `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.start_project` | `off` | `off` / `shadow` / `assist` | Pre-selecting the repository of a task's first start. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.host_placement` | `off` | `off` / `shadow` / `assist` | Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |

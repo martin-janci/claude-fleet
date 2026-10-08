@@ -24,7 +24,8 @@
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
   import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
-  import { readPref, writePref } from './prefs';
+  import { readPref, writePref, uiLayout } from './prefs';
+  import { accessOf } from './access';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
@@ -296,7 +297,7 @@
     const recent: SessionPredicate = r === 'all' ? null : (s) => withinRecency(s.last_activity_at, r, opts.now);
     return bothPredicates(bothPredicates(needsYouOnly ? (s) => needsYou(s, opts) : null, recent), work);
   }
-  const rowPredicate = $derived.by((): SessionPredicate => {
+  const rowBase = $derived.by((): SessionPredicate => {
     if (focus) {
       const id = focus.id;
       return (s) => s.id === id;
@@ -306,6 +307,19 @@
     const unfolded: SessionPredicate = folded.size === 0 ? null : (s) => !folded.has(s.id);
     return bothPredicates(unfolded, triagePredicate(workPredicate));
   });
+  // ── Shared with me (redesign step 5.8) ──
+  // The New layout lifts the sessions someone shared with this person (watch
+  // or drive) out of the tree and the groups into one group of their own;
+  // Classic keeps them where they were. An unknown access (null) is not a
+  // share and stays put.
+  const splitShared = $derived($uiLayout === 'new' && !focus);
+  function isSharedWithMe(s: SessionRow): boolean {
+    const a = $accessOf(s);
+    return a === 'watch' || a === 'drive';
+  }
+  const rowPredicate = $derived(
+    splitShared ? bothPredicates((s) => !isSharedWithMe(s), rowBase) : rowBase,
+  );
 
   // What narrows the list, for the empty state (the chrome shows the same
   // facets as chips).
@@ -908,6 +922,19 @@
     );
   }
   const orphanSessions = $derived(orphansOf(treePredicate));
+  const sharedWithMe = $derived.by((): SessionRow[] => {
+    if (!splitShared) return [];
+    const q = viewSearch.toLowerCase();
+    const base = rowBase;
+    return $sessions.filter(
+      (s) =>
+        s.kind !== 'external' &&
+        isSharedWithMe(s) &&
+        sessionVisible(s, viewHost, viewBg, base, viewScope) &&
+        sessionMatchesSearch(s, q),
+    );
+  });
+  let sharedOpen = $state(true);
 
   // ── Flat groups (redesign step 3.6): state, host or agent ──
   // The same rows the project tree and "Other sessions" would show, in the
@@ -928,7 +955,9 @@
   // The rows the list would show under the same filters, narrowed to what
   // raises the badge (`inbox.ts`); the rest is counted in one line.
   const inboxPool = $derived(
-    $sidebarView === 'inbox' ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions] : [],
+    $sidebarView === 'inbox'
+      ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions, ...sharedWithMe]
+      : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
   // Redesign step 7.4: a row whose state moves it to another group is a new
@@ -1683,7 +1712,7 @@
           </li>
         {/each}
       </ul>
-    {:else if !loadError && orphanSessions.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
+    {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
              instead of "no sessions" over a fleet that has some. -->
@@ -1709,6 +1738,25 @@
         {#each orphanSessions as sess (sess.id)}
           {@render sessionRow(sess)}
         {/each}
+      </div>
+    {/if}
+
+    {#if sharedWithMe.length > 0}
+      <div class="orphan-section" data-testid="shared-with-me">
+        <button
+          class="section-header section-toggle"
+          data-testid="shared-with-me-toggle"
+          aria-expanded={sharedOpen}
+          onclick={() => (sharedOpen = !sharedOpen)}
+        >
+          <span class="caret" class:collapsed={!sharedOpen}>▾</span>
+          Shared with me ({sharedWithMe.length})
+        </button>
+        {#if sharedOpen}
+          {#each sharedWithMe as sess (sess.id)}
+            {@render sessionRow(sess)}
+          {/each}
+        {/if}
       </div>
     {/if}
 

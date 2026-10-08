@@ -2328,6 +2328,7 @@ pub(crate) async fn spec_for_session_with(
     let row = &seed.row;
     let pane_cmd = crate::service::sessions::recreate_pane_command(
         &row.kind,
+        &row.agent,
         row.claude_session_id.as_deref(),
         &row.tmux_name,
         &launch,

@@ -137,3 +137,24 @@ REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current\n",
         stale.join(", ")
     );
 }
+
+/// Every wizard the app ships as a form (redesign step 10.12,
+/// `src/lib/forms/wizards/*.json`) is a valid fleet.form/1 spec, so the same
+/// file renders as a dialog, as a chat form and on the phone.
+#[test]
+fn every_wizard_spec_is_valid() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/lib/forms/wizards");
+    let mut seen = 0;
+    for entry in std::fs::read_dir(&dir).expect("the wizards directory") {
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let spec = cases(&format!("src/lib/forms/wizards/{name}"));
+        if let Err(problems) = parse(&spec) {
+            panic!("{name}: {problems:?}");
+        }
+        seen += 1;
+    }
+    assert!(seen > 0, "no wizard specs in {}", dir.display());
+}

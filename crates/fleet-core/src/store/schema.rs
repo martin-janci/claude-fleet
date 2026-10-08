@@ -649,6 +649,16 @@ fn host_tokens_has_rotated_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 139.
+fn routine_runs_has_outcome_source(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'outcome_source'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 132.
 fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1592,11 +1602,24 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/137_grant_profile.sql"),
         already_applied: Some(grants_have_profile),
     },
+    // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
+    // new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        138,
+        include_str!("../../migrations/138_usage_daily_person.sql"),
+    ),
+    // Orbit Fleet 8.10: what a routine run came to (two ADD COLUMNs,
+    // guarded on the last).
+    Migration {
+        version: 139,
+        sql: include_str!("../../migrations/139_routine_run_outcome.sql"),
+        already_applied: Some(routine_runs_has_outcome_source),
+    },
     // PR shepherd, step 3: the merge queue's record (a new table and an
     // index, `IF NOT EXISTS`, safe to re-run).
     Migration::plain(
-        138,
-        include_str!("../../migrations/138_pr_shepherd_merges.sql"),
+        140,
+        include_str!("../../migrations/140_pr_shepherd_merges.sql"),
     ),
 ];
 

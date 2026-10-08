@@ -55,6 +55,9 @@ pub async fn add_project(
 #[derive(Deserialize)]
 pub struct ListGithubReposArgs {
     pub host_alias: String,
+    /// A GitHub user or organisation to list instead of the host login's own.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// The repositories `gh` can see on `host_alias`, for the Add-project
@@ -177,13 +180,18 @@ pub(crate) mod routed {
     ) -> Result<Vec<GithubRepo>, IpcError> {
         match backend.hub() {
             Some(hub) => {
-                hub.route(
-                    "list_github_repos",
-                    &serde_json::json!({ "host_alias": args.host_alias }),
-                )
-                .await
+                // `owner` only when set: without one the request is exactly
+                // what a hub before 6.11 was always sent.
+                let mut req = serde_json::json!({ "host_alias": args.host_alias });
+                if let Some(owner) = &args.owner {
+                    req["owner"] = serde_json::json!(owner);
+                }
+                hub.route("list_github_repos", &req).await
             }
-            None => add_project::list_github_repos(&args.host_alias, store, ssh).await,
+            None => {
+                add_project::list_github_repos(&args.host_alias, args.owner.as_deref(), store, ssh)
+                    .await
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 {
-  "revision": 10,
+  "revision": 11,
   "types": {
     "AccountRow": [
       "display_name",
@@ -258,6 +258,7 @@
     "GithubRepo": [
       "description",
       "is_private",
+      "language",
       "name_with_owner",
       "updated_at"
     ],

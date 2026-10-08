@@ -31,6 +31,7 @@ mod local_workspaces;
 mod mission_loop;
 mod nl_census;
 mod orchestration;
+mod org_activity;
 mod org_members;
 mod orgs;
 mod participants;
@@ -153,7 +154,7 @@ pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
 pub use routines::{
     NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
-    ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+    ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
 };
 pub use rows::*;
 pub use schema::known_schema_version;
@@ -566,6 +567,21 @@ impl Store {
             instance: next_instance(),
             peer_generations: Default::default(),
         })
+    }
+
+    /// What the fleet knows beyond a session's own row — down hosts,
+    /// accounts at a limit or without a login — as this store's bus follows
+    /// it (step 2.6, [`EventBus::attention_facts`]). Empty off the hub, which
+    /// is the row-only classification. Every hub site that decides
+    /// `needs_attention` reads it here, beside `health.context_red_pct`.
+    pub fn attention_facts(&self) -> crate::service::attention::Facts {
+        self.bus.inner.attention_facts()
+    }
+
+    /// Each account's latest usage answer as this store's bus follows it
+    /// ([`EventBus::account_usage`]). Empty off the hub.
+    pub fn bus_account_usage(&self) -> Vec<crate::service::account_usage::AccountUsageSnapshot> {
+        self.bus.inner.account_usage()
     }
 
     /// An in-memory store for a test. Its database is a copy of one that went
