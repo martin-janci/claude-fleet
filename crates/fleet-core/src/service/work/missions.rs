@@ -151,7 +151,7 @@ fn visible_item(s: &Store, scope: &ViewScope, id: i64) -> Result<WorkItemRow, Ip
 }
 
 /// Who an event says acted: the person, else the hub itself.
-fn actor(scope: &ViewScope) -> String {
+pub(super) fn actor(scope: &ViewScope) -> String {
     match scope.person {
         Some(p) => format!("person:{p}"),
         None => "fleet".into(),

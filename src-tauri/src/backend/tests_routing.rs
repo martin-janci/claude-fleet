@@ -3622,6 +3622,31 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "import_mission_plan",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_import", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "mission_id": 4,
+                    "plan": [{ "step": "1.1", "title": "Schema", "lane": "A", "needs": ["0.9"] }] }),
+            r#"{"created":1,"updated":0,"unchanged":0,"deps_added":0,"deps_removed":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::import_mission_plan(
+                    b,
+                    commands::missions::ImportMissionPlanArgs {
+                        mission_id: 4,
+                        plan: vec![fleet_core::service::work::plan_import::PlanRow {
+                            step: "1.1".into(),
+                            title: "Schema".into(),
+                            lane: Some("A".into()),
+                            needs: vec!["0.9".into()],
+                            status: None,
+                        }],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "delete_mission",
             "work_link",
             json!({ "session_id": null, "action": "mission_delete", "key": null, "item_id": null,
