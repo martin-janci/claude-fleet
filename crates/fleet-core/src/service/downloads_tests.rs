@@ -303,7 +303,12 @@ async fn a_copy_is_written_in_chunks_hashed_and_moved_into_place() {
         Match::script_contains("tail -c +7 "),
         Reply::ok("\n__CF_OUT__\nworl"),
     );
-    let sha = fetch_chunked(&ssh, &row, 6).await.unwrap();
+    let heard = Mutex::new(vec![]);
+    let sha = fetch_chunked(&ssh, &row, 6, &|got| heard.lock().unwrap().push(got))
+        .await
+        .unwrap();
+    // The running total after each slice but the last (then it is ready).
+    assert_eq!(*heard.lock().unwrap(), [6]);
     let got = std::fs::read(file_of(row.id).unwrap()).unwrap();
     assert_eq!(got, b"hello worl");
     use sha2::Digest;
@@ -322,7 +327,7 @@ async fn a_copy_is_written_in_chunks_hashed_and_moved_into_place() {
         Match::script_contains("tail -c +7 "),
         Reply::fail(5, "gone"),
     );
-    let e = fetch_chunked(&ssh, &short, 6).await.unwrap_err();
+    let e = fetch_chunked(&ssh, &short, 6, &|_| {}).await.unwrap_err();
     assert!(e.message.contains("stopped at 6 of 10"), "{}", e.message);
     remove_files(short.id);
     assert!(!part_of(short.id).unwrap().exists());
@@ -362,4 +367,26 @@ fn the_sweep_drops_expired_rows_and_orphaned_bytes() {
     assert_eq!(sweep_with(&store, ready_at + 60, 0), 0);
     assert!(!file_of(old.id).unwrap().exists());
     assert!(!file_of(orphan.id).unwrap().exists());
+}
+
+#[test]
+fn a_row_being_copied_carries_its_bytes_so_far() {
+    let s = Store::open_in_memory().unwrap();
+    let mut row = insert(&s, "web-1", None, 10);
+    // The progress map is the process's: an id no other test's store reaches.
+    row.id = 9_000_001;
+    let b = Budget::from_store(&s);
+    assert_eq!(present(&b, row.clone()).fetched_bytes, Some(0));
+    progress::set(row.id, 6);
+    assert_eq!(present(&b, row.clone()).fetched_bytes, Some(6));
+    progress::clear(row.id);
+    let failed = DownloadRow {
+        state: "failed".into(),
+        ..row
+    };
+    assert_eq!(
+        present(&b, failed).fetched_bytes,
+        None,
+        "only while fetching"
+    );
 }
