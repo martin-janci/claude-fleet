@@ -1010,7 +1010,7 @@
     font-size: 0.9rem;
     line-height: 1;
     cursor: pointer;
-    min-width: 1.6rem;
+    min-width: var(--control-h);
   }
   .icon-btn:hover:not(:disabled) {
     color: var(--fg);
@@ -1021,7 +1021,7 @@
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
     font-size: 0.85rem;
-    min-width: 1.4rem;
+    min-width: var(--control-h);
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }
