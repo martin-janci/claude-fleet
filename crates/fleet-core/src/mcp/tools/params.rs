@@ -1006,6 +1006,14 @@ pub struct SettingHistoryParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AnswerMcpConfirmParams {
+    /// The confirm_nonce the waiting call was handed.
+    pub nonce: String,
+    /// true runs the call on its retry; false refuses it.
+    pub approved: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct DecideSettingProposalsParams {
     /// Proposal ids to apply.
     #[serde(default)]

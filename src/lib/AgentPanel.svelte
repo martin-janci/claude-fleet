@@ -42,6 +42,8 @@
   import { agentContext, type AgentContextInput } from './agent_context';
   import { OPERATOR_COMMANDS } from './operator';
   import { insertIntoComposer } from './conversation';
+  import ConfirmCards from './ConfirmCards.svelte';
+  import { uiLayout } from './prefs';
   import {
     agentPanelSize,
     agentPanelMaximized,
@@ -206,6 +208,12 @@
 </script>
 
 {#snippet chip()}
+  <!-- Step 9.2: the agent's starts and kills wait here as cards, in the
+       transcript, in the New layout. Mounted only while this row renders, so
+       a request is never parked on a card nobody can see (confirms.ts). -->
+  {#if $uiLayout === 'new'}
+    <ConfirmCards />
+  {/if}
   {#if ctx}
     <button
       class="chip"
