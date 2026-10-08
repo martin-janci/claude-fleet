@@ -1309,6 +1309,19 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "catalog_admin",
     "import_assets",
     "changesets",
+    // Round-2 review, #418 V1: these five are `Access::Client` and report
+    // across every LOADED catalog. Before Assets M3 only `personal` was ever
+    // loaded, so their answers were single-catalog and harmless; M3's
+    // `ensure_fresh` walks every `catalogs` row, which turned them into a
+    // read of an org catalog's names, versions, write paths and secret names
+    // for anyone holding any client token. `listing_scope`'s own rule says
+    // the opposite — personal only for a per-host token or an org-bound
+    // client, "so none of them learns an org catalog's name or assets".
+    "scan_assets",
+    "plan_sync",
+    "list_layers",
+    "resolve_preview",
+    "propose_layers",
     "list_downloads",
     "remove_download",
     "session_share",
@@ -1938,6 +1951,55 @@ pub fn scrub_line(s: &str) -> String {
         .collect()
 }
 
+/// Render one JSON object as sorted `k=v` pairs, applying [`SKIP_KEYS`] and
+/// [`REDACT_KEYS`] AT EVERY DEPTH.
+///
+/// **Why this recurses.** The key lists are the whole of the secret fence, and
+/// before this they were consulted only on the TOP level of the argument map.
+/// A tool whose arguments nest — `catalog_admin` is `{action, args:{…}}`, and
+/// `set_secret`'s `value` lives inside that `args` — had its nested object
+/// rendered by `Value::to_string()`, which serialises the subtree whole. So
+/// `value`, a key [`SKIP_KEYS`] exists to drop entirely ("not even its length
+/// may be persisted"), was written to the `session_events` row in full, where
+/// `session_history` — `readonly: true` — reads it back. Depth is not a
+/// property an argument's author chooses on the fence's behalf, so the fence
+/// now applies wherever the key appears.
+fn render_obj(map: &serde_json::Map<String, serde_json::Value>) -> String {
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let mut parts = Vec::with_capacity(keys.len());
+    for k in keys {
+        if SKIP_KEYS.contains(&k.as_str()) {
+            continue;
+        }
+        parts.push(format!("{k}={}", render_value(k, &map[k])));
+    }
+    parts.join(" ")
+}
+
+/// One value, under the key it arrived as. A nested object or array recurses
+/// so the key rules reach every leaf; a scalar renders as before.
+fn render_value(key: &str, v: &serde_json::Value) -> String {
+    if REDACT_KEYS.contains(&key) {
+        return match v {
+            serde_json::Value::String(s) => format!("<{} chars>", s.chars().count()),
+            serde_json::Value::Null => "null".to_string(),
+            _ => "<redacted>".to_string(),
+        };
+    }
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(m) => format!("{{{}}}", render_obj(m)),
+        // An array has no keys of its own, so each element is judged under the
+        // array's own key: `secrets: [{…}]` keeps the fence on every element.
+        serde_json::Value::Array(items) => {
+            let inner: Vec<String> = items.iter().map(|i| render_value(key, i)).collect();
+            format!("[{}]", inner.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
 /// One-line, key-sorted `k=v` summary of tool arguments with free-text
 /// values replaced by `<N chars>` and the whole thing capped.
 ///
@@ -1951,29 +2013,7 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
     let Some(map) = args else {
         return String::new();
     };
-    let mut keys: Vec<&String> = map.keys().collect();
-    keys.sort();
-    let mut parts = Vec::with_capacity(keys.len());
-    for k in keys {
-        if SKIP_KEYS.contains(&k.as_str()) {
-            continue;
-        }
-        let v = &map[k];
-        let rendered = if REDACT_KEYS.contains(&k.as_str()) {
-            match v {
-                serde_json::Value::String(s) => format!("<{} chars>", s.chars().count()),
-                serde_json::Value::Null => "null".to_string(),
-                _ => "<redacted>".to_string(),
-            }
-        } else {
-            match v {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            }
-        };
-        parts.push(format!("{k}={rendered}"));
-    }
-    let joined = scrub_line(&parts.join(" "));
+    let joined = scrub_line(&render_obj(map));
     if joined.chars().count() > SUMMARY_MAX_CHARS {
         let mut s: String = joined.chars().take(SUMMARY_MAX_CHARS).collect();
         s.push('…');
@@ -2478,6 +2518,45 @@ mod tests {
     /// second one. Control characters AND the three separators
     /// `char::is_control` misses become spaces.
     #[test]
+    /// A secret nested inside another argument is dropped, exactly as a
+    /// top-level one is.
+    ///
+    /// `catalog_admin` carries `{action, args:{…}}`, so `set_secret`'s `value`
+    /// — a [`SKIP_KEYS`] key whose own comment says "not even its length may
+    /// be persisted" — is never a TOP-level key of the argument map. Before
+    /// the key rules recursed, the nested object was rendered whole by
+    /// `Value::to_string()` and the secret was written to the
+    /// `session_events` row, where `session_history` (`readonly: true`) reads
+    /// it back. Depth is the tool author's choice; the fence is not.
+    #[test]
+    fn redact_args_drops_a_secret_however_deeply_it_is_nested() {
+        let args = serde_json::json!({
+            "action": "set_secret",
+            "args": { "name": "jira", "host_alias": "h1", "value": "SUPER-SECRET-TOKEN" }
+        });
+        let s = redact_args(args.as_object());
+        assert!(
+            !s.contains("SUPER-SECRET-TOKEN"),
+            "nested secret survived: {s}"
+        );
+        assert!(!s.contains("value="), "the dropped key is still named: {s}");
+        // The useful, non-secret parts are still there to audit with.
+        assert!(s.contains("action=set_secret"), "{s}");
+        assert!(s.contains("name=jira"), "{s}");
+
+        // Two levels down, and inside an array, are the same answer.
+        let deep = serde_json::json!({ "a": { "b": { "secret": "NOPE" } } });
+        assert!(!redact_args(deep.as_object()).contains("NOPE"));
+        let arr = serde_json::json!({ "items": [{ "value": "ALSO-NOPE" }] });
+        assert!(!redact_args(arr.as_object()).contains("ALSO-NOPE"));
+
+        // A free-text key keeps its length-only rendering at depth too.
+        let nested_prompt = serde_json::json!({ "outer": { "prompt": "abc" } });
+        let r = redact_args(nested_prompt.as_object());
+        assert!(r.contains("<3 chars>"), "{r}");
+        assert!(!r.contains("abc"), "{r}");
+    }
+
     fn redact_args_keeps_the_summary_on_one_line() {
         let args = serde_json::json!({
             "name": "phone\npair_client by master: name=evil",

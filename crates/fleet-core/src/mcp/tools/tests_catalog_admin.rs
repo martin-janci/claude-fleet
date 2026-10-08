@@ -1000,9 +1000,19 @@ async fn apply_sync_with_an_unknown_plan_is_refused_before_run_for_a_client() {
 }
 
 /// Final review M2: `import_host` into an org catalog reads a host's whole
-/// Claude config. A client granted only that catalog may import from a
-/// host bound to its org or admitted to the catalog; any other source host
+/// Claude config. A client granted only that catalog may import from a host
+/// BOUND TO its org; any other source host — a merely admitted one included —
 /// also needs the personal grant (the master is never refused).
+///
+/// **The admitted case was the hole** (round-2 review, #418 V3). This test
+/// used to assert that admitting a host lifted the requirement, and that is
+/// what made the exemption self-granting: `catalogs::admit` checks only that
+/// the catalog has an org and the host has none, never who is calling, so the
+/// same org-only grantee could admit any org-less host and then import its
+/// `~/.claude.json` — `env` and `headers` copied verbatim, fleet's own token
+/// the only thing scrubbed — into the org catalog, and read the values back
+/// with `get_asset` on that one grant. The exemption now rests on the host's
+/// `org_id`, which fleet admin sets and a catalog grantee cannot write.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn importing_an_outside_host_into_an_org_catalog_needs_the_personal_grant_too() {
@@ -1023,16 +1033,33 @@ async fn importing_an_outside_host_into_an_org_catalog_needs_the_personal_grant_
         assert_ne!(code_of(&r), "E_FORBIDDEN", "{:?}", r.err());
     }
 
+    // Admission does NOT lift it: the grantee can write that fact itself.
     t.store
         .lock()
         .unwrap()
         .admit_host_catalog("h", acme)
         .unwrap();
+    let r = call_on(&t, &ops, "import_host", Some(args.clone()), Some("acme")).await;
+    assert_eq!(
+        code_of(&r),
+        "E_FORBIDDEN",
+        "an admitted host is still outside acme's org: {:?}",
+        r.err()
+    );
+    assert!(message_of(r).contains("catalog personal"));
+
+    // Binding the host to the catalog's org DOES lift it — that is the fact
+    // the exemption is meant to rest on, and only fleet admin writes it.
+    {
+        let st = t.store.lock().unwrap();
+        let org = st.get_catalog_by_name("acme").unwrap().unwrap().org_id;
+        st.set_host_org("h", org).unwrap();
+    }
     let r = call_on(&t, &ops, "import_host", Some(args), Some("acme")).await;
     assert_ne!(
         code_of(&r),
         "E_FORBIDDEN",
-        "an admitted host: {:?}",
+        "a host of acme's own org: {:?}",
         r.err()
     );
 }

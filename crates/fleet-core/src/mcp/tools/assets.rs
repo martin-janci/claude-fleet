@@ -37,12 +37,18 @@ impl FleetTools {
         hosts.")]
     pub(super) async fn scan_assets(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ScanAssetsParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "scan_assets",
-            &format!("host_alias={}", p.host_alias.as_deref().unwrap_or("*")),
+            &format!(
+                "host_alias={} caller={}",
+                p.host_alias.as_deref().unwrap_or("*"),
+                caller.label()
+            ),
         );
+        deny_cross_catalog_read(&caller, "scan_assets")?;
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let res = catalog::inventory::scan_hosts(&self.store, &self.ssh, p.host_alias.as_deref())
             .await
@@ -115,17 +121,20 @@ impl FleetTools {
         catalog) unless allow_unlayered is set. Nothing is written.")]
     pub(super) async fn plan_sync(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<PlanSyncParams>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "plan_sync",
             &format!(
-                "host_alias={} kind={} name={}",
+                "host_alias={} kind={} name={} caller={}",
                 p.host_alias.as_deref().unwrap_or("*"),
                 p.kind.as_deref().unwrap_or("*"),
                 p.name.as_deref().unwrap_or("*"),
+                caller.label(),
             ),
         );
+        deny_cross_catalog_read(&caller, "plan_sync")?;
         let kind = match &p.kind {
             Some(k) => Some(parse_kind(k)?),
             None => None,
@@ -281,13 +290,18 @@ impl FleetTools {
             }
         }
         // Final review M2: importing into an org catalog reads the source
-        // host's whole Claude config. A host of that org (bound to it, or
-        // admitted to the catalog) is the org's to read; any other host —
-        // `local` included — also needs the personal grant, as it did
+        // host's whole Claude config. A host BOUND TO that org is the org's
+        // to read; any other host — `local` included, and a host merely
+        // ADMITTED to the catalog — also needs the personal grant, as it did
         // before import became per catalog (R21).
+        //
+        // Admission is deliberately not enough here: `catalogs::admit` does
+        // not ask who is calling, so an org-only grantee could admit a host
+        // and self-grant this exemption (round-2 review, #418 V3). See
+        // `host_is_of_catalogs_org`.
         if let (AdminCall::ImportHost(a), Some(row)) = (&call, target.as_ref()) {
             if row.org_id.is_some()
-                && !host_serves_catalog(&self.store, &a.host_alias, row)?
+                && !host_is_of_catalogs_org(&self.store, &a.host_alias, row)?
                 && !may_admin_catalog(&caller, &self.store, catalog::catalogs::PERSONAL)?
             {
                 return Err(mcp_err(
@@ -505,8 +519,12 @@ impl FleetTools {
     #[tool(description = "The catalog's layer definitions (layers/*.yaml) \
         and each host's role + active contexts. Read-only. Requires \
         catalog_configure + catalog_load in the app.")]
-    pub(super) async fn list_layers(&self) -> Result<CallToolResult, McpError> {
-        audit("list_layers", "");
+    pub(super) async fn list_layers(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("list_layers", &format!("caller={}", caller.label()));
+        deny_cross_catalog_read(&caller, "list_layers")?;
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let out = catalog::list_layers(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&out)
@@ -520,9 +538,14 @@ impl FleetTools {
         catalog_configure + catalog_load in the app.")]
     pub(super) async fn resolve_preview(
         &self,
+        Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ResolvePreviewParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("resolve_preview", &format!("host_alias={}", p.host_alias));
+        audit(
+            "resolve_preview",
+            &format!("host_alias={} caller={}", p.host_alias, caller.label()),
+        );
+        deny_cross_catalog_read(&caller, "resolve_preview")?;
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let res = catalog::resolve_preview(&p.host_alias, &self.store).map_err(to_mcp_err)?;
         // `Resolution` is a full `Catalog` (every asset body and resource's
@@ -536,8 +559,12 @@ impl FleetTools {
         assets by the exact set of hosts they are on: the largest group \
         becomes 'core'; single-host assets come back separately for triage. \
         Read-only.")]
-    pub(super) async fn propose_layers(&self) -> Result<CallToolResult, McpError> {
-        audit("propose_layers", "");
+    pub(super) async fn propose_layers(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("propose_layers", &format!("caller={}", caller.label()));
+        deny_cross_catalog_read(&caller, "propose_layers")?;
         catalog::ensure_fresh(&self.store).map_err(to_mcp_err)?;
         let out = catalog::propose::propose_layers(&self.store).map_err(to_mcp_err)?;
         ok_json_compact(&out)
@@ -729,9 +756,27 @@ impl FleetTools {
     }
 }
 
-/// Whether `host` takes org catalog `row`: bound to its org, or (a host
-/// with no org) admitted to it.
-fn host_serves_catalog(
+/// Whether `host` BELONGS to org catalog `row`'s org — the one fact the
+/// import exemption may rest on, because the caller cannot write it.
+///
+/// **Why admission is not enough** (round-2 review, #418 V3). This used to
+/// answer `true` for an admitted host too, which reads naturally — a host
+/// with no org that has been admitted to a catalog is "served" by it. But
+/// `catalogs::admit` checks only that the catalog has an org and the host has
+/// none; it does not ask who is calling. So a client granted one org catalog
+/// could admit any org-less host to it and, by doing so, hand itself the
+/// exemption below — after which `import_host` reads that host's
+/// `~/.claude.json` and settings over SSH and writes them into the org
+/// catalog, `import_claude_only` copies `env` and `headers` verbatim
+/// (scrubbing only fleet's own token), and `get_asset` on the same grant
+/// reads the values back. That is the MCP and hook secrets of any host with
+/// no org, exfiltrated on a grant for an unrelated catalog.
+///
+/// A host's `org_id` is set by fleet admin, not by a catalog grantee, so
+/// deciding the exemption on it alone closes the loop. An admitted host that
+/// is not of the catalog's org now needs the personal grant, exactly as any
+/// other outside host does.
+fn host_is_of_catalogs_org(
     store: &std::sync::Mutex<Store>,
     host: &str,
     row: &crate::store::CatalogRow,
@@ -739,11 +784,7 @@ fn host_serves_catalog(
     let s = store
         .lock()
         .map_err(|_| mcp_err(codes::E_LOCK, "store mutex poisoned", None))?;
-    if row.org_id.is_some() && s.host_org(host).map_err(to_mcp_err)? == row.org_id {
-        return Ok(true);
-    }
-    let admitted = s.host_admissions(host).map_err(|e| to_mcp_err(e.into()))?;
-    Ok(admitted.contains(&row.id))
+    Ok(row.org_id.is_some() && s.host_org(host).map_err(to_mcp_err)? == row.org_id)
 }
 
 /// What a person approves for a host-writing card apply (fix round 1): the
@@ -829,6 +870,37 @@ pub(crate) fn listing_scope(caller: &Caller) -> catalog::ListingScope {
     } else {
         catalog::ListingScope::Personal
     }
+}
+
+/// Refuse a caller that may not read across catalogs (round-2 review,
+/// #418 V1).
+///
+/// The five cross-catalog READ tools — `scan_assets`, `plan_sync`,
+/// `list_layers`, `resolve_preview`, `propose_layers` — answer out of every
+/// LOADED catalog, and since Assets M3 that is every `catalogs` row rather
+/// than just `personal`. They have no personal-only mode to fall back to
+/// (unlike `list_assets`, which takes a [`listing_scope`]), so the audience
+/// is the same one `list_catalogs` and `listing_scope::Every` already name:
+/// the master, or a person's own unbound full device. A per-host token is
+/// refused earlier by `NOT_FOR_HOST_TOKENS`; this is what refuses an
+/// ORG-BOUND or readonly client, which that list does not cover.
+///
+/// It also puts the standalone tools back in step with the `catalog_admin`
+/// ACTION forms of the same names, which `docs/hub.md` already documents as
+/// needing the personal grant.
+fn deny_cross_catalog_read(caller: &Caller, tool: &str) -> Result<(), McpError> {
+    if may_list_every_catalog(caller) {
+        return Ok(());
+    }
+    Err(mcp_err(
+        "E_FORBIDDEN",
+        format!(
+            "{tool} reads across every catalog, which needs the master token or your own \
+             unbound full device; {} may not",
+            caller.label()
+        ),
+        None,
+    ))
 }
 
 /// Who may see every catalog — its name, paths, remotes, grantees and
