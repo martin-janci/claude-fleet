@@ -8,7 +8,8 @@ import { get } from 'svelte/store';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
-import { workBoardOpen, requestHostsView, settingsOpen } from './lib/app_views';
+import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView } from './lib/app_views';
+import { toolkitTab } from './lib/toolkit_skills';
 import { sidebarView } from './lib/work_view';
 import { destination } from './lib/destination';
 import { uiLayout } from './lib/prefs';
@@ -125,7 +126,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     const ids = Array.from(getByTestId('rail').querySelectorAll('[data-testid^="rail-"]'), (e) =>
       e.getAttribute('data-testid'),
     );
-    expect(ids).toEqual(['rail-control', 'rail-inbox', 'rail-sessions', 'rail-work', 'rail-accounts', 'rail-settings']);
+    expect(ids).toEqual(['rail-control', 'rail-inbox', 'rail-sessions', 'rail-work', 'rail-accounts', 'rail-toolkit', 'rail-settings']);
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
   });
 
@@ -143,6 +144,32 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(get(destination)).toBe('session');
     expect(terminalSlot(container)).toBe(term);
+  });
+
+  it('Toolkit (step 3.16) is the Assets screen, from the rail and from every old entry point', async () => {
+    uiLayout.set('new');
+    toolkitTab.set('skills');
+    const { container, getByTestId } = render(App);
+    const term = terminalSlot(container);
+    await fireEvent.click(getByTestId('rail-toolkit'));
+    expect(openOverlays(container)).toEqual(['assets-overlay']);
+    expect(getByTestId('rail-toolkit').getAttribute('aria-current')).toBe('page');
+    expect(getByTestId('toolkit-skills')).toBeTruthy();
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(get(destination)).toBe('session');
+    expect(terminalSlot(container)).toBe(term);
+    // The quick switcher's asset rows open the same screen on its Assets tab.
+    requestAssetsView({ select: 'asset:personal:skill/x' });
+    await waitFor(() => expect(openOverlays(container)).toEqual(['assets-overlay']));
+    expect(get(toolkitTab)).toBe('assets');
+    expect(getByTestId('toolkit')).toBeTruthy();
+  });
+
+  it('Classic keeps the Assets overlay without Toolkit', async () => {
+    const { getByTestId, queryByTestId } = render(App);
+    await fireEvent.click(getByTestId('tab-assets'));
+    expect(getByTestId('assets-overlay')).toBeTruthy();
+    expect(queryByTestId('toolkit')).toBeNull();
   });
 
   it('Work and Sessions pick the sidebar tree and leave a fleet page', async () => {

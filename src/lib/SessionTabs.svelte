@@ -18,6 +18,8 @@
   import { attentionState } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { shortcutLabel } from './shortcuts';
+  import { accessOf } from './access';
+  import { editorBlockedReason, openSessionInEditor } from './editor';
 
   interface Props {
     session: SessionRow | null;
@@ -65,6 +67,10 @@
     { id: 'details', label: 'Details', chord: null },
   ]);
   const inspectorChord = $derived(shortcutLabel('inspector', isMac));
+  // Open in VS Code (step 5.5): the worktree on this machine, or over
+  // Remote - SSH for a session on another host.
+  const editorChord = $derived(shortcutLabel('open-in-editor', isMac));
+  const editorBlocked = $derived(editorBlockedReason(session, $accessOf(session)));
 </script>
 
 <div class="session-head" data-testid="session-head">
@@ -73,6 +79,19 @@
       <span class="name" data-testid="session-head-name">{name}</span>
       <span class="state state-{state}" data-testid="session-head-state">{STATE_LABELS[state]}</span>
       <span class="grow"></span>
+      <button
+        type="button"
+        class="btn btn--quiet btn--icon editor-open"
+        disabled={editorBlocked !== null}
+        title={editorBlocked ?? `Open in VS Code (${editorChord})`}
+        aria-label="Open in VS Code"
+        data-testid="open-in-editor"
+        onclick={() => session && void openSessionInEditor(session)}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"
+          ><path d="M6 4L2 8l4 4M10 4l4 4-4 4" /></svg
+        >
+      </button>
       <button
         type="button"
         class="btn btn--quiet btn--icon inspector-toggle"
@@ -177,6 +196,7 @@
     font-weight: 500;
     border-bottom-color: var(--accent);
   }
+  .editor-open svg,
   .inspector-toggle svg {
     fill: none;
     stroke: currentColor;

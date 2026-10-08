@@ -412,7 +412,7 @@
   }
   .err {
     max-width: 260px;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 11px;
     text-align: right;
   }

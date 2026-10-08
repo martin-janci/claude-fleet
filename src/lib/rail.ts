@@ -33,7 +33,7 @@ export const RAIL_ITEMS: readonly RailItem[] = [
   { id: 'work', label: 'Work', shortcut: 'work-view', step: '3.2', landed: true },
   { id: 'automation', label: 'Automation', shortcut: null, step: '8.4', landed: false },
   { id: 'accounts', label: 'Accounts', shortcut: 'hosts', step: '4.1', landed: true },
-  { id: 'toolkit', label: 'Toolkit', shortcut: null, step: '3.16', landed: false },
+  { id: 'toolkit', label: 'Toolkit', shortcut: null, step: '3.16', landed: true },
   { id: 'settings', label: 'Settings', shortcut: 'settings', step: '3.2', landed: true },
 ];
 
@@ -46,13 +46,12 @@ export function visibleRailItems(items: readonly RailItem[] = RAIL_ITEMS): RailI
  * The item the right column belongs to. Accounts covers both of its pages
  * (Accounts and Hosts: "Accounts & hosts"); every other overlay (Files, the
  * board) sits over a session, so the sidebar's tree names the item. Assets
- * belongs to Toolkit, hidden until 3.16, so nothing is current there. The
- * Inbox (3.3) is the Sessions list narrowed, so the same rule names it.
- * Control (9.1) is a destination of its own.
+ * is Toolkit's screen (3.16). The Inbox (3.3) is the Sessions list narrowed,
+ * so the same rule names it. Control (9.1) is a destination of its own.
  */
 export function currentRailItem(dest: Destination, view: SidebarView): RailId | null {
   if (dest === 'control') return 'control';
   if (dest === 'accounts' || dest === 'hosts') return 'accounts';
-  if (dest === 'assets') return null;
+  if (dest === 'assets') return 'toolkit';
   return view === 'work' ? 'work' : view === 'inbox' ? 'inbox' : 'sessions';
 }

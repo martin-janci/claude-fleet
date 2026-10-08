@@ -12,6 +12,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
+  import { openInEditorIfAllowed } from './lib/editor';
   import { todayOpen } from './lib/today';
   import {
     bumpWorkChanged,
@@ -33,6 +34,8 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
+  import Toolkit from './lib/Toolkit.svelte';
+  import { toolkitTab } from './lib/toolkit_skills';
   import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
   import ControlView from './lib/ControlView.svelte';
@@ -717,7 +720,15 @@
     if (!$selectedSession) return;
     goTo('files');
   }
+  // Every Assets entry point (the Classic tab, the sidebar, the quick
+  // switcher) opens Toolkit's Assets tab in the New layout (step 3.16).
   function showAssets() {
+    toolkitTab.set('assets');
+    goTo('assets');
+  }
+  // The rail's Toolkit reopens the tab it showed last.
+  function showToolkit() {
+    closeHosts();
     goTo('assets');
   }
   function showAccounts() {
@@ -738,6 +749,7 @@
       closeHosts();
       goTo('control');
     } else if (id === 'accounts') showAccounts();
+    else if (id === 'toolkit') showToolkit();
     else if (id === 'settings') settingsOpen.set(true);
   }
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
@@ -909,6 +921,7 @@
     else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
     else if (chord === 'today') toggleToday();
     else if (chord === 'inspector') toggleInspector();
+    else if (chord === 'open-in-editor') void openInEditorIfAllowed($selectedSession, selAccess);
     else if (chord === 'work-view') {
       sidebarCollapsed = false;
       toggleSidebarView();
@@ -1301,7 +1314,11 @@
       {/if}
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <AssetsPanel visible={assetsMode} />
+          {#if newLayout}
+            <Toolkit visible={assetsMode} />
+          {:else}
+            <AssetsPanel visible={assetsMode} />
+          {/if}
         </div>
       {/if}
       {#if accountsMode}

@@ -821,8 +821,8 @@
     border-radius: var(--radius-pill);
     font-size: var(--control-font-sm);
     line-height: 16px;
-    background: var(--usage-crit);
-    color: #fff;
+    background: var(--danger-fill);
+    color: var(--on-danger);
   }
   .search {
     flex: 1;
