@@ -119,6 +119,13 @@ pub fn hub_connection(
     status.current()
 }
 
+/// The disconnected banner's "Retry now": try the hub's event stream again
+/// at once instead of after the backoff. Does nothing while connected.
+#[tauri::command]
+pub fn hub_retry_now(status: State<'_, Arc<crate::backend::connection::HubConnectionStatus>>) {
+    status.retry_now();
+}
+
 /// Whether a client token is sitting on this machine with **no hub
 /// configured** — a credential nothing reads and, until this existed, nothing
 /// offered to clear.

@@ -296,6 +296,7 @@
     "hub_connection",
     "hub_disconnect",
     "hub_pair",
+    "hub_retry_now",
     "hub_status",
     "hub_stranded_token",
     "keep_both_local_conflict",

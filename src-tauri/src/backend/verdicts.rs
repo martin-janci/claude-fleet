@@ -1123,6 +1123,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "hub_retry_now",
+        Verdict::SameInBoth {
+            why: "cuts THIS process's wait before it reconnects to the hub. It is the \
+                  banner's Retry now, pressed exactly when the hub cannot be reached",
+        },
+    ),
+    (
         "hub_connection",
         Verdict::SameInBoth {
             why: "reports whether THIS process's event stream to the hub is up. Asking the \
