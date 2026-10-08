@@ -5,6 +5,7 @@
 // through these stores instead of prop-drilling. Same pattern as
 // `new_session_request.ts`.
 import { writable } from 'svelte/store';
+import { destinationFlag } from './destination';
 import type { AssetsCommand } from './quick_switcher';
 
 export interface HostsViewRequest {
@@ -16,8 +17,9 @@ export interface HostsViewRequest {
 /** A pending "open the Hosts view" request; App consumes and clears it. */
 export const hostsViewRequest = writable<HostsViewRequest | null>(null);
 
-/** Whether the Hosts view is showing. Written by App only. */
-export const hostsViewOpen = writable(false);
+/** Whether the Hosts view is showing: a view of the `destination` store
+ *  (redesign step 3.1), which App writes. */
+export const hostsViewOpen = destinationFlag('hosts');
 
 export function requestHostsView(host: string | null = null): void {
   hostsViewRequest.set({ host });
@@ -182,7 +184,9 @@ export function workViewChordLabel(isMac: boolean): string {
 }
 
 /** Whether the task board shows over the terminal (sprints design
- *  2026-09-28 §6c). The Work view's Board button opens it; App closes it
- *  when another overlay (Files, Assets, Hosts) or the Session tab takes
- *  the slot, and on Esc. */
-export const workBoardOpen = writable(false);
+ *  2026-09-28 §6c). The Work view's Board button opens it; another overlay
+ *  (Files, Assets, Hosts) or the Session tab taking the slot closes it, as
+ *  does Esc. A view of the `destination` store (redesign step 3.1): opening
+ *  it leaves whichever overlay was open, closing it returns to the Session
+ *  tab. */
+export const workBoardOpen = destinationFlag('board');
