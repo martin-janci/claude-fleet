@@ -291,6 +291,32 @@ ever offered); a follow-up already there is never overwritten.
 **Off.** `decide.jev.status_map` to `off`; your confirmed maps stay (they
 are yours).
 
+## `start_project` — the repository of a task's first start (K1)
+
+When no project has worked on a task's key prefix yet, a start cannot be
+planned: the start popover asks *Pick a repository…* over the eight most
+recently used projects. With `decide.jev.start_project` on, Jev is asked one
+Choice over those same candidates (or `unsure`).
+
+- **What is sent.** The task's key and title, the first 1,000 characters of
+  its cached description, and each candidate's `owner/repo`, redacted.
+  Nothing from the repositories.
+- **Shadow.** Asked off the preview's path and only recorded, with the first
+  candidate (today's first row) as the baseline.
+- **Assist.** The preview waits for the one call (`decide.jev.timeout_ms`)
+  and the popover pre-selects the answer with *Proposed by Jev (N%)*. You
+  still press Start, and any other choice is yours.
+- **Asked once per input.** Re-opening the popover on the same task reuses
+  the decided run for 14 days.
+- **Follow-up.** Your start marks the proposal you were shown `confirmed`
+  (same repository) or `corrected` (to yours). An agent's start, and a
+  shadow answer nobody saw, mark nothing.
+- **What is recorded.** Subject `work_start` `item:<id>`, or `key:<HMAC>` for
+  a key no tracker knows; options are project ids (`p<id>`).
+
+Code: `service/decide/start_project.rs`, `preview_start_decided` in
+`service/trackers/tickets.rs`; card K1 in the test map.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
@@ -300,6 +326,7 @@ are yours).
 | `decide.jev.enabled` | `false` | on / off | The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted. Experimental. Asks to confirm. |
 | `decide.jev.status_map` | `off` | `off` / `shadow` / `assist` | Proposing a status category for an Asana section. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.start_project` | `off` | `off` / `shadow` / `assist` | Pre-selecting the repository of a task's first start. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |

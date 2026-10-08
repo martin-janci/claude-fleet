@@ -17,6 +17,7 @@
     previewStartWork,
     projectLabel,
     startBlockedBy,
+    suggestedProjectId,
     type StartChoice,
     type StartPreview,
   } from './start_preview';
@@ -47,6 +48,12 @@
   let preview = $state.raw<StartPreview>(initial);
   // svelte-ignore state_referenced_locally
   let choice = $state<StartChoice>(choiceFromPreview(initial, base.with_brief ?? true));
+  // Jev's proposal (K1) from the first preview: the re-read with the
+  // project chosen no longer carries it, so it is kept here for the hint.
+  // svelte-ignore state_referenced_locally
+  const suggested = suggestedProjectId(initial);
+  // svelte-ignore state_referenced_locally
+  const suggestedPct = initial.suggested_project?.confidence_pct ?? null;
   let branch = $state('');
   let showBrief = $state(false);
   let busy = $state(false);
@@ -63,6 +70,8 @@
 
   onMount(async () => {
     branch = planned?.branch ?? '';
+    // A pre-selected repository still needs its host and plan resolved.
+    if (suggested != null && choice.project_id === suggested) void readNow();
     await tick();
     // The unresolved field first, else Start.
     const first =
@@ -194,6 +203,11 @@
       {/if}
     </select>
   </label>
+  {#if suggested != null && choice.project_id === suggested}
+    <span class="hint" data-testid="start-popover-suggested"
+      >Proposed by Jev{suggestedPct != null ? ` (${suggestedPct}%)` : ''}: check it before you start.</span
+    >
+  {/if}
 
   <label class="field">
     <span>Host</span>

@@ -9,6 +9,7 @@ import {
   previewIsClean,
   primaryAction,
   startBlockedBy,
+  suggestedProjectId,
   type StartPreview,
 } from './start_preview';
 
@@ -104,5 +105,23 @@ describe('previewUnsupported', () => {
     expect(previewUnsupported({ code: 'E_INVALID', message: 'unknown work_link action "preview_start"; one of link' })).toBe(true);
     expect(previewUnsupported({ code: 'E_INVALID', message: 'start needs exactly one of key, url or item_id' })).toBe(false);
     expect(previewUnsupported({ code: 'E_FORBIDDEN', message: 'preview_start refused' })).toBe(false);
+  });
+});
+
+describe('suggestedProjectId', () => {
+  const missing = (over: Partial<StartPreview> = {}) =>
+    preview({ plan: null, missing: 'project', suggested_project: { project_id: 3, confidence_pct: 90 }, ...over });
+
+  it('pre-selects a proposed candidate, and only while the project is missing', () => {
+    expect(suggestedProjectId(missing())).toBe(3);
+    expect(choiceFromPreview(missing()).project_id).toBe(3);
+    expect(suggestedProjectId(missing({ missing: 'host' }))).toBeNull();
+    expect(suggestedProjectId(missing({ suggested_project: null }))).toBeNull();
+  });
+
+  it('never pre-selects a project the preview does not offer', () => {
+    const p = missing({ suggested_project: { project_id: 99 } });
+    expect(suggestedProjectId(p)).toBeNull();
+    expect(choiceFromPreview(p).project_id).toBeNull();
   });
 });

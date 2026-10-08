@@ -230,6 +230,11 @@ person's Clear work holds against the unchanged branch / PR (R9u, migration
 `docs/superpowers/specs/2026-09-27-jev-test-map.md`.
 Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
+Five more use cases, K1–K5, were accepted by the owner on 2026-10-07 (test
+map §5): K1 `start_project` next, K5 with the picker's phase 2, K2 and K3 as
+shadow slots in Mode B and the mission loop, K4 last. K1 is built, off
+(`decide.jev.start_project`, `service/decide/start_project.rs`): the start
+popover pre-selects Jev's repository in assist; K2–K5 are not built.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
 recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed.

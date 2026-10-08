@@ -2834,6 +2834,24 @@
       ]
     },
     {
+      "default_widget": "select",
+      "key": "decide.jev.start_project",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: start repository",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "decide.jev.unassigned",
       "kind": {
