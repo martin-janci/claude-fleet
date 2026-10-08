@@ -33,4 +33,4 @@ CREATE TABLE IF NOT EXISTS agent_installs (
 CREATE INDEX IF NOT EXISTS agent_installs_by_host
   ON agent_installs (host_alias, started_at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (127);
+INSERT OR IGNORE INTO schema_version (version) VALUES (128);

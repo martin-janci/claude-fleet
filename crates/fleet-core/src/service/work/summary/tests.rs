@@ -412,6 +412,51 @@ async fn a_summary_is_stored_once_per_conversation_and_fenced() {
     assert_eq!(rows[0].2.as_deref(), Some("Second take."));
 }
 
+/// Redesign 8.2: a summary run is booked with its cost and its origin, and
+/// the summary is the envelope's text.
+#[tokio::test]
+async fn a_summary_run_is_booked_with_its_cost() {
+    let (st, link) = past_session("sum-cost");
+    let fake = FakeSsh::new();
+    fake.on_host(
+        "sum-cost",
+        Match::script_contains(SUMMARY_TAG),
+        Reply::ok(
+            "fleet-summary=run\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Goal: fix login.\",\"total_cost_usd\":0.002,\"usage\":{\"input_tokens\":5000,\"output_tokens\":80}}\n",
+        ),
+    );
+    let out = summarize(
+        &st,
+        &fake,
+        "ABC-1",
+        link,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .await
+    .unwrap();
+    assert!(out.summary.contains("Goal: fix login."), "{}", out.summary);
+    assert!(!out.summary.contains("total_cost_usd"), "{}", out.summary);
+    let s = st.lock().unwrap();
+    let row: (String, String, Option<String>, i64, Option<i64>) = s
+        .conn_ref()
+        .query_row(
+            "SELECT origin, host_alias, claude_session_id, cost_micros, input_tokens FROM aux_usage",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "summary".into(),
+            "sum-cost".into(),
+            Some(CID.into()),
+            2_000,
+            Some(5000)
+        )
+    );
+}
+
 #[tokio::test]
 async fn each_host_answer_maps_to_its_code_and_stores_nothing() {
     let cases: [(&str, Reply, &str); 6] = [

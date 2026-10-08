@@ -354,13 +354,13 @@
   .rail li.done { color: var(--fg); }
   .num {
     width: 1.3rem; height: 1.3rem; border-radius: 50%; border: 1px solid var(--border);
-    display: inline-flex; align-items: center; justify-content: center; font-size: 0.7rem;
+    display: inline-flex; align-items: center; justify-content: center; font-size: 0.8rem;
   }
   .current .num { border-color: var(--accent); }
   .done .num { border-color: var(--ok, var(--accent)); color: var(--ok, var(--accent)); }
-  .note { margin-top: auto; font-size: 0.75rem; color: var(--fg-muted); }
+  .note { margin-top: auto; font-size: 0.8rem; color: var(--fg-muted); }
   .body { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
-  .count { margin: 0; font-size: 0.75rem; color: var(--fg-muted); }
+  .count { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
   h2 { margin: 0; font-size: 1.1rem; }
   .sub { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
   .muted { color: var(--fg-muted); font-size: 0.8rem; }
@@ -372,13 +372,13 @@
     padding: 0.35rem 0.6rem; color: var(--fg); cursor: pointer;
   }
   .host.picked, .host:hover { border-color: var(--accent); }
-  .field { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.75rem; color: var(--fg-muted); }
+  .field { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.8rem; color: var(--fg-muted); }
   .field input { font: inherit; font-size: 0.85rem; padding: 0.3rem 0.5rem; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); }
   .drafts { display: flex; flex-direction: column; gap: 0.25rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
   .draft { display: flex; justify-content: space-between; gap: 0.5rem; align-items: center; }
   .checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
   .check { display: grid; grid-template-columns: 1.2rem 1fr auto; gap: 0.5rem; align-items: baseline; font-size: 0.85rem; }
-  .check .detail { color: var(--fg-muted); font-size: 0.75rem; }
+  .check .detail { color: var(--fg-muted); font-size: 0.8rem; }
   .check.ok .glyph { color: var(--ok, var(--accent)); }
   .check.warn .glyph, .check.warn .detail { color: var(--usage-warn); }
   .check.fail .glyph, .check.fail .detail { color: var(--usage-crit); }
@@ -394,7 +394,7 @@
     background: transparent; color: var(--fg); border-radius: 4px; cursor: pointer;
   }
   .link { border: none; padding: 0; text-align: left; color: var(--accent); }
-  .quiet { align-self: flex-start; font-size: 0.75rem; padding: 0.2rem 0.6rem; }
+  .quiet { align-self: flex-start; font-size: 0.8rem; padding: 0.2rem 0.6rem; }
   .actions button.primary { border-color: var(--accent); }
   button:disabled { opacity: 0.5; cursor: default; }
 </style>
