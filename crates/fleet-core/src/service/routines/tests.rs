@@ -479,6 +479,34 @@ async fn a_fire_on_an_account_over_the_line_is_skipped() {
     assert_eq!(runs_of(&f, r.id)[1].state, "running");
 }
 
+/// Redesign 8.7: a routine names the account it runs as.
+#[test]
+fn a_routine_names_the_account_it_bills() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    let ana = person(&f.store, None, f.ana);
+    assert_eq!(
+        get(&f.store, &ana, r.id).unwrap().account,
+        None,
+        "no login yet"
+    );
+    {
+        let s = lock(&f.store).unwrap();
+        let now = crate::store::now_unix();
+        crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 95.0, now);
+    }
+    let a = get(&f.store, &ana, r.id).unwrap().account.unwrap();
+    assert_eq!(
+        (
+            a.host_alias.as_str(),
+            a.login.profile.as_deref(),
+            a.login.account_uuid.as_str()
+        ),
+        ("mac", Some("work"), "work")
+    );
+    assert!(a.over);
+}
+
 #[tokio::test]
 async fn pause_all_stops_the_schedule_but_not_a_person() {
     let f = fx();

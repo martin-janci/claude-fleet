@@ -168,39 +168,76 @@ impl OverLimit {
     }
 }
 
-/// Whether automation (a routine, the mission loop) should leave the login
-/// `profile` on `host_alias` alone: its account is at or past
-/// `accounts.pause_at`. Read from the store's newest usage snapshots, which
-/// the usage poll writes wherever it runs (the hub included), so a loop
-/// needs no cache. `None` when under the line, without a reading, for a
-/// login that is not on a known account, or for an unknown host: nothing
-/// here refuses what it cannot measure.
-pub fn over_limit(
+/// The account a login bills, for automation that names it ("runs as … on
+/// mac", redesign 8.7): from the store's newest usage snapshots, which the
+/// usage poll writes wherever it runs (the hub included), so a loop needs no
+/// cache.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LoginAccount {
+    pub host_alias: String,
+    #[serde(flatten)]
+    pub login: HostLogin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// At or past `accounts.pause_at`: automation leaves it alone.
+    pub over: bool,
+}
+
+/// [`LoginAccount`] of the login `profile` on `host_alias` (`None` = the
+/// host's own). `None` for an unknown host or a login not on a known
+/// account.
+pub fn login_account(
     s: &Store,
     host_alias: &str,
     profile: Option<&str>,
     now: i64,
-) -> Result<Option<OverLimit>, IpcError> {
+) -> Result<Option<LoginAccount>, IpcError> {
     let Some(host) = s.get_host_row(host_alias)? else {
         return Ok(None);
     };
     let snaps = s.latest_usage_snapshots()?;
     let pause_at = pause_at_pct(s);
     let profile = profile.map(str::trim).filter(|p| !p.is_empty());
-    let login = logins_with(&host, |uuid| {
+    let Some(login) = logins_with(&host, |uuid| {
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
             .and_then(|r| used_pct_of(&r.usage, now))
     })
     .into_iter()
-    .find(|l| l.profile.as_deref() == profile);
-    Ok(login
-        .filter(|l| l.used_pct.is_some_and(|u| u >= pause_at))
-        .map(|login| OverLimit {
-            host_alias: host_alias.to_string(),
-            login,
-            pause_at_pct: pause_at,
+    .find(|l| l.profile.as_deref() == profile) else {
+        return Ok(None);
+    };
+    let email = s
+        .list_accounts()?
+        .into_iter()
+        .find(|a| a.uuid == login.account_uuid)
+        .and_then(|a| a.email);
+    Ok(Some(LoginAccount {
+        host_alias: host_alias.to_string(),
+        over: login.used_pct.is_some_and(|u| u >= pause_at),
+        login,
+        email,
+    }))
+}
+
+/// Whether automation (a routine, the mission loop) should leave the login
+/// `profile` on `host_alias` alone: its account is at or past
+/// `accounts.pause_at` ([`login_account`]). `None` when under the line,
+/// without a reading, for a login that is not on a known account, or for an
+/// unknown host: nothing here refuses what it cannot measure.
+pub fn over_limit(
+    s: &Store,
+    host_alias: &str,
+    profile: Option<&str>,
+    now: i64,
+) -> Result<Option<OverLimit>, IpcError> {
+    Ok(login_account(s, host_alias, profile, now)?
+        .filter(|a| a.over)
+        .map(|a| OverLimit {
+            host_alias: a.host_alias,
+            login: a.login,
+            pause_at_pct: pause_at_pct(s),
         }))
 }
 
