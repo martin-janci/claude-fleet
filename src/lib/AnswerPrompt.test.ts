@@ -1,5 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { uiLayout } from './prefs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
@@ -393,5 +394,37 @@ describe('AnswerPrompt 1–9 (redesign step 3.8)', () => {
     await fireEvent.keyDown(document.body, { key: '1' });
     await settle();
     expect(mockedSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
+  afterEach(() => uiLayout.set('classic'));
+
+  it('the New layout draws the kit card, with the command, on a row as in the Conversation', async () => {
+    uiLayout.set('new');
+    const v = { ...view({ ...DIALOG, detail: 'Bash(git push)' }) };
+    const onAnswered = vi.fn();
+    render(AnswerPrompt, { session: session(), view: v, compact: true, onAnswered });
+    const card = screen.getByTestId('answer-card');
+    expect(card.querySelector('.of-question.compact')).toBeTruthy();
+    expect(screen.getByTestId('question-detail').textContent).toBe('Bash(git push)');
+    // A row has nowhere to type: no own-words button there.
+    expect(screen.queryByTestId('question-own-words')).toBeNull();
+    await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '', { keys: '3' });
+    expect(onAnswered).toHaveBeenCalledWith('No, and tell Claude what to do differently');
+    expect(screen.getByTestId('answer-sent').textContent).toContain('No, and tell Claude');
+  });
+
+  it('a refused send moves nobody on', async () => {
+    uiLayout.set('new');
+    mockedAct.mockResolvedValue({ ok: true, value: probe(null) });
+    const onAnswered = vi.fn();
+    render(AnswerPrompt, { session: session(), view: view(), onAnswered });
+    await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    expect(onAnswered).not.toHaveBeenCalled();
   });
 });

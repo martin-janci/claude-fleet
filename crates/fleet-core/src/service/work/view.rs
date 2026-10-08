@@ -593,6 +593,44 @@ pub struct ReviewItem {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<ReviewAlternative>,
     pub created_at: i64,
+    /// Who proposed it, when it is not a rule's reading of a signal: the
+    /// decision model's suggestion (J1, rule R12, redesign 6.8). Absent for
+    /// every other item, and from an older hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<ReviewProposer>,
+}
+
+/// [`ReviewItem::proposed_by`]: "Proposed by Jev · from the first prompt ·
+/// 82%".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewProposer {
+    /// `jev`.
+    pub source: String,
+    /// Why, in fleet's words.
+    pub reason: String,
+    /// The model's confidence, in whole percent, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+}
+
+/// PURE: who proposed a link that carries `rule` and `evidence`: the
+/// decision model for an R12 suggestion, with the confidence its evidence
+/// note holds (`82%`); `None` for a rule's own reading.
+pub fn proposer_of(rule: Option<&str>, evidence: &[serde_json::Value]) -> Option<ReviewProposer> {
+    if rule != Some(crate::service::decide::work_link::RULE) {
+        return None;
+    }
+    let confidence_pct = evidence
+        .iter()
+        .filter(|e| e.get("signal").and_then(|s| s.as_str()) == Some("jev"))
+        .filter_map(|e| e.get("note").and_then(|n| n.as_str()))
+        .filter_map(|n| n.trim_end_matches('%').parse::<u8>().ok())
+        .next_back();
+    Some(ReviewProposer {
+        source: "jev".into(),
+        reason: "from the first prompt".into(),
+        confidence_pct,
+    })
 }
 
 /// Another suggestion of the same session, for *Change…*.
@@ -1302,10 +1340,18 @@ fn why_of(e: &Evidence) -> String {
         Some("prompt_key") => "mentioned in a prompt",
         Some("prompt_issue") => "issue number in a prompt",
         Some("agent_inferred") => "Claude named it",
+        Some("jev") => "Jev proposed",
         _ => "seen",
     };
     let text: String = e.text.chars().take(60).collect();
-    format!("{what} {text} · {}", e.rule).trim().to_string()
+    // The decision model's confidence rides the note (`82%`).
+    let note = match (e.signal, e.note.as_deref()) {
+        (super::resolve::Signal::Jev, Some(n)) => format!(" ({n})"),
+        _ => String::new(),
+    };
+    format!("{what} {text}{note} · {}", e.rule)
+        .trim()
+        .to_string()
 }
 
 fn strength_rank(s: Option<&str>) -> u8 {
@@ -3216,6 +3262,9 @@ pub(crate) fn review_of(
             preselected: l.link.preselected,
             alternatives: alts,
             created_at: l.link.decided_at.unwrap_or(l.link.created_at),
+            proposed_by: (kind == "suggestion")
+                .then(|| proposer_of(l.link.rule.as_deref(), &l.link.evidence))
+                .flatten(),
         }
     };
     for (sid, links) in &by_session {

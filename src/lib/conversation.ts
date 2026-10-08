@@ -777,6 +777,9 @@ export interface SlashCommand {
   description: string;
   /** Completes with a trailing space so the user can type the argument. */
   args?: boolean;
+  /** Where it comes from when it is not a built-in (redesign 5.9): a skill
+   *  or command in the project's `.claude/` folder. */
+  source?: 'skill' | 'command';
 }
 
 /**
@@ -815,10 +818,38 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
  * whole draft is one token that begins with `/` (no spaces or newlines): once
  * an argument or a second line is being typed, the menu gets out of the way.
  */
-export function matchSlashCommands(draft: string): SlashCommand[] {
+export function matchSlashCommands(draft: string, extra: readonly SlashCommand[] = []): SlashCommand[] {
   if (!draft.startsWith('/') || /\s/.test(draft)) return [];
   const prefix = draft.slice(1).toLowerCase();
-  return SLASH_COMMANDS.filter((c) => c.name.startsWith(prefix));
+  // A project skill named like a built-in is not offered twice: the REPL
+  // runs the built-in.
+  const builtin = new Set(SLASH_COMMANDS.map((c) => c.name));
+  return [...SLASH_COMMANDS, ...extra.filter((c) => !builtin.has(c.name))].filter((c) =>
+    c.name.toLowerCase().startsWith(prefix),
+  );
+}
+
+/** What identifies a turn across reloads and "Load older": its prompt's
+ *  uuid, else its start time. */
+export function turnAnchor(t: Pick<ConvTurn, 'prompt_uuid' | 'at' | 'ended_at'>): string | null {
+  return t.prompt_uuid ?? t.at ?? t.ended_at ?? null;
+}
+
+/**
+ * Where the "New" divider goes (redesign 5.9, from 2.3's `last_viewed_at`):
+ * the anchor of the first turn that started or answered after the person
+ * last looked, or `null` when nothing did or nobody has looked yet.
+ * `seenAt` is unix seconds.
+ */
+export function newDividerAnchor(turns: readonly ConvTurn[], seenAt: number | null | undefined): string | null {
+  if (seenAt == null) return null;
+  const after = (iso: string | null) => {
+    if (!iso) return false;
+    const ms = Date.parse(iso);
+    return !Number.isNaN(ms) && ms / 1000 > seenAt;
+  };
+  const t = turns.find((x) => after(x.at) || after(x.ended_at));
+  return t ? turnAnchor(t) : null;
 }
 
 /** The draft text that accepting a menu item yields. */

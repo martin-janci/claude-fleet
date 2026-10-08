@@ -54,6 +54,8 @@ import { hubConnection } from './hub_connection';
 import { invoke } from '@tauri-apps/api/core';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
+import { uiLayout } from './prefs';
+import { toasts, clearToasts } from './toasts';
 
 const REMOTE: HubStatus = {
   remote: true,
@@ -1574,6 +1576,152 @@ describe('ConversationPanel live indicator', () => {
     await settle();
     expect(screen.queryByTestId('answer-card')).toBeNull();
     expect(screen.getByTestId('conv-blocked')).toBeTruthy();
+  });
+
+  describe('the one approval card (redesign 5.9, New layout)', () => {
+    const PUSH = { ...DIALOG, detail: 'Bash(git push -u origin main)' };
+    afterEach(() => {
+      uiLayout.set('classic');
+      sessions.set([]);
+      clearToasts();
+    });
+
+    it('card and agent tab stay in step: the card shows what the pane shows, whichever side answers', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+      uiLayout.set('new');
+      mockedConv.mockReturnValue(ok(conv()));
+      const blocked = { ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) };
+      mockedAct.mockResolvedValue(blocked);
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      render(ConversationPanel, { session: session({ claude_status: 'blocked', pending_input: PUSH }), visible: true });
+      await settle();
+      const card = screen.getByTestId('answer-card');
+      expect(card.getAttribute('data-layout')).toBe('new');
+      expect(screen.getByTestId('question-detail').textContent).toBe('Bash(git push -u origin main)');
+      // Nothing is pre-selected on a permission: no answer is the primary.
+      expect(card.querySelector('.of-btn.primary')).toBeNull();
+      expect(screen.getAllByTestId('answer-option').map((b) => b.textContent?.trim())).toEqual([
+        '1Yes',
+        "2Yes, and don't ask again",
+        '3No, and tell Claude what to do differently',
+      ]);
+
+      // Answered in the agent tab: the next pane read has no dialog, and the
+      // card goes with it.
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working', spinner: 'Pushing…' }) });
+      vi.advanceTimersByTime(ACTIVITY_POLL_MS);
+      await settle();
+      await settle();
+      expect(screen.queryByTestId('answer-card')).toBeNull();
+
+      // A new dialog in the pane brings the card back; answering on the card
+      // presses the key into the same pane the agent tab shows.
+      mockedAct.mockResolvedValue(blocked);
+      vi.advanceTimersByTime(ACTIVITY_POLL_MS);
+      await settle();
+      await settle();
+      await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+      await settle();
+      expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: '1' });
+    });
+
+    it('after Approve, focus moves to the next session that needs you, with Undo back', async () => {
+      uiLayout.set('new');
+      const here = session({ claude_status: 'blocked', pending_input: PUSH });
+      const next = session({ id: 2, tmux_name: 'other', friendly_name: 'Fix the flake', claude_status: 'blocked', pending_input: DIALOG });
+      sessions.set([here, next]);
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      render(ConversationPanel, { session: here, visible: true });
+      await settle();
+      await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+      await settle();
+      await settle();
+      expect(selectSessionExplicitlySpy).toHaveBeenCalledWith(expect.objectContaining({ id: 2 }));
+      const t = get(toasts).at(-1)!;
+      expect(t.message).toBe('✓ Approved · moved to next: Fix the flake');
+      expect(t.action?.label).toBe('Undo');
+      t.action!.run();
+      expect(selectSessionExplicitlySpy).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1 }));
+    });
+
+    it('stays put when nothing else needs you, and in Classic', async () => {
+      const here = session({ claude_status: 'blocked', pending_input: PUSH });
+      sessions.set([here, session({ id: 2, tmux_name: 'other', claude_status: 'blocked', pending_input: DIALOG })]);
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      // Classic: the old card, and no move.
+      render(ConversationPanel, { session: here, visible: true });
+      await settle();
+      expect(screen.getByTestId('answer-card').getAttribute('data-layout')).toBeNull();
+      await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+      await settle();
+      expect(selectSessionExplicitlySpy).not.toHaveBeenCalled();
+    });
+
+    it('"Answer in your own words…" dismisses the dialog, then hands the composer the keyboard', async () => {
+      uiLayout.set('new');
+      mockedConv.mockReturnValue(ok(conv()));
+      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
+      mockedSend.mockResolvedValue({ ok: true, value: undefined });
+      render(ConversationPanel, { session: session({ claude_status: 'blocked', pending_input: PUSH }), visible: true });
+      await settle();
+      await fireEvent.click(screen.getByTestId('question-own-words'));
+      await settle();
+      await settle();
+      expect(mockedSend).toHaveBeenCalledWith('local', 'ctl', '', { keys: 'Escape' });
+      expect(document.activeElement).toBe(screen.getByTestId('conv-composer-input'));
+    });
+  });
+
+  describe('quick prompts in the New layout (redesign 5.9)', () => {
+    afterEach(() => uiLayout.set('classic'));
+
+    it('shows three chips and puts the rest under ⋯, every one still reachable', async () => {
+      uiLayout.set('new');
+      composerPresets.set(['A', 'B', 'C', 'D', 'E'].map((l) => ({ label: l, text: `do ${l}` })));
+      mockedConv.mockReturnValue(ok(conv()));
+      render(ConversationPanel, { session: session(), visible: true });
+      await settle();
+      expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C']);
+      const more = screen.getByTestId('conv-chips-more');
+      expect(more.getAttribute('aria-label')).toBe('2 more quick prompts');
+      await fireEvent.click(more);
+      expect(screen.getAllByTestId('conv-chip').map((c) => c.textContent?.trim())).toEqual(['A', 'B', 'C', 'D', 'E']);
+    });
+  });
+
+  describe('the New divider (redesign 5.9)', () => {
+    const turns = [
+      { prompt: 'old', at: '2026-09-13T10:00:00.000Z', ended_at: '2026-09-13T10:01:00.000Z', items: [] },
+      { prompt: 'new', at: '2026-09-13T11:00:00.000Z', ended_at: '2026-09-13T11:01:00.000Z', items: [] },
+    ];
+    const seen = Date.parse('2026-09-13T10:30:00.000Z') / 1000;
+    afterEach(() => uiLayout.set('classic'));
+
+    it('sits above the first turn after the person last looked, and stays put for the visit', async () => {
+      uiLayout.set('new');
+      mockedConv.mockReturnValue(ok(conv({ turns })));
+      const { rerender } = render(ConversationPanel, { session: session({ last_viewed_at: seen }), visible: true });
+      await settle();
+      await settle();
+      const div = screen.getByTestId('conv-new-divider');
+      expect(div.nextElementSibling?.textContent).toContain('new');
+      // This visit's own stamp moves last_viewed_at: the line stays.
+      await rerender({ session: session({ last_viewed_at: seen + 7200 }), visible: true });
+      await settle();
+      expect(screen.getAllByTestId('conv-new-divider')).toHaveLength(1);
+    });
+
+    it('is absent in Classic', async () => {
+      mockedConv.mockReturnValue(ok(conv({ turns })));
+      render(ConversationPanel, { session: session({ last_viewed_at: seen }), visible: true });
+      await settle();
+      await settle();
+      expect(screen.queryByTestId('conv-new-divider')).toBeNull();
+    });
   });
 
   it('a stuck row shows no indicator (the composer note covers it)', async () => {

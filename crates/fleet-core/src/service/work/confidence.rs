@@ -34,8 +34,9 @@ fn rule_base(rule: &str, strength: Option<&str>) -> Option<u8> {
         "R5" => 80,
         // One strong state signal that no tracker can resolve.
         "R3u" => 75,
-        // Several strong state signals compete; the agent's own guess.
-        "R4" | "R11" => 60,
+        // Several strong state signals compete; the agent's own guess; the
+        // decision model's (J1, redesign 6.8), which never reaches "high".
+        "R4" | "R11" | "R12" => 60,
         // Two trackers claim the key.
         "R8" => 40,
         // A key in passing: prompt, trailer, `#n`.
@@ -102,6 +103,7 @@ mod tests {
             ("pr", Some("strong"), Some("R3u"), 75),
             ("branch", Some("strong"), Some("R4"), 60),
             ("agent_inferred", Some("inferred"), Some("R11"), 60),
+            ("jev", Some("inferred"), Some("R12"), 60),
             ("prompt", Some("weak"), Some("R8"), 40),
             ("prompt", Some("weak"), Some("R6"), 35),
             ("trailer", Some("weak"), Some("R6"), 35),

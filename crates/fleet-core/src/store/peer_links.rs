@@ -80,10 +80,10 @@ pub struct PeerLinkSummary {
     pub pending: i64,
     pub revoked_at: Option<i64>,
     /// Round trip of this side's last exchange that did not park, in ms
-    /// (migration 130): a dialer's only. Absent from an older hub.
+    /// (migration 131): a dialer's only. Absent from an older hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<i64>,
-    /// Messages carried either way today (UTC) and since migration 130.
+    /// Messages carried either way today (UTC) and since migration 131.
     #[serde(default)]
     pub messages_today: i64,
     #[serde(default)]

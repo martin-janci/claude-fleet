@@ -417,7 +417,8 @@
   const unsubReq = switcherRequest.subscribe((r) => {
     if (!r) return;
     switcherRequest.set(null);
-    show('new', r.host ?? null, r.ticket ?? null);
+    if (r.mode === 'switch') show('switch');
+    else show('new', r.host ?? null, r.ticket ?? null);
   });
   const unsubHost = newSessionHostRequest.subscribe((h) => {
     if (h === null) return;

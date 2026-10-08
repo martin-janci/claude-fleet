@@ -27,4 +27,12 @@ export interface Answer {
   /** The consumer's primary, never the AI's pick on a push or permission. */
   primary?: boolean;
   onselect: () => void;
+  /** The key hint when it is not the answer's position (an agent's own
+   *  ordinal); the number keys follow it too. */
+  kbd?: string;
+  disabled?: boolean;
+  title?: string;
+  /** A multi-select answer: ticked or not. Absent on a single choice. */
+  checked?: boolean;
+  testid?: string;
 }
