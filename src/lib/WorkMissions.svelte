@@ -11,6 +11,7 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { projects } from './projects';
+  import { hosts } from './hosts';
   import { timeAgo } from './session_status';
   import { createWorkTask, onWorkChangedDebounced } from './work';
   import { NEWER_HUB, isOlderHub, readErrorText as rawErrorText } from './work_view';
@@ -59,6 +60,12 @@
     plannerError,
     plannerRefusal,
     withoutConfigKeys,
+    autonomyWords,
+    policyWith,
+    wakeLabel,
+    POLICY_DEFAULT_PARALLEL,
+    POLICY_MAX_PARALLEL,
+    POLICY_MIN_WAKE_SECS,
     type HumanError,
     type MissionCard,
     type GraphNode,
@@ -91,6 +98,15 @@
   let editDoneWhen = $state('');
   let editLevel = $state(0);
   let editMode = $state('finite');
+  /** Runs open at once, and a continuous mission's wake interval in minutes
+   *  ('' = no timer) (step 1.8). */
+  let editParallel = $state(POLICY_DEFAULT_PARALLEL);
+  let editWakeMins = $state<number | null>(null);
+  const minWakeMins = POLICY_MIN_WAKE_SECS / 60;
+  const wakeBad = $derived(
+    editMode === 'continuous' && editWakeMins != null && !(editWakeMins >= minWakeMins),
+  );
+  const parallelBad = $derived(!(Number.isInteger(editParallel) && editParallel >= 1 && editParallel <= POLICY_MAX_PARALLEL));
 
   let newTask = $state('');
   let repoPick = $state<number | ''>('');
@@ -160,6 +176,8 @@
   }
   // The loop (orchestration O4–O6).
   const plan = $derived(detail?.plan ?? null);
+  /** The header's autonomy in words: "Runs at L1 · L3 asked · L1 ceiling". */
+  const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
   const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open'));
   let answers = $state<Record<number, string>>({});
@@ -167,6 +185,8 @@
   let grantLevel = $state(2);
   let grantHours = $state(8);
   let grantBudget = $state('');
+  /** Hosts the grant lets the loop run on; none ticked: any host. */
+  let grantHosts = $state<string[]>([]);
 
   /** A short report of what a press did, failures first. */
   function reportSteps(results: { ok: boolean; detail: string }[] | undefined) {
@@ -224,9 +244,13 @@
         level: grantLevel,
         hours: grantHours,
         ...(grantBudget.trim() && cents > 0 ? { budget_cents: cents } : {}),
+        ...(grantHosts.length > 0 ? { hosts: [...grantHosts] } : {}),
       }),
     );
-    if (out) granting = false;
+    if (out) {
+      granting = false;
+      grantHosts = [];
+    }
   }
 
   async function revokeGrant() {
@@ -331,11 +355,15 @@
     editDoneWhen = (mission.done_when ?? []).join('\n');
     editLevel = mission.level;
     editMode = mission.mode;
+    editParallel = mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL;
+    const wake = mission.policy?.wake_every_secs;
+    editWakeMins = wake ? Math.round(wake / 60) : null;
     editing = true;
   }
 
   async function saveEdit() {
-    if (!mission) return;
+    if (!mission || wakeBad || parallelBad) return;
+    const wakeSecs = editMode === 'continuous' && editWakeMins != null ? Math.round(editWakeMins * 60) : null;
     const m = await act(
       updateMission(
         mission.id,
@@ -345,6 +373,7 @@
           done_when: doneWhenRows(editDoneWhen),
           level: editLevel,
           mode: editMode,
+          policy: policyWith(mission.policy, { max_parallel: editParallel, wake_every_secs: wakeSecs }),
         },
         mission.version,
       ),
@@ -415,7 +444,8 @@
       </div>
       <h3 class="name">{mission.name}</h3>
       <p class="meta muted">
-        {#if mission.mode === 'continuous'}Continuous · {/if}L{mission.level}
+        {#if mission.mode === 'continuous'}Continuous{#if wakeLabel(mission.policy?.wake_every_secs)}, wakes {wakeLabel(mission.policy?.wake_every_secs)}{/if} · {/if}L{mission.level} asked
+        · {mission.policy?.max_parallel ?? POLICY_DEFAULT_PARALLEL} at once
         {#if progressLabel(mission)} · {progressLabel(mission)}{/if}
         · updated {timeAgo(mission.updated_at)}
       </p>
@@ -444,9 +474,35 @@
               <option value="continuous">Continuous</option>
             </select></label
           >
+          <label class="field inline"
+            >Parallel runs
+            <input
+              type="number"
+              min="1"
+              max={POLICY_MAX_PARALLEL}
+              bind:value={editParallel}
+              class="role"
+              data-testid="mission-edit-parallel"
+            /></label
+          >
+          {#if editMode === 'continuous'}
+            <label class="field inline"
+              >Wake every (min)
+              <input
+                type="number"
+                min={minWakeMins}
+                placeholder="no timer"
+                bind:value={editWakeMins}
+                class="role"
+                data-testid="mission-edit-wake"
+              /></label
+            >
+          {/if}
         </div>
+        {#if wakeBad}<p class="muted small" role="alert" data-testid="mission-edit-wake-bad">A continuous mission wakes at most every {minWakeMins} minutes.</p>{/if}
+        {#if parallelBad}<p class="muted small" role="alert">Parallel runs is 1 to {POLICY_MAX_PARALLEL}.</p>{/if}
         <div class="row">
-          <button class="btn" type="button" disabled={busy || saveBlocked} data-testid="mission-edit-save" onclick={() => void saveEdit()}
+          <button class="btn" type="button" disabled={busy || saveBlocked || wakeBad || parallelBad} data-testid="mission-edit-save" onclick={() => void saveEdit()}
             >Save</button
           >
           <button class="btn btn--quiet" type="button" onclick={() => (editing = false)}>Cancel</button>
@@ -480,9 +536,10 @@
       {#if plan}
         <section class="loop" data-testid="mission-loop">
           <p class="muted small" data-testid="mission-autonomy">
-            L{plan.autonomy.effective}: {withoutConfigKeys(plan.autonomy.why)} · spent {dollars(plan.cost_micros)}{#if plan.autonomy.grant?.budget_micros}
+            {autonomy?.runs} · {autonomy?.limits} · spent {dollars(plan.cost_micros)}{#if plan.autonomy.grant?.budget_micros}
               of {dollars(plan.autonomy.grant.budget_micros)}{/if} · {plan.counts.open} running
           </p>
+          {#if autonomy?.hint}<p class="muted small" data-testid="mission-autonomy-hint">{autonomy.hint}</p>{/if}
           {#if mayChange}
             <div class="row">
               {#if mission.state === 'active' && pressable.length > 0}
@@ -515,6 +572,16 @@
                 >
                 <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
                 <label class="field inline">Budget $ <input placeholder="none" bind:value={grantBudget} class="role" data-testid="mission-grant-budget" /></label>
+                {#if $hosts.length > 0}
+                  <fieldset class="field inline hosts" data-testid="mission-grant-hosts">
+                    <legend>Hosts <span class="muted small">(none ticked: any)</span></legend>
+                    {#each $hosts as h (h.alias)}
+                      <label class="host"
+                        ><input type="checkbox" value={h.alias} bind:group={grantHosts} data-testid="mission-grant-host" /> {h.alias}</label
+                      >
+                    {/each}
+                  </fieldset>
+                {/if}
                 <button class="btn" type="submit" disabled={busy} data-testid="mission-grant-save">Sign</button>
               </form>
             {/if}
@@ -922,6 +989,8 @@
   .meta { font-size: 0.75rem; }
   .notice { margin: 0; color: var(--danger); }
   .state.error p { color: var(--danger); margin: 0 0 0.3rem; }
+  .hosts { border: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+  .hosts legend { padding: 0; margin-right: var(--space-1); float: left; }
   .planner-error { border: 1px solid var(--danger); border-radius: var(--radius-md); padding: var(--space-2) var(--space-3); margin: var(--space-2) 0; }
   .planner-error p { margin: 0 0 var(--space-1); }
   .planner-error .title { color: var(--danger); font-weight: 600; }
