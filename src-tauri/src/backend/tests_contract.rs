@@ -218,6 +218,8 @@ pub(crate) fn sample_host() -> HostRow {
         latency_ms: Some(18),
         worktree_kb: Some(9_400_000),
         worktree_at: Some(1_700_000_000),
+        // Some, so the golden pins the name the New session picker reads.
+        agents_on_path: Some(vec!["claude".into(), "codex".into()]),
     }
 }
 

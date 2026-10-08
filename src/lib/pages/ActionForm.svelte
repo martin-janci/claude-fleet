@@ -2,6 +2,7 @@
   // One action's form: an input per declared param and a button labelled
   // with the action. Options come from the page (hosts, trackers), already
   // narrowed to what the record does not hold.
+  import Loader from '../Loader.svelte';
   import { formReady, formValues, paramValue, type ActionSpec } from './resources';
 
   let {
@@ -84,6 +85,13 @@
     {/if}
   {/each}
   <button class="btn" type="submit" disabled={busy || !ready} data-testid={`run-${action.id}`}>{action.label}</button>
+  {#if busy && action.busy === 'counter-orbit'}
+    <!-- 11.12: two hubs exchanging keys. -->
+    <span class="busy" data-testid={`busy-${action.id}`}>
+      <Loader name="counter-orbit" size={32} label="Talking to the other hub" />
+      <span>Talking to the other hub…</span>
+    </span>
+  {/if}
 </form>
 
 <style>
@@ -98,5 +106,12 @@
     font: inherit;
     font-size: 11px;
     padding: 0.2rem 0.35rem;
+  }
+  .busy {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 11px;
+    color: var(--fg-muted);
   }
 </style>

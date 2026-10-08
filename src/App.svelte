@@ -82,6 +82,7 @@
     sessionViewChordLabel,
     settingsOpen,
     openSettingsAt,
+    shortcutSheetOpen,
   } from './lib/app_views';
   import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
@@ -1481,6 +1482,16 @@
       onopenhost: (host) => openHosts(host),
     }}
   />
+  {#if $uiLayout === 'new'}
+    <!-- The manual's StatusBar ends on the shortcuts sheet (3.17). -->
+    <button
+      type="button"
+      class="hub-badge footer-end"
+      data-testid="footer-shortcuts"
+      title="Keyboard shortcuts  ?"
+      onclick={() => shortcutSheetOpen.set(true)}>? Shortcuts…</button
+    >
+  {/if}
 </footer>
 
 <style>
@@ -1510,6 +1521,9 @@
     display: flex;
     align-items: center;
     gap: 1rem;
+  }
+  .footer-end {
+    margin-left: auto;
   }
   .status .err { color: #e64a4a; }
   .hub-badge {

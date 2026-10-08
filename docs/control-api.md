@@ -258,7 +258,8 @@ side are in `hub.md` → *A host that cannot be reached*; this is the contract.
 
 Tools see an agent host through the same calls as an SSH host. `agent_status`
 reports which agent hosts are connected. `add_host { transport: "agent" }`
-registers one without an SSH probe.
+registers one without an SSH probe. `install_agent` does the whole *Set it
+up* of `docs/hub.md` for a host the hub already reaches over SSH.
 
 ## Tools
 
@@ -282,7 +283,9 @@ Index by area (names only; see the reference for details):
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `hide_host`, `provision_hosts`,
   `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
-  connected; see *`/agent`* above).
+  connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
+  on a host the hub reaches over SSH and move the host onto it; a job read
+  with `agent_installs`).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `forget_project` (drop a row a local-less hub cannot rescan away),
   `add_project` (clone, adopt or create a repository on a host — `git` and
@@ -377,7 +380,7 @@ Index by area (names only; see the reference for details):
   `resume_claude_session_id`).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_blame`, `repo_log`, `repo_branches`,
-  `repo_commit`, `repo_commit_diff`.
+  `repo_commit`, `repo_commit_diff`, `repo_branch_diff`, `repo_range_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
 - **Asset catalog** — `list_assets` (catalog assets with per-host drift
   state, unmanaged assets and parse problems; the personal catalog only
