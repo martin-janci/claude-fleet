@@ -83,6 +83,15 @@ it (the new token is only persisted once the host's files were rewritten, so an
 unreachable host keeps its old one). **Rotate all tokens** does the same for
 every host; the master token is unaffected.
 
+Settings → Control API lists every token in one **Control API tokens** table:
+each host's (per-host), with when it was last **used** (the last request it
+authenticated, stamped at most once a minute), when it was created and, once
+rotated, when; and beside them the paired devices' tokens, with when each was
+last seen. A host row has **Rotate**, a device row **Revoke** (as Settings →
+Devices does; the device you are using has none). A rotation keeps the host's
+created time, records the rotation and starts "used" over; stamping use never
+invalidates the hub's token cache (`auth_epoch`), a rotation does.
+
 ## Connecting a client
 
 The Settings panel has a collapsible **MCP client config** disclosure — expand

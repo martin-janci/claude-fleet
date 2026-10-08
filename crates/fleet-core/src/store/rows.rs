@@ -1384,8 +1384,14 @@ pub struct SessionEvent {
 pub struct HostTokenRow {
     pub host_alias: String,
     pub token: String,
+    /// When the host's first token was minted.
     pub created_at: i64,
     pub mode: String,
+    /// The last request this token authenticated (migration 126), stamped
+    /// at most once a minute; `None` never since.
+    pub last_used_at: Option<i64>,
+    /// When a fresh token last replaced the host's (migration 126).
+    pub rotated_at: Option<i64>,
 }
 
 /// One paired client token (migration 032): a phone, a laptop browser. Unlike

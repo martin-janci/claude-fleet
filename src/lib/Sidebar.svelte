@@ -17,6 +17,7 @@
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
   import { groupRows, isFlatGroupBy } from './row_groups';
+  import { inboxRows, notWaiting, notWaitingText } from './inbox';
   import { sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
@@ -98,6 +99,7 @@
     type TriageBucket,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
+  import { attentionFacts } from './attention_facts';
   import { push, pushError } from './toasts';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
@@ -215,7 +217,7 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
     return () => clearInterval(t);
   });
-  const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec });
+  const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec, facts: $attentionFacts });
   // The org scope (work graph M5): a view filter composed into every
   // builder below through `rowMatches`. `null` while no scope is chosen or
   // the selector is hidden (fewer than two scopes).
@@ -901,6 +903,15 @@
   );
   let collapsedFlat: Set<string> = $state(new Set());
 
+  // ── Inbox (redesign step 3.3) ──
+  // The rows the list would show under the same filters, narrowed to what
+  // raises the badge (`inbox.ts`); the rest is counted in one line.
+  const inboxPool = $derived(
+    $sidebarView === 'inbox' ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions] : [],
+  );
+  const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
+  const inboxRestText = $derived(notWaitingText(notWaiting(inboxPool, attentionOpts)));
+
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
   // bg-agent toggle does not.
@@ -1354,6 +1365,26 @@
 
   {#if $sidebarView === 'work'}
   <WorkTree />
+  {:else if $sidebarView === 'inbox'}
+  <!-- The Inbox (redesign step 3.3): only what raises the badge, worst
+       first, then one line for everything else and the way to it. -->
+  <div class="scroller inbox" data-testid="inbox">
+    <div class="section-header inbox-head" data-testid="inbox-head">
+      {inboxList.length === 0 ? 'Nothing needs you' : `${inboxList.length} need${inboxList.length === 1 ? 's' : ''} you`}
+    </div>
+    {#each inboxList as sess (sess.id)}
+      {@render sessionRow(sess)}
+    {/each}
+    <div class="inbox-rest" data-testid="inbox-rest">
+      {#if inboxRestText}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
+      <button
+        type="button"
+        class="btn btn--quiet"
+        data-testid="inbox-all-sessions"
+        onclick={() => sidebarView.set('sessions')}>All sessions →</button
+      >
+    </div>
+  </div>
   {:else}
   <div class="scroller">
     {#if !$onboardingDismissed}
@@ -1933,7 +1964,7 @@
     font-size: 0.65rem;
     width: 0.7rem;
     text-align: center;
-    transition: transform 0.1s ease;
+    transition: transform var(--dur-fast) ease;
     display: inline-block;
   }
   .caret.collapsed { transform: rotate(-90deg); }
@@ -2094,6 +2125,15 @@
     line-height: 1.4;
     color: var(--fg-muted);
   }
+  .inbox-rest {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.75rem;
+  }
+  .inbox-rest .muted { color: var(--fg-muted); }
   .section-header {
     font-size: 0.65rem;
     text-transform: uppercase;
@@ -2116,7 +2156,7 @@
     font-size: 0.65rem;
     width: 0.7rem;
     text-align: center;
-    transition: transform 0.1s ease;
+    transition: transform var(--dur-fast) ease;
     display: inline-block;
   }
   .section-toggle .caret.collapsed { transform: rotate(-90deg); }
@@ -2151,7 +2191,7 @@
 
   .purge-btn {
     opacity: 0;
-    transition: opacity 0.15s;
+    transition: opacity var(--dur-base);
     color: var(--color-error, #f44336);
   }
   /* UX-04: `.icon-btn:disabled { opacity: 0.6 }` outranks `opacity: 0` here,
