@@ -44,6 +44,10 @@ export interface StartPreview {
   /** With `missing: 'project'`: the repository Jev proposes (K1, assist).
    *  A pre-selection only; the person still presses Start. */
   suggested_project?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
+  /** With a planned project: the sibling repository (one the key ran in
+   *  before) Jev proposes the task also needs (N3, assist). A pre-tick
+   *  only; the person still presses Start. */
+  suggested_sibling?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
 }
 
 /** Jev's K1 answer as the shared chip reads it (redesign 3.12), when the
