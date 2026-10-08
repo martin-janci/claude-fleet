@@ -381,7 +381,7 @@
     line-height: 1.35;
   }
   .err {
-    color: var(--danger, #e64a4a);
+    color: var(--danger);
   }
 
   /* Sidebar density: the choices are the whole point there. */

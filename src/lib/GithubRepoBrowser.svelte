@@ -133,7 +133,7 @@
 
 <style>
   .status { font-size: 0.75rem; color: var(--fg-muted); margin: 0; }
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; white-space: pre-wrap; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; white-space: pre-wrap; }
   .retry {
     align-self: flex-start;
     font-size: 0.8rem;

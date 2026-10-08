@@ -596,14 +596,14 @@
         <span
           class="chip"
           data-testid="details-stuck"
-          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+          style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
           title={session.current_activity ?? undefined}
         >⚠ stuck: {stuckKindLabel(session.stuck_kind)}{#if session.stuck_since !== null} · {formatElapsed(session.stuck_since, nowSec)}{/if}</span>
       {:else if session.claude_status}
         <span
           class="chip"
           data-testid="details-claude-status"
-          style="background: {claudeStatusColor(session.claude_status)}22; color: {claudeStatusColor(session.claude_status)}; border-color: {claudeStatusColor(session.claude_status)}44;"
+          style="background: color-mix(in srgb, {claudeStatusColor(session.claude_status)} 13%, transparent); color: {claudeStatusColor(session.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(session.claude_status)} 27%, transparent);"
           title={session.current_activity ?? undefined}
         >{claudeStatusLabel(session.claude_status)}</span>
       {/if}
@@ -701,7 +701,7 @@
           <span
             class="chip"
             data-testid="details-ci"
-            style="color: {ciStatusColor(session.ci_status)}; border-color: {ciStatusColor(session.ci_status)}55;"
+            style="color: {ciStatusColor(session.ci_status)}; border-color: color-mix(in srgb, {ciStatusColor(session.ci_status)} 33%, transparent);"
             title="CI checks: {session.ci_status}"
           >{ciStatusLabel(session.ci_status)}</span>
         {/if}
@@ -1309,15 +1309,15 @@
   .danger {
     font-size: 0.85rem;
     padding: 0.35rem 0.8rem;
-    border: 1px solid #e64a4a;
+    border: 1px solid var(--danger);
     background: transparent;
-    color: #e64a4a;
+    color: var(--danger);
     border-radius: 5px;
     cursor: pointer;
   }
-  .danger:hover { background: rgba(230, 74, 74, 0.1); }
+  .danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
 
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
 
   .safe-kill-pill {
     margin: 0;
@@ -1332,9 +1332,9 @@
     border: 1px solid rgba(110, 160, 230, 0.4);
   }
   .safe-kill-pill.failed {
-    background: rgba(230, 74, 74, 0.12);
-    color: #e64a4a;
-    border: 1px solid rgba(230, 74, 74, 0.4);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   }
   .safe-kill-pill.ready {
     background: rgba(60, 180, 90, 0.15);
@@ -1425,10 +1425,10 @@
     cursor: pointer;
   }
   .confirm-actions button.danger {
-    color: #e64a4a;
-    border-color: #e64a4a;
+    color: var(--danger);
+    border-color: var(--danger);
   }
-  .confirm-actions button.danger:hover { background: rgba(230, 74, 74, 0.12); }
+  .confirm-actions button.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 
   .related {
     border-top: 1px solid var(--border);

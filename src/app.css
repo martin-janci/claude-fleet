@@ -17,6 +17,16 @@
   --usage-crit: #c62828;
   /* Healthy context. 4.91:1 vs --bg-pane #fafafa (5.13:1 vs --bg #fff). */
   --usage-ok: #2e7d32;
+  /* Session status, one colour per state on desktop and phone (fleet-mobile's
+     FleetTheme uses the same mapping): working blue, waiting amber, failed
+     red, done green, idle grey. Each is text-safe (>= 4.5:1) on --bg-pane;
+     the three severities alias the usage tokens so there is one source. */
+  --status-working: #1d5bd8;
+  --status-waiting: var(--usage-warn);
+  --status-failed: var(--usage-crit);
+  --status-done: var(--usage-ok);
+  --status-idle: #6e6d75;
+  --danger: var(--status-failed);
   /* Read at 16 sites that have been falling through to their fallback
      since the token was designed and never shipped. 59 more hardcode the
      stack; they are not this task's business. */
@@ -39,6 +49,24 @@
 
   --control-font: 12px;
   --control-font-sm: 11px;
+
+  /* ── type scale ──
+     Six steps for everything that is not a control. src/lib grew 46
+     distinct font sizes; new code picks one of these, and old sizes move
+     onto them as their components are touched. */
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+
+  /* ── spacing scale (4px base) ── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
 
   --ring-w: 2px;
   --ring-offset: 1px;
@@ -90,6 +118,12 @@
     --usage-crit: #ef5350;
     /* vs --bg-pane #161616: 9.37:1. */
     --usage-ok: #5dd17a;
+    --status-working: #7fa3ff;
+    --status-waiting: var(--usage-warn);
+    --status-failed: var(--usage-crit);
+    --status-done: var(--usage-ok);
+    --status-idle: #a09fa8;
+    --danger: var(--status-failed);
 
     --control-bg: #1c1c1c;
     --control-bg-hover: #262626;
@@ -121,6 +155,12 @@
   --usage-crit: #c62828;
   /* Healthy context. 4.91:1 vs --bg-pane #fafafa (5.13:1 vs --bg #fff). */
   --usage-ok: #2e7d32;
+  --status-working: #1d5bd8;
+  --status-waiting: var(--usage-warn);
+  --status-failed: var(--usage-crit);
+  --status-done: var(--usage-ok);
+  --status-idle: #6e6d75;
+  --danger: var(--status-failed);
 
   /* --border is 1.26:1 against --bg: it may SEPARATE things, but it can
      never be the only signal for a state. Use --control-border-strong
@@ -153,6 +193,12 @@
   --usage-crit: #ef5350;
   /* vs --bg-pane #161616: 9.37:1. */
   --usage-ok: #5dd17a;
+  --status-working: #7fa3ff;
+  --status-waiting: var(--usage-warn);
+  --status-failed: var(--usage-crit);
+  --status-done: var(--usage-ok);
+  --status-idle: #a09fa8;
+  --danger: var(--status-failed);
 
   --control-bg: #1c1c1c;
   --control-bg-hover: #262626;

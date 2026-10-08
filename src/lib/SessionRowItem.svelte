@@ -615,14 +615,14 @@
         <span
           class="claude-chip stuck-chip"
           data-testid="stuck-chip"
-          style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+          style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
           title="Stuck: {stuckKindLabel(sess.stuck_kind)}"
         >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
       {:else if sess.claude_status}
         <span
           class="claude-chip"
           data-testid="claude-chip"
-          style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
+          style="background: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 13%, transparent); color: {claudeStatusColor(sess.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 27%, transparent);"
           title="Claude: {sess.claude_status}"
         >{claudeStatusLabel(sess.claude_status)}</span>
       {/if}
@@ -714,7 +714,7 @@
             <span
               class="claude-chip stuck-chip"
               data-testid="stuck-chip"
-              style="background: {STUCK_COLOR}22; color: {STUCK_COLOR}; border-color: {STUCK_COLOR}66;"
+              style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
               title="Stuck: {stuckKindLabel(sess.stuck_kind)}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
             >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
           {:else if isInactiveAgent(sess)}
@@ -726,7 +726,7 @@
             <span
               class="claude-chip"
               data-testid="claude-chip"
-              style="background: {claudeStatusColor(sess.claude_status)}22; color: {claudeStatusColor(sess.claude_status)}; border-color: {claudeStatusColor(sess.claude_status)}44;"
+              style="background: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 13%, transparent); color: {claudeStatusColor(sess.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 27%, transparent);"
               title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
             >{#if sess.claude_status === 'working'}<SpiralLoader size={10} class="chip-spiral" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
           {/if}
@@ -1049,7 +1049,7 @@
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }
-  .icon-btn.danger:hover { color: #e64a4a; border-color: #e64a4a; }
+  .icon-btn.danger:hover { color: var(--danger); border-color: var(--danger); }
 
   /* Line 1's dot/badges/name sit near the row's vertical center; align the
      checkbox with that line instead of the two-line row's overall center
@@ -1057,7 +1057,7 @@
      and visually float the box between the two lines). */
   .select-box { margin: 0; margin-top: 0.2rem; flex-shrink: 0; align-self: flex-start; }
   .sess-row.checked { outline: 1px solid var(--accent); }
-  .sess-row.stuck { background: rgba(230, 74, 74, 0.06); }
+  .sess-row.stuck { background: color-mix(in srgb, var(--danger) 6%, transparent); }
 
   .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1082,7 +1082,7 @@
   .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
   .bg-badge { font-size: 0.7rem; margin-left: 0.2rem; }
 
-  .err { color: #e64a4a; font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
   .inline-err { padding-left: 1.6rem; font-size: 0.75rem; }
 
   .sess-row {

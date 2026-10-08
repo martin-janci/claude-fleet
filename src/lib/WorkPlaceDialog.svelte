@@ -187,7 +187,7 @@
   .what { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
   .note { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
   .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; }
-  .err { color: #e64a4a; margin: 0; }
+  .err { color: var(--danger); margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
   p { margin: 0; }
 </style>

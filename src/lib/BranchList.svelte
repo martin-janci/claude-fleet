@@ -90,5 +90,5 @@
   .bactions button:hover { color: var(--fg); border-color: var(--accent); }
   .bactions button.del:hover { color: #f85149; border-color: #f85149; }
   .hint { color: var(--fg-muted); padding: 0.5rem 0.7rem; }
-  .hint.err { color: #e64a4a; }
+  .hint.err { color: var(--danger); }
 </style>

@@ -850,7 +850,7 @@
   .glyph { width: 1.1rem; text-align: center; flex: 0 0 auto; color: var(--fg-muted); }
   .glyph.s-done, .glyph.s-ready { color: #3fae5a; }
   .glyph.s-running, .glyph.s-doing { color: #e0a030; }
-  .glyph.s-failed, .glyph.s-blocked { color: #e64a4a; }
+  .glyph.s-failed, .glyph.s-blocked { color: var(--danger); }
   .main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
   .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
   .dep { font-size: 0.7rem; }
@@ -859,16 +859,16 @@
   .wave-head { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.3rem; }
   .vbadge { font-size: 0.7rem; align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: 999px; }
   .vbadge.v-verified { color: #3fae5a; border-color: #3fae5a; }
-  .vbadge.v-failed { color: #e64a4a; border-color: #e64a4a; }
+  .vbadge.v-failed { color: var(--danger); border-color: var(--danger); }
   .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: 0.75rem; }
   .checks .line { font-family: var(--font-mono, monospace); }
   .checks .c-pass .glyph { color: #3fae5a; }
-  .checks .c-fail .glyph { color: #e64a4a; }
+  .checks .c-fail .glyph { color: var(--danger); }
   .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }
   .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: 4px; }
   .muted { color: var(--fg-muted); margin: 0; }
   .small { font-size: 0.75rem; }
   .meta { font-size: 0.75rem; }
-  .notice { margin: 0; color: #e64a4a; }
-  .state.error p { color: #e64a4a; margin: 0 0 0.3rem; }
+  .notice { margin: 0; color: var(--danger); }
+  .state.error p { color: var(--danger); margin: 0 0 0.3rem; }
 </style>

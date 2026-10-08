@@ -750,7 +750,7 @@
   .steps, .summary { list-style: none; margin: 0.5rem 0; padding: 0; font-size: 0.85rem; }
   .steps li { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.15rem 0; }
   .steps li[data-state='pending'] { color: var(--fg-muted); }
-  .steps li[data-state='failed'] .label { color: #e64a4a; }
+  .steps li[data-state='failed'] .label { color: var(--danger); }
   .steps li[data-state='warned'] .label { color: #d29b4a; }
   .mark { width: 1rem; text-align: center; }
   .steps li[data-state='pending'] .mark::before { content: '○'; }
@@ -769,5 +769,5 @@
   .clean-paths li { padding: 0.1rem 0; }
   .clean-paths code { font-size: 0.75rem; }
   .buttons { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; }
-  .buttons .danger { color: #e64a4a; }
+  .buttons .danger { color: var(--danger); }
 </style>

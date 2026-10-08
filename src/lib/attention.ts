@@ -26,13 +26,16 @@ export function isStuckKind(v: unknown): v is StuckKind {
   return typeof v === 'string' && (STUCK_KINDS as readonly string[]).includes(v);
 }
 
+// The theme's status tokens (app.css), so both themes clear the text floor
+// and the desktop reads like the phone: working blue, waiting amber, done
+// green. Callers tint with `color-mix`, never by appending hex alpha.
 const STATUS_COLOR: Record<ClaudeStatus, string> = {
-  working: '#50c86e', // green — active
-  blocked: '#f0b429', // yellow — needs input
-  completed: '#6c8ebf', // blue — done
-  failed: '#e64a4a', // red
-  stopped: '#888', // grey — stopped by hook or user
-  idle: '#888', // grey
+  working: 'var(--status-working)',
+  blocked: 'var(--status-waiting)', // needs input
+  completed: 'var(--status-done)',
+  failed: 'var(--status-failed)',
+  stopped: 'var(--status-idle)', // stopped by hook or user
+  idle: 'var(--status-idle)',
 };
 
 const STATUS_LABEL: Record<ClaudeStatus, string> = {
@@ -66,7 +69,7 @@ export function stuckKindLabel(kind: StuckKind | null): string {
 }
 
 /** Red, always — the stuck chip outranks whatever claude_status says. */
-export const STUCK_COLOR = '#e64a4a';
+export const STUCK_COLOR = 'var(--status-failed)';
 
 // ── context pressure ──
 
@@ -386,11 +389,11 @@ export function ciStatusLabel(status: CiStatus | null): string {
 export function ciStatusColor(status: CiStatus | null): string {
   switch (status) {
     case 'passing':
-      return '#50c86e';
+      return 'var(--status-done)';
     case 'failing':
-      return '#e64a4a';
+      return 'var(--status-failed)';
     case 'pending':
-      return '#d29b4a';
+      return 'var(--status-waiting)';
     default:
       return 'transparent';
   }
