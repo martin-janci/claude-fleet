@@ -1,215 +1,408 @@
-/* --syn-* are the file-viewer syntax-highlight token colours: One Light on
-   the light theme, One Dark on the dark theme, so each keeps its contrast. */
-:root {
-  --bg: #ffffff;
-  --bg-pane: #fafafa;
-  --fg: #1a1a1a;
-  --fg-muted: #6b6b6b;
-  --border: #e5e5e5;
-  --accent: #2563eb;
-  --syn-kw: #a626a4;
-  --syn-str: #50a14f;
-  --syn-num: #b76b01;
-  --syn-code: #0184bc;
-  /* Usage/context severity. Contrast vs --bg-pane #fafafa: warn 4.81:1, crit 5.39:1
-     (vs --bg #fff: 5.02:1, 5.62:1) — text ≥ 4.5:1, bars ≥ 3:1. */
-  --usage-warn: #b45309;
-  --usage-crit: #c62828;
-  /* Healthy context. 4.91:1 vs --bg-pane #fafafa (5.13:1 vs --bg #fff). */
-  --usage-ok: #2e7d32;
-  /* Session status, one colour per state on desktop and phone (fleet-mobile's
-     FleetTheme uses the same mapping): working blue, waiting amber, failed
-     red, done green, idle grey. Each is text-safe (>= 4.5:1) on --bg-pane;
-     the three severities alias the usage tokens so there is one source. */
-  --status-working: #1d5bd8;
-  --status-waiting: var(--usage-warn);
-  --status-failed: var(--usage-crit);
-  --status-done: var(--usage-ok);
-  --status-idle: #6e6d75;
-  --danger: var(--status-failed);
-  /* Read at 16 sites that have been falling through to their fallback
-     since the token was designed and never shipped. 59 more hardcode the
-     stack; they are not this task's business. */
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+/* Design tokens. Every colour, type, spacing, radius, shadow and duration
+   token the Orbit Fleet design manual names comes from its snapshot,
+   docs/design/tokens.json, with the manual's names. src/lib/tokens.ts holds
+   the colours as data, and tokens.test.ts fails when app.css, tokens.ts and
+   the snapshot disagree, or when a documented pair loses its contrast.
+   Change a value in the snapshot first (the manual is the source of truth),
+   then here in all four theme blocks, then in tokens.ts.
 
-  /* ── control geometry: one scale, no exceptions ──
+   Known contrast exceptions kept from the manual: --control-border is about
+   1.5:1 on --bg-pane (a control also has its fill and label), and the light
+   --syn-num is about 4.1:1. */
+
+:root {
+  /* Grounds. */
+  --bg: #f7f7f8;
+  --bg-pane: #ffffff;
+  --bg-raise: #f2f2f4;
+  --bg-hover: #ebebee;
+  --bg-sunk: #f2f2f4;
+  /* Text and lines. */
+  --fg: #18181b;
+  --fg-2: #3f3f46;
+  --fg-muted: #6b6b74;
+  --border: #e4e4e7;
+  --control-border: #d4d4d8;
+  /* Action and selection. */
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --accent-soft: #e7eefe;
+  --ring: var(--accent);
+  /* Status: the full colour is text; soft, faint and line tint chips and banners. */
+  --status-working: #3157c9;
+  --status-waiting: #8f520b;
+  --status-failed: #c62828;
+  --status-done: #17723e;
+  --status-idle: #6b6b74;
+  --on-waiting: #ffffff;
+  --waiting-soft: rgba(143,82,11,0.13);
+  --waiting-faint: rgba(143,82,11,0.07);
+  --waiting-line: rgba(143,82,11,0.45);
+  --failed-soft: rgba(198,40,40,0.12);
+  --failed-line: rgba(198,40,40,0.35);
+  --done-soft: rgba(23,114,62,0.12);
+  /* Destructive. */
+  --danger: var(--status-failed);
+  --danger-fill: #c62828;
+  --on-danger: #ffffff;
+  /* Chips, counts, meters. */
+  --chip-bg: #efeff2;
+  --count-bg: #e9e9ec;
+  --track: #e4e4e7;
+  /* Code viewer and inline code. */
+  --code: #0e7490;
+  --syn-kw: #8a3fb0;
+  --syn-str: #3f7d20;
+  --syn-num: #b76b01;
+  /* Organisations: 8px swatches, never fills. */
+  --org-1: #2563eb;
+  --org-2: #17723e;
+  --org-3: #8a3fb0;
+  --org-4: #6b6b74;
+  /* Brand: the mark, splash and loaders, never UI chrome. */
+  --brand-ink: #1b2430;
+  --brand-light: #f2f4f7;
+  --brand-amber: #d29b4a;
+  --loader-accent: #60a5fa;
+  --comet-head: var(--accent);
+  --agent-claude: #d97757;
+  --shadow-pop: 0 6px 18px rgba(24,24,27,0.12);
+
+  /* App tokens the manual does not name. The usage severities are the
+     status colours, so the context meter and the status chips share one
+     source; --syn-code is the old name of --code. */
+  --usage-ok: var(--status-done);
+  --usage-warn: var(--status-waiting);
+  --usage-crit: var(--status-failed);
+  --syn-code: var(--code);
+  /* Classic controls, until the kit (0.7, 0.9) moves them onto bg-raise.
+     --border may SEPARATE things but never be the only signal for a state;
+     use --control-border-strong or --accent for anything that has to be read. */
+  --control-bg: #ffffff;
+  --control-bg-hover: #f0f0f0;
+  --control-bg-active: #e4e4e4;
+  --control-border-strong: #8e8e8e;
+  --control-fg: #1a1a1a;
+  --control-fg-quiet: #5a5a5a;
+
+  /* ── type ──
+     Six steps for everything that is not a control, plus code. New code
+     picks one of these; old sizes move onto them as their components are
+     touched. Each step has its size, -lh line height and -weight. */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* The older name, read at 16 sites. */
+  --mono: var(--font-mono);
+  --text-2xs: 11px;
+  --text-2xs-lh: 14px;
+  --text-2xs-weight: 500;
+  --text-xs: 12px;
+  --text-xs-lh: 16px;
+  --text-xs-weight: 400;
+  --text-sm: 13px;
+  --text-sm-lh: 18px;
+  --text-sm-weight: 500;
+  --text-md: 14px;
+  --text-md-lh: 21px;
+  --text-md-weight: 400;
+  --text-lg: 16px;
+  --text-lg-lh: 22px;
+  --text-lg-weight: 600;
+  --text-xl: 20px;
+  --text-xl-lh: 26px;
+  --text-xl-weight: 600;
+  --text-code: 12px;
+  --text-code-lh: 18px;
+  --text-code-weight: 400;
+
+  /* ── spacing (4px base), control and layout sizes ──
      --control-h is WCAG 2.5.8's 24px minimum target. Do not raise it to
      "fix" a small control: this is a dense pro tool, and 24px is both the
-     floor and the answer. */
-  --control-h: 24px;
-  --control-h-lg: 28px;
-  --control-px: 8px;
-  --control-px-lg: 12px;
-  --control-gap: 6px;
-
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  /* RESERVED for aria-pressed toggles and the context meter. */
-  --radius-pill: 999px;
-
-  --control-font: 12px;
-  --control-font-sm: 11px;
-
-  /* ── type scale ──
-     Six steps for everything that is not a control. src/lib grew 46
-     distinct font sizes; new code picks one of these, and old sizes move
-     onto them as their components are touched. */
-  --text-2xs: 11px;
-  --text-xs: 12px;
-  --text-sm: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
-  --text-xl: 20px;
-
-  /* ── spacing scale (4px base) ── */
+     floor and the answer. --status-h is the space the footer OCCUPIES,
+     border included (24px of content + its 1px top border): the FAB and
+     toast layers clear it, and `.status` sizes itself from it with
+     `box-sizing: border-box`. */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-6: 24px;
+  --control-h: 24px;
+  --control-h-sm: 22px;
+  --control-h-lg: 28px;
+  --header-h: 44px;
+  --rail-w: 68px;
+  --list-w: 340px;
+  --settings-nav-w: 240px;
+  --prose-max: 720px;
+  --status-h: 25px;
 
+  /* ── radii ── --radius-pill is RESERVED for dots, meters and toggles. */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-brand: 24px;
+  --radius-pill: 999px;
+
+  /* ── durations ── UI motion 80 to 280ms; a loader only after --loader-delay. */
+  --dur-fast: 80ms;
+  --dur-base: 160ms;
+  --dur-slow: 280ms;
+  --loader-delay: 400ms;
+  --loader-reduced: 2.4s;
+  --hub-lost-after: 6s;
+
+  /* ── app geometry the manual does not name ── */
+  --control-px: 8px;
+  --control-px-lg: 12px;
+  --control-gap: 6px;
+  --control-font: 12px;
+  --control-font-sm: 11px;
   --ring-w: 2px;
   --ring-offset: 1px;
-
-  /* The bottom-right corner stacks three independent fixed layers: the
-     status footer, the agent FAB above it, and the toast stack above that.
-     Before these tokens the FAB covered the footer's usage button (the only
-     way into Hosts at an over-quota account) and any toast covered the FAB,
-     so the agent's single entry point was unclickable while a toast was up.
-     One column, measured off one source. */
-  /* The space the footer OCCUPIES, border included (24px of content + its 1px
-     top border). The layers above it clear this, and `.status` sizes itself
-     from it with `box-sizing: border-box` — there is no global border-box
-     rule, so a bare `height: 24px` there would really take 25px and leave
-     every token below it 1px short. */
-  --status-h: 25px;
+  /* The bottom-right corner stacks three fixed layers: the status footer,
+     the agent FAB above it, and the toasts above that. One column, measured
+     off one source, so no layer covers the one below. */
   --fab-size: 48px;
   --layer-gap: 8px;
-
-  /* --border is 1.26:1 against --bg: it may SEPARATE things, but it can
-     never be the only signal for a state. Use --control-border-strong
-     (3.14:1) or --accent for anything that has to be read. */
-  --control-bg: #ffffff;
-  --control-bg-hover: #f0f0f0;
-  --control-bg-active: #e4e4e4;
-  --control-border: #cfcfcf;
-  --control-border-strong: #8e8e8e;
-  --control-fg: #1a1a1a;
-  --control-fg-quiet: #5a5a5a;
-  --accent-fg: #ffffff;
-  --accent-soft: color-mix(in srgb, var(--accent) 10%, var(--bg));
-  --ring: var(--accent);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
+    /* Grounds. */
     --bg: #0f0f0f;
     --bg-pane: #161616;
+    --bg-raise: #1c1c1c;
+    --bg-hover: #232323;
+    --bg-sunk: #202020;
+    /* Text and lines. */
     --fg: #ededed;
-    --fg-muted: #999999;
-    --border: #262626;
+    --fg-2: #b4b4b4;
+    --fg-muted: #8f8f8f;
+    --border: #2a2a2a;
+    --control-border: #3a3a3a;
+    /* Action and selection. */
     --accent: #60a5fa;
+    --accent-fg: #0b1220;
+    --accent-soft: #1c2735;
+    --ring: var(--accent);
+    /* Status: the full colour is text; soft, faint and line tint chips and banners. */
+    --status-working: #7fa3ff;
+    --status-waiting: #d29b4a;
+    --status-failed: #ef5350;
+    --status-done: #5dd17a;
+    --status-idle: #a09fa8;
+    --on-waiting: #1a1205;
+    --waiting-soft: rgba(210,155,74,0.13);
+    --waiting-faint: rgba(210,155,74,0.07);
+    --waiting-line: rgba(210,155,74,0.45);
+    --failed-soft: rgba(239,83,80,0.12);
+    --failed-line: rgba(239,83,80,0.35);
+    --done-soft: rgba(93,209,122,0.12);
+    /* Destructive. */
+    --danger: var(--status-failed);
+    --danger-fill: #c62828;
+    --on-danger: #ffffff;
+    /* Chips, counts, meters. */
+    --chip-bg: #232323;
+    --count-bg: #262626;
+    --track: #2a2a2a;
+    /* Code viewer and inline code. */
+    --code: #56b6c2;
     --syn-kw: #c678dd;
     --syn-str: #98c379;
     --syn-num: #d19a66;
-    --syn-code: #56b6c2;
-    /* vs --bg-pane #161616: warn 7.35:1, crit 5.19:1 (vs --bg #0f0f0f: 7.78:1, 5.50:1). */
-    --usage-warn: #d29b4a;
-    --usage-crit: #ef5350;
-    /* vs --bg-pane #161616: 9.37:1. */
-    --usage-ok: #5dd17a;
-    --status-working: #7fa3ff;
-    --status-waiting: var(--usage-warn);
-    --status-failed: var(--usage-crit);
-    --status-done: var(--usage-ok);
-    --status-idle: #a09fa8;
-    --danger: var(--status-failed);
+    /* Organisations: 8px swatches, never fills. */
+    --org-1: #60a5fa;
+    --org-2: #5dd17a;
+    --org-3: #c084fc;
+    --org-4: #a09fa8;
+    /* Brand: the mark, splash and loaders, never UI chrome. */
+    --brand-ink: #1b2430;
+    --brand-light: #f2f4f7;
+    --brand-amber: #d29b4a;
+    --loader-accent: #60a5fa;
+    --comet-head: var(--brand-light);
+    --agent-claude: #d97757;
+    --shadow-pop: 0 6px 18px rgba(0,0,0,0.35);
 
+    /* App tokens the manual does not name. The usage severities are the
+       status colours, so the context meter and the status chips share one
+       source; --syn-code is the old name of --code. */
+    --usage-ok: var(--status-done);
+    --usage-warn: var(--status-waiting);
+    --usage-crit: var(--status-failed);
+    --syn-code: var(--code);
+    /* Classic controls, until the kit (0.7, 0.9) moves them onto bg-raise.
+       --border may SEPARATE things but never be the only signal for a state;
+       use --control-border-strong or --accent for anything that has to be read. */
     --control-bg: #1c1c1c;
     --control-bg-hover: #262626;
     --control-bg-active: #303030;
-    --control-border: #3a3a3a;
     --control-border-strong: #6e6e6e;
     --control-fg: #ededed;
     --control-fg-quiet: #a8a8a8;
-    --accent-fg: #0b1220;
-    --accent-soft: color-mix(in srgb, var(--accent) 16%, var(--bg));
-    --ring: var(--accent);
   }
 }
 
 :root[data-theme='light'] {
-  --bg: #ffffff;
-  --bg-pane: #fafafa;
-  --fg: #1a1a1a;
-  --fg-muted: #6b6b6b;
-  --border: #e5e5e5;
+  /* Grounds. */
+  --bg: #f7f7f8;
+  --bg-pane: #ffffff;
+  --bg-raise: #f2f2f4;
+  --bg-hover: #ebebee;
+  --bg-sunk: #f2f2f4;
+  /* Text and lines. */
+  --fg: #18181b;
+  --fg-2: #3f3f46;
+  --fg-muted: #6b6b74;
+  --border: #e4e4e7;
+  --control-border: #d4d4d8;
+  /* Action and selection. */
   --accent: #2563eb;
-  --syn-kw: #a626a4;
-  --syn-str: #50a14f;
-  --syn-num: #b76b01;
-  --syn-code: #0184bc;
-  /* Usage/context severity. Contrast vs --bg-pane #fafafa: warn 4.81:1, crit 5.39:1
-     (vs --bg #fff: 5.02:1, 5.62:1) — text ≥ 4.5:1, bars ≥ 3:1. */
-  --usage-warn: #b45309;
-  --usage-crit: #c62828;
-  /* Healthy context. 4.91:1 vs --bg-pane #fafafa (5.13:1 vs --bg #fff). */
-  --usage-ok: #2e7d32;
-  --status-working: #1d5bd8;
-  --status-waiting: var(--usage-warn);
-  --status-failed: var(--usage-crit);
-  --status-done: var(--usage-ok);
-  --status-idle: #6e6d75;
+  --accent-fg: #ffffff;
+  --accent-soft: #e7eefe;
+  --ring: var(--accent);
+  /* Status: the full colour is text; soft, faint and line tint chips and banners. */
+  --status-working: #3157c9;
+  --status-waiting: #8f520b;
+  --status-failed: #c62828;
+  --status-done: #17723e;
+  --status-idle: #6b6b74;
+  --on-waiting: #ffffff;
+  --waiting-soft: rgba(143,82,11,0.13);
+  --waiting-faint: rgba(143,82,11,0.07);
+  --waiting-line: rgba(143,82,11,0.45);
+  --failed-soft: rgba(198,40,40,0.12);
+  --failed-line: rgba(198,40,40,0.35);
+  --done-soft: rgba(23,114,62,0.12);
+  /* Destructive. */
   --danger: var(--status-failed);
+  --danger-fill: #c62828;
+  --on-danger: #ffffff;
+  /* Chips, counts, meters. */
+  --chip-bg: #efeff2;
+  --count-bg: #e9e9ec;
+  --track: #e4e4e7;
+  /* Code viewer and inline code. */
+  --code: #0e7490;
+  --syn-kw: #8a3fb0;
+  --syn-str: #3f7d20;
+  --syn-num: #b76b01;
+  /* Organisations: 8px swatches, never fills. */
+  --org-1: #2563eb;
+  --org-2: #17723e;
+  --org-3: #8a3fb0;
+  --org-4: #6b6b74;
+  /* Brand: the mark, splash and loaders, never UI chrome. */
+  --brand-ink: #1b2430;
+  --brand-light: #f2f4f7;
+  --brand-amber: #d29b4a;
+  --loader-accent: #60a5fa;
+  --comet-head: var(--accent);
+  --agent-claude: #d97757;
+  --shadow-pop: 0 6px 18px rgba(24,24,27,0.12);
 
-  /* --border is 1.26:1 against --bg: it may SEPARATE things, but it can
-     never be the only signal for a state. Use --control-border-strong
-     (3.14:1) or --accent for anything that has to be read. */
+  /* App tokens the manual does not name. The usage severities are the
+     status colours, so the context meter and the status chips share one
+     source; --syn-code is the old name of --code. */
+  --usage-ok: var(--status-done);
+  --usage-warn: var(--status-waiting);
+  --usage-crit: var(--status-failed);
+  --syn-code: var(--code);
+  /* Classic controls, until the kit (0.7, 0.9) moves them onto bg-raise.
+     --border may SEPARATE things but never be the only signal for a state;
+     use --control-border-strong or --accent for anything that has to be read. */
   --control-bg: #ffffff;
   --control-bg-hover: #f0f0f0;
   --control-bg-active: #e4e4e4;
-  --control-border: #cfcfcf;
   --control-border-strong: #8e8e8e;
   --control-fg: #1a1a1a;
   --control-fg-quiet: #5a5a5a;
-  --accent-fg: #ffffff;
-  --accent-soft: color-mix(in srgb, var(--accent) 10%, var(--bg));
-  --ring: var(--accent);
 }
 
 :root[data-theme='dark'] {
+  /* Grounds. */
   --bg: #0f0f0f;
   --bg-pane: #161616;
+  --bg-raise: #1c1c1c;
+  --bg-hover: #232323;
+  --bg-sunk: #202020;
+  /* Text and lines. */
   --fg: #ededed;
-  --fg-muted: #999999;
-  --border: #262626;
+  --fg-2: #b4b4b4;
+  --fg-muted: #8f8f8f;
+  --border: #2a2a2a;
+  --control-border: #3a3a3a;
+  /* Action and selection. */
   --accent: #60a5fa;
+  --accent-fg: #0b1220;
+  --accent-soft: #1c2735;
+  --ring: var(--accent);
+  /* Status: the full colour is text; soft, faint and line tint chips and banners. */
+  --status-working: #7fa3ff;
+  --status-waiting: #d29b4a;
+  --status-failed: #ef5350;
+  --status-done: #5dd17a;
+  --status-idle: #a09fa8;
+  --on-waiting: #1a1205;
+  --waiting-soft: rgba(210,155,74,0.13);
+  --waiting-faint: rgba(210,155,74,0.07);
+  --waiting-line: rgba(210,155,74,0.45);
+  --failed-soft: rgba(239,83,80,0.12);
+  --failed-line: rgba(239,83,80,0.35);
+  --done-soft: rgba(93,209,122,0.12);
+  /* Destructive. */
+  --danger: var(--status-failed);
+  --danger-fill: #c62828;
+  --on-danger: #ffffff;
+  /* Chips, counts, meters. */
+  --chip-bg: #232323;
+  --count-bg: #262626;
+  --track: #2a2a2a;
+  /* Code viewer and inline code. */
+  --code: #56b6c2;
   --syn-kw: #c678dd;
   --syn-str: #98c379;
   --syn-num: #d19a66;
-  --syn-code: #56b6c2;
-  /* vs --bg-pane #161616: warn 7.35:1, crit 5.19:1 (vs --bg #0f0f0f: 7.78:1, 5.50:1). */
-  --usage-warn: #d29b4a;
-  --usage-crit: #ef5350;
-  /* vs --bg-pane #161616: 9.37:1. */
-  --usage-ok: #5dd17a;
-  --status-working: #7fa3ff;
-  --status-waiting: var(--usage-warn);
-  --status-failed: var(--usage-crit);
-  --status-done: var(--usage-ok);
-  --status-idle: #a09fa8;
-  --danger: var(--status-failed);
+  /* Organisations: 8px swatches, never fills. */
+  --org-1: #60a5fa;
+  --org-2: #5dd17a;
+  --org-3: #c084fc;
+  --org-4: #a09fa8;
+  /* Brand: the mark, splash and loaders, never UI chrome. */
+  --brand-ink: #1b2430;
+  --brand-light: #f2f4f7;
+  --brand-amber: #d29b4a;
+  --loader-accent: #60a5fa;
+  --comet-head: var(--brand-light);
+  --agent-claude: #d97757;
+  --shadow-pop: 0 6px 18px rgba(0,0,0,0.35);
 
+  /* App tokens the manual does not name. The usage severities are the
+     status colours, so the context meter and the status chips share one
+     source; --syn-code is the old name of --code. */
+  --usage-ok: var(--status-done);
+  --usage-warn: var(--status-waiting);
+  --usage-crit: var(--status-failed);
+  --syn-code: var(--code);
+  /* Classic controls, until the kit (0.7, 0.9) moves them onto bg-raise.
+     --border may SEPARATE things but never be the only signal for a state;
+     use --control-border-strong or --accent for anything that has to be read. */
   --control-bg: #1c1c1c;
   --control-bg-hover: #262626;
   --control-bg-active: #303030;
-  --control-border: #3a3a3a;
   --control-border-strong: #6e6e6e;
   --control-fg: #ededed;
   --control-fg-quiet: #a8a8a8;
-  --accent-fg: #0b1220;
-  --accent-soft: color-mix(in srgb, var(--accent) 16%, var(--bg));
-  --ring: var(--accent);
+}
+
+/* One focus style for everything focusable, at zero specificity so any
+   component that draws its own focus keeps it. */
+:where(:focus-visible) {
+  outline: var(--ring-w) solid var(--ring);
+  outline-offset: var(--ring-offset);
 }
 
 html, body, #app {
@@ -218,6 +411,6 @@ html, body, #app {
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-family: var(--font-sans);
   font-size: 14px;
 }
