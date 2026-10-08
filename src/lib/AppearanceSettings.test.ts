@@ -2,11 +2,12 @@ import { render, screen, fireEvent } from '@testing-library/svelte';
 import { describe, it, expect, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import AppearanceSettings from './AppearanceSettings.svelte';
-import { uiLayout } from './prefs';
+import { uiDensity, uiLayout } from './prefs';
 import { applyTheme, theme } from './theme';
 
 afterEach(() => {
   uiLayout.set('classic');
+  uiDensity.set('comfortable');
   applyTheme('auto');
 });
 
@@ -29,5 +30,13 @@ describe('AppearanceSettings', () => {
     await fireEvent.click(screen.getByTestId('appearance-theme-auto'));
     expect(get(theme)).toBe('auto');
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+  });
+
+  it('starts on Comfortable (0.5.4 rows) and persists Compact', async () => {
+    render(AppearanceSettings);
+    expect(screen.getByTestId('appearance-density-comfortable').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('appearance-density-compact'));
+    expect(get(uiDensity)).toBe('compact');
+    expect(localStorage.getItem('cf:pref:ui.density')).toBe('"compact"');
   });
 });

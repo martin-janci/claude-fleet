@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import {
     sessions,
     hasNoPane,
@@ -57,6 +57,7 @@
   import { accessOf } from './access';
   import { shareSheetFor, sessionBlocked } from './share';
   import { hubConnection } from './hub_connection';
+  import { sessionActionRequest, takeSessionAction, type SessionActionId } from './session_actions';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -563,6 +564,33 @@
     await tick();
     selectSession(r.value, { follow: true });
   }
+  // A row's ⋯ menu or right-click asked for an action on this session
+  // (redesign step 3.10, `session_actions.ts`): run it as this pane's own
+  // button would, with the same gate, confirm and dialog.
+  const rowActions: Record<SessionActionId, { blocked: () => string | null; run: () => void }> = {
+    label: { blocked: () => setFriendlyNameBlocked, run: beginLabelEdit },
+    rename: { blocked: () => renameBlocked, run: beginRename },
+    restart: { blocked: () => restartBlocked, run: askRestart },
+    repair: { blocked: () => (repairing ? 'Repairing…' : repairBlocked), run: askRepair },
+    send_prompt: { blocked: () => sendPromptBlocked, run: openComposer },
+    review: { blocked: () => reviewBlocked, run: () => (reviewOpen = true) },
+    recreate: { blocked: () => recreateBlocked, run: askRecreate },
+    move: { blocked: () => moveBlocked, run: openMove },
+    share: { blocked: () => shareBlocked, run: openShare },
+    remove_from_list: { blocked: () => dismissAgentBlocked, run: () => void onRemoveFromList() },
+    safe_remove: { blocked: () => inspectSafeKillBlocked, run: () => void askSafeKill() },
+    kill: { blocked: () => killBlocked, run: askKill },
+  };
+  $effect(() => {
+    const r = $sessionActionRequest;
+    if (!r || r.sessionId !== session.id) return;
+    untrack(() => {
+      const taken = takeSessionAction(session.id);
+      if (!taken || taken.action === 'details') return;
+      const a = rowActions[taken.action];
+      if (a.blocked() === null) a.run();
+    });
+  });
 </script>
 
 <article class="details" data-testid="session-details">
@@ -793,181 +821,189 @@
     </section>
   {/if}
 
-  <section class="block actions">
-    <button
-      class="ghost"
-      onclick={beginLabelEdit}
-      disabled={setFriendlyNameBlocked !== null}
-      title={setFriendlyNameBlocked ?? ''}
-      data-testid="label-from-details"
-    >
-      🏷 Edit label
-    </button>
-    <!-- An external row runs outside fleet: the label (local fleet metadata)
-         is the only thing fleet can change about it. -->
+  <!-- Redesign 1.5, the action hierarchy: one primary (Send prompt), three
+       quick actions, and the rest behind ⋯ with the destructive ones last,
+       each behind its own confirm. Nothing is gone: every action that was a
+       button here is still a button, one click further at most. A pending
+       move's own controls stay in view, since they are the next step. -->
+  <section class="block actions" data-testid="details-actions">
     {#if session.kind !== 'external'}
-      <button
-        class="ghost"
-        onclick={beginRename}
-        disabled={renameBlocked !== null}
-        title={renameBlocked ?? ''}
-        data-testid="rename-from-details"
-      >
-        ✎ Rename tmux session
-      </button>
-      <button
-        class="ghost"
-        onclick={askRestart}
-        disabled={restartBlocked !== null}
-        title={restartBlocked ?? ''}
-        data-testid="restart-from-details"
-      >
-        ↻ Restart
-      </button>
-      {#if !hasNoPane(session) && session.project_id !== null}
-        <button
-          class="ghost"
-          onclick={askRepair}
-          disabled={repairing || repairBlocked !== null}
-          title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
-          data-testid="repair-from-details"
-        >
-          🩹 Repair workspace
-        </button>
-      {/if}
       {#if session.kind !== 'shell'}
         <button
-          class="ghost"
+          class="btn btn--primary"
           onclick={openComposer}
           disabled={sendPromptBlocked !== null}
           title={sendPromptBlocked ?? ''}
           data-testid="send-prompt-from-details"
-        >
+    >
           → Send prompt
         </button>
       {/if}
       <button
-        class="ghost"
+        class="btn btn--quiet is-bounded"
         onclick={() => (reviewOpen = true)}
         disabled={reviewBlocked !== null}
         title={reviewBlocked ?? ''}
         data-testid="open-review"
-      >
+  >
         🔍 Review
       </button>
       <button
-        class="ghost"
-        onclick={askRecreate}
-        disabled={recreateBlocked !== null}
-        title={recreateBlocked ?? ''}
-        data-testid="recreate-from-details"
-      >
-        ♻ Recreate
-      </button>
-      {#if canMove}
-        <button
-          class="ghost"
-          onclick={openMove}
-          disabled={moveBlocked !== null}
-          title={moveBlocked ?? 'Continue this conversation on another host: same branch, same Claude session'}
-          data-testid="move-from-details"
-        >
-          ⇄ Move to host…
-        </button>
-      {/if}
-      <button
-        class="ghost"
+        class="btn btn--quiet is-bounded"
         onclick={openShare}
         disabled={shareBlocked !== null}
         title={shareBlocked ?? 'Share this session with one person — watch or drive, revocable, and never a terminal'}
         data-testid="share-from-details"
-      >
+  >
         👥 Share…
       </button>
-      <!-- The rest of the move LIFECYCLE, gated on the same `moveBlocked` as
-           "Move to host…" above: spec §4.3 puts the whole lifecycle in the
-           `own` tier, so moving back, finishing, undoing and resuming a wait
-           are the owner's exactly as starting one is. They used to be the one
-           set of move controls with no gate at all — a grantee could finish or
-           undo the owner's half-done move, which kills a session. -->
       {#if moveBackOrigin}
         <button
-          class="ghost"
+          class="btn btn--quiet is-bounded"
           onclick={openMoveBack}
           disabled={moveBlocked !== null}
           title={moveBlocked ?? 'Move this session back to the host it came from'}
           data-testid="details-move-back"
-        >
+    >
           ⇄ Move back to {moveBackOrigin.fromHost}
         </button>
       {/if}
       {#if unresolvedMove}
         <button
-          class="ghost"
+          class="btn btn--quiet is-bounded"
           onclick={openFinishOrUndo}
           disabled={moveBlocked !== null}
           title={moveBlocked ?? 'Open the Transfer sheet to finish this move'}
           data-testid="details-finish-move"
-        >
+    >
           Finish the move to {unresolvedMove.toHost}
         </button>
         <button
-          class="ghost"
+          class="btn btn--quiet is-bounded"
           onclick={openFinishOrUndo}
           disabled={moveBlocked !== null}
           title={moveBlocked ?? 'Open the Transfer sheet to undo this move'}
           data-testid="details-undo-move"
-        >
+    >
           Undo the move
         </button>
       {/if}
       {#if unresolvedWaitRec}
         <button
-          class="ghost"
+          class="btn btn--quiet is-bounded"
           onclick={openWait}
           disabled={moveBlocked !== null}
           title={moveBlocked ?? 'Open the Transfer sheet for this pending move'}
           data-testid="details-resume-wait"
-        >
+    >
           ⇄ Waiting to move to {unresolvedWaitRec.toHost}
         </button>
       {/if}
-      {#if isInactiveAgent(session)}
-        <button
-          class="ghost"
-          onclick={onRemoveFromList}
-          disabled={dismissAgentBlocked !== null}
-          title={dismissAgentBlocked ?? 'Hide this inactive agent until it becomes active again'}
-          data-testid="remove-from-list-details"
-        >
-          Remove from list
-        </button>
-      {/if}
-      <!-- An inactive agent's daemon is gone: Remove from list (above) is its
-           only removal action. -->
-      {#if !isInactiveAgent(session)}
-        {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
-          <button
-            class="ghost"
-            onclick={askSafeKill}
-            disabled={inspectSafeKillBlocked !== null}
-            title={inspectSafeKillBlocked ?? ''}
-            data-testid="safe-kill-from-details"
-          >
-            ⏏ Safe remove
-          </button>
-        {/if}
-        <button
-          class="danger"
-          onclick={askKill}
-          disabled={killBlocked !== null}
-          title={killBlocked ?? ''}
-          data-testid="kill-from-details"
-        >
-          Kill session
-        </button>
-      {/if}
     {/if}
+    <details class="more" data-testid="details-more">
+      <summary class="btn btn--quiet is-bounded" aria-label="More actions" title="More actions">⋯</summary>
+      <div class="more-menu">
+        <button
+          class="menu-item"
+          onclick={beginLabelEdit}
+          disabled={setFriendlyNameBlocked !== null}
+          title={setFriendlyNameBlocked ?? ''}
+          data-testid="label-from-details"
+    >
+          🏷 Edit label
+        </button>
+        <!-- An external row runs outside fleet: the label (local fleet
+             metadata) is the only thing fleet can change about it. -->
+        {#if session.kind !== 'external'}
+          <button
+            class="menu-item"
+            onclick={beginRename}
+            disabled={renameBlocked !== null}
+            title={renameBlocked ?? ''}
+            data-testid="rename-from-details"
+      >
+            ✎ Rename tmux session
+          </button>
+          <button
+            class="menu-item"
+            onclick={askRestart}
+            disabled={restartBlocked !== null}
+            title={restartBlocked ?? ''}
+            data-testid="restart-from-details"
+      >
+            ↻ Restart
+          </button>
+          {#if !hasNoPane(session) && session.project_id !== null}
+            <button
+              class="menu-item"
+              onclick={askRepair}
+              disabled={repairing || repairBlocked !== null}
+              title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
+              data-testid="repair-from-details"
+        >
+              🩹 Repair workspace
+            </button>
+          {/if}
+          <button
+            class="menu-item"
+            onclick={askRecreate}
+            disabled={recreateBlocked !== null}
+            title={recreateBlocked ?? ''}
+            data-testid="recreate-from-details"
+      >
+            ♻ Recreate
+          </button>
+          {#if canMove}
+            <button
+              class="menu-item"
+              onclick={openMove}
+              disabled={moveBlocked !== null}
+              title={moveBlocked ?? 'Continue this conversation on another host: same branch, same Claude session'}
+              data-testid="move-from-details"
+        >
+              ⇄ Move to host…
+            </button>
+          {/if}
+          {#if isInactiveAgent(session)}
+            <button
+              class="menu-item"
+              onclick={onRemoveFromList}
+              disabled={dismissAgentBlocked !== null}
+              title={dismissAgentBlocked ?? 'Hide this inactive agent until it becomes active again'}
+              data-testid="remove-from-list-details"
+        >
+              Remove from list
+            </button>
+          {/if}
+          <!-- Destructive, last, each behind its confirm. An inactive
+               agent's daemon is gone: Remove from list (above) is its only
+               removal action. -->
+          {#if !isInactiveAgent(session)}
+            <hr class="more-sep" />
+            {#if session.kind !== 'shell' && session.status === 'running' && session.safe_kill_state !== 'requested'}
+              <button
+                class="menu-item"
+                onclick={askSafeKill}
+                disabled={inspectSafeKillBlocked !== null}
+                title={inspectSafeKillBlocked ?? ''}
+                data-testid="safe-kill-from-details"
+          >
+                ⏏ Safe remove
+              </button>
+            {/if}
+            <button
+              class="menu-item danger"
+              onclick={askKill}
+              disabled={killBlocked !== null}
+              title={killBlocked ?? ''}
+              data-testid="kill-from-details"
+        >
+              Kill session
+            </button>
+          {/if}
+        {/if}
+      </div>
+    </details>
   </section>
 
   {#if session.safe_kill_state === 'requested'}
@@ -1295,17 +1331,42 @@
   }
   .copy:hover { border-color: var(--accent); }
 
-  .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-  .ghost {
-    font-size: 0.85rem;
-    padding: 0.35rem 0.8rem;
+  .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: flex-start; }
+  /* ⋯: everything that is not one of the three quick actions. */
+  .more { position: relative; }
+  .more > summary { list-style: none; }
+  .more > summary::-webkit-details-marker { display: none; }
+  .more-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 4px;
+    padding: 4px;
+    min-width: 13rem;
     border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--bg-raise);
+  }
+  .menu-item {
+    text-align: left;
+    font: inherit;
+    font-size: 0.85rem;
+    padding: 0.3rem 0.6rem;
+    min-height: 24px;
+    border: none;
+    border-radius: 4px;
     background: transparent;
     color: var(--fg);
-    border-radius: 5px;
     cursor: pointer;
   }
-  .ghost:hover { border-color: var(--accent); }
+  .menu-item:hover:not(:disabled) { background: var(--control-bg-hover); }
+  .menu-item:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: -2px; }
+  .menu-item.danger { color: var(--danger); }
+  .menu-item.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+  /* One disabled look, distinct from a quiet button: dimmed, no hover, and
+     the reason in the title. */
+  .menu-item:disabled { opacity: 0.55; cursor: default; }
+  .more-sep { width: 100%; border: none; border-top: 1px solid var(--border); margin: 3px 0; }
   .danger {
     font-size: 0.85rem;
     padding: 0.35rem 0.8rem;

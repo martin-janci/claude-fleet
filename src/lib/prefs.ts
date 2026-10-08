@@ -92,3 +92,21 @@ const isUiLayout = (v: unknown): v is UiLayout => v === 'classic' || v === 'new'
  */
 export const uiLayout = writable<UiLayout>(readPref<UiLayout>('ui.layout', 'classic', isUiLayout));
 uiLayout.subscribe((v) => writePref('ui.layout', v));
+
+// ─── Row density (redesign step 3.6) ─────────────────────────────────────
+
+export type UiDensity = 'comfortable' | 'compact';
+
+const isUiDensity = (v: unknown): v is UiDensity => v === 'comfortable' || v === 'compact';
+
+/**
+ * How tall a session row is. Comfortable is 0.5.4's row, every badge
+ * included; Compact is the redesign's two-line row (a sans title, one meta
+ * line, chips until hover) at {@link COMPACT_ROW_PX}.
+ */
+export const uiDensity = writable<UiDensity>(readPref<UiDensity>('ui.density', 'comfortable', isUiDensity));
+uiDensity.subscribe((v) => writePref('ui.density', v));
+
+/** A Compact row's height: 20 of them fit a 1080p window with 280 px to spare
+ *  for the title bar, header and the list's own chrome. */
+export const COMPACT_ROW_PX = 40;

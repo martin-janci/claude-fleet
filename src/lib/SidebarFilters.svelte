@@ -129,6 +129,10 @@
       title: 'Group sessions by work: a ticket key (ABC-123) in a tag, branch or worktree name',
       testid: 'group-by-toggle',
     },
+    // Redesign step 3.6: the flat groupings, after Project and Work.
+    { id: 'state', label: 'State' },
+    { id: 'host', label: 'Host' },
+    { id: 'agent', label: 'Agent' },
   ];
 
   // ── Work filters (work graph M10.4) ──
@@ -402,7 +406,7 @@
                 onchange={(id) =>
                   id === 'work'
                     ? sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))
-                    : sidebarGroupBy.set('project')}
+                    : sidebarGroupBy.set(id)}
               />
             </div>
             <button
@@ -579,8 +583,13 @@
   <Attention />
   <ScopeAttention />
   <TrackerAttention />
-  <LinkReview />
-  <TidyReview />
+  <!-- Redesign 1.2: one quiet attention line, "3 links to review · 4 to
+       tidy · 1 reopened", in place of the link bar and the Tidy chips. Each
+       segment opens its own sheet, which wraps onto the lines below. -->
+  <div class="attention-line" data-testid="attention-line">
+    <LinkReview />
+    <TidyReview />
+  </div>
   {#if $sessionFocus && sessionsList}
     <!-- A clicked suggestion: the tree shows only this session. -->
     <div class="focus-bar" data-testid="session-focus-bar" role="status">
@@ -639,6 +648,21 @@
 </header>
 
 <style>
+  .attention-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    padding: 0 0.5rem;
+  }
+  /* "a · b · c": a dot before every segment after the first. The segments
+     belong to LinkReview and TidyReview, hence :global. */
+  .attention-line :global(.al-seg ~ .al-seg)::before {
+    content: '·';
+    margin-right: 0.3rem;
+    color: var(--fg-muted);
+    text-decoration: none;
+    display: inline-block;
+  }
   .sidebar-header {
     flex: 0 0 auto;
     display: flex;
