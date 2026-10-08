@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import { invokeCmd } from './result';
   import type { PickedFile } from './attachments';
@@ -488,7 +489,7 @@
 
   <div class="actions">
     <button type="button" onclick={oncancel} disabled={saving} data-testid="editor-cancel">Cancel</button>
-    <button type="button" class="primary" onclick={save} disabled={!canSave} data-testid="editor-save">{saving ? 'Saving…' : 'Save'}</button>
+    <button type="button" class="primary" onclick={save} disabled={!canSave} data-testid="editor-save">{#if saving}<Loader name="comet" size={12} class="btn-loader" />{/if}{saving ? 'Saving…' : 'Save'}</button>
   </div>
 </div>
 

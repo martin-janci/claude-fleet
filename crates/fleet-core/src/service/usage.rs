@@ -913,8 +913,11 @@ pub async fn maybe_collect(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> O
         }
         *last = Some(std::time::Instant::now());
     }
+    let next = Some(std::time::Duration::from_secs(interval));
     let exec: &dyn SshExec = ssh.as_ref();
-    Some(collect_all(store, exec, now_unix()).await)
+    let n = collect_all(store, exec, now_unix()).await;
+    crate::service::loops::report("usage", Ok::<_, String>(()), next);
+    Some(n)
 }
 
 fn now_unix() -> i64 {

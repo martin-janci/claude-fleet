@@ -107,11 +107,12 @@
           <input
             type="password"
             placeholder="value"
+            aria-label={`Value of ${name}`}
             value={draftValue(name)}
             oninput={(e) => onValueInput(name, e)}
             data-testid={`secret-value-${name}`}
           />
-          <select value={draftHost(name)} onchange={(e) => onHostChange(name, e)} data-testid={`secret-host-${name}`}>
+          <select aria-label={`Where ${name} applies`} value={draftHost(name)} onchange={(e) => onHostChange(name, e)} data-testid={`secret-host-${name}`}>
             <option value="">global</option>
             {#each visibleHosts as h (h.alias)}
               <option value={h.alias}>{h.alias} ({hostStatus(name, h.alias)})</option>

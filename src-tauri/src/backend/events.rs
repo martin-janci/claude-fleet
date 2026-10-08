@@ -266,6 +266,8 @@ pub struct EventBridge {
     /// The `id:` of the last row frame this bridge applied — what the next
     /// open sends as `Last-Event-ID`. `None` until a row frame carried one.
     last_id: Mutex<Option<String>>,
+    /// Ends a backoff wait early: the banner's "Retry now".
+    wake: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl EventBridge {
@@ -284,6 +286,7 @@ impl EventBridge {
             cancel,
             status: Arc::new(NoReporter),
             last_id: Mutex::new(None),
+            wake: None,
         }
     }
 
@@ -292,6 +295,12 @@ impl EventBridge {
     /// something else need not.
     pub fn reporting_to(mut self, status: Arc<dyn ConnectionReporter>) -> Self {
         self.status = status;
+        self
+    }
+
+    /// Let `wake` end a backoff wait early (`HubConnectionStatus::retry_now`).
+    pub fn waking_on(mut self, wake: Arc<tokio::sync::Notify>) -> Self {
+        self.wake = Some(wake);
         self
     }
 
@@ -364,7 +373,17 @@ impl EventBridge {
             if self.cancel.is_cancelled() {
                 return;
             }
-            self.delay.sleep(wait).await;
+            match &self.wake {
+                Some(wake) => {
+                    let woken = wake.notified();
+                    tokio::select! {
+                        _ = self.delay.sleep(wait) => {}
+                        _ = woken => tracing::info!("[hub events] retrying now, as asked"),
+                        _ = self.cancel.cancelled() => return,
+                    }
+                }
+                None => self.delay.sleep(wait).await,
+            }
         }
     }
 

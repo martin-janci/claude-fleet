@@ -2076,3 +2076,74 @@ async fn a_resync_ends_by_telling_the_window_to_refetch_projects_and_work() {
          every row; only the Work view's own reload (M14.1d) follows it"
     );
 }
+
+// --- Retry now (the banner's button, redesign step 10.6) ---------------------
+
+/// Never returns: only a wake or the cancel token ends the wait.
+struct StuckDelay;
+
+#[async_trait::async_trait]
+impl Delay for StuckDelay {
+    async fn sleep(&self, _how_long: Duration) {
+        std::future::pending::<()>().await
+    }
+}
+
+#[tokio::test]
+async fn retry_now_ends_the_backoff_wait_and_tries_at_once() {
+    let cancel = CancellationToken::new();
+    let stream = ScriptedStream::new(
+        vec![Connection::Fails("refused"), Connection::Fails("refused")],
+        cancel.clone(),
+    );
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let bridge = EventBridge::new(
+        stream.clone(),
+        Arc::new(Recorder::default()),
+        Arc::new(CountingResync::default()),
+        Arc::new(StuckDelay),
+        cancel.clone(),
+    )
+    .waking_on(Arc::clone(&wake));
+    let run = tokio::spawn(async move { bridge.run().await });
+
+    // The first open fails and the bridge waits: a backoff that never ends
+    // on its own, so nothing opens again until the button is pressed.
+    while stream.opens() < 1 {
+        tokio::task::yield_now().await;
+    }
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(stream.opens(), 1, "nothing retries before Retry now");
+
+    // A wake reaches only a bridge that is waiting, so press until it lands.
+    while stream.opens() < 2 {
+        wake.notify_waiters();
+        tokio::task::yield_now().await;
+    }
+    // The script is spent: the next open cancels the bridge and run() ends.
+    while !run.is_finished() {
+        wake.notify_waiters();
+        tokio::task::yield_now().await;
+    }
+    run.await.expect("the bridge ends");
+    assert_eq!(stream.opens(), 2);
+}
+
+#[tokio::test]
+async fn a_bridge_without_a_wake_waits_its_backoff() {
+    let cancel = CancellationToken::new();
+    let stream = ScriptedStream::new(vec![Connection::Fails("refused")], cancel.clone());
+    let delay = Arc::new(FakeDelay::default());
+    EventBridge::new(
+        stream.clone(),
+        Arc::new(Recorder::default()),
+        Arc::new(CountingResync::default()),
+        delay.clone(),
+        cancel,
+    )
+    .run()
+    .await;
+    assert_eq!(delay.waits().len(), 1, "it waited the backoff as before");
+}

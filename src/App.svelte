@@ -11,6 +11,7 @@
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
+  import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
   import { todayOpen } from './lib/today';
   import {
     bumpWorkChanged,
@@ -18,7 +19,9 @@
     noteWorkChanged,
     noteWorkEvents,
     sessionEventsTouchWork,
+    selectedTaskId,
     sidebarView,
+    taskDetailOpen,
     toggleSidebarView,
   } from './lib/work_view';
   import type { SessionEvent } from './lib/sessions';
@@ -539,15 +542,29 @@
   const newLayout = $derived($uiLayout === 'new');
   // A row's ⋯ menu asks Details to run an action (step 3.10): Details must be
   // showing to take it.
+  // In the New layout that is the inspector, or the Details tab when the
+  // inspector has no room.
   const unsubRowAction = sessionActionRequest.subscribe((r) => {
-    if (r) centerCollapsed = false;
+    if (!r) return;
+    centerCollapsed = false;
+    if ($uiLayout === 'new') {
+      if (inspectorRoom) inspectorOpen = true;
+      else if (!detailsMain) goTo('details');
+    }
   });
   onDestroy(unsubRowAction);
   // The Accounts page (step 4.1) is New-layout only until the rail (3.2);
   // switching back to Classic leaves it.
   const accountsMode = $derived($destination === 'accounts');
+  // The Details tab (step 3.5): the New layout's session details in the
+  // right column, in place of the inspector beside it.
+  const detailsMode = $derived($destination === 'details');
   $effect(() => {
-    if ($uiLayout !== 'new') untrack(() => leave('accounts'));
+    if ($uiLayout !== 'new')
+      untrack(() => {
+        leave('accounts');
+        leave('details');
+      });
   });
   // Classic has no Inbox (step 3.3): it shows the Sessions list instead.
   $effect(() => {
@@ -606,7 +623,7 @@
   // underneath. Unlike Files/Hosts the Session tab keeps the center
   // (Details) pane — both its views are views *of* the session. The board
   // covers the Session tab without leaving it, so its segment stays shown.
-  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode && !accountsMode);
+  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode && !accountsMode && !detailsMode);
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
   );
@@ -750,6 +767,56 @@
     setSessionView(otherSessionView(effectiveView));
   }
   const NO_PANE_TITLE = 'Runs outside tmux — no terminal';
+
+  // ── The New layout's session tabs and inspector (step 3.5) ──
+  // The inspector is Classic's Details pane moved beside the session, 280 to
+  // 320 px, on ⌥⌘B / Ctrl+Alt+B. What fills a whole column (Today, a task,
+  // the empty state, the Details tab) shows in the right column instead, so
+  // it is never squeezed into the inspector, and Details mounts once.
+  let inspectorOpen = $state(readPref('layout.inspector', true, isBool));
+  $effect(() => {
+    writePref('layout.inspector', inspectorOpen);
+  });
+  const taskShowing = $derived($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen && !$todayOpen);
+  const wideMode = $derived(filesMode || hostsMode || assetsMode || accountsMode);
+  const detailsMain = $derived(
+    newLayout && !wideMode && !boardMode && (detailsMode || $todayOpen || taskShowing || !$selectedSession),
+  );
+  const inspectorRoom = $derived(newLayout && !!$selectedSession && !wideMode && !boardMode && !detailsMain);
+  const inspectorShown = $derived(inspectorRoom && inspectorOpen);
+  const currentTab: SessionTab | null = $derived(
+    detailsMode
+      ? 'details'
+      : filesMode
+        ? 'files'
+        : sessionTabActive && !boardMode
+          ? effectiveView === 'conversation'
+            ? 'conversation'
+            : 'agent'
+          : null,
+  );
+  const tabDisabled = $derived<Partial<Record<SessionTab, string>>>({
+    ...(!selHasClaudeId && !selNoPane ? { conversation: 'No Claude session id yet' } : {}),
+    ...(selNoPane ? { agent: NO_PANE_TITLE, files: NO_PANE_TITLE } : {}),
+  });
+  const selName = $derived(
+    $selectedSession
+      ? ($showFriendlyNames && $selectedSession.friendly_name) || $selectedSession.tmux_name
+      : '',
+  );
+  function onSessionTab(tab: SessionTab) {
+    if (tab === 'conversation') setSessionView('conversation');
+    else if (tab === 'agent') setSessionView('terminal');
+    else if (tab === 'files') showFiles();
+    else {
+      closeHosts();
+      goTo('details');
+    }
+  }
+  function toggleInspector() {
+    if (newLayout) inspectorOpen = !inspectorOpen;
+    else toggleCenter();
+  }
   /** The Terminal pill's tooltip on a session shared with this person: it is
    *  still a view of the pane, just not a live one (multi-user M1). */
   const WATCH_ONLY_TITLE = 'Shared with you — a read-only snapshot of the pane, not a terminal';
@@ -825,6 +892,7 @@
     // The Work view has its own org filter: the chord cycles that one there.
     else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
     else if (chord === 'today') todayOpen.update((v) => !v);
+    else if (chord === 'inspector') toggleInspector();
     else if (chord === 'work-view') {
       sidebarCollapsed = false;
       toggleSidebarView();
@@ -902,9 +970,13 @@
     const wide = filesMode || hostsMode || assetsMode || accountsMode;
     const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
     const centerResizer = wide || centerCollapsed ? '0px' : '4px';
-    const cols = `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
-    // The New layout's rail is one more column in front (step 3.2).
-    return $uiLayout === 'new' ? `var(--rail-w) ${cols}` : cols;
+    // The New layout (steps 3.2, 3.5): the rail in front, no center pane,
+    // and the inspector after the session.
+    if ($uiLayout === 'new') {
+      const insp = inspectorShown ? 'minmax(var(--inspector-min), var(--inspector-max))' : '0px';
+      return `var(--rail-w) ${sb} ${sbResizer} 1fr 0px ${insp}`;
+    }
+    return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
   });
 </script>
 
@@ -990,7 +1062,11 @@
     <Resizer id="sidebar" onresize={onResizeSidebar} />
   {/if}
 
-  {#if filesMode || hostsMode || accountsMode}
+  <!-- The New layout has no center pane (step 3.5): Details is the
+       inspector after the session, or fills the right column. -->
+  {#if newLayout}
+    <!-- nothing -->
+  {:else if filesMode || hostsMode || accountsMode}
     <!-- Center collapsed to 0 in files/hosts/accounts mode — two empty grid cells. -->
     <div></div>
     <div></div>
@@ -1022,6 +1098,21 @@
   {/if}
 
   <div class="right-col" data-testid="pane-terminal">
+    {#if newLayout}
+      <SessionTabs
+        session={$selectedSession}
+        name={selName}
+        current={currentTab}
+        disabled={tabDisabled}
+        assetsActive={assetsMode}
+        {inspectorOpen}
+        inspectorAvailable={inspectorRoom}
+        {isMac}
+        onselect={onSessionTab}
+        onassets={showAssets}
+        oninspector={toggleInspector}
+      />
+    {:else}
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
@@ -1108,6 +1199,7 @@
         data-testid="tab-hosts">Hosts <kbd>{hostsChord}</kbd></button
       >
     </div>
+    {/if}
     <div class="right-body">
       {#if $selectedSession && selNoPane}
         <!-- Rows with no pane (bg agents, external Claude sessions) have no
@@ -1200,8 +1292,26 @@
           <WorkBoard onclose={newLayout ? undefined : () => leave('board')} />
         </div>
       {/if}
+      {#if detailsMain}
+        <!-- The New layout's Details tab, and what fills a column (Today, a
+             task, the empty state): over the mounted terminal like the rest. -->
+        <div class="view-slot overlay" data-testid="details-view">
+          <Details />
+        </div>
+      {/if}
     </div>
   </div>
+  {#if newLayout}
+    <!-- The center resizer's 0-width slot, then the inspector (step 3.5). -->
+    <div></div>
+    {#if inspectorShown}
+      <aside class="inspector" data-testid="inspector" aria-label="Inspector">
+        <Details />
+      </aside>
+    {:else}
+      <div></div>
+    {/if}
+  {/if}
 </main>
 
 {#if showDownloads}
@@ -1389,6 +1499,13 @@
   .center-collapse:hover { color: var(--fg); border-color: var(--accent); }
 
   /* Right column: a thin Terminal/Files tab strip above the body. */
+  .inspector {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    border-left: 1px solid var(--border);
+    background: var(--bg-pane);
+  }
   .right-col {
     display: flex;
     flex-direction: column;

@@ -19,7 +19,8 @@ function loaderUses(file: string, src: string): LoaderUse[] {
   for (const m of markup.matchAll(/<Loader\b[\s\S]*?\/>/g)) {
     const before = markup.slice(0, m.index);
     const open = (before.match(/<button\b/g) ?? []).length;
-    const closed = (before.match(/<\/button>/g) ?? []).length;
+    // Prettier closes a long button as `</button` and `>` on the next line.
+    const closed = (before.match(/<\/button\s*>/g) ?? []).length;
     out.push({ file, tag: m[0].replace(/\s+/g, ' '), inline: ROW_OR_BAR.test(file) || open > closed });
   }
   return out;
@@ -40,6 +41,7 @@ describe('loader use', () => {
     ]);
     expect(loaderUses('src/lib/SessionRowItem.svelte', '<span><Loader name="radar" /></span>')[0].inline).toBe(true);
     expect(loaderUses('src/lib/StatusBar.svelte', '<Loader />')[0].inline).toBe(true);
+    expect(loaderUses('src/lib/X.svelte', '<button>Open</button\n  ><Loader name="galaxy" />')[0].inline).toBe(false);
   });
 
   it('allows only the Comet or the 16 px Orbit inline', () => {

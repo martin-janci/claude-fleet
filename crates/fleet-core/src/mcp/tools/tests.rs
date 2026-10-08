@@ -3946,10 +3946,12 @@ fn the_served_definition_budget_stays_bounded() {
     /// the Files tab's `repo_blame` and `repo_branches`' `merged` note.
     /// Measured at 86,933 on 2026-10-08 after the redesign's
     /// `touch_session_viewed` (step 2.3, +308 bytes over main's 86,625).
-    /// Measured at 87,798 on 2026-10-08 after the fleet-agent install job
+    /// Measured at 87,031 on 2026-10-08 after the loop registry
+    /// (`fleet_health` names `loops[]` and `automation_paused`, +176 bytes).
+    /// Measured at 87,896 on 2026-10-08 after the fleet-agent install job
     /// (Orbit Fleet 4.9: `install_agent` and `agent_installs`, +865 bytes
-    /// over main's 86,933).
-    const BUDGET_BYTES: usize = 87_898;
+    /// over main's 87,031).
+    const BUDGET_BYTES: usize = 87_996;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

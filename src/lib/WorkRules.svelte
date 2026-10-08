@@ -20,6 +20,7 @@
     type WorkRuleDraft,
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
+  import Skeleton from './states/Skeleton.svelte';
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -144,7 +145,7 @@
     {#if error}
       <p class="err" role="alert" data-testid="rules-error">{error}</p>
     {:else if !loaded}
-      <p class="muted">Loading…</p>
+      <Skeleton />
     {:else if rules.length === 0}
       <p class="muted" data-testid="rules-empty">No rules yet. “Place in group…” on a task offers one for similar tasks.</p>
     {:else}

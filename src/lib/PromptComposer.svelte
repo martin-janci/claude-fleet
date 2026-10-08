@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions, sendPrompt, type SessionRow } from './sessions';
@@ -207,7 +208,7 @@
         aria-describedby={sendBlocked ? 'composer-send-blocked' : undefined}
         onclick={canSend ? send : undefined}
         data-testid="composer-send"
-      >{sending ? 'Sending…' : 'Send →'}</button>
+      >{#if sending}<Loader name="comet" size={12} class="btn-loader" />{/if}{sending ? 'Sending…' : 'Send →'}</button>
     </div>
     {#if sendBlocked}
       <p id="composer-send-blocked" class="blocked-reason" role="status">{sendBlocked}</p>

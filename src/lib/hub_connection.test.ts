@@ -1,7 +1,8 @@
 // SF-8: the design says a dropped hub stream reconnects "showing a banner
 // while disconnected". This store is that banner's source of truth, and the
 // banner component renders it.
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
 
@@ -163,5 +164,42 @@ describe('the banner', () => {
     expect(screen.getByTestId('hub-connection-banner').textContent?.toLowerCase()).toContain(
       'update this app'
     );
+  });
+});
+
+describe('the banner counts down and offers Retry now (step 10.6)', () => {
+  it('counts the wait down live, without the static wait in the sentence', async () => {
+    vi.useFakeTimers();
+    try {
+      hubConnection.set({ state: 'offline', attempt: 2, retry_in_secs: 8, reason: 'connection refused' });
+      render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+      expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Retrying in 8 s');
+      expect(screen.getByTestId('hub-connection-banner').textContent).not.toContain('next try in');
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Retrying in 5 s');
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Trying now…');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Retry now asks the backend to try at once, and a new state restarts the count', async () => {
+    hubConnection.set({ state: 'offline', attempt: 2, retry_in_secs: 30, reason: 'connection refused' });
+    render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+    await fireEvent.click(screen.getByTestId('hub-retry-now'));
+    expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'hub_retry_now')).toBe(true);
+    expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Trying now…');
+    expect((screen.getByTestId('hub-retry-now') as HTMLButtonElement).disabled).toBe(true);
+    hubConnection.set({ state: 'offline', attempt: 3, retry_in_secs: 16, reason: 'connection refused' });
+    await tick();
+    expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Retrying in 16 s');
+    expect((screen.getByTestId('hub-retry-now') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a contract skew has no countdown: retrying does not fix it', () => {
+    hubConnection.set(hubTooOld);
+    render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+    expect(screen.queryByTestId('hub-retry-now')).toBeNull();
   });
 });
