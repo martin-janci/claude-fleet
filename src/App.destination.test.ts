@@ -10,14 +10,18 @@ import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
 import { workBoardOpen, requestHostsView } from './lib/app_views';
 import { destination } from './lib/destination';
+import { uiLayout } from './lib/prefs';
 
-const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay'];
+const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay'];
 
 beforeEach(() => {
   onboardingDismissed.set(true);
   clearToasts();
 });
-afterEach(() => destination.set('session'));
+afterEach(() => {
+  destination.set('session');
+  uiLayout.set('classic');
+});
 
 function terminalSlot(container: HTMLElement): Element {
   const slot = container.querySelector('.right-body > .view-slot:not(.overlay)');
@@ -72,5 +76,36 @@ describe('App: the destination store', () => {
     requestHostsView();
     await waitFor(() => expect(openOverlays(container)).toEqual(['hosts-overlay']));
     expect(get(destination)).toBe('hosts');
+  });
+});
+
+describe('App: the Accounts page (step 4.1)', () => {
+  it('Classic shows no Accounts tab', () => {
+    const { queryByTestId } = render(App);
+    expect(queryByTestId('tab-accounts')).toBeNull();
+  });
+
+  it('New opens it as one more overlay over a mounted terminal, and Esc leaves it', async () => {
+    uiLayout.set('new');
+    const { container, getByTestId } = render(App);
+    const term = terminalSlot(container);
+    await fireEvent.click(getByTestId('tab-hosts'));
+    await fireEvent.click(getByTestId('tab-accounts'));
+    expect(openOverlays(container)).toEqual(['accounts-overlay']);
+    expect(getByTestId('tab-accounts').getAttribute('aria-selected')).toBe('true');
+    expect(getByTestId('tab-session').classList.contains('active')).toBe(false);
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(get(destination)).toBe('session');
+    expect(terminalSlot(container)).toBe(term);
+  });
+
+  it('switching back to Classic leaves it', async () => {
+    uiLayout.set('new');
+    const { container, getByTestId, queryByTestId } = render(App);
+    await fireEvent.click(getByTestId('tab-accounts'));
+    uiLayout.set('classic');
+    await waitFor(() => expect(openOverlays(container)).toEqual([]));
+    expect(queryByTestId('tab-accounts')).toBeNull();
+    expect(get(destination)).toBe('session');
   });
 });

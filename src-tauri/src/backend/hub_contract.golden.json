@@ -336,9 +336,11 @@
       "agent_version",
       "alias",
       "auth_overrides",
+      "boot_at",
       "claude_profiles",
       "claude_version",
       "claude_version_at",
+      "cpu_count",
       "disk_home_free_kb",
       "disk_home_total_kb",
       "disk_tmp_free_kb",
@@ -347,8 +349,10 @@
       "hidden",
       "last_hook_at",
       "last_pinged_at",
+      "latency_ms",
       "load_1m",
       "mem_avail_kb",
+      "mem_total_kb",
       "org_id",
       "provision_stale",
       "provision_warning",
@@ -359,7 +363,9 @@
       "tmux_version",
       "transport",
       "unclaimed_sessions",
-      "uptime_secs"
+      "uptime_secs",
+      "worktree_at",
+      "worktree_kb"
     ],
     "HostWorktrees": [
       "cloned",

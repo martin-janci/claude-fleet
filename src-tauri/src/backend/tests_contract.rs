@@ -194,6 +194,12 @@ pub(crate) fn sample_host() -> HostRow {
             account_uuid: Some("acct-work".into()),
             email: Some("work@example.com".into()),
         }]),
+        cpu_count: Some(16),
+        mem_total_kb: Some(65_842_312),
+        boot_at: Some(1_687_558_400),
+        latency_ms: Some(18),
+        worktree_kb: Some(9_400_000),
+        worktree_at: Some(1_700_000_000),
     }
 }
 

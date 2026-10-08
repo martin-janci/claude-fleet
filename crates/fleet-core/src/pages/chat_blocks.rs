@@ -23,7 +23,7 @@ const KEY_MAX: usize = 64;
 
 pub const KINDS: &[&str] = &[
     "report", "steps", "guide", "callout", "facts", "choices", "form", "progress", "results",
-    "error",
+    "error", "setting",
 ];
 const TONES: &[&str] = &["info", "tip", "success", "warning", "danger"];
 pub const PROGRESS_STATES: &[&str] = &["running", "waiting", "done", "failed"];
@@ -84,11 +84,19 @@ pub enum BlockKind {
         intro: Option<String>,
         steps: Vec<TutorialStep>,
     },
-    /// Reference material in folding sections.
+    /// Reference material in folding sections, or with `page` a guide
+    /// fleet already has (a `fleet.page/1` page of layout `guide`), drawn
+    /// as Settings draws it; the other keys are then ignored.
     Guide {
-        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<String>,
+        /// Required without `page`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         intro: Option<String>,
+        /// Required without `page`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         sections: Vec<GuideSection>,
     },
     Callout {
@@ -153,6 +161,16 @@ pub enum BlockKind {
         detail: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         next: Vec<Choice>,
+    },
+    /// A settings change waiting for a person: the id `set_setting` with
+    /// `propose: true` answered. The card reads the key and both values
+    /// from the proposal itself, never from the block, and applies it only
+    /// after a confirm.
+    Setting {
+        proposal: u64,
+        /// What the change does, in words.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
 }
 
@@ -308,6 +326,9 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
                 p.str(s, "lang", at, false, 20);
             });
         }
+        "guide" if !matches!(o.get("page"), None | Some(Value::Null)) => {
+            p.key(o, "page", "");
+        }
         "guide" => {
             p.str(o, "title", "", true, 120);
             p.str(o, "intro", "", false, 2000);
@@ -380,6 +401,14 @@ pub fn check(v: &Value) -> Result<(), Vec<String>> {
             p.each(&next, "next", choice);
             p.str(o, "body", "", false, 4000);
             p.str(o, "detail", "", false, 8000);
+        }
+        "setting" => {
+            if matches!(o.get("proposal"), None | Some(Value::Null)) {
+                p.add("", "`proposal` is required");
+            } else {
+                p.num(o, "proposal", "", 1);
+            }
+            p.str(o, "note", "", false, 500);
         }
         _ => unreachable!("kind is one of KINDS"),
     }
@@ -703,7 +732,8 @@ impl Problems {
         }
     }
 
-    /// A progress `id` or an error `code`: a key, never prose.
+    /// A progress `id`, an error `code` or a guide's `page`: a key, never
+    /// prose.
     fn key(&mut self, o: &Map<String, Value>, name: &str, at: &str) {
         if let Some(v) = self.str(o, name, at, true, KEY_MAX) {
             let ok = v

@@ -70,8 +70,13 @@ export const settingsOpen = writable(false);
  *  dialog clears it once it has scrolled. */
 export const settingsSection = writable<string | null>(null);
 
-/** Open Settings at `section`. */
-export function openSettingsAt(section: string): void {
+/** The setting to show on the page `settingsSection` names (a chat card's
+ *  "undo in Settings"). Cleared with the section. */
+export const settingsKey = writable<string | null>(null);
+
+/** Open Settings at `section`; on a page, at `key` when given. */
+export function openSettingsAt(section: string, key?: string): void {
+  settingsKey.set(key ?? null);
   settingsSection.set(section);
   settingsOpen.set(true);
 }

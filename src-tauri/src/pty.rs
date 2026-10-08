@@ -43,8 +43,141 @@ const PTY_REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const MIN_COLS: u16 = 10;
 const MIN_ROWS: u16 = 2;
 
-/// One active PTY at a time (we render a single terminal pane). Opening a new
-/// PTY closes the previous one. Holds the master (for resize), the writer
+/// How many PTYs may be open at once, across every session: the agent pane
+/// plus shell terminals (step 5.3). Each holds a child process, two threads
+/// and up to [`PTY_BUFFER_CAP`] of un-drained output, so the map is bounded
+/// rather than trusting every caller to close what it opened.
+pub(crate) const MAX_PTYS: usize = 16;
+
+/// Every open PTY, keyed by the id the frontend chose when it opened it
+/// (`pty_open { id }`). Each entry is independent: its own child, reader,
+/// writer thread and capped buffer, so closing or replacing one never
+/// touches another. The map lock is held only to look up, insert or remove
+/// an entry; every blocking step (spawn, kill, reap, writes) runs outside it.
+pub struct PtyState {
+    entries: std::collections::HashMap<String, PtyEntry>,
+}
+
+impl PtyState {
+    pub fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Whether a PTY is attached under `id`.
+    #[cfg(test)]
+    pub(crate) fn is_open(&self, id: &str) -> bool {
+        self.entries.get(id).is_some_and(PtyEntry::is_open)
+    }
+
+    /// The entry for `id`, created closed when absent, for tests that drive
+    /// one entry's internals directly.
+    #[cfg(test)]
+    fn entry(&mut self, id: &str) -> &mut PtyEntry {
+        self.entries
+            .entry(id.to_string())
+            .or_insert_with(PtyEntry::new)
+    }
+
+    /// Install a new attachment under `id`. Either way the caller gets parts
+    /// to tear down off-lock: what it replaced (the previous attachment under
+    /// the SAME id, if any), or — when `id` is new and [`MAX_PTYS`] are
+    /// already open — the new attachment itself, refused.
+    #[must_use = "the returned parts must be torn down off-lock"]
+    fn install(
+        &mut self,
+        id: &str,
+        master: Box<dyn MasterPty + Send>,
+        input_tx: SyncSender<Vec<u8>>,
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+        shared: Arc<PtyShared>,
+    ) -> Installed {
+        if !self.entries.contains_key(id) && self.entries.len() >= MAX_PTYS {
+            return Installed::OverCap(PtyParts {
+                master: Some(master),
+                input_tx: Some(input_tx),
+                child: Some(child),
+                shared,
+            });
+        }
+        let entry = self
+            .entries
+            .entry(id.to_string())
+            .or_insert_with(PtyEntry::new);
+        Installed::Replaced(entry.install(master, input_tx, child, shared))
+    }
+
+    /// Remove `id`'s entry, leaving the map without it. The parts do the
+    /// blocking teardown, off-lock.
+    #[must_use = "the attachment must be torn down off-lock"]
+    fn remove(&mut self, id: &str) -> Option<PtyParts> {
+        self.entries.remove(id).map(|mut e| e.take_parts())
+    }
+
+    /// Remove every entry (app exit).
+    #[must_use = "the attachments must be torn down off-lock"]
+    fn remove_all(&mut self) -> Vec<PtyParts> {
+        self.entries
+            .drain()
+            .map(|(_, mut e)| e.take_parts())
+            .collect()
+    }
+}
+
+impl Default for PtyState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What [`PtyState::install`] hands back for off-lock teardown.
+enum Installed {
+    /// Installed; these are the parts it replaced (empty for a new id).
+    Replaced(PtyParts),
+    /// Refused over [`MAX_PTYS`]; these are the new parts.
+    OverCap(PtyParts),
+}
+
+impl Installed {
+    /// The replaced parts, for tests that install under the cap.
+    #[cfg(test)]
+    fn replaced(self) -> PtyParts {
+        match self {
+            Installed::Replaced(p) => p,
+            Installed::OverCap(_) => panic!("refused over the cap"),
+        }
+    }
+}
+
+fn too_many_ptys() -> IpcError {
+    IpcError::new(
+        codes::E_PTY,
+        format!("{MAX_PTYS} terminals are already open; close one first"),
+    )
+}
+
+/// A PTY id from the frontend: 1 to 64 characters of letters, digits and
+/// `_ . : -` (`agent`, `sh:12:2`). It is only a map key, never part of a
+/// command line, but it is still untrusted IPC input.
+pub(crate) fn validate_pty_id(id: &str) -> Result<(), IpcError> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            codes::E_INVALID,
+            "pty id must be 1-64 characters of letters, digits, _ . : -",
+        ))
+    }
+}
+
+/// One PTY in the map. Opening the same id again closes the previous one.
+/// Holds the master (for resize), the writer
 /// thread's input channel (for keystrokes and pastes) and the child handle
 /// (for kill on close); output and liveness live in `PtyShared`, which the
 /// reader thread owns a clone of.
@@ -56,7 +189,7 @@ const MIN_ROWS: u16 = 2;
 /// sometimes silently never reach JS, while emits from the command's own
 /// runtime thread always do. Polling has the same on-screen latency (~one
 /// frame) and no missing-event class of bugs.
-pub struct PtyState {
+pub(crate) struct PtyEntry {
     master: Option<Box<dyn MasterPty + Send>>,
     /// Input goes to the writer thread through a bounded channel. NOTHING
     /// that can block may live under this mutex (see CLAUDE.md): a PTY whose
@@ -136,8 +269,8 @@ impl PtyShared {
     }
 }
 
-impl PtyState {
-    pub fn new() -> Self {
+impl PtyEntry {
+    fn new() -> Self {
         Self {
             master: None,
             input_tx: None,
@@ -149,11 +282,11 @@ impl PtyState {
 
     /// Whether a PTY is currently attached (a master is held).
     #[cfg(test)]
-    pub(crate) fn is_open(&self) -> bool {
+    fn is_open(&self) -> bool {
         self.master.is_some()
     }
 
-    /// The single-PTY invariant: installing a new attachment takes ownership
+    /// The one-PTY-per-id invariant: installing a new attachment takes ownership
     /// of the new handles and hands the PREVIOUS ones back, so the caller can
     /// tear them down (kill, reap, drop fds — all blocking) after releasing
     /// the state lock.
@@ -189,7 +322,7 @@ impl PtyState {
     }
 }
 
-impl PtyState {
+impl PtyEntry {
     /// Report the attachment over once its child has been gone for `grace`,
     /// even though the reader has not seen EOF.
     ///
@@ -224,7 +357,7 @@ impl PtyState {
     }
 }
 
-/// One attachment's handles, taken out of `PtyState` so they can be torn down
+/// One attachment's handles, taken out of its `PtyEntry` so they can be torn down
 /// with NO lock held.
 struct PtyParts {
     master: Option<Box<dyn MasterPty + Send>>,
@@ -357,16 +490,29 @@ fn reap(mut child: Box<dyn portable_pty::Child + Send + Sync>) {
     });
 }
 
-/// Close the current attachment: detach it under the lock, tear it down
-/// after releasing it.
-pub(crate) fn close_pty(state: &Mutex<PtyState>) {
+/// Close `id`'s attachment: remove it under the lock, tear it down after
+/// releasing it. Closing an id that is not open is a no-op.
+pub(crate) fn close_pty(state: &Mutex<PtyState>, id: &str) {
     let parts = match state.lock() {
-        Ok(mut s) => s.take_parts(),
+        Ok(mut s) => s.remove(id),
         // Poisoned: nothing safe to take, and the handles are dropped with
         // the state at exit.
         Err(_) => return,
     };
-    parts.teardown();
+    if let Some(parts) = parts {
+        parts.teardown();
+    }
+}
+
+/// Close every attachment (app exit), each torn down off-lock.
+pub(crate) fn close_all_ptys(state: &Mutex<PtyState>) {
+    let all = match state.lock() {
+        Ok(mut s) => s.remove_all(),
+        Err(_) => return,
+    };
+    for parts in all {
+        parts.teardown();
+    }
 }
 
 /// Own the PTY's writer on a dedicated thread, fed by a bounded channel.
@@ -627,6 +773,9 @@ pub(crate) fn incomplete_suffix_len(raw: &[u8]) -> usize {
 
 #[derive(Deserialize)]
 pub struct PtyOpenArgs {
+    /// The map key this PTY lives under (see [`validate_pty_id`]). Opening
+    /// an id that is open replaces that PTY and no other.
+    pub id: String,
     pub session_name: String,
     pub host_alias: String,
     /// Initial PTY size from the frontend's xterm.js fit().
@@ -634,7 +783,7 @@ pub struct PtyOpenArgs {
     pub rows: u16,
 }
 
-/// Attach the single global PTY to a session's tmux pane.
+/// Attach the PTY `args.id` to a session's tmux pane.
 ///
 /// Opens an `ssh … tmux attach` from THIS machine. It carries no remote-mode
 /// guard, and that is deliberate: the hub is not in this path at all. The
@@ -655,6 +804,7 @@ pub fn pty_open(
     ssh: State<'_, std::sync::Arc<SshClient>>,
 ) -> Result<(), IpcError> {
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
+    validate_pty_id(&args.id)?;
     fleet_core::validate::host_alias(&args.host_alias)?;
     // Attaches to an existing session (`-t`), so a `#` in its name is fine.
     fleet_core::validate::tmux_name_addressable(&args.session_name)?;
@@ -663,6 +813,16 @@ pub fn pty_open(
     // would read as an SSH alias. Waited for BEFORE `openpty`, so no pseudo
     // console is held open through the (up to `SETTLE_WAIT`) wait.
     fleet_core::wsl::settled_for_blocking(&args.host_alias);
+    // Refuse a new id over the cap before spawning anything; `install`
+    // checks again under the same lock it inserts with.
+    {
+        let s = state
+            .lock()
+            .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
+        if !s.entries.contains_key(&args.id) && s.entries.len() >= MAX_PTYS {
+            return Err(too_many_ptys());
+        }
+    }
     let mux_opts = attach_mux_opts(&ssh, &args.host_alias);
     let is_wsl = fleet_core::wsl::is_wsl_host(&args.host_alias);
     let program = attach_program_label(&args.host_alias, is_wsl);
@@ -712,14 +872,21 @@ pub fn pty_open(
     // old buffer is orphaned and freed once that thread observes EOF.
     let shared = Arc::new(PtyShared::for_program(program));
     let input_tx = spawn_writer(writer, Arc::clone(&shared));
-    let previous = {
+    let installed = {
         let mut s = state
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
-        s.install(pair.master, input_tx, child, Arc::clone(&shared))
+        s.install(&args.id, pair.master, input_tx, child, Arc::clone(&shared))
     };
-    // Kill and reap the attachment we just replaced with the lock released.
-    previous.teardown();
+    // Kill and reap what we replaced (or, over the cap, what we just
+    // spawned) with the lock released.
+    match installed {
+        Installed::Replaced(previous) => previous.teardown(),
+        Installed::OverCap(ours) => {
+            ours.teardown();
+            return Err(too_many_ptys());
+        }
+    }
 
     shared.note(&attach_banner(&args.session_name, &args.host_alias));
 
@@ -775,9 +942,19 @@ pub struct PtyDrainResult {
     pub overflowed: bool,
 }
 
+/// The id-only argument of `pty_drain` and `pty_close`.
+#[derive(Deserialize)]
+pub struct PtyIdArgs {
+    pub id: String,
+}
+
 #[tauri::command(async)]
-pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, IpcError> {
-    drain_from(&state)
+pub fn pty_drain(
+    args: PtyIdArgs,
+    state: State<'_, Mutex<PtyState>>,
+) -> Result<PtyDrainResult, IpcError> {
+    validate_pty_id(&args.id)?;
+    drain_from(&state, &args.id)
 }
 
 /// Transport-agnostic body of `pty_drain`. Swaps the accumulated bytes out
@@ -789,12 +966,22 @@ pub fn pty_drain(state: State<'_, Mutex<PtyState>>) -> Result<PtyDrainResult, Ip
 /// One lock acquisition, one buffer: the earlier shape re-locked to push the
 /// tail back, which a concurrent `install()` could turn into "the old
 /// session's bytes land in front of the new session's first output".
-fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
+///
+/// An id that is not open drains nothing: no bytes, no EOF, as a closed
+/// single PTY always did.
+fn drain_from(state: &Mutex<PtyState>, id: &str) -> Result<PtyDrainResult, IpcError> {
     let (raw, overflowed, eof) = {
-        #[cfg_attr(not(windows), allow(unused_mut))]
-        let mut s = state
+        let mut map = state
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
+        let Some(s) = map.entries.get_mut(id) else {
+            return Ok(PtyDrainResult {
+                data: String::new(),
+                bytes: 0,
+                eof: false,
+                overflowed: false,
+            });
+        };
         #[cfg(windows)]
         s.poll_child_exit(CHILD_EXIT_GRACE);
         let exited = s.shared.exited.load(Ordering::Acquire);
@@ -828,6 +1015,7 @@ fn drain_from(state: &Mutex<PtyState>) -> Result<PtyDrainResult, IpcError> {
 
 #[derive(Deserialize)]
 pub struct PtyWriteArgs {
+    pub id: String,
     pub data: String,
 }
 
@@ -837,7 +1025,8 @@ pub struct PtyWriteArgs {
 /// call to a separate runtime task, letting two fast keystrokes race.
 #[tauri::command]
 pub fn pty_write(args: PtyWriteArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
-    write_to(&state, &args.data)
+    validate_pty_id(&args.id)?;
+    write_to(&state, &args.id, &args.data)
 }
 
 /// Transport-agnostic body of `pty_write`. Hands the bytes to the writer
@@ -845,13 +1034,14 @@ pub fn pty_write(args: PtyWriteArgs, state: State<'_, Mutex<PtyState>>) -> Resul
 /// (or the writer thread died on an I/O error), `E_PTY_BUSY` when the input
 /// queue is full — the PTY is not draining our input, and blocking here
 /// would freeze the terminal instead of just this keystroke.
-fn write_to(state: &Mutex<PtyState>, data: &str) -> Result<(), IpcError> {
+fn write_to(state: &Mutex<PtyState>, id: &str, data: &str) -> Result<(), IpcError> {
     let tx = {
         let s = state
             .lock()
             .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
-        s.input_tx
-            .as_ref()
+        s.entries
+            .get(id)
+            .and_then(|e| e.input_tx.as_ref())
             .ok_or_else(|| IpcError::new(codes::E_PTY_CLOSED, "no PTY open"))?
             .clone()
     };
@@ -869,24 +1059,30 @@ fn write_to(state: &Mutex<PtyState>, data: &str) -> Result<(), IpcError> {
 
 #[derive(Deserialize)]
 pub struct PtyResizeArgs {
+    pub id: String,
     pub cols: u16,
     pub rows: u16,
 }
 
 #[tauri::command(async)]
 pub fn pty_resize(args: PtyResizeArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
-    resize_in(&state, args.cols, args.rows)
+    validate_pty_id(&args.id)?;
+    resize_in(&state, &args.id, args.cols, args.rows)
 }
 
 /// Transport-agnostic body of `pty_resize`: `E_PTY_CLOSED` when nothing is
 /// attached, otherwise the (clamped) size is applied to the master.
-fn resize_in(state: &Mutex<PtyState>, cols: u16, rows: u16) -> Result<(), IpcError> {
+///
+/// The resize is an `ioctl` on the master (`TIOCSWINSZ` / `ResizePseudoConsole`):
+/// it does not wait on the child, so it may run under the map lock.
+fn resize_in(state: &Mutex<PtyState>, id: &str, cols: u16, rows: u16) -> Result<(), IpcError> {
     let s = state
         .lock()
         .map_err(|_| IpcError::new(codes::E_LOCK, "pty mutex poisoned"))?;
     let master = s
-        .master
-        .as_ref()
+        .entries
+        .get(id)
+        .and_then(|e| e.master.as_ref())
         .ok_or_else(|| IpcError::new(codes::E_PTY_CLOSED, "no PTY open"))?;
     master
         .resize(clamp_size(cols, rows))
@@ -895,8 +1091,9 @@ fn resize_in(state: &Mutex<PtyState>, cols: u16, rows: u16) -> Result<(), IpcErr
 }
 
 #[tauri::command(async)]
-pub fn pty_close(state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
-    close_pty(&state);
+pub fn pty_close(args: PtyIdArgs, state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
+    validate_pty_id(&args.id)?;
+    close_pty(&state, &args.id);
     Ok(())
 }
 
@@ -904,6 +1101,9 @@ pub fn pty_close(state: State<'_, Mutex<PtyState>>) -> Result<(), IpcError> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// The PTY id the single-entry tests use.
+    const ID: &str = "agent";
 
     fn bash_available() -> bool {
         std::process::Command::new("bash")
@@ -1173,7 +1373,7 @@ mod tests {
     /// The shared output state of the (only) open, for tests that feed bytes
     /// in the way the reader thread does.
     fn shared_of(state: &Mutex<PtyState>) -> Arc<PtyShared> {
-        Arc::clone(&state.lock().unwrap().shared)
+        Arc::clone(&state.lock().unwrap().entry(ID).shared)
     }
 
     #[test]
@@ -1202,11 +1402,11 @@ mod tests {
         let state = Mutex::new(PtyState::new());
         let shared = shared_of(&state);
         shared.append(&vec![b'x'; PTY_BUFFER_CAP + 1]);
-        let first = drain_from(&state).unwrap();
+        let first = drain_from(&state, ID).unwrap();
         assert!(first.overflowed);
         assert_eq!((first.data.as_str(), first.bytes), ("", 0));
         shared.append(b"fresh");
-        let second = drain_from(&state).unwrap();
+        let second = drain_from(&state, ID).unwrap();
         assert!(!second.overflowed, "reported once");
         assert_eq!(second.data, "fresh", "accumulation resumes after a drain");
     }
@@ -1218,20 +1418,20 @@ mod tests {
         // The marker TEXT in ordinary session output means nothing: grepping
         // this repo inside an attached pane must not look like a disconnect.
         shared.note("[cf] PTY EOF after 0 bytes (tmux attach exited)");
-        let first = drain_from(&state).unwrap();
+        let first = drain_from(&state, ID).unwrap();
         assert!(first.data.contains("[cf] PTY EOF"));
         assert!(!first.eof, "output text is not a signal");
 
         // The reader flags the real thing after writing its display line.
         shared.note("bye");
         shared.exited.store(true, Ordering::Release);
-        let second = drain_from(&state).unwrap();
+        let second = drain_from(&state, ID).unwrap();
         assert_eq!(second.data, "bye");
         assert!(!second.eof, "remaining bytes are delivered first");
-        let third = drain_from(&state).unwrap();
+        let third = drain_from(&state, ID).unwrap();
         assert_eq!((third.data.as_str(), third.bytes), ("", 0));
         assert!(third.eof, "reported with zero new bytes");
-        assert!(drain_from(&state).unwrap().eof, "sticky");
+        assert!(drain_from(&state, ID).unwrap().eof, "sticky");
     }
 
     #[test]
@@ -1239,13 +1439,13 @@ mod tests {
         let state = Mutex::new(PtyState::new());
         let old = shared_of(&state);
         old.exited.store(true, Ordering::Release);
-        assert!(drain_from(&state).unwrap().eof);
+        assert!(drain_from(&state, ID).unwrap().eof);
         // A re-open installs a fresh shared state; the old reader thread
         // keeps writing to (and flagging) the Arc nobody drains any more.
-        state.lock().unwrap().shared = Arc::new(PtyShared::new());
+        state.lock().unwrap().entry(ID).shared = Arc::new(PtyShared::new());
         old.note("stale");
         old.exited.store(true, Ordering::Release);
-        let after = drain_from(&state).unwrap();
+        let after = drain_from(&state, ID).unwrap();
         assert!(!after.eof);
         assert_eq!(after.data, "");
     }
@@ -1286,26 +1486,26 @@ mod tests {
         let crab = "🦀".as_bytes();
         // First chunk ends mid-codepoint.
         {
-            let s = state.lock().unwrap();
-            let mut b = s.shared.buffer.lock().unwrap();
+            let mut s = state.lock().unwrap();
+            let mut b = s.entry(ID).shared.buffer.lock().unwrap();
             b.bytes.extend_from_slice(b"x");
             b.bytes.extend_from_slice(&crab[..3]);
         }
-        let first = drain_from(&state).unwrap();
+        let first = drain_from(&state, ID).unwrap();
         assert_eq!((first.data.as_str(), first.bytes), ("x", 1));
         // The reader appends the tail plus more; the retained prefix stays in
         // front so the codepoint reassembles in order.
         {
-            let s = state.lock().unwrap();
-            let mut b = s.shared.buffer.lock().unwrap();
+            let mut s = state.lock().unwrap();
+            let mut b = s.entry(ID).shared.buffer.lock().unwrap();
             assert_eq!(&b.bytes[..], &crab[..3]);
             b.bytes.extend_from_slice(&crab[3..]);
             b.bytes.extend_from_slice(b"y");
         }
-        let second = drain_from(&state).unwrap();
+        let second = drain_from(&state, ID).unwrap();
         assert_eq!((second.data.as_str(), second.bytes), ("🦀y", 5));
         // Empty buffer drains to nothing.
-        let third = drain_from(&state).unwrap();
+        let third = drain_from(&state, ID).unwrap();
         assert_eq!((third.data.as_str(), third.bytes), ("", 0));
     }
 
@@ -1317,20 +1517,20 @@ mod tests {
         let state = Mutex::new(PtyState::new());
         let crab = "🦀".as_bytes();
         {
-            let s = state.lock().unwrap();
-            let mut b = s.shared.buffer.lock().unwrap();
+            let mut s = state.lock().unwrap();
+            let mut b = s.entry(ID).shared.buffer.lock().unwrap();
             b.bytes.extend_from_slice(b"a\xffb ");
             b.bytes.extend_from_slice(&crab[..2]);
         }
-        let first = drain_from(&state).unwrap();
+        let first = drain_from(&state, ID).unwrap();
         assert_eq!((first.data.as_str(), first.bytes), ("a\u{FFFD}b ", 4));
         {
-            let s = state.lock().unwrap();
-            let mut b = s.shared.buffer.lock().unwrap();
+            let mut s = state.lock().unwrap();
+            let mut b = s.entry(ID).shared.buffer.lock().unwrap();
             b.bytes.extend_from_slice(&crab[2..]);
             b.bytes.extend_from_slice(b"z");
         }
-        let second = drain_from(&state).unwrap();
+        let second = drain_from(&state, ID).unwrap();
         assert_eq!(second.data, "🦀z");
     }
 
@@ -1344,7 +1544,7 @@ mod tests {
         let crab = "🦀".as_bytes();
         let old = shared_of(&state);
         old.append(&crab[..2]);
-        let first = drain_from(&state).unwrap();
+        let first = drain_from(&state, ID).unwrap();
         assert_eq!((first.data.as_str(), first.bytes), ("", 0));
         assert_eq!(
             &old.buffer.lock().unwrap().bytes[..],
@@ -1354,8 +1554,8 @@ mod tests {
 
         let fresh = Arc::new(PtyShared::new());
         fresh.note("banner");
-        state.lock().unwrap().shared = Arc::clone(&fresh);
-        let second = drain_from(&state).unwrap();
+        state.lock().unwrap().entry(ID).shared = Arc::clone(&fresh);
+        let second = drain_from(&state, ID).unwrap();
         assert_eq!(second.data, "banner", "no stale bytes in front");
         assert_eq!(&old.buffer.lock().unwrap().bytes[..], &crab[..2]);
     }
@@ -1372,12 +1572,15 @@ mod tests {
     #[test]
     fn write_and_resize_report_e_pty_closed_when_nothing_is_attached() {
         let state = Mutex::new(PtyState::new());
-        assert!(!state.lock().unwrap().is_open());
-        assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
-        assert_eq!(resize_in(&state, 80, 24).unwrap_err().code, "E_PTY_CLOSED");
+        assert!(!state.lock().unwrap().is_open(ID));
+        assert_eq!(write_to(&state, ID, "x").unwrap_err().code, "E_PTY_CLOSED");
+        assert_eq!(
+            resize_in(&state, ID, 80, 24).unwrap_err().code,
+            "E_PTY_CLOSED"
+        );
         // Closing a never-opened state is a no-op.
-        close_pty(&state);
-        assert!(!state.lock().unwrap().is_open());
+        close_pty(&state, ID);
+        assert!(!state.lock().unwrap().is_open(ID));
     }
 
     /// A writer that blocks inside `write` until the test releases it — what
@@ -1412,12 +1615,13 @@ mod tests {
         let (release, blocked) = std::sync::mpsc::channel::<()>();
         let state = Mutex::new(PtyState::new());
         let shared = shared_of(&state);
-        state.lock().unwrap().input_tx = Some(spawn_writer(Box::new(BlockedSink(blocked)), shared));
+        state.lock().unwrap().entry(ID).input_tx =
+            Some(spawn_writer(Box::new(BlockedSink(blocked)), shared));
 
         let start = Instant::now();
         let mut busy = 0usize;
         for _ in 0..(PTY_INPUT_QUEUE * 2) {
-            if let Err(e) = write_to(&state, "x") {
+            if let Err(e) = write_to(&state, ID, "x") {
                 assert_eq!(e.code, "E_PTY_BUSY");
                 busy += 1;
             }
@@ -1437,14 +1641,14 @@ mod tests {
     fn a_writer_error_closes_the_input_channel_and_says_so_on_screen() {
         let state = Mutex::new(PtyState::new());
         let shared = shared_of(&state);
-        state.lock().unwrap().input_tx =
+        state.lock().unwrap().entry(ID).input_tx =
             Some(spawn_writer(Box::new(FailingSink), Arc::clone(&shared)));
 
         // The first chunk is queued; the thread then fails and exits, so
         // every later write reports the PTY closed.
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            match write_to(&state, "x") {
+            match write_to(&state, ID, "x") {
                 Err(e) if e.code == "E_PTY_CLOSED" => break,
                 _ => {
                     assert!(Instant::now() < deadline, "writer thread never closed");
@@ -1469,6 +1673,11 @@ mod tests {
 
     /// `spawn_sleeper` with its writer already on a writer thread.
     fn install_sleeper(state: &Mutex<PtyState>) -> Option<(u32, Arc<PtyShared>)> {
+        install_sleeper_as(state, ID)
+    }
+
+    /// [`install_sleeper`] under `id`.
+    fn install_sleeper_as(state: &Mutex<PtyState>, id: &str) -> Option<(u32, Arc<PtyShared>)> {
         let (master, writer, child, pid) = spawn_sleeper()?;
         let shared = Arc::new(PtyShared::new());
         let input_tx = spawn_writer(writer, Arc::clone(&shared));
@@ -1476,7 +1685,8 @@ mod tests {
         // must never run under the state lock (see the CLAUDE.md convention).
         let previous = {
             let mut s = state.lock().unwrap();
-            s.install(master, input_tx, child, Arc::clone(&shared))
+            s.install(id, master, input_tx, child, Arc::clone(&shared))
+                .replaced()
         };
         previous.teardown();
         Some((pid, shared))
@@ -1555,14 +1765,14 @@ mod tests {
         };
         let _guard1 = KillOnDrop(pid1);
         sh1.note("stale");
-        assert!(state.lock().unwrap().is_open());
+        assert!(state.lock().unwrap().is_open(ID));
         assert!(alive(pid1));
         // A live attachment accepts writes and resizes.
-        write_to(&state, "hello").unwrap();
-        resize_in(&state, 100, 30).unwrap();
+        write_to(&state, ID, "hello").unwrap();
+        resize_in(&state, ID, 100, 30).unwrap();
 
         let Some((pid2, _sh2)) = install_sleeper(&state) else {
-            close_pty(&state);
+            close_pty(&state, ID);
             return;
         };
         let _guard2 = KillOnDrop(pid2);
@@ -1571,12 +1781,12 @@ mod tests {
         assert!(died(pid1), "first attachment must be killed on re-open");
         assert!(alive(pid2));
         assert!(sh1.buffer.lock().unwrap().bytes.is_empty());
-        assert!(state.lock().unwrap().is_open());
+        assert!(state.lock().unwrap().is_open(ID));
 
-        close_pty(&state);
+        close_pty(&state, ID);
         assert!(died(pid2));
-        assert!(!state.lock().unwrap().is_open());
-        assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
+        assert!(!state.lock().unwrap().is_open(ID));
+        assert_eq!(write_to(&state, ID, "x").unwrap_err().code, "E_PTY_CLOSED");
     }
 
     /// The Windows EOF path, driven directly: a child that has exited is
@@ -1618,11 +1828,11 @@ mod tests {
             }
         });
         let state = Mutex::new(PtyState::new());
-        let previous =
-            state
-                .lock()
-                .unwrap()
-                .install(pair.master, input_tx, child, Arc::clone(&shared));
+        let previous = state
+            .lock()
+            .unwrap()
+            .install(ID, pair.master, input_tx, child, Arc::clone(&shared))
+            .replaced();
         previous.teardown();
 
         // Not yet: a long grace keeps it open however soon the child ends.
@@ -1631,14 +1841,16 @@ mod tests {
             state
                 .lock()
                 .unwrap()
+                .entry(ID)
                 .poll_child_exit(Duration::from_secs(3600));
-            if state.lock().unwrap().child_gone_at.is_some() || Instant::now() > deadline {
+            if state.lock().unwrap().entry(ID).child_gone_at.is_some() || Instant::now() > deadline
+            {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(
-            state.lock().unwrap().child_gone_at.is_some(),
+            state.lock().unwrap().entry(ID).child_gone_at.is_some(),
             "the child ended"
         );
         assert!(
@@ -1646,11 +1858,19 @@ mod tests {
             "still inside the grace"
         );
 
-        state.lock().unwrap().poll_child_exit(Duration::ZERO);
+        state
+            .lock()
+            .unwrap()
+            .entry(ID)
+            .poll_child_exit(Duration::ZERO);
         assert!(shared.exited.load(Ordering::Acquire));
         let text = String::from_utf8_lossy(&shared.buffer.lock().unwrap().bytes).into_owned();
         assert_eq!(text.matches("[cf] ssh exited").count(), 1, "{text}");
-        state.lock().unwrap().poll_child_exit(Duration::ZERO);
+        state
+            .lock()
+            .unwrap()
+            .entry(ID)
+            .poll_child_exit(Duration::ZERO);
         let text = String::from_utf8_lossy(&shared.buffer.lock().unwrap().bytes).into_owned();
         assert_eq!(
             text.matches("[cf] ssh exited").count(),
@@ -1658,7 +1878,7 @@ mod tests {
             "noted once: {text}"
         );
 
-        close_pty(&state);
+        close_pty(&state, ID);
     }
 
     #[test]
@@ -1669,15 +1889,142 @@ mod tests {
         };
         let _guard = KillOnDrop(pid);
         // Detaching is all that happens under the lock...
-        let parts = state.lock().unwrap().take_parts();
+        let parts = state.lock().unwrap().remove(ID).unwrap();
         assert!(alive(pid), "still running: nothing has been killed yet");
         assert!(
             state.try_lock().is_ok(),
             "the state is free while the child is torn down"
         );
-        assert_eq!(write_to(&state, "x").unwrap_err().code, "E_PTY_CLOSED");
+        assert_eq!(write_to(&state, ID, "x").unwrap_err().code, "E_PTY_CLOSED");
         // ...the kill + reap happens here, off-lock.
         parts.teardown();
         assert!(died(pid));
+    }
+
+    // ---- the id-keyed map ----
+
+    #[test]
+    fn pty_ids_are_short_inert_map_keys() {
+        for ok in ["agent", "sh:12:2", "a.b-c_d", &"x".repeat(64)] {
+            assert!(validate_pty_id(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", " ", "a b", "a;b", "$(x)", "a/b", &"x".repeat(65)] {
+            assert_eq!(
+                validate_pty_id(bad).unwrap_err().code,
+                codes::E_INVALID,
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_id_has_its_own_buffer_and_an_unknown_id_drains_nothing() {
+        let state = Mutex::new(PtyState::new());
+        let a = Arc::clone(&state.lock().unwrap().entry("a").shared);
+        let b = Arc::clone(&state.lock().unwrap().entry("b").shared);
+        a.note("for a");
+        b.note("for b");
+        assert_eq!(drain_from(&state, "a").unwrap().data, "for a");
+        assert_eq!(drain_from(&state, "b").unwrap().data, "for b");
+        let none = drain_from(&state, "c").unwrap();
+        assert_eq!(
+            (none.data.as_str(), none.eof, none.overflowed),
+            ("", false, false)
+        );
+        assert!(
+            !state.lock().unwrap().entries.contains_key("c"),
+            "a drain creates nothing"
+        );
+        // One entry overflowing never touches another's buffer.
+        a.append(&vec![b'x'; PTY_BUFFER_CAP + 1]);
+        b.note("still here");
+        assert!(drain_from(&state, "a").unwrap().overflowed);
+        let b_out = drain_from(&state, "b").unwrap();
+        assert_eq!(b_out.data, "still here");
+        assert!(!b_out.overflowed);
+    }
+
+    #[test]
+    fn writes_go_to_the_named_pty_only() {
+        let (tx_a, rx_a) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let (tx_b, rx_b) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let state = Mutex::new(PtyState::new());
+        state.lock().unwrap().entry("a").input_tx = Some(tx_a);
+        state.lock().unwrap().entry("b").input_tx = Some(tx_b);
+        write_to(&state, "a", "to a").unwrap();
+        write_to(&state, "b", "to b").unwrap();
+        assert_eq!(rx_a.try_recv().unwrap(), b"to a");
+        assert_eq!(rx_b.try_recv().unwrap(), b"to b");
+        assert!(rx_a.try_recv().is_err() && rx_b.try_recv().is_err());
+        assert_eq!(write_to(&state, "c", "x").unwrap_err().code, "E_PTY_CLOSED");
+        assert_eq!(
+            resize_in(&state, "c", 80, 24).unwrap_err().code,
+            "E_PTY_CLOSED"
+        );
+    }
+
+    #[test]
+    fn closing_one_pty_leaves_the_others_running() {
+        let state = Mutex::new(PtyState::new());
+        let Some((pid_a, _)) = install_sleeper_as(&state, "a") else {
+            return;
+        };
+        let _ga = KillOnDrop(pid_a);
+        let Some((pid_b, _)) = install_sleeper_as(&state, "b") else {
+            close_all_ptys(&state);
+            return;
+        };
+        let _gb = KillOnDrop(pid_b);
+        // Opening "b" did not replace "a": both are alive and attached.
+        assert!(alive(pid_a) && alive(pid_b));
+        assert!(state.lock().unwrap().is_open("a") && state.lock().unwrap().is_open("b"));
+
+        close_pty(&state, "a");
+        assert!(died(pid_a));
+        assert!(alive(pid_b), "closing a never touches b");
+        write_to(&state, "b", "still typing").unwrap();
+        resize_in(&state, "b", 90, 20).unwrap();
+
+        close_all_ptys(&state);
+        assert!(died(pid_b));
+        assert!(state.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn a_new_id_past_the_cap_is_refused_and_its_child_torn_down() {
+        let state = Mutex::new(PtyState::new());
+        for i in 0..MAX_PTYS {
+            state.lock().unwrap().entry(&format!("p{i}"));
+        }
+        let Some((master, writer, child, pid)) = spawn_sleeper() else {
+            return;
+        };
+        let _g = KillOnDrop(pid);
+        let shared = Arc::new(PtyShared::new());
+        let input_tx = spawn_writer(writer, Arc::clone(&shared));
+        let refused =
+            state
+                .lock()
+                .unwrap()
+                .install("one-too-many", master, input_tx, child, shared);
+        let Installed::OverCap(ours) = refused else {
+            panic!("the cap must refuse a new id");
+        };
+        let e = too_many_ptys();
+        assert_eq!(e.code, codes::E_PTY);
+        assert!(e.message.contains(&MAX_PTYS.to_string()), "{}", e.message);
+        // The caller tears down what it spawned, off-lock.
+        ours.teardown();
+        assert!(died(pid));
+        assert_eq!(state.lock().unwrap().entries.len(), MAX_PTYS);
+        // Re-opening an id that is already in the map is a replacement, not
+        // a new PTY, so the cap does not apply to it.
+        let Some((pid2, _)) = install_sleeper_as(&state, "p0") else {
+            return;
+        };
+        let _g2 = KillOnDrop(pid2);
+        assert!(state.lock().unwrap().is_open("p0"));
+        close_all_ptys(&state);
+        assert!(died(pid2));
     }
 }
