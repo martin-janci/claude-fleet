@@ -9,4 +9,4 @@ ALTER TABLE peer_links ADD COLUMN latency_ms INTEGER;
 ALTER TABLE peer_links ADD COLUMN msgs_day INTEGER;
 ALTER TABLE peer_links ADD COLUMN msgs_today INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE peer_links ADD COLUMN msgs_total INTEGER NOT NULL DEFAULT 0;
-INSERT OR IGNORE INTO schema_version (version) VALUES (131);
+INSERT OR IGNORE INTO schema_version (version) VALUES (132);

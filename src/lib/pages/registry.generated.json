@@ -3241,7 +3241,7 @@
               "type": "field"
             },
             {
-              "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. A new person gets a device in Settings → Devices (Pair a device, for them).",
+              "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another.",
               "tone": "info",
               "type": "notice"
             }

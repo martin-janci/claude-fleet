@@ -54,6 +54,7 @@ pub const LOOPS: &[LoopSpec] = &[
     spec("account_usage", "Account usage", false),
     spec("trackers", "Tracker sync", true),
     spec("missions", "Missions", true),
+    spec("routines", "Routines", true),
     spec("catalog_scan", "Catalog sync", true),
     spec("local_sync", "Local folder sync", true),
     spec("reprovision", "Host refresh", true),

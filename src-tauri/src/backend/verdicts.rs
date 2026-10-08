@@ -359,6 +359,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_mission_state", Verdict::Routed { tool: "work_link" }),
     ("set_mission_repo", Verdict::Routed { tool: "work_link" }),
     ("set_mission_item", Verdict::Routed { tool: "work_link" }),
+    ("import_mission_plan", Verdict::Routed { tool: "work_link" }),
     ("delete_mission", Verdict::Routed { tool: "work_link" }),
     // Orchestration O2: the mission graph's writes.
     ("set_work_dep", Verdict::Routed { tool: "work_link" }),
@@ -476,6 +477,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_org_setting", Verdict::Routed { tool: "org_admin" }),
     ("set_org_member", Verdict::Routed { tool: "org_admin" }),
     ("remove_org_member", Verdict::Routed { tool: "org_admin" }),
+    ("org_member_grants", Verdict::Routed { tool: "org_admin" }),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),
     // Org administration phase B: the company's paired devices and people,

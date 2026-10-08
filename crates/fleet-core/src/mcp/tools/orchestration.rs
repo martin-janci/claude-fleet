@@ -1066,7 +1066,7 @@ impl FleetTools {
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
         mission_id?, item_id?: root}; mission_state {mission_id, status}; \
         mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
-        mission_delete. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
+        mission_delete; mission_import {plan}. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
         propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \
         done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | \
         person | text]}; verify {item_id, line, ok, note?}: a person's check. \
@@ -1601,6 +1601,10 @@ impl FleetTools {
                 "mission_delete" => {
                     ok_json(&ms::delete(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
                 }
+                "mission_import" => ok_json(
+                    &crate::service::work::plan_import::import(&args, &self.store, &view_scope)
+                        .map_err(to_mcp_err)?,
+                ),
                 // The loop (orchestration O4–O6): a person takes the next
                 // steps, asks the planner, signs or ends a grant.
                 "mission_start" => ok_json(
