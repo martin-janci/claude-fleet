@@ -548,6 +548,8 @@
             oneditdone={endEdit}
             onreprobe={() => void reprobe(selectedHost.alias)}
             onrefreshusage={() => void refreshUsage(selectedHost.alias)}
+            onnewsession={() => onNewSession(selectedHost.alias)}
+            {hubVersion}
           />
         {/key}
       {:else}

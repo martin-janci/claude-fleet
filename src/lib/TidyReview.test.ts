@@ -151,16 +151,16 @@ describe('TidyReview', () => {
     expect(screen.queryByTestId('reopened-pill')).toBeNull();
   });
 
-  it('a neutral "Tidy up · n" and an accent "Reopened · n"', async () => {
+  it('a neutral "n to tidy" and an accent "n reopened"', async () => {
     candidates = [cand(1), cand(2)];
     reopened = [{ item_id: 7, key: 'PAY-7', title: 'Retry', reopened_at: 5, past_sessions: 2 }];
     await mount();
     const pill = await screen.findByTestId('tidy-pill');
-    expect(pill).toHaveTextContent('Tidy up · 2');
+    expect(pill).toHaveTextContent('2 to tidy');
     expect(pill.classList.contains('tidy-pill')).toBe(true);
     expect(pill.classList.contains('reopened-pill')).toBe(false);
     const r = screen.getByTestId('reopened-pill');
-    expect(r).toHaveTextContent('Reopened · 1');
+    expect(r).toHaveTextContent('1 reopened');
     expect(r.classList.contains('reopened-pill')).toBe(true);
   });
 
@@ -524,7 +524,7 @@ describe('TidyReview', () => {
     await fireEvent.click(screen.getByTestId('reopened-pill'));
     await tick();
     expect(screen.getByTestId('reopened-list')).toBeTruthy();
-    await fireEvent.click(screen.getByText('close'));
+    await fireEvent.click(screen.getByText('Close'));
     await tick();
     expect(screen.queryByTestId('reopened-list')).toBeNull();
     // Opening the tidy sheet puts the list away, so only one sheet shows.
