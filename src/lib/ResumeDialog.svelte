@@ -7,8 +7,7 @@
   // renders it.
   import { onMount, untrack } from 'svelte';
   import { get } from 'svelte/store';
-  import Modal from './Modal.svelte';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import DialogSheet from './DialogSheet.svelte';
   import { resumeWork, workResumePlan, type ResumeMode, type ResumePlan } from './work';
   import { sessions } from './sessions';
   import { sessionIdBlocked } from './share';
@@ -68,6 +67,26 @@
   const modes = $derived((plan?.modes ?? []) as ResumeMode[]);
   const current = $derived(modes.find((m) => m.mode === mode) ?? null);
   const live = $derived(plan?.live ?? []);
+  const candidates = $derived(plan?.candidates ?? []);
+  const lead = $derived(
+    candidates.length > 1
+      ? `This work has ${candidates.length} earlier sessions. Pick one to continue.`
+      : 'Pick up where the last session left off, or start again with a brief.',
+  );
+
+  /** "3 d ago" from unix seconds. */
+  function ago(ts: number): string {
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (s < 3600) return `${Math.max(1, Math.floor(s / 60))} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    return `${Math.floor(s / 86400)} d ago`;
+  }
+
+  async function pickCandidate(id: number) {
+    linkId = id;
+    briefFor = null;
+    await loadPlan();
+  }
 
   function firstOk(p: ResumePlan, prefer: Mode): Mode {
     const ok = (m: string) => p.modes.some((x) => x.mode === m && x.ok);
@@ -152,12 +171,29 @@
   });
 </script>
 
-<Modal label="Resume {workKey}" {onclose} width="560px" testid="resume-dialog">
-  <h3 class="title">Resume <code>{workKey}</code>{#if plan?.title}<span class="t"> — {plan.title}</span>{/if}</h3>
-
-  {#if error}
-    <p class="err" role="alert" data-testid="resume-error">{error}</p>
-  {/if}
+<DialogSheet
+  title="Resume work {workKey}{plan?.title ? ` · ${plan.title}` : ''}"
+  {lead}
+  verb={LABELS[mode]}
+  busyVerb="Starting…"
+  {busy}
+  canConfirm={!!plan && live.length === 0 && !!current?.ok && shareBlocked === null && !(mode === 'brief' && briefLoading)}
+  onconfirm={() => void start()}
+  {onclose}
+  {error}
+  errorTestid="resume-error"
+  confirmTitle={shareBlocked}
+  confirmTestid="resume-start"
+  width="560px"
+  testid="resume-dialog"
+>
+  {#snippet secondary()}
+    {#if plan && live.length === 0 && mode !== 'fresh' && modes.some((m) => m.mode === 'fresh' && m.ok)}
+      <button type="button" class="btn btn--quiet" data-testid="resume-fresh-instead" onclick={() => pick('fresh')}
+        >Start fresh instead</button
+      >
+    {/if}
+  {/snippet}
 
   {#if plan}
     {#if live.length > 0}
@@ -168,6 +204,30 @@
         >
       </p>
     {:else}
+      {#if candidates.length > 1}
+        <ul class="candidates" role="radiogroup" aria-label="Earlier sessions">
+          {#each candidates as c (c.link_id)}
+            <li>
+              <label class:off={!c.resumable}>
+                <input
+                  type="radio"
+                  name="resume-candidate"
+                  checked={(plan.link_id ?? linkId) === c.link_id}
+                  disabled={busy}
+                  data-testid="resume-candidate-{c.link_id}"
+                  onchange={() => void pickCandidate(c.link_id)}
+                />
+                <span class="lbl">{c.name ?? c.branch ?? `session ${c.link_id}`}</span>
+                <span class="hint"
+                  >{[c.host_alias, c.ended_at ? ago(c.ended_at) : null, c.conversations ? `${c.conversations} conversation${c.conversations === 1 ? '' : 's'}` : null, c.resumable ? null : 'conversation gone']
+                    .filter(Boolean)
+                    .join(' · ')}</span
+                >
+              </label>
+            </li>
+          {/each}
+        </ul>
+      {/if}
       <p class="where" data-testid="resume-where">
         {#if plan.host_alias}Lands on <b>{plan.host_alias}</b>{:else}No host to land on{/if}
         {#if plan.branch} · branch <code>{plan.branch}</code>{/if}
@@ -217,7 +277,7 @@
     </ul>
 
     {#if mode === 'brief' && current?.ok}
-      <label class="brief-lbl" for="resume-brief">Brief (sent as context with the first prompt; edit freely)</label>
+      <label class="brief-lbl" for="resume-brief">Tell it what changed since (sent as context with the first prompt; edit freely)</label>
       {#if briefLoading}
         <p class="muted">Building the brief…</p>
       {:else}
@@ -228,33 +288,9 @@
   {:else if !error}
     <p class="muted">Reading past work…</p>
   {/if}
-
-  <div class="actions">
-    <button type="button" onclick={onclose}>Cancel</button>
-    <button
-      type="button"
-      class="primary"
-      data-testid="resume-start"
-      disabled={!plan || live.length > 0 || !current?.ok || busy || shareBlocked !== null || (mode === 'brief' && briefLoading)}
-      title={shareBlocked}
-      onclick={start}>{#if busy}<SpiralLoader size={12} class="btn-spiral" />Starting…{:else}{LABELS[mode]}{/if}</button
-    >
-  </div>
-</Modal>
+</DialogSheet>
 
 <style>
-  button :global(.btn-spiral) {
-    margin-right: 0.35em;
-    vertical-align: -1px;
-  }
-  .title {
-    margin: 0 0 0.6rem;
-    font-size: 1rem;
-  }
-  .title .t {
-    font-weight: normal;
-    color: var(--fg-muted, #999);
-  }
   .where,
   .live {
     margin: 0 0 0.5rem;
@@ -265,23 +301,27 @@
     align-items: center;
     margin-bottom: 0.5rem;
   }
-  .modes {
+  .modes,
+  .candidates {
     list-style: none;
     padding: 0;
     margin: 0 0 0.6rem;
   }
-  .modes label {
+  .modes label,
+  .candidates label {
     display: grid;
     grid-template-columns: auto 1fr;
     column-gap: 0.4rem;
     padding: 0.25rem 0;
     cursor: pointer;
   }
-  .modes label.off {
+  .modes label.off,
+  .candidates label.off {
     cursor: not-allowed;
     opacity: 0.6;
   }
-  .modes .hint {
+  .modes .hint,
+  .candidates .hint {
     grid-column: 2;
     font-size: 0.85em;
     color: var(--fg-muted, #999);
@@ -297,9 +337,6 @@
     font-family: var(--mono, monospace);
     font-size: 0.8em;
   }
-  .err {
-    color: var(--danger, #e5534b);
-  }
   .muted {
     color: var(--fg-muted, #999);
   }
@@ -314,11 +351,5 @@
     color: var(--accent, #4c8dff);
     cursor: pointer;
     text-decoration: underline;
-  }
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    margin-top: 0.8rem;
   }
 </style>

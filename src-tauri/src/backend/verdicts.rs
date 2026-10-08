@@ -578,6 +578,24 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "queue_prompt",
+        Verdict::Routed {
+            tool: "queue_prompt",
+        },
+    ),
+    (
+        "queued_prompts",
+        Verdict::Routed {
+            tool: "queued_prompts",
+        },
+    ),
+    (
+        "cancel_queued_prompt",
+        Verdict::Routed {
+            tool: "queued_prompts",
+        },
+    ),
+    (
         "recreate_session",
         Verdict::Routed {
             tool: "recreate_session",

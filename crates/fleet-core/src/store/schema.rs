@@ -1458,6 +1458,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/124_session_origin.sql"),
         already_applied: Some(sessions_has_origin),
     },
+    // Orbit Fleet 5.10, Send prompt: `deferred_prompts`, prompts typed in
+    // once a busy session is idle. New objects only, `IF NOT EXISTS`, safe
+    // to re-run.
+    Migration::plain(
+        125,
+        include_str!("../../migrations/125_deferred_prompts.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

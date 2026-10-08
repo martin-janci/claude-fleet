@@ -127,6 +127,11 @@ const SESSION_TIER = {
 
   // ── writes that are not in that list: `drive` ──────────────────────────
   send_prompt: 'drive',
+  // Typed later instead of now (step 5.10); its list and take-back are the
+  // same pending input, so a watcher reads none of it.
+  queue_prompt: 'drive',
+  queued_prompts: 'drive',
+  cancel_queued_prompt: 'drive',
   answer_form: 'drive',
   decline_form: 'drive',
   // `send_message { deliver, submit }` is a pane write by another route, so

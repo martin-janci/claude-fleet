@@ -2410,8 +2410,9 @@ fn router_sum_serves_every_tool() {
     // claim tools (T12) + the New session picker's `project_picks` /
     // `set_project_pick` + org administration's `org_admin` (phase B) +
     // chat forms' `ask` + debug devices' `debug_devices` + Lost and found's
-    // `adopt_session` + the Files tab's `repo_blame`.
-    assert_eq!(served, 121);
+    // `adopt_session` + the Files tab's `repo_blame` + Send prompt's
+    // `queue_prompt` / `queued_prompts`.
+    assert_eq!(served, 123);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3942,7 +3943,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// `adopt_session` tool, +557 bytes).
     /// Measured at 86,625 on 2026-10-08 after merging `main` (86,158) into
     /// the Files tab's `repo_blame` and `repo_branches`' `merged` note.
-    const BUDGET_BYTES: usize = 86_725;
+    /// Measured at 87,540 on 2026-10-08 after step 5.10's queued prompts
+    /// (`queue_prompt` and `queued_prompts`) on top of it.
+    const BUDGET_BYTES: usize = 87_640;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10081,6 +10084,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // because `to_addr` can name the same row by address.
     ("send_message", &["Drive"]),
     ("send_prompt", &["Drive"]),
+    ("queue_prompt", &["Drive"]),
+    ("queued_prompts", &["Drive"]),
     ("session_conversations", &["Read"]),
     ("session_history", &["Read"]),
     ("wait_for_reply", &["Read"]),
