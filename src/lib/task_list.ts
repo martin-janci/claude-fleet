@@ -1,5 +1,6 @@
 // The Work tab's List layout (design 2026-09-29): one `work_tree` read
-// grouped by status in the client — To do, Doing, Done (last 7 days) — with
+// grouped by status in the client — To do, Doing, Done (last 7 days), by the
+// same rule as the Board (`taskColumnOf`) — with
 // native subtasks and agent jobs nested under a listed parent.
 import type { WorkTask } from './work_view';
 
@@ -15,10 +16,16 @@ export interface StatusSections {
   done: TaskNode[];
 }
 
-function sectionOf(t: WorkTask): keyof StatusSections {
-  const live = (t.counts?.active ?? 0) > 0;
-  if (live || t.status_category === 'in_progress') return 'doing';
+/** The one status rule List and Board share (plan step 1.6): a task sits
+ *  where its status says, not where its sessions are. A tracker item sits in
+ *  the column its tracker reports (sprints design §2, E11), a native item in
+ *  its effective status (the hub has already lifted a live one to
+ *  `in_progress`, and a person's setting is final). Only a bare key, which has
+ *  no status at all, follows its sessions. */
+export function taskColumnOf(t: WorkTask): keyof StatusSections {
   if (t.status_category === 'done') return 'done';
+  if (t.status_category === 'in_progress') return 'doing';
+  if (!t.status_category && (t.counts?.active ?? 0) > 0) return 'doing';
   return 'todo';
 }
 
@@ -35,7 +42,7 @@ export function groupTasksByStatus(tasks: WorkTask[], nowSecs: number): StatusSe
   }
   const out: StatusSections = { todo: [], doing: [], done: [] };
   for (const t of [...roots].sort(newestFirst)) {
-    const s = sectionOf(t);
+    const s = taskColumnOf(t);
     if (s === 'done' && (t.last_activity_at ?? 0) < nowSecs - DONE_WINDOW_SECS) continue;
     out[s].push({ task: t, children: [...(kids.get(t.task_id) ?? [])].sort(newestFirst) });
   }
@@ -48,11 +55,7 @@ export function displayTitle(t: WorkTask): string {
 
 // ── The board (sprints design 2026-09-28 §6c) ──
 //
-// Columns by status: a card sits where its status says, not where its
-// sessions are — a tracker item in the column its tracker reports (§2, E11),
-// a native item in its effective status (the hub has already lifted a live
-// one to `in_progress`, and a person's setting is final). Only a bare key,
-// which has no status at all, follows its sessions.
+// Columns by status, through the same `taskColumnOf` rule the List uses.
 
 export type BoardColumn = keyof StatusSections;
 export const BOARD_COLUMNS: readonly BoardColumn[] = ['todo', 'doing', 'done'];
@@ -68,12 +71,7 @@ export const BOARD_COLUMN_STATUS: Record<BoardColumn, 'todo' | 'in_progress' | '
   done: 'done',
 };
 
-export function boardColumnOf(t: WorkTask): BoardColumn {
-  if (t.status_category === 'done') return 'done';
-  if (t.status_category === 'in_progress') return 'doing';
-  if (!t.status_category && (t.counts?.active ?? 0) > 0) return 'doing';
-  return 'todo';
-}
+export const boardColumnOf: (t: WorkTask) => BoardColumn = taskColumnOf;
 
 export interface BoardColumns extends StatusSections {
   /** Done tasks older than the window, left off the Done column. */

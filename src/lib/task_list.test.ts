@@ -8,12 +8,14 @@ import {
   displayTitle,
   groupTasksByStatus,
   groupTasksForBoard,
+  taskColumnOf,
+  type StatusSections,
 } from './task_list';
 
 const NOW = 1_790_700_000;
 
 describe('groupTasksByStatus', () => {
-  it('uses the effective status, and a live session means Doing', () => {
+  it('uses the effective status; a live session moves only a bare key', () => {
     const s = groupTasksByStatus(
       [
         task({ task_id: 'item:1', status_category: 'todo', counts: { active: 0, ended: 0, suggested: 0 }, last_activity_at: NOW - 10 }),
@@ -23,9 +25,9 @@ describe('groupTasksByStatus', () => {
       ],
       NOW,
     );
-    expect(s.todo.map((n) => n.task.task_id)).toEqual(['item:1']);
-    expect(s.doing.map((n) => n.task.task_id).sort()).toEqual(['item:2', 'item:3']);
-    expect(s.done.map((n) => n.task.task_id)).toEqual(['item:4']);
+    expect(s.todo.map((n) => n.task.task_id)).toEqual(['item:2', 'item:1']);
+    expect(s.doing).toEqual([]);
+    expect(s.done.map((n) => n.task.task_id)).toEqual(['item:3', 'item:4']);
   });
 
   it('Done keeps the last 7 days', () => {
@@ -50,6 +52,32 @@ describe('groupTasksByStatus', () => {
     );
     expect(s.doing[0].children.map((c) => c.task_id)).toEqual(['item:2']);
     expect(s.todo.map((n) => n.task.task_id)).toEqual(['item:3']);
+  });
+});
+
+describe('List and Board share one status rule', () => {
+  const live = { active: 1, ended: 0, suggested: 0 };
+  const idle = { active: 0, ended: 0, suggested: 0 };
+  const cases = [
+    // TASK-224: a tracker ticket still in To do while a session works on it.
+    task({ task_id: 'jira:TASK-224', kind: 'tracker', key: 'TASK-224', status_category: 'todo', counts: live }),
+    task({ task_id: 'item:1', status_category: 'in_progress', counts: idle }),
+    task({ task_id: 'item:2', status_category: 'done', counts: live }),
+    task({ task_id: 'item:3', status_category: 'todo', counts: idle }),
+    task({ task_id: 'ref:A-1', kind: 'ref', status_category: null, counts: live }),
+    task({ task_id: 'ref:A-2', kind: 'ref', status_category: null, counts: idle }),
+  ];
+  const where = (sections: StatusSections, id: string) =>
+    (Object.keys(sections) as (keyof StatusSections)[]).find((k) => sections[k].some((n) => n.task.task_id === id));
+
+  it('every task lands in the same column in List and Board', () => {
+    const list = groupTasksByStatus(cases.map((t) => ({ ...t, last_activity_at: NOW })), NOW);
+    const board = groupTasksForBoard(cases.map((t) => ({ ...t, last_activity_at: NOW })), NOW);
+    for (const t of cases) {
+      expect(where(list, t.task_id), t.task_id).toBe(where(board, t.task_id));
+      expect(where(list, t.task_id), t.task_id).toBe(taskColumnOf(t));
+    }
+    expect(where(list, 'jira:TASK-224')).toBe('todo');
   });
 });
 
