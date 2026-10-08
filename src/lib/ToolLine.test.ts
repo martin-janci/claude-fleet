@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { uiLayout } from './prefs';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
@@ -249,5 +250,33 @@ describe('ToolLine', () => {
     expect(result.textContent).not.toContain('line 20');
     await fireEvent.click(screen.getByRole('button', { name: 'Show all' }));
     expect(screen.getByTestId('conv-tool-result').textContent).toContain('line 29');
+  });
+});
+
+describe('ToolLine state mark (redesign 5.14, New layout)', () => {
+  afterEach(() => uiLayout.set('classic'));
+  const mark = () => screen.getByTestId('conv-tool-state');
+
+  it('only the running call carries a Comet; finished calls go still', () => {
+    uiLayout.set('new');
+    const { unmount } = render(ToolLine, { line: line({ done: false, ended_at: null }), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: true });
+    expect(mark().getAttribute('data-state')).toBe('running');
+    expect(mark().querySelector('[data-testid^="loader"]')).toBeTruthy();
+    unmount();
+    const done = render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: true });
+    expect(mark().getAttribute('data-state')).toBe('done');
+    expect(mark().querySelector('[data-testid^="loader"]')).toBeNull();
+    expect(mark().textContent).toContain('✓');
+    done.unmount();
+    // An unfinished call outside the running turn never got its result:
+    // still, not spinning.
+    render(ToolLine, { line: line({ done: false, ended_at: null }), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: false });
+    expect(mark().getAttribute('data-state')).toBe('still');
+    expect(mark().querySelector('[data-testid^="loader"]')).toBeNull();
+  });
+
+  it('Classic has no state mark', () => {
+    render(ToolLine, { line: line({ done: false, ended_at: null }), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: true });
+    expect(screen.queryByTestId('conv-tool-state')).toBeNull();
   });
 });
