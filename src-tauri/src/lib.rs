@@ -567,6 +567,7 @@ pub fn run() {
             commands::debug_devices::forget_debug_device,
             commands::debug_devices::boot_debug_device,
             commands::debug_devices::shutdown_debug_device,
+            commands::prs::list_pull_requests,
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,
             commands::tasks::list_tasks,

@@ -1441,6 +1441,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/123_host_probe_facts.sql"),
         already_applied: Some(hosts_has_worktree_at),
     },
+    // Pull requests (redesign 6.4): `pull_requests` and two indexes. New
+    // objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(124, include_str!("../../migrations/124_pull_requests.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

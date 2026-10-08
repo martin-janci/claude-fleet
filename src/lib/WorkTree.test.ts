@@ -157,6 +157,18 @@ describe('WorkTree', () => {
     expect(screen.getByTestId('work-tab-review').textContent).toContain('4');
   });
 
+  it('the Pull requests tab shows the PRs view beside Tasks, Review and Missions (6.4)', async () => {
+    render(WorkTree);
+    await flush();
+    expect(screen.queryByTestId('work-prs')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-tab-prs'));
+    await flush();
+    expect(screen.getByTestId('work-prs')).toBeTruthy();
+    expect(screen.queryByTestId('work-review')).toBeNull();
+    // Every earlier tab is still there.
+    for (const t of ['tasks', 'review', 'missions']) expect(screen.getByTestId(`work-tab-${t}`)).toBeTruthy();
+  });
+
   it('opening a section loads it by itself; Load more pages with its own cursor', async () => {
     render(WorkTree);
     await flush();
