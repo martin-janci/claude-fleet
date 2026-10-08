@@ -1668,6 +1668,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                     source_session_id: on_b,
                     prompt: "review".into(),
                     call_id: None,
+                    origin: None,
                 },
                 confirm_nonce: None,
             }),
@@ -18227,4 +18228,68 @@ async fn a_client_msg_id_reused_for_another_recipient_still_sends() {
             .unwrap();
         assert_eq!(n, 1, "session {to} got its message");
     }
+}
+
+/// Redesign 2.2 (migration 124): what a start over each kind of connection
+/// records as the session's origin. Every MCP start path asks this one
+/// function, so it pins them all.
+#[test]
+fn a_starts_origin_follows_the_connection() {
+    use crate::store::SessionOrigin;
+    let store = Store::open_in_memory().unwrap();
+    store.upsert_host("h").unwrap();
+    let agent_row = store
+        .upsert_session("agent", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    store
+        .conn_ref()
+        .execute(
+            "UPDATE sessions SET tmux_pane_id = '%3' WHERE id = ?1",
+            [agent_row],
+        )
+        .unwrap();
+    let operator_row = store
+        .upsert_session("fleet-operator", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    crate::service::operator::set_operator_ref(
+        &store,
+        &crate::service::operator::OperatorRef {
+            host_alias: "h".into(),
+            tmux_name: "fleet-operator".into(),
+        },
+    )
+    .unwrap();
+
+    // A person's own device: that person.
+    assert_eq!(
+        super::fleet::origin_for(&client_caller("phone", TokenMode::Full), &store),
+        SessionOrigin::person(Some(OWNER_PERSON))
+    );
+    // A per-host token: an agent in the session its pane proves, else a
+    // script on the host. A pane on another host proves nothing.
+    assert_eq!(
+        super::fleet::origin_for(&pane_caller(Some("%3")), &store),
+        SessionOrigin::token(Some(agent_row))
+    );
+    assert_eq!(
+        super::fleet::origin_for(&pane_caller(None), &store),
+        SessionOrigin::token(None)
+    );
+    let mut elsewhere = pane_caller(Some("%3"));
+    elsewhere.host_alias = Some("other".into());
+    assert_eq!(
+        super::fleet::origin_for(&elsewhere, &store),
+        SessionOrigin::token(None)
+    );
+    // The operator's own client: the operator, by its session.
+    assert_eq!(
+        super::fleet::origin_for(
+            &client_caller(
+                crate::service::operator::OPERATOR_CLIENT_NAME,
+                TokenMode::Full
+            ),
+            &store
+        ),
+        SessionOrigin::operator(Some(operator_row))
+    );
 }

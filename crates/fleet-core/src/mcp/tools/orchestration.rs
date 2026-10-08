@@ -546,6 +546,11 @@ impl FleetTools {
                         effort: None,
                         profile: None,
                         agent: None,
+                        // Who asked for the worker (migration 124): the
+                        // connection, as for `new_session`.
+                        origin: lock(self.reader())
+                            .ok()
+                            .map(|s| super::fleet::origin_for(&caller, &s)),
                         // The requester's owner (above), else this
                         // connection's own person. A dispatch with no
                         // requester is somebody asking fleet directly, so it
@@ -1803,16 +1808,24 @@ impl FleetTools {
                     None,
                 ));
             }
-            let owner = {
+            let (owner, origin) = {
                 let s = lock(self.reader()).map_err(to_mcp_err)?;
-                super::fleet::owner_for(&caller, &s)
+                (
+                    super::fleet::owner_for(&caller, &s),
+                    super::fleet::origin_for(&caller, &s),
+                )
             };
             let view_scope = self.view_scope(&caller)?;
             // Jev K1 asks only when its gate opens (off by default).
             let decide = crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store));
             let preview = crate::service::trackers::tickets::preview_start_decided(
                 &self.store,
-                &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
+                &crate::service::work::start_args_owned(
+                    &args,
+                    caller.work_decider(),
+                    owner,
+                    Some(origin.clone()),
+                ),
                 &view_scope,
                 &crate::service::trackers::default_net(),
                 Some(&decide),
@@ -1831,9 +1844,12 @@ impl FleetTools {
             // private session owned by the HUB's owner — readable by somebody
             // who did not ask for it, and `null` in the answer to the person
             // who did, because T8 drops a row the caller may not see.
-            let owner = {
+            let (owner, origin) = {
                 let s = lock(self.reader()).map_err(to_mcp_err)?;
-                super::fleet::owner_for(&caller, &s)
+                (
+                    super::fleet::owner_for(&caller, &s),
+                    super::fleet::origin_for(&caller, &s),
+                )
             };
             // The whole scope, for the two things a start does that reach an
             // EXISTING row (multi-user M1, T9b): its `E_EXISTS` prose names
@@ -1851,7 +1867,12 @@ impl FleetTools {
                     &self.store,
                     &self.ssh,
                     &self.reg,
-                    &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
+                    &crate::service::work::start_args_owned(
+                        &args,
+                        caller.work_decider(),
+                        owner,
+                        Some(origin.clone()),
+                    ),
                     ids,
                     &view_scope,
                     &crate::service::trackers::default_net(),
@@ -1866,7 +1887,12 @@ impl FleetTools {
                 &self.store,
                 &self.ssh,
                 &self.reg,
-                &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
+                &crate::service::work::start_args_owned(
+                    &args,
+                    caller.work_decider(),
+                    owner,
+                    Some(origin.clone()),
+                ),
                 &view_scope,
                 &crate::service::trackers::default_net(),
             )
@@ -1890,16 +1916,24 @@ impl FleetTools {
             // start path (its project, host and worktree, the brief), tracked
             // as a task whose first prompt carries the done marker. The
             // fences are the start's own, under the whole scope.
-            let owner = {
+            let (owner, origin) = {
                 let s = lock(self.reader()).map_err(to_mcp_err)?;
-                super::fleet::owner_for(&caller, &s)
+                (
+                    super::fleet::owner_for(&caller, &s),
+                    super::fleet::origin_for(&caller, &s),
+                )
             };
             let view_scope = self.view_scope(&caller)?;
             let out = crate::service::work::run::run_item(
                 &self.store,
                 &self.ssh,
                 &self.reg,
-                &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
+                &crate::service::work::start_args_owned(
+                    &args,
+                    caller.work_decider(),
+                    owner,
+                    Some(origin.clone()),
+                ),
                 args.role.as_deref().unwrap_or("implement"),
                 &view_scope,
                 &crate::service::trackers::default_net(),

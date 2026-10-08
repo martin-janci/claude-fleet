@@ -713,6 +713,26 @@ impl Store {
         rows.collect()
     }
 
+    /// Record who or what started a session (migration 124). Every start
+    /// path writes it once the row exists; a restart, recreate or repair
+    /// keeps the row and so keeps its origin. On the row, so this emits
+    /// `session_updated`.
+    pub fn set_session_origin(
+        &self,
+        id: i64,
+        origin: &SessionOrigin,
+    ) -> Result<(), rusqlite::Error> {
+        let n = self.conn.execute(
+            "UPDATE sessions SET origin = ?1, origin_ref = ?2 \
+             WHERE id = ?3 AND (origin IS NOT ?1 OR origin_ref IS NOT ?2)",
+            rusqlite::params![origin.origin, origin.origin_ref, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(())
+    }
+
     /// Mark a session as a review of `reviews_session_id` (or back to 'work' with
     /// None). Write-once at spawn_review time. Reconcile never touches these
     /// columns — they survive re-probe because upsert_session's ON CONFLICT clause

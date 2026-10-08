@@ -421,6 +421,12 @@ impl FleetTools {
             effort: p.effort,
             profile: p.profile,
             agent: p.agent,
+            // Who started it (migration 124), from the connection, as the
+            // owner is.
+            origin: Some({
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
+                super::fleet::origin_for(&caller, &s)
+            }),
             // Whose the new session is (multi-user M1, T5): the person behind
             // THIS connection, resolved by `owner_for` — a paired device's own
             // person, the hub's personal owner for the master token, and
@@ -486,6 +492,12 @@ impl FleetTools {
             effort: None,
             profile: None,
             agent: None,
+            // Who started it (migration 124), from the connection, as the
+            // owner is.
+            origin: Some({
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
+                super::fleet::origin_for(&caller, &s)
+            }),
             // The caller's own person, as in `new_session` above — a shell
             // session is as private as any other (its pane sees the same
             // checkout and the same credentials).
