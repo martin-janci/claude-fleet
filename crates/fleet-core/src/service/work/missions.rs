@@ -67,9 +67,14 @@ pub struct MissionDetail {
     #[serde(default)]
     pub events: Vec<MissionEventRow>,
     /// The loop's phase, derived and never stored (§4.5): `running` (a
-    /// member has an open run) or `waiting`, for an active mission only.
+    /// member has an open run), `blocked` (nothing is ready and something
+    /// failed or waits outside) or `waiting`, for an active mission only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    /// The dependency graph over `items`: each one's derived state and
+    /// wave (orchestration O2).
+    #[serde(default)]
+    pub graph: super::graph::MissionGraph,
     /// Whether this caller may change it: the UI's buttons, not a fence.
     #[serde(default)]
     pub may_change: bool,
@@ -176,21 +181,13 @@ pub fn mission(
     let s = lock(store)?;
     let mission = visible(&s, scope, id)?;
     let mut items = Vec::new();
-    let mut running = false;
     for i in s.mission_items(id)? {
-        if !crate::service::trackers::tickets::item_visible(&scope.org, &s, &i)? {
-            continue;
+        if crate::service::trackers::tickets::item_visible(&scope.org, &s, &i)? {
+            items.push(i);
         }
-        if mission.state == "active" && !running {
-            running = s
-                .tasks_for_item(i.id)?
-                .iter()
-                .any(|t| matches!(t.state.as_str(), "queued" | "running"));
-        }
-        items.push(i);
     }
-    let phase = (mission.state == "active")
-        .then(|| if running { "running" } else { "waiting" }.to_string());
+    let graph = super::graph::build(&s, scope, &items)?;
+    let phase = (mission.state == "active").then(|| graph.phase().to_string());
     let events = s.mission_events(id, before_event, MISSION_EVENTS_PAGE)?;
     let may_change = may_change_mission(&s, scope, &mission)?;
     Ok(MissionDetail {
@@ -198,6 +195,7 @@ pub fn mission(
         items,
         events,
         phase,
+        graph,
         may_change,
     })
 }

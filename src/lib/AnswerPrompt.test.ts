@@ -275,3 +275,93 @@ describe('AnswerPrompt', () => {
     expect(screen.queryByTestId('answer-open-terminal')).toBeNull();
   });
 });
+
+describe('AnswerPrompt, multi-select', () => {
+  const MULTI: PendingInput = {
+    kind: 'input',
+    question: 'Which features do you want to enable?',
+    multi: true,
+    options: [
+      { n: 1, label: 'Auth', selected: true },
+      { n: 2, label: 'Logging', selected: false, checked: true },
+      { n: 3, label: 'Metrics', selected: false },
+      { n: 4, label: 'Type something', selected: false },
+    ],
+  };
+
+  beforeEach(() => {
+    mockedAct.mockResolvedValue({ ok: true, value: probe(MULTI) });
+  });
+
+  it('shows each box ticked as the pane has it', () => {
+    render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
+    const opts = screen.getAllByTestId('answer-option');
+    expect(opts.map((o) => o.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false', 'false']);
+  });
+
+  it('toggles a box and keeps the choices up for the next one', async () => {
+    // A digit only toggles on a multi-select. Reporting it as "Sent" and
+    // hiding the choices left the user with one tick and no way to finish.
+    render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
+    await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
+    await settle();
+    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '', { keys: '1' });
+    expect(screen.queryByTestId('answer-sent')).toBeNull();
+    expect(screen.getAllByTestId('answer-option')[0].getAttribute('aria-checked')).toBe('true');
+
+    await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
+    await settle();
+    expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '', { keys: '3' });
+    expect(screen.queryByTestId('answer-stale')).toBeNull();
+  });
+
+  it('still toggles once the pane shows the earlier tick', async () => {
+    // The pane after one toggle: same question, one more box ticked. That
+    // is the same dialog, not "the dialog changed — nothing was sent".
+    const afterOne: PendingInput = {
+      ...MULTI,
+      options: MULTI.options.map((o) => (o.n === 1 ? { ...o, checked: true } : o)),
+    };
+    mockedAct.mockResolvedValue({ ok: true, value: probe(afterOne) });
+    render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
+    await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '', { keys: '3' });
+    expect(screen.queryByTestId('answer-stale')).toBeNull();
+  });
+
+  it('continues with Tab, which keeps the ticks and moves on', async () => {
+    render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
+    await fireEvent.click(screen.getByTestId('answer-continue'));
+    await settle();
+    expect(mockedSend).toHaveBeenCalledWith('local', 'dev-foo', '', { keys: 'Tab' });
+    expect(screen.getByTestId('answer-sent').textContent).toContain('Logging');
+  });
+
+  it('leaves the free-text row to the terminal', async () => {
+    render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
+    const free = screen.getAllByTestId('answer-option')[3] as HTMLButtonElement;
+    expect(free.disabled).toBe(true);
+    await fireEvent.click(free);
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+
+  it('toggles nothing while the cursor is in the free-text box', async () => {
+    // There a digit is typed into the box instead of toggling anything.
+    const typing: PendingInput = {
+      ...MULTI,
+      options: MULTI.options.map((o) => ({ ...o, selected: o.n === 4 })),
+    };
+    render(AnswerPrompt, { session: session({ pending_input: typing }), view: view(typing) });
+    const first = screen.getAllByTestId('answer-option')[0] as HTMLButtonElement;
+    expect(first.disabled).toBe(true);
+    expect(first.getAttribute('title')).toMatch(/Type something/);
+    expect((screen.getByTestId('answer-continue') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('has no Continue on a single-select dialog', () => {
+    render(AnswerPrompt, { session: session(), view: view() });
+    expect(screen.queryByTestId('answer-continue')).toBeNull();
+  });
+});

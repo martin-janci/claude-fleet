@@ -279,6 +279,45 @@ describe('WorkTaskDetail', () => {
     expect(screen.queryByTestId('start-popover')).toBeNull();
   });
 
+  it("pre-selects Jev's proposed repository, resolves it, and still waits for Start", async () => {
+    handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
+    const base = {
+      key: 'ABC-12',
+      title: 'Login',
+      item_id: 12,
+      projects: [
+        { id: 3, owner: 'acme', repo: 'api' },
+        { id: 4, owner: 'acme', repo: 'web' },
+      ],
+      hosts: [{ alias: 'mefistos', reachable: true }],
+      conflicts: [],
+      brief: null,
+      checkout: null,
+    };
+    handlers.preview_start_work = (a) =>
+      a.project_id === 4
+        ? {
+            ...base,
+            plan: { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 4, host_alias: 'mefistos', branch: 'abc-12-login', name: 'ABC-12 Login' },
+            missing: null,
+            checkout: { exists: false },
+          }
+        : { ...base, plan: null, missing: 'project', suggested_project: { project_id: 4, confidence_pct: 88, run_id: 5 } };
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await flush();
+    await flush();
+    expect((screen.getByTestId('start-popover-project') as HTMLSelectElement).value).toBe('4');
+    expect(screen.getByTestId('start-popover-suggested').textContent).toContain('Proposed by Jev (88%)');
+    // The pre-selection is read back with its host and plan; nothing starts by itself.
+    expect(calls('preview_start_work').at(-1)).toEqual({ item_id: 12, with_brief: true, project_id: 4 });
+    expect(calls('start_work')).toHaveLength(0);
+    await fireEvent.click(screen.getByTestId('start-popover-go'));
+    await flush();
+    expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true, project_id: 4, host_alias: 'mefistos' });
+  });
+
   it('a hub without the preview starts as before', async () => {
     handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
     handlers.preview_start_work = () => {

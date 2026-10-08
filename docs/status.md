@@ -235,6 +235,11 @@ person's Clear work holds against the unchanged branch / PR (R9u, migration
 `docs/superpowers/specs/2026-09-27-jev-test-map.md`.
 Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
+Five more use cases, K1–K5, were accepted by the owner on 2026-10-07 (test
+map §5): K1 `start_project` next, K5 with the picker's phase 2, K2 and K3 as
+shadow slots in Mode B and the mission loop, K4 last. K1 is built, off
+(`decide.jev.start_project`, `service/decide/start_project.rs`): the start
+popover pre-selects Jev's repository in assist; K2–K5 are not built.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
 recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed.
@@ -287,7 +292,16 @@ fence by the mission's org first, then its owner or the org's members (only
 an org admin changes one); per-host and peer tokens are refused. Seven routed
 desktop commands (`commands/missions.rs`) back the Work view's Missions tab.
 Projects carry no org, so the repo allow-list is not org-checked yet. The
-phone does not show missions yet. No graph or loop yet (O2–O8).
+phone does not show missions yet. O2 is built: `work_item_deps` and
+`work_items.held_at` (migration 116), drawn by `work_link { dep | hold }`
+(cycles and cross-org edges refused in the store, `store/item_deps.rs`);
+`service/work/graph.rs` derives each member's state (ready, waiting,
+blocked, running, failed, held, …) and wave on every read and gives an
+active mission its `running | blocked | waiting` phase. An agent proposes a
+plan with `work_link { propose_tree }`, whose proposals join the parent's
+mission; a person takes it with `accept_many` and can `undo_accept` within
+10 minutes while nothing has touched it. The Missions tab lists tasks by
+wave. No evidence or loop yet (O3–O8).
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,

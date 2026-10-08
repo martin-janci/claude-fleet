@@ -1058,7 +1058,9 @@ impl FleetTools {
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
         mission_id?, item_id?: root}; mission_state {mission_id, status}; \
         mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
-        mission_delete. Work view: \
+        mission_delete. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
+        propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \
+        Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
         &self,
@@ -1313,6 +1315,66 @@ impl FleetTools {
             };
             return ok_json(
                 &crate::service::work::local::propose(&args, &self.store, &scope, &proposer)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "propose_tree" {
+            // `propose`'s proposer, through the same gate at the same reach:
+            // every proposal of the tree is stored in this session's name.
+            let proposer = match args.session_id {
+                Some(sid) => {
+                    let r = self.resolve_target_row(
+                        &caller,
+                        Some(sid),
+                        None,
+                        None,
+                        Reach::Drive,
+                        "the session",
+                    )?;
+                    crate::service::work::view::proposer_label(&r)
+                }
+                None => caller.label(),
+            };
+            return ok_json(
+                &crate::service::work::local::propose_tree(&args, &self.store, &scope, &proposer)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        // A person's decision on many proposals at once (orchestration O2),
+        // and taking it back. Scoped callers are refused inside, before any
+        // row; each item's mission is fenced on the whole `view_scope`.
+        if args.action == "accept_many" {
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::graph::accept_many(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "undo_accept" {
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::graph::undo_accept(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        // An edge of the graph, or a hold (orchestration O2): a person's plan,
+        // so never a per-host or peer token (`mission_caller`); the item's
+        // own sessions pass the drive gate, as for `set_status`.
+        if args.action == "dep" {
+            mission_caller(&caller)?;
+            self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::graph::dep(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "hold" {
+            mission_caller(&caller)?;
+            self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::graph::hold(&args, &self.store, &view_scope)
                     .map_err(to_mcp_err)?,
             );
         }
@@ -1614,11 +1676,14 @@ impl FleetTools {
                 super::fleet::owner_for(&caller, &s)
             };
             let view_scope = self.view_scope(&caller)?;
-            let preview = crate::service::trackers::tickets::preview_start(
+            // Jev K1 asks only when its gate opens (off by default).
+            let decide = crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store));
+            let preview = crate::service::trackers::tickets::preview_start_decided(
                 &self.store,
                 &crate::service::work::start_args_owned(&args, caller.work_decider(), owner),
                 &view_scope,
                 &crate::service::trackers::default_net(),
+                Some(&decide),
             )
             .await
             .map_err(to_mcp_err)?;
@@ -2048,6 +2113,12 @@ fn ipc_of_mcp(e: McpError) -> IpcError {
         message,
         details: None,
     }
+}
+
+/// The item a `work_link { dep | hold }` changes.
+fn graph_item(args: &crate::service::work::WorkLinkArgs) -> Result<i64, McpError> {
+    args.item_id
+        .ok_or_else(|| mcp_err("E_INVALID", format!("{} needs item_id", args.action), None))
 }
 
 /// Refuse a `work_link { mission_* }` from a per-host or peer token: a

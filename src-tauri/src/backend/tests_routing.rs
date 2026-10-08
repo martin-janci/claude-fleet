@@ -3278,6 +3278,76 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // ── orchestration O2: the mission graph ───────────────────────────
+        (
+            "set_work_dep",
+            "work_link",
+            json!({ "session_id": null, "action": "dep", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "on": true, "depends_on": 5 }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_dep(
+                    b,
+                    commands::missions::SetWorkDepArgs {
+                        item_id: 3,
+                        depends_on: 5,
+                        on: true,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "set_work_hold",
+            "work_link",
+            json!({ "session_id": null, "action": "hold", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "on": false }),
+            r#"{"item_id":3,"changed":false}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_hold(
+                    b,
+                    commands::missions::SetWorkHoldArgs {
+                        item_id: 3,
+                        on: false,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "accept_work_proposals",
+            "work_link",
+            json!({ "session_id": null, "action": "accept_many", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "item_ids": [3, 4] }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::accept_work_proposals(
+                    b,
+                    commands::missions::WorkProposalsArgs {
+                        item_ids: vec![3, 4],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "undo_work_accept",
+            "work_link",
+            json!({ "session_id": null, "action": "undo_accept", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "item_ids": [3] }),
+            r#"[]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::undo_work_accept(
+                    b,
+                    commands::missions::WorkProposalsArgs { item_ids: vec![3] },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── multi-user M1 (T13): the three sharing mutations ─────────────
         //
         // `level` crosses as the string the user chose and is validated by

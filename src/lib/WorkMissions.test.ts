@@ -138,6 +138,56 @@ describe('WorkMissions', () => {
     expect(screen.getByTestId('mission-detail')).toBeTruthy();
   });
 
+  it('lists the tasks by wave with what each waits for', async () => {
+    handlers.work_mission = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), item(11, 'Schema'), item(12, 'API')],
+      graph: {
+        nodes: [
+          { item_id: 10, state: 'ready', wave: 1 },
+          { item_id: 11, state: 'ready', wave: 1 },
+          { item_id: 12, state: 'waiting', wave: 2, depends_on: [11], waiting_for: [11] },
+        ],
+        waves: 2,
+      },
+      events: [],
+      may_change: true,
+    });
+    handlers.set_work_dep = () => ({ item_id: 12, changed: true });
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    expect(screen.getAllByTestId('mission-wave')).toHaveLength(2);
+    expect(screen.getByTestId('mission-waits').textContent).toContain('waits for Schema');
+    await fireEvent.click(screen.getByTestId('mission-dep-remove'));
+    await flush();
+    expect(calls('set_work_dep')[0]).toEqual({ item_id: 12, depends_on: 11, on: false });
+  });
+
+  it('accepts every proposal at once and can undo it', async () => {
+    handlers.work_mission = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), { ...item(11, 'Plan a'), origin: 'proposed', proposal_state: 'proposed' }],
+      graph: { nodes: [{ item_id: 10, state: 'ready', wave: 1 }, { item_id: 11, state: 'proposed', wave: 1 }], waves: 1 },
+      events: [],
+      may_change: true,
+    });
+    handlers.accept_work_proposals = () => [];
+    handlers.undo_work_accept = () => [];
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-accept-all'));
+    await flush();
+    expect(calls('accept_work_proposals')[0]).toEqual({ item_ids: [11] });
+    await fireEvent.click(screen.getByTestId('mission-undo-accept'));
+    await flush();
+    expect(calls('undo_work_accept')[0]).toEqual({ item_ids: [11] });
+    expect(screen.queryByTestId('mission-undo-accept')).toBeNull();
+  });
+
   it('hides the controls from someone who may only read', async () => {
     handlers.work_mission = () => ({ mission: current, items: [], events: [], may_change: false });
     render(WorkMissions);
@@ -171,5 +221,8 @@ describe('missions helpers', () => {
       'Changed goal',
     );
     expect(eventSentence({ id: 3, at: 1, kind: 'task_done', actor: 'fleet' })).toBe('task done');
+    expect(eventSentence({ id: 4, at: 1, kind: 'dep_added', actor: 'fleet', work_item_id: 3, payload: { depends_on: 2 } })).toBe(
+      'Task 3 waits for 2',
+    );
   });
 });

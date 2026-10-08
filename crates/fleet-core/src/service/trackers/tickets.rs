@@ -1612,6 +1612,24 @@ pub async fn start_work_unprompted(
         crate::service::sessions::new_session(a, store.as_ref(), ssh, reg)
     })
     .await?;
+    // Jev K1's follow-up: where a person's start landed answers a proposal
+    // they were shown. Best effort; an agent's start answers nothing.
+    if args.decider == Decider::Person {
+        if let Ok(s) = lock(store) {
+            if let Err(e) = crate::service::decide::start_project::record_start(
+                &s,
+                plan.item_id,
+                &plan.key,
+                plan.project_id,
+                crate::store::now_unix(),
+            ) {
+                tracing::warn!(
+                    "[decide] start_project follow-up not recorded: {}",
+                    e.message
+                );
+            }
+        }
+    }
     Ok((row, plan, queued))
 }
 
@@ -1678,6 +1696,74 @@ pub struct StartPreview {
     pub brief: Option<String>,
     #[serde(default)]
     pub checkout: Option<CheckoutPreview>,
+    /// With `missing: "project"`: the candidate the decision model proposes
+    /// (Jev K1, `decide.jev.start_project` at `assist`). A pre-selection
+    /// only; the person still starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_project: Option<crate::service::decide::start_project::SuggestedProject>,
+}
+
+/// [`preview_start`], and when it answers `missing: "project"`, the
+/// decision model's pre-selection (Jev K1, `service::decide::start_project`):
+/// in `shadow` asked off this path and only recorded; in `assist` awaited
+/// (one call, bounded by `decide.jev.timeout_ms`) and returned as
+/// `suggested_project`. With the defaults the gate refuses and nothing is
+/// asked. `decide` is `None` where no call may be made.
+pub async fn preview_start_decided(
+    store: &Mutex<Store>,
+    args: &StartArgs,
+    view: &crate::service::view_scope::ViewScope,
+    net: &TrackerNet,
+    decide: Option<&crate::service::decide::DecideCtx>,
+) -> Result<StartPreview, IpcError> {
+    use crate::service::decide::{start_project, Mode};
+    let mut preview = preview_start(store, args, view, net).await?;
+    let Some(ctx) = decide else {
+        return Ok(preview);
+    };
+    if preview.missing.as_deref() != Some("project") {
+        return Ok(preview);
+    }
+    let input = {
+        let s = lock(store)?;
+        let org_id = preview
+            .item_id
+            .map(|id| s.item_org(id))
+            .transpose()?
+            .flatten();
+        let description = preview
+            .item_id
+            .map(|id| s.work_item_meta(id))
+            .transpose()?
+            .and_then(|m| m.description);
+        start_project::StartInput {
+            key: preview.key.clone(),
+            title: preview.title.clone(),
+            item_id: preview.item_id,
+            org_id,
+            description,
+            candidates: preview
+                .projects
+                .iter()
+                .map(|p| start_project::Candidate {
+                    project_id: p.id,
+                    owner: p.owner.clone(),
+                    repo: p.repo.clone(),
+                })
+                .collect(),
+        }
+    };
+    match start_project::mode_for(ctx, &input) {
+        Some(Mode::Assist) => preview.suggested_project = start_project::ask(ctx, &input).await,
+        Some(Mode::Shadow) => {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                start_project::ask(&ctx, &input).await;
+            });
+        }
+        None => {}
+    }
+    Ok(preview)
 }
 
 /// Most projects a preview offers to pick from.
@@ -1791,6 +1877,7 @@ pub async fn preview_start(
         conflicts,
         brief: None,
         checkout: None,
+        suggested_project: None,
     };
     let plan = match plan_resolved(store, &planned, view, &ticket) {
         Ok(p) => p,

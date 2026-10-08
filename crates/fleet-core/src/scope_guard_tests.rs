@@ -499,6 +499,30 @@ const SCOPE_GUARDS: &[Guard] = &[
     },
     Guard {
         file: "crates/fleet-core/src/service/work/local.rs",
+        func: "propose_tree",
+        nth: 0,
+        code: "if !scope.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "`propose` #0's parent-item question, asked of a tree's parent and \
+              of every existing item an entry waits for. This is the org \
+              boundary, not a privacy fence; the person half is at the tool \
+              layer, where the proposing session passes `resolve_target_row` at \
+              `Reach::Drive`",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/graph.rs",
+        func: "person_decides",
+        nth: 0,
+        code: "if !scope.org.is_all() {",
+        verdict: Verdict::OrgBoundary,
+        why: "`decide` #0's rule for many proposals at once: deciding is a \
+              PERSON's act by design, so every scoped caller is refused before \
+              any row is reached. This is the org boundary, not a privacy \
+              fence; each item's mission is then fenced by owner and org \
+              membership (`graph::require_mission_change`)",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/local.rs",
         func: "propose",
         nth: 0,
         code: "if !scope.is_all() {",

@@ -251,6 +251,8 @@ Väčšina krokov je mechanická a Fleet ich spraví sám, bez tokenov:
 
 Planner sa volá len na **úsudok**: prvotný rozklad cieľa, vyhodnotenie zlyhania (retry, rozdeliť, vzdať, opýtať sa), follow-upy z review, a otázka „je cieľ splnený?". Toto je hlavná páka na cenu a na to, aby autonómia nevytvárala viac procesu než úžitku (counter-review).
 
+**Jev (K3, test map §5).** Výsledok workera bez JSON hlásenia a ďalší krok po zlyhaní (`retry / split / give_up / ask`) sa pýtajú Jev ako lacný predfilter pred plannerom, od O2 v shadow režime. Jev nikdy nenavrhuje `complete` ani neoznačí `done_when` za overené.
+
 ### 5.4 ProjectSnapshot
 
 Súhlas s handoverom, s dvoma pravidlami navyše:

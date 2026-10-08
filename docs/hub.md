@@ -2282,7 +2282,10 @@ A session row's `pending_input` (carried on `session:updated`, migration 040)
 is the permission/question dialog a blocked pane is showing —
 `{kind, question, options[{n,label,selected}]}`, or null when the pane shows
 none — so a client can turn the numbered choices into buttons instead of
-typing them.
+typing them. A multi-select question adds `multi: true` and `checked: true` on
+each ticked option (both absent otherwise): there a digit toggles a box, and
+`send_prompt { keys: "Tab" }` keeps the ticks and moves on to the next
+question or to the "Review your answers" step.
 
 `session:created` and `session:updated` frames also carry `needs_attention`
 (`{reason, since}`, absent when the session needs nobody) — the same answer
@@ -3227,7 +3230,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 286 commands, 195 route to a hub tool, 1 routes except for one argument shape, 48 refuse, and 42 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 290 commands, 199 route to a hub tool, 1 routes except for one argument shape, 48 refuse, and 42 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

@@ -1605,6 +1605,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Pre-selecting the repository of a task's first start. Shadow only records; assist suggests.",
+      "key": "decide.jev.start_project",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: start repository",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -2680,6 +2720,11 @@
             },
             {
               "key": "decide.jev.status_map",
+              "type": "field"
+            },
+            {
+              "hint": "Pre-selects the repository when a task's first start has none; you still press Start.",
+              "key": "decide.jev.start_project",
               "type": "field"
             },
             {

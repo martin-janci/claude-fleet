@@ -217,8 +217,16 @@ pub struct PaneIntel {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingOption {
     pub n: u8,
+    /// The choice's text. On a multi-select question the `[ ]` / `[✔]`
+    /// checkbox is not part of it: that is [`checked`](Self::checked), so
+    /// ticking a box does not make the same question read as a new one.
     pub label: String,
+    /// Carries the `❯` cursor (the key Enter would act on).
     pub selected: bool,
+    /// Ticked, on a multi-select question ([`PendingInput::multi`]). Left off
+    /// the wire when false, so a single-select dialog reads as it always has.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checked: bool,
 }
 
 /// The permission/question dialog a blocked pane is showing, as stored on
@@ -229,6 +237,14 @@ pub struct PendingInput {
     pub kind: String,
     pub question: Option<String>,
     pub options: Vec<PendingOption>,
+    /// A multi-select question (AskUserQuestion with `multiSelect`): a digit
+    /// TOGGLES that option's checkbox instead of answering, so no keystroke a
+    /// single-select card sends ever finishes it. `Tab` keeps the ticks and
+    /// moves on, to the next question or to the "Review your answers" step,
+    /// whose `1. Submit answers` is an ordinary single-select dialog. Left off
+    /// the wire when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi: bool,
 }
 
 /// Why a pane showing a Claude Code dialog is waiting on the user.
@@ -540,6 +556,8 @@ struct Dialog {
     prompt: Option<String>,
     /// The dialog's numbered choices, in on-screen order.
     options: Vec<PendingOption>,
+    /// A multi-select question: see [`PendingInput::multi`].
+    multi: bool,
 }
 
 impl Dialog {
@@ -571,8 +589,10 @@ impl Dialog {
                     n: o.n,
                     label: o.label.chars().take(PENDING_LABEL_MAX).collect(),
                     selected: o.selected,
+                    checked: o.checked,
                 })
                 .collect(),
+            multi: self.multi,
         }
     }
 }
@@ -615,6 +635,32 @@ fn parse_choice(line: &str) -> Option<(u8, &str, bool)> {
     }
 }
 
+/// Split a multi-select choice's checkbox off its label: `[ ] Auth` is
+/// `Some((false, "Auth"))`, `[✔] Auth` is `Some((true, "Auth"))`. `None` for a
+/// label with no checkbox, i.e. every single-select choice.
+///
+/// Claude Code 2.1 draws a multi-select option as `❯ 1. [ ] Label`, the tick
+/// being `figures.tick` (`✔`, or `✓` / `√` where the terminal lacks it).
+fn split_checkbox(label: &str) -> Option<(bool, &str)> {
+    let rest = label.strip_prefix('[')?;
+    let mut chars = rest.chars();
+    let mark = chars.next()?;
+    let rest = chars.as_str().strip_prefix(']')?;
+    let checked = match mark {
+        ' ' => false,
+        '✔' | '✓' | '√' | 'x' | 'X' | '×' => true,
+        _ => return None,
+    };
+    Some((checked, rest.trim_start()))
+}
+
+/// The row a multi-select dialog submits from, when it carries the `❯`
+/// cursor: `❯ Submit` on the last question, `❯ Next` on an earlier one.
+fn is_focused_submit_row(line: &str) -> bool {
+    let rest = line.trim_start_matches(['❯', '›']);
+    rest.len() != line.len() && matches!(rest.trim(), "Submit" | "Next")
+}
+
 /// `Some(selected)` when a cleaned line is a numbered choice such as
 /// `❯ 1. Yes` (`selected` = true) or `2. No`. `1.5 GB` and `42 + x` are not.
 /// A thin, test-only view of [`parse_choice`] (production code needs the
@@ -630,7 +676,9 @@ fn numbered_choice(line: &str) -> Option<bool> {
 /// * permission: the "No, and tell Claude what to do differently" choice, or
 ///   a "Do you want to …" / "Would you like to …" line followed by at least
 ///   two numbered choices (plan approval included);
-/// * question: an "Enter to select" hint plus a selected numbered choice.
+/// * question: an "Enter to select" hint (or the "Ready to submit your
+///   answers?" review line) plus a selected numbered choice, or a multi-select
+///   question whose cursor is on its `❯ Submit` / `❯ Next` row.
 ///
 /// Because a dialog replaces the REPL's input box and footer, a live-REPL
 /// cue ([`LIVE_REPL_CUES`], or an input prompt line `❯ …` that is not a
@@ -652,26 +700,53 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     let is_choice = |i: usize| choices.iter().any(|(j, ..)| *j == i);
     let last = |pred: &dyn Fn(&str) -> bool| lower.iter().rposition(|l| pred(l));
 
+    // A multi-select question whose cursor sits on its Submit/Next row has no
+    // `❯` on any choice, yet it is the same dialog, still waiting.
+    let submit_focused = lines.iter().any(|l| is_focused_submit_row(l));
+
     let tell_claude = last(&|l| l.contains("no, and tell claude"));
     let ask = last(&|l| l.contains("do you want to") || l.contains("would you like to"));
     let select_hint = last(&|l| l.contains("enter to select"));
+    // The "Review your answers" step a multi-select question (or a set of
+    // questions) ends on draws no footer hint, only this line above its
+    // `1. Submit answers` / `2. Cancel` choices.
+    let review = last(&|l| l.contains("ready to submit your answers"));
 
+    // An AskUserQuestion may well read "Which … do you want to enable?". A
+    // permission dialog never draws checkboxes, and a multi-select question
+    // does on every choice.
+    let ask_choices = |a: usize| choices.iter().filter(move |(j, ..)| *j > a);
     let kind = if tell_claude.is_some()
-        || ask.is_some_and(|a| choices.iter().filter(|(j, ..)| *j > a).count() >= 2)
-    {
+        || ask.is_some_and(|a| {
+            // The review step echoes each question above its own
+            // "Ready to submit your answers?" line.
+            review.is_none_or(|r| r < a)
+                && ask_choices(a).count() >= 2
+                && !ask_choices(a).all(|(_, _, label, _)| split_checkbox(label).is_some())
+        }) {
         WaitingFor::Permission
-    } else if select_hint.is_some() && choices.iter().any(|(_, _, _, sel)| *sel) {
+    } else if (select_hint.is_some() || review.is_some())
+        && (submit_focused || choices.iter().any(|(_, _, _, sel)| *sel))
+    {
         WaitingFor::Input
     } else {
         return None;
     };
 
-    let dialog_end = [tell_claude, ask, select_hint, choices.last().map(|c| c.0)]
-        .into_iter()
-        .flatten()
-        .max()?;
+    let dialog_end = [
+        tell_claude,
+        ask,
+        select_hint,
+        review,
+        choices.last().map(|c| c.0),
+    ]
+    .into_iter()
+    .flatten()
+    .max()?;
     let live_below = lower.iter().enumerate().skip(dialog_end + 1).any(|(i, l)| {
-        !is_choice(i) && (LIVE_REPL_CUES.iter().any(|c| l.contains(c)) || lines[i].starts_with('❯'))
+        !is_choice(i)
+            && !is_focused_submit_row(lines[i])
+            && (LIVE_REPL_CUES.iter().any(|c| l.contains(c)) || lines[i].starts_with('❯'))
     });
     if live_below {
         return None;
@@ -712,15 +787,11 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
     // raw capture (a description line) — an unindented, non-empty line ends
     // the run, so an unrelated list higher up the scrollback is excluded.
     let bound_after = ask.into_iter().chain(question_idx).max();
-    let options: Vec<PendingOption> = match bound_after {
+    let options: Vec<ParsedOption> = match bound_after {
         Some(after) => choices
             .iter()
             .filter(|(i, ..)| *i > after)
-            .map(|(_, n, label, selected)| PendingOption {
-                n: *n,
-                label: (*label).to_string(),
-                selected: *selected,
-            })
+            .map(|(_, n, label, selected)| choice_option(*n, label, *selected))
             .collect(),
         None => match choices.last() {
             Some((last_idx, ..)) => {
@@ -741,21 +812,57 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
                 choices
                     .iter()
                     .filter(|(i, ..)| *i >= start)
-                    .map(|(_, n, label, selected)| PendingOption {
-                        n: *n,
-                        label: (*label).to_string(),
-                        selected: *selected,
-                    })
+                    .map(|(_, n, label, selected)| choice_option(*n, label, *selected))
                     .collect()
             }
             None => Vec::new(),
         },
     };
+    // Every choice of a multi-select question carries a checkbox (the
+    // "Type something" row included); one stray `[x] …` label in a
+    // single-select menu does not make it one.
+    let multi =
+        kind == WaitingFor::Input && !options.is_empty() && options.iter().all(|o| o.multi_choice);
+    let options = options
+        .into_iter()
+        .map(|o| PendingOption {
+            checked: multi && o.option.checked,
+            label: if multi { o.option.label } else { o.raw_label },
+            ..o.option
+        })
+        .collect();
     Some(Dialog {
         kind,
         prompt: question.or(selected),
         options,
+        multi,
     })
+}
+
+/// A dialog choice as parsed, before the dialog as a whole decides whether it
+/// is a multi-select: the checkbox-split option, whether it had a checkbox,
+/// and the label as drawn, for a dialog that turns out not to be one.
+struct ParsedOption {
+    option: PendingOption,
+    multi_choice: bool,
+    raw_label: String,
+}
+
+fn choice_option(n: u8, label: &str, selected: bool) -> ParsedOption {
+    let (multi_choice, checked, text) = match split_checkbox(label) {
+        Some((checked, text)) => (true, checked, text),
+        None => (false, false, label),
+    };
+    ParsedOption {
+        option: PendingOption {
+            n,
+            label: text.to_string(),
+            selected,
+            checked,
+        },
+        multi_choice,
+        raw_label: label.to_string(),
+    }
 }
 
 /// Derive a coarse status from the tail. Used ONLY as a fallback when the
@@ -1297,25 +1404,155 @@ mod tests {
                 PendingOption {
                     n: 1,
                     label: "24 hours (Recommended)".into(),
-                    selected: true
+                    selected: true,
+                    checked: false,
                 },
                 PendingOption {
                     n: 2,
                     label: "1 hour".into(),
-                    selected: false
+                    selected: false,
+                    checked: false,
                 },
                 PendingOption {
                     n: 3,
                     label: "Until dismissed".into(),
-                    selected: false
+                    selected: false,
+                    checked: false,
                 },
                 PendingOption {
                     n: 4,
                     label: "Type something.".into(),
-                    selected: false
+                    selected: false,
+                    checked: false,
                 },
             ]
         );
+    }
+
+    /// RECONSTRUCTED from Claude Code 2.1's multi-select renderer (not a
+    /// live capture): an AskUserQuestion with `multiSelect: true` draws each
+    /// option as `N. [ ] Label` / `N. [✔] Label` and a `Submit` row under
+    /// them. A digit TOGGLES a box, so the card must know it is a multi-select
+    /// and must not count the box as part of the label: ticking one would
+    /// otherwise turn the same question into a "changed" dialog.
+    #[test]
+    fn multi_select_question_strips_the_checkbox_into_checked() {
+        let text = include_str!("testdata/pane_intel/question_multi_select.txt");
+        assert_dialog(
+            "question_multi_select",
+            text,
+            WaitingFor::Input,
+            "waiting for input: Which features do you want to enable?",
+            4,
+        );
+        let p = fixture_intel("question_multi_select", text)
+            .pending_input
+            .expect("dialog");
+        assert!(p.multi);
+        let got: Vec<(u8, &str, bool, bool)> = p
+            .options
+            .iter()
+            .map(|o| (o.n, o.label.as_str(), o.selected, o.checked))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, "Auth", true, false),
+                (2, "Logging", false, true),
+                (3, "Metrics", false, true),
+                (4, "Type something", false, false),
+            ]
+        );
+    }
+
+    /// With the cursor on the multi-select's own `❯ Submit` row no choice
+    /// carries `❯`, and the row itself starts with it — neither may read as
+    /// "the dialog is gone" or "the REPL prompt is back".
+    #[test]
+    fn multi_select_with_the_cursor_on_submit_is_still_the_dialog() {
+        let text = include_str!("testdata/pane_intel/question_multi_select.txt")
+            .replace("❯ 1. [ ] Auth", "  1. [ ] Auth")
+            .replace("     Submit", "❯    Submit");
+        let p = fixture_intel("multi_select_submit_focused", &text)
+            .pending_input
+            .expect("still a dialog");
+        assert!(p.multi);
+        assert_eq!(p.options.len(), 4);
+        assert!(p.options.iter().all(|o| !o.selected));
+    }
+
+    /// The step a multi-select ends on: no "Enter to select" footer, only
+    /// the "Ready to submit your answers?" line over two numbered choices. It
+    /// is what actually sends the answers, so it must be a dialog too.
+    #[test]
+    fn review_your_answers_step_is_blocked_on_input() {
+        let text = "\
+ ←  ✔ Features  ✔ Submit  →
+
+Review your answers
+
+ • Which features do you want to enable?
+   → Logging, Metrics
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+";
+        assert_dialog(
+            "review_answers",
+            text,
+            WaitingFor::Input,
+            "waiting for input: Ready to submit your answers?",
+            2,
+        );
+        let p = analyze(text).pending_input.expect("dialog");
+        assert!(!p.multi);
+        assert_eq!(p.options[0].label, "Submit answers");
+    }
+
+    /// A box-like label in a single-select menu stays the label as drawn: a
+    /// dialog is a multi-select only when EVERY choice carries a checkbox.
+    #[test]
+    fn one_checkbox_label_does_not_make_a_multi_select() {
+        let text = "\
+Which one?
+
+❯ 1. [x] keep the marker
+  2. Drop it
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+";
+        let p = analyze(text).pending_input.expect("dialog");
+        assert!(!p.multi);
+        assert_eq!(p.options[0].label, "[x] keep the marker");
+        assert!(!p.options[0].checked);
+    }
+
+    /// The two multi-select fields stay off the wire for every other dialog,
+    /// and a row stored before they existed still reads.
+    #[test]
+    fn pending_input_multi_fields_are_omitted_when_false_and_default_when_absent() {
+        let single = PendingInput {
+            kind: "input".into(),
+            question: Some("Q?".into()),
+            options: vec![PendingOption {
+                n: 1,
+                label: "A".into(),
+                selected: true,
+                checked: false,
+            }],
+            multi: false,
+        };
+        let json = serde_json::to_string(&single).expect("serialize");
+        assert!(
+            !json.contains("multi") && !json.contains("checked"),
+            "{json}"
+        );
+        let old =
+            r#"{"kind":"input","question":null,"options":[{"n":1,"label":"A","selected":true}]}"#;
+        let back: PendingInput = serde_json::from_str(old).expect("old row");
+        assert!(!back.multi && !back.options[0].checked);
     }
 
     #[test]
@@ -1422,8 +1659,10 @@ mod tests {
                     n,
                     label: long_label.clone(),
                     selected: false,
+                    checked: false,
                 })
                 .collect(),
+            multi: false,
         };
         let p = dialog.pending_input();
         assert_eq!(p.question.as_deref().map(|q| q.chars().count()), Some(300));
@@ -1452,7 +1691,8 @@ Do you want to make this edit to src/main.rs?
             PendingOption {
                 n: 1,
                 label: "Yes".into(),
-                selected: true
+                selected: true,
+                checked: false,
             }
         );
         assert_eq!(p.options[2].n, 3);
@@ -1512,12 +1752,14 @@ Some unrelated prose line
                 PendingOption {
                     n: 1,
                     label: "Yes".into(),
-                    selected: true
+                    selected: true,
+                    checked: false,
                 },
                 PendingOption {
                     n: 2,
                     label: "No, and tell Claude what to do differently".into(),
-                    selected: false
+                    selected: false,
+                    checked: false,
                 },
             ]
         );
