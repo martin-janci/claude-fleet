@@ -115,9 +115,9 @@ pub use nl_census::{
     NL_CENSUS_MIN_SCHEMA,
 };
 pub use orchestration::{
-    check_policy, mission_transition_allowed, MissionEventRow, MissionPatch, MissionPolicy,
-    MissionRepoRow, MissionRow, NewMission, NewMissionEvent, MISSION_FINAL_STATES,
-    MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES,
+    check_policy, mission_item_cap, mission_transition_allowed, mode_runs_loop, MissionEventRow,
+    MissionPatch, MissionPolicy, MissionRepoRow, MissionRow, NewMission, NewMissionEvent,
+    MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES, PLAN_MISSION_ITEM_CAP,
 };
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,

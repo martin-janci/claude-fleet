@@ -17,6 +17,7 @@
   import { bucketState, rank } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { attentionFacts, blockedLine } from './attention_facts';
+  import { slideIn, wash } from './motion_catalog';
   import { accountByUuid, accountLabel } from './accounts';
   import { pushError } from './toasts';
   import { rowPrompt, shortAge, timeAgo } from './session_status';
@@ -39,6 +40,7 @@
     setWorkProjectTrust,
     unlinkSessionWork,
     workWhy,
+    JEV_RULE,
     crossOrgOf,
     crossOrgSentence,
     type WorkLink,
@@ -607,6 +609,8 @@
   onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onRowKey(e)}
   oncontextmenu={onRowContextMenu}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
+  use:slideIn={sess.id}
+  use:wash={bucketState(triage.bucket)}
 >
   {#if selectMode && !readOnly}
     <!-- a11y smell, known: an <input> nested in a role="button" row. The
@@ -729,6 +733,7 @@
             <WorkChip
               workKey={suggestionKey}
               suggested
+              proposed={$uiLayout === 'new' && suggestion.rule === JEV_RULE}
               testid="work-suggestion"
               onclick={(e) => (workBlocked === null ? openWorkMenu(e) : e.stopPropagation())}
             />

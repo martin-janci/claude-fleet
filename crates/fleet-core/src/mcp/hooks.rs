@@ -237,6 +237,12 @@ pub async fn handle_hook(
             if event != "UserPromptSubmit" {
                 return StatusCode::NO_CONTENT.into_response();
             }
+            // J1 (redesign 6.8): which work item this session is on, asked of
+            // the decision model off this path, and only when its gate is open.
+            if let Some(id) = crate::service::hooks::work_link_subject(&state.store, &payload, &ctx)
+            {
+                crate::service::decide::work_link::spawn_ask(&state.store, id);
+            }
             // Mail, then the classification nudge (work graph M4.6) when it
             // fires and fits: see `prompt_submit_context`.
             match crate::service::hooks::prompt_submit_context(&state.store, &payload, &ctx) {

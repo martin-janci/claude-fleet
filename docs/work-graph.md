@@ -410,7 +410,7 @@ Fleet watches for work in:
 One recogniser (`service/work/recognize.rs`, mirrored in
 `src/lib/work_keys.ts` over a shared fixture) finds keys; with a tracker
 connected, a key must carry one of its prefixes, so `GPT-4` or `COVID-19`
-are never keys. One resolver (`service/work/resolve.rs`, rules R1–R11)
+are never keys. One resolver (`service/work/resolve.rs`, rules R1–R12)
 decides what each sighting becomes:
 
 - a **confirmed automatic link**, only for strong, unambiguous signals, for
@@ -446,7 +446,7 @@ suggestions, each with its **evidence**: one line per signal, for example
 - pull request closes ABC-123 · R4
 - Claude named ABC-7 when asked at 11:40 · R11
 
-The rule tag (R1…R11) says which resolver rule decided it. With
+The rule tag (R1…R12) says which resolver rule decided it. With
 `work.evidence_snippets` on (the default), hovering an evidence line shows
 a redacted ±40-character snippet of the prompt around the match; off, only
 the matched text is kept. The popover's buttons are **Confirm** (↵ / `y`),
@@ -476,6 +476,16 @@ gets one short note (at most 400 characters) asking Claude to name its
 work. Claude's answer (`source: agent_inferred`) is only ever a
 pre-selected suggestion (rule R11) that you confirm or reject. It spends
 context on a guess, which is why it is off.
+
+### Jev's proposal (off by default)
+
+With `decide.jev.work_link` on `assist`, the same unlinked conversation can
+get a suggestion from the decision model instead, without touching the
+conversation: Jev reads the first prompt (keys, links and the branch
+removed) and picks one of the same candidates or none. Its answer is a
+pre-selected suggestion (rule R12, source `jev`), marked ✦ and "Proposed by
+Jev" on the row and in Review, that you confirm or reject. See
+[decisions](decisions.md#work_link--the-work-item-of-a-session-no-rule-could-link-j1).
 
 ### SessionStart context (off by default)
 
