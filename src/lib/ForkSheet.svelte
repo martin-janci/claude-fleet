@@ -16,10 +16,11 @@
   // so uncommitted changes stay with this session, and the note says so.
   // A hub older than this build answers E_UNSUPPORTED for it; that is shown
   // as "update the hub", with Same worktree still one click away.
-  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
-  import Modal from './Modal.svelte';
-  import { rewindConversation } from './sessions';
+  import DialogSheet from './DialogSheet.svelte';
+  import { rewindConversation, sessions } from './sessions';
+  import { moveSession } from './moveSession';
+  import { hosts } from './hosts';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionIdBlocked } from './share';
@@ -39,13 +40,29 @@
     onclose: () => void;
   } = $props();
 
+  const source = $derived($sessions.find((s) => s.id === sessionId) ?? null);
+  const sourceName = $derived(source ? (source.friendly_name ?? source.tmux_name) : 'this session');
+
   let choice = $state<'new' | 'same'>('new');
   // Prefill only — a live-changing suggestion while the sheet is open would
   // stomp on whatever the user typed, so this is deliberately a one-time
   // snapshot, not a binding to the prop.
   let worktreeName = $state(untrack(() => suggestedName));
+  /** `null` = the source's own host. Another host forks here, then moves the
+   *  fork there (step 5.10: "Fork with a host choice"). */
+  let targetHost = $state<string | null>(null);
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let notice = $state<string | null>(null);
+
+  /** Hosts the fork can move to: visible, reachable, not the source's. */
+  const otherHosts = $derived(
+    $hosts
+      .filter((h) => !h.hidden && h.reachable && h.alias !== source?.host_alias)
+      .map((h) => h.alias)
+      .sort(),
+  );
+  const moving = $derived(targetHost !== null);
 
   const slug = $derived(finalizeBranchSlug(worktreeName));
   const nameProblem = $derived.by(() => {
@@ -75,34 +92,80 @@
    * confirmation — there is no second one — so a reason arriving while it is
    * open has to reach Fork itself, and `fork()` re-reads it rather than
    * trusting the disabled attribute.
+   *
+   * Forking to another host also moves the fork, so `move_session`'s own
+   * pair is asked too, on the source row (the fork inherits its owner).
    */
   const blocked = $derived(
     hubActionBlocked('rewind_conversation', $hubStatus, $hubConnection) ??
-      $sessionIdBlocked(sessionId, 'rewind_conversation'),
+      $sessionIdBlocked(sessionId, 'rewind_conversation') ??
+      (moving
+        ? (hubActionBlocked('move_session', $hubStatus, $hubConnection) ??
+          $sessionIdBlocked(sessionId, 'move_session'))
+        : null),
   );
-  const canSubmit = $derived(!busy && !blocked && nameProblem === null);
+  const canSubmit = $derived(!busy && !blocked && nameProblem === null && !notice);
+
+  function pickHost(v: string) {
+    targetHost = v === '' ? null : v;
+    // Same worktree means this host's checkout: another host needs its own.
+    if (targetHost !== null) choice = 'new';
+  }
 
   async function fork() {
     if (!canSubmit) return;
     busy = true;
     error = null;
     const r = await rewindConversation(sessionId, 'fork', anchor, choice === 'new' ? slug : null);
-    busy = false;
     if (!r.ok) {
+      busy = false;
       error = r.error.code === 'E_UNSUPPORTED' && choice === 'new' ? NEW_WORKTREE_OLD_HUB : r.error.message;
+      return;
+    }
+    if (targetHost === null) {
+      busy = false;
+      onclose();
+      return;
+    }
+    // The fork exists; now carry it over. A failed move leaves a working
+    // fork on this host, and says so rather than hiding it behind an error.
+    const m = await moveSession(r.value.id, targetHost, { when: 'idle' });
+    busy = false;
+    if (!m.ok) {
+      error = `Forked on ${r.value.host_alias}, but the move to ${targetHost} failed: ${m.error.message}`;
+      notice = 'forked';
+      return;
+    }
+    if (m.value.kind === 'waiting') {
+      notice = `Forked. It moves to ${targetHost} as soon as it is idle.`;
       return;
     }
     onclose();
   }
 </script>
 
-<Modal title="Fork this reply" onclose={busy ? undefined : onclose} width="440px" testid="fork-sheet">
-  <p class="hint">
-    Starts a new session on this reply's history. This session is left running, unchanged.
-  </p>
+<DialogSheet
+  title={`Fork "${sourceName}"`}
+  lead="Copies the conversation up to a turn into a new session. The original never changes."
+  verb={notice ? 'Done' : 'Fork'}
+  busyVerb={moving ? 'Forking and moving…' : 'Forking…'}
+  {busy}
+  canConfirm={canSubmit || notice !== null}
+  onconfirm={() => (notice ? onclose() : void fork())}
+  {onclose}
+  error={error ?? blocked}
+  errorTestid="fork-error"
+  confirmTestid="fork-confirm"
+  width="460px"
+  testid="fork-sheet"
+>
+  <div class="field">
+    <span class="field-label">From turn</span>
+    <span data-testid="fork-from">{anchor === null ? 'The latest turn' : 'This reply'}</span>
+  </div>
 
-  <fieldset class="choices">
-    <legend class="sr-only">Worktree for the new session</legend>
+  <fieldset class="field choices">
+    <legend class="field-label">Into</legend>
 
     <label class="choice">
       <input
@@ -113,12 +176,13 @@
         disabled={busy}
         onchange={() => (choice = 'new')}
       />
-      <span class="choice-label">New worktree <span class="recommended">(recommended)</span></span>
+      <span class="choice-label">New worktree <span class="recommended">· fresh branch at HEAD</span></span>
     </label>
     <div class="new-worktree-fields">
-      <label for="fork-worktree-name">worktree and branch name</label>
+      <label for="fork-worktree-name" class="field-label">worktree and branch name</label>
       <input
         id="fork-worktree-name"
+        type="text"
         data-testid="fork-worktree-name"
         value={worktreeName}
         oninput={(e) => (worktreeName = (e.target as HTMLInputElement).value)}
@@ -127,7 +191,7 @@
       {#if nameProblem}
         <p class="problem" data-testid="fork-name-problem">{nameProblem}</p>
       {/if}
-      <p class="note" data-testid="fork-new-note">
+      <p class="field-note" data-testid="fork-new-note">
         Branches off this session's last commit. Uncommitted changes stay here — commit them first to take
         them along.
       </p>
@@ -139,7 +203,7 @@
         name="fork-worktree"
         data-testid="fork-same-worktree"
         checked={choice === 'same'}
-        disabled={busy}
+        disabled={busy || moving}
         onchange={() => (choice = 'same')}
       />
       <span class="choice-label" data-testid="fork-same-warning"
@@ -148,44 +212,43 @@
     </label>
   </fieldset>
 
-  {#if error}<p class="err" data-testid="fork-error">{error}</p>{:else if blocked}<p class="err">{blocked}</p>{/if}
+  <label class="field">
+    <span class="field-label">Host · agent</span>
+    <span class="row">
+      <select
+        data-testid="fork-host"
+        value={targetHost ?? ''}
+        disabled={busy}
+        onchange={(e) => pickHost((e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="">{source?.host_alias ?? 'this host'} (this session's)</option>
+        {#each otherHosts as h (h)}<option value={h}>{h}</option>{/each}
+      </select>
+      <span class="field-note">Claude Code</span>
+    </span>
+    {#if moving}
+      <p class="field-note" data-testid="fork-move-note">
+        Forks here, then moves the new session and its worktree to {targetHost}.
+      </p>
+    {/if}
+  </label>
 
-  <div class="actions">
-    <button type="button" onclick={onclose} disabled={busy}>Cancel</button>
-    <button
-      type="button"
-      class="primary"
-      data-testid="fork-confirm"
-      disabled={!canSubmit}
-      onclick={() => void fork()}>{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Forking…' : 'Fork'}</button
-    >
-  </div>
-</Modal>
+  {#if notice && notice !== 'forked'}
+    <p class="notice" data-testid="fork-notice">{notice}</p>
+  {/if}
+</DialogSheet>
 
 <style>
-  .hint {
-    margin: 0 0 0.6rem;
-    font-size: 0.85em;
-    color: var(--fg-muted);
-  }
   .choices {
     border: none;
     padding: 0;
-    margin: 0 0 0.6rem;
-  }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
+    margin: 0;
   }
   .choice {
     display: flex;
     align-items: flex-start;
-    gap: 0.4rem;
-    padding: 0.3rem 0;
+    gap: var(--space-2, 8px);
+    padding: var(--space-1, 4px) 0;
     cursor: pointer;
   }
   .choice-label {
@@ -193,51 +256,26 @@
   }
   .recommended {
     color: var(--fg-muted);
-    font-size: 0.85em;
+    font-size: var(--text-xs, 11.5px);
   }
   .new-worktree-fields {
-    margin: 0 0 0.3rem 1.5rem;
+    margin: 0 0 var(--space-1, 4px) 1.5rem;
     display: flex;
     flex-direction: column;
-    gap: 0.2rem;
+    gap: var(--space-1, 4px);
   }
-  .new-worktree-fields label {
-    font-size: 0.8em;
-    color: var(--fg-muted);
-  }
-  .note {
-    margin: 0.2rem 0 0;
-    font-size: 0.8em;
-    color: var(--fg-muted);
+  .row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 8px);
   }
   .problem {
-    margin: 0.2rem 0 0;
-    font-size: 0.8em;
+    margin: 0;
+    font-size: var(--text-xs, 11.5px);
     color: var(--danger);
   }
-  .err {
-    color: var(--danger);
-  }
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    margin-top: 0.8rem;
-  }
-  .actions button {
-    font-size: 0.85rem;
-    padding: 0.3rem 0.8rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .actions button.primary {
-    border-color: var(--accent);
-  }
-  .actions button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
+  .notice {
+    margin: 0;
+    font-size: var(--text-sm, 12.5px);
   }
 </style>

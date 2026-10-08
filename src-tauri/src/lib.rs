@@ -120,6 +120,9 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 fleet_core::rt::install(tokio::runtime::Handle::current());
             });
+            // The tray and menu-bar icon (redesign 3.17), idle until the
+            // frontend says otherwise.
+            commands::tray::install(app);
             let handle = app.handle().clone();
             // Built concretely and then coerced, rather than built as the
             // trait object: the hub event bridge needs the concrete type. Both
@@ -374,6 +377,7 @@ pub fn run() {
             commands::health::health_check,
             commands::diagnostics::collect_diagnostics,
             commands::diagnostics::open_log_folder,
+            commands::tray::set_tray_state,
             commands::projects::list_projects,
             commands::projects::refresh_projects,
             commands::projects::add_project,
@@ -530,6 +534,9 @@ pub fn run() {
             commands::sessions::rewind_conversation,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
+            commands::sessions::queue_prompt,
+            commands::sessions::queued_prompts,
+            commands::sessions::cancel_queued_prompt,
             commands::sessions::recreate_session,
             commands::sessions::restore_host_sessions,
             commands::sessions::discover_lost_sessions,
@@ -587,6 +594,8 @@ pub fn run() {
             commands::files::repo_file,
             commands::files::repo_diff,
             commands::files::repo_blame,
+            commands::files::repo_branch_diff,
+            commands::files::repo_range_diff,
             commands::upload::upload_to_session,
             commands::upload::pick_attachments,
             commands::upload::attachment_preview,
@@ -613,6 +622,10 @@ pub fn run() {
             commands::hosts::add_host,
             commands::hosts::probe_host,
             commands::hosts::check_host,
+            commands::hosts::list_host_setups,
+            commands::hosts::save_host_setup,
+            commands::hosts::discard_host_setup,
+            commands::hosts::run_host_setup_check,
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
             commands::hosts::merge_host,

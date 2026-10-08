@@ -3,6 +3,7 @@
 // FilesPanel holds its own component-local state and caches results.
 
 import { invokeCmd, type Result } from './result';
+import type { Commit } from './history';
 
 /** One entry from `git status` for a session's worktree. */
 export interface ChangedFile {
@@ -60,6 +61,31 @@ export interface FileBlame {
   truncated: boolean;
 }
 
+/** Which committed range a Changed-section diff covers (redesign step 5.6):
+ *  the branch's commits no remote has, or the branch against its base. */
+export type DiffRange = 'unpushed' | 'base';
+
+/** What the session's branch carries beyond the worktree: commits not
+ *  pushed yet, and what it changes against the base branch. */
+export interface BranchDiff {
+  /** The checked-out branch; null when HEAD is detached. */
+  branch: string | null;
+  /** Its upstream (`origin/feat`); null when it was never pushed. */
+  upstream: string | null;
+  /** Commits no remote has, newest first. */
+  unpushed: Commit[];
+  /** The files those commits change, as one diff. */
+  unpushedFiles: ChangedFile[];
+  /** More unpushed commits than the backend lists. */
+  truncated: boolean;
+  /** The base branch (`origin/main`), or null without one. */
+  base: string | null;
+  /** Commits on the branch since it left the base. */
+  aheadOfBase: number;
+  /** The files the branch changes against its merge base with the base. */
+  baseFiles: ChangedFile[];
+}
+
 export function repoChanges(sessionId: number): Promise<Result<ChangedFile[]>> {
   return invokeCmd<ChangedFile[]>('repo_changes', { args: { session_id: sessionId } });
 }
@@ -78,6 +104,14 @@ export function repoDiff(sessionId: number, path: string): Promise<Result<FileDi
 
 export function repoBlame(sessionId: number, path: string): Promise<Result<FileBlame>> {
   return invokeCmd<FileBlame>('repo_blame', { args: { session_id: sessionId, path } });
+}
+
+export function repoBranchDiff(sessionId: number): Promise<Result<BranchDiff>> {
+  return invokeCmd<BranchDiff>('repo_branch_diff', { args: { session_id: sessionId } });
+}
+
+export function repoRangeDiff(sessionId: number, path: string, range: DiffRange): Promise<Result<FileDiff>> {
+  return invokeCmd<FileDiff>('repo_range_diff', { args: { session_id: sessionId, path, range } });
 }
 
 /** Blame needs the file in a commit: an untracked file has no history. */
@@ -118,4 +152,43 @@ export function hasDiff(status: string | undefined): boolean {
  */
 export function isWorktreeGone(r: Result<unknown>): boolean {
   return !r.ok && r.error.code === 'E_NO_WORKTREE';
+}
+
+/**
+ * Go to file (redesign step 5.6, ⌥⌘P): the worktree paths matching `query`,
+ * best first. Every query character must appear in order (a subsequence,
+ * case-insensitive); a match inside the file name beats one spread over the
+ * folders, a run of consecutive characters beats scattered ones, and a
+ * shorter path wins a tie. An empty query lists the first `limit` paths.
+ */
+export function goToFileMatches(entries: readonly string[], query: string, limit = 50): string[] {
+  const q = query.trim().toLowerCase().replace(/\s+/g, '');
+  if (q === '') return entries.slice(0, limit);
+  const scored: { path: string; score: number }[] = [];
+  for (const path of entries) {
+    const s = subsequenceScore(path, q);
+    if (s !== null) scored.push({ path, score: s });
+  }
+  scored.sort((a, b) => b.score - a.score || a.path.length - b.path.length || a.path.localeCompare(b.path));
+  return scored.slice(0, limit).map((m) => m.path);
+}
+
+function subsequenceScore(path: string, q: string): number | null {
+  const lc = path.toLowerCase();
+  const base = lc.lastIndexOf('/') + 1;
+  // The whole query inside the file name is the strongest signal.
+  const inName = lc.indexOf(q, base);
+  if (inName >= 0) return 1000 - (inName - base) * 2 - (lc.length - base);
+  let score = 0;
+  let at = -1;
+  let prev = -2;
+  for (const ch of q) {
+    at = lc.indexOf(ch, at + 1);
+    if (at < 0) return null;
+    score += at === prev + 1 ? 5 : 1;
+    if (at >= base) score += 2;
+    if (at === 0 || '/._-'.includes(lc[at - 1])) score += 3;
+    prev = at;
+  }
+  return score;
 }

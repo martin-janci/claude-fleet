@@ -268,7 +268,7 @@ impl Store {
             "UPDATE hosts SET disk_home_free_kb = ?1, disk_home_total_kb = ?2, \
              disk_tmp_free_kb = ?3, load_1m = ?4, mem_avail_kb = ?5, uptime_secs = ?6, \
              health_at = ?7, auth_overrides = ?8, cpu_count = ?9, mem_total_kb = ?10, \
-             boot_at = ?11, latency_ms = ?12 WHERE alias = ?13",
+             boot_at = ?11, latency_ms = ?12, agents_on_path = ?14 WHERE alias = ?13",
             rusqlite::params![
                 h.disk_home_free_kb,
                 h.disk_home_total_kb,
@@ -284,7 +284,10 @@ impl Store {
                 h.mem_total_kb,
                 h.boot_at,
                 h.latency_ms,
-                alias
+                alias,
+                h.agents_on_path
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into())),
             ],
         )?;
         Ok(())
@@ -1194,6 +1197,7 @@ mod tests {
             boot_at: Some(1_687_558_400),
             latency_ms: Some(18),
             auth_overrides: Some(vec!["CLAUDE_CODE_USE_BEDROCK".into()]),
+            agents_on_path: Some(vec!["claude".into(), "codex".into()]),
         };
         s.set_host_health("h", &sample, 1_700_000_000).unwrap();
         let row = s.get_host_row("h").unwrap().unwrap();
@@ -1203,6 +1207,9 @@ mod tests {
         assert_eq!(row.latency_ms, Some(18));
         let ping = crate::store::HostHealth::of(&row);
         assert_eq!((ping.cpu_count, ping.latency_ms), (Some(16), Some(18)));
+        let agents = Some(vec!["claude".to_string(), "codex".to_string()]);
+        assert_eq!(row.agents_on_path, agents);
+        assert_eq!(ping.agents_on_path, agents, "the ping carries it");
         assert_eq!(row.disk_home_free_kb, Some(3_600_000));
         assert_eq!(row.disk_home_total_kb, Some(150_000_000));
         assert_eq!(row.disk_tmp_free_kb, Some(5_900_000));
@@ -1221,6 +1228,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.get_host_row("h").unwrap().unwrap().auth_overrides, None);
+        assert_eq!(s.get_host_row("h").unwrap().unwrap().agents_on_path, None);
         assert_eq!(row.health_at, Some(1_700_000_000));
         s.set_host_last_hook_at("h", 1_700_000_100).unwrap();
         s.set_host_agent_version("h", "0.2.26").unwrap();

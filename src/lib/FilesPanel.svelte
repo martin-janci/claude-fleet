@@ -5,13 +5,16 @@
   import {
     repoChanges,
     repoTree,
+    repoBranchDiff,
     isWorktreeGone,
+    type BranchDiff,
     type ChangedFile,
+    type DiffRange,
     type RepoTree,
   } from './files';
   import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoDeleteMergedBranches, repoStage, repoUnstage, repoCommitCreate, type Commit, type CommitDetail, type Branch } from './history';
   import type { Result } from './result';
-  import { readPref, writePref } from './prefs';
+  import { readPref, writePref, uiLayout } from './prefs';
   import { openPathRequest } from './app_views';
   import FileList from './FileList.svelte';
   import FileViewer from './FileViewer.svelte';
@@ -19,6 +22,10 @@
   import CommitGraph from './CommitGraph.svelte';
   import BranchList from './BranchList.svelte';
   import RemoteToolbar from './RemoteToolbar.svelte';
+  import BranchPushBar from './BranchPushBar.svelte';
+  import GoToFile from './GoToFile.svelte';
+  import { matchShortcut } from './shortcuts';
+  import { detectMac } from './terminal_keys';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import PromptDialog from './PromptDialog.svelte';
   import { validateBranchName } from './branch-slug';
@@ -45,6 +52,12 @@
   // When set, the body shows a calm placeholder instead of raw git errors.
   let worktreeGone = $state(false);
   let selectedPath = $state<string | null>(null);
+  // The new layout's committed groups under Changed (redesign step 5.6) and
+  // the group the selected row came from; null for a worktree row. A hub
+  // or build without `repo_branch_diff` leaves `branch` null: the classic
+  // flat list, nothing lost.
+  let branch = $state<BranchDiff | null>(null);
+  let selectedRange = $state<DiffRange | null>(null);
   // Line to show for a path opened from the Conversation tab; cleared as
   // soon as the user picks another file.
   let focusLine = $state<number | null>(null);
@@ -70,9 +83,12 @@
     return () => clearTimeout(saveTimer);
   });
 
-  const selectedStatus = $derived(
-    selectedPath ? changes.find((c) => c.path === selectedPath)?.status : undefined,
-  );
+  const selectedStatus = $derived.by(() => {
+    if (!selectedPath) return undefined;
+    const files =
+      selectedRange === 'unpushed' ? branch?.unpushedFiles : selectedRange === 'base' ? branch?.baseFiles : changes;
+    return files?.find((c) => c.path === selectedPath)?.status;
+  });
 
   // Reload from scratch whenever the selected session changes. The panel is
   // remounted on each entry into files mode, so this also covers first load.
@@ -86,6 +102,8 @@
     tree = null;
     treeLoaded = false;
     selectedPath = null;
+    selectedRange = null;
+    branch = null;
     focusLine = null;
     commits = [];
     historyLoaded = false;
@@ -106,6 +124,7 @@
       mode = 'tree';
       if (!treeLoaded) void loadTree();
       selectedPath = req.path;
+      selectedRange = null;
       focusLine = req.line;
     });
   });
@@ -138,6 +157,16 @@
     loading = false;
     if (r.ok) changes = r.value;
     else applyFailure(r);
+    if (r.ok && $uiLayout === 'new') void loadBranch(sid);
+  }
+
+  async function loadBranch(sid: number): Promise<void> {
+    const r = await repoBranchDiff(sid);
+    if (sid !== session.id) return;
+    // A failure only hides the groups: the worktree list above already
+    // says what is wrong with the repo, and an older hub has no such tool.
+    branch = r.ok ? r.value : null;
+    if (selectedRange && !branch) selectedRange = null;
   }
 
   async function loadTree(): Promise<void> {
@@ -178,11 +207,11 @@
     const sid = session.id;
     const r = await repoCommit(sid, hash);
     if (sid !== session.id) return;
-    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; focusLine = null; }
+    if (r.ok) { openCommit = r.value; selectedPath = r.value.files[0]?.path ?? null; selectedRange = null; focusLine = null; }
     else applyFailure(r);
   }
 
-  function backToGraph(): void { openCommit = null; selectedPath = null; focusLine = null; }
+  function backToGraph(): void { openCommit = null; selectedPath = null; selectedRange = null; focusLine = null; }
 
   async function loadBranches(): Promise<void> {
     const sid = session.id;
@@ -300,6 +329,7 @@
   function onMode(m: typeof mode): void {
     mode = m;
     focusLine = null;
+    selectedRange = null;
     error = null;
     worktreeGone = false;
     openCommit = null;
@@ -319,6 +349,33 @@
 
   function onSelect(path: string): void {
     selectedPath = path;
+    selectedRange = null;
+    focusLine = null;
+  }
+
+  function onSelectRange(path: string, range: DiffRange): void {
+    selectedPath = path;
+    selectedRange = range;
+    focusLine = null;
+  }
+
+  // Go to file (⌥⌘P / Ctrl+Alt+P): the panel only exists on the Files tab,
+  // so the chord does nothing anywhere else. The picker opens at once and
+  // fills when the tree arrives.
+  const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
+  let goToOpen = $state(false);
+  function onWindowKeydown(e: KeyboardEvent): void {
+    if (goToOpen || e.defaultPrevented || worktreeGone) return;
+    if (matchShortcut('global', e, isMac) !== 'go-to-file') return;
+    e.preventDefault();
+    if (!treeLoaded) void loadTree();
+    goToOpen = true;
+  }
+  function goToFile(path: string): void {
+    goToOpen = false;
+    if (mode !== 'tree') onMode('tree');
+    selectedPath = path;
+    selectedRange = null;
     focusLine = null;
   }
 
@@ -326,6 +383,8 @@
     listPx = Math.max(160, Math.min(560, listPx + delta));
   }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="panel-wrap">
   <!-- Shared mode toggle header, always visible -->
@@ -414,16 +473,46 @@
             {onSelect}
           />
         {:else}
-          <FileList {mode} {changes} {tree} {loading} {error} {selectedPath} {onSelect} enableStaging={true} onStageToggle={stageToggle} onCommit={commitStaged} {writeBlocked} />
+          <FileList
+            {mode}
+            {changes}
+            {tree}
+            {loading}
+            {error}
+            {selectedPath}
+            {onSelect}
+            enableStaging={true}
+            onStageToggle={stageToggle}
+            onCommit={commitStaged}
+            {writeBlocked}
+            branch={mode === 'changes' && $uiLayout === 'new' ? branch : null}
+            {selectedRange}
+            {onSelectRange}
+          />
+          {#if mode === 'changes' && branch && $uiLayout === 'new'}
+            <BranchPushBar {session} {branch} ondone={onRefresh} {writeBlocked} />
+          {/if}
         {/if}
       </div>
       <Resizer id="files-list" onresize={onResize} />
       <div class="viewer-col">
-        <FileViewer {session} path={selectedPath} status={selectedStatus} {reloadKey} commit={openCommit?.hash ?? null} {focusLine} />
+        <FileViewer
+          {session}
+          path={selectedPath}
+          status={selectedStatus}
+          {reloadKey}
+          commit={openCommit?.hash ?? null}
+          range={openCommit ? null : selectedRange}
+          {focusLine}
+        />
       </div>
     </div>
   {/if}
 </div>
+
+{#if goToOpen}
+  <GoToFile entries={tree?.entries ?? []} loading={tree === null} onpick={goToFile} onclose={() => (goToOpen = false)} />
+{/if}
 
 {#if dialog?.kind === 'checkout-branch'}
   {@const name = dialog.name}

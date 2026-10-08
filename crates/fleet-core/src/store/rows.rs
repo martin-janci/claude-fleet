@@ -401,6 +401,10 @@ pub struct SessionRow {
 /// agent adapters land (redesign step 12.1), the only agent fleet launches.
 pub const AGENT_CLAUDE: &str = "claude";
 
+/// `sessions.agent` (migration 121): Google's Antigravity CLI (`agy`),
+/// launched through `agent_adapter::Agy` (redesign step 12.3).
+pub const AGENT_AGY: &str = "agy";
+
 /// `sessions.agent` (migration 121): no agent, a plain login shell
 /// (`kind = 'shell'`).
 pub const AGENT_SHELL: &str = "shell";
@@ -408,7 +412,7 @@ pub const AGENT_SHELL: &str = "shell";
 /// Every value migration 121's `CHECK` admits. `codex` and `agy` are
 /// reserved for the adapters: a row may carry them, `new_session` refuses
 /// them until fleet can launch them.
-pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, "codex", "agy", AGENT_SHELL];
+pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, "codex", AGENT_AGY, AGENT_SHELL];
 
 /// [`SessionRow::agent`] when a frame carries no `agent` key: a hub built
 /// before migration 121, whose sessions all run Claude Code.
@@ -1241,6 +1245,11 @@ pub struct HostRow {
     pub worktree_kb: Option<i64>,
     #[serde(default)]
     pub worktree_at: Option<i64>,
+    /// Which agent CLIs the host has on its `PATH` (Orbit Fleet 12.4,
+    /// migration 134). `None`: never sampled, or the host could not tell.
+    /// Per-field default: an older hub omits it.
+    #[serde(default)]
+    pub agents_on_path: Option<Vec<String>>,
 }
 
 /// One login profile on a host, as `hosts.claude_profiles` stores it.
@@ -1283,6 +1292,10 @@ pub struct HostHealth {
     pub latency_ms: Option<i64>,
     #[serde(default)]
     pub worktree_kb: Option<i64>,
+    /// Migration 134 (Orbit Fleet 12.4). Per-field default: an older hub's
+    /// ping omits it.
+    #[serde(default)]
+    pub agents_on_path: Option<Vec<String>>,
 }
 
 impl HostHealth {
@@ -1301,6 +1314,7 @@ impl HostHealth {
             boot_at: row.boot_at,
             latency_ms: row.latency_ms,
             worktree_kb: row.worktree_kb,
+            agents_on_path: row.agents_on_path.clone(),
         }
     }
 }
@@ -1329,7 +1343,7 @@ pub(super) const HOST_COLUMNS: &str =
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
      harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
-     boot_at, latency_ms, worktree_kb, worktree_at";
+     boot_at, latency_ms, worktree_kb, worktree_at, agents_on_path";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1389,6 +1403,10 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         latency_ms: row.get(30)?,
         worktree_kb: row.get(31)?,
         worktree_at: row.get(32)?,
+        // Migration 134 (Orbit Fleet 12.4). Same lenient read.
+        agents_on_path: row
+            .get::<_, Option<String>>(33)?
+            .and_then(|t| serde_json::from_str::<Vec<String>>(&t).ok()),
     })
 }
 

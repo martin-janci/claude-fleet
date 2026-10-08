@@ -40,6 +40,9 @@ pub mod host_placement;
 #[cfg(test)]
 mod host_placement_tests;
 pub mod jev;
+pub mod quick_answer;
+#[cfg(test)]
+mod quick_answer_tests;
 pub mod sibling_repos;
 #[cfg(test)]
 mod sibling_repos_tests;
@@ -94,15 +97,18 @@ pub enum Feature {
     /// Pre-selecting the host of a project's new session when no rule or
     /// number decides (N5, redesign step 4.11).
     HostPlacement,
+    /// The likely option first in an agent's question or a form (J5).
+    QuickAnswer,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 5] = [
+    pub const ALL: [Feature; 6] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
         Feature::SiblingRepos,
         Feature::HostPlacement,
+        Feature::QuickAnswer,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -112,6 +118,7 @@ impl Feature {
             Feature::StartProject => "start_project",
             Feature::SiblingRepos => "sibling_repos",
             Feature::HostPlacement => "host_placement",
+            Feature::QuickAnswer => "quick_answer",
         }
     }
 
@@ -127,6 +134,7 @@ impl Feature {
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
             Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
             Feature::HostPlacement => settings::DECIDE_JEV_HOST_PLACEMENT,
+            Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
         }
     }
 }

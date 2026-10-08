@@ -3,7 +3,7 @@
 // through App.svelte.
 import { derived, get, writable, type Readable, type Writable } from 'svelte/store';
 import { invokeCmd } from './result';
-import { restartSession, sessions, type SessionRow } from './sessions';
+import { killSession, restartSession, sessions, type SessionRow } from './sessions';
 import { sessionActionBlocked } from './share';
 import { pushError } from './toasts';
 
@@ -93,46 +93,54 @@ export const operatorRow: Readable<SessionRow | null> = derived(
 );
 
 /**
- * PURE: what the panel says for a blocked state, and whether there is a
- * button under it.
- *
- * Only `absent` and `lost` get a button. The brief's other two candidates
- * were dropped:
- *  - `no_mcp`'s "Enable the control API" would call `mcp_configure`, a
- *    LocalOnly command — nothing behind this button may be LocalOnly, so a
- *    phone client can reuse it. (It also cannot occur in hub mode, where the
- *    control API is always on.) The fix lives in Settings instead.
- *  - `token_revoked`'s "Mint a new token" would call `ensure_operator`,
- *    which returns early when the session is alive — and for a revoked
- *    token the session IS alive, so the button would do nothing. The honest
- *    recovery is killing that session from the sidebar and pressing the
- *    open-agent button again, which the title says outright.
+ * The next step a blocked state's button takes (redesign step 9.1, the
+ * AgentStates board: "the redesign gives each one a next step").
+ *  - `wake` / `move`: `openAgent` (wakes it, or starts it on the fallback).
+ *  - `restart`: `restartOperator`, the `lost` recovery.
+ *  - `control_api`: Settings › Control API, where the control API is turned
+ *    on. Not `mcp_configure` itself: that command is LocalOnly, and nothing
+ *    behind this button may be (a phone client reuses it).
+ *  - `replace`: `replaceOperator`, which kills the agent's session (after a
+ *    confirm: kills are always confirmed) and starts a new one with a fresh
+ *    token. `ensure_operator` alone returns early while the session lives,
+ *    which for a revoked token it does.
+ *  - `add_host` / `open_host`: the Hosts view, to add a host or see why the
+ *    agent's host stopped answering.
+ */
+export type OperatorNextStep = 'wake' | 'restart' | 'move' | 'control_api' | 'replace' | 'add_host' | 'open_host';
+
+/**
+ * PURE: what the panel says for a blocked state, and the button under it.
+ * Every state has one (step 9.1); `next` says which function it runs, so
+ * the panel never matches on the copy.
  */
 export function blockedCopy(
   b: OperatorBlocked,
   host = 'local',
   fallback: string | null = null,
-): { title: string; action: string | null } {
+): { title: string; action: string; next: OperatorNextStep } {
   switch (b) {
     case 'absent':
-      return { title: 'The agent is not running.', action: 'Wake the agent' };
+      return { title: 'The agent is not running.', action: 'Wake the agent', next: 'wake' };
     case 'lost':
       return {
         title:
           "The agent's session was lost. It is not brought back silently, because it may have stopped mid-sentence.",
         action: 'Restart the agent',
+        next: 'restart',
       };
     case 'no_mcp':
       return {
-        title:
-          'The control API is off, so the agent would have no tools. Turn it on in Settings → Control API.',
-        action: null,
+        title: 'The control API is off, so the agent would have no tools. Turn it on in Settings › Control API.',
+        action: 'Open Settings › Control API',
+        next: 'control_api',
       };
     case 'token_revoked':
       return {
         title:
-          "The agent's token was revoked, so it can no longer reach the fleet. Kill its session from the sidebar and press the button again to mint a new one.",
-        action: null,
+          "The agent's token was revoked, so it can no longer reach the fleet. Replacing the agent kills its session and starts a new one with a fresh token.",
+        action: 'Replace the agent',
+        next: 'replace',
       };
     case 'no_host':
       // `absent` here would offer "Wake the agent" for a press that cannot
@@ -145,21 +153,25 @@ export function blockedCopy(
           host === 'local'
             ? 'The agent runs on the local host, and this fleet has none (a hub started with hub.local_host=false). Start the hub with --operator-host <alias> to run it on a fleet host.'
             : `The agent is set to run on ${host}, which is not in this fleet, and no other host can run it. Add that host, or point the agent elsewhere with --operator-host <alias>.`,
-        action: null,
+        action: 'Add a host',
+        next: 'add_host',
       };
     case 'host_down':
       // The agent's host stopped answering. With somewhere else to go,
       // `openAgent` moves it there without asking — this copy is what shows
       // if that move failed, and its button tries again. With nowhere, the
-      // copy says what a host needs to qualify (`pick_operator_home`).
+      // copy says what a host needs to qualify (`pick_operator_home`), and
+      // the button opens that host.
       return fallback
         ? {
             title: `${host} is unreachable, so the agent is moving to ${fallback}. Its conversation so far stays on ${host}.`,
             action: `Start the agent on ${fallback}`,
+            next: 'move',
           }
         : {
             title: `The agent's host ${host} is unreachable, and no other host can run it (one needs to be reachable, in no org, with claude installed). It is back when ${host} is.`,
-            action: null,
+            action: `Open ${host}`,
+            next: 'open_host',
           };
   }
 }
@@ -212,6 +224,16 @@ export function openAgent(): Promise<void> {
   // already long past that line: the button did nothing, visibly, until the
   // birth resolved.
   agentPanelOpen.set(true);
+  return ensureAgent();
+}
+
+/**
+ * Make sure there is an agent, without opening the floating sheet: what
+ * Control (redesign step 9.1) runs when it shows, since in the New layout the
+ * agent lives in the right column and not in the sheet. Shares `openAgent`'s
+ * re-entrancy guard, so ⌘E pressed mid-birth joins the birth in flight.
+ */
+export function ensureAgent(): Promise<void> {
   if (opening) return opening;
   const p = openAgentOnce().finally(() => {
     if (opening === p) opening = null;
@@ -301,6 +323,35 @@ export async function restartOperator(): Promise<void> {
     return;
   }
   await refreshOperator();
+}
+
+/**
+ * Replace the agent (the `token_revoked` recovery, redesign step 9.1): kill
+ * its session, then start a new one, which mints a fresh token. The caller
+ * confirms first: a kill is always confirmed. Gated like `restartOperator`,
+ * on the `own` tier of `kill_session`, and every way it stops short says why
+ * in `operatorError`.
+ */
+export async function replaceOperator(): Promise<void> {
+  operatorError.set(null);
+  const session = get(operatorSession);
+  if (!session) {
+    operatorError.set("The agent's session is not known yet. Close the panel and open it again.");
+    return;
+  }
+  const blocked = sessionActionBlocked(session, 'kill_session');
+  if (blocked !== null) {
+    operatorError.set(blocked);
+    return;
+  }
+  const r = await killSession(session.host_alias, session.tmux_name);
+  if (!r.ok) {
+    operatorError.set(`Kill failed: ${r.error.message}`);
+    pushError(r.error, 'Kill failed');
+    return;
+  }
+  operatorSession.set(null);
+  await ensureAgent();
 }
 
 /**

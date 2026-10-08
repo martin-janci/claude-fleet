@@ -42,6 +42,7 @@
   import ProposedBy from './ProposedBy.svelte';
   import { preselect, type ProposalLike } from './ai_proposal';
   import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
+  import { previewStartWork, siblingProposal } from './start_preview';
   import { openNewSessionPicker } from './switcher_request';
 
   let {
@@ -867,8 +868,38 @@
     ticketKey ? siblingCandidates(ticketKey, projectId, ticketPast, $sessions, $projects) : [],
   );
   function toggleAlso(id: number, on: boolean) {
+    alsoTouched = true;
     alsoIn = on ? [...alsoIn.filter((x) => x !== id), id] : alsoIn.filter((x) => x !== id);
   }
+
+  // Redesign 3.12 (N3): in the New layout the start preview may carry Jev's
+  // proposed sibling; it pre-ticks only while the person has not touched
+  // the boxes, and the ProposedBy chip says why. Asked once per ticket,
+  // project and host.
+  let siblingAsk = $state<ProposalLike | null>(null);
+  let alsoTouched = false;
+  $effect(() => {
+    const id = ticket?.id;
+    const host = chosenHost;
+    void projectId;
+    siblingAsk = null;
+    alsoTouched = false;
+    if (untrack(() => $uiLayout) !== 'new' || id == null || !host) return;
+    void previewStartWork({ item_id: id, project_id: projectId, host_alias: host, with_brief: true }).then((r) => {
+      if (ticket?.id !== id || chosenHost !== host || !r.ok) return;
+      siblingAsk = siblingProposal(r.value);
+    });
+  });
+  const proposedSibling = $derived.by(() => {
+    const v = preselect('sibling', siblingAsk);
+    const id = v == null ? null : Number(v);
+    return id != null && siblings.some((c) => c.id === id) ? id : null;
+  });
+  $effect(() => {
+    const id = proposedSibling;
+    if (id == null || untrack(() => alsoTouched || alsoIn.includes(id))) return;
+    alsoIn = [...untrack(() => alsoIn), id];
+  });
   const multiBlocked = $derived(hubActionBlocked('start_work_multi', $hubStatus, $hubConnection));
 
   async function submitMulti(t: TicketRow, host: string, extra: number[]) {
@@ -1206,6 +1237,15 @@
                   />
                   {c.label}
                 </label>
+                {#if c.id === proposedSibling && alsoIn.includes(c.id)}
+                  <ProposedBy
+                    proposal={siblingAsk}
+                    field="sibling"
+                    changeLabel="Untick"
+                    testid="ticket-also-in-proposed"
+                    onchange={() => toggleAlso(c.id, false)}
+                  />
+                {/if}
               {/each}
             </fieldset>
           {/if}

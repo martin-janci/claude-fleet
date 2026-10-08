@@ -1768,6 +1768,8 @@
       "default": "off",
       "help": "Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests.",
       "key": "decide.jev.host_placement",
+      "help": "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
+      "key": "decide.jev.quick_answer",
       "kind": {
         "options": [
           "off",
@@ -1777,6 +1779,7 @@
         "type": "choice"
       },
       "label": "Jev: session host",
+      "label": "Jev: quick answer",
       "modified": false,
       "option_labels": [
         [
@@ -2935,6 +2938,8 @@
             {
               "hint": "Pre-selects a new session's host when two or more online hosts under their limit are left; you press Create.",
               "key": "decide.jev.host_placement",
+              "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission.",
+              "key": "decide.jev.quick_answer",
               "type": "field"
             },
             {
@@ -3594,6 +3599,10 @@
         },
         {
           "items": [
+            {
+              "key": "sync",
+              "type": "field"
+            },
             {
               "key": "latency",
               "type": "field"
@@ -6099,6 +6108,7 @@
             }
           ]
         ],
+        "busy": "counter-orbit",
         "command": "link_peer_hub",
         "envelope": "args",
         "id": "peer_link.add",
@@ -6197,6 +6207,13 @@
           "label": "Address",
           "max": 512,
           "type": "text"
+        },
+        {
+          "help": "Messages carried today against those still queued, while the queue drains.",
+          "id": "sync",
+          "label": "Syncing",
+          "type": "sync",
+          "unit": "messages"
         },
         {
           "help": "The round trip of the last exchange this hub dialed.",

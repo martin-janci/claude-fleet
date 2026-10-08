@@ -13,6 +13,8 @@ import {
   closeAgent,
   toggleAgent,
   restartOperator,
+  replaceOperator,
+  ensureAgent,
   refreshOperator,
   operatorError,
   operatorHost,
@@ -117,22 +119,22 @@ describe('openAgent', () => {
 });
 
 describe('blockedCopy', () => {
-  // RULING (overrides the original brief): only `absent` and `lost` are
-  // recoverable from this panel without either calling a LocalOnly command
-  // (`no_mcp` → `mcp_configure`) or doing nothing (`token_revoked` → the
-  // session is alive, so `ensure_operator` would no-op). Those two states
-  // get a title-only explanation and no button.
-  it('absent and lost offer a button; no_mcp, token_revoked and no_host do not', () => {
-    expect(blockedCopy('absent').action).toBe('Wake the agent');
-    expect(blockedCopy('lost').action).toBe('Restart the agent');
-    expect(blockedCopy('no_mcp').action).toBeNull();
-    expect(blockedCopy('token_revoked').action).toBeNull();
-    // The operator runs on the `local` host. A hub with `hub.local_host=false`
-    // has none, so there is nowhere to start it and no press that could help
-    // — reporting `absent` there offered a button that silently did nothing.
-    expect(blockedCopy('no_host').action).toBeNull();
-    for (const b of ['no_mcp', 'lost', 'token_revoked', 'absent', 'no_host'] as const) {
+  // Redesign step 9.1 (the AgentStates board): every blocked state has a
+  // next step. None of them is a LocalOnly command: `no_mcp` opens Settings
+  // rather than calling `mcp_configure`, and `token_revoked` replaces the
+  // agent (kill, after a confirm, then a fresh start) rather than calling
+  // `ensure_operator` on a live session, which would no-op.
+  it('every blocked state offers a next step', () => {
+    expect(blockedCopy('absent')).toMatchObject({ action: 'Wake the agent', next: 'wake' });
+    expect(blockedCopy('lost')).toMatchObject({ action: 'Restart the agent', next: 'restart' });
+    expect(blockedCopy('no_mcp')).toMatchObject({ action: 'Open Settings › Control API', next: 'control_api' });
+    expect(blockedCopy('token_revoked')).toMatchObject({ action: 'Replace the agent', next: 'replace' });
+    expect(blockedCopy('no_host')).toMatchObject({ action: 'Add a host', next: 'add_host' });
+    expect(blockedCopy('host_down', 'mercury', 'mac').next).toBe('move');
+    expect(blockedCopy('host_down', 'mercury').next).toBe('open_host');
+    for (const b of ['no_mcp', 'lost', 'token_revoked', 'absent', 'no_host', 'host_down'] as const) {
       expect(blockedCopy(b).title.length).toBeGreaterThan(0);
+      expect(blockedCopy(b).action.length).toBeGreaterThan(0);
     }
   });
 
@@ -153,7 +155,7 @@ describe('blockedCopy', () => {
     expect(onGhost).toContain('mefistos');
     expect(onGhost).toContain('not in this fleet');
     expect(onGhost).not.toContain('hub.local_host');
-    expect(blockedCopy('no_host', 'mefistos').action).toBeNull();
+    expect(blockedCopy('no_host', 'mefistos').action).toBe('Add a host');
   });
 });
 
@@ -165,9 +167,9 @@ describe('host_down', () => {
     expect(c.title).toContain('oci');
   });
 
-  it('with no fallback, says what a host needs and offers nothing', () => {
+  it('with no fallback, says what a host needs and opens that host', () => {
     const c = blockedCopy('host_down', 'mefistos');
-    expect(c.action).toBeNull();
+    expect(c.action).toBe('Open mefistos');
     expect(c.title).toContain('mefistos');
     expect(c.title).toContain('no other host');
   });
@@ -246,6 +248,46 @@ describe('restartOperator', () => {
     expect(invoke.mock.calls[0][0]).toBe('restart_session');
     expect(invoke.mock.calls[1][0]).toBe('operator_status');
     expect(get(operatorState)).toBe('ready');
+  });
+});
+
+describe('replaceOperator (token_revoked, step 9.1)', () => {
+  it('kills the agent\'s session, then starts a new one', async () => {
+    operatorState.set('token_revoked');
+    // An id of its own: a kill leaves a tombstone that later tests' row 7
+    // events would hit.
+    operatorSession.set(row({ id: 70 }));
+    invoke.mockResolvedValueOnce(70); // kill_session
+    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' }); // operator_status
+    invoke.mockResolvedValueOnce(row({ id: 8 })); // ensure_operator
+    await replaceOperator();
+    expect(invoke.mock.calls.map((c) => c[0])).toEqual(['kill_session', 'operator_status', 'ensure_operator']);
+    expect(invoke.mock.calls[0][1]).toEqual({ args: { host_alias: 'local', name: 'fleet-operator' } });
+    expect(get(operatorState)).toBe('ready');
+    expect(get(operatorSession)?.id).toBe(8);
+    // The sheet stays as it was: Control replaces the agent without it.
+    expect(get(agentPanelOpen)).toBe(false);
+  });
+
+  it('a failed kill says why and starts nothing', async () => {
+    operatorState.set('token_revoked');
+    operatorSession.set(row());
+    invoke.mockRejectedValueOnce({ code: 'E_TMUX', message: 'no server running' });
+    await replaceOperator();
+    const cmds = invoke.mock.calls.map((c) => c[0]).filter((c) => c !== 'report_client_error');
+    expect(cmds).toEqual(['kill_session']);
+    expect(get(operatorError)).toBe('Kill failed: no server running');
+    expect(get(operatorState)).toBe('token_revoked');
+  });
+});
+
+describe('ensureAgent (Control, step 9.1)', () => {
+  it('wakes the agent without opening the sheet', async () => {
+    invoke.mockResolvedValueOnce({ ready: false, session: null, blocked: 'absent' });
+    invoke.mockResolvedValueOnce(row());
+    await ensureAgent();
+    expect(get(operatorState)).toBe('ready');
+    expect(get(agentPanelOpen)).toBe(false);
   });
 });
 

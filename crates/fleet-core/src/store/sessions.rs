@@ -2207,6 +2207,12 @@ impl Store {
     pub fn bus_move_progress(&self, p: &crate::events::MoveProgress) {
         self.bus.move_progress(p);
     }
+
+    /// Emit `confirm:changed` (not a store row): the confirmation queue
+    /// moved (redesign step 9.2).
+    pub fn bus_confirm_changed(&self) {
+        self.bus.confirm_changed();
+    }
 }
 
 #[cfg(test)]

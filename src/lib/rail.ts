@@ -27,7 +27,7 @@ export interface RailItem {
 }
 
 export const RAIL_ITEMS: readonly RailItem[] = [
-  { id: 'control', label: 'Control', shortcut: 'agent', step: '9.1', landed: false },
+  { id: 'control', label: 'Control', shortcut: 'agent', step: '9.1', landed: true },
   { id: 'inbox', label: 'Inbox', shortcut: null, step: '3.3', landed: true },
   { id: 'sessions', label: 'Sessions', shortcut: 'work-view', step: '3.2', landed: true },
   { id: 'work', label: 'Work', shortcut: 'work-view', step: '3.2', landed: true },
@@ -47,9 +47,10 @@ export function visibleRailItems(items: readonly RailItem[] = RAIL_ITEMS): RailI
  * (Accounts and Hosts: "Accounts & hosts"); every other overlay (Files, the
  * board) sits over a session, so the sidebar's tree names the item. Assets
  * is Toolkit's screen (3.16). The Inbox (3.3) is the Sessions list narrowed,
- * so the same rule names it.
+ * so the same rule names it. Control (9.1) is a destination of its own.
  */
 export function currentRailItem(dest: Destination, view: SidebarView): RailId | null {
+  if (dest === 'control') return 'control';
   if (dest === 'accounts' || dest === 'hosts') return 'accounts';
   if (dest === 'assets') return 'toolkit';
   return view === 'work' ? 'work' : view === 'inbox' ? 'inbox' : 'sessions';

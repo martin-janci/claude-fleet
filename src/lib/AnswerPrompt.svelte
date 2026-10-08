@@ -31,6 +31,8 @@
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
+  import ProposedBy from './ProposedBy.svelte';
+  import { quickOrder, quickProposal } from './quick_answer';
   import type { SessionRow } from './sessions';
   import { uiLayout } from './prefs';
   import QuestionCard from './kit/QuestionCard.svelte';
@@ -102,6 +104,21 @@
   });
 
   const isChecked = (o: AnswerOption) => (o.checked === true) !== toggled.has(o.n);
+
+  // J5 quick answer (redesign step 10.9): Jev's likely option goes first,
+  // never on a permission, a multi-select or a risky option
+  // (quick_answer.ts). The numbers follow the shown order; each option still
+  // sends its own key. "Keep the order" puts them back for this question.
+  let keepOrder = $state(false);
+  $effect(() => {
+    void identity;
+    keepOrder = false;
+  });
+  const order = $derived(
+    view.multi || keepOrder
+      ? { shown: view.options, proposed: null }
+      : quickOrder(view.options, quickProposal(session), view.kind),
+  );
 
   /** Why a multi-select's boxes cannot be toggled from here right now: with
    *  the cursor in the free-text row, a digit is typed into that box. */
@@ -181,7 +198,8 @@
     if (matchShortcut('question-card', e, isMac) !== 'question-card.answer') return;
     const target = e.target as HTMLElement | null;
     if (isEditable(target) || target?.dataset?.imeProxy !== undefined || target?.closest?.('dialog')) return;
-    const o = view.options.find((x) => x.n === Number(e.key));
+    // Reordered, a digit is the shown place; otherwise the pane's number.
+    const o = order.proposed ? order.shown[Number(e.key) - 1] : view.options.find((x) => x.n === Number(e.key));
     if (!o || o.key === null || writeBlocked !== null) return;
     e.preventDefault();
     choose(o);
@@ -195,9 +213,11 @@
   const answers = $derived<Answer[]>(
     sent !== null
       ? []
-      : view.options.map((o) => ({
+      : order.shown.map((o, i) => ({
           label: o.label,
-          kbd: o.key ?? undefined,
+          // Reordered by the quick answer, the number is the shown place.
+          kbd: order.proposed ? String(i + 1) : (o.key ?? undefined),
+          primary: order.proposed === o || undefined,
           disabled: optionDisabled(o),
           title: writeBlocked ?? optionTitle(o),
           checked: view.multi ? isChecked(o) : undefined,
@@ -240,6 +260,14 @@
     label={view.kind === 'permission' ? 'Permission request' : 'Question from Claude'}
     onownwords={onOwnWords && writeBlocked === null && sent === null ? ownWords : undefined}
   >
+    {#if order.proposed && sent === null && !compact}
+      <ProposedBy
+        proposal={quickProposal(session)}
+        field="quick_answer"
+        changeLabel="Keep the order"
+        testid="answer-proposed"
+        onchange={() => (keepOrder = true)} />
+    {/if}
     {#if sent !== null}
       <p class="sent" role="status" data-testid="answer-sent">✓ Sent: {sent} · <button
           type="button"
@@ -302,7 +330,7 @@
         onclick={(e) => mine(e, () => (sent = null))}>Choose again</button></p>
   {:else}
   <div class="options">
-    {#each view.options as o (o.n)}
+    {#each order.shown as o, i (o.n)}
       <button
         type="button"
         class="btn btn--chip option"
@@ -317,9 +345,17 @@
         disabled={busy || writeBlocked !== null || o.key === null || (view.multi && (toggleBlocked !== null || terminalOnly(o)))}
         title={writeBlocked ?? optionTitle(o)}
         onclick={(e) => mine(e, () => choose(o))}
-      ><span class="ordinal" aria-hidden="true">{o.n}</span>{#if view.multi}<span class="box" aria-hidden="true">{isChecked(o) ? '✔' : ''}</span>{/if}<span class="label">{o.label}</span></button>
+      ><span class="ordinal" aria-hidden="true">{order.proposed ? i + 1 : o.n}</span>{#if view.multi}<span class="box" aria-hidden="true">{isChecked(o) ? '✔' : ''}</span>{/if}<span class="label">{o.label}</span></button>
     {/each}
   </div>
+  {#if order.proposed && !compact}
+    <ProposedBy
+      proposal={quickProposal(session)}
+      field="quick_answer"
+      changeLabel="Keep the order"
+      testid="answer-proposed"
+      onchange={() => (keepOrder = true)} />
+  {/if}
   {#if view.multi}
     <div class="multi">
       <button

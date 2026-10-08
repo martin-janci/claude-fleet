@@ -18,6 +18,7 @@ describe('AppRail', () => {
     expect(mac.getByTestId('rail-sessions').title).toBe('Sessions  ⌘⇧W');
     expect(mac.getByTestId('rail-accounts').title).toBe('Accounts & hosts  ⌘I');
     expect(mac.getByTestId('rail-settings').title).toBe('Settings  ⌘,');
+    expect(mac.getByTestId('rail-control').title).toBe('Control  ⌘E');
     mac.unmount();
     const other = render(AppRail, { isMac: false, onselect: () => {} });
     expect(other.getByTestId('rail-work').title).toBe('Work  Ctrl+Shift+W');
@@ -27,8 +28,11 @@ describe('AppRail', () => {
   it('marks the current item and hands a click to its owner', async () => {
     const onselect = vi.fn();
     const { getByTestId, queryByTestId } = render(AppRail, { isMac: true, onselect });
-    expect(queryByTestId('rail-control')).toBeNull();
+    expect(queryByTestId('rail-automation')).toBeNull();
     expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
+    destination.set('control');
+    await Promise.resolve();
+    expect(getByTestId('rail-control').getAttribute('aria-current')).toBe('page');
     destination.set('hosts');
     await Promise.resolve();
     expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');

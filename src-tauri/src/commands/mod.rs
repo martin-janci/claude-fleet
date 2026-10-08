@@ -29,6 +29,7 @@ pub mod resolve_move;
 pub mod sessions;
 pub mod tasks;
 pub mod trackers;
+pub mod tray;
 pub mod upload;
 pub mod voice;
 pub mod work;

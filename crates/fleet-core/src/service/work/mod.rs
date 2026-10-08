@@ -323,6 +323,10 @@ pub struct WorkLinkArgs {
     /// mission_grant: runs at once, at most.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<u32>,
+    /// mission_grant: the login its runs bill, a credential profile on the
+    /// run's host; omitted, the host's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -828,6 +832,8 @@ pub fn start_args_as(
         decider,
         owner: None,
         origin: None,
+        // A start names no login: `profile` is mission_grant's.
+        profile: None,
         reference: args.url.clone().or(args.key.clone()),
         item_id: args.item_id,
         project_id: args.project_id,
