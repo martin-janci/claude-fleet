@@ -81,6 +81,8 @@ export interface Section {
   intro?: string;
   collapsible?: boolean;
   advanced?: boolean;
+  /** A record's `count` / `money` fields shown as tiles. */
+  tiles?: boolean;
   when?: Condition;
   items: Item[];
 }

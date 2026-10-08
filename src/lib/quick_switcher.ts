@@ -34,7 +34,7 @@ export const TICKET_SECTIONS = ['My work', 'Current sprint', 'Recent'] as const;
 export interface SwitcherEntry {
   /** `ticket`: a cached tracker ticket (work graph M3); `lookup`: resolve
    *  the pasted URL / typed key through the tracker. */
-  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup' | 'asset' | 'command';
+  kind: 'session' | 'project' | 'host' | 'ticket' | 'lookup' | 'asset' | 'command' | 'setting';
   /** `session:<id>`, `project:<id>`, `host:<alias>`, `ticket:<KEY>`,
    *  `lookup:<query>`, `asset:<catalog>:<kind>/<name>` (the Assets
    *  workspace's own selection key) or `command:<rescan|sync|propose>`. */
@@ -51,8 +51,12 @@ export interface SwitcherEntry {
   asset?: { key: string };
   /** Commands: which Assets command to run. */
   command?: AssetsCommand;
+  /** Palette commands (step 3.9, `commands.ts`): the command id. */
+  action?: string;
+  /** A plain-words settings change (step 3.9): applied on Enter. */
+  setting?: { key: string; value: string; label: string; words: string; confirm: boolean };
   ticket?: TicketRow;
-  /** Tickets: the section heading. */
+  /** Tickets and palette commands: the section heading. */
   section?: string;
   /** Lookup: what to resolve. */
   lookup?: string;
@@ -263,8 +267,11 @@ export function rankEntries(
   recent: readonly string[],
 ): SwitcherEntry[] {
   // Assets and commands never displace a session, project, host or ticket:
-  // they merge after all of them, assets first.
-  const isTail = (e: SwitcherEntry) => e.kind === 'asset' || e.kind === 'command';
+  // they merge after all of them, assets first. Two exceptions (step 3.9):
+  // a settings change typed in plain words is what the query asked for, so
+  // it leads, and a command on the open session that the query matches
+  // comes next.
+  const isTail = (e: SwitcherEntry) => e.kind === 'asset' || e.kind === 'command' || e.kind === 'setting';
   const head = rankHead(
     entries.filter((e) => !isTail(e)),
     query,
@@ -278,8 +285,11 @@ export function rankEntries(
       .filter((x): x is { e: SwitcherEntry; score: number } => x.score !== null)
       .sort((a, b) => b.score - a.score)
       .map((x) => x.e);
-  const tail = [...tailRows('asset'), ...tailRows('command')];
-  return [...head, ...tail];
+  const settings = entries.filter((e) => e.kind === 'setting');
+  const commands = tailRows('command');
+  const lead = q0 ? commands.filter((e) => e.section === 'This session') : [];
+  const tail = [...tailRows('asset'), ...commands.filter((e) => !lead.includes(e))];
+  return [...settings, ...lead, ...head, ...tail];
 }
 
 function rankHead(

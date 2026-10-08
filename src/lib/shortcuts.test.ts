@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import {
+  MATCHED_SCOPES,
   SHORTCUTS,
   SCOPE_SOURCES,
   bind,
@@ -254,4 +255,26 @@ describe('shortcut freeze: per-view tables match their handlers', () => {
       expect(missing).toEqual([]);
     });
   }
+});
+
+// Step 3.8's scopes are matched through the registry, so their handlers must
+// ask it for their own scope.
+describe('shortcut registry: matched scopes ask the registry', () => {
+  for (const [scope, file] of Object.entries(MATCHED_SCOPES)) {
+    it(`${scope} (${file})`, () => {
+      expect(readFileSync(file, 'utf8')).toContain(`matchShortcut('${scope}'`);
+    });
+  }
+
+  it("3.8's global chords: ⌥⌘N / Ctrl+Alt+N, ⌘1–9 on the Mac only, ? everywhere", () => {
+    expect(shortcutLabel('next-needs-you', true)).toBe('⌥⌘N');
+    expect(shortcutLabel('next-needs-you', false)).toBe('Ctrl+Alt+N');
+    expect(shortcutLabel('jump-n', true)).toBe('⌘1');
+    expect(SHORTCUTS.find((s) => s.id === 'jump-n')?.other).toEqual([]);
+    const q: KeyEventLike = { key: '?', metaKey: false, ctrlKey: false, altKey: false, shiftKey: true };
+    expect(matchShortcut('global', q, true)).toBe('shortcut-sheet');
+    expect(matchShortcut('global', q, false)).toBe('shortcut-sheet');
+    const three: KeyEventLike = { key: '3', metaKey: false, ctrlKey: false, altKey: false, shiftKey: false };
+    expect(matchShortcut('question-card', three, true)).toBe('question-card.answer');
+  });
 });

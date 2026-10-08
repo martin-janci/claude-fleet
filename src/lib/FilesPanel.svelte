@@ -8,7 +8,7 @@
     type ChangedFile,
     type RepoTree,
   } from './files';
-  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoStage, repoUnstage, repoCommitCreate, type Commit, type CommitDetail, type Branch } from './history';
+  import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoDeleteMergedBranches, repoStage, repoUnstage, repoCommitCreate, type Commit, type CommitDetail, type Branch } from './history';
   import type { Result } from './result';
   import { readPref, writePref } from './prefs';
   import { openPathRequest } from './app_views';
@@ -25,7 +25,8 @@
 
   let { session }: { session: SessionRow } = $props();
 
-  // None of the ten git-write commands (checkout, branch create/delete,
+  // None of the eleven git-write commands (checkout, branch create/delete
+  // one or every merged one,
   // stage/unstage, commit, fetch/pull/push) has a hub tool — a remote client
   // must not mutate a worktree a running agent may be mid-edit in
   // (`src-tauri/src/commands/mutate.rs`). One reason, computed once, fans out
@@ -218,6 +219,7 @@
     | { kind: 'checkout-branch'; name: string }
     | { kind: 'checkout-commit'; hash: string }
     | { kind: 'delete-branch'; name: string }
+    | { kind: 'delete-merged'; names: string[] }
     | { kind: 'new-branch'; startPoint: string | null };
   let dialog = $state<FilesDialog | null>(null);
   // "Check out the new branch now?" — a checkbox inside the prompt instead
@@ -244,6 +246,31 @@
   function doDeleteBranch(name: string): void {
     closeDialog();
     void runAction(repoDeleteBranch(session.id, name, false), () => { loadBranches(); historyLoaded = false; });
+  }
+
+  // What the last "Delete merged" kept, said once under the toolbar: a
+  // branch that gained a commit since the list was read, or one checked out
+  // in another worktree, is kept rather than lost.
+  let branchNotice = $state<string | null>(null);
+
+  function confirmDeleteMerged(names: string[]): void {
+    dialog = { kind: 'delete-merged', names };
+  }
+
+  async function doDeleteMerged(names: string[]): Promise<void> {
+    closeDialog();
+    branchNotice = null;
+    const r = await repoDeleteMergedBranches(session.id, names);
+    if (!r.ok) {
+      applyFailure(r);
+      return;
+    }
+    const { deleted, kept } = r.value;
+    branchNotice = kept.length
+      ? `Deleted ${deleted.length}; kept ${kept.join(', ')} (no longer merged, or checked out).`
+      : null;
+    void loadBranches();
+    historyLoaded = false;
   }
 
   function promptCreateBranch(startPoint: string | null): void {
@@ -275,6 +302,7 @@
     error = null;
     worktreeGone = false;
     openCommit = null;
+    branchNotice = null;
     if (m === 'tree' && !treeLoaded) void loadTree();
     if (m === 'history' && !historyLoaded) void loadHistory();
     if (m === 'branches') void loadBranches();
@@ -350,6 +378,9 @@
       <div class="hbar hbar-row">
         <RemoteToolbar {session} ondone={onRefresh} {writeBlocked} />
       </div>
+      {#if branchNotice}
+        <p class="branch-notice" data-testid="delete-merged-notice">{branchNotice}</p>
+      {/if}
       <div class="branch-scroll">
         <BranchList
           {branches}
@@ -358,6 +389,7 @@
           onCheckout={(n) => confirmCheckout(n)}
           onDelete={(n) => confirmDeleteBranch(n)}
           onNew={() => promptCreateBranch(null)}
+          onDeleteMerged={(names) => confirmDeleteMerged(names)}
           {writeBlocked}
         />
       </div>
@@ -429,6 +461,20 @@
   >
     Delete branch <code>{name}</code>?
   </ConfirmDialog>
+{:else if dialog?.kind === 'delete-merged'}
+  {@const names = dialog.names}
+  <ConfirmDialog
+    title="Delete merged branches?"
+    confirmLabel={`Delete ${names.length}`}
+    danger
+    onconfirm={() => void doDeleteMerged(names)}
+    oncancel={closeDialog}
+    confirmTestId="confirm-delete-merged"
+  >
+    The base branch already contains {names.length === 1 ? 'this local branch' : `these ${names.length} local branches`},
+    so no commit is lost: <code>{names.join(', ')}</code>. Each is checked again before it goes;
+    remote branches stay.
+  </ConfirmDialog>
 {:else if dialog?.kind === 'new-branch'}
   {@const startPoint = dialog.startPoint}
   <PromptDialog
@@ -451,6 +497,7 @@
 {/if}
 
 <style>
+  .branch-notice { margin: 0; padding: 0.3rem 0.7rem; font-size: 0.76rem; color: var(--fg-muted); }
   .dlg-hint { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
   .dlg-hint code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .dlg-check { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; cursor: pointer; }

@@ -1,7 +1,8 @@
 // Org administration phase C: an org's page shows its spend (when the hub
 // sends it) and its own settings — each inherits the fleet's value or takes
 // the org's own, written through `set_org_setting`; and an org over budget
-// raises one Attention item.
+// raises one Attention item. Redesign 11.1: the overview is tiles, a 14-day
+// spend chart and a "Needs an admin" list.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -58,7 +59,15 @@ const acme: OrgDetail = {
   spent_today_micros: 12_340_000,
   spent_week_micros: 50_000_000,
   spent_month_micros: 90_500_000,
+  budget_daily_usd: 10,
+  budget_monthly_usd: 0,
   over_budget: ['daily'],
+  spend_series: Array.from({ length: 14 }, (_, i) => ({ day: `2026-09-${String(25 + i).padStart(2, '0')}`, cost_micros: i * 1_000_000 })),
+  needs_admin: [
+    { kind: 'budget', period: 'daily', spent_micros: 12_340_000, budget_micros: 10_000_000 },
+    { kind: 'untrusted_device', device: "Peter's iPhone", paired_at: Math.floor(Date.now() / 1000) - 7200 },
+    { kind: 'unclaimed_sessions', host: 'mercury', count: 4 },
+  ],
   settings: [{ setting: budget, own: '10' }, { setting: model }],
 };
 
@@ -87,14 +96,47 @@ describe('an org’s spend and its own settings', () => {
     render(ResourcePage, { props: { page, resource } });
     await waitFor(() => expect(screen.getByTestId('value-spent_today_micros').textContent).toBe('$12.34'));
     expect(screen.getByTestId('value-spent_month_micros').textContent).toBe('$90.50');
-    expect(screen.getByTestId('item-over_budget').textContent).toContain('daily');
+    expect(screen.getAllByTestId('item-needs_admin')[0].textContent).toContain('Daily budget reached');
+  });
+
+  it('shows the overview as tiles with each budget under its amount', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    await waitFor(() => expect(screen.getByTestId('tile-spent_today_micros')).toBeTruthy());
+    expect(screen.getByTestId('tile-sub-spent_today_micros').textContent).toBe('123% of $10');
+    // No monthly budget: no line under the month.
+    expect(screen.queryByTestId('tile-sub-spent_month_micros')).toBeNull();
+    expect(screen.getByTestId('tile-session_count')).toBeTruthy();
+  });
+
+  it('charts the last 14 days of spend, today last', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    await fireEvent.click(await screen.findByTestId('chart-spend_series-table-toggle'));
+    const rows = screen.getByTestId('chart-spend_series-table').querySelectorAll('tbody tr');
+    expect(rows).toHaveLength(14);
+    expect(rows[13].textContent).toContain('$13.00');
+  });
+
+  it('lists what needs an admin: a budget, an untrusted device, unclaimed sessions', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    const items = await screen.findAllByTestId('item-needs_admin');
+    expect(items.map((i) => i.textContent)).toEqual([
+      expect.stringContaining('Daily budget reached'),
+      expect.stringContaining("Peter's iPhone is not trusted yet"),
+      expect.stringContaining('4 unclaimed sessions on mercury'),
+    ]);
+    expect(items[1].textContent).toContain('paired 2 h ago');
   });
 
   it('leaves the spend and settings out when the hub does not send them', async () => {
-    route([{ ...acme, spent_today_micros: undefined, spent_week_micros: undefined, spent_month_micros: undefined, settings: undefined, over_budget: undefined }]);
+    route([{ ...acme, spent_today_micros: undefined, spent_week_micros: undefined, spent_month_micros: undefined, settings: undefined, over_budget: undefined, spend_series: undefined, needs_admin: undefined }]);
     render(ResourcePage, { props: { page, resource } });
     await waitFor(() => expect(screen.getByTestId('record-field-name')).toBeTruthy());
-    expect(screen.queryByTestId('record-field-spent_today_micros')).toBeNull();
+    expect(screen.queryByTestId('tile-spent_today_micros')).toBeNull();
+    expect(screen.queryByTestId('record-field-spend_series')).toBeNull();
+    expect(screen.queryByTestId('record-field-needs_admin')).toBeNull();
     expect(screen.queryByTestId('record-field-settings')).toBeNull();
   });
 

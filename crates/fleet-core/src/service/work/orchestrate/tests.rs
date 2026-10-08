@@ -357,3 +357,20 @@ fn a_continuous_mission_wakes_on_its_timer() {
     };
     assert_eq!(next_wake(&m, &busy, 100), 100 + RUNNING_RECHECK_SECS);
 }
+
+/// Redesign 2.2 (migration 124): a run's session is the mission's, whoever
+/// took the step.
+#[test]
+fn a_runs_start_is_recorded_as_the_missions() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let s = lock(&fx.deps.store).unwrap();
+    for actor in [Actor::Loop, Actor::Person("fleet".into())] {
+        let start = start_for(&s, &fx.m, item, &actor, None).unwrap();
+        assert_eq!(
+            start.origin,
+            Some(crate::store::SessionOrigin::mission(fx.m.id)),
+            "{actor:?}"
+        );
+    }
+}

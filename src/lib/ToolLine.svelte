@@ -334,7 +334,7 @@
     width: 0.7rem;
     text-align: center;
     opacity: 0.6;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-fast) ease;
   }
   button.tool .chev::before {
     content: '›';

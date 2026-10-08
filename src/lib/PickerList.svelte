@@ -53,6 +53,7 @@
     listId,
     testid,
     rowActions,
+    rowTrail,
     ongroupclick,
     oncontext,
   }: {
@@ -70,6 +71,9 @@
     testid?: string;
     /** Hover actions for `actionable` rows; mouse only (aria-hidden, not focusable). */
     rowActions?: Snippet<[PickerItem]>;
+    /** Something always shown at the row's end, before the chip and meta
+     *  (the New layout's account pill, redesign 4.3). Its clicks stay its own. */
+    rowTrail?: Snippet<[PickerItem]>;
     /** Click on a group heading that carries a `groupKey`. */
     ongroupclick?: (groupKey: string) => void;
     /** Right-click on a row (the browser's menu is suppressed when set). */
@@ -150,6 +154,7 @@
           <span class="desc">{item.description}</span>
         {/if}
       </div>
+      {#if rowTrail}{@render rowTrail(item)}{/if}
       {#if item.chip}<span class="chip">{item.chip}</span>{/if}
       {#if item.meta || item.kbd}
         <span class="meta">{item.meta ?? ''}{#if item.kbd}<kbd class="kbd">{item.kbd}</kbd>{/if}</span>
