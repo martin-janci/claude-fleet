@@ -403,6 +403,36 @@ Code: `service/decide/work_link.rs`, `work_link_subject` in
 `service/hooks.rs`, `on_jev_proposal` in `service/work/detect.rs`; card J1
 in the test map.
 
+## `duplicate` — a proposed task that may repeat an existing one (K4)
+
+When an agent (`work_link { action: propose | propose_tree }`) or the
+planner proposes a task, and `decide.jev.duplicate` is on, Jev is asked one
+Choice per new proposal: which open task of the same org touched in the last
+90 days is the SAME work, or `none`. The candidates are the tasks sharing a
+telling title word with the proposal, most alike first, at most 10; with
+none, nothing is asked. A proposal accepted at once (a planner card with
+"accept created") is never asked about.
+
+- **What is sent.** The proposal's title and the start of the agent's `why`
+  (600 characters), redacted; each candidate's key and title.
+- **Shadow.** Asked off the proposing call's path and only recorded, with
+  `none` as the baseline (today nothing flags a duplicate).
+- **Assist.** A usable answer (at least 50%, not `none`) stays on the
+  proposal as its `duplicate` proposal: in the New layout the proposal's
+  card on the task page shows *May duplicate KEY · Proposed by Jev · N%*
+  with **Merge** (reject the proposal; the existing task covers it) and
+  **Keep both** (accept it). Nothing is rejected or accepted by itself.
+- **Asked once.** A decided run about the same proposal and input is never
+  asked again.
+- **Follow-up.** A person's single Reject (Merge) marks the run
+  `confirmed`, an Accept (Keep both) `rejected`. A bulk accept marks
+  nothing, and a shadow answer nobody saw is never marked.
+- **What is recorded.** Subject `work_item` `<proposal id>`; options are
+  item ids (`i<id>`) and `none`.
+
+Code: `service/decide/duplicate.rs`, `duplicate_hint` in
+`service/work/view.rs`; card K4 in the test map.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
@@ -414,6 +444,7 @@ in the test map.
 | `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.start_project` | `off` | `off` / `shadow` / `assist` | Pre-selecting the repository of a task's first start. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |

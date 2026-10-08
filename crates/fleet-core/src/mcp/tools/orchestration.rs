@@ -1328,10 +1328,11 @@ impl FleetTools {
                 }
                 None => caller.label(),
             };
-            return ok_json(
-                &crate::service::work::local::propose(&args, &self.store, &scope, &proposer)
-                    .map_err(to_mcp_err)?,
-            );
+            let made = crate::service::work::local::propose(&args, &self.store, &scope, &proposer)
+                .map_err(to_mcp_err)?;
+            // K4: whether it repeats an existing task (off by default).
+            crate::service::decide::duplicate::spawn_ask(&self.store, vec![made.id]);
+            return ok_json(&made);
         }
         if args.action == "propose_tree" {
             // `propose`'s proposer, through the same gate at the same reach:
@@ -1350,10 +1351,14 @@ impl FleetTools {
                 }
                 None => caller.label(),
             };
-            return ok_json(
-                &crate::service::work::local::propose_tree(&args, &self.store, &scope, &proposer)
-                    .map_err(to_mcp_err)?,
+            let made =
+                crate::service::work::local::propose_tree(&args, &self.store, &scope, &proposer)
+                    .map_err(to_mcp_err)?;
+            crate::service::decide::duplicate::spawn_ask(
+                &self.store,
+                made.iter().map(|r| r.id).collect(),
             );
+            return ok_json(&made);
         }
         // A person's decision on many proposals at once (orchestration O2),
         // and taking it back. Scoped callers are refused inside, before any

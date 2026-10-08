@@ -526,7 +526,19 @@ pub fn decide(
     let id = args
         .item_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "accept / reject needs item_id"))?;
-    lock(store)?.decide_proposal(id, accept)
+    let s = lock(store)?;
+    let row = s.decide_proposal(id, accept)?;
+    // K4's follow-up: Merge (reject) confirms Jev's "may duplicate", Keep
+    // both (accept) rejects it. Never fails the decision.
+    if let Err(e) = crate::service::decide::duplicate::record_decision(
+        &s,
+        id,
+        accept,
+        crate::service::catalog::now_secs(),
+    ) {
+        tracing::warn!("[decide] duplicate follow-up not recorded: {}", e.message);
+    }
+    Ok(row)
 }
 
 /// A local item is visible: always to `All`; to a per-host token through

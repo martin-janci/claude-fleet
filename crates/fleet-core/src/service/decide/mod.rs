@@ -35,6 +35,9 @@
 
 #[cfg(feature = "nl-detect")]
 pub mod bench;
+pub mod duplicate;
+#[cfg(test)]
+mod duplicate_tests;
 pub mod haiku;
 pub mod jev;
 pub mod sibling_repos;
@@ -88,14 +91,17 @@ pub enum Feature {
     StartProject,
     /// Pre-ticking the sibling repository a ticket start also needs (N3).
     SiblingRepos,
+    /// Flagging a proposed task that may duplicate an existing one (K4).
+    Duplicate,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 4] = [
+    pub const ALL: [Feature; 5] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
         Feature::SiblingRepos,
+        Feature::Duplicate,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -104,6 +110,7 @@ impl Feature {
             Feature::WorkLink => "work_link",
             Feature::StartProject => "start_project",
             Feature::SiblingRepos => "sibling_repos",
+            Feature::Duplicate => "duplicate",
         }
     }
 
@@ -118,6 +125,7 @@ impl Feature {
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
             Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
+            Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
         }
     }
 }
