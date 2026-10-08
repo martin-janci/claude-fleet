@@ -100,6 +100,7 @@ fn the_evidence_output_parses_and_an_error_says_why() {
     );
 }
 
+#[cfg(unix)]
 fn git(dir: &std::path::Path, args: &[&str]) {
     let out = crate::proc::std_command("git")
         .args(args)
@@ -117,6 +118,9 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
+// The script runs on a fleet host (a Unix shell); a Windows runner's
+// `bash` is not one.
+#[cfg(unix)]
 #[test]
 fn the_script_reads_a_real_checkout_against_its_base() {
     let dir = tempfile::tempdir().unwrap();

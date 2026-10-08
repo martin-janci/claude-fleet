@@ -33,6 +33,7 @@ fn the_script_quotes_every_value() {
     assert!(!s.contains("__FLEET_MT 1 0"));
 }
 
+#[cfg(unix)]
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = crate::proc::std_command("git")
         .args(args)
@@ -48,6 +49,9 @@ fn git(dir: &std::path::Path, args: &[&str]) -> String {
 
 /// Against a real repo: two branches that edit one line conflict, a third
 /// that edits another file does not.
+// The script runs on a fleet host (a Unix shell); a Windows runner's
+// `bash` is not one.
+#[cfg(unix)]
 #[test]
 fn real_git_tells_a_conflict_from_a_clean_merge() {
     let probe = crate::proc::std_command("git")
