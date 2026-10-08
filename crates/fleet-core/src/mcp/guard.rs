@@ -493,6 +493,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::LongPoll,
     },
+    // Pull requests (redesign 6.4): a read of what reconcile recorded,
+    // filtered per row to the sessions the caller may see.
+    ToolPolicy {
+        name: "prs",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Trusting a client widens what its token can do (unmarked delivery), so
     // it is credential administration like minting and revoking.
     ToolPolicy {

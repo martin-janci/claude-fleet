@@ -831,6 +831,15 @@ Index by area (names only; see the reference for details):
   holder extends it. A per-host token sees its own host's devices and the
   ones a person marked `shared` on hosts of its own org; `configure {
   label, shared }` and `forget` are a person's. See `docs/debug-devices.md`.
+- **Pull requests** — `prs`, `action: list { state?: open|merged|closed|all,
+  project_id?, limit? }` (redesign 6.4). Every PR a session's branch has had,
+  newest change first: repo and number, title, head branch, state, draft,
+  CI, review decision, merge state, merged time and the session that opened
+  it. Reconcile records them from the `gh pr view` probe that already fills
+  a session's `pr_url` / `ci_status`, and keeps them after the session is
+  gone. A row is served to whoever may see the session that opened it; a PR
+  whose session is gone only to the hub's own reader or the person of a
+  one-person hub. A read: nothing here merges or closes a PR.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a

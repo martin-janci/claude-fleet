@@ -134,4 +134,14 @@ describe('Loader kit', () => {
     expect(ring.classList).toContain('ofl--determinate');
     expect(ring.style.getPropertyValue('--ofl-p')).toBe('0.64');
   });
+
+  // Redesign step 3.14: a lost hub must not read as a loop of hope.
+  it('Signal lost plays once and rests, in every motion setting', () => {
+    const css = readFileSync('src/lib/loader-kit.css', 'utf8');
+    expect(css).toMatch(
+      /\.ofl\.ofl-name-signal-lost \*,\s*\.ofl\.ofl-name-signal-lost\.ofl--still \*\s*\{[^}]*animation-iteration-count:\s*1 !important;[^}]*animation-fill-mode:\s*forwards !important;/,
+    );
+    render(Loader, { props: { name: 'signal-lost', delay: 0 } });
+    expect(screen.getByTestId('loader').classList).toContain('ofl-name-signal-lost');
+  });
 });

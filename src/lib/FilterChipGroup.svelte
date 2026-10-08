@@ -71,10 +71,10 @@
     margin-right: 2px;
   }
   .dot-on {
-    background: rgb(80, 200, 110);
+    background: var(--status-done);
   }
   .dot-off {
-    background: rgb(220, 130, 130);
+    background: var(--status-failed);
   }
   .alert {
     display: inline-block;
@@ -82,6 +82,6 @@
     height: 6px;
     border-radius: 50%;
     margin-left: 4px;
-    background: var(--danger, #c33);
+    background: var(--danger);
   }
 </style>

@@ -18,7 +18,7 @@
   import { selectSessionExplicitly, taskLinksLoaded } from './selection';
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
-  import { timeAgo } from './session_status';
+  import { shortAge, timeAgo } from './session_status';
   import { assessRow, hasReading, verdictColor, verdictLabel } from './evidence';
   import { changedAny, describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
   import { providerInfo, startWork, unavailableLabel } from './trackers';
@@ -324,7 +324,7 @@
           data-testid="work-task-edit"
           disabled={editBlocked !== null}
           title={editBlocked ?? 'Edit the title, description, status and assignees'}
-          onclick={() => (editing = true)}>Edit</button
+          onclick={() => (editing = true)}>Edit…</button
         >
       {/if}
       <button class="btn btn--quiet" type="button" disabled={loading} data-testid="work-task-refresh" onclick={() => void load(taskId)}
@@ -556,7 +556,7 @@
       <h3>Last outcome</h3>
       <div class="outcome" data-testid="work-task-outcome">
         <p class="small muted">
-          {timeAgo(o.at)}{#if o.name}&nbsp;· {o.name}{/if}{#if o.host}&nbsp;· {o.host}{/if}{#if o.branch}&nbsp;· branch {o.branch}{/if}
+          {shortAge(o.at)}{#if o.name}&nbsp;· {o.name}{/if}{#if o.host}&nbsp;· {o.host}{/if}{#if o.branch}&nbsp;· branch {o.branch}{/if}
           {#if o.pr_url}
             · <button class="link-btn" type="button" onclick={() => void openExternal(o.pr_url ?? '')}>PR</button>
           {/if}
@@ -736,11 +736,11 @@
     color: var(--fg-muted);
   }
   .warn {
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .err,
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .error p {
     margin: 0 0 0.4rem;

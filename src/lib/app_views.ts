@@ -128,7 +128,8 @@ export type AppChord =
   | 'scope'
   | 'today'
   | 'work-view'
-  | 'inspector';
+  | 'inspector'
+  | 'open-in-editor';
 
 const APP_CHORDS: readonly AppChord[] = [
   'hosts',
@@ -139,6 +140,7 @@ const APP_CHORDS: readonly AppChord[] = [
   'today',
   'work-view',
   'inspector',
+  'open-in-editor',
 ];
 
 /**

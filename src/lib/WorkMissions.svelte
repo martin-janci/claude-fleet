@@ -12,7 +12,7 @@
   import { hubConnection } from './hub_connection';
   import { projects } from './projects';
   import { hosts } from './hosts';
-  import { timeAgo } from './session_status';
+  import { shortAge, timeAgo } from './session_status';
   import { createWorkTask, onWorkChangedDebounced } from './work';
   import { NEWER_HUB, isOlderHub, readErrorText as rawErrorText } from './work_view';
   import type { IpcError } from './result';
@@ -854,7 +854,7 @@
       <h4>Log</h4>
       <ul class="events" data-testid="mission-events">
         {#each detail.events ?? [] as e (e.id)}
-          <li><span class="muted small">{timeAgo(e.at)}</span> {eventSentence(e)}</li>
+          <li><span class="muted small">{shortAge(e.at)}</span> {eventSentence(e)}</li>
         {/each}
       </ul>
 
@@ -921,7 +921,7 @@
 </div>
 
 <style>
-  .loop { display: flex; flex-direction: column; gap: 0.3rem; border-left: 2px solid var(--border, #8884); padding-left: 0.5rem; }
+  .loop { display: flex; flex-direction: column; gap: 0.3rem; border-left: 2px solid var(--border); padding-left: 0.5rem; }
   .steps, .cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
   .steps li, .cards li { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .cards input { flex: 1 1 8rem; min-width: 0; }
@@ -956,7 +956,7 @@
     text-align: left;
     cursor: pointer;
   }
-  .open:hover { background: var(--bg-hover, rgba(127, 127, 127, 0.08)); }
+  .open:hover { background: var(--bg-hover); }
   .title { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
   .name { margin: 0.25rem 0 0; overflow-wrap: anywhere; }
   .goal { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -966,8 +966,8 @@
   .done-when li { padding: 0.1rem 0; }
   .events li { padding: 0.1rem 0; }
   .glyph { width: 1.1rem; text-align: center; flex: 0 0 auto; color: var(--fg-muted); }
-  .glyph.s-done, .glyph.s-ready { color: #3fae5a; }
-  .glyph.s-running, .glyph.s-doing { color: #e0a030; }
+  .glyph.s-done, .glyph.s-ready { color: var(--status-done); }
+  .glyph.s-running, .glyph.s-doing { color: var(--status-waiting); }
   .glyph.s-failed, .glyph.s-blocked { color: var(--danger); }
   .main { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; }
   .deps { display: flex; flex-wrap: wrap; gap: 0.2rem; margin-top: 0.15rem; }
@@ -976,11 +976,11 @@
   .wave { display: flex; flex-direction: column; gap: 0.1rem; }
   .wave-head { font-size: 11px; color: var(--fg-muted); margin-top: 0.3rem; }
   .vbadge { font-size: 11px; align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: 999px; }
-  .vbadge.v-verified { color: #3fae5a; border-color: #3fae5a; }
+  .vbadge.v-verified { color: var(--status-done); border-color: var(--status-done); }
   .vbadge.v-failed { color: var(--danger); border-color: var(--danger); }
   .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: 11px; }
   .checks .line { font-family: var(--font-mono, monospace); }
-  .checks .c-pass .glyph { color: #3fae5a; }
+  .checks .c-pass .glyph { color: var(--status-done); }
   .checks .c-fail .glyph { color: var(--danger); }
   .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }
   .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: 4px; }
