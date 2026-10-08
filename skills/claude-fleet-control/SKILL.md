@@ -231,7 +231,7 @@ limits: `docs/forms.md`.
 
 When the person reads you in fleet's Conversation view, a fenced
 ```` ```fleet-ui ```` block in your reply is drawn as a card: `steps` (a
-tutorial with checkboxes), `guide` (folding sections), `callout`, `facts`,
+tutorial with checkboxes), `guide` (folding sections; or `{"kind": "guide", "page": <id>}` for a guide fleet has, from `guide { list }`, drawn as Settings draws it), `callout`, `facts`,
 `choices` (buttons that put a prompt in the composer), `form` (a
 `fleet.form/1` form, no secrets, whose answers arrive as the person's next
 prompt), `progress` (a long job; write it again with the same `id` and the

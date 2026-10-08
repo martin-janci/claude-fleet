@@ -90,7 +90,9 @@ export const RESULT_ITEM_TYPES = ['stat', 'chart', 'table'] as const;
 export type UiBlock =
   | ({ kind: 'report'; title?: string } & TaskReport)
   | { kind: 'steps'; title: string; intro?: string; steps: UiStep[] }
-  | { kind: 'guide'; title: string; intro?: string; sections: UiSection[] }
+  /** With `page`, a guide fleet already has, drawn as Settings draws it
+   *  (`rich/GuidePageCard.svelte`); `title` and `sections` are then empty. */
+  | { kind: 'guide'; page?: string; title: string; intro?: string; sections: UiSection[] }
   | { kind: 'callout'; tone: Tone; title?: string; body: string }
   | { kind: 'facts'; title?: string; items: [string, string][] }
   | { kind: 'choices'; title?: string; question?: string; options: UiChoice[] }
@@ -117,7 +119,7 @@ export type UiBlock =
 
 export type UiKind = UiBlock['kind'];
 export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting'];
-/** A progress `id` and an error `code`: a key, never prose. */
+/** A progress `id`, an error `code` and a guide's `page`: a key, never prose. */
 const KEY_RE = /^[A-Za-z0-9_.:-]+$/;
 const KEY_MAX = 64;
 
@@ -580,6 +582,10 @@ export function checkUiBlock(raw: string): Check {
       break;
     }
     case 'guide': {
+      if (v.page !== undefined && v.page !== null) {
+        block = { kind: 'guide', page: key(v, 'page', p, ''), title: '', sections: [] };
+        break;
+      }
       const title = str(v, 'title', p, '', { required: true, max: 120 }) ?? '';
       const intro = str(v, 'intro', p, '', { max: 2000 });
       const sections = each(arr(v, 'sections', p, '', 1, 20), p, 'section', (s, at) => ({

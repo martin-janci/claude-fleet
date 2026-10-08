@@ -32,7 +32,7 @@ it closes.
 |---|---|
 | answer now, while you wait | `ask` (`docs/forms.md`), not a block |
 | follow a procedure, ticking steps off | `steps` |
-| read reference material in parts | `guide` |
+| read reference material in parts, or walk a guide fleet has | `guide` |
 | notice one thing (a risk, a tip) | `callout` |
 | see a few labelled values at a glance | `facts` |
 | pick what you do next | `choices` |
@@ -91,6 +91,17 @@ ticks last while the window is open.
 | `sections` | yes | 1–20 of `{ title, body }`, `body` Markdown ≤ 8000 |
 
 Each section folds. The first one starts open.
+
+**A guide fleet already has.** With `page` (a page id, letters, digits and
+`. _ : -`, ≤ 64), the card is that guide: a compiled-in or approved
+`fleet.page/1` page of layout `guide` (Settings › Guides, `guide { list }`
+over the control API). It is drawn by the same view as in Settings: the
+same steps with Back, Next and Done, and its fields are the live settings,
+with their own guards (a paired desktop that may not write them shows
+them read-only). *Open in Settings* opens it there; Done folds the card.
+The other keys are ignored: `{"spec": "fleet.ui/1", "kind": "guide",
+"page": "guide.cleanup"}`. A page this fleet does not have says so and
+links to Settings › Guides.
 
 ### `callout`
 
