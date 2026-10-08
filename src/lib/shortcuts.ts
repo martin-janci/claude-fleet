@@ -1,0 +1,341 @@
+/**
+ * The shortcut registry (Orbit Fleet redesign step 0.1): every chord the app
+ * answers, in one table, per platform.
+ *
+ * - `global` chords are matched here: `appChord`, `isSwitcherChord` and
+ *   `isNewSessionChord` read this table, so a chord can only change by
+ *   changing a row below, and `shortcuts.test.ts` freezes every 0.5.4 chord
+ *   against a copy of the matchers as they shipped.
+ * - The other scopes are the per-view tables (Hosts, Assets, the task list,
+ *   the review sheets, the board, a session row) and the contextual chords of
+ *   the terminal, the conversation, the switcher and the New session dialog.
+ *   Their handlers still read `e.key` themselves; the rows here are the
+ *   inventory the freeze test checks against the handler sources, and what a
+ *   `?` sheet (3.8) and ⌘K commands (3.9) will read.
+ * - `planned` rows are the design manual's new chords (`keyboard.md`): they
+ *   match nothing yet, but they take part in the conflict check, so a chord
+ *   is known to be free on both platforms before its step wires it.
+ *
+ * A binding names `KeyboardEvent.key` (compared case-insensitively) and the
+ * exact modifiers held; `anyShift` ignores Shift, for symbols such as `?`
+ * that need it on some layouts and for handlers that never looked at it.
+ */
+
+export type Mod = 'meta' | 'ctrl' | 'alt' | 'shift';
+
+export interface Binding {
+  readonly key: string;
+  readonly mods: readonly Mod[];
+  readonly anyShift?: boolean;
+}
+
+export type Scope =
+  | 'global'
+  | 'terminal'
+  | 'conversation'
+  | 'switcher'
+  | 'switcher-new'
+  | 'new-session-dialog'
+  | 'hosts'
+  | 'assets'
+  | 'task-list'
+  | 'work-review'
+  | 'link-review'
+  | 'tidy-review'
+  | 'work-board'
+  | 'session-row'
+  | 'question-card';
+
+export interface Shortcut {
+  readonly id: string;
+  readonly scope: Scope;
+  readonly action: string;
+  readonly mac: readonly Binding[];
+  readonly other: readonly Binding[];
+  /** `live` chords work today; `planned` ones are reserved for their step. */
+  readonly status: 'live' | 'planned';
+  /** The plan step that wires a planned chord. */
+  readonly step?: string;
+  /** Global chords this one deliberately takes over inside its scope. */
+  readonly shadows?: readonly string[];
+}
+
+/** `'Meta+Shift+O'` → a binding; a trailing `~` means any Shift. */
+export function bind(spec: string): Binding {
+  const anyShift = spec.endsWith('~');
+  const body = anyShift ? spec.slice(0, -1) : spec;
+  // The key may itself be `+` only as the whole spec; none of ours is.
+  const parts = body.split('+');
+  const key = parts.pop() ?? '';
+  const mods = parts.map((p) => {
+    const m = p.toLowerCase();
+    if (m !== 'meta' && m !== 'ctrl' && m !== 'alt' && m !== 'shift') {
+      throw new Error(`shortcuts: unknown modifier "${p}" in "${spec}"`);
+    }
+    return m as Mod;
+  });
+  return { key: key === 'Space' ? ' ' : key, mods, ...(anyShift ? { anyShift } : {}) };
+}
+
+const both = (...specs: string[]) => ({ mac: specs.map(bind), other: specs.map(bind) });
+const split = (mac: string[], other: string[]) => ({ mac: mac.map(bind), other: other.map(bind) });
+const keys = (...specs: string[]) => both(...specs);
+
+function row(
+  scope: Scope,
+  id: string,
+  action: string,
+  b: { mac: Binding[]; other: Binding[] },
+  extra: Partial<Pick<Shortcut, 'status' | 'step' | 'shadows'>> = {},
+): Shortcut {
+  return { id, scope, action, ...b, status: extra.status ?? 'live', ...extra };
+}
+
+const digits = (prefix: string) => Array.from({ length: 9 }, (_, i) => `${prefix}${i + 1}`);
+
+export const SHORTCUTS: readonly Shortcut[] = [
+  // ── Global (app_views.appChord, quick_switcher) ──────────────────────
+  // Plain Ctrl chords stay with the terminal on Linux/Windows (Ctrl+K is
+  // kill-line, Ctrl+J line-feed), so the app takes Ctrl+Shift there. The
+  // Super/Windows-key forms of ⌘I/⌘J/⌘E/⌘, are what appChord has always
+  // accepted off the Mac; they are kept, not advertised.
+  row('global', 'switcher', 'Quick switcher and commands',
+    split(['Meta+K', 'Meta+P'], ['Ctrl+Shift+K', 'Ctrl+Shift+P'])),
+  row('global', 'new-session', 'New session', split(['Meta+N'], ['Ctrl+Shift+N'])),
+  row('global', 'hosts', 'Accounts and hosts', split(['Meta+I'], ['Ctrl+Shift+H', 'Meta+I'])),
+  row('global', 'session-view', 'Flip the Session view (agent tab)',
+    split(['Meta+J'], ['Ctrl+Shift+J', 'Meta+J'])),
+  row('global', 'agent', 'Open the agent (Control from 9.1)', split(['Meta+E'], ['Ctrl+Shift+E', 'Meta+E'])),
+  row('global', 'settings', 'Settings', split(['Meta+,'], ['Meta+,'])),
+  row('global', 'work-view', 'Switch Sessions and Work', split(['Meta+Shift+W'], ['Ctrl+Shift+W'])),
+  row('global', 'scope', 'Organisation scope', split(['Meta+Shift+O'], ['Ctrl+Shift+O'])),
+  row('global', 'today', 'Today', split(['Meta+Shift+T'], ['Ctrl+Shift+T'])),
+  // The design manual's new chords (keyboard.md); ⌥⌘ is Ctrl+Alt elsewhere.
+  row('global', 'settings-ctrl', 'Settings with Ctrl+, on Linux and Windows',
+    split([], ['Ctrl+,']), { status: 'planned', step: '1.9' }),
+  row('global', 'open-in-editor', 'Open in VS Code',
+    split(['Meta+Shift+E'], ['Ctrl+Alt+E']), { status: 'planned', step: '5.6' }),
+  row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B']), { status: 'planned', step: '3.5' }),
+  row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { status: 'planned', step: '5.5' }),
+  row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { status: 'planned', step: '5.5' }),
+  row('global', 'go-to-file', 'Go to file (Files tab only)',
+    split(['Alt+Meta+P'], ['Ctrl+Alt+P']), { status: 'planned', step: '5.3' }),
+
+  // ── Terminal (TerminalView) ──────────────────────────────────────────
+  // Cmd is never sent to the pty; Ctrl+Shift is the copy/paste chord off
+  // the Mac so plain Ctrl+C / Ctrl+V still reach the program.
+  row('terminal', 'terminal.paste', 'Paste', split(['Meta+V~'], ['Meta+V~', 'Ctrl+Shift+V'])),
+  row('terminal', 'terminal.copy', 'Copy the selection', split(['Meta+C~'], ['Meta+C~', 'Ctrl+Shift+C'])),
+  row('terminal', 'terminal.select-all', 'Select the viewport',
+    split(['Meta+A~'], ['Meta+A~', 'Ctrl+Shift+A'])),
+
+  // ── Conversation (ConversationPanel) ─────────────────────────────────
+  row('conversation', 'conversation.find', 'Find in the conversation', split(['Meta+F'], ['Ctrl+F'])),
+  row('conversation', 'conversation.prev-turn', 'Previous turn', keys('[~')),
+  row('conversation', 'conversation.next-turn', 'Next turn', keys(']~')),
+
+  // ── Quick switcher (QuickSwitcher, while open) ───────────────────────
+  row('switcher', 'switcher.down', 'Next result', keys('ArrowDown', 'Ctrl+N')),
+  row('switcher', 'switcher.up', 'Previous result', keys('ArrowUp')),
+  row('switcher', 'switcher.open', 'Open the result', keys('Enter')),
+  row('switcher', 'switcher.new-with-query', 'New session from the query (or start the ticket)',
+    keys('Meta+Enter~', 'Ctrl+Enter~')),
+  row('switcher-new', 'switcher-new.close-menu', 'Close the menu or clear the query', keys('Escape')),
+  row('switcher-new', 'switcher-new.back', 'Back to the switcher (empty query)', keys('Backspace')),
+  row('switcher-new', 'switcher-new.pin', 'Pin the project', keys('Meta+P~', 'Ctrl+P~'),
+    { shadows: ['switcher'] }),
+  row('switcher-new', 'switcher-new.hide', 'Hide the project', keys('Meta+Backspace~', 'Ctrl+Backspace~')),
+  row('switcher-new', 'switcher-new.groups', 'Groups menu', keys('Meta+G~', 'Ctrl+G~')),
+  row('switcher-new', 'switcher-new.undo', 'Undo the last pin or hide', keys('Meta+Z~', 'Ctrl+Z~')),
+  row('switcher-new', 'switcher-new.menu', 'Project menu', keys('Shift+F10', 'ContextMenu~')),
+  row('switcher-new', 'switcher-new.pick-n', 'Pick the numbered project',
+    keys(...digits('Meta+').map((s) => `${s}~`), ...digits('Ctrl+').map((s) => `${s}~`))),
+  row('switcher-new', 'switcher-new.unfold', 'Unfold a group', keys('ArrowRight')),
+  row('switcher-new', 'switcher-new.fold', 'Fold the group', keys('ArrowLeft')),
+
+  // ── New session dialog ───────────────────────────────────────────────
+  row('new-session-dialog', 'new-session.reroll', 'Re-roll the name', keys('Meta+R~', 'Ctrl+R~')),
+  row('new-session-dialog', 'new-session.create', 'Create', keys('Enter')),
+
+  // ── Per-view tables: single keys, never with Cmd/Ctrl/Alt ────────────
+  // HostsView
+  row('hosts', 'hosts.down', 'Next host', keys('j', 'ArrowDown')),
+  row('hosts', 'hosts.up', 'Previous host', keys('k', 'ArrowUp')),
+  row('hosts', 'hosts.first', 'First host', keys('Home')),
+  row('hosts', 'hosts.last', 'Last host', keys('End')),
+  row('hosts', 'hosts.detail', 'Into the detail', keys('Enter', 'ArrowRight')),
+  row('hosts', 'hosts.list', 'Back to the list', keys('ArrowLeft')),
+  row('hosts', 'hosts.close', 'Close the legend, the detail or Hosts', keys('Escape')),
+  row('hosts', 'hosts.reprobe', 'Re-probe the host', keys('r')),
+  row('hosts', 'hosts.usage', 'Refresh usage', keys('u')),
+  row('hosts', 'hosts.filter-sidebar', 'Filter the sidebar to the host', keys('s')),
+  row('hosts', 'hosts.new-session', 'New session on the host', keys('n')),
+  row('hosts', 'hosts.edit', 'Edit the account', keys('e')),
+  row('hosts', 'hosts.search', 'Search hosts', keys('/')),
+  row('hosts', 'hosts.legend', 'Legend', keys('?~')),
+  // AssetsWorkspace
+  row('assets', 'assets.primary', 'Run the primary (apply the card or Sync fleet)',
+    keys('Meta+Enter', 'Ctrl+Enter')),
+  row('assets', 'assets.down', 'Next row', keys('j', 'ArrowDown')),
+  row('assets', 'assets.up', 'Previous row', keys('k', 'ArrowUp')),
+  row('assets', 'assets.search', 'Search assets', keys('/')),
+  row('assets', 'assets.adopt', 'Adopt (import or apply the New card)', keys('a')),
+  row('assets', 'assets.sync', 'Sync the asset', keys('s')),
+  row('assets', 'assets.edit', 'Edit the asset', keys('e')),
+  row('assets', 'assets.ignore', 'Ignore the card', keys('i')),
+  // TaskList
+  row('task-list', 'task-list.down', 'Next task', keys('j')),
+  row('task-list', 'task-list.up', 'Previous task', keys('k')),
+  row('task-list', 'task-list.work', 'Work on the task', keys('s')),
+  row('task-list', 'task-list.work-ask', 'Start options for the task', keys('Shift+S')),
+  // WorkReview
+  row('work-review', 'work-review.down', 'Next item', keys('j', 'ArrowDown')),
+  row('work-review', 'work-review.up', 'Previous item', keys('k', 'ArrowUp')),
+  row('work-review', 'work-review.yes', 'Confirm or keep', keys('y')),
+  row('work-review', 'work-review.no', 'Reject the suggestion', keys('n')),
+  row('work-review', 'work-review.pick', 'Pick for a bulk action', keys('x')),
+  // LinkReview
+  row('link-review', 'link-review.down', 'Next link', keys('j', 'ArrowDown')),
+  row('link-review', 'link-review.up', 'Previous link', keys('k', 'ArrowUp')),
+  row('link-review', 'link-review.yes', 'Confirm the link', keys('y', 'Enter')),
+  row('link-review', 'link-review.no', 'Not this', keys('n', 'Backspace')),
+  row('link-review', 'link-review.close', 'Close the sheet', keys('Escape')),
+  // TidyReview
+  row('tidy-review', 'tidy-review.down', 'Next session', keys('j', 'ArrowDown')),
+  row('tidy-review', 'tidy-review.up', 'Previous session', keys('k', 'ArrowUp')),
+  row('tidy-review', 'tidy-review.toggle', 'Toggle the session', keys('Space')),
+  row('tidy-review', 'tidy-review.apply', 'Apply the tidy', keys('Enter')),
+  row('tidy-review', 'tidy-review.close', 'Close the sheet', keys('Escape')),
+  // WorkBoard
+  row('work-board', 'work-board.edit', 'Edit the card', keys('e')),
+  row('work-board', 'work-board.left', 'Move the card a column left', keys('ArrowLeft')),
+  row('work-board', 'work-board.right', 'Move the card a column right', keys('ArrowRight')),
+  row('work-board', 'work-board.cancel-drag', 'Cancel the drag', keys('Escape~')),
+  // SessionRowItem
+  row('session-row', 'session-row.yes', 'Confirm the suggested link', keys('y')),
+  row('session-row', 'session-row.no', 'Reject the suggested link', keys('n')),
+  row('session-row', 'session-row.link', 'Link or pick work', keys('l')),
+
+  // ── Question card (10.1): 1–9 answer when the composer is not focused ─
+  row('question-card', 'question-card.answer', 'Answer with option 1–9', keys(...digits('')),
+    { status: 'planned', step: '10.1' }),
+];
+
+/** The view handlers each per-view scope lives in, for the freeze test. */
+export const SCOPE_SOURCES: Partial<Record<Scope, string>> = {
+  terminal: 'src/lib/TerminalView.svelte',
+  conversation: 'src/lib/ConversationPanel.svelte',
+  switcher: 'src/lib/QuickSwitcher.svelte',
+  'switcher-new': 'src/lib/QuickSwitcher.svelte',
+  'new-session-dialog': 'src/lib/NewSessionDialog.svelte',
+  hosts: 'src/lib/HostsView.svelte',
+  assets: 'src/lib/AssetsWorkspace.svelte',
+  'task-list': 'src/lib/TaskList.svelte',
+  'work-review': 'src/lib/WorkReview.svelte',
+  'link-review': 'src/lib/LinkReview.svelte',
+  'tidy-review': 'src/lib/TidyReview.svelte',
+  'work-board': 'src/lib/WorkBoard.svelte',
+  'session-row': 'src/lib/SessionRowItem.svelte',
+};
+
+export interface KeyEventLike {
+  key: string;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+}
+
+export function bindingMatches(b: Binding, e: KeyEventLike): boolean {
+  if (b.key.toLowerCase() !== e.key.toLowerCase()) return false;
+  const has = (m: Mod) => b.mods.includes(m);
+  if (has('meta') !== e.metaKey || has('ctrl') !== e.ctrlKey || has('alt') !== e.altKey) return false;
+  return b.anyShift === true || has('shift') === e.shiftKey;
+}
+
+export function bindingsFor(s: Shortcut, isMac: boolean): readonly Binding[] {
+  return isMac ? s.mac : s.other;
+}
+
+/** The live shortcut in `scope` that `e` triggers, or null. */
+export function matchShortcut(scope: Scope, e: KeyEventLike, isMac: boolean): string | null {
+  for (const s of SHORTCUTS) {
+    if (s.scope !== scope || s.status !== 'live') continue;
+    if (bindingsFor(s, isMac).some((b) => bindingMatches(b, e))) return s.id;
+  }
+  return null;
+}
+
+export function shortcutById(id: string): Shortcut | undefined {
+  return SHORTCUTS.find((s) => s.id === id);
+}
+
+const MAC_GLYPH: Record<Mod, string> = { ctrl: '⌃', alt: '⌥', meta: '⌘', shift: '⇧' };
+const MAC_ORDER: Mod[] = ['ctrl', 'alt', 'meta', 'shift'];
+const OTHER_NAME: Record<Mod, string> = { ctrl: 'Ctrl', alt: 'Alt', shift: 'Shift', meta: 'Super' };
+const OTHER_ORDER: Mod[] = ['ctrl', 'alt', 'shift', 'meta'];
+const KEY_NAME: Record<string, string> = {
+  ' ': 'Space', arrowdown: '↓', arrowup: '↑', arrowleft: '←', arrowright: '→', escape: 'Esc',
+};
+
+/** How a binding reads on its platform: `⌘⇧O`, `⌥⌘B`, `Ctrl+Shift+H`. */
+export function formatBinding(b: Binding, isMac: boolean): string {
+  const k = KEY_NAME[b.key.toLowerCase()] ?? (b.key.length === 1 ? b.key.toUpperCase() : b.key);
+  if (isMac) return MAC_ORDER.filter((m) => b.mods.includes(m)).map((m) => MAC_GLYPH[m]).join('') + k;
+  return [...OTHER_ORDER.filter((m) => b.mods.includes(m)).map((m) => OTHER_NAME[m]), k].join('+');
+}
+
+/** The advertised chord of a shortcut: its first binding on the platform. */
+export function shortcutLabel(id: string, isMac: boolean): string {
+  const s = shortcutById(id);
+  const b = s ? bindingsFor(s, isMac)[0] : undefined;
+  if (!b) throw new Error(`shortcuts: no ${isMac ? 'mac' : 'non-mac'} binding for "${id}"`);
+  return formatBinding(b, isMac);
+}
+
+function overlaps(a: Binding, b: Binding): boolean {
+  if (a.key.toLowerCase() !== b.key.toLowerCase()) return false;
+  const strip = (x: Binding) => x.mods.filter((m) => !(x.anyShift && m === 'shift'));
+  const am = strip(a), bm = strip(b);
+  for (const m of ['meta', 'ctrl', 'alt'] as const) if (am.includes(m) !== bm.includes(m)) return false;
+  if (a.anyShift || b.anyShift) return true;
+  return am.includes('shift') === bm.includes('shift');
+}
+
+export interface Conflict {
+  a: string;
+  b: string;
+  platform: 'mac' | 'other';
+  chord: string;
+}
+
+/**
+ * Every pair of shortcuts that one key press would trigger together: two in
+ * the same scope, or a global one and one in any scope (a global chord fires
+ * everywhere) unless the scoped row declares that it `shadows` it.
+ */
+export function findConflicts(table: readonly Shortcut[] = SHORTCUTS): Conflict[] {
+  const out: Conflict[] = [];
+  for (let i = 0; i < table.length; i++) {
+    for (let j = i + 1; j < table.length; j++) {
+      const a = table[i], b = table[j];
+      const sameScope = a.scope === b.scope;
+      const crossGlobal = !sameScope && (a.scope === 'global' || b.scope === 'global');
+      if (!sameScope && !crossGlobal) continue;
+      if (crossGlobal) {
+        const [g, s] = a.scope === 'global' ? [a, b] : [b, a];
+        if (s.shadows?.includes(g.id)) continue;
+      }
+      for (const isMac of [true, false]) {
+        for (const x of bindingsFor(a, isMac)) {
+          const y = bindingsFor(b, isMac).find((yy) => overlaps(x, yy));
+          if (y) {
+            out.push({ a: a.id, b: b.id, platform: isMac ? 'mac' : 'other', chord: formatBinding(x, isMac) });
+            break;
+          }
+        }
+      }
+    }
+  }
+  return out;
+}

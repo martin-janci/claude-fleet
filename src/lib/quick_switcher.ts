@@ -10,6 +10,7 @@
 // they never displace a session result. Ranking is `fuzzy.ts` over every
 // searchable facet (friendly name, tmux name, project, host, branch,
 // status) so `"blue mef"` finds the blue-sirius session on mefistos.
+import { matchShortcut, shortcutLabel, type KeyEventLike } from './shortcuts';
 import { get, writable } from 'svelte/store';
 import { fuzzyMatchFields } from './fuzzy';
 import type { ProjectTreeRow } from './projects';
@@ -418,37 +419,19 @@ export function contextProject(
  * Ctrl+Shift+P, so plain Ctrl+K (readline kill-line) and Ctrl+P (previous
  * history) keep reaching the terminal.
  */
-export function isSwitcherChord(
-  e: {
-    key: string;
-    metaKey: boolean;
-    ctrlKey: boolean;
-    altKey: boolean;
-    shiftKey: boolean;
-  },
-  isMac: boolean,
-): boolean {
-  const k = e.key.toLowerCase();
-  if (k !== 'k' && k !== 'p') return false;
-  if (e.altKey) return false;
-  if (isMac) return e.metaKey && !e.ctrlKey && !e.shiftKey;
-  return e.ctrlKey && e.shiftKey && !e.metaKey;
+export function isSwitcherChord(e: KeyEventLike, isMac: boolean): boolean {
+  return matchShortcut('global', e, isMac) === 'switcher';
 }
 
 /** Human label for the open chord, for hints and docs. */
 export function chordLabel(isMac: boolean): string {
-  return isMac ? '⌘K' : 'Ctrl+Shift+K';
+  return shortcutLabel('switcher', isMac);
 }
 
 /** The New session picker's chord (project picker spec v2): ⌘N on macOS,
  *  Ctrl+Shift+N elsewhere — plain Ctrl+N stays readline's next-history. */
-export function isNewSessionChord(
-  e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean },
-  isMac: boolean,
-): boolean {
-  if (e.key.toLowerCase() !== 'n' || e.altKey) return false;
-  if (isMac) return e.metaKey && !e.ctrlKey && !e.shiftKey;
-  return e.ctrlKey && e.shiftKey && !e.metaKey;
+export function isNewSessionChord(e: KeyEventLike, isMac: boolean): boolean {
+  return matchShortcut('global', e, isMac) === 'new-session';
 }
 
 /** "Start from work": My work tickets nobody has a session on, at most `cap`. */
