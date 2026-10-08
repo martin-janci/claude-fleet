@@ -98,3 +98,14 @@ export async function moveToHeadroom(
   }
   return out;
 }
+
+/** The New session dialog's default (step 4.5): the login with the most
+ *  headroom among those with a reading; `null` when none has one. */
+export function freestLogin(logins: readonly HostLogin[]): HostLogin | null {
+  let best: HostLogin | null = null;
+  for (const l of logins) {
+    if (l.used_pct == null) continue;
+    if (best == null || l.used_pct < (best.used_pct as number)) best = l;
+  }
+  return best;
+}
