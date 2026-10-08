@@ -10127,6 +10127,7 @@ async fn list_hosts_serves_the_unclaimed_count_to_whoever_administers_the_host()
 pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // lifecycle.rs
     ("kill_session", &["Own"]),
+    ("shell_terminals", &["Own"]),
     ("move_session", &["Own"]),
     ("rename_session", &["Own"]),
     ("repair_session", &["Drive"]),

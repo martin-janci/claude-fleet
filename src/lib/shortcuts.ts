@@ -138,8 +138,9 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // The design manual's new chords (keyboard.md); ⌥⌘ is Ctrl+Alt elsewhere.
   row('global', 'open-in-editor', 'Open in VS Code', split(['Meta+Shift+E'], ['Ctrl+Alt+E'])),
   row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B'])),
-  row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { status: 'planned', step: '5.5' }),
-  row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { status: 'planned', step: '5.5' }),
+  // Step 5.3: matched by TerminalView in the new layout, where the strip is.
+  row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { step: '5.3' }),
+  row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { step: '5.3' }),
   row('global', 'go-to-file', 'Go to file (Files tab only)',
     split(['Alt+Meta+P'], ['Ctrl+Alt+P'])),
   // Step 3.8: the list keys that work from anywhere outside a text field

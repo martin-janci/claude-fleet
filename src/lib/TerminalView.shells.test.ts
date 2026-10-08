@@ -1,0 +1,182 @@
+// Shell terminals (redesign step 5.3): the strip in the new layout, one pty
+// id per terminal, Split, Close, and the ⌥⌘T / ⌘` chords.
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { tick } from 'svelte';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+vi.mock('@tauri-apps/api/webview', () => ({
+  getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
+}));
+vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ readText: vi.fn(), writeText: vi.fn() }));
+
+import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import TerminalView from './TerminalView.svelte';
+import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
+import { selectSession, clearSelection } from './selection';
+import { clearToasts } from './toasts';
+import { uiLayout } from './prefs';
+import { nextTerminalTab, shellTerminalName, terminalPtyId } from './terminals';
+
+const row = {
+  id: 1, tmux_name: 'api', host_alias: 'alpha', project_id: null, worktree_id: null, created_at: 1,
+  last_activity_at: 1, status: 'running', notes: null, account_uuid: null, kind: 'work',
+  reviews_session_id: null, worktree_key: 'main', lost_at: null, claude_session_id: null,
+  claude_status: null, effort_level: null, pr_url: null, current_activity: null, friendly_name: null,
+  safe_kill_state: null, safe_kill_nonce: null, safe_kill_detail: null, safe_kill_requested_at: null,
+  context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null,
+  last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0,
+  last_stop_at: null, parent_session_id: null, tags: [], model: null, context_tokens: null,
+  context_window: null, context_source: null, context_at: null, context_stale: false,
+  tmux_pane_id: null, pending_input: null,
+} as unknown as SessionRow;
+
+type Inv = ReturnType<typeof vi.fn>;
+const inv = () => mockedInvoke as Inv;
+const calls = (cmd: string) => inv().mock.calls.filter((c) => c[0] === cmd);
+const args = (c: unknown[]) => (c[1] as { args: Record<string, unknown> }).args;
+const settle = async (n = 12) => {
+  for (let i = 0; i < n; i++) {
+    await tick();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+};
+
+class FakeResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+/** The terminals tmux has, as the backend would answer. */
+let open: number[] = [];
+const answer = (opened: number | null = null) => ({
+  session_id: 1,
+  host_alias: 'alpha',
+  terminals: open.map((n) => ({ n, tmux_name: `api--sh${n}` })),
+  opened,
+});
+
+beforeEach(() => {
+  open = [];
+  inv().mockReset();
+  inv().mockImplementation(async (cmd: string, payload?: { args?: { action?: string; n?: number | null } }) => {
+    if (cmd === 'pty_drain') return { data: '', bytes: 0 };
+    if (cmd === 'shell_terminals') {
+      const a = payload?.args ?? {};
+      if (a.action === 'open') {
+        const n = a.n ?? [1, 2, 3].find((x) => !open.includes(x))!;
+        if (!open.includes(n)) open.push(n);
+        return answer(n);
+      }
+      if (a.action === 'close') open = open.filter((x) => x !== a.n);
+      return answer();
+    }
+    return null;
+  });
+  globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
+  resetTombstonesForTests();
+  sessions.set([row]);
+  clearSelection();
+  clearToasts();
+});
+
+afterEach(() => {
+  clearSelection();
+  uiLayout.set('classic');
+});
+
+describe('shell terminals strip (step 5.3)', () => {
+  it('the classic layout keeps the agent terminal alone, with no strip and no list call', async () => {
+    uiLayout.set('classic');
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    expect(screen.queryByTestId('terminal-strip')).toBeNull();
+    expect(calls('shell_terminals')).toHaveLength(0);
+    expect(calls('pty_open').map((c) => args(c).id)).toEqual(['agent']);
+  });
+
+  it('+ New opens a terminal and attaches it under its own pty id; the agent tab goes back', async () => {
+    uiLayout.set('new');
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    expect(screen.getByTestId('terminal-strip')).toBeTruthy();
+    expect(args(calls('shell_terminals')[0])).toMatchObject({ session_id: 1, action: 'list' });
+
+    await fireEvent.click(screen.getByTestId('terminal-new'));
+    await settle();
+    expect(screen.getByTestId('terminal-tab-1').getAttribute('aria-selected')).toBe('true');
+    const opens = calls('pty_open').map((c) => args(c));
+    expect(opens.at(-1)).toMatchObject({ id: 'sh1', session_name: 'api--sh1', host_alias: 'alpha' });
+    // The agent's attach was closed by its own id, never replaced.
+    expect(calls('pty_close').map((c) => args(c).id)).toContain('agent');
+    expect(screen.getByTestId('terminal-shell-tag').textContent).toContain('Shell 1');
+
+    await fireEvent.click(screen.getByTestId('terminal-tab-agent'));
+    await settle();
+    expect(calls('pty_open').map((c) => args(c)).at(-1)).toMatchObject({ id: 'agent', session_name: 'api' });
+    expect(calls('pty_close').map((c) => args(c).id)).toContain('sh1');
+  });
+
+  it('Split shows the agent and the picked shell side by side, each on its own pty', async () => {
+    uiLayout.set('new');
+    open = [2];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-2'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-split-toggle'));
+    await settle(20);
+    expect(screen.getByTestId('terminal-split')).toBeTruthy();
+    const ids = calls('pty_open').map((c) => args(c).id);
+    expect(ids.slice(-2).sort()).toEqual(['agent', 'sh2']);
+  });
+
+  it('closing a terminal lets go of it first and never stops the session', async () => {
+    uiLayout.set('new');
+    open = [1];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-1'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-close-1'));
+    await settle();
+    expect(args(calls('shell_terminals').at(-1)!)).toMatchObject({ action: 'close', n: 1 });
+    expect(screen.queryByTestId('terminal-tab-1')).toBeNull();
+    expect(calls('pty_open').map((c) => args(c)).at(-1)).toMatchObject({ id: 'agent' });
+    expect(calls('kill_session')).toHaveLength(0);
+  });
+
+  it('Ctrl+Alt+T opens a terminal and Ctrl+` walks the tabs, neither reaching the pty', async () => {
+    uiLayout.set('new');
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.keyDown(window, { key: 't', ctrlKey: true, altKey: true });
+    await settle();
+    expect(screen.getByTestId('terminal-tab-1').getAttribute('aria-selected')).toBe('true');
+    await fireEvent.keyDown(window, { key: '`', ctrlKey: true });
+    await settle();
+    expect(screen.getByTestId('terminal-tab-agent').getAttribute('aria-selected')).toBe('true');
+    expect(calls('pty_write')).toHaveLength(0);
+  });
+});
+
+describe('terminals helpers', () => {
+  it('names terminals and their ptys like the backend', () => {
+    expect(shellTerminalName('api', 3)).toBe('api--sh3');
+    expect(terminalPtyId(null)).toBe('agent');
+    expect(terminalPtyId(4)).toBe('sh4');
+  });
+
+  it('next tab goes agent, 1, 2, … and wraps', () => {
+    expect(nextTerminalTab(null, [2, 1])).toBe(1);
+    expect(nextTerminalTab(1, [1, 2])).toBe(2);
+    expect(nextTerminalTab(2, [1, 2])).toBeNull();
+    expect(nextTerminalTab(null, [])).toBeNull();
+  });
+});

@@ -303,7 +303,9 @@ Index by area (names only; see the reference for details):
 - **Sessions** — `list_sessions`, `related_sessions`, `new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `rename_session`,
   `set_friendly_name`, `touch_session_viewed` (the turns it has finished
-  read as seen; drive reach), `register_self`, `whoami`, `ensure_operator` (the UX
+  read as seen; drive reach), `shell_terminals` (list, open or close the
+  session's shell terminals, tmux sessions `<name>--sh<N>` beside the agent
+  that no session list shows; own reach), `register_self`, `whoami`, `ensure_operator` (the UX
   agent's own session, idempotent), `operator_status` (why it cannot work,
   if it cannot).
 - **Sharing & ownership** (multi-user M1) — `session_share` (give one

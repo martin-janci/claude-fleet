@@ -213,8 +213,9 @@ describe('shortcut registry', () => {
     expect(md).toContain(`| ${mac('new-terminal')} | New terminal (${other('new-terminal')})`);
     expect(md).toContain(`| ${mac('next-terminal')} | Next terminal`);
     expect(md).toContain(`| ${mac('go-to-file')} | Go to file, Files tab only (${other('go-to-file')})`);
+    // Wired by step 5.3 (TerminalView).
     for (const id of ['new-terminal', 'next-terminal']) {
-      expect(SHORTCUTS.find((s) => s.id === id)?.status).toBe('planned');
+      expect(SHORTCUTS.find((s) => s.id === id)?.status).toBe('live');
     }
     // Step 3.5 wired the inspector, 5.5 Open in VS Code.
     expect(SHORTCUTS.find((s) => s.id === 'inspector')?.status).toBe('live');
@@ -233,7 +234,7 @@ describe('shortcut registry', () => {
 
   it('planned chords match nothing until their step wires them', () => {
     const planned = SHORTCUTS.filter((s) => s.status === 'planned');
-    expect(planned.length).toBeGreaterThan(0);
+    // Step 5.3 wired the last planned rows; the guard stays for the next ones.
     for (const s of planned) {
       expect(s.step, s.id).toBeTruthy();
       for (const isMac of [true, false]) {
