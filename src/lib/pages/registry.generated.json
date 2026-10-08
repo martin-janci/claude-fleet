@@ -1721,6 +1721,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
+      "key": "decide.jev.quick_answer",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: quick answer",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -2845,6 +2885,11 @@
             {
               "hint": "Pre-selects the repository when a task's first start has none; you still press Start.",
               "key": "decide.jev.start_project",
+              "type": "field"
+            },
+            {
+              "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission.",
+              "key": "decide.jev.quick_answer",
               "type": "field"
             },
             {

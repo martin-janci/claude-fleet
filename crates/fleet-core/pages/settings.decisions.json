@@ -49,6 +49,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.quick_answer",
+          "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         }
       ]

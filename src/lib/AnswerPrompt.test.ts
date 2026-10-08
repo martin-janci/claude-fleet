@@ -397,6 +397,68 @@ describe('AnswerPrompt 1–9 (redesign step 3.8)', () => {
   });
 });
 
+describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
+  const QUESTION: PendingInput = {
+    kind: 'input',
+    question: 'Which test runner?',
+    options: [
+      { n: 1, label: 'Jest', selected: true },
+      { n: 2, label: 'Vitest', selected: false },
+      { n: 3, label: 'Push the branch first', selected: false },
+    ],
+  };
+  const jev = (value: string, confidence_pct = 80) => ({
+    proposals: [{ feature: 'quick_answer', value, source: 'jev' as const, confidence_pct }],
+  });
+
+  beforeEach(() => {
+    mockedAct.mockResolvedValue({ ok: true, value: probe(QUESTION) });
+  });
+
+  const shown = () => screen.getAllByTestId('answer-option').map((b) => b.textContent);
+
+  it('moves the likely option first, numbers the shown order, and a digit still sends its own key', async () => {
+    render(AnswerPrompt, { session: session({ pending_input: QUESTION, ...jev('o2') }), view: view(QUESTION) });
+    expect(shown()).toEqual(['1Vitest', '2Jest', '3Push the branch first']);
+    expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
+    await fireEvent.keyDown(document.body, { key: '1' });
+    await settle();
+    expect(mockedSend.mock.calls[0][3]).toEqual({ keys: '2' });
+  });
+
+  it('never moves a risky option, a weak or unsure proposal, or anything on a permission', () => {
+    for (const p of [jev('o3'), jev('o2', 30), jev('unsure')]) {
+      const { unmount } = render(AnswerPrompt, { session: session({ pending_input: QUESTION, ...p }), view: view(QUESTION) });
+      expect(shown()).toEqual(['1Jest', '2Vitest', '3Push the branch first']);
+      expect(screen.queryByTestId('answer-proposed')).toBeNull();
+      unmount();
+    }
+    render(AnswerPrompt, { session: session(jev('o2')), view: view() });
+    expect(shown()[0]).toBe('1Yes');
+  });
+
+  it('Keep the order puts the options back for this question', async () => {
+    render(AnswerPrompt, { session: session({ pending_input: QUESTION, ...jev('o2') }), view: view(QUESTION) });
+    await fireEvent.click(screen.getByTestId('answer-proposed-change'));
+    expect(shown()).toEqual(['1Jest', '2Vitest', '3Push the branch first']);
+  });
+
+  it('the New layout’s card shows the likely answer first as its primary, numbered as shown', async () => {
+    uiLayout.set('new');
+    try {
+      render(AnswerPrompt, { session: session({ pending_input: QUESTION, ...jev('o2') }), view: view(QUESTION) });
+      const opts = screen.getAllByTestId('answer-option');
+      expect(opts.map((b) => b.textContent?.replace(/\s+/g, ''))).toEqual(['1Vitest', '2Jest', '3Pushthebranchfirst']);
+      expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
+      await fireEvent.keyDown(document.body, { key: '1' });
+      await settle();
+      expect(mockedSend.mock.calls[0][3]).toEqual({ keys: '2' });
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+});
+
 describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
   afterEach(() => uiLayout.set('classic'));
 
