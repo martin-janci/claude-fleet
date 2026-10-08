@@ -50,7 +50,7 @@
         {
           "type": "field",
           "key": "decide.jev.host_placement",
-          "hint": "Pre-selects the host of a new session only when two or more online hosts under their limit are left; you still press Create."
+          "hint": "Pre-selects a new session's host when two or more online hosts under their limit are left; you press Create."
         },
         {
           "type": "field",
