@@ -432,6 +432,10 @@ pub struct MemberSummary {
     /// admin | member | viewer.
     pub role: String,
     pub added_at: i64,
+    /// Since when an org share reaches them (redesign 11.2); absent for a
+    /// viewer, who receives none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares_since: Option<i64>,
     /// The hub's owner (who administers every org anyway).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub owner: bool,
@@ -463,6 +467,7 @@ pub fn list_members(s: &Store, org: i64) -> Result<Vec<MemberSummary>, IpcError>
             display_name: p.display_name,
             role: m.role,
             added_at: m.added_at,
+            shares_since: m.shares_since,
             owner: owner == Some(m.person_id),
         });
     }

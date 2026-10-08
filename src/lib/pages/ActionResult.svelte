@@ -76,7 +76,7 @@
     margin: 0;
     max-height: 22rem;
     overflow: auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     line-height: 1.35;
     white-space: pre-wrap;
     word-break: break-all;

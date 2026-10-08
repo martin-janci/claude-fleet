@@ -49,6 +49,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.sibling_repos",
+          "hint": "Pre-ticks the other repository a ticket start also needs; you still press Start."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         }
       ]

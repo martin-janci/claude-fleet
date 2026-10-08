@@ -186,6 +186,7 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'fg', bg: 'bg-pane', tint: 'failed-soft', min: 4.5, note: 'body text in a failed banner' },
   { fg: 'status-done', bg: 'bg-pane', tint: 'done-soft', min: 4.5, note: 'Done chip' },
   { fg: 'on-waiting', bg: 'status-waiting', min: 4.5, note: 'text on a filled waiting badge' },
+  { fg: 'status-working', bg: 'accent-soft', min: 4.5, note: 'a frozen session chip (step 7.3)' },
   // Destructive.
   { fg: 'danger', bg: 'bg-pane', min: 4.5, note: 'error text and invalid fields' },
   { fg: 'danger', bg: 'bg', min: 4.5, note: 'error text on the page ground' },
@@ -195,6 +196,11 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'usage-warn', bg: 'bg-pane', min: 4.5, note: 'warn text and bars' },
   { fg: 'usage-crit', bg: 'bg-pane', min: 4.5, note: 'crit text and bars' },
   { fg: 'status-working', bg: 'track', min: 3, note: 'a meter fill on its track' },
+  // History graph lanes (CommitGraph's palette, step 7.3): lines and dots,
+  // so the non-text floor, on the pane the graph is drawn on.
+  ...(['org-3', 'code', 'syn-num', 'syn-str', 'syn-kw', 'status-idle'] as const).map(
+    (fg): ContrastPair => ({ fg, bg: 'bg-pane', min: 3, note: `${fg} as a history-graph lane` }),
+  ),
   // Code, in the bg-sunk well it sits in.
   ...(['code', 'syn-kw', 'syn-str', 'syn-num'] as const).map((fg): ContrastPair => ({ fg, bg: 'bg-sunk', min: 4.5, note: `${fg} in a code well` })),
   // Organisation swatches are non-text.

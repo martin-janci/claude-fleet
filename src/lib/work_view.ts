@@ -16,9 +16,11 @@
  * whatever the hub answered.
  */
 
+import type { ProposalLike } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import type { DecisionProposal } from './proposals';
 import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
 import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
 import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
@@ -52,7 +54,19 @@ export interface WorkTreeFilters {
    *  (`archived_hidden`); absent shows them (a client from before the
    *  archive). `workTree` always sends it. An older hub ignores it. */
   archived?: boolean;
+  /** One person it is assigned to in its tracker, by name (redesign 6.2). */
+  assignee?: string;
+  /** One tracker column, the tracker's own status name ("QA Review"). */
+  status_name?: string;
+  /** What a section under each org is; absent is `group`. */
+  group_by?: WorkGroupBy;
 }
+
+/** `filters.group_by` (redesign step 6.2): the task's own group (a person,
+ *  rule, tracker container, repo or key), one section per org, or its
+ *  assignee, mission, account or repo. An older hub ignores it. */
+export const WORK_GROUP_BY = ['group', 'org', 'person', 'mission', 'account', 'repo'] as const;
+export type WorkGroupBy = (typeof WORK_GROUP_BY)[number];
 
 export const STATUS_FILTERS = ['any', 'open', 'todo', 'in_progress', 'done'] as const;
 export type WorkStatusFilter = (typeof STATUS_FILTERS)[number];
@@ -185,6 +199,9 @@ export interface WorkTask {
   blocked_by?: string[];
   /** Spend of its sessions in micro-USD, each session once. Absent when 0. */
   cost_micros?: number;
+  /** What a rule, Jev or an LLM proposes about the task (redesign 2.8).
+   *  Absent when nothing proposes anything. */
+  proposals?: DecisionProposal[];
   last_activity_at?: number | null;
   repos?: string[];
   /** 0 = no placement. */
@@ -411,6 +428,31 @@ export interface ReviewItem {
   preselected?: boolean;
   alternatives?: { link_id?: number | null; task_id: string; key?: string | null; title?: string | null }[];
   created_at?: number;
+  /** Who proposed it when no rule read it off a signal: the decision
+   *  model's suggestion (J1, rule R12, redesign 6.8). Absent otherwise, and
+   *  from an older hub. */
+  proposed_by?: ReviewProposer | null;
+}
+
+/** `ReviewItem.proposed_by` (`work::view::ReviewProposer`). */
+export interface ReviewProposer {
+  source: 'jev' | 'rule' | 'llm';
+  /** Why, in fleet's words ("from the first prompt"). */
+  reason: string;
+  confidence_pct?: number | null;
+}
+
+/** The proposal `ProposedBy` shows for a Review item, or null for a rule's
+ *  own reading. */
+export function reviewProposal(it: Pick<ReviewItem, 'proposed_by' | 'task'>): ProposalLike | null {
+  const p = it.proposed_by;
+  if (!p) return null;
+  return {
+    value: it.task.key ?? it.task.task_id,
+    source: p.source,
+    reason: p.reason,
+    confidence_pct: p.confidence_pct ?? null,
+  };
 }
 
 export interface ReviewPage {
@@ -827,10 +869,28 @@ export function normalizeFilters(v: unknown): WorkTreeFilters {
   if (typeof v.query === 'string' && v.query.trim() !== '') out.query = v.query.trim();
   if (typeof v.group === 'string' && v.group !== '') out.group = v.group;
   if (v.archived === true) out.archived = true;
+  if (typeof v.assignee === 'string' && v.assignee.trim() !== '') out.assignee = v.assignee.trim();
+  if (typeof v.status_name === 'string' && v.status_name.trim() !== '') out.status_name = v.status_name.trim();
+  if (typeof v.group_by === 'string' && (WORK_GROUP_BY as readonly string[]).includes(v.group_by) && v.group_by !== 'group') {
+    out.group_by = v.group_by as WorkGroupBy;
+  }
   return out;
 }
 
-const FILTER_ORDER: (keyof WorkTreeFilters)[] = ['org', 'tracker', 'status', 'mine', 'has', 'review', 'query', 'group', 'archived'];
+const FILTER_ORDER: (keyof WorkTreeFilters)[] = [
+  'org',
+  'tracker',
+  'status',
+  'status_name',
+  'mine',
+  'assignee',
+  'has',
+  'review',
+  'query',
+  'group',
+  'archived',
+  'group_by',
+];
 
 /** A stable string for a filters object (equal filters, equal keys). */
 export function filtersKey(f: WorkTreeFilters): string {
@@ -842,11 +902,12 @@ export function sameFilters(a: WorkTreeFilters, b: WorkTreeFilters): boolean {
   return filtersKey(a) === filtersKey(b);
 }
 
-/** How many filters are on (the chip's count); `group` is navigation, and
- *  showing archived tasks widens the view rather than narrowing it. */
+/** How many filters are on (the chip's count); `group` is navigation,
+ *  `group_by` arranges rather than narrows, and showing archived tasks
+ *  widens the view. */
 export function activeFilterCount(f: WorkTreeFilters): number {
   const n = normalizeFilters(f);
-  return FILTER_ORDER.filter((k) => k !== 'group' && k !== 'archived' && n[k] !== undefined).length;
+  return FILTER_ORDER.filter((k) => k !== 'group' && k !== 'archived' && k !== 'group_by' && n[k] !== undefined).length;
 }
 
 // ---------------------------------------------------------------------------

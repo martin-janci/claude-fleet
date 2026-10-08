@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { newBgSession } from './sessions';
   import { untrack } from 'svelte';
   import { defaultHost, hosts, isPickableHost } from './hosts';
@@ -94,7 +95,7 @@
         title={bgSessionBlocked ?? ''}
         data-testid="bg-session-submit"
       >
-        {bgModalLoading ? 'Launching…' : 'Launch'}
+        {#if bgModalLoading}<Loader name="comet" size={12} class="btn-loader" />{/if}{bgModalLoading ? 'Launching…' : 'Launch'}
       </button>
     </div>
   </div>

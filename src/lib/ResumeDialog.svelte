@@ -324,7 +324,7 @@
   .candidates .hint {
     grid-column: 2;
     font-size: 0.85em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .brief-lbl {
     display: block;
@@ -338,17 +338,17 @@
     font-size: 0.8em;
   }
   .muted {
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .warn {
     margin: 0 0 0.5rem;
-    color: var(--warn, #f59e0b);
+    color: var(--status-waiting);
   }
   .linkish {
     background: none;
     border: none;
     padding: 0;
-    color: var(--accent, #4c8dff);
+    color: var(--accent);
     cursor: pointer;
     text-decoration: underline;
   }

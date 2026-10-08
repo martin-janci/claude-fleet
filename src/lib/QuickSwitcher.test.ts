@@ -396,6 +396,113 @@ describe('QuickSwitcher tickets', () => {
   });
 });
 
+// Redesign 3.12 (K1): the project a ticket start lands in, proposed by a
+// rule (earlier work on the key's family) or by Jev, with the shared chip.
+describe('QuickSwitcher ticket starts propose a project (New layout)', () => {
+  const other = {
+    project: { id: 2, owner: 'acme', repo: 'papaya-pos', base_path: '/r/pp', last_session_at: 1, adopted: false, system: false },
+    worktrees: [],
+  };
+  const ticket = { id: 101, tracker_id: 1, source: 'jira', key: 'ABC-1', title: 'ABC-1 title', status_category: 'todo', status_name: 'To Do', created_at: 1, updated_at: 1 };
+  let suggested: { project_id: number; confidence_pct?: number } | null;
+  let calls: [string, unknown][];
+  beforeEach(async () => {
+    const { uiLayout } = await import('./prefs');
+    uiLayout.set('new');
+    projects.set([project, other]);
+    suggested = { project_id: 2, confidence_pct: 88 };
+    calls = [];
+    __trackers.set([
+      { id: 1, provider: 'jira', name: 'acme', site_url: 'https://acme.atlassian.net', state: 'ok', created_at: 1, config: { key_prefixes: ['ABC'] } },
+    ]);
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      calls.push([cmd, args]);
+      const view = (args as { args?: { view?: string } } | undefined)?.args?.view;
+      if (cmd === 'work_tickets' && view === 'mine') return [ticket];
+      if (cmd === 'work_tickets') return [];
+      if (cmd === 'preview_start_work')
+        return {
+          key: 'ABC-1', title: 'ABC-1 title', item_id: 101, plan: null, missing: 'project',
+          projects: [{ id: 1, owner: 'martin-janci', repo: 'claude-fleet' }, { id: 2, owner: 'acme', repo: 'papaya-pos' }],
+          hosts: [], conflicts: [], suggested_project: suggested,
+        };
+      if (cmd === 'start_work') throw { code: 'E_AMBIGUOUS', message: 'pick a project' };
+      return null;
+    });
+  });
+  afterEach(async () => {
+    const { uiLayout } = await import('./prefs');
+    uiLayout.set('classic');
+  });
+
+  async function enterOnTicket(mod = false) {
+    render(QuickSwitcher);
+    const input = await openSwitcher();
+    await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(1));
+    await fireEvent.input(input, { target: { value: 'abc-1' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter', ctrlKey: mod });
+    await vi.waitFor(() => expect(get(newSessionRequest)).not.toBeNull());
+    return get(newSessionRequest)!;
+  }
+
+  it('Jev above the floor picks the project and the dialog gets the chip', async () => {
+    const req = await enterOnTicket();
+    expect(req.project.project.id).toBe(2);
+    expect(req.proposal).toEqual({ value: '2', source: 'jev', confidence_pct: 88 });
+    expect(req.ticket?.key).toBe('ABC-1');
+  });
+
+  it('⌘↵ that needs a project lands on the same proposal', async () => {
+    const req = await enterOnTicket(true);
+    expect(calls.some(([c]) => c === 'start_work')).toBe(true);
+    expect(req.project.project.id).toBe(2);
+    expect(req.proposal?.source).toBe('jev');
+  });
+
+  it('unsure or below the floor proposes nothing: the context project, no chip', async () => {
+    suggested = { project_id: 2, confidence_pct: 40 };
+    const req = await enterOnTicket();
+    expect(req.project.project.id).toBe(1);
+    expect(req.proposal).toBeNull();
+  });
+
+  it('a rule beats Jev: earlier work on the family picks the project, no Jev call', async () => {
+    sessions.set([sess({ id: 77, project_id: 2, host_alias: 'mefistos', work: { key: 'ABC-9' } } as Partial<SessionRow> & { id: number })]);
+    const req = await enterOnTicket();
+    expect(req.project.project.id).toBe(2);
+    expect(req.initialHost).toBe('mefistos');
+    expect(req.proposal).toMatchObject({ value: '2', source: 'rule', reason: 'ABC work runs here' });
+    expect(calls.some(([c]) => c === 'preview_start_work')).toBe(false);
+  });
+
+  it('Classic asks nothing and attaches no proposal', async () => {
+    const { uiLayout } = await import('./prefs');
+    uiLayout.set('classic');
+    const req = await enterOnTicket();
+    expect(req.project.project.id).toBe(1);
+    expect(req.proposal ?? null).toBeNull();
+    expect(calls.some(([c]) => c === 'preview_start_work')).toBe(false);
+  });
+
+  it("the dialog's Change re-opens the picker for the ticket; the pick keeps it", async () => {
+    render(QuickSwitcher);
+    const { openNewSessionPicker } = await import('./switcher_request');
+    openNewSessionPicker(undefined, ticket as never);
+    await tick();
+    const input = screen.getByTestId('switcher-input') as HTMLInputElement;
+    expect(input.placeholder).toBe('Repository for ABC-1…');
+    await fireEvent.input(input, { target: { value: 'papaya' } });
+    await tick();
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    await tick();
+    const req = get(newSessionRequest)!;
+    expect(req.project.project.id).toBe(2);
+    expect(req.ticket?.key).toBe('ABC-1');
+    expect(req.initialName).toBe('ABC-1 ABC-1 title');
+  });
+});
+
 describe('QuickSwitcher assets and commands', () => {
   const listing = {
     head: null, loaded_at: null, unmanaged: [], problems: [],
@@ -907,5 +1014,18 @@ describe('QuickSwitcher — New session mode', () => {
     await fireEvent.input(input, { target: { value: 'ppt-epic' } });
     await tick();
     expect(document.querySelector('[data-key="project:5"]')).not.toBeNull();
+  });
+});
+
+describe('QuickSwitcher — the header command field (3.17)', () => {
+  it('opens the plain switcher, not New session mode', async () => {
+    switcherRequest.set(null);
+    render(QuickSwitcher);
+    const { openSwitcher } = await import('./switcher_request');
+    openSwitcher();
+    await tick();
+    expect(screen.getByTestId('switcher-input')).toBeTruthy();
+    expect(screen.queryByTestId('mode-chip')).toBeNull();
+    expect(get(switcherRequest)).toBeNull();
   });
 });

@@ -308,6 +308,9 @@ pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_STAGGER_MS: &str = "restore.stagger_ms";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
+/// Pause all (redesign 8.1): every loop that acts on its own skips its
+/// passes while on (`service::loops`); the loops that only observe go on.
+pub const AUTOMATION_PAUSED: &str = "automation.paused";
 /// Orchestration O4–O6: the missions' loop runs at all (the kill switch).
 pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 /// Orchestration O6: the highest autonomy any mission's loop may take,
@@ -408,6 +411,10 @@ pub const MOVE_MAX_SESSION_STATE_MB: &str =
 pub const MOVE_WAIT_MAX_MINS: &str = "move.wait_max_mins";
 
 /// Collect per-session token usage from Claude transcripts (Wave 5 G1).
+/// Percent used of an account's tighter window at which starting a session
+/// on it asks first and offers the login with headroom (redesign step 4.4,
+/// `service::account_limits`).
+pub const ACCOUNTS_PAUSE_AT: &str = "accounts.pause_at";
 pub const USAGE_ENABLED: &str = "usage.enabled";
 /// Seconds between usage passes (one batched script per host). `0` stops
 /// collection.
@@ -525,6 +532,9 @@ pub const DECIDE_JEV_WORK_LINK: &str = "decide.jev.work_link";
 /// `start_project`'s mode (pre-selecting the repository of a task's first
 /// start, K1).
 pub const DECIDE_JEV_START_PROJECT: &str = "decide.jev.start_project";
+/// `sibling_repos`' mode (pre-ticking the sibling repository a ticket start
+/// also needs, N3).
+pub const DECIDE_JEV_SIBLING_REPOS: &str = "decide.jev.sibling_repos";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -634,6 +644,13 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Ms)
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        AUTOMATION_PAUSED,
+        "false",
+        Kind::Bool,
+        "Pause all automation",
+        "Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused.",
+    ),
     Spec::new(
         ORCHESTRATOR_ENABLED,
         "true",
@@ -908,6 +925,14 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Seconds)
     .zero("off")
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        ACCOUNTS_PAUSE_AT,
+        "90",
+        Kind::Int { min: 50, max: 100 },
+        "Ask before starting at",
+        "Used share of an account's 5-hour or weekly window at which starting a session on it asks first and offers the login with the most headroom.",
+    )
+    .unit(Unit::Percent),
     Spec::new(
         USAGE_PRICES_JSON,
         "{}",
@@ -1244,6 +1269,15 @@ pub const SPECS: &[Spec] = &[
         Kind::Choice(DECIDE_MODES),
         "Jev: start repository",
         "Pre-selecting the repository of a task's first start. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_SIBLING_REPOS,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: sibling repository",
+        "Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests.",
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
@@ -2395,6 +2429,9 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_STATUS_MAP, None), "off");
         assert_eq!(resolve(DECIDE_JEV_WORK_LINK, None), "off");
         assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
+        assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
+        assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
         assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");
         // `auto` is not offered yet (D36), nor is a free-text model.

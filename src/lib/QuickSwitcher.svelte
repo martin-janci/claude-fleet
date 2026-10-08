@@ -30,7 +30,8 @@
   import AccountPill from './AccountPill.svelte';
   import { uiLayout } from './prefs';
   import type { PickerItem } from './PickerList.svelte';
-  import { sessions, type SessionRow } from './sessions';
+  import { sessions, sessionsAnswered, type SessionRow } from './sessions';
+  import Loader from './Loader.svelte';
   import { projects } from './projects';
   import { hosts } from './hosts';
   import { requestAssetsView, requestHostsView } from './app_views';
@@ -65,8 +66,11 @@
     trackers,
     providerInfo,
     showProviderBadges,
+    keyFamily,
     type TicketRow,
   } from './trackers';
+  import { previewStartWork, projectProposal } from './start_preview';
+  import { preselect, type ProposalLike } from './ai_proposal';
   import { workKeyFor, worktreeBranchById } from './work_keys';
   import { settingsOpen } from './app_views';
   import { push, pushError } from './toasts';
@@ -101,6 +105,8 @@
   // dialog's preselected host), the folds the person toggled, and the
   // actions menu.
   let preferredHost = $state<string | null>(null);
+  /** The ticket a project pick starts (the dialog's Change, redesign 3.12). */
+  let pendingTicket = $state<TicketRow | null>(null);
   let toggled = $state<ReadonlySet<string>>(new Set());
   // Re-rank triggers besides the query: open, the person's own actions, folds.
   let seq = $state(0);
@@ -155,6 +161,17 @@
     ),
   );
   const ticketRows = $derived(ticketEntries(tickets, ticketBadges));
+  // Step 3.13: what the switcher holds shows at once; until the first
+  // session list answers, one line says which hosts it is still hearing
+  // from, with the kit's Dot wave (it appears only after 400 ms).
+  const stillHearing = $derived.by(() => {
+    if ($sessionsAnswered) return null;
+    const names = $hosts.filter((h) => !h.hidden).map((h) => h.alias);
+    if (names.length === 0) return 'Sessions still arriving';
+    const shown = names.slice(0, 3).join(', ');
+    const more = names.length > 3 ? ` and ${names.length - 3} more` : '';
+    return `Still hearing from ${shown}${more}`;
+  });
   // Step 3.9: `>` commands, `#` tasks and tickets, `@` hosts.
   const prefix = $derived(splitPrefix(query));
   const lookupRow = $derived(
@@ -374,11 +391,12 @@
     }
   });
 
-  function show(next: 'switch' | 'new' = 'switch', host: string | null = null) {
+  function show(next: 'switch' | 'new' = 'switch', host: string | null = null, ticket: TicketRow | null = null) {
     query = '';
     activeKey = null;
     mode = next;
     preferredHost = host;
+    pendingTicket = ticket;
     toggled = new Set();
     menu = null;
     // Undo belongs to this open: a ⌘Z an hour later never reverts a pin.
@@ -399,7 +417,8 @@
   const unsubReq = switcherRequest.subscribe((r) => {
     if (!r) return;
     switcherRequest.set(null);
-    show('new', r.host ?? null);
+    if (r.mode === 'switch') show('switch');
+    else show('new', r.host ?? null, r.ticket ?? null);
   });
   const unsubHost = newSessionHostRequest.subscribe((h) => {
     if (h === null) return;
@@ -534,7 +553,13 @@
   }
   function pickProject(e: Entry, autostart = false) {
     recordPick(e.key);
-    requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, autostart });
+    const t = pendingTicket;
+    if (t) {
+      // The person chose the repository for a ticket start: the ticket stays.
+      requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, ...ticketName(t), ticket: t });
+    } else {
+      requestNewSession({ project: e.project, initialHost: preferredHost ?? undefined, autostart });
+    }
     hide();
   }
   function toggleFold(sectionKey: string) {
@@ -605,7 +630,7 @@
       return;
     }
     const w = workEntryOf(key);
-    if (w?.ticket) openTicket(w.ticket);
+    if (w?.ticket) void openTicket(w.ticket);
     else if (w?.lookup) void lookupThenOpen(w.lookup);
   }
 
@@ -627,7 +652,7 @@
       requestNewSession({ project: e.project });
       hide();
     } else if (e.kind === 'ticket' && e.ticket) {
-      openTicket(e.ticket);
+      void openTicket(e.ticket);
     } else if (e.kind === 'lookup' && e.lookup) {
       void lookupThenOpen(e.lookup);
     } else if (e.kind === 'asset' && e.asset) {
@@ -663,8 +688,9 @@
     const ids = t.live_session_ids ?? [];
     return $sessions.find((s) => ids.includes(s.id) && s.status !== 'ghost') ?? null;
   }
+  const ticketName = (t: TicketRow) => ({ initialName: t.title ? `${t.key ?? ''} ${t.title}` : (t.key ?? '') });
   /** Enter on a ticket: jump to its live session, else the dialog, prefilled. */
-  function openTicket(t: TicketRow) {
+  async function openTicket(t: TicketRow) {
     const live = liveSessionOf(t);
     if (live) {
       selectSessionExplicitly(live);
@@ -673,23 +699,36 @@
     }
     const key = t.key ?? '';
     const place = placeForTicket(key, $sessions, $projects, (s) => workKeyFor(s, branchById)?.key ?? null);
-    const project = place?.project ?? contextProject(ranked, $selectedSession, $projects);
+    const fresh = $uiLayout === 'new';
+    // Redesign 3.12 (K1): a rule (earlier work on the key's family) beats
+    // Jev; with neither, the dialog opens on the context project as before.
+    let proposal: ProposalLike | null = null;
+    let project = place?.project ?? null;
+    if (place && fresh) {
+      proposal = { value: String(place.project.project.id), source: 'rule', reason: `${keyFamily(key)} work runs here` };
+    } else if (!place && fresh && t.id != null) {
+      hide();
+      const r = await previewStartWork({ item_id: t.id, with_brief: true });
+      const jev = r.ok ? projectProposal(r.value) : null;
+      const id = preselect('project', jev);
+      const hit = id == null ? undefined : $projects.find((p) => p.project.id === Number(id));
+      if (hit) {
+        project = hit;
+        proposal = jev;
+      }
+    }
+    project ??= contextProject(ranked, $selectedSession, $projects);
     if (!project) {
       push({ kind: 'info', message: 'No projects yet — refresh the sidebar first.' });
       return;
     }
-    requestNewSession({
-      project,
-      initialName: t.title ? `${key} ${t.title}` : key,
-      initialHost: place?.host,
-      ticket: t,
-    });
+    requestNewSession({ project, ...ticketName(t), initialHost: place?.host, ticket: t, proposal });
     hide();
   }
   async function lookupThenOpen(reference: string) {
     const r = await workLookup(reference);
     if (r.ok) {
-      openTicket(r.value);
+      void openTicket(r.value);
       return;
     }
     const d = r.error.details as { site_url?: string; provider?: string } | null | undefined;
@@ -731,7 +770,7 @@
     }
     if (r.error.code === 'E_AMBIGUOUS' && e.ticket) {
       // No project to default to: the dialog asks.
-      openTicket(e.ticket);
+      void openTicket(e.ticket);
       return;
     }
     pushError(r.error, 'Start work failed');
@@ -868,7 +907,9 @@
         }}
         onkeydown={onInputKeydown}
         placeholder={mode === 'new'
-          ? 'project or ticket…'
+          ? pendingTicket
+            ? `Repository for ${pendingTicket.key ?? 'this ticket'}…`
+            : 'project or ticket…'
           : 'Jump to a session, host, ticket or asset… (name, key, project, host, branch, status, or paste a ticket URL)'}
         autocomplete="off"
         spellcheck="false"
@@ -920,6 +961,12 @@
         </div>
       {/if}
     </div>
+    {#if mode !== 'new' && stillHearing}
+      <div class="still-hearing" data-testid="switcher-still-hearing" role="status">
+        <Loader name="dot-wave" size={40} stage={false} />
+        <span>{stillHearing}</span>
+      </div>
+    {/if}
     <div class="hint">
       {#if mode === 'new'}
         <span>↵ open</span>
@@ -1013,7 +1060,7 @@
   }
   .mode-chip {
     flex: 0 0 auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     font-weight: 600;
     padding: 0.15rem 0.5rem;
     border-radius: var(--radius-sm);
@@ -1057,11 +1104,19 @@
   .ib.on {
     color: var(--accent);
   }
+  .still-hearing {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    color: var(--fg-muted);
+    font-size: 11px;
+  }
   .hint {
     display: flex;
     flex-wrap: wrap;
     gap: 0.8rem;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
 </style>

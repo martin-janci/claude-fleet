@@ -120,9 +120,28 @@ export function requestOpenPath(sessionId: number, path: string, line: number | 
 export const OPEN_PATH_CONTEXT = 'md-open-path';
 export type OpenPathFn = (path: string, line: number | null) => void;
 
-export type AppChord = 'hosts' | 'settings' | 'session-view' | 'agent' | 'scope' | 'today' | 'work-view';
+export type AppChord =
+  | 'hosts'
+  | 'settings'
+  | 'session-view'
+  | 'agent'
+  | 'scope'
+  | 'today'
+  | 'work-view'
+  | 'inspector'
+  | 'open-in-editor';
 
-const APP_CHORDS: readonly AppChord[] = ['hosts', 'settings', 'session-view', 'agent', 'scope', 'today', 'work-view'];
+const APP_CHORDS: readonly AppChord[] = [
+  'hosts',
+  'settings',
+  'session-view',
+  'agent',
+  'scope',
+  'today',
+  'work-view',
+  'inspector',
+  'open-in-editor',
+];
 
 /**
  * The app-level chords, platform-correct like the quick switcher's:

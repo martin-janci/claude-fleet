@@ -442,11 +442,15 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
     static LAST: std::sync::LazyLock<Mutex<Option<std::time::Instant>>> =
         std::sync::LazyLock::new(|| Mutex::new(None));
     static RUNNING: AtomicBool = AtomicBool::new(false);
+    let next = Some(std::time::Duration::from_secs(PRUNE_INTERVAL_SECS));
     {
         let Ok(mut last) = LAST.lock() else {
             return false;
         };
         if !crate::service::repair_tick::due(*last, PRUNE_INTERVAL_SECS) {
+            return false;
+        }
+        if !crate::service::loops::gate("worktree_prune", store, next) {
             return false;
         }
         if RUNNING
@@ -463,6 +467,7 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
     tokio::spawn(async move {
         let _guard = guard;
         run_with(&store, ssh.as_ref()).await;
+        crate::service::loops::report("worktree_prune", Ok::<_, String>(()), next);
     });
     true
 }

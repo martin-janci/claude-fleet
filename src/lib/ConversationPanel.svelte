@@ -24,7 +24,7 @@
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { needsMore, wrapsPastOneLine } from './composer_overflow';
   import { contextLevel } from './attention';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
   import type { SessionEvent } from './timeline';
   import ConversationHeader from './ConversationHeader.svelte';
@@ -76,6 +76,8 @@
     carriedCount,
     matchSlashCommands,
     completeSlashCommand,
+    newDividerAnchor,
+    turnAnchor,
     MODEL_OPTIONS,
     EFFORT_OPTIONS,
     pickerCommand,
@@ -119,6 +121,10 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
+  import { uiLayout } from './prefs';
+  import { inboxQueue, nextInInbox } from './inbox';
+  import { push as pushToast } from './toasts';
+  import { projectSkills } from './project_skills';
 
   let {
     session,
@@ -435,6 +441,12 @@
       conversations = [];
       draft = composerDrafts.get(session.id) ?? '';
       draftFor = session.id;
+      // What the person had seen before this visit (redesign 5.9): read
+      // once, before this visit's own stamp moves `last_viewed_at`.
+      seenAt = session.last_viewed_at ?? null;
+      dividerAnchor = null;
+      dividerSet = false;
+      projectCmds = [];
       histIndex = null;
       sendError = null;
       // The tray belongs to the session it was filled for. This panel is ONE
@@ -694,6 +706,41 @@
   // pending, not dead, so it keeps its running clock.
   // The conversation tool details are read from: the one on screen.
   const detailCid = $derived(convCid);
+
+  // ─── The "New" divider (redesign 5.9) ──────────────────────────────────────
+  // Placed once per visit, on the first load of the current conversation:
+  // turns that start while the person is here are not news, so the line does
+  // not follow them down.
+  let seenAt: number | null = null;
+  let dividerAnchor = $state<string | null>(null);
+  let dividerSet = false;
+  $effect(() => {
+    const c = conv;
+    if (!c || dividerSet || viewing !== null) return;
+    untrack(() => {
+      if (convCid !== session.claude_session_id) return;
+      dividerSet = true;
+      dividerAnchor = newDividerAnchor(c.turns, seenAt);
+    });
+  });
+  const showDivider = $derived($uiLayout === 'new' && viewing === null && dividerAnchor !== null);
+
+  // ─── After an answer (redesign 5.9) ────────────────────────────────────────
+  // In the New layout an answered card moves you on to the next session that
+  // needs you, with Undo to come back. The answer itself has gone to the pane
+  // already; Undo takes you back to it, it cannot unsend a key.
+  function afterAnswer(label: string) {
+    const from = session;
+    const next = nextInInbox($inboxQueue, from.id);
+    if (!next) return;
+    const verb = /^(yes|approve|allow)\b/i.test(label.trim()) ? 'Approved' : `Answered “${label}”`;
+    selectSessionExplicitly(next);
+    pushToast({
+      kind: 'success',
+      message: `✓ ${verb} · moved to next: ${next.friendly_name ?? next.tmux_name}`,
+      action: { label: 'Undo', run: () => selectSessionExplicitly(from) },
+    });
+  }
 
   const thread = $derived(
     conv ? buildThread(conv.turns, events, { blocked: viewing === null && indicator?.kind === 'blocked' }, conv.truncated) : [],
@@ -1233,7 +1280,32 @@
   const ctxLevel = $derived(contextLevel(session.context_pct));
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
-  const slashMatches = $derived(slashDismissedFor === draft ? [] : matchSlashCommands(draft));
+  // The New layout shows three quick prompts and puts the rest under ⋯
+  // (redesign 5.9); a suggested Compact stays out in front.
+  const CHIPS_SHOWN = 3;
+  const validPresets = $derived($composerPresets.filter((p) => p.label.trim() && p.text.trim()));
+  const chipList = $derived(
+    $uiLayout === 'new' && !chipsExpanded
+      ? validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p)))
+      : $uiLayout === 'new'
+        ? validPresets
+        : $composerPresets,
+  );
+  const chipsHidden = $derived($uiLayout === 'new' && !chipsExpanded ? validPresets.length - chipList.length : 0);
+  // The project's own skills and commands join the built-ins in the New
+  // layout (redesign 5.9), read once the draft starts a slash command.
+  let projectCmds = $state<SlashCommand[]>([]);
+  const slashDraft = $derived($uiLayout === 'new' && draft.startsWith('/') && !/\s/.test(draft));
+  $effect(() => {
+    if (!slashDraft) return;
+    const id = session.id;
+    void projectSkills(id).then((list) => {
+      if (session.id === id) projectCmds = list;
+    });
+  });
+  const slashMatches = $derived(
+    slashDismissedFor === draft ? [] : matchSlashCommands(draft, $uiLayout === 'new' ? projectCmds : []),
+  );
   // Ids for the combobox wiring, per panel instance so two panels never hand
   // the same id to assistive tech.
   const SLASH_LIST_ID = `conv-slash-list-${hlSuffix}`;
@@ -1971,7 +2043,7 @@
                 data-match={matchKeys.has(key) || undefined}
                 data-current-match={currentMatch === key || undefined}
               >
-                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{timeAgo(row.event.at, nowMs)}</time>
+                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{shortAge(row.event.at, Math.floor(nowMs / 1000))}</time>
               </div>
             {:else}
             {@const turn = row.turn}
@@ -1982,6 +2054,9 @@
             {@const groups = groupItems(turn.items)}
             {@const replyText = groups.flatMap((x) => (x.kind === 'text' ? [x.text] : [])).join('\n\n')}
             {@const duration = turnRunning ? null : turnDuration(turn.at, turn.ended_at)}
+            {#if showDivider && turnAnchor(turn) === dividerAnchor}
+              <div class="new-divider" data-testid="conv-new-divider" role="separator" aria-label="New since you last looked"><span>New</span></div>
+            {/if}
             <section
               class="turn"
               data-row-key={key}
@@ -2243,7 +2318,13 @@
                E_FORBIDDEN. The two surfaces rendered the same card with
                different gating until this; the `blocked` notice below (and the
                row's status chip) still says the session is waiting. -->
-          <AnswerPrompt {session} view={answerView} {onOpenTerminal} />
+          <AnswerPrompt
+            {session}
+            view={answerView}
+            {onOpenTerminal}
+            onAnswered={$uiLayout === 'new' ? afterAnswer : undefined}
+            onOwnWords={$uiLayout === 'new' && showComposer ? () => void tick().then(() => box?.focus()) : undefined}
+          />
         {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
             <div class="blocked-text">
@@ -2355,6 +2436,7 @@
                 onclick={() => acceptSlash(c)}>
                 <span class="slash-name">/{c.name}</span>
                 <span class="slash-desc">{c.description}</span>
+                {#if c.source}<span class="slash-source" data-testid="conv-slash-source">{c.source === 'skill' ? 'Skill' : 'Command'}</span>{/if}
               </button>
             </li>
           {/each}
@@ -2374,8 +2456,8 @@
             onclick={() => void sendText('')}>⏎ Press Enter</button>
         </div>
       {/if}
-      <div class="chips" data-testid="conv-chips" data-expanded={chipsExpanded} bind:this={chipsRow}>
-        {#each $composerPresets as p, i (i)}
+      <div class="chips" data-testid="conv-chips" data-expanded={$uiLayout === 'new' || chipsExpanded} bind:this={chipsRow}>
+        {#each chipList as p, i (i)}
           {#if p.label.trim() && p.text.trim()}
             {@const suggested = suggestCompact && isCompactPreset(p)}
             <button
@@ -2398,7 +2480,17 @@
           {/if}
         {/each}
       </div>
-      {#if chipsOverflow}
+      {#if $uiLayout === 'new' && (chipsExpanded || chipsHidden > 0)}
+        <!-- New layout (redesign 5.9): three chips, the rest under ⋯. -->
+        <button
+          type="button"
+          class="btn btn--chip chips-more"
+          data-testid="conv-chips-more"
+          aria-expanded={chipsExpanded}
+          aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+          title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
+          onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
+      {:else if $uiLayout !== 'new' && chipsOverflow}
         <button
           type="button"
           class="btn btn--chip chips-more"
@@ -2679,7 +2771,7 @@
   .attach-img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .attach-ext {
     font-family: var(--mono);
-    font-size: 10px;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--control-fg-quiet);
@@ -2823,6 +2915,31 @@
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
     color: var(--accent);
   }
+  .slash-source {
+    flex: none;
+    margin-left: auto;
+    padding: 0 6px;
+    border-radius: 4px;
+    background: var(--chip-bg, color-mix(in srgb, currentColor 10%, transparent));
+    font-size: 11px;
+    opacity: 0.85;
+  }
+  .new-divider {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 4px 0 8px;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .new-divider::before,
+  .new-divider::after {
+    content: '';
+    flex: 1 1 auto;
+    height: 1px;
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
   .slash-desc {
     flex: 1 1 auto;
     color: var(--fg-muted);
@@ -2833,12 +2950,12 @@
   .composer-error {
     margin: 0 0 0.35rem;
     color: var(--usage-crit);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .composer-status {
     margin: 0.35rem 0 0;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
     transition: opacity var(--dur-base) ease;
   }
   .composer-status.is-idle {
@@ -2864,7 +2981,7 @@
     margin: 0;
     padding: 0.35rem 0 0.6rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .probe-off code {
     font-size: inherit;
@@ -2910,7 +3027,7 @@
     margin-top: 0.2rem;
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.74rem;
+    font-size: 11px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
@@ -2921,7 +3038,7 @@
     border-radius: 6px;
     background: transparent;
     color: var(--fg);
-    font-size: 0.78rem;
+    font-size: 11px;
     cursor: pointer;
   }
   .blocked-btn:hover {
@@ -2990,7 +3107,7 @@
     margin-bottom: 0.2rem;
   }
   .who {
-    font-size: 0.7rem;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.02em;
     text-transform: uppercase;
@@ -2999,7 +3116,7 @@
   time {
     flex: 0 0 auto;
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
     white-space: nowrap;
   }
   .prompt-text {
@@ -3028,7 +3145,7 @@
   .outgoing-files {
     margin-top: 0.25rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .receipt {
     display: flex;
@@ -3037,7 +3154,7 @@
     gap: 0.35rem;
     padding-left: 0.2rem;
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .receipt[data-tone='ok'] {
     color: var(--usage-ok);
@@ -3076,7 +3193,7 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 0.75rem;
+    font-size: 11px;
     cursor: pointer;
   }
   .reply {
@@ -3100,21 +3217,21 @@
   }
   .duration {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .failed-count .pill {
     color: var(--usage-crit);
     background: color-mix(in srgb, var(--usage-crit) 14%, transparent);
     border-radius: 9px;
     padding: 0 6px;
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .tools {
     margin: 0.3rem 0 0.5rem;
   }
   .tools summary {
     cursor: pointer;
-    font-size: 0.76rem;
+    font-size: 11px;
     color: var(--fg-muted);
     list-style: none;
     user-select: none;
@@ -3161,7 +3278,7 @@
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--accent) 8%, var(--bg-pane));
     color: var(--fg-muted);
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   .viewing .linkish,
   .switch-notice .linkish {
@@ -3188,7 +3305,7 @@
     gap: 0.45rem;
     margin: 0.2rem 0 0.9rem;
     color: var(--fg-muted);
-    font-size: 0.74rem;
+    font-size: 11px;
     text-align: center;
   }
   .event .detail {
@@ -3209,7 +3326,7 @@
   .compact summary {
     cursor: pointer;
     color: var(--fg-muted);
-    font-size: 0.76rem;
+    font-size: 11px;
     user-select: none;
   }
   .command {
@@ -3217,7 +3334,7 @@
   }
   .command code {
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.76rem;
+    font-size: 11px;
     color: var(--accent);
   }
   .command-out {
@@ -3228,7 +3345,7 @@
     background: var(--bg-pane);
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     line-height: 1.45;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -3252,7 +3369,7 @@
   .reminders,
   .harness {
     margin: 0.25rem 0 0.4rem;
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .reminders > summary,
   .harness > summary {
@@ -3281,7 +3398,7 @@
   .interrupt {
     margin: 0.3rem 0 0.5rem;
     color: var(--usage-warn);
-    font-size: 0.76rem;
+    font-size: 11px;
     font-style: italic;
   }
   .notification {
@@ -3322,7 +3439,7 @@
     flex: 0 0 auto;
     margin-left: auto;
     padding-left: 0.4rem;
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .scroll-actions {
     position: absolute;
@@ -3343,7 +3460,7 @@
     border-radius: 999px;
     background: var(--bg-pane);
     color: var(--fg);
-    font-size: 0.75rem;
+    font-size: 11px;
     cursor: pointer;
     box-shadow: 0 2px 8px color-mix(in srgb, var(--fg) 15%, transparent);
   }

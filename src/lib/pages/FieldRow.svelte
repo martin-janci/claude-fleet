@@ -495,7 +495,7 @@
     margin-left: 0;
   }
   .history-btn {
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .control {
     display: flex;
@@ -559,7 +559,7 @@
   }
   .help {
     margin: 0.2rem 0 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     line-height: 1.4;
   }
@@ -570,7 +570,7 @@
   }
   .err {
     margin: 0.2rem 0 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--usage-crit);
   }
   .suggestion {
@@ -582,7 +582,7 @@
     padding: 0.3rem 0.5rem;
     border: 1px dashed var(--accent);
     border-radius: var(--radius-sm);
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   .suggestion .chip {
     color: var(--accent);
@@ -597,7 +597,7 @@
     color: var(--fg-muted);
   }
   .history {
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     margin-top: 0.25rem;
   }

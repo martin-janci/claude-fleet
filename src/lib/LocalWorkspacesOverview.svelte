@@ -96,7 +96,7 @@
               >
             {/if}
             <button class="ghost small" disabled={busy} onclick={() => (confirmDisconnect = w)}
-              >Disconnect</button
+              >Disconnect…</button
             >
           </div>
         </li>
@@ -112,7 +112,7 @@
         data-testid="lw-cleanup"
         disabled={busy || stale.length === 0}
         onclick={() => (confirmCleanup = true)}
-      >Clean up stale ({stale.length})</button>
+      >Clean up {stale.length} stale…</button>
     </div>
   {/if}
 </Modal>
@@ -150,13 +150,13 @@
 
 <style>
   .muted { margin: 0; color: var(--fg-muted); font-size: 0.85rem; }
-  .small { font-size: 0.78rem; }
+  .small { font-size: 11px; }
   .links { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.6rem; max-height: 60vh; overflow: auto; }
   .links li { border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.6rem; display: flex; flex-direction: column; gap: 0.25rem; }
   .head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; font-size: 0.9rem; }
   .label { margin-left: auto; font-size: 0.82rem; }
-  .chip { font-size: 0.7rem; border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; padding: 0 0.35rem; }
-  .path { font-family: var(--mono); font-size: 0.78rem; overflow-wrap: anywhere; }
+  .chip { font-size: 11px; border: 1px solid var(--accent); color: var(--accent); border-radius: 3px; padding: 0 0.35rem; }
+  .path { font-family: var(--mono); font-size: 11px; overflow-wrap: anywhere; }
   .stale { margin: 0; color: var(--usage-warn); font-size: 0.8rem; }
   .row { display: flex; gap: 0.3rem; flex-wrap: wrap; align-items: center; }
   .sep { width: 0.5rem; }
@@ -177,7 +177,7 @@
     border-radius: 5px;
     cursor: pointer;
   }
-  .ghost.small { font-size: 0.75rem; padding: 0.12rem 0.45rem; }
+  .ghost.small { font-size: 11px; padding: 0.12rem 0.45rem; }
   .ghost:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { opacity: 0.55; cursor: default; }
 </style>

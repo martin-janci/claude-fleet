@@ -50,7 +50,8 @@
     contextLevel,
     formatElapsed,
     sessionStart,
-    stuckKindLabel,
+    stuckStatus,
+    sessionStatusWord,
     STUCK_COLOR,
   } from './attention';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
@@ -623,14 +624,14 @@
       <span class="status status-{session.status}">{session.status}</span>
       {#if session.stuck_kind}
         <span
-          class="chip"
+          class="chip stuck-chip"
           data-testid="details-stuck"
           style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
           title={session.current_activity ?? undefined}
-        >⚠ stuck: {stuckKindLabel(session.stuck_kind)}{#if session.stuck_since !== null} · {formatElapsed(session.stuck_since, nowSec)}{/if}</span>
+        >{stuckStatus(session.stuck_kind)}{#if session.stuck_since !== null} · {formatElapsed(session.stuck_since, nowSec)}{/if}</span>
       {:else if session.claude_status}
         <span
-          class="chip"
+          class="chip claude-chip"
           data-testid="details-claude-status"
           style="background: color-mix(in srgb, {claudeStatusColor(session.claude_status)} 13%, transparent); color: {claudeStatusColor(session.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(session.claude_status)} 27%, transparent);"
           title={session.current_activity ?? undefined}
@@ -659,6 +660,7 @@
       <dt>Login</dt>
       <dd class="login" data-testid="session-login">
         <select
+          aria-label="Claude login"
           data-testid="session-login-pick"
           value={loginTarget}
           onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
@@ -676,7 +678,7 @@
             onclick={() => (confirmingSwitch = true)}
             disabled={restartBlocked !== null}
             title={restartBlocked ?? ''}
-          >Switch</button>
+          >Switch…</button>
         {/if}
       </dd>
     {/if}
@@ -768,7 +770,7 @@
             >
               <span class="host-badge">[{r.host_alias}]</span>
               <span class="account">{accountEmailTier(accountForRow(r))}</span>
-              <span class="status-dot status-{r.status}" title={r.status}></span>
+              <span class="status-word" data-status={r.status}>{sessionStatusWord(r)}</span>
               <span class="sess-name">{r.tmux_name}</span>
               <span class="age">{formatRelative(r.last_activity_at)}</span>
             </button>
@@ -791,7 +793,7 @@
             >
               <span class="host-badge">[{r.host_alias}]</span>
               <span class="account">{accountEmailTier(accountForRow(r))}</span>
-              <span class="status-dot status-{r.status}" title={r.status}></span>
+              <span class="status-word" data-status={r.status}>{sessionStatusWord(r)}</span>
               <span class="sess-name">{r.tmux_name}</span>
               <span class="age">{formatRelative(r.last_activity_at)}</span>
             </button>
@@ -836,7 +838,7 @@
           title={sendPromptBlocked ?? ''}
           data-testid="send-prompt-from-details"
     >
-          → Send prompt
+          → Send prompt…
         </button>
       {/if}
       <button
@@ -846,7 +848,7 @@
         title={reviewBlocked ?? ''}
         data-testid="open-review"
   >
-        🔍 Review
+        🔍 Review…
       </button>
       <button
         class="btn btn--quiet is-bounded"
@@ -876,7 +878,7 @@
           title={moveBlocked ?? 'Open the Transfer sheet to finish this move'}
           data-testid="details-finish-move"
     >
-          Finish the move to {unresolvedMove.toHost}
+          Finish the move to {unresolvedMove.toHost}…
         </button>
         <button
           class="btn btn--quiet is-bounded"
@@ -885,7 +887,7 @@
           title={moveBlocked ?? 'Open the Transfer sheet to undo this move'}
           data-testid="details-undo-move"
     >
-          Undo the move
+          Undo the move…
         </button>
       {/if}
       {#if unresolvedWaitRec}
@@ -896,7 +898,7 @@
           title={moveBlocked ?? 'Open the Transfer sheet for this pending move'}
           data-testid="details-resume-wait"
     >
-          ⇄ Waiting to move to {unresolvedWaitRec.toHost}
+          ⇄ Waiting to move to {unresolvedWaitRec.toHost}…
         </button>
       {/if}
     {/if}
@@ -931,7 +933,7 @@
             title={restartBlocked ?? ''}
             data-testid="restart-from-details"
       >
-            ↻ Restart
+            ↻ Restart…
           </button>
           {#if !hasNoPane(session) && session.project_id !== null}
             <button
@@ -941,7 +943,7 @@
               title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
               data-testid="repair-from-details"
         >
-              🩹 Repair workspace
+              🩹 Repair workspace…
             </button>
           {/if}
           <button
@@ -951,7 +953,7 @@
             title={recreateBlocked ?? ''}
             data-testid="recreate-from-details"
       >
-            ♻ Recreate
+            ♻ Recreate…
           </button>
           {#if canMove}
             <button
@@ -988,7 +990,7 @@
                 title={inspectSafeKillBlocked ?? ''}
                 data-testid="safe-kill-from-details"
           >
-                ⏏ Safe remove
+                ⏏ Safe remove…
               </button>
             {/if}
             <button
@@ -998,7 +1000,7 @@
               title={killBlocked ?? ''}
               data-testid="kill-from-details"
         >
-              Kill session
+              Kill session…
             </button>
           {/if}
         {/if}
@@ -1014,7 +1016,7 @@
   {:else if session.safe_kill_state === 'failed'}
     <p class="safe-kill-pill failed" data-testid="safe-kill-failed">
       Safe-remove failed: {session.safe_kill_detail ?? 'no reason given'}.
-      Resolve in the session, then retry, or use <strong>Kill session</strong>.
+      Resolve in the session, then retry, or use <strong>Kill session…</strong>.
     </p>
   {:else if session.safe_kill_state === 'ready'}
     <p class="safe-kill-pill ready" data-testid="safe-kill-ready">
@@ -1244,13 +1246,13 @@
     border-radius: 4px;
     outline: none;
   }
-  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; flex-wrap: wrap; }
+  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 11px; flex-wrap: wrap; }
   .friendly { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
   .chip {
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
     border: 1px solid;
-    font-size: 0.65rem;
+    font-size: 11px;
     white-space: nowrap;
   }
   .last-prompt {
@@ -1273,11 +1275,11 @@
     border-radius: 999px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 0.65rem;
+    font-size: 11px;
   }
-  .status-running { background: rgba(60, 180, 90, 0.18); color: rgba(80, 200, 110, 1); }
-  .status-frozen { background: rgba(110, 160, 230, 0.18); color: rgba(140, 180, 240, 1); }
-  .status-orphan { background: rgba(180, 100, 100, 0.18); color: rgba(220, 130, 130, 1); }
+  .status-running { background: var(--done-soft); color: var(--status-done); }
+  .status-frozen { background: var(--accent-soft); color: var(--status-working); }
+  .status-orphan { background: var(--failed-soft); color: var(--status-failed); }
 
   .meta {
     display: grid;
@@ -1287,7 +1289,7 @@
   }
   .meta dt {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -1296,7 +1298,7 @@
 
   .block h3 {
     margin: 0 0 0.4rem 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1388,9 +1390,9 @@
     line-height: 1.35;
   }
   .safe-kill-pill.pending {
-    background: rgba(110, 160, 230, 0.14);
-    color: rgba(140, 180, 240, 1);
-    border: 1px solid rgba(110, 160, 230, 0.4);
+    background: var(--accent-soft);
+    color: var(--status-working);
+    border: 1px solid color-mix(in srgb, var(--status-working) 40%, transparent);
   }
   .safe-kill-pill.failed {
     background: color-mix(in srgb, var(--danger) 12%, transparent);
@@ -1398,9 +1400,9 @@
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   }
   .safe-kill-pill.ready {
-    background: rgba(60, 180, 90, 0.15);
-    color: rgba(80, 200, 110, 1);
-    border: 1px solid rgba(60, 180, 90, 0.4);
+    background: var(--done-soft);
+    color: var(--status-done);
+    border: 1px solid color-mix(in srgb, var(--status-done) 40%, transparent);
   }
 
   .link {
@@ -1453,7 +1455,7 @@
     gap: 0.3rem;
   }
   .inspect-line { margin: 0; font-size: 0.8rem; color: var(--fg); }
-  .inspect-line.warn { color: #d29b4a; }
+  .inspect-line.warn { color: var(--status-waiting); }
   .dirty-list {
     margin: 0.2rem 0 0 0;
     padding: 0;
@@ -1461,7 +1463,7 @@
     max-height: 9rem;
     overflow-y: auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .dirty-list li {
     display: flex;
@@ -1470,12 +1472,12 @@
     padding: 0.05rem 0;
   }
   .status-code {
-    color: #d29b4a;
+    color: var(--status-waiting);
     width: 2ch;
     flex: 0 0 auto;
     white-space: pre;
   }
-  .small { font-size: 0.75rem; }
+  .small { font-size: 11px; }
   .confirm-actions button {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
@@ -1497,7 +1499,7 @@
     margin-top: 0.6rem;
   }
   .related h3 {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1531,7 +1533,7 @@
   }
   .related .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
@@ -1539,7 +1541,7 @@
   }
   .related .account {
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -1548,10 +1550,16 @@
   }
   .related .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   .related .age {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
+  }
+  /* The status as a word (7.2): the bare dot it replaces had no style, so
+     it showed nothing and said nothing. */
+  .related .status-word {
+    color: var(--fg-muted);
+    font-size: 0.8rem;
   }
 </style>

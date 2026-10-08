@@ -85,7 +85,7 @@
   }
   .stat dt {
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .stat dd { margin: 0; }
   .value {
@@ -96,7 +96,7 @@
   .hint {
     margin-left: 0.3rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .table-wrap { overflow-x: auto; }
   .table-title {

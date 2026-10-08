@@ -70,12 +70,10 @@ use crate::service::decide::{
 use crate::service::nl::census::{FleetPrompts, Shown};
 use crate::service::nl::{self, Ranker};
 use crate::service::trackers::tickets::{branch_slug, RECENT_DAYS};
-use crate::service::work::recognize::{recognize, RecognizeCtx};
+use crate::service::work::recognize::RecognizeCtx;
 use crate::store::{BenchHostLink, BenchItemRow, Store, TrackerRow, NL_CENSUS_MIN_SCHEMA};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::LazyLock;
 
 /// The question's version, recorded on every Jev run of the benchmark.
 pub const QUESTION_VERSION: &str = "work_link.bench.v1";
@@ -97,7 +95,7 @@ pub const ENGLISH_CELL: &str = "en×en";
 /// feature's mode, and kept out of the live breaker, budget and stats.
 pub const SUBJECT_KIND: &str = crate::store::DECISION_BENCH_SUBJECT;
 /// The option that means "none of these".
-pub const NONE_OPTION: &str = "none";
+pub const NONE_OPTION: &str = crate::service::decide::work_link::NONE_OPTION;
 /// The most candidates a case offers (test map J1: ≤ 50).
 pub const MAX_CANDIDATES: usize = 50;
 /// How long after the decision an item may have been updated and still
@@ -241,7 +239,7 @@ pub struct Candidate {
 
 /// PURE: an item's option key.
 pub fn option_id(item_id: i64) -> String {
-    format!("i{item_id}")
+    crate::service::decide::work_link::option_id(item_id)
 }
 
 /// What the leakage test checks a case's state against. Never reported.
@@ -292,11 +290,6 @@ impl BenchCase {
 
 // --- the leakage guard ---------------------------------------------------------
 
-static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:\b(?:https?|ftp|ssh|git|wss?)://|\bwww\.)[^\s<>()\[\]{}'"`]+"#)
-        .expect("URL pattern compiles")
-});
-
 /// What [`redact_prompt`] removes besides every recogniser match and URL.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Redact<'a> {
@@ -309,26 +302,7 @@ pub struct Redact<'a> {
     pub started_slug: Option<&'a str>,
 }
 
-/// Every case-insensitive occurrence of `needle` replaced by `with`,
-/// repeated until none is left (a removal can join two halves).
-fn remove_ci(text: &str, needle: &str, with: &str) -> String {
-    let needle = needle.trim();
-    if needle.is_empty() {
-        return text.to_string();
-    }
-    let re = match Regex::new(&format!("(?i){}", regex::escape(needle))) {
-        Ok(r) => r,
-        Err(_) => return text.to_string(),
-    };
-    let mut t = text.to_string();
-    for _ in 0..16 {
-        if !re.is_match(&t) {
-            break;
-        }
-        t = re.replace_all(&t, with).into_owned();
-    }
-    t
-}
+use crate::service::decide::work_link::remove_ci;
 
 /// Two stems name the same word: equal, or (both at least
 /// [`RELATED_STEM_CHARS`] long) one a prefix of the other — `oprav` and
@@ -383,31 +357,9 @@ pub fn guard_ctx(trackers: &[TrackerRow]) -> RecognizeCtx {
 /// PURE: the state a model is shown for `prompt` (the leakage guard; see
 /// the module docs). The envelope's own redaction (`redact_state`) runs last.
 pub fn redact_prompt(prompt: &str, ctx: &RecognizeCtx, r: &Redact<'_>) -> String {
-    // 1. Every recogniser match (keys, ticket URLs, #123), right to left.
-    let mut t = prompt.to_string();
-    let mut spans: Vec<(usize, usize)> = recognize(&t, ctx).into_iter().map(|m| m.span).collect();
-    spans.sort();
-    let mut merged: Vec<(usize, usize)> = Vec::new();
-    for (a, b) in spans {
-        match merged.last_mut() {
-            Some(last) if a < last.1 => last.1 = last.1.max(b),
-            _ => merged.push((a, b)),
-        }
-    }
-    for (a, b) in merged.into_iter().rev() {
-        if t.is_char_boundary(a) && t.is_char_boundary(b) && a <= b && b <= t.len() {
-            t.replace_range(a..b, "[ref]");
-        }
-    }
-    // 2. Every URL.
-    t = URL_RE.replace_all(&t, "[url]").into_owned();
-    // 3. The branch, whole and by its path segments.
-    if let Some(b) = r.branch.map(str::trim).filter(|b| !b.is_empty()) {
-        t = remove_ci(&t, b, "[branch]");
-        for seg in b.split('/').filter(|s| s.chars().count() >= 3) {
-            t = remove_ci(&t, seg, "[branch]");
-        }
-    }
+    // 1–3. Every recogniser match (keys, ticket URLs, #123), every URL, and
+    //      the branch: what the live question strips too.
+    let mut t = crate::service::decide::work_link::strip_refs(prompt, ctx, r.branch);
     // 4. The truth's key and exact title.
     if let Some(k) = r.truth_key {
         t = remove_ci(&t, k, "[ref]");
@@ -1151,36 +1103,19 @@ pub fn bm25_outcome(case: &BenchCase) -> Outcome {
 }
 
 /// The instruction of the Jev question.
-pub const JEV_INSTRUCTIONS: &str = "Which one of these work items is this coding session \
-    working on? The state is the first prompt a person typed into the session; ticket keys, \
-    links and branch names were removed from it. Answer \"none\" if none of them fits or it \
-    cannot be told.";
+pub const JEV_INSTRUCTIONS: &str = crate::service::decide::work_link::INSTRUCTIONS;
 
 /// PURE: the Jev request for `case`: its state, and one Choice over the
-/// candidate ids (each described by its title) plus [`NONE_OPTION`].
+/// candidate ids (each described by its title) plus [`NONE_OPTION`] — the
+/// live question's own ([`crate::service::decide::work_link::question`]).
 pub fn jev_request(case: &BenchCase) -> JevRequest {
-    let mut criteria: BTreeMap<String, Option<serde_json::Value>> = case
-        .candidates
-        .iter()
-        .map(|c| {
-            (
-                c.id.clone(),
-                Some(serde_json::Value::String(c.title.clone())),
-            )
-        })
-        .collect();
-    criteria.insert(
-        NONE_OPTION.to_string(),
-        Some(serde_json::Value::String(
-            "None of these: the session works on something else, or it cannot be told".into(),
-        )),
-    );
     JevRequest {
         state: serde_json::json!({ "first_prompt": case.state }),
-        question: Question::Choice {
-            instructions: serde_json::Value::String(JEV_INSTRUCTIONS.into()),
-            criteria,
-        },
+        question: crate::service::decide::work_link::question(
+            case.candidates
+                .iter()
+                .map(|c| (c.id.clone(), c.title.as_str())),
+        ),
     }
 }
 

@@ -181,7 +181,7 @@
   }
   .tick {
     fill: var(--fg-muted);
-    font-size: 8px;
+    font-size: 11px;
   }
   .bar {
     fill: var(--accent);
@@ -213,7 +213,7 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 0.2rem 0.4rem;
-    font-size: 0.72rem;
+    font-size: 11px;
     display: flex;
     gap: 0.4rem;
     pointer-events: none;
@@ -243,7 +243,7 @@
   }
   table.data {
     width: 100%;
-    font-size: 0.78rem;
+    font-size: 11px;
     border-collapse: collapse;
   }
   table.data th,

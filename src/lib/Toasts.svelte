@@ -1,5 +1,16 @@
 <script lang="ts">
-  import { toasts, droppedToasts, dismiss, clearToasts, runToastAction } from './toasts';
+  import {
+    toasts,
+    droppedToasts,
+    dismiss,
+    clearToasts,
+    runToastAction,
+    toastCountdowns,
+    holdToast,
+    releaseToast,
+  } from './toasts';
+  import { effectiveMotion } from './motion';
+  import { timerBarRuns, toastIn, toastOut } from './motion_catalog';
 </script>
 
 <!-- Polite live region: screen readers announce new toasts without
@@ -9,7 +20,21 @@
     <!-- No nested live region: an assertive role="alert" inside this polite
          role="status" is undefined behaviour and screen readers either
          double-announce it or drop one. The container announces. -->
-    <div class="toast {t.kind}" data-testid="toast" data-kind={t.kind}>
+    <!-- Redesign step 7.4: enters from the right, leaves with a fade; the
+         countdown holds while the pointer or focus is on the toast. -->
+    {@const countdown = $toastCountdowns[t.id]}
+    <div
+      class="toast {t.kind}"
+      data-testid="toast"
+      data-kind={t.kind}
+      in:toastIn
+      out:toastOut
+      onmouseenter={() => holdToast(t.id)}
+      onmouseleave={() => releaseToast(t.id)}
+      onfocusin={() => holdToast(t.id)}
+      onfocusout={() => releaseToast(t.id)}
+      role="group"
+    >
       {#if t.code}
         <code class="code" data-testid="toast-code">{t.code}</code>
       {/if}
@@ -21,6 +46,16 @@
         <span class="count" title="repeated">×{t.count}</span>
       {/if}
       <button class="close" onclick={() => dismiss(t.id)} aria-label="Dismiss" data-testid="toast-dismiss">×</button>
+      {#if countdown && timerBarRuns($effectiveMotion)}
+        {#key countdown.arm}
+          <span
+            class="timer"
+            data-testid="toast-timer"
+            aria-hidden="true"
+            style:animation-duration="{countdown.ms}ms"
+          ></span>
+        {/key}
+      {/if}
     </div>
   {/each}
   <!-- LAST, not first. The column is anchored at its bottom edge and grows
@@ -52,12 +87,12 @@
     gap: 0.4rem;
   }
   .dropped {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .dismiss-all {
     font: inherit;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.15rem 0.45rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -80,6 +115,8 @@
     pointer-events: none;
   }
   .toast {
+    position: relative;
+    overflow: hidden;
     pointer-events: auto;
     display: flex;
     align-items: flex-start;
@@ -96,19 +133,19 @@
   }
   .toast.error { border-left-color: var(--danger); }
   .toast.success { border-left-color: var(--status-done); }
-  .toast.warning { border-left-color: #e0a030; }
+  .toast.warning { border-left-color: var(--status-waiting); }
   .toast.info { border-left-color: var(--accent); }
   .code {
     flex: 0 0 auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.05rem 0.3rem;
     border-radius: 3px;
     background: var(--bg-pane);
     color: var(--fg-muted);
   }
   .msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-  .count { color: var(--fg-muted); font-size: 0.7rem; }
+  .count { color: var(--fg-muted); font-size: 11px; }
   .action {
     flex: 0 0 auto;
     background: transparent;
@@ -116,7 +153,7 @@
     border-radius: 4px;
     color: var(--accent);
     cursor: pointer;
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0 0.4rem;
   }
   .action:hover { border-color: var(--accent); }
@@ -131,4 +168,27 @@
     padding: 0 0.1rem;
   }
   .close:hover { color: var(--fg); }
+  /* The countdown of an auto-dismissing toast: it drains left to right and
+     stops while the toast is hovered or focused, as the timer does. */
+  .timer {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 2px;
+    background: var(--fg-muted);
+    opacity: 0.45;
+    transform-origin: left;
+    animation-name: toast-drain;
+    animation-timing-function: linear;
+    animation-fill-mode: forwards;
+  }
+  .toast:hover .timer,
+  .toast:focus-within .timer {
+    animation-play-state: paused;
+  }
+  @keyframes toast-drain {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
+  }
 </style>

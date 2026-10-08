@@ -212,7 +212,9 @@ pub fn spawn_reconcile_tick(
                     }
                     Err(e) => tracing::warn!("reconcile tick: reconcile failed: {e}"),
                 }
-                stats.finish(started, unix_now(), outcome.map_err(|e| e.to_string()));
+                let outcome = outcome.map_err(|e| e.to_string());
+                service::loops::report("reconcile", outcome.clone().map(|_| ()), Some(period));
+                stats.finish(started, unix_now(), outcome);
                 // Lifecycle F2: a `working` row nothing has moved for
                 // `reconcile.stale_working_secs` becomes `idle` (+ the
                 // `stale_working` attention reason), before the playbooks
@@ -227,6 +229,7 @@ pub fn spawn_reconcile_tick(
                 if lifted > 0 {
                     tracing::debug!("reconcile tick: {lifted} stale working stamp(s) lifted");
                 }
+                service::loops::report("stale_working", Ok::<_, String>(()), Some(period));
                 // Chat forms: expire unanswered ones, drop old rows, and
                 // remove secret files nobody needs from their hosts.
                 let now = unix_now();
@@ -237,14 +240,18 @@ pub fn spawn_reconcile_tick(
                         "reconcile tick: {forms} form row(s) aged, {swept} secret dir(s) removed"
                     );
                 }
+                service::loops::report("forms", Ok::<_, String>(()), Some(period));
                 // Wave 2 Track D: lifecycle automation rides the same tick, after
                 // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.
                 // Both are opt-in through settings and cheap when off. Their
                 // work is best-effort: a failure is logged inside and never
                 // stops the loop.
-                let n = service::playbooks::run(store, ssh).await;
-                if n > 0 {
-                    tracing::info!("reconcile tick: applied {n} stuck playbook(s)");
+                if service::loops::gate("playbooks", store, Some(period)) {
+                    let n = service::playbooks::run(store, ssh).await;
+                    if n > 0 {
+                        tracing::info!("reconcile tick: applied {n} stuck playbook(s)");
+                    }
+                    service::loops::report("playbooks", Ok::<_, String>(()), Some(period));
                 }
                 // Step 5.10: a prompt queued for a busy session goes in once the
                 // session is idle; the Stop hook delivers it first, this catches
@@ -264,13 +271,16 @@ pub fn spawn_reconcile_tick(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
-                    match service::tasks::sweep_open_tasks(&s, now) {
+                    let swept = service::tasks::sweep_open_tasks(&s, now);
+                    drop(s);
+                    match &swept {
                         Ok(failed) if !failed.is_empty() => {
                             tracing::info!("reconcile tick: failed {} stale task(s)", failed.len())
                         }
                         Ok(_) => {}
                         Err(e) => tracing::warn!("reconcile tick: task sweep failed: {e}"),
                     }
+                    service::loops::report("tasks", swept.map(|_| ()), Some(period));
                 }
                 // Error reports (spec 2026-09-21): the hub's own ERROR events
                 // join the table, and rows past `reports.max_age_secs` go.
@@ -281,6 +291,7 @@ pub fn spawn_reconcile_tick(
                     if swept > 0 {
                         tracing::info!("reconcile tick: swept {swept} old error report(s)");
                     }
+                    service::loops::report("reports", Ok::<_, String>(()), Some(period));
                 }
                 // Opt-in (`repair.auto_on_tick`): re-add vanished worktrees with
                 // the create-only automatic policy. Detached and rate-limited.
@@ -326,6 +337,7 @@ pub fn spawn_account_usage_tick(
             let bus = &bus;
             let poller = &poller;
             async move {
+                let next = Some(USAGE_POLL_INTERVAL);
                 let hosts: Vec<HostRow> = match store.lock() {
                     Ok(s) => match s.list_hosts() {
                         // One hidden/local rule for every host loop (hub-ops F6).
@@ -335,11 +347,13 @@ pub fn spawn_account_usage_tick(
                         ),
                         Err(e) => {
                             tracing::warn!("account usage tick: list_hosts failed: {e}");
+                            service::loops::report("account_usage", Err(e), next);
                             return;
                         }
                     },
                     Err(e) => {
                         tracing::warn!("account usage tick: store mutex poisoned: {e}");
+                        service::loops::report("account_usage", Err(e.to_string()), next);
                         return;
                     }
                 };
@@ -354,6 +368,7 @@ pub fn spawn_account_usage_tick(
                     Arc::clone(bus),
                     Some(Arc::clone(store)),
                 );
+                service::loops::report("account_usage", Ok::<_, String>(()), next);
             }
         })
         .await;

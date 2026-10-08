@@ -132,7 +132,7 @@
 {/if}
 
 <style>
-  .status { font-size: 0.75rem; color: var(--fg-muted); margin: 0; }
+  .status { font-size: 11px; color: var(--fg-muted); margin: 0; }
   .err { color: var(--danger); font-size: 0.8rem; margin: 0; white-space: pre-wrap; }
   .retry {
     align-self: flex-start;

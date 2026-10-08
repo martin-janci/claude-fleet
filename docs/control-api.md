@@ -757,10 +757,14 @@ Index by area (names only; see the reference for details):
   `peer` token long-polls it to trade messages and acknowledgements; the one
   tool a peer token reaches, and no other token reaches it, so it is listed
   to peer tokens only), `list_peer_links` (this hub's links to other fleets'
-  hubs — fleet, role, state, pending count, last exchange and error, never a
-  token; a read, but master token only, since it names other fleets — the
-  `fleet-hub peer add|list|remove` commands drive the same links straight on
-  `state.db`).
+  hubs — fleet, role, state, pending count, last exchange and error, the
+  last round trip and the messages carried today and in all, never a token;
+  a read for the master and the hub owner's own device, since it names other
+  fleets), `link_peer` / `unlink_peer` (link a hub with the one-time code its
+  owner minted, or remove a link and fail what waits for it; the master or
+  the owner's trusted full device). Settings → Federation shows and drives
+  them from a paired desktop; the `fleet-hub peer add|list|remove` commands
+  drive the same links straight on `state.db`.
 - **Updates** — `update_status` (the fleet's application updates: the
   verified release channel, each target's reported version and phase with
   what the hub would tell it now, per-component counts and the operator's
@@ -791,6 +795,29 @@ Index by area (names only; see the reference for details):
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
   stream. See `docs/hub.md` → *File downloads*.
+- **Routines** — `routines`, by `action` (Orbit Fleet 8.5): a person's
+  saved prompt that starts a session on a cron schedule (`trigger: cron`,
+  five fields read at the `utc_offset_min` the device had when it was
+  saved), on a session timeline event (`trigger: event`, one of `turn_done`,
+  `stop_failure`, `stuck`, `lost`, `task_done`, `task_failed`,
+  `session_restore_failed`, `workspace_repair_failed`, written for a
+  session its owner owns and not started by a routine), or only when a
+  person presses `run_now` (`trigger: manual`). `list`; `get {
+  routine_id }` with its last runs; `runs { routine_id, limit? }`; `save {
+  routine, routine_id? }` writes the whole routine (host, project,
+  `profile` = the account it bills, prompt, `budget_run_micros`,
+  `budget_day_micros`, `overlap: skip | parallel`); `delete`; `set_enabled
+  { enabled }`; `skip_next { skip? }`; `run_now`. Each run's session has
+  origin `routine` and is the routine's owner's; the prompt is its
+  handover. A run is `done` when its session's first turn finishes,
+  `failed` on an error, a lost or removed session, six quiet hours, or a
+  session past the run budget (which also turns the routine off with
+  `paused_reason`), and `skipped` when the last run is still going under
+  `overlap: skip`, today's budget is spent, or a person skipped it.
+  `automation.paused` (Pause all) stops the schedule and event fires,
+  never `run_now`. Read and changed by the owner and the org's admins, read
+  by the org's members, never served to a per-host token; the routine's
+  org is its host's.
 - **Debug devices** — `debug_devices`, by `action`. Android phones and
   emulators, iOS simulators and devices attached to any fleet host,
   inventoried by a scan of that host (`list { refresh? }`, `scan { host? }`,
@@ -810,6 +837,15 @@ Index by area (names only; see the reference for details):
   holder extends it. A per-host token sees its own host's devices and the
   ones a person marked `shared` on hosts of its own org; `configure {
   label, shared }` and `forget` are a person's. See `docs/debug-devices.md`.
+- **Pull requests** — `prs`, `action: list { state?: open|merged|closed|all,
+  project_id?, limit? }` (redesign 6.4). Every PR a session's branch has had,
+  newest change first: repo and number, title, head branch, state, draft,
+  CI, review decision, merge state, merged time and the session that opened
+  it. Reconcile records them from the `gh pr view` probe that already fills
+  a session's `pr_url` / `ci_status`, and keeps them after the session is
+  gone. A row is served to whoever may see the session that opened it; a PR
+  whose session is gone only to the hub's own reader or the person of a
+  one-person hub. A read: nothing here merges or closes a PR.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a

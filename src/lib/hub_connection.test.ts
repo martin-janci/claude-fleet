@@ -1,7 +1,8 @@
 // SF-8: the design says a dropped hub stream reconnects "showing a banner
 // while disconnected". This store is that banner's source of truth, and the
 // banner component renders it.
-import { render, screen } from '@testing-library/svelte';
+import { render, screen, fireEvent } from '@testing-library/svelte';
+import { tick } from 'svelte';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
 
@@ -15,6 +16,9 @@ import {
   startHubConnection,
   connectionBanner,
   setGapHandler,
+  lostSince,
+  lostLine,
+  SIGNAL_LOST_AFTER_MS,
   type HubConnection,
 } from './hub_connection';
 import HubConnectionBanner from './HubConnectionBanner.svelte';
@@ -146,7 +150,7 @@ describe('the banner', () => {
     render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
     const b = screen.getByTestId('hub-connection-banner');
     expect(b.getAttribute('role')).toBe('alert');
-    expect(b.textContent).toContain('attempt 3');
+    expect(b.textContent).toContain('try 3');
   });
 
   it('shows the too-old sentence for a hub behind this app', () => {
@@ -163,5 +167,102 @@ describe('the banner', () => {
     expect(screen.getByTestId('hub-connection-banner').textContent?.toLowerCase()).toContain(
       'update this app'
     );
+  });
+});
+
+describe('the banner counts down and offers Retry now (step 10.6)', () => {
+  it('counts the wait down live, without the static wait in the sentence', async () => {
+    vi.useFakeTimers();
+    try {
+      hubConnection.set({ state: 'offline', attempt: 2, retry_in_secs: 8, reason: 'connection refused' });
+      render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+      expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Retrying in 8 s');
+      expect(screen.getByTestId('hub-connection-banner').textContent).not.toContain('next try in');
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Retrying in 5 s');
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Trying now…');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Retry now asks the backend to try at once, and a new state restarts the count', async () => {
+    hubConnection.set({ state: 'offline', attempt: 2, retry_in_secs: 30, reason: 'connection refused' });
+    render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+    await fireEvent.click(screen.getByTestId('hub-retry-now'));
+    expect(vi.mocked(invoke).mock.calls.some((c) => c[0] === 'hub_retry_now')).toBe(true);
+    expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Trying now…');
+    expect((screen.getByTestId('hub-retry-now') as HTMLButtonElement).disabled).toBe(true);
+    hubConnection.set({ state: 'offline', attempt: 3, retry_in_secs: 16, reason: 'connection refused' });
+    await tick();
+    expect(screen.getByTestId('hub-retry-countdown').textContent).toBe('Retrying in 16 s');
+    expect((screen.getByTestId('hub-retry-now') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a contract skew has no countdown: retrying does not fix it', () => {
+    hubConnection.set(hubTooOld);
+    render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+    expect(screen.queryByTestId('hub-retry-now')).toBeNull();
+  });
+});
+
+// Redesign step 3.14: the lost link with the kit's loaders and the design's
+// line ("Lost … at 14:52 · try 3 · your sessions keep running on their hosts").
+describe('when the link was lost (step 3.14)', () => {
+  it('is stamped by the first lost state, kept across retries and a skew, cleared by connected', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(2_000);
+      hubConnection.set(reconnecting);
+      vi.setSystemTime(9_000);
+      hubConnection.set({ ...reconnecting, attempt: 4 });
+      hubConnection.set(offline);
+      hubConnection.set(hubTooOld);
+      expect(get(lostSince)).toBe(2_000);
+      hubConnection.set({ state: 'connected' });
+      expect(get(lostSince)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reads as the design writes it', () => {
+    const at = new Date(2026, 9, 8, 14, 52).getTime();
+    expect(lostLine(reconnecting, at, 'https://fleet.example.com')).toBe(
+      'Lost https://fleet.example.com at 14:52 · try 3 · your sessions keep running on their hosts',
+    );
+    expect(lostLine(offline, at, null)).toBe(
+      'Cannot reach the hub since 14:52 · try 2 · your sessions keep running on their hosts',
+    );
+    expect(lostLine({ state: 'connected' }, at, null)).toBeNull();
+    expect(lostLine(hubTooOld, at, null)).toBeNull();
+  });
+
+  it('the banner shows the Gravity well, then Signal lost once the hub has been gone 6 s', async () => {
+    vi.useFakeTimers();
+    try {
+      hubConnection.set(reconnecting);
+      render(HubConnectionBanner, { props: { hubUrl: 'https://fleet.example.com' } });
+      const b = screen.getByTestId('hub-connection-banner');
+      expect(b.dataset.state).toBe('reconnecting');
+      expect(b.textContent).toContain('your sessions keep running on their hosts');
+      expect(b.textContent).toContain('the hub closed the event stream');
+      await vi.advanceTimersByTimeAsync(400);
+      expect(screen.getByTestId('hub-lost-loader').dataset.loader).toBe('gravity-well');
+      await vi.advanceTimersByTimeAsync(SIGNAL_LOST_AFTER_MS);
+      expect(b.dataset.state).toBe('signal-lost');
+      expect(screen.getByTestId('hub-lost-loader').dataset.loader).toBe('signal-lost');
+      // Retry now and the countdown stay through both.
+      expect(screen.getByTestId('hub-retry-now')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a skew shows no loader', () => {
+    hubConnection.set(hubTooNew);
+    render(HubConnectionBanner, { props: { hubUrl: null } });
+    expect(screen.queryByTestId('hub-lost-loader')).toBeNull();
   });
 });

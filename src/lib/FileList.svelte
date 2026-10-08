@@ -1,6 +1,7 @@
 <script lang="ts" module>
   import type { ChangedFile, RepoTree } from './files';
   import { fileIcon, folderIcon } from './fileicons';
+  import Skeleton from './states/Skeleton.svelte';
 
   interface TreeNode {
     name: string;
@@ -125,7 +126,7 @@
 
   <div class="rows">
     {#if loading}
-      <p class="hint">Loading…</p>
+      <Skeleton />
     {:else if error}
       <p class="hint err">{error}</p>
     {:else if mode === 'changes'}
@@ -251,7 +252,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--fg);
-    font-size: 0.78rem;
+    font-size: 11px;
     padding: 0.25rem 0.45rem;
     flex: 0 0 auto;
   }
@@ -278,7 +279,7 @@
     border: none;
     color: var(--fg);
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: 11px;
     padding: 0.34rem 0.4rem;
     text-align: left;
   }
@@ -300,7 +301,7 @@
     flex: 0 0 auto;
     width: 0.95rem;
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .ficon {
     flex: 0 0 auto;
@@ -317,32 +318,32 @@
     line-height: 1.1rem;
     text-align: center;
     border-radius: 3px;
-    font-size: 0.66rem;
+    font-size: 11px;
     font-weight: 700;
   }
   .b-mod {
-    background: color-mix(in srgb, #d9a000 30%, transparent);
-    color: #d9a000;
+    background: var(--waiting-soft);
+    color: var(--status-waiting);
   }
   .b-add {
-    background: color-mix(in srgb, #3fb950 30%, transparent);
-    color: #3fb950;
+    background: var(--done-soft);
+    color: var(--status-done);
   }
   .b-del {
-    background: color-mix(in srgb, #f85149 30%, transparent);
-    color: #f85149;
+    background: var(--failed-soft);
+    color: var(--status-failed);
   }
   .b-ren {
-    background: color-mix(in srgb, #58a6ff 30%, transparent);
-    color: #58a6ff;
+    background: var(--accent-soft);
+    color: var(--status-working);
   }
   .b-unt {
     background: color-mix(in srgb, var(--fg-muted) 26%, transparent);
     color: var(--fg-muted);
   }
   .b-cnf {
-    background: color-mix(in srgb, #db6d28 32%, transparent);
-    color: #db6d28;
+    background: var(--failed-soft);
+    color: var(--status-failed);
   }
   .row-wrap {
     display: flex;
@@ -371,7 +372,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--fg);
-    font-size: 0.78rem;
+    font-size: 11px;
     font-family: inherit;
     resize: vertical;
     padding: 0.25rem 0.4rem;
@@ -384,7 +385,7 @@
     border-radius: 4px;
     color: var(--fg);
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: 11px;
     padding: 0.25rem 0.5rem;
     text-align: center;
   }

@@ -44,16 +44,16 @@ export interface SessionActionDef {
 export const ROW_ACTIONS: readonly SessionActionDef[] = [
   { id: 'label', label: 'Edit label', detailsTestId: 'label-from-details' },
   { id: 'rename', label: 'Rename tmux session', detailsTestId: 'rename-from-details' },
-  { id: 'restart', label: 'Restart', detailsTestId: 'restart-from-details' },
-  { id: 'repair', label: 'Repair workspace', detailsTestId: 'repair-from-details' },
-  { id: 'send_prompt', label: 'Send prompt', detailsTestId: 'send-prompt-from-details' },
-  { id: 'review', label: 'Review', detailsTestId: 'open-review' },
-  { id: 'recreate', label: 'Recreate', detailsTestId: 'recreate-from-details' },
+  { id: 'restart', label: 'Restart…', detailsTestId: 'restart-from-details' },
+  { id: 'repair', label: 'Repair workspace…', detailsTestId: 'repair-from-details' },
+  { id: 'send_prompt', label: 'Send prompt…', detailsTestId: 'send-prompt-from-details' },
+  { id: 'review', label: 'Review…', detailsTestId: 'open-review' },
+  { id: 'recreate', label: 'Recreate…', detailsTestId: 'recreate-from-details' },
   { id: 'move', label: 'Move to host…', detailsTestId: 'move-from-details' },
   { id: 'share', label: 'Share…', detailsTestId: 'share-from-details' },
   { id: 'remove_from_list', label: 'Remove from list', detailsTestId: 'remove-from-list-details' },
-  { id: 'safe_remove', label: 'Safe remove', detailsTestId: 'safe-kill-from-details' },
-  { id: 'kill', label: 'Kill session', detailsTestId: 'kill-from-details', danger: true },
+  { id: 'safe_remove', label: 'Safe remove…', detailsTestId: 'safe-kill-from-details' },
+  { id: 'kill', label: 'Kill session…', detailsTestId: 'kill-from-details', danger: true },
 ];
 
 /** Whether Details shows the action's button for this row. */

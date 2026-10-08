@@ -256,7 +256,7 @@
   }
   .where {
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .none {
     font-size: 0.8rem;
@@ -269,7 +269,7 @@
     border-radius: 999px;
     background: var(--accent);
     color: var(--bg);
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .nl {
     display: flex;
@@ -279,7 +279,7 @@
     padding: 0.4rem 0.45rem;
     border: 1px dashed var(--accent);
     border-radius: var(--radius-sm);
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   .nl-change {
     flex-basis: 100%;

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ListLoading from './ListLoading.svelte';
   import { untrack } from 'svelte';
   import type { SessionRow } from './sessions';
   import {
@@ -355,7 +356,7 @@
       </div>
       <div class="hscroll">
         {#if loading && commits.length === 0}
-          <p class="hint">Loading…</p>
+          <ListLoading />
         {:else if error}
           <p class="hint err">{error}</p>
         {:else}
@@ -497,7 +498,7 @@
 {/if}
 
 <style>
-  .branch-notice { margin: 0; padding: 0.3rem 0.7rem; font-size: 0.76rem; color: var(--fg-muted); }
+  .branch-notice { margin: 0; padding: 0.3rem 0.7rem; font-size: 11px; color: var(--fg-muted); }
   .dlg-hint { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
   .dlg-hint code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .dlg-check { display: flex; align-items: center; gap: 0.4rem; font-size: 0.82rem; cursor: pointer; }
@@ -527,7 +528,7 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.2rem 0.4rem;
   }
   .modes button:first-child {
@@ -589,7 +590,7 @@
   }
   .hbar {
     padding: 0.3rem 0.6rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     flex: 0 0 auto;
     border-bottom: 1px solid var(--border);
     color: var(--fg-muted);
@@ -651,7 +652,7 @@
     border-top: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: 11px;
     padding: 0.4rem 0.7rem;
     text-align: center;
   }
@@ -669,7 +670,7 @@
     border: none;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0;
     margin-bottom: 0.2rem;
   }
@@ -677,14 +678,14 @@
     color: var(--fg);
   }
   .csub {
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .cmeta {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     margin-top: 0.1rem;
   }

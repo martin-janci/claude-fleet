@@ -569,6 +569,16 @@ fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 129.
+fn sessions_has_turn_outcome(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'turn_outcome'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 125.
 fn sessions_has_last_viewed_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -624,6 +634,16 @@ fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<b
 fn host_tokens_has_rotated_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('host_tokens') WHERE name = 'rotated_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 132.
+fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('peer_links') WHERE name = 'msgs_total'",
         [],
         |r| r.get(0),
     )?;
@@ -1494,12 +1514,42 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/126_host_token_use.sql"),
         already_applied: Some(host_tokens_has_rotated_at),
     },
+    // Orbit Fleet 8.2: `aux_usage`, the cost of fleet's own `claude -p`
+    // runs. A new table and indexes, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(127, include_str!("../../migrations/127_aux_usage.sql")),
+    // Pull requests (redesign 6.4): `pull_requests` and two indexes. New
+    // objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(128, include_str!("../../migrations/128_pull_requests.sql")),
+    // Orbit Fleet 2.8: a finished turn's outcome (J2) and the subject index
+    // proposals are read through (one ADD COLUMN, guarded, an index, and the
+    // row-version trigger re-issued).
+    Migration {
+        version: 129,
+        sql: include_str!("../../migrations/129_session_turn_outcome.sql"),
+        already_applied: Some(sessions_has_turn_outcome),
+    },
+    // Orbit Fleet 4.2, cost per account and per model:
+    // `usage_daily_account` and its index. New objects only, `IF NOT
+    // EXISTS`, safe to re-run.
+    Migration::plain(
+        130,
+        include_str!("../../migrations/130_usage_daily_account.sql"),
+    ),
+    // Orbit Fleet 8.5: routines and their runs (two new tables).
+    Migration::plain(131, include_str!("../../migrations/131_routines.sql")),
+    // Orbit Fleet 11.5, the Federation page: a link's latency and message
+    // counts on `peer_links` (four ADD COLUMNs, guarded on the last).
+    Migration {
+        version: 132,
+        sql: include_str!("../../migrations/132_peer_link_traffic.sql"),
+        already_applied: Some(peer_links_has_msgs_total),
+    },
     // Orbit Fleet 5.10, Send prompt: `deferred_prompts`, prompts typed in
     // once a busy session is idle. New objects only, `IF NOT EXISTS`, safe
     // to re-run.
     Migration::plain(
-        127,
-        include_str!("../../migrations/127_deferred_prompts.sql"),
+        133,
+        include_str!("../../migrations/133_deferred_prompts.sql"),
     ),
 ];
 
@@ -3030,6 +3080,57 @@ mod tests {
         assert!(old.touch_session_viewed(id, stamped + 5).unwrap());
         assert_eq!(row().last_viewed_at, Some(stamped + 5));
         assert_eq!(row().row_version, before + 1, "the trigger watches it");
+    }
+
+    /// 129 on a database stopped at 128: `turn_outcome` arrives empty, the
+    /// CHECK refuses a word J2 never answers, the row-version trigger
+    /// watches it, and proposals have their subject index.
+    #[test]
+    fn migration_129_adds_an_empty_turn_outcome() {
+        let old = Store::open_in_memory().expect("open");
+        old.upsert_host("h").unwrap();
+        let id = old
+            .upsert_session("w", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        old.conn
+            .execute_batch(
+                "DROP TRIGGER sessions_row_version_bump;\
+                 DROP INDEX decision_runs_subject;\
+                 ALTER TABLE sessions DROP COLUMN turn_outcome;\
+                 DELETE FROM schema_version WHERE version >= 129;",
+            )
+            .unwrap();
+        old.migrate().expect("129 on an existing DB");
+        assert_eq!(old.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+        let row = || old.get_session_by_id(id).unwrap().unwrap();
+        assert_eq!(row().turn_outcome, None);
+        let before = row().row_version;
+        assert!(old.set_turn_outcome(id, Some("asked")).unwrap());
+        assert!(
+            !old.set_turn_outcome(id, Some("asked")).unwrap(),
+            "no change"
+        );
+        assert_eq!(row().turn_outcome.as_deref(), Some("asked"));
+        assert_eq!(row().row_version, before + 1, "the trigger watches it");
+        assert!(old.set_turn_outcome(id, Some("done")).is_err());
+        assert!(old
+            .conn
+            .execute(
+                "UPDATE sessions SET turn_outcome = 'done' WHERE id = ?1",
+                [id]
+            )
+            .is_err());
+        assert!(old.set_turn_outcome(id, None).unwrap());
+        let indexed: i64 = old
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'decision_runs_subject'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 1);
     }
 
     /// 091 on a database stopped at 090: existing host_layers rows and managed

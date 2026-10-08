@@ -102,6 +102,18 @@ pub(crate) fn sample_session() -> SessionRow {
         origin_ref: Some("7".into()),
         // Some, so the golden pins the name the unread state reads.
         last_viewed_at: Some(1_700_000_100),
+        // Some, so the golden pins the name J2's answer reads.
+        turn_outcome: Some("finished".into()),
+        // One, so the golden pins the proposal shape every row carries.
+        proposals: vec![fleet_core::store::DecisionProposal {
+            feature: "turn_outcome".into(),
+            value: "finished".into(),
+            source: "jev".into(),
+            reason: Some("no output for 2 min after the prompt".into()),
+            confidence_pct: Some(82),
+            run_id: Some(41),
+            at: Some(1_700_000_200),
+        }],
         pending_form: Some(fleet_core::store::PendingForm {
             form_id: "f_x".into(),
             title: "T".into(),
@@ -130,6 +142,7 @@ pub(crate) fn sample_session() -> SessionRow {
                 checked: false,
             }],
             multi: false,
+            detail: None,
         }),
         work: Some(WorkSummary {
             link_id: 5,
@@ -407,6 +420,10 @@ fn sample_health() -> Health {
             spent_micros: 31_000_000,
             budget_micros: 30_000_000,
         }],
+        // Redesign 8.1: no client reads the loop registry yet, so it stays
+        // out of the contract (empty and false are not sent).
+        loops: Vec::new(),
+        automation_paused: false,
     }
 }
 
@@ -644,6 +661,12 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         c.insert(name.to_string(), keys);
     };
     put("SessionRow", wire_keys(&sample_session()));
+    // The one proposal shape every row carries (redesign 2.8), with every
+    // optional key set.
+    put(
+        "SessionRow.proposals",
+        wire_keys(&sample_session().proposals[0]),
+    );
     put("WorkLinkRow", wire_keys(&sample_work_link()));
     // `confirm_session_work` / `reject_session_work`: the row plus the
     // decided link's version.
@@ -1035,11 +1058,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty-nine keys nothing else would notice losing. Its list is a literal
+/// seventy-one keys nothing else would notice losing. Its list is a literal
 /// here, not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty_nine() {
+fn a_session_rows_wire_names_are_these_exact_seventy_one() {
     let expected = [
         "account_uuid",
         "agent",
@@ -1081,6 +1104,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_nine() {
         "pr_url",
         "project_id",
         "prompt_submit_seq",
+        "proposals",
         "reviews_session_id",
         "row_version",
         "safe_kill_detail",
@@ -1095,6 +1119,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_nine() {
         "tags",
         "tmux_name",
         "tmux_pane_id",
+        "turn_outcome",
         "turn_seq",
         "usage_cache_read_tokens",
         "usage_cache_write_tokens",
@@ -1112,7 +1137,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_nine() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 69, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 71, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

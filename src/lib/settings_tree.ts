@@ -101,6 +101,7 @@ export const SETTINGS_TREE: readonly SettingsGroup[] = [
       { id: 'orgs', label: 'Organisations', page: 'settings.orgs' },
       { id: 'people', label: 'People', page: 'settings.people' },
       { id: 'devices', label: 'Devices', page: 'settings.devices' },
+      { id: 'federation', label: 'Federation', page: 'settings.federation' },
       { id: 'debug-devices', label: 'Debug devices', page: 'debug_devices' },
     ],
   },

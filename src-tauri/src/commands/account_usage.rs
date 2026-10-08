@@ -12,6 +12,8 @@
 use crate::backend::FleetBackend;
 use fleet_core::events::EventBus;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::account_limits::{self, CheckAccountHeadroomArgs, Headroom};
+use fleet_core::service::account_spend::{self, AccountSpend};
 use fleet_core::service::account_usage::{AccountUsageSnapshot, UsageCache};
 use fleet_core::service::account_usage_poll;
 use fleet_core::ssh::SshClient;
@@ -30,6 +32,15 @@ pub struct AccountUsageHistoryArgs {
     pub account_uuid: String,
     /// Unix seconds; snapshots fetched before it are left out.
     pub since: i64,
+}
+
+#[derive(Deserialize)]
+pub struct AccountSpendArgs {
+    /// Unix seconds; spend on UTC days before its day is left out.
+    pub since: i64,
+    /// One account only; every account when absent.
+    #[serde(default)]
+    pub account_uuid: Option<String>,
 }
 
 /// Every known account's cached usage snapshot. Never fetches.
@@ -71,4 +82,35 @@ pub fn account_usage_history(
 ) -> Result<Vec<UsageSnapshotRow>, IpcError> {
     backend.refuse_local_only("account_usage_history")?;
     account_usage_poll::account_usage_history(&args.account_uuid, args.since, &store)
+}
+
+/// Whether starting under a login on a host crosses `accounts.pause_at`, and
+/// the login on that host with the most headroom (redesign step 4.4). Reads
+/// the cache only. Refused in remote mode like the commands above.
+#[tauri::command]
+pub fn check_account_headroom(
+    args: CheckAccountHeadroomArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    cache: State<'_, Arc<Mutex<UsageCache>>>,
+) -> Result<Headroom, IpcError> {
+    backend.refuse_local_only("check_account_headroom")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    account_limits::check_account_headroom(&args, &store, &cache, now)
+}
+
+/// Live spend per account and per model since `since`, from the
+/// `usage_daily_account` roll-up (redesign step 4.2). Refused in remote mode:
+/// this app collects no usage while a hub owns the fleet.
+#[tauri::command]
+pub fn account_spend(
+    args: AccountSpendArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<AccountSpend>, IpcError> {
+    backend.refuse_local_only("account_spend")?;
+    account_spend::account_spend(args.since, args.account_uuid.as_deref(), &store)
 }

@@ -380,6 +380,17 @@ pub struct SessionRow {
     /// fleet found it; a session fleet started counts from `started_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_viewed_at: Option<i64>,
+    /// What a finished turn came to when hooks said nothing (migration
+    /// 129, J2 in step 5.11): one of [`TURN_OUTCOMES`]. A hook event always
+    /// wins over it. `None` when nothing answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_outcome: Option<String>,
+    /// What a rule, Jev or an LLM proposes about this session, one per
+    /// feature (step 2.8): read from `decision_runs`, never stored on the
+    /// row. A person confirms or changes each; none ever acts. Empty, and
+    /// absent on the wire, when nothing proposes anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<DecisionProposal>,
     /// The form this session's agent asked and is waiting on. `serde(default)`
     /// so an older hub's row (without it) still parses.
     #[serde(default)]
@@ -403,6 +414,75 @@ pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, "codex", "agy", AGENT_SHELL];
 /// before migration 121, whose sessions all run Claude Code.
 fn agent_claude() -> String {
     AGENT_CLAUDE.to_string()
+}
+
+/// `sessions.turn_outcome` (migration 130): every value its `CHECK` admits.
+pub const TURN_OUTCOMES: [&str; 5] = ["finished", "asked", "stuck", "working", "unsure"];
+
+/// `decision_runs.subject_kind` of a run about one session: its
+/// `subject_id` is the session id as text. What [`SessionRow::proposals`]
+/// reads.
+pub const PROPOSAL_SUBJECT_SESSION: &str = "session";
+
+/// `decision_runs.subject_kind` of a run about one work item: its
+/// `subject_id` is the `work_items.id` as text.
+pub const PROPOSAL_SUBJECT_WORK_ITEM: &str = "work_item";
+
+/// Below this confidence an answer is recorded, never proposed: the UI
+/// pre-selects nothing (redesign ai.md, "below the confidence floor").
+pub const PROPOSAL_MIN_CONFIDENCE: f64 = 0.5;
+
+/// One proposal on the wire (step 2.8): a value a rule, Jev or an LLM
+/// suggests for one question about a row, with where it came from. The
+/// shape every row carries, so the UI draws "Proposed by Jev · why ·
+/// Change" one way. Only a live `assist` answer is proposed: never a
+/// shadow run, a fallback, `unsure`, one under [`PROPOSAL_MIN_CONFIDENCE`],
+/// or one a person already confirmed, corrected or rejected.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DecisionProposal {
+    /// The question: a `decide` feature (`start_project`, `turn_outcome`,
+    /// `work_link`…).
+    pub feature: String,
+    /// The proposed answer, an id or a vocabulary word (`p12`,
+    /// `finished`).
+    pub value: String,
+    /// `rule`, `jev` or `llm`.
+    pub source: String,
+    /// Fleet's own words for why, when the use case composes them; never
+    /// model text. A run read back from `decision_runs` (which holds no
+    /// text) carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The model's confidence in whole percent, when it gave one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_pct: Option<u8>,
+    /// The recorded run, which a confirm or a change marks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<i64>,
+    /// When it was decided, unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<i64>,
+}
+
+/// `DecisionProposal::source` for a `decision_runs.provider`.
+pub fn proposal_source(provider: &str) -> &'static str {
+    match provider {
+        "rules" => "rule",
+        "llm" => "llm",
+        _ => "jev",
+    }
+}
+
+/// Decode a [`proposals_sql!`] subselect: a JSON array, sorted by feature
+/// so two reads of the same runs compare equal. Malformed text reads as
+/// no proposals rather than failing the row.
+pub(super) fn decode_proposals(raw: Option<String>) -> Vec<DecisionProposal> {
+    let mut v: Vec<DecisionProposal> = raw
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    v.sort_by(|a, b| a.feature.cmp(&b.feature));
+    v
 }
 
 /// `sessions.origin` (migration 124): every value its `CHECK` admits.
@@ -454,6 +534,11 @@ impl SessionOrigin {
     /// request proved, or a script on the host (`None`).
     pub fn token(proven_session: Option<i64>) -> Self {
         Self::with("token", proven_session)
+    }
+
+    /// A routine's run started it (redesign 8.5).
+    pub fn routine(routine_id: i64) -> Self {
+        Self::with("routine", Some(routine_id))
     }
 
     /// The origin a row records, to carry it onto another row (a move).
@@ -630,7 +715,9 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile, \
      (SELECT json_object('form_id', f.form_id, 'title', json_extract(f.spec, '$.title')) \
         FROM form_requests f WHERE f.session_id = sessions.id AND f.state = 'pending') \
-       AS pending_form, agent, origin, origin_ref, last_viewed_at"
+       AS pending_form, agent, origin, origin_ref, last_viewed_at, turn_outcome, ",
+    crate::proposals_sql!("session", "CAST(sessions.id AS TEXT)"),
+    " AS proposals"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -747,6 +834,8 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         origin: row.get(69)?,
         origin_ref: row.get(70)?,
         last_viewed_at: row.get(71)?,
+        turn_outcome: row.get(72)?,
+        proposals: decode_proposals(row.get(73)?),
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).
@@ -923,6 +1012,20 @@ pub struct DayDelta {
     pub day: i64,
     pub totals: UsageTotals,
     pub backfill: bool,
+    /// The model that spent this slice (`usage_daily_account`, step 4.2);
+    /// `None` when the transcript line carried none.
+    pub model: Option<String>,
+}
+
+/// One account's LIVE spend on one model over a window, summed from
+/// `usage_daily_account` (migration 130, redesign step 4.2). `''` names an
+/// unknown account (a session whose login fleet has not read yet) or a
+/// transcript line with no model.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AccountModelCost {
+    pub account_uuid: String,
+    pub model: String,
+    pub totals: UsageTotals,
 }
 
 /// One usage pass's result for a session, applied by `Store::apply_usage`.

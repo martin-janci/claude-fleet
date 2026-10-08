@@ -9,6 +9,7 @@ use rusqlite::{Connection, OptionalExtension, Result, TransactionBehavior};
 use std::sync::Arc;
 
 mod account_usage_snapshots;
+mod aux_usage;
 pub mod backup;
 mod bench_work_link;
 mod catalog;
@@ -36,10 +37,12 @@ mod peer_links;
 mod people;
 mod project_picks;
 mod projects;
+mod pull_requests;
 mod read_cursors;
 mod read_pool;
 mod reconcile;
 mod reports;
+mod routines;
 mod rows;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
@@ -73,6 +76,7 @@ mod work_usage;
 mod work_view;
 
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
+pub use aux_usage::{AuxUsageRow, NewAuxUsage, AUX_ORIGIN_PLANNER, AUX_ORIGIN_SUMMARY};
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
     AppliedRecord, ChangesetItemRow, ChangesetRow, NewChangesetItem, TriageVerdictRow,
@@ -114,9 +118,9 @@ pub use nl_census::{
     NL_CENSUS_MIN_SCHEMA,
 };
 pub use orchestration::{
-    check_policy, mission_transition_allowed, MissionEventRow, MissionPatch, MissionPolicy,
-    MissionRepoRow, MissionRow, NewMission, NewMissionEvent, MISSION_FINAL_STATES,
-    MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES,
+    check_policy, mission_item_cap, mission_transition_allowed, mode_runs_loop, MissionEventRow,
+    MissionPatch, MissionPolicy, MissionRepoRow, MissionRow, NewMission, NewMissionEvent,
+    MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES, PLAN_MISSION_ITEM_CAP,
 };
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
@@ -136,9 +140,14 @@ pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
 };
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
+pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
+pub use routines::{
+    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
+    ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+};
 pub use rows::*;
 pub use schema::known_schema_version;
 #[cfg(test)]

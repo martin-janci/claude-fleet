@@ -49,7 +49,9 @@ mod orchestration;
 mod params;
 mod peer;
 mod present;
+mod prs;
 mod repo;
+mod routines;
 mod session_ops;
 mod sharing;
 mod support;
@@ -364,6 +366,8 @@ impl FleetTools {
             + Self::sharing_router()
             + Self::forms_router()
             + Self::devices_router()
+            + Self::prs_router()
+            + Self::routines_router()
     }
 }
 

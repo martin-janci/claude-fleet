@@ -19,14 +19,14 @@ pub enum OpenApp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Os {
+pub(crate) enum Os {
     Mac,
     Linux,
     Windows,
 }
 
 impl Os {
-    fn current() -> Os {
+    pub(crate) fn current() -> Os {
         if cfg!(target_os = "macos") {
             Os::Mac
         } else if cfg!(windows) {
@@ -38,10 +38,10 @@ impl Os {
 }
 
 /// What `cmd /C` would read as more than a path.
-const CMD_META: &[char] = &['&', '|', '<', '>', '^', '%', '"', '!'];
+pub(crate) const CMD_META: &[char] = &['&', '|', '<', '>', '^', '%', '"', '!'];
 
 /// The program and its arguments; the child also starts in the folder.
-pub(super) fn command_for(
+pub(crate) fn command_for(
     app: OpenApp,
     path: &str,
     os: Os,
@@ -106,9 +106,24 @@ pub fn open(app: OpenApp, path: &str) -> Result<(), IpcError> {
     }
     let os = Os::current();
     let (program, args) = command_for(app, path, os)?;
-    let child = crate::proc::std_command(&program)
-        .args(&args)
-        .current_dir(path)
+    spawn_detached(&program, &args, Some(path), app, os)
+}
+
+/// Start `program` without waiting for it, in `cwd` when given; a missing
+/// program names how to get it ([`install_hint`]).
+pub(crate) fn spawn_detached(
+    program: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    app: OpenApp,
+    os: Os,
+) -> Result<(), IpcError> {
+    let mut cmd = crate::proc::std_command(program);
+    cmd.args(args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

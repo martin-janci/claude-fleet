@@ -1,8 +1,10 @@
 <script lang="ts" module>
-  // Stable lane palette, indexed by GraphRow.color.
+  // Stable lane palette, indexed by GraphRow.color. Theme tokens, so a lane
+  // keeps its contrast in light mode; set through `style:` because an SVG
+  // presentation attribute does not resolve var().
   const PALETTE = [
-    '#58a6ff', '#3fb950', '#d29922', '#db61a2', '#a371f7',
-    '#f85149', '#39c5cf', '#e3b341', '#bc8cff', '#7ee787',
+    'var(--status-working)', 'var(--status-done)', 'var(--status-waiting)', 'var(--org-3)', 'var(--status-failed)',
+    'var(--code)', 'var(--syn-num)', 'var(--syn-str)', 'var(--syn-kw)', 'var(--status-idle)',
   ];
   export function laneColor(i: number): string {
     return PALETTE[i % PALETTE.length];
@@ -111,9 +113,9 @@
     >
       <svg class="gutter" width={gutterW} height={ROW_H} aria-hidden="true">
         {#each segments(i) as s}
-          <line x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} stroke={s.color} stroke-width="1.5" />
+          <line x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2} style:stroke={s.color} stroke-width="1.5" />
         {/each}
-        <circle cx={cx(r.column)} cy={ROW_H / 2} r={DOT_R} fill={laneColor(r.color)} />
+        <circle cx={cx(r.column)} cy={ROW_H / 2} r={DOT_R} style:fill={laneColor(r.color)} />
       </svg>
       <span class="meta">
         {#each c?.refs ?? [] as ref}
@@ -140,7 +142,7 @@
 </div>
 
 <style>
-  .graph { font-size: 0.78rem; }
+  .graph { font-size: 11px; }
   .crow {
     display: flex;
     align-items: center;
@@ -177,18 +179,18 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .author, .date { flex: 0 0 auto; color: var(--fg-muted); font-size: 0.72rem; }
+  .author, .date { flex: 0 0 auto; color: var(--fg-muted); font-size: 11px; }
   .ref {
     flex: 0 0 auto;
     border-radius: 3px;
     padding: 0 0.3rem;
-    font-size: 0.66rem;
+    font-size: 11px;
     font-family: var(--mono, monospace);
   }
-  .ref.branch { background: color-mix(in srgb, #3fb950 30%, transparent); color: #3fb950; }
-  .ref.remote { background: color-mix(in srgb, #58a6ff 28%, transparent); color: #58a6ff; }
-  .ref.tag { background: color-mix(in srgb, #d29922 30%, transparent); color: #d29922; }
-  .ref.head { background: color-mix(in srgb, #f85149 30%, transparent); color: #f85149; }
+  .ref.branch { background: var(--done-soft); color: var(--status-done); }
+  .ref.remote { background: var(--accent-soft); color: var(--status-working); }
+  .ref.tag { background: var(--waiting-soft); color: var(--status-waiting); }
+  .ref.head { background: var(--failed-soft); color: var(--status-failed); }
   .actions { flex: 0 0 auto; visibility: hidden; display: flex; gap: 0.2rem; }
   .actions button {
     background: transparent;
@@ -196,7 +198,7 @@
     border-radius: 3px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0 0.3rem;
   }
   .actions button:hover { color: var(--fg); border-color: var(--accent); }

@@ -16,6 +16,7 @@ import type { ReviewItem, SessionTaskLink } from './work_view';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
+import { uiLayout } from './prefs';
 
 const item = (over: Partial<ReviewItem> = {}): ReviewItem => ({
   review_id: 'link:42',
@@ -127,6 +128,53 @@ describe('WorkReview', () => {
     await flush();
     expect(screen.queryByTestId('work-review-confirm-high')).toBeNull();
     expect(screen.getAllByTestId('work-review-confidence')).toHaveLength(1);
+  });
+
+  it("names Jev on the decision model's suggestion, with its reason and confidence, and Change opens the panel (6.8)", async () => {
+    pending = [
+      item({
+        rule: 'R12',
+        strength: 'inferred',
+        confidence: 60,
+        why: ['Jev proposed ABC-12 (82%) · R12'],
+        proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 82 },
+      }),
+      item({ review_id: 'link:50', session_id: 8, link_id: 50 }),
+    ];
+    uiLayout.set('new');
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    const pill = within(rows[0]).getByTestId('work-review-proposed-by');
+    expect(pill.textContent).toContain('Proposed by Jev');
+    expect(pill.textContent).toContain('from the first prompt');
+    expect(pill.textContent).toContain('82%');
+    // A rule's own reading says nothing about Jev.
+    expect(within(rows[1]).queryByTestId('work-review-proposed-by')).toBeNull();
+    // Jev's 60 never joins the one-click high-confidence confirm.
+    expect(screen.queryByTestId('work-review-confirm-high')).toBeNull();
+    await fireEvent.click(within(rows[0]).getByTestId('work-review-proposed-by-change'));
+    await flush();
+    expect(within(rows[0]).getByTestId('work-review-change-panel')).toBeTruthy();
+    uiLayout.set('classic');
+  });
+
+  it('keeps Classic as it was: the why line names Jev, no pill (6.8 parity)', async () => {
+    pending = [item({ rule: 'R12', why: ['Jev proposed ABC-12 (82%) · R12'], proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 82 } })];
+    uiLayout.set('classic');
+    render(WorkReview);
+    await flush();
+    expect(screen.queryByTestId('work-review-proposed-by')).toBeNull();
+    expect(screen.getByTestId('work-review-why').textContent).toBe('Jev proposed ABC-12 (82%) · R12');
+  });
+
+  it('shows no Jev pill under the confidence floor (6.8)', async () => {
+    pending = [item({ rule: 'R12', proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 40 } })];
+    uiLayout.set('new');
+    render(WorkReview);
+    await flush();
+    expect(screen.queryByTestId('work-review-proposed-by')).toBeNull();
+    uiLayout.set('classic');
   });
 
   it('lists every item with its kind and why', async () => {

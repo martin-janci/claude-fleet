@@ -166,7 +166,7 @@ fn steps_for(s: &Store, m: &MissionRow, a: &Autonomy) -> Result<Vec<Step>, IpcEr
 /// The plan a mission's detail carries: `None` for a draft or a finished
 /// one.
 pub fn plan_for(s: &Store, m: &MissionRow) -> Result<Option<MissionPlan>, IpcError> {
-    if !matches!(m.state.as_str(), "active" | "paused") {
+    if !matches!(m.state.as_str(), "active" | "paused") || !crate::store::mode_runs_loop(&m.mode) {
         return Ok(None);
     }
     let a = autonomy(s, m, now_unix())?;
@@ -177,6 +177,21 @@ pub fn plan_for(s: &Store, m: &MissionRow) -> Result<Option<MissionPlan>, IpcErr
         counts: s.mission_task_counts(m.id)?,
         autonomy: a,
     }))
+}
+
+/// Refuse the loop's own acts (Start wave, the planner, a grant) on a
+/// `plan` mission: people and their own sessions work a plan through.
+fn not_a_plan(m: &MissionRow) -> Result<(), IpcError> {
+    if crate::store::mode_runs_loop(&m.mode) {
+        return Ok(());
+    }
+    Err(IpcError::new(
+        codes::E_INVALID_STATE,
+        format!(
+            "{} is a plan: fleet tracks it but does not run it; make it finite to run it",
+            m.name
+        ),
+    ))
 }
 
 /// Who takes a step.
@@ -424,6 +439,7 @@ pub async fn start(
     let (m, steps) = {
         let s = lock(&deps.store)?;
         let m = changeable(&s, scope, id)?;
+        not_a_plan(&m)?;
         if m.state != "active" {
             return Err(IpcError::new(
                 codes::E_INVALID_STATE,
@@ -777,6 +793,34 @@ fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<S
     ))
 }
 
+/// Book a planner run's cost on its mission (redesign 8.2), so the budget
+/// brake counts it. `usage` is `None` when `claude` reported none: the run
+/// is still booked, at 0. A failed write is logged, never the plan's error.
+pub fn book_planner_run(
+    s: &Store,
+    m: &MissionRow,
+    host: &str,
+    model: &str,
+    usage: Option<&crate::service::claude_print::Envelope>,
+    now: i64,
+) {
+    let row = crate::store::NewAuxUsage {
+        origin: crate::store::AUX_ORIGIN_PLANNER,
+        host_alias: host.to_string(),
+        model: model.to_string(),
+        mission_id: Some(m.id),
+        org_id: m.org_id,
+        claude_session_id: None,
+        input_tokens: usage.and_then(|u| u.input_tokens),
+        output_tokens: usage.and_then(|u| u.output_tokens),
+        cost_micros: usage.and_then(|u| u.cost_microusd).unwrap_or(0),
+        at: now,
+    };
+    if let Err(e) = s.insert_aux_usage(&row) {
+        tracing::warn!(mission = m.id, error = %e.message, "[orchestrate] planner cost not booked");
+    }
+}
+
 /// Ask the planner about `m` now, and card its answer.
 pub async fn run_planner(
     deps: &Deps,
@@ -842,7 +886,12 @@ pub async fn run_planner(
     .await?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let answer = match planner::parse_planner_output(&stdout) {
-        PlannerOutput::Ran(a) => a,
+        PlannerOutput::Ran(ran) => {
+            let (answer, usage) = planner::planner_answer(ran);
+            let s = lock(&deps.store)?;
+            book_planner_run(&s, m, &host, &model, usage.as_ref(), now_unix());
+            answer
+        }
         PlannerOutput::NoClaude => {
             return Err(IpcError::new(
                 codes::E_INVALID_STATE,
@@ -1044,6 +1093,7 @@ pub async fn plan_now(
         let s = lock(&deps.store)?;
         changeable(&s, scope, id)?
     };
+    not_a_plan(&m)?;
     if !matches!(m.state.as_str(), "draft" | "active" | "paused") {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
@@ -1095,6 +1145,7 @@ pub fn grant(
     });
     let s = lock(store)?;
     let m = changeable(&s, scope, id)?;
+    not_a_plan(&m)?;
     if crate::store::MISSION_FINAL_STATES.contains(&m.state.as_str()) {
         return Err(IpcError::new(
             codes::E_INVALID_STATE,
@@ -1264,7 +1315,7 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
         };
         let a = autonomy(&s, &m, now)?;
         let counts = s.mission_task_counts(id)?;
-        if !a.enabled || m.state != "active" {
+        if !a.enabled || m.state != "active" || !crate::store::mode_runs_loop(&m.mode) {
             s.release_mission_lease(id, Some(now + IDLE_RECHECK_SECS), Some(now))?;
             return Ok(());
         }
@@ -1345,23 +1396,36 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
 
 /// One pass of the loop: every due mission, one after the other.
 pub async fn tick_once(deps: &Deps, now: i64) {
+    let next = Some(TICK_EVERY);
     let due = match deps.store.lock() {
         Ok(s) => {
+            // Pause all (redesign 8.1) before the loop's own switch, so
+            // health says why nothing moves.
+            if !crate::service::loops::gate_in("missions", &s, next) {
+                return;
+            }
             if !settings::get_bool(&s, settings::ORCHESTRATOR_ENABLED) {
+                crate::service::loops::report("missions", Ok::<_, String>(()), next);
                 return;
             }
             s.missions_due(now).unwrap_or_default()
         }
-        Err(_) => return,
+        Err(e) => {
+            crate::service::loops::report("missions", Err(e.to_string()), next);
+            return;
+        }
     };
+    let mut failed: Option<String> = None;
     for id in due {
         if let Err(e) = tick_mission(deps, id, now).await {
             tracing::warn!(mission = id, error = %e.message, "[orchestrate] tick failed");
+            failed = Some(format!("mission {id}: {}", e.message));
             if let Ok(s) = deps.store.lock() {
                 let _ = s.release_mission_lease(id, Some(now + RUNNING_RECHECK_SECS), None);
             }
         }
     }
+    crate::service::loops::report("missions", failed.map_or(Ok(()), Err), next);
 }
 
 /// The loop's periodic task, on the hub and on a standalone desktop. A

@@ -17,6 +17,7 @@
   import { bucketState, rank } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { attentionFacts, blockedLine } from './attention_facts';
+  import { slideIn, wash } from './motion_catalog';
   import { accountByUuid, accountLabel } from './accounts';
   import { pushError } from './toasts';
   import { rowPrompt, shortAge, timeAgo } from './session_status';
@@ -39,6 +40,7 @@
     setWorkProjectTrust,
     unlinkSessionWork,
     workWhy,
+    JEV_RULE,
     crossOrgOf,
     crossOrgSentence,
     type WorkLink,
@@ -49,6 +51,7 @@
   import SessionStatusChip from './SessionStatusChip.svelte';
   import SessionRowDetails from './SessionRowDetails.svelte';
   import SessionRowMeta from './SessionRowMeta.svelte';
+  import LimitActions from './LimitActions.svelte';
   import { COMPACT_ROW_PX, uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
@@ -606,6 +609,8 @@
   onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onRowKey(e)}
   oncontextmenu={onRowContextMenu}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
+  use:slideIn={sess.id}
+  use:wash={bucketState(triage.bucket)}
 >
   {#if selectMode && !readOnly}
     <!-- a11y smell, known: an <input> nested in a role="button" row. The
@@ -641,11 +646,11 @@
            Read-only — name and status chip only, no actions. Checked before
            the ghost branch: a ghosted external row must not offer
            Recreate / Dismiss either. -->
-      <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+      <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
       <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
       <SessionStatusChip {sess} brief />
     {:else if sess.status === 'ghost'}
-      <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
+      <span class="status-dot status-ghost" title="ghost — session lost" role="img" aria-label="Status: ghost, session lost"></span>
       <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
       <span class="sess-name" title={sess.tmux_name}>{
         $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
@@ -676,7 +681,7 @@
     {:else}
       <div class="sess-lines">
         <div class="sess-line1">
-          <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+          <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
           {#if relatedCount > 0}
             <span
               class="related-badge"
@@ -728,6 +733,7 @@
             <WorkChip
               workKey={suggestionKey}
               suggested
+              proposed={$uiLayout === 'new' && suggestion.rule === JEV_RULE}
               testid="work-suggestion"
               onclick={(e) => (workBlocked === null ? openWorkMenu(e) : e.stopPropagation())}
             />
@@ -967,6 +973,13 @@
             {promptText}
             reason={blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u)))}
           />
+          {#if triage.bucket === 'account_limit'}
+            <LimitActions
+              {sess}
+              resetsAt={$attentionFacts?.limited_accounts?.[sess.account_uuid ?? '']?.resets_at ?? null}
+              accountName={(u) => accountLabel($accountByUuid.get(u))}
+            />
+          {/if}
         {:else if $showRowDetails}
           <SessionRowDetails {sess} {nowSec} {secondaryName} />
         {/if}
@@ -1002,7 +1015,7 @@
     font-size: 0.9rem;
     line-height: 1;
     cursor: pointer;
-    min-width: 1.6rem;
+    min-width: var(--control-h);
   }
   .icon-btn:hover:not(:disabled) {
     color: var(--fg);
@@ -1013,7 +1026,7 @@
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
     font-size: 0.85rem;
-    min-width: 1.4rem;
+    min-width: var(--control-h);
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }
@@ -1029,7 +1042,7 @@
 
   .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
@@ -1038,7 +1051,7 @@
   }
 
   .related-badge {
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0.05rem 0.3rem;
@@ -1046,12 +1059,12 @@
     flex-shrink: 0;
   }
 
-  .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
-  .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
-  .bg-badge { font-size: 0.7rem; margin-left: 0.2rem; }
+  .review-badge { font-size: 11px; margin-left: 0.2rem; }
+  .shell-badge { font-size: 11px; margin-left: 0.2rem; color: var(--fg-muted); }
+  .bg-badge { font-size: 11px; margin-left: 0.2rem; }
 
   .err { color: var(--danger); font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
-  .inline-err { padding-left: 1.6rem; font-size: 0.75rem; }
+  .inline-err { padding-left: 1.6rem; font-size: 11px; }
 
   .sess-row {
     display: flex;
@@ -1129,12 +1142,15 @@
     flex-shrink: 0;
     background: var(--fg-muted);
   }
-  .status-dot.status-running { background: rgb(80, 200, 110); }
-  .status-dot.status-frozen { background: rgb(140, 180, 240); }
-  .status-dot.status-orphan { background: rgb(220, 130, 130); }
-  .status-dot.status-ghost { background: rgb(160, 120, 200); opacity: 0.55; }
+  /* Colour never carries the state alone (7.2): the dot is labelled, and
+     each state has its own shape. Running is a filled disc, frozen a ring,
+     orphan a square, ghost a dashed ring. */
+  .status-dot.status-running { background: var(--status-done); }
+  .status-dot.status-frozen { background: transparent; box-shadow: inset 0 0 0 1.5px var(--status-working); }
+  .status-dot.status-orphan { background: var(--status-failed); border-radius: 1px; }
+  .status-dot.status-ghost { background: transparent; border: 1.5px dashed var(--status-idle); box-sizing: border-box; opacity: 0.8; }
   .lost-at {
-    font-size: 0.7em;
+    font-size: 11px;
     opacity: 0.6;
     margin-left: auto;
     padding-right: 0.25rem;
@@ -1156,9 +1172,9 @@
   .lw-dot.tone-conflict,
   .lw-dot.tone-error { background: var(--usage-crit); }
   .lw-dot.tone-idle { border: 1.5px solid var(--fg-muted); box-sizing: border-box; }
-  .lw-changes { font-size: 0.65rem; color: var(--usage-warn); }
+  .lw-changes { font-size: 11px; color: var(--usage-warn); }
   .privacy-chip {
-    font-size: 0.6rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 0.05rem 0.28rem;
@@ -1169,7 +1185,7 @@
     white-space: nowrap;
   }
   .form-chip {
-    font-size: 0.6rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 0.05rem 0.28rem;
@@ -1185,7 +1201,7 @@
     flex-direction: column;
     gap: 0.3rem;
     width: 100%;
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .why-link {
     display: flex;
@@ -1220,8 +1236,8 @@
     flex-wrap: wrap;
     gap: 0.3rem;
     align-items: center;
-    font-size: 0.72rem;
-    color: var(--warn, #f59e0b);
+    font-size: 11px;
+    color: var(--status-waiting);
   }
   .work-menu {
     display: flex;
@@ -1233,11 +1249,11 @@
   .work-input {
     flex: 1 1 8rem;
     min-width: 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.1rem 0.3rem;
   }
   .work-btn {
-    font-size: 0.65rem;
+    font-size: 11px;
     padding: 0.05rem 0.35rem;
     white-space: nowrap;
   }
@@ -1258,7 +1274,7 @@
   }
   .sess-age {
     flex-shrink: 0;
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     font-variant-numeric: tabular-nums;
   }

@@ -341,7 +341,7 @@
     flex: 1 1 auto;
     min-width: 0;
     font-family: var(--mono, ui-monospace, monospace);
-    font-size: 0.78rem;
+    font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -355,7 +355,7 @@
     border-radius: 4px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.15rem 0.55rem;
     white-space: nowrap;
   }
@@ -368,7 +368,7 @@
     border-radius: 4px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.15rem 0.55rem;
   }
   .blame-toggle.active {
@@ -388,7 +388,7 @@
     text-overflow: ellipsis;
     color: var(--fg-muted);
     border-right: 1px solid var(--border);
-    font-size: 0.72rem;
+    font-size: 11px;
     user-select: none;
   }
   .blame.first {
@@ -406,7 +406,7 @@
     border: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.15rem 0.55rem;
   }
   .toggle button:first-child {
@@ -432,7 +432,7 @@
   }
   .file {
     font-family: var(--mono, ui-monospace, monospace);
-    font-size: 0.78rem;
+    font-size: 11px;
     line-height: 1.5;
     white-space: pre;
   }

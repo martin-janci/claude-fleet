@@ -10,6 +10,7 @@ import {
   primaryAction,
   startBlockedBy,
   suggestedProjectId,
+  projectProposal,
   type StartPreview,
 } from './start_preview';
 
@@ -123,5 +124,16 @@ describe('suggestedProjectId', () => {
     const p = missing({ suggested_project: { project_id: 99 } });
     expect(suggestedProjectId(p)).toBeNull();
     expect(choiceFromPreview(p).project_id).toBeNull();
+  });
+
+  it('pre-selects nothing below the floor or without a confidence (3.12)', () => {
+    expect(suggestedProjectId(missing({ suggested_project: { project_id: 3, confidence_pct: 49 } }))).toBeNull();
+    expect(suggestedProjectId(missing({ suggested_project: { project_id: 3 } }))).toBeNull();
+    expect(suggestedProjectId(missing({ suggested_project: { project_id: 3, confidence_pct: 50 } }))).toBe(3);
+  });
+
+  it('hands the chip the same answer', () => {
+    expect(projectProposal(missing())).toEqual({ value: '3', source: 'jev', confidence_pct: 90 });
+    expect(projectProposal(missing({ missing: 'host' }))).toBeNull();
   });
 });

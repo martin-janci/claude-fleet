@@ -133,7 +133,7 @@
           class="btn btn--primary"
           disabled={busy}
           data-testid="rich-setting-apply"
-          onclick={() => (confirming = true)}>Apply</button>
+          onclick={() => (confirming = true)}>Apply…</button>
         <button type="button" class="btn" disabled={busy} data-testid="rich-setting-later-btn" onclick={() => settle('later')}
           >Not now</button>
         <span class="meta">undo in Settings</span>
@@ -176,11 +176,11 @@
     justify-content: space-between;
     align-items: baseline;
     gap: 0.5rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .tag {
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
@@ -213,7 +213,7 @@
   }
   .meta {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .actions {

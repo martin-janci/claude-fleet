@@ -481,6 +481,8 @@ fn row(
         origin: None,
         origin_ref: None,
         last_viewed_at: None,
+        turn_outcome: None,
+        proposals: Vec::new(),
         pending_form: None,
         parent_session_id: None,
         tags: Vec::new(),
@@ -7389,7 +7391,8 @@ async fn a_stuck_transition_is_logged_with_host_session_and_kind() {
 
 #[test]
 fn launch_switch_reads_one_valid_argument_only() {
-    use super::prompt::{launch_switch, LaunchSwitch};
+    use crate::agent_adapter::LaunchSwitch;
+    let launch_switch = |p| crate::agent_adapter::claude().launch_switch(p);
     assert_eq!(
         launch_switch("/model opus"),
         Some(LaunchSwitch::Model(Some("opus")))

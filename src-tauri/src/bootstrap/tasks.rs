@@ -164,8 +164,18 @@ impl FleetTasks for RealFleetTasks {
     }
 
     /// The missions' loop (orchestration O4–O8), each mission under its
-    /// lease; `orchestrator.enabled` is its kill switch.
+    /// lease; `orchestrator.enabled` is its kill switch. The routines'
+    /// scheduler (redesign 8.5) starts with it: the same fleet-owning
+    /// automation, each routine under its lease, stopped by Pause all.
     fn start_mission_tick(&self) {
+        std::mem::drop(fleet_core::service::routines::spawn_routine_tick(
+            fleet_core::service::routines::Deps::live(
+                Arc::clone(&self.store),
+                Arc::clone(&self.ssh),
+                Arc::clone(&self.reg),
+            ),
+            tokio_util::sync::CancellationToken::new(),
+        ));
         std::mem::drop(fleet_core::service::work::orchestrate::spawn_mission_tick(
             fleet_core::service::work::orchestrate::Deps {
                 store: Arc::clone(&self.store),
@@ -215,7 +225,9 @@ impl FleetTasks for RealFleetTasks {
         )
         // The disconnected banner's signal; the same status `hub_connection`
         // answers from.
-        .reporting_to(Arc::clone(&self.hub_link) as Arc<dyn ConnectionReporter>);
+        .reporting_to(Arc::clone(&self.hub_link) as Arc<dyn ConnectionReporter>)
+        // The banner's "Retry now" (`hub_retry_now`).
+        .waking_on(self.hub_link.retry_handle());
         spawn_event_bridge(bridge);
     }
 

@@ -529,6 +529,29 @@ pub fn prompt_submit_context(
     })
 }
 
+/// The session a person's prompt was typed into, for the decision model's
+/// `work_link` question (J1, redesign 6.8,
+/// [`crate::service::decide::work_link::spawn_ask`]): the row, when the
+/// prompt is a person's (not one Claude Code submitted itself) in the row's
+/// CURRENT conversation. Whether to ask at all is the adapter's call.
+pub fn work_link_subject(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<i64> {
+    if payload
+        .prompt
+        .as_deref()
+        .is_some_and(crate::service::prompt_origin::is_harness)
+    {
+        return None;
+    }
+    let s = lock(store).ok()?;
+    let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+    let current = row.claude_session_id.as_deref()?;
+    (payload.session_id.as_deref() == Some(current)).then_some(row.id)
+}
+
 /// The classification nudge for this prompt, if it fires: `(row id, text,
 /// conversation id)`. Only for the row's CURRENT conversation — a nested
 /// `claude -p` sharing the pane never gets it (see

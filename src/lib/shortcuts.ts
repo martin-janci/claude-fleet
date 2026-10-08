@@ -45,7 +45,8 @@ export type Scope =
   | 'work-board'
   | 'session-row'
   | 'session-list'
-  | 'question-card';
+  | 'question-card'
+  | 'form-card';
 
 /** Each scope's heading, in the order the lists show them: Settings →
  *  Shortcuts and the `?` sheet both read it, so they name a scope alike. */
@@ -54,6 +55,7 @@ export const SCOPE_TITLES: Record<Scope, string> = {
   'session-list': 'Session list',
   'session-row': 'Session row',
   'question-card': 'Question card',
+  'form-card': 'Chat form',
   conversation: 'Conversation',
   terminal: 'Terminal',
   switcher: 'Quick switcher',
@@ -134,9 +136,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'scope', 'Organisation scope', split(['Meta+Shift+O'], ['Ctrl+Shift+O'])),
   row('global', 'today', 'Today', split(['Meta+Shift+T'], ['Ctrl+Shift+T'])),
   // The design manual's new chords (keyboard.md); ⌥⌘ is Ctrl+Alt elsewhere.
-  row('global', 'open-in-editor', 'Open in VS Code',
-    split(['Meta+Shift+E'], ['Ctrl+Alt+E']), { status: 'planned', step: '5.6' }),
-  row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B']), { status: 'planned', step: '3.5' }),
+  row('global', 'open-in-editor', 'Open in VS Code', split(['Meta+Shift+E'], ['Ctrl+Alt+E'])),
+  row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B'])),
   row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { status: 'planned', step: '5.5' }),
   row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { status: 'planned', step: '5.5' }),
   row('global', 'go-to-file', 'Go to file (Files tab only)',
@@ -252,6 +253,9 @@ export const SHORTCUTS: readonly Shortcut[] = [
 
   // ── Question card (3.8): 1–9 answer when no text field has focus ─────
   row('question-card', 'question-card.answer', 'Answer with option 1–9', keys(...digits(''))),
+
+  // ── Chat form (10.1): 1–9 pick the step's only numbered choice ───────
+  row('form-card', 'form-card.option', 'Pick option 1–9', keys(...digits(''))),
 ];
 
 /** The view handlers each per-view scope lives in, for the freeze test. */
@@ -276,6 +280,7 @@ export const SCOPE_SOURCES: Partial<Record<Scope, string>> = {
 export const MATCHED_SCOPES: Partial<Record<Scope, string>> = {
   'session-list': 'src/lib/Sidebar.svelte',
   'question-card': 'src/lib/AnswerPrompt.svelte',
+  'form-card': 'src/lib/forms/FormWizard.svelte',
 };
 
 export interface KeyEventLike {
@@ -284,10 +289,15 @@ export interface KeyEventLike {
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey: boolean;
+  /** The physical key. On macOS Option rewrites `key` (⌥B types `∫`), so an
+   *  Alt chord on a letter also matches by `code`. */
+  code?: string;
 }
 
 export function bindingMatches(b: Binding, e: KeyEventLike): boolean {
-  if (b.key.toLowerCase() !== e.key.toLowerCase()) return false;
+  const letterByCode =
+    e.altKey && /^[a-z]$/i.test(b.key) && e.code === `Key${b.key.toUpperCase()}`;
+  if (b.key.toLowerCase() !== e.key.toLowerCase() && !letterByCode) return false;
   const has = (m: Mod) => b.mods.includes(m);
   if (has('meta') !== e.metaKey || has('ctrl') !== e.ctrlKey || has('alt') !== e.altKey) return false;
   return b.anyShift === true || has('shift') === e.shiftKey;

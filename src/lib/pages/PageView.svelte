@@ -309,7 +309,7 @@
   }
   h5 {
     margin: 0 0 0.35rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -350,14 +350,14 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .filters select {
     font: inherit;
   }
   .notice {
-    font-size: 0.78rem;
+    font-size: 11px;
     margin: 0.2rem 0;
     padding: 0.4rem 0.6rem;
     border-radius: var(--radius-sm);
@@ -392,7 +392,7 @@
     counter-reset: step;
     margin: 0 0 0.5rem;
     padding: 0;
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   .steps li {
     counter-increment: step;

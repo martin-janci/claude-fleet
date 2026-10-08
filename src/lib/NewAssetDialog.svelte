@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
   import { catalog, catalogOf, createAsset, KIND_ORDER, KIND_LABEL, type AssetKind } from './assets';
 
@@ -67,7 +68,7 @@
   {#if error}<p class="err" data-testid="new-asset-error">{error}</p>{/if}
   <div class="actions">
     <button onclick={onclose} disabled={busy}>Cancel</button>
-    <button class="primary" onclick={create} disabled={!canCreate} data-testid="new-asset-create">{busy ? 'Creating…' : 'Create'}</button>
+    <button class="primary" onclick={create} disabled={!canCreate} data-testid="new-asset-create">{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Creating…' : 'Create'}</button>
   </div>
 </Modal>
 

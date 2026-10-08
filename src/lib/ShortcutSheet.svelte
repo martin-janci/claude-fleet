@@ -85,7 +85,7 @@
   }
   h4 {
     margin: 0 0 0.3rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     font-weight: 600;
   }
@@ -101,7 +101,7 @@
   dd { margin: 0; flex-shrink: 0; }
   kbd {
     font-family: var(--font-mono);
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.05rem 0.35rem;
     border: 1px solid var(--border);
     border-radius: 4px;

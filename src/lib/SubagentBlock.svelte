@@ -6,11 +6,13 @@
   // own name rather than by an agent type it has none of — see
   // `blockTypeLabel`.
   import {
+    backgroundStatusWord,
     blockTypeLabel,
     formatDuration,
     toolDurationMs,
     isLongPrompt,
     PROMPT_CLAMP_LINES,
+    type BackgroundStatus,
     type ConvGroup,
   } from './conversation';
   import Markdown from './MarkdownView.svelte';
@@ -38,7 +40,7 @@
   // background work still running, rather than a call nothing is driving.
   // Without it, an unfinished block outside the live turn still gets no word
   // and the duration's "no result" stands alone.
-  const statusWord = $derived(
+  const subState = $derived<BackgroundStatus | null>(
     item.error ? 'failed' : item.done ? 'done' : live || onOpen ? 'running' : null,
   );
 
@@ -64,9 +66,9 @@
     <span class="sub-type">{blockTypeLabel(item)}</span>
     {#if item.description}<span class="sep" aria-hidden="true">·</span><span class="sub-desc">{item.description}</span>{/if}
     {#if duration}<span class="sub-dur" class:muted={noResult}>{duration}</span>{/if}
-    {#if statusWord}
-      <span class="sub-status" class:pushed={!duration} data-status={statusWord} data-testid="conv-subagent-status"
-        >{statusWord}</span
+    {#if subState}
+      <span class="sub-status" class:pushed={!duration} data-status={subState} data-testid="conv-subagent-status"
+        >{backgroundStatusWord(subState)}</span
       >
     {/if}
     {#if onOpen}
@@ -105,7 +107,7 @@
     align-items: baseline;
     gap: 0.4rem;
     min-width: 0;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .sub-type {
@@ -122,7 +124,7 @@
   .sub-dur {
     flex: 0 0 auto;
     margin-left: auto;
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .sub-dur.muted {
     font-style: italic;
@@ -130,7 +132,7 @@
   }
   .sub-status {
     flex: 0 0 auto;
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   /* Without a duration beside it the status is the first thing on the
      right, so it takes over pushing the group there. */
@@ -147,7 +149,7 @@
     border: none;
     color: var(--accent);
     font: inherit;
-    font-size: 0.7rem;
+    font-size: 11px;
     cursor: pointer;
   }
   .sub-open:hover {
@@ -175,7 +177,7 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 0.75rem;
+    font-size: 11px;
     cursor: pointer;
   }
 </style>
