@@ -21,7 +21,8 @@
     type StuckKind,
   } from './sessions';
   import { newlyStuck, stuckMessage, stuckSnapshot } from './attention';
-  import { notifyStuckOs, notifyStuckToast, showOsNotification } from './notify';
+  import { notificationAllowed, notifyStuckOs, notifyStuckToast, showOsNotification } from './notify';
+  import { fleetSettings } from './fleet_settings';
   import { push } from './toasts';
 
   /** Latest announcement for the live region (screen readers read changes). */
@@ -35,7 +36,9 @@
     if (get(notifyStuckToast)) {
       for (const m of messages) push({ kind: 'error', code: 'STUCK', message: m, sticky: false, timeoutMs: 8000 });
     }
-    if (get(notifyStuckOs)) {
+    // A stuck session is Blocked in the hub's notifications matrix (11.9):
+    // the desktop column and quiet hours decide the OS notification.
+    if (get(notifyStuckOs) && notificationAllowed('desktop', 'blocked', get(fleetSettings))) {
       for (let i = 0; i < rows.length; i++) {
         showOsNotification('Orbit Fleet: session stuck', messages[i], `stuck-${rows[i].id}`);
       }

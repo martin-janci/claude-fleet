@@ -53,6 +53,9 @@ pub enum Kind {
     PriceMap,
     /// One line of text, at most `max` bytes, no control characters.
     Text { max: usize },
+    /// A daily time range `HH:MM-HH:MM` (24-hour, local to whoever reads
+    /// it; it may run past midnight), or `""` for none.
+    TimeRange,
 }
 
 /// Upper bound for `Kind::Secs` (ten years): keeps every `secs as i64`
@@ -559,6 +562,26 @@ pub const UPDATE_DESKTOP_MODE: &str = "update.desktop.mode";
 pub const UPDATE_MOBILE_MODE: &str = "update.mobile.mode";
 pub const UPDATE_MODES: &[&str] = &["manual", "notify", "automatic"];
 pub const UPDATE_MOBILE_MODES: &[&str] = &["manual", "notify"];
+
+/// The notifications matrix (Orbit Fleet 11.9): for each channel, the
+/// session states that reach it. Stored on the hub so the desktop and the
+/// phone read the same answer.
+pub const NOTIFY_DESKTOP: &str = "notify.desktop";
+pub const NOTIFY_PHONE: &str = "notify.phone";
+pub const NOTIFY_SOUND: &str = "notify.sound";
+/// Quiet hours: no notification on any channel inside this daily range
+/// except for the states in `notify.quiet_except`.
+pub const NOTIFY_QUIET_HOURS: &str = "notify.quiet_hours";
+pub const NOTIFY_QUIET_EXCEPT: &str = "notify.quiet_except";
+/// The states a notification is about, in the matrix's row order.
+pub const NOTIFY_STATES: &[&str] = &["needs_you", "failed", "blocked", "done", "routine_failed"];
+pub const NOTIFY_STATE_LABELS: &[(&str, &str)] = &[
+    ("needs_you", "Needs you"),
+    ("failed", "Failed"),
+    ("blocked", "Blocked"),
+    ("done", "Done"),
+    ("routine_failed", "Routine run failed"),
+];
 /// How often the hub re-reads the channel, and clients re-check.
 pub const UPDATE_CHECK_INTERVAL_SECS: &str = "update.check_interval_secs";
 pub const UPDATE_CHECK_INTERVAL_MIN_SECS: u64 = 900;
@@ -1484,6 +1507,45 @@ pub const SPECS: &[Spec] = &[
     .unit(Unit::Usd)
     .zero("none")
     .per_org(),
+    Spec::new(
+        NOTIFY_DESKTOP,
+        "needs_you,failed,blocked,routine_failed",
+        Kind::ChoiceSet(NOTIFY_STATES),
+        "Desktop",
+        "The session states the desktop shows a notification for.",
+    )
+    .labels(NOTIFY_STATE_LABELS),
+    Spec::new(
+        NOTIFY_PHONE,
+        "needs_you,failed,routine_failed",
+        Kind::ChoiceSet(NOTIFY_STATES),
+        "Phone",
+        "The session states the phone shows a notification for.",
+    )
+    .labels(NOTIFY_STATE_LABELS),
+    Spec::new(
+        NOTIFY_SOUND,
+        "needs_you",
+        Kind::ChoiceSet(NOTIFY_STATES),
+        "Sound",
+        "The session states whose notification also plays a sound.",
+    )
+    .labels(NOTIFY_STATE_LABELS),
+    Spec::new(
+        NOTIFY_QUIET_HOURS,
+        "",
+        Kind::TimeRange,
+        "Quiet hours",
+        "A daily range, like 22:00-07:30, in which no notification is shown or sounded, on each device's own clock. Empty: none.",
+    ),
+    Spec::new(
+        NOTIFY_QUIET_EXCEPT,
+        "failed",
+        Kind::ChoiceSet(NOTIFY_STATES),
+        "Through quiet hours",
+        "The states that still notify during quiet hours.",
+    )
+    .labels(NOTIFY_STATE_LABELS),
 ];
 
 /// Parse + validate a `Kind::ChoiceSet` value into the chosen options, in
@@ -1631,7 +1693,34 @@ pub fn validate(key: &str, value: &str) -> Result<(), IpcError> {
             codes::E_INVALID,
             format!("{key} must be one line of at most {max} characters"),
         )),
+        Kind::TimeRange => parse_time_range(v).map(|_| ()).ok_or_else(|| {
+            IpcError::new(
+                codes::E_INVALID,
+                format!("{key} must be a time range like 22:00-07:30, or empty for none"),
+            )
+        }),
     }
+}
+
+/// `"22:00-07:30"` → minutes of the day `(1320, 450)`; `""` → `Some(None)`;
+/// anything else → `None`. A range whose ends are equal is refused: it
+/// would mean either nothing or the whole day.
+pub fn parse_time_range(v: &str) -> Option<Option<(u16, u16)>> {
+    let v = v.trim();
+    if v.is_empty() {
+        return Some(None);
+    }
+    let minute = |t: &str| -> Option<u16> {
+        let (h, m) = t.trim().split_once(':')?;
+        if h.is_empty() || h.len() > 2 || m.len() != 2 {
+            return None;
+        }
+        let (h, m) = (h.parse::<u16>().ok()?, m.parse::<u16>().ok()?);
+        (h < 24 && m < 60).then_some(h * 60 + m)
+    };
+    let (from, until) = v.split_once('-')?;
+    let (from, until) = (minute(from)?, minute(until)?);
+    (from != until).then_some(Some((from, until)))
 }
 
 /// Pure: resolve a raw stored value (or `None`) against its spec, falling
@@ -1805,6 +1894,7 @@ pub enum KindDesc {
     IdSet,
     PriceMap,
     Text { max: usize },
+    TimeRange,
 }
 
 impl From<Kind> for KindDesc {
@@ -1823,6 +1913,7 @@ impl From<Kind> for KindDesc {
             Kind::IdSet => KindDesc::IdSet,
             Kind::PriceMap => KindDesc::PriceMap,
             Kind::Text { max } => KindDesc::Text { max },
+            Kind::TimeRange => KindDesc::TimeRange,
         }
     }
 }
@@ -2006,6 +2097,29 @@ pub fn set_by(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 11.9: quiet hours are a range of minutes that may wrap past
+    /// midnight; empty means none.
+    #[test]
+    fn a_time_range_is_two_clock_times_or_nothing() {
+        assert_eq!(parse_time_range(""), Some(None));
+        assert_eq!(parse_time_range("22:00-07:30"), Some(Some((1320, 450))));
+        assert_eq!(parse_time_range(" 9:05 - 17:00 "), Some(Some((545, 1020))));
+        for bad in [
+            "22:00",
+            "24:00-07:00",
+            "22:60-07:00",
+            "7-8",
+            "08:00-08:00",
+            "a:bc-07:00",
+        ] {
+            assert_eq!(parse_time_range(bad), None, "{bad}");
+        }
+        assert!(validate(NOTIFY_QUIET_HOURS, "22:00-07:00").is_ok());
+        assert!(validate(NOTIFY_QUIET_HOURS, "late").is_err());
+        assert!(validate(NOTIFY_QUIET_EXCEPT, "failed,needs_you").is_ok());
+        assert!(validate(NOTIFY_DESKTOP, "nonsense").is_err());
+    }
 
     /// `text` with its comments removed: whole `//` lines, and `/* … */` and
     /// `<!-- … -->` blocks (also across lines). Line structure is kept.

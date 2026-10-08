@@ -65,6 +65,7 @@
     id_set: 'id_list',
     price_map: 'textarea',
     text: 'text',
+    time_range: 'text',
   };
 
   /** Widgets whose control is one input a <label for> can point at. */

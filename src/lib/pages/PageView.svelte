@@ -6,6 +6,7 @@
   // source's declared shape.
   import { tick } from 'svelte';
   import FieldRow from './FieldRow.svelte';
+  import MatrixSection from './MatrixSection.svelte';
   import DataItem from './DataItem.svelte';
   import Disclosure from './Disclosure.svelte';
   import Tabs from './Tabs.svelte';
@@ -253,6 +254,12 @@
 
 {#snippet sectionBody(section: Section)}
   {#if section.intro}<p class="intro">{section.intro}</p>{/if}
+  {#if section.matrix}
+    <MatrixSection
+      descs={section.items.flatMap((i) => (i.type === 'field' ? (descs.get(i.key) ?? []) : []))}
+      {values}
+      {readonly} />
+  {:else}
   <div class="items">
     {#each section.items as item, i (i)}
       {#if item.type === 'field'}
@@ -295,6 +302,7 @@
       {/if}
     {/each}
   </div>
+  {/if}
 {/snippet}
 
 <style>
