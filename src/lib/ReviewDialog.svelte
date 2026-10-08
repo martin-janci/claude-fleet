@@ -5,7 +5,7 @@
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
   import Modal from './Modal.svelte';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import Loader from './Loader.svelte';
 
   let { source, onClose }: { source: SessionRow; onClose: () => void } = $props();
 
@@ -76,14 +76,14 @@
         onclick={start}
         data-testid="review-start"
       >
-        {#if spawning}<SpiralLoader size={12} class="btn-spiral" />Starting…{:else}Start review{/if}
+        {#if spawning}<Loader name="comet" size={12} class="btn-loader" />Starting…{:else}Start review{/if}
       </button>
     </div>
   </div>
 </Modal>
 
 <style>
-  button :global(.btn-spiral) {
+  button :global(.btn-loader) {
     margin-right: 0.35em;
     vertical-align: -1px;
   }

@@ -112,7 +112,7 @@
   import Markdown from './MarkdownView.svelte';
   import RichText from './RichText.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import Loader from './Loader.svelte';
   import { selectSessionExplicitly } from './selection';
   import { tasks } from './tasks';
   import { outbox, isHeld, receipt, outboxBody } from './outbox';
@@ -1925,7 +1925,7 @@
     </div>
   {:else if loading}
     <p class="muted conv-loading" data-testid="conv-loading" role="status">
-      <SpiralLoader size={16} />Loading conversation…
+      <Loader size={16} />Loading conversation…
     </p>
   {:else}
     <!-- A scrollable region has to be in the tab order, or the transcript
@@ -1955,7 +1955,7 @@
             Older turns not shown{#if (turnsWanted ?? CONV_TURNS_STEP) < CONV_MAX_TURNS}
               ·
               <button type="button" class="linkish" data-testid="conv-load-older" disabled={loadingOlder} onclick={() => void loadOlder()}
-                >{#if loadingOlder}<SpiralLoader size={12} class="inline-spiral" />Loading…{:else}Load older{/if}</button
+                >{#if loadingOlder}<Loader name="comet" size={12} class="inline-loader" />Loading…{:else}Load older{/if}</button
               >{/if}
           </p>
         {/if}
@@ -2194,7 +2194,7 @@
               </div>
               <div class="receipt" data-tone={r.tone} data-testid="conv-receipt" role="status" aria-live="polite">
                 {#if m.state === 'sending'}
-                  <SpiralLoader size={12} class="receipt-mark" />
+                  <Loader name="comet" size={12} class="receipt-mark" />
                 {:else}
                   <span class="receipt-mark" aria-hidden="true"
                     >{m.state === 'received' ? '✓✓' : m.state === 'sent' || m.state === 'queued' ? '✓' : m.state === 'failed' ? '!' : '·'}</span
@@ -2265,7 +2265,7 @@
             role={indicator ? 'status' : undefined}
             aria-hidden={indicator ? undefined : 'true'}
           >
-            <SpiralLoader size={16} paused={!indicator} class="indicator-spiral" />
+            <Loader size={16} paused={!indicator} class="indicator-loader" />
             <span class="indicator-label"
               >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Waiting for Claude…' : indicatorLabel}</span
             >
@@ -2839,7 +2839,7 @@
     margin: 0.35rem 0 0;
     color: var(--fg-muted);
     font-size: 0.75rem;
-    transition: opacity 0.2s ease;
+    transition: opacity var(--dur-base) ease;
   }
   .composer-status.is-idle {
     opacity: 0;
@@ -2851,7 +2851,7 @@
     padding: 0.35rem 0 0.6rem;
     color: var(--fg-muted);
     font-size: 0.8rem;
-    transition: opacity 0.2s ease;
+    transition: opacity var(--dur-base) ease;
   }
   .indicator.is-idle {
     opacity: 0;
@@ -2869,10 +2869,7 @@
   .probe-off code {
     font-size: inherit;
   }
-  .indicator :global(.indicator-spiral) {
-    color: var(--accent);
-  }
-  .conv-loading {
+    .conv-loading {
     /* Fills the thread area and sits in its middle, where the transcript
        (and the empty state) will be — not pinned to the top-left corner. */
     flex: 1 1 auto;
@@ -2884,7 +2881,7 @@
     padding: 1.5rem 1.1rem;
     color: var(--fg-muted);
   }
-  .linkish :global(.inline-spiral) {
+  .linkish :global(.inline-loader) {
     margin-right: 0.3em;
     vertical-align: -1px;
   }
@@ -3133,7 +3130,7 @@
     text-align: center;
     font-size: 1rem;
     line-height: 1;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-fast) ease;
   }
   .tools[open] summary::before {
     transform: rotate(90deg);
