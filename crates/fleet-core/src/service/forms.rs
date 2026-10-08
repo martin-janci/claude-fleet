@@ -10,9 +10,9 @@ use crate::ssh::SshExec;
 use crate::store::{FormFinish, FormRow, NewForm, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_WAIT_SECS: u64 = 600;
 pub const MAX_WAIT_SECS: u64 = 600;
@@ -418,8 +418,12 @@ pub async fn answer(
             .await
             .map_err(|e| host_write_error(first, &e.message))?;
         // Durable before the first write: whatever happens next, the sweep
-        // knows this form's directory may exist.
-        lock(store)?.mark_form_secrets_pending(form_id)?;
+        // knows this form's directory may exist. The form may have been
+        // withdrawn during the home lookup above: then nothing is written.
+        let marked = lock(store)?.mark_form_secrets_pending(form_id)?;
+        if !marked {
+            return Err(not_pending(&self::row(store, form_id)?));
+        }
         for (field, secret) in &answers.secrets {
             let path = format!("{dir}/{field}");
             if let Err(e) = crate::service::provision::write_host_file_secret(
@@ -477,9 +481,43 @@ pub fn expire_and_purge(store: &Mutex<Store>, now: i64) -> usize {
     expired + purged
 }
 
-/// The tick: remove secret directories no form needs any more. A host
-/// that does not answer is tried again on a later tick.
+/// First retry delay for a host whose sweep failed; doubles per consecutive
+/// failure up to [`SWEEP_BACKOFF_MAX`].
+const SWEEP_BACKOFF_BASE: Duration = Duration::from_secs(10 * 60);
+const SWEEP_BACKOFF_MAX: Duration = Duration::from_secs(6 * 3600);
+
+/// Per host: when the sweep may try it again, and how many times in a row it
+/// failed. An unreachable host costs ~30 s a try, so without this every tick
+/// paid it again for as long as the host stayed down.
+type SweepBackoff = Mutex<HashMap<String, (Instant, u32)>>;
+
+/// In-process only: a restart tries every host once more, which is fine.
+static SWEEP_BACKOFF: std::sync::LazyLock<SweepBackoff> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The wait after the `failures`-th consecutive failure (1-based).
+fn sweep_backoff_delay(failures: u32) -> Duration {
+    let doublings = failures.saturating_sub(1).min(16);
+    SWEEP_BACKOFF_BASE
+        .saturating_mul(1u32 << doublings)
+        .min(SWEEP_BACKOFF_MAX)
+}
+
+/// The tick: remove secret directories no form needs any more. A host that
+/// does not answer is tried again after a growing delay (10 min, doubling,
+/// at most 6 h); a host that is no longer in the hosts table has nothing to
+/// remove and its forms are marked swept.
 pub async fn sweep_secret_dirs(store: &Mutex<Store>, ssh: &dyn SshExec, now: i64) -> usize {
+    sweep_secret_dirs_at(store, ssh, now, &SWEEP_BACKOFF, Instant::now()).await
+}
+
+async fn sweep_secret_dirs_at(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    now: i64,
+    backoff: &SweepBackoff,
+    at: Instant,
+) -> usize {
     let due = match lock(store).and_then(|s| Ok(s.forms_to_sweep(now - KEEP_SECS)?)) {
         Ok(d) => d,
         Err(e) => {
@@ -488,18 +526,41 @@ pub async fn sweep_secret_dirs(store: &Mutex<Store>, ssh: &dyn SshExec, now: i64
         }
     };
     let mut swept = 0;
-    let mut down: BTreeSet<String> = BTreeSet::new();
     for (form_id, host) in due {
         if swept >= MAX_SWEEPS_PER_PASS {
             break;
         }
-        // One failure per host per pass: the rest wait for a later tick
-        // instead of costing a timeout each.
-        if down.contains(&host) {
+        // The host was removed: there is nothing left to reach, so the
+        // marker would otherwise retry forever.
+        let gone = host != crate::service::projects::LOCAL_HOST
+            && lock(store)
+                .and_then(|s| Ok(s.get_host_row(&host)?))
+                .is_ok_and(|h| h.is_none());
+        if gone {
+            tracing::warn!(%form_id, %host, "[forms] host is gone; marking its form swept");
+            if let Ok(s) = lock(store) {
+                if s.mark_form_swept(&form_id).is_ok() {
+                    swept += 1;
+                }
+            }
+            continue;
+        }
+        // A host that failed recently (this pass included) waits: the rest
+        // of its forms do not cost a timeout each.
+        let waiting = backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&host)
+            .is_some_and(|(next, _)| *next > at);
+        if waiting {
             continue;
         }
         match remove_secret_dir(ssh, &host, &form_id).await {
             Ok(()) => {
+                backoff
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&host);
                 if let Ok(s) = lock(store) {
                     if s.mark_form_swept(&form_id).is_ok() {
                         swept += 1;
@@ -507,8 +568,11 @@ pub async fn sweep_secret_dirs(store: &Mutex<Store>, ssh: &dyn SshExec, now: i64
                 }
             }
             Err(e) => {
-                tracing::debug!(%form_id, %host, error = %e.message, "[forms] sweep deferred");
-                down.insert(host);
+                let mut map = backoff.lock().unwrap_or_else(|e| e.into_inner());
+                let failures = map.get(&host).map_or(0, |(_, n)| *n).saturating_add(1);
+                let delay = sweep_backoff_delay(failures);
+                tracing::debug!(%form_id, %host, error = %e.message, ?delay, "[forms] sweep deferred");
+                map.insert(host, (at + delay, failures));
             }
         }
     }
@@ -541,6 +605,19 @@ mod tests {
             .upsert_session("dev", "h", None, None, 1, 1, "running", None)
             .unwrap();
         (Mutex::new(s), sid)
+    }
+
+    /// One sweep pass with its own backoff map (the static one is shared by
+    /// every test in the process).
+    async fn sweep(st: &Mutex<Store>, fake: &FakeSsh) -> usize {
+        sweep_secret_dirs_at(
+            st,
+            fake,
+            now_unix(),
+            &SweepBackoff::default(),
+            Instant::now(),
+        )
+        .await
     }
 
     fn values(v: Value) -> Map<String, Value> {
@@ -693,6 +770,116 @@ mod tests {
         );
     }
 
+    /// A transport that withdraws a form just as the home lookup answers —
+    /// the window between `answer`'s pending check and its first write.
+    struct WithdrawsOnHome<'a> {
+        inner: &'a FakeSsh,
+        store: &'a Mutex<Store>,
+        form_id: String,
+    }
+
+    #[async_trait::async_trait]
+    impl SshExec for WithdrawsOnHome<'_> {
+        async fn run(
+            &self,
+            host: &str,
+            args: &[&str],
+            timeout: Duration,
+        ) -> Result<std::process::Output, IpcError> {
+            self.inner.run(host, args, timeout).await
+        }
+        async fn run_bounded(
+            &self,
+            host: &str,
+            args: &[&str],
+            connect_timeout: Duration,
+            wall_clock: Duration,
+        ) -> Result<std::process::Output, IpcError> {
+            self.inner
+                .run_bounded(host, args, connect_timeout, wall_clock)
+                .await
+        }
+        async fn run_cancellable(
+            &self,
+            host: &str,
+            args: &[&str],
+            timeout: Duration,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Result<std::process::Output, IpcError> {
+            self.inner.run_cancellable(host, args, timeout, token).await
+        }
+        async fn run_bounded_cancellable(
+            &self,
+            host: &str,
+            args: &[&str],
+            connect_timeout: Duration,
+            wall_clock: Duration,
+            token: tokio_util::sync::CancellationToken,
+        ) -> Result<std::process::Output, IpcError> {
+            self.inner
+                .run_bounded_cancellable(host, args, connect_timeout, wall_clock, token)
+                .await
+        }
+        async fn upload_file(
+            &self,
+            host: &str,
+            local_path: &std::path::Path,
+            remote_path: &str,
+            timeout: Duration,
+        ) -> Result<(), IpcError> {
+            self.inner
+                .upload_file(host, local_path, remote_path, timeout)
+                .await
+        }
+        async fn remote_home(&self, host: &str) -> Result<String, IpcError> {
+            let _ = cancel(self.store, &self.form_id);
+            self.inner.remote_home(host).await
+        }
+        async fn run_with_stdin(
+            &self,
+            host: &str,
+            args: &[&str],
+            stdin: Vec<u8>,
+            connect_timeout: Duration,
+            wall_clock: Duration,
+            max_output: usize,
+        ) -> Result<std::process::Output, IpcError> {
+            self.inner
+                .run_with_stdin(host, args, stdin, connect_timeout, wall_clock, max_output)
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_form_withdrawn_during_the_home_lookup_writes_no_secret() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u");
+        let ssh = WithdrawsOnHome {
+            inner: &fake,
+            store: &st,
+            form_id: id.clone(),
+        };
+        let err = answer(
+            &st,
+            &ssh,
+            &id,
+            &values(json!({ "env": "prod", "pw": PASSWORD })),
+            "ada",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_CONFLICT);
+        assert!(
+            fake.calls().iter().all(|c| c.stdin.is_none()),
+            "no secret may be uploaded for a form that is no longer pending"
+        );
+        let row = st.lock().unwrap().form(&id).unwrap().unwrap();
+        assert_eq!(row.state, "cancelled");
+        assert!(!row.secrets_on_host);
+    }
+
     #[tokio::test]
     async fn a_failed_upload_with_a_working_cleanup_clears_the_marker() {
         let (st, sid) = fixture();
@@ -840,7 +1027,7 @@ mod tests {
         }
         let fake = FakeSsh::new();
         fake.on(Match::Any, Reply::Unreachable);
-        assert_eq!(sweep_secret_dirs(&st, &fake, now_unix()).await, 0);
+        assert_eq!(sweep(&st, &fake).await, 0);
         assert_eq!(
             fake.calls().len(),
             1,
@@ -910,7 +1097,7 @@ mod tests {
             s.mark_session_killed(sid, 5).unwrap();
         }
         let fake = FakeSsh::new();
-        assert_eq!(sweep_secret_dirs(&st, &fake, now_unix()).await, 1);
+        assert_eq!(sweep(&st, &fake).await, 1);
         let script = fake.calls()[0].script().unwrap();
         assert!(
             script.contains("rm -rf") && script.contains(&id),
@@ -924,11 +1111,7 @@ mod tests {
                 .unwrap()
                 .secrets_on_host
         );
-        assert_eq!(
-            sweep_secret_dirs(&st, &fake, now_unix()).await,
-            0,
-            "done once"
-        );
+        assert_eq!(sweep(&st, &fake).await, 0, "done once");
     }
 
     #[tokio::test]
@@ -944,7 +1127,7 @@ mod tests {
         }
         let fake = FakeSsh::new();
         fake.on(Match::Any, Reply::Unreachable);
-        assert_eq!(sweep_secret_dirs(&st, &fake, now_unix()).await, 0);
+        assert_eq!(sweep(&st, &fake).await, 0);
         assert!(
             st.lock()
                 .unwrap()
@@ -953,5 +1136,91 @@ mod tests {
                 .unwrap()
                 .secrets_on_host
         );
+    }
+
+    /// A session killed with a pending secret marker, one form per call.
+    fn orphaned_form(st: &Mutex<Store>, sid: i64) -> String {
+        let id = open(st, sid, &spec(), None).unwrap().form_id;
+        let s = st.lock().unwrap();
+        s.conn_ref()
+            .execute(
+                "UPDATE form_requests SET secrets_on_host = 1 WHERE form_id = ?1",
+                [&id],
+            )
+            .unwrap();
+        s.mark_session_killed(sid, 5).unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_host_is_skipped_until_its_backoff_has_passed() {
+        let (st, sid) = fixture();
+        orphaned_form(&st, sid);
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::Unreachable);
+        let backoff = SweepBackoff::default();
+        let t0 = Instant::now();
+        let now = now_unix();
+        assert_eq!(sweep_secret_dirs_at(&st, &fake, now, &backoff, t0).await, 0);
+        assert_eq!(fake.calls().len(), 1, "tried once");
+        // The very next pass: zero ssh calls.
+        assert_eq!(sweep_secret_dirs_at(&st, &fake, now, &backoff, t0).await, 0);
+        assert_eq!(fake.calls().len(), 1, "skipped while backing off");
+        let almost = t0 + SWEEP_BACKOFF_BASE - Duration::from_secs(1);
+        sweep_secret_dirs_at(&st, &fake, now, &backoff, almost).await;
+        assert_eq!(fake.calls().len(), 1, "still skipped just before the delay");
+        // After 10 minutes it is tried again, and the delay doubles.
+        let t1 = t0 + SWEEP_BACKOFF_BASE;
+        sweep_secret_dirs_at(&st, &fake, now, &backoff, t1).await;
+        assert_eq!(fake.calls().len(), 2, "tried again once the delay passed");
+        sweep_secret_dirs_at(&st, &fake, now, &backoff, t1 + SWEEP_BACKOFF_BASE).await;
+        assert_eq!(
+            fake.calls().len(),
+            2,
+            "the second failure waits twice as long"
+        );
+        // A host that answers again is swept and forgotten.
+        let up = FakeSsh::new();
+        let t2 = t1 + SWEEP_BACKOFF_BASE * 2;
+        assert_eq!(sweep_secret_dirs_at(&st, &up, now, &backoff, t2).await, 1);
+        assert!(backoff.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_backoff_doubles_from_ten_minutes_and_stops_at_six_hours() {
+        let mins = |f| sweep_backoff_delay(f).as_secs() / 60;
+        assert_eq!(
+            [
+                mins(1),
+                mins(2),
+                mins(3),
+                mins(4),
+                mins(5),
+                mins(6),
+                mins(40)
+            ],
+            [10, 20, 40, 80, 160, 320, 360]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_form_on_a_host_that_is_gone_is_marked_swept_without_ssh() {
+        let (st, sid) = fixture();
+        let id = orphaned_form(&st, sid);
+        st.lock()
+            .unwrap()
+            .conn_ref()
+            .execute("PRAGMA foreign_keys = OFF", [])
+            .unwrap();
+        st.lock()
+            .unwrap()
+            .conn_ref()
+            .execute("DELETE FROM hosts WHERE alias = 'h'", [])
+            .unwrap();
+        let fake = FakeSsh::new();
+        assert_eq!(sweep(&st, &fake).await, 1);
+        assert!(fake.calls().is_empty(), "no host to reach, no ssh call");
+        let row = st.lock().unwrap().form(&id).unwrap().unwrap();
+        assert!(!row.secrets_on_host);
     }
 }

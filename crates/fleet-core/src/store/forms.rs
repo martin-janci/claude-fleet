@@ -219,13 +219,17 @@ impl Store {
     /// Record, before the first secret is written, that a pending form's
     /// secrets may be on its host: a crash or a failed cleanup then still
     /// leaves the marker for the sweep. No `row_version` bump, no event.
-    pub fn mark_form_secrets_pending(&self, form_id: &str) -> Result<()> {
-        self.conn.execute(
+    ///
+    /// `true` when the form is still pending and now carries the marker;
+    /// `false` when it was decided or deleted meanwhile, in which case the
+    /// caller must not write a secret.
+    pub fn mark_form_secrets_pending(&self, form_id: &str) -> Result<bool> {
+        let n = self.conn.execute(
             "UPDATE form_requests SET secrets_on_host = 1
               WHERE form_id = ?1 AND state = 'pending'",
             [form_id],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     pub fn mark_form_swept(&self, form_id: &str) -> Result<()> {
