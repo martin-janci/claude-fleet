@@ -570,6 +570,15 @@ fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 129.
+fn grants_have_profile(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orchestration_grants') WHERE name = 'profile'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn sessions_has_turn_outcome(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'turn_outcome'",
@@ -1527,6 +1536,13 @@ const MIGRATIONS: &[Migration] = &[
     ),
     // Orbit Fleet 8.5: routines and their runs (two new tables).
     Migration::plain(131, include_str!("../../migrations/131_routines.sql")),
+    // Orbit Fleet 8.7: a mission grant names its login (one ADD COLUMN,
+    // guarded).
+    Migration {
+        version: 132,
+        sql: include_str!("../../migrations/132_grant_profile.sql"),
+        already_applied: Some(grants_have_profile),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -85,6 +85,10 @@ pub struct GrantRow {
     pub budget_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<i64>,
+    /// The login its runs bill (migration 132): a credential profile on
+    /// the run's host; `None` = the host's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     pub created_at: i64,
     pub expires_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,6 +103,7 @@ pub struct NewGrant<'a> {
     pub hosts: Option<Vec<String>>,
     pub budget_micros: Option<i64>,
     pub max_parallel: Option<i64>,
+    pub profile: Option<String>,
     pub expires_at: i64,
 }
 
@@ -136,7 +141,7 @@ fn map_card(r: &rusqlite::Row<'_>) -> rusqlite::Result<CardRow> {
 }
 
 const GRANT_COLUMNS: &str = "id, orchestration_project_id, plan_version, level, granted_by, \
-     hosts, budget_micros, max_parallel, created_at, expires_at, revoked_at";
+     hosts, budget_micros, max_parallel, created_at, expires_at, revoked_at, profile";
 
 fn map_grant(r: &rusqlite::Row<'_>) -> rusqlite::Result<GrantRow> {
     Ok(GrantRow {
@@ -153,6 +158,7 @@ fn map_grant(r: &rusqlite::Row<'_>) -> rusqlite::Result<GrantRow> {
         created_at: r.get(8)?,
         expires_at: r.get(9)?,
         revoked_at: r.get(10)?,
+        profile: r.get(11)?,
     })
 }
 
@@ -422,8 +428,8 @@ impl Store {
             .map(|h| serde_json::to_string(h).unwrap_or_else(|_| "[]".into()));
         self.conn.execute(
             "INSERT INTO orchestration_grants (orchestration_project_id, plan_version, level, \
-               granted_by, hosts, budget_micros, max_parallel, created_at, expires_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+               granted_by, hosts, budget_micros, max_parallel, created_at, expires_at, profile) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 mission_id,
                 plan_version,
@@ -433,7 +439,8 @@ impl Store {
                 g.budget_micros,
                 g.max_parallel,
                 now_unix(),
-                g.expires_at
+                g.expires_at,
+                g.profile
             ],
         )?;
         let id = self.conn.last_insert_rowid();

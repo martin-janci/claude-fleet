@@ -807,7 +807,9 @@ Index by area (names only; see the reference for details):
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under
-  `overlap: skip`, today's budget is spent, or a person skipped it.
+  `overlap: skip`, today's budget is spent, the account its login bills
+  is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
+  usage readings), or a person skipped it.
   `automation.paused` (Pause all) stops the schedule and event fires,
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
