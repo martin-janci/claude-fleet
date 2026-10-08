@@ -3,6 +3,7 @@
     "add_host",
     "add_tracker",
     "catalog_spawn_author_session",
+    "check_host",
     "check_local_prereqs",
     "decide_status_map_proposal",
     "discard_kill_session",

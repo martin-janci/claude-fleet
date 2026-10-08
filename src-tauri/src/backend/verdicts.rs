@@ -979,6 +979,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "check_host",
+        Verdict::LocalOnly {
+            instead: "the health checklist reads a host's settings over this app's own SSH; \
+                      repair a host's hooks from the hub with `fleet-hub provision --host <alias>`",
+        },
+    ),
+    (
         "hide_host",
         Verdict::LocalOnly {
             instead: "hiding a host is fleet administration, which the hub reserves for its \
