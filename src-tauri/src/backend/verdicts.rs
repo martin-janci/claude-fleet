@@ -477,6 +477,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_org_setting", Verdict::Routed { tool: "org_admin" }),
     ("set_org_member", Verdict::Routed { tool: "org_admin" }),
     ("remove_org_member", Verdict::Routed { tool: "org_admin" }),
+    ("org_member_grants", Verdict::Routed { tool: "org_admin" }),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),
     // Org administration phase B: the company's paired devices and people,
