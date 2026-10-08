@@ -56,7 +56,7 @@ export function timeAgo(unixSecs: number, nowMs: number = Date.now()): string {
 /** Elapsed since the session started ("3h 5m"), or '' before it started. */
 /** The short age the redesign's rows use (step 3.6, the manual's content
  *  rules): `now`, `2m`, `3h`, `4d`. */
-export function shortAge(unixSecs: number, nowSec: number): string {
+export function shortAge(unixSecs: number, nowSec: number = Math.floor(Date.now() / 1000)): string {
   const t = timeAgo(unixSecs, nowSec * 1000);
   return t === 'just now' ? 'now' : t.replace(/ ago$/, '');
 }

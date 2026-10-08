@@ -430,7 +430,7 @@
   }
   h4 {
     margin: 0.35rem 0 0.1rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;

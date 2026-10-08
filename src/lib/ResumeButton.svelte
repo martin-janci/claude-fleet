@@ -86,6 +86,8 @@
     class="more"
     title="More ways to resume"
     aria-label="More ways to resume {workKey}"
+    aria-haspopup="dialog"
+    aria-expanded={open}
     data-testid="resume-more"
     onclick={more}>▾</button
   >
@@ -101,7 +103,7 @@
     flex: none;
   }
   button {
-    font-size: 0.75em;
+    font-size: 11px;
     padding: 0 0.35rem;
     line-height: 1.5;
     border: 1px solid var(--border);

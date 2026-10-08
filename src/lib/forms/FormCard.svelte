@@ -137,13 +137,13 @@
 <style>
   .card { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.7rem 0.8rem; border: 1px solid var(--border); border-left: 3px solid var(--usage-warn); border-radius: 6px; background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane)); }
   header { display: flex; gap: 0.5rem; align-items: baseline; }
-  .who { font-size: 0.75rem; color: var(--fg-muted); }
+  .who { font-size: 11px; color: var(--fg-muted); }
   .why, .intro { margin: 0; font-size: 0.8rem; }
-  .blocked { margin: 0; font-size: 0.78rem; color: var(--fg-muted); }
+  .blocked { margin: 0; font-size: 11px; color: var(--fg-muted); }
   .decline { display: flex; gap: 0.4rem; }
   .decline input { flex: 1; font: inherit; font-size: 0.8rem; }
-  .link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--fg-muted); text-decoration: underline; cursor: pointer; font-size: 0.78rem; }
-  .err { margin: 0; font-size: 0.78rem; color: var(--usage-crit); }
+  .link { align-self: flex-start; background: none; border: none; padding: 0; color: var(--fg-muted); text-decoration: underline; cursor: pointer; font-size: 11px; }
+  .err { margin: 0; font-size: 11px; color: var(--usage-crit); }
   .outcome, .done { display: flex; justify-content: space-between; margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
   .x { background: none; border: none; cursor: pointer; color: inherit; }
 </style>

@@ -309,7 +309,7 @@
     padding: 0.5rem;
     border-radius: 4px;
     overflow: auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     margin: 0.4rem 0;
   }
   .mcp-config button {
@@ -318,7 +318,7 @@
     color: var(--fg);
     cursor: pointer;
     padding: 0.18rem 0.5rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     border-radius: 4px;
   }
   .mcp-config button:hover { border-color: var(--accent); }
@@ -348,7 +348,7 @@
   }
   .provision-table th {
     text-align: left;
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -361,7 +361,7 @@
   }
   .provision-detail {
     color: var(--fg-muted);
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   .provision-note {
     margin-top: 0.4rem;

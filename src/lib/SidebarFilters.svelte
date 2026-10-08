@@ -40,6 +40,8 @@
   import TidyReview from './TidyReview.svelte';
   import TrackerAttention from './TrackerAttention.svelte';
   import ActiveFilters from './ActiveFilters.svelte';
+  import FiltersSection from './FiltersSection.svelte';
+  import { SESSION_GROUPS } from './filter_schema';
   import FilterChipGroup from './FilterChipGroup.svelte';
   import { sessionFocus, clearSessionFocus } from './session_focus';
   import { RECENCY_VALUES, type Recency } from './session_status';
@@ -122,6 +124,8 @@
     clearSelected: () => void;
   } = $props();
   const sessionsList = $derived(listView !== 'work');
+  // Redesign step 3.7: the New layout draws the shared Filters section.
+  const newLayout = $derived($uiLayout === 'new');
 
   // Work keeps its own test id and toggles back to Project when pressed
   // again, as it did before it became a SegmentedControl.
@@ -181,8 +185,11 @@
   );
   // The strip and the badge carry what the panel holds: search and Needs
   // you show their state in their own controls already. (The empty state
-  // names them all.)
-  const stripFacets = $derived(facets.filter((f) => f.id !== 'search' && f.id !== 'needs-you'));
+  // names them all.) In the New layout Needs you is in the panel, so it
+  // joins the strip.
+  const stripFacets = $derived(
+    facets.filter((f) => f.id !== 'search' && (newLayout || f.id !== 'needs-you')),
+  );
   const panelCount = $derived(stripFacets.length);
 
   let panelOpen = $state(false);
@@ -258,227 +265,38 @@
 
 <svelte:window onpointerdown={onWindowPointer} onkeydown={onWindowKey} />
 
-<header class="sidebar-header" data-testid="sidebar-chrome-top">
-  <!-- R0 — Work graph M14: two projections of one graph, Sessions (host /
-       project → session → its tasks) and Work (org → group → task → its
-       sessions). ⌘⇧W / Ctrl+Shift+W flips them. Global actions on the
-       right: they are not filters. -->
-  <div class="row r0">
-    {#if listView === 'inbox'}
-      <!-- The Inbox (redesign step 3.3), with Today as its second tab until
-           Control (9.1) takes it; ⌘⇧T opens Today as before. -->
-      <div class="btn-group view-switch" role="tablist" aria-label="Inbox" data-testid="inbox-tabs">
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={!$todayOpen}
-          class:is-active={!$todayOpen}
-          data-testid="inbox-tab-inbox"
-          onclick={() => todayOpen.set(false)}
-          >Inbox{#if needsYouCount > 0}<span class="tab-badge hot" title="{needsYouCount} waiting on you"
-              >{needsYouCount}</span
-            >{/if}</button
-        >
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={$todayOpen}
-          class:is-active={$todayOpen}
-          data-testid="inbox-tab-today"
-          title={`Today (${todayChord})`}
-          onclick={() => todayOpen.set(true)}>Today</button
-        >
-      </div>
-    {:else}
-      <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch">
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={$sidebarView === 'sessions'}
-          class:is-active={$sidebarView === 'sessions'}
-          data-testid="sidebar-view-sessions"
-          title={`Sessions (${workViewChord})`}
-          onclick={() => sidebarView.set('sessions')}
-          >{$uiLayout === 'new' ? 'All sessions' : 'Sessions'}{#if !sessionsList && needsYouCount > 0}<span
-              class="tab-badge hot"
-              data-testid="sessions-tab-needs-you"
-              title="{needsYouCount} waiting on you">{needsYouCount}</span
-            >{/if}</button
-        >
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={$sidebarView === 'work'}
-          class:is-active={$sidebarView === 'work'}
-          data-testid="sidebar-view-work"
-          title={`Work: organisation → group → task → its sessions (${workViewChord})`}
-          onclick={() => sidebarView.set('work')}>Work</button
-        >
-      </div>
-    {/if}
-    <span class="spacer"></span>
-    <button
-      class="btn btn--quiet btn--icon"
-      onclick={() => onOpenSettings()}
-      title="Settings"
-      aria-label="Settings"
-      aria-expanded={showSettings}
-      data-testid="settings-open"
-    >⚙</button>
-    <button
-      class="btn btn--quiet btn--icon"
-      onclick={refresh}
-      disabled={loading}
-      data-testid="sidebar-refresh"
-      title="Refresh"
-      aria-label="Refresh"
-    >{#if loading}…{:else}↻{/if}</button>
-    {#if onCollapse}
-      <button
-        class="btn btn--quiet btn--icon"
-        onclick={onCollapse}
-        title="Hide sidebar (more room for terminal)"
-        aria-label="Hide sidebar"
-        data-testid="sidebar-collapse"
-      >‹</button>
-    {/if}
-  </div>
-
-  {#if sessionsList}
-    <!-- R1: what to look for, and where the rest of the filters are. -->
-    <div class="row">
-      {#if $scopeSelectorShown}
-        <!-- Work graph M5: the org scope — a view, never a boundary here. Only
-             with two or more scopes, so a one-company fleet sees no chrome. -->
-        <select
-          class="scope"
-          data-testid="scope-select"
-          aria-label="Organisation scope"
-          title={scopeTitle}
-          value={$effectiveScope}
-          onchange={(e) => scopeFilter.set((e.currentTarget as HTMLSelectElement).value)}
-        >
-          <option value="all">All</option>
-          {#each $scopes as sc (sc.id)}
-            <option value={sc.id}>{sc.label}</option>
-          {/each}
-          <option value={UNASSIGNED}>Unassigned</option>
-        </select>
-      {/if}
-      <input
-        class="search"
-        type="search"
-        placeholder="Search sessions, projects…"
-        aria-label="Search sessions"
-        bind:value={search}
-        data-testid="sidebar-search"
-      />
-      <button
-        bind:this={filtersBtn}
-        class="btn btn--quiet is-bounded filters-btn"
-        class:has-active={panelCount > 0}
-        data-testid="filters-open"
-        aria-expanded={panelOpen}
-        aria-controls="sidebar-filter-panel"
-        aria-label={panelCount > 0 ? `Filters, ${panelCount} active` : 'Filters'}
-        title="Filter by machine, time, work and more"
-        onclick={() => (panelOpen = !panelOpen)}
-        use:hintAnchor={{ id: 'host-filter', when: visibleHosts.length >= 2 }}
-      >
-        <span aria-hidden="true">⏷</span> Filters{#if panelCount > 0}<span class="badge">{panelCount}</span>{/if}
-      </button>
-    </div>
-
-    <!-- R2: the one-click filter and the mode that act on this list. -->
-    <div class="row r2">
-      <!-- One triage pill (P13/P27): the ranked queue replaces the old
-           stuck-only and needs-attention pills, which ordered rows two
-           different ways. -->
-      <button
-        class="btn btn--chip btn--toggle triage-pill"
-        class:hot={needsYouCount > 0}
-        data-testid="needs-you-filter"
-        aria-pressed={needsYouOnly}
-        title="Counts what is waiting on you now: blocked, stuck, failed, lost, safe-remove pending/failed. Toggling also shows sessions idle > {$attentionIdleMinutes} min."
-        onclick={() => (needsYouOnly = !needsYouOnly)}
-      >
-        <!-- At zero there is nothing to warn about: the ⚠ and the count were
-             permanent chrome that read as an alert. The pill stays so the
-             filter remains reachable. -->
-        {#if needsYouCount > 0}<span aria-hidden="true">⚠</span> Needs you <span class="count">{needsYouCount}</span>{:else}Needs you{/if}
-      </button>
-      <button
-        class="btn btn--chip btn--toggle"
-        data-testid="select-mode"
-        aria-pressed={selectMode}
-        title="Select several sessions (or shift/cmd-click rows) for bulk actions"
-        onclick={() => toggleSelectMode()}
-      >Select</button>
-      <span class="spacer"></span>
-      <div class="options" bind:this={optionsRoot}>
-        <button
-          class="btn btn--quiet btn--icon"
-          data-testid="view-options-open"
-          aria-label="View options"
-          aria-haspopup="true"
-          aria-expanded={optionsOpen}
-          title="View options: names, details, grouping"
-          onclick={() => (optionsOpen = !optionsOpen)}
-        >⋯</button>
-        {#if optionsOpen}
-          <div class="menu" role="group" aria-label="View options" data-testid="view-options">
-            <span class="menu-label">Group by</span>
-            <div class="group-by">
-              <SegmentedControl
-                label="Group by"
-                testidPrefix="group-by-"
-                value={$sidebarGroupBy}
-                options={GROUP_BY_OPTIONS}
-                onchange={(id) =>
-                  id === 'work'
-                    ? sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))
-                    : sidebarGroupBy.set(id)}
-              />
+{#snippet panelSections()}
+        {#if newLayout}
+          <section>
+            <h3>Quick</h3>
+            <div class="chips">
+              <button
+                class="btn btn--chip btn--toggle triage-pill"
+                class:hot={needsYouCount > 0}
+                data-testid="needs-you-filter"
+                aria-pressed={needsYouOnly}
+                title="What is waiting on you now. Toggling also shows sessions idle > {$attentionIdleMinutes} min."
+                onclick={() => (needsYouOnly = !needsYouOnly)}
+                >Needs you{#if needsYouCount > 0}&nbsp;<span class="count">{needsYouCount}</span>{/if}</button
+              >
             </div>
-            <button
-              type="button"
-              class="switch-row"
-              role="switch"
-              aria-checked={$showFriendlyNames}
-              data-testid="friendly-name-toggle"
-              title="Show the agent-set friendly name instead of the raw tmux name"
-              onclick={() => showFriendlyNames.update((v) => !v)}
-            >
-              <span>Friendly names</span><span class="switch" aria-hidden="true"></span>
-            </button>
-            <button
-              type="button"
-              class="switch-row"
-              role="switch"
-              aria-checked={$showRowDetails}
-              data-testid="toggle-row-details"
-              title="Host, worktree, elapsed and badges under each session"
-              onclick={() => showRowDetails.update((v) => !v)}
-            >
-              <span>Row details</span><span class="switch" aria-hidden="true"></span>
-            </button>
-          </div>
+          </section>
         {/if}
-      </div>
-    </div>
-
-    <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} emptyFocus={() => filtersBtn} />
-
-    {#if panelOpen}
-      <div
-        class="panel"
-        id="sidebar-filter-panel"
-        role="group"
-        aria-label="Filters"
-        data-testid="filter-panel"
-      >
         <section>
           <h3>Scope</h3>
+          {#if newLayout && $scopeSelectorShown}
+            <FilterChipGroup
+              label="Organisation"
+              value={$effectiveScope}
+              options={[
+                { id: 'all', label: 'Any' },
+                ...$scopes.map((sc) => ({ id: sc.id, label: sc.label })),
+                { id: UNASSIGNED, label: 'Unassigned' },
+              ]}
+              testidFor={(id) => (id === 'all' ? 'filter-scope' : `filter-scope-${id}`)}
+              onchange={(id) => scopeFilter.set(id)}
+            />
+          {/if}
           <nav class="hosts" aria-label="host filter">
             <FilterChipGroup
               label="Machine"
@@ -600,6 +418,275 @@
             </button>
           {/if}
         </section>
+{/snippet}
+
+{#snippet viewOptions()}
+      <div class="options" bind:this={optionsRoot}>
+        <button
+          class="btn btn--quiet btn--icon"
+          data-testid="view-options-open"
+          aria-label="View options"
+          aria-haspopup="true"
+          aria-expanded={optionsOpen}
+          title={newLayout ? 'View options: names, details, select' : 'View options: names, details, grouping'}
+          onclick={() => (optionsOpen = !optionsOpen)}
+        >⋯</button>
+        {#if optionsOpen}
+          <div class="menu" role="group" aria-label="View options" data-testid="view-options">
+            {#if newLayout}
+              <button
+                type="button"
+                class="switch-row"
+                role="switch"
+                aria-checked={selectMode}
+                data-testid="select-mode"
+                title="Select several sessions (or shift/cmd-click rows) for bulk actions"
+                onclick={() => toggleSelectMode()}
+              >
+                <span>Select several</span><span class="switch" aria-hidden="true"></span>
+              </button>
+            {:else}
+            <span class="menu-label">Group by</span>
+            <div class="group-by">
+              <SegmentedControl
+                label="Group by"
+                testidPrefix="group-by-"
+                value={$sidebarGroupBy}
+                options={GROUP_BY_OPTIONS}
+                onchange={(id) =>
+                  id === 'work'
+                    ? sidebarGroupBy.update((v) => (v === 'work' ? 'project' : 'work'))
+                    : sidebarGroupBy.set(id)}
+              />
+            </div>
+            {/if}
+            <button
+              type="button"
+              class="switch-row"
+              role="switch"
+              aria-checked={$showFriendlyNames}
+              data-testid="friendly-name-toggle"
+              title="Show the agent-set friendly name instead of the raw tmux name"
+              onclick={() => showFriendlyNames.update((v) => !v)}
+            >
+              <span>Friendly names</span><span class="switch" aria-hidden="true"></span>
+            </button>
+            <button
+              type="button"
+              class="switch-row"
+              role="switch"
+              aria-checked={$showRowDetails}
+              data-testid="toggle-row-details"
+              title="Host, worktree, elapsed and badges under each session"
+              onclick={() => showRowDetails.update((v) => !v)}
+            >
+              <span>Row details</span><span class="switch" aria-hidden="true"></span>
+            </button>
+          </div>
+        {/if}
+      </div>
+{/snippet}
+
+
+<header class="sidebar-header" data-testid="sidebar-chrome-top">
+  <!-- R0 — Work graph M14: two projections of one graph, Sessions (host /
+       project → session → its tasks) and Work (org → group → task → its
+       sessions). ⌘⇧W / Ctrl+Shift+W flips them. Global actions on the
+       right: they are not filters. -->
+  <div class="row r0">
+    {#if listView === 'inbox'}
+      <!-- The Inbox (redesign step 3.3), with Today as its second tab until
+           Control (9.1) takes it; ⌘⇧T opens Today as before. -->
+      <div class="btn-group view-switch" role="tablist" aria-label="Inbox" data-testid="inbox-tabs">
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={!$todayOpen}
+          class:is-active={!$todayOpen}
+          data-testid="inbox-tab-inbox"
+          onclick={() => todayOpen.set(false)}
+          >Inbox{#if needsYouCount > 0}<span class="tab-badge hot" title="{needsYouCount} waiting on you"
+              >{needsYouCount}</span
+            >{/if}</button
+        >
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={$todayOpen}
+          class:is-active={$todayOpen}
+          data-testid="inbox-tab-today"
+          title={`Today (${todayChord})`}
+          onclick={() => todayOpen.set(true)}>Today</button
+        >
+      </div>
+    {:else}
+      <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch">
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={$sidebarView === 'sessions'}
+          class:is-active={$sidebarView === 'sessions'}
+          data-testid="sidebar-view-sessions"
+          title={`Sessions (${workViewChord})`}
+          onclick={() => sidebarView.set('sessions')}
+          >{$uiLayout === 'new' ? 'All sessions' : 'Sessions'}{#if !sessionsList && needsYouCount > 0}<span
+              class="tab-badge hot"
+              data-testid="sessions-tab-needs-you"
+              title="{needsYouCount} waiting on you">{needsYouCount}</span
+            >{/if}</button
+        >
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={$sidebarView === 'work'}
+          class:is-active={$sidebarView === 'work'}
+          data-testid="sidebar-view-work"
+          title={`Work: organisation → group → task → its sessions (${workViewChord})`}
+          onclick={() => sidebarView.set('work')}>Work</button
+        >
+      </div>
+    {/if}
+    <span class="spacer"></span>
+    <button
+      class="btn btn--quiet btn--icon"
+      onclick={() => onOpenSettings()}
+      title="Settings"
+      aria-label="Settings"
+      aria-expanded={showSettings}
+      data-testid="settings-open"
+    >⚙</button>
+    <button
+      class="btn btn--quiet btn--icon"
+      onclick={refresh}
+      disabled={loading}
+      data-testid="sidebar-refresh"
+      title="Refresh"
+      aria-label="Refresh"
+    >{#if loading}…{:else}↻{/if}</button>
+    {#if onCollapse}
+      <button
+        class="btn btn--quiet btn--icon"
+        onclick={onCollapse}
+        title="Hide sidebar (more room for terminal)"
+        aria-label="Hide sidebar"
+        data-testid="sidebar-collapse"
+      >‹</button>
+    {/if}
+  </div>
+
+  {#if sessionsList && newLayout}
+    <!-- The New layout (step 3.7): one row while closed, the same shape as
+         the Work view's; Needs you and the organisation join the panel. -->
+    <FiltersSection
+      {search}
+      onsearch={(v) => (search = v)}
+      searchLabel="Search sessions"
+      placeholder="Search sessions, projects…"
+      searchTestid="sidebar-search"
+      count={panelCount}
+      filtersTitle="Filter by machine, time, work and more"
+      filtersTestid="filters-open"
+      panelId="sidebar-filter-panel"
+      panelLabel="Filters"
+      panelTestid="filter-panel"
+      clearTestid="wf-clear"
+      doneTestid="filters-done"
+      groupValue={$sidebarGroupBy}
+      groupOptions={SESSION_GROUPS}
+      ongroup={(id) => sidebarGroupBy.set(id)}
+      groupTestid="group-select"
+      onclearall={clearAll}
+      bind:open={panelOpen}
+      bind:filtersBtn
+      trailing={viewOptions}
+      panel={panelSections}
+    />
+    <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} emptyFocus={() => filtersBtn} />
+  {:else if sessionsList}
+    <!-- R1: what to look for, and where the rest of the filters are. -->
+    <div class="row">
+      {#if $scopeSelectorShown}
+        <!-- Work graph M5: the org scope — a view, never a boundary here. Only
+             with two or more scopes, so a one-company fleet sees no chrome. -->
+        <select
+          class="scope"
+          data-testid="scope-select"
+          aria-label="Organisation scope"
+          title={scopeTitle}
+          value={$effectiveScope}
+          onchange={(e) => scopeFilter.set((e.currentTarget as HTMLSelectElement).value)}
+        >
+          <option value="all">All</option>
+          {#each $scopes as sc (sc.id)}
+            <option value={sc.id}>{sc.label}</option>
+          {/each}
+          <option value={UNASSIGNED}>Unassigned</option>
+        </select>
+      {/if}
+      <input
+        class="search"
+        type="search"
+        placeholder="Search sessions, projects…"
+        aria-label="Search sessions"
+        bind:value={search}
+        data-testid="sidebar-search"
+      />
+      <button
+        bind:this={filtersBtn}
+        class="btn btn--quiet is-bounded filters-btn"
+        class:has-active={panelCount > 0}
+        data-testid="filters-open"
+        aria-expanded={panelOpen}
+        aria-controls="sidebar-filter-panel"
+        aria-label={panelCount > 0 ? `Filters, ${panelCount} active` : 'Filters'}
+        title="Filter by machine, time, work and more"
+        onclick={() => (panelOpen = !panelOpen)}
+        use:hintAnchor={{ id: 'host-filter', when: visibleHosts.length >= 2 }}
+      >
+        <span aria-hidden="true">⏷</span> Filters{#if panelCount > 0}<span class="badge">{panelCount}</span>{/if}
+      </button>
+    </div>
+
+    <!-- R2: the one-click filter and the mode that act on this list. -->
+    <div class="row r2">
+      <!-- One triage pill (P13/P27): the ranked queue replaces the old
+           stuck-only and needs-attention pills, which ordered rows two
+           different ways. -->
+      <button
+        class="btn btn--chip btn--toggle triage-pill"
+        class:hot={needsYouCount > 0}
+        data-testid="needs-you-filter"
+        aria-pressed={needsYouOnly}
+        title="Counts what is waiting on you now: blocked, stuck, failed, lost, safe-remove pending/failed. Toggling also shows sessions idle > {$attentionIdleMinutes} min."
+        onclick={() => (needsYouOnly = !needsYouOnly)}
+      >
+        <!-- At zero there is nothing to warn about: the ⚠ and the count were
+             permanent chrome that read as an alert. The pill stays so the
+             filter remains reachable. -->
+        {#if needsYouCount > 0}<span aria-hidden="true">⚠</span> Needs you <span class="count">{needsYouCount}</span>{:else}Needs you{/if}
+      </button>
+      <button
+        class="btn btn--chip btn--toggle"
+        data-testid="select-mode"
+        aria-pressed={selectMode}
+        title="Select several sessions (or shift/cmd-click rows) for bulk actions"
+        onclick={() => toggleSelectMode()}
+      >Select</button>
+      <span class="spacer"></span>
+      {@render viewOptions()}
+    </div>
+
+    <ActiveFilters facets={stripFacets} onclear={clearFacet} onclearall={clearAll} emptyFocus={() => filtersBtn} />
+
+    {#if panelOpen}
+      <div
+        class="panel"
+        id="sidebar-filter-panel"
+        role="group"
+        aria-label="Filters"
+        data-testid="filter-panel"
+      >
+        {@render panelSections()}
         <div class="panel-foot">
           {#if panelCount > 0}
             <button type="button" class="btn btn--quiet" data-testid="wf-clear" onclick={clearAll}>Clear all</button>

@@ -161,6 +161,7 @@
     "list_orgs",
     "list_people",
     "list_projects",
+    "list_pull_requests",
     "list_sessions",
     "list_tasks",
     "list_trackers",

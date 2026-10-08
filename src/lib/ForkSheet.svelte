@@ -16,6 +16,7 @@
   // so uncommitted changes stay with this session, and the note says so.
   // A hub older than this build answers E_UNSUPPORTED for it; that is shown
   // as "update the hub", with Same worktree still one click away.
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { rewindConversation } from './sessions';
@@ -156,7 +157,7 @@
       class="primary"
       data-testid="fork-confirm"
       disabled={!canSubmit}
-      onclick={() => void fork()}>{busy ? 'Forking…' : 'Fork'}</button
+      onclick={() => void fork()}>{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Forking…' : 'Fork'}</button
     >
   </div>
 </Modal>

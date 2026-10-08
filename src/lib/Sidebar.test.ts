@@ -80,6 +80,7 @@ import { trackers } from './trackers';
 import { switcherRequest } from './switcher_request';
 import { addProjectRequest } from './app_views';
 import { newSessionRequest, clearNewSessionRequest } from './new_session_request';
+import { expectAccessible } from './a11y_check';
 
 /** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
 async function openFilters() {
@@ -1284,7 +1285,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     await tick(); await tick();
     const chips = screen.getAllByTestId('stuck-chip');
     expect(chips).toHaveLength(1);
-    expect(chips[0]).toHaveTextContent('stuck: press Enter');
+    expect(chips[0]).toHaveTextContent('Failed · press Enter');
     // The stuck row shows no claude chip; the healthy one does.
     const rows = screen.getAllByTestId('sess-row');
     const stuckRow = rows.find((r) => r.getAttribute('data-stuck') === 'press_enter')!;
@@ -1650,7 +1651,7 @@ describe('Sidebar triage (W2 Track D)', () => {
     const row = screen.getByTestId('sess-row');
     const line1 = row.querySelector('.sess-line1')!;
     expect(line1.querySelector('.sess-name')).toHaveTextContent('dev-martin-janci-claude-fleet--fix-login');
-    expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('working');
+    expect(line1.querySelector('[data-testid="claude-chip"]')).toHaveTextContent('Working');
     const details = screen.getByTestId('sess-details');
     expect(details.querySelector('[data-testid="host-badge"]')).toHaveTextContent('local');
     // The tmux name already ends in "--fix-login" — showing the worktree
@@ -1797,7 +1798,7 @@ describe('Outside fleet group', () => {
     await tick(); await tick();
 
     const chip = screen.getByTestId('inactive-chip');
-    expect(chip).toHaveTextContent('inactive');
+    expect(chip).toHaveTextContent('Idle · process ended');
     expect(screen.queryByTestId('claude-chip')).toBeNull();
 
     const removeBtn = screen.getByTestId('remove-from-list');
@@ -3299,5 +3300,16 @@ describe('Inbox (redesign step 3.3)', () => {
     expect(screen.getByTestId('inbox-tab-today').getAttribute('aria-selected')).toBe('true');
     await fireEvent.click(screen.getByTestId('inbox-tab-inbox'));
     expect(get(todayOpen)).toBe(false);
+  });
+});
+
+describe('Sidebar accessibility (7.2)', () => {
+  it('passes the axe and audit checks; a project row says whether it is open', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(1, 'dev-b'), sessionFor(2, 'dev-c')]);
+    const { container } = render(Sidebar);
+    await tick(); await tick();
+    const projRows = await screen.findAllByTestId('proj-row');
+    for (const r of projRows) expect(r.getAttribute('aria-expanded')).toBe('true');
+    await expectAccessible(container);
   });
 });

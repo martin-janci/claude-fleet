@@ -203,14 +203,14 @@
     gap: 0.5rem;
     padding: 0.3rem 0.5rem;
     border-bottom: 1px solid var(--border);
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
     flex: none;
   }
   .badge {
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 0.68rem;
+    font-size: 11px;
     padding: 0.1rem 0.35rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -222,12 +222,12 @@
     margin-left: auto;
   }
   .refresh {
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .why {
     margin: 0;
     padding: 0.45rem 0.6rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     line-height: 1.45;
     color: var(--fg-muted);
     border-bottom: 1px solid var(--border);
@@ -236,7 +236,7 @@
   .err {
     margin: 0;
     padding: 0.4rem 0.6rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--status-failed);
     flex: none;
   }

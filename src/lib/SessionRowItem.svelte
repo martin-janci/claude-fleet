@@ -641,11 +641,11 @@
            Read-only — name and status chip only, no actions. Checked before
            the ghost branch: a ghosted external row must not offer
            Recreate / Dismiss either. -->
-      <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+      <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
       <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
       <SessionStatusChip {sess} brief />
     {:else if sess.status === 'ghost'}
-      <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
+      <span class="status-dot status-ghost" title="ghost — session lost" role="img" aria-label="Status: ghost, session lost"></span>
       <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
       <span class="sess-name" title={sess.tmux_name}>{
         $showFriendlyNames && sess.friendly_name ? sess.friendly_name : sess.tmux_name
@@ -676,7 +676,7 @@
     {:else}
       <div class="sess-lines">
         <div class="sess-line1">
-          <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
+          <span class="status-dot status-{sess.status}" title={sess.status} role="img" aria-label="Status: {sess.status}"></span>
           {#if relatedCount > 0}
             <span
               class="related-badge"
@@ -1029,7 +1029,7 @@
 
   .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
@@ -1038,7 +1038,7 @@
   }
 
   .related-badge {
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     background: color-mix(in srgb, var(--accent) 14%, transparent);
     padding: 0.05rem 0.3rem;
@@ -1046,12 +1046,12 @@
     flex-shrink: 0;
   }
 
-  .review-badge { font-size: 0.7rem; margin-left: 0.2rem; }
-  .shell-badge { font-size: 0.7rem; margin-left: 0.2rem; color: var(--fg-muted); }
-  .bg-badge { font-size: 0.7rem; margin-left: 0.2rem; }
+  .review-badge { font-size: 11px; margin-left: 0.2rem; }
+  .shell-badge { font-size: 11px; margin-left: 0.2rem; color: var(--fg-muted); }
+  .bg-badge { font-size: 11px; margin-left: 0.2rem; }
 
   .err { color: var(--danger); font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
-  .inline-err { padding-left: 1.6rem; font-size: 0.75rem; }
+  .inline-err { padding-left: 1.6rem; font-size: 11px; }
 
   .sess-row {
     display: flex;
@@ -1129,12 +1129,15 @@
     flex-shrink: 0;
     background: var(--fg-muted);
   }
+  /* Colour never carries the state alone (7.2): the dot is labelled, and
+     each state has its own shape. Running is a filled disc, frozen a ring,
+     orphan a square, ghost a dashed ring. */
   .status-dot.status-running { background: var(--status-done); }
-  .status-dot.status-frozen { background: var(--status-working); }
-  .status-dot.status-orphan { background: var(--status-failed); }
-  .status-dot.status-ghost { background: var(--status-idle); opacity: 0.55; }
+  .status-dot.status-frozen { background: transparent; box-shadow: inset 0 0 0 1.5px var(--status-working); }
+  .status-dot.status-orphan { background: var(--status-failed); border-radius: 1px; }
+  .status-dot.status-ghost { background: transparent; border: 1.5px dashed var(--status-idle); box-sizing: border-box; opacity: 0.8; }
   .lost-at {
-    font-size: 0.7em;
+    font-size: 11px;
     opacity: 0.6;
     margin-left: auto;
     padding-right: 0.25rem;
@@ -1156,9 +1159,9 @@
   .lw-dot.tone-conflict,
   .lw-dot.tone-error { background: var(--usage-crit); }
   .lw-dot.tone-idle { border: 1.5px solid var(--fg-muted); box-sizing: border-box; }
-  .lw-changes { font-size: 0.65rem; color: var(--usage-warn); }
+  .lw-changes { font-size: 11px; color: var(--usage-warn); }
   .privacy-chip {
-    font-size: 0.6rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 0.05rem 0.28rem;
@@ -1169,7 +1172,7 @@
     white-space: nowrap;
   }
   .form-chip {
-    font-size: 0.6rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding: 0.05rem 0.28rem;
@@ -1185,7 +1188,7 @@
     flex-direction: column;
     gap: 0.3rem;
     width: 100%;
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .why-link {
     display: flex;
@@ -1220,7 +1223,7 @@
     flex-wrap: wrap;
     gap: 0.3rem;
     align-items: center;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--status-waiting);
   }
   .work-menu {
@@ -1233,11 +1236,11 @@
   .work-input {
     flex: 1 1 8rem;
     min-width: 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.1rem 0.3rem;
   }
   .work-btn {
-    font-size: 0.65rem;
+    font-size: 11px;
     padding: 0.05rem 0.35rem;
     white-space: nowrap;
   }
@@ -1258,7 +1261,7 @@
   }
   .sess-age {
     flex-shrink: 0;
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     font-variant-numeric: tabular-nums;
   }

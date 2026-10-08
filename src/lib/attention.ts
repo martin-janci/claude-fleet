@@ -39,20 +39,25 @@ const STATUS_COLOR: Record<ClaudeStatus, string> = {
   idle: 'var(--status-idle)',
 };
 
+// The manual's status words (`kit/status.ts::STATUS_WORDS`): one plain word,
+// no glyph; the colour carries the tone. A session waiting on the person is
+// "Needs you"; one stopped by a hook or the user sits idle like any other.
 const STATUS_LABEL: Record<ClaudeStatus, string> = {
-  working: '⚡ working',
-  blocked: '⏸ blocked',
-  completed: '✓ done',
-  failed: '✗ failed',
-  stopped: '■ stopped',
-  idle: '· idle',
+  working: 'Working',
+  blocked: 'Needs you',
+  completed: 'Done',
+  failed: 'Failed',
+  stopped: 'Idle',
+  idle: 'Idle',
 };
 
 export function claudeStatusColor(status: ClaudeStatus | null): string {
   return status && isClaudeStatus(status) ? STATUS_COLOR[status] : 'transparent';
 }
 
-export function claudeStatusLabel(status: ClaudeStatus | null): string {
+/** The status word for a `claude_status`; '' for anything else (it reads
+ *  any string, so a caller holding a wider state need not narrow it). */
+export function claudeStatusLabel(status: ClaudeStatus | string | null): string {
   return status && isClaudeStatus(status) ? STATUS_LABEL[status] : '';
 }
 
@@ -67,6 +72,19 @@ const STUCK_LABEL: Record<StuckKind, string> = {
 /** Human label for a stuck kind, e.g. `press_enter` → "press Enter". */
 export function stuckKindLabel(kind: StuckKind | null): string {
   return kind && isStuckKind(kind) ? STUCK_LABEL[kind] : '';
+}
+
+/** A stuck session's status: "Failed · press Enter". */
+export function stuckStatus(kind: StuckKind | null): string {
+  const why = stuckKindLabel(kind);
+  return why ? `Failed · ${why}` : 'Failed';
+}
+
+/** A session's one status word: stuck, then its claude_status, else Idle
+ *  (a pane with no Claude state, or a stopped one, sits idle). */
+export function sessionStatusWord(s: Pick<SessionRow, 'stuck_kind' | 'claude_status'>): string {
+  if (s.stuck_kind) return stuckStatus(s.stuck_kind);
+  return claudeStatusLabel(s.claude_status) || 'Idle';
 }
 
 /** Red, always — the stuck chip outranks whatever claude_status says. */

@@ -368,6 +368,19 @@ export function notificationLabel(n: { summary: string | null; event: string | n
  *  report, and calling it `done` would be a lie. */
 export type BackgroundStatus = 'running' | 'done' | 'failed' | 'stopped' | 'idle';
 
+const BACKGROUND_WORD: Record<BackgroundStatus, string> = {
+  running: 'Working',
+  done: 'Done',
+  failed: 'Failed',
+  stopped: 'Idle',
+  idle: 'Idle',
+};
+
+/** A background job's status in the manual's words ("Working", not "running"). */
+export function backgroundStatusWord(s: BackgroundStatus): string {
+  return BACKGROUND_WORD[s] ?? 'Idle';
+}
+
 /** One report a background task filed. A resumed agent files several. */
 export interface BackgroundReport {
   at: string | null;

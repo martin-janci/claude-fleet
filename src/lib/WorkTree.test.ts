@@ -185,10 +185,27 @@ describe('WorkTree', () => {
       await fireEvent.click(screen.getByTestId('work-tab-missions'));
       expect(get(workBoardOpen)).toBe(false);
       expect(screen.getByTestId('work-tab-missions').getAttribute('aria-selected')).toBe('true');
+      // Pull requests (6.4) is the fourth tab, as on the Work board.
+      await fireEvent.click(screen.getByTestId('work-tab-prs'));
+      await flush();
+      expect(screen.getByTestId('work-prs')).toBeTruthy();
+      expect(screen.getByTestId('work-tab-prs').getAttribute('aria-selected')).toBe('true');
     } finally {
       uiLayout.set('classic');
       workBoardOpen.set(false);
     }
+  });
+
+  it('the Pull requests tab shows the PRs view beside Tasks, Review and Missions (6.4)', async () => {
+    render(WorkTree);
+    await flush();
+    expect(screen.queryByTestId('work-prs')).toBeNull();
+    await fireEvent.click(screen.getByTestId('work-tab-prs'));
+    await flush();
+    expect(screen.getByTestId('work-prs')).toBeTruthy();
+    expect(screen.queryByTestId('work-review')).toBeNull();
+    // Every earlier tab is still there.
+    for (const t of ['tasks', 'review', 'missions']) expect(screen.getByTestId(`work-tab-${t}`)).toBeTruthy();
   });
 
   it('opening a section loads it by itself; Load more pages with its own cursor', async () => {

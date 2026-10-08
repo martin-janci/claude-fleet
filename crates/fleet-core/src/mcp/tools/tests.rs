@@ -2397,6 +2397,7 @@ fn router_sum_serves_every_tool() {
         include_str!("sharing.rs"),
         include_str!("forms.rs"),
         include_str!("devices.rs"),
+        include_str!("prs.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2406,13 +2407,6 @@ fn router_sum_serves_every_tool() {
         served, attrs,
         "a router block is missing from tool_router()"
     );
-    // 108 (main, incl. file downloads) + multi-user M1's six sharing /
-    // claim tools (T12) + the New session picker's `project_picks` /
-    // `set_project_pick` + org administration's `org_admin` (phase B) +
-    // chat forms' `ask` + debug devices' `debug_devices` + Lost and found's
-    // `adopt_session` + the Files tab's `repo_blame` + the redesign's
-    // `touch_session_viewed` (step 2.3).
-    assert_eq!(served, 122);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3832,120 +3826,21 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 }
 
 /// The definition budget, guarded. Every byte here is paid for by every
-/// request a connected client makes, so a tool added or a description grown
-/// is a cost the repo should see in a diff, not in a bill. Update the
-/// constant deliberately — with the numbers the failure prints.
+/// request a connected client makes, so a description grown past the
+/// average is a cost the repo should see in a diff, not in a bill.
+///
+/// The budget scales with the number of tools served: a fixed byte total
+/// (with a measurement appended per change) was edited by every PR that
+/// added a tool, so every open PR conflicted with every merge to main
+/// (2026-10-08). A new tool of ordinary size now fits on its own; an
+/// unusually long one, or descriptions grown in place, still fail here.
 #[test]
 fn the_served_definition_budget_stays_bounded() {
-    /// Definition bytes served to the master token (the widest surface),
-    /// counted the way a model pays for them: name + description + schema,
-    /// summed over the tools; ~3.7 chars per token.
-    ///
-    /// Raise it only from a measurement: the run prints the merged surface,
-    /// and the constant is that plus 100 bytes of headroom. Two branches
-    /// measured apart never cover the merged surface, so a merge that trips
-    /// this re-measures. The why of each raise belongs in its commit
-    /// message (`git log -L` on this constant), not here: a log in this
-    /// comment conflicted on every merge. Measured at 67,546 on 2026-09-29
-    /// (`session_tool_detail` merged with the native item status work,
-    /// declarative pages P5–P6 and update S4b). Measured at 67,956 on
-    /// 2026-09-29 after shared work context (`work_link` create / propose /
-    /// accept and its `parent` / `notes` / `why` parameters, +410 bytes).
-    /// Measured at 68,195 on 2026-09-30 after asset catalog S1a Task 6
-    /// (`import_assets`/`CatalogAdminParams::action` grew to describe
-    /// importing from any host over SSH and the new `only` parameter,
-    /// +139 bytes). Measured at 68,519 on 2026-09-30 after asset catalog
-    /// S1a Task 7 (`plan_sync`'s description and `PlanSyncParams` grew the
-    /// `allow_unlayered` escape hatch for a remote host with no layers,
-    /// +224 bytes). Measured at 69,180 on 2026-09-30 after multi-harness F3a
-    /// (`set_host_harnesses` and its `catalog_admin` action). Measured at
-    /// 69,306 on 2026-09-30 after declarative pages' `guide` tool (a host's
-    /// session proposes a guide, +787 bytes). Measured at 69,996 on 2026-09-30
-    /// with both merged. Measured at 70,039 on 2026-10-01 after Assets M3
-    /// Task 3 (`resolve_preview` names each held-back catalog, +33 bytes).
-    /// Measured at 70,391 on 2026-10-01 after Assets M3 Task 5
-    /// (`catalog_admin` takes a `catalog` and five catalog-set actions,
-    /// +352 bytes). Measured at 70,523 on 2026-10-02 after merging `main`
-    /// into Assets M3 (70,483, +92 bytes) and the final review's M-c
-    /// (`remove_catalog` is master-only, said in `catalog_admin`'s
-    /// description and its `catalog` parameter, +40 bytes). Measured at
-    /// 70,542 on 2026-10-03 after Assets M4 Task 3 (`catalog_admin`'s
-    /// `catalog` parameter names the authoring actions, +19 bytes).
-    /// Measured at 71,417 on 2026-10-03 after Assets M4 Task 9 (the
-    /// `changesets` tool and its four parameters, +875 bytes; master only —
-    /// a per-host token is never served it).
-    /// Measured at 72,687 on 2026-10-04 after merging Assets M4 into file
-    /// downloads (`send_file`, `list_downloads`, `remove_download`, +1,170
-    /// bytes). Measured at 72,701 on 2026-10-04 after Assets M5 Task 4
-    /// (`asset_history` in `CatalogAdminParams::action`, +14 bytes).
-    /// Measured at 72,827 on 2026-10-05 after its fix round 1
-    /// (`list_assets` takes `all_catalogs`, +126 bytes). M6 Task 3:
-    /// changesets propose_layer + change (measured 74,163; the typed
-    /// `LayerChange` schema, three variants, +1,236 bytes). M6 Task 4:
-    /// catalog_admin drift_diff (measured 74,174; the action named in
-    /// `CatalogAdminParams::action`, +11 bytes).
-    /// **Measured at 75,369 on 2026-10-05**, merging multi-user M1 T12 on
-    /// top of that: the five sharing definitions `session_share`,
-    /// `session_unshare`, `session_narrow`, `session_access` and `my_grants`,
-    /// each with its parameters and its refusal codes (+2,542 bytes over
-    /// `main`'s 72,827 — the figure M1 measured against `main` before the
-    /// Assets M5 merge, arrived at again here from the other side). The
-    /// sixth tool, `session_claim`, is `Access::HostToken` and is NOT on the
-    /// master surface this constant measures; `NOT_FOR_HOST_TOKENS` keeps
-    /// the other five off a per-host token's. The constant is that
-    /// measurement plus the customary 100 bytes of headroom.
-    /// Measured at 76,716 on 2026-10-05 after merging `main` (multi-user
-    /// M1's sharing tools, 75,369) into Assets M6 (the changesets
-    /// propose_layer / change / `LayerChange` and drift_diff growth,
-    /// +1,347 bytes over `main`): exactly the two sides' sum.
-    /// Measured at 76,892 on 2026-10-06 after the task → session spec's A1
-    /// (`work_link { start }` takes `parallel`, and a `preview_start` action
-    /// sits beside it, named in the description and the action enum, +176
-    /// bytes). Measured at 76,964 on 2026-10-06 after merging `main`
-    /// (76,788: the operator's other-host start and the project picker,
-    /// +72 bytes over 76,716) into it: exactly the two sides' sum.
-    /// Measured at 77,224 on 2026-10-06 after the task → session spec's A2
-    /// (`work_link { switch }`, `ack_live` on link and switch, and `work {
-    /// tickets }`'s `include_local`, +260 bytes).
-    /// Measured at 78,504 on 2026-10-07 after merging sprints and releases
-    /// (`work { buckets | bucket }`, `work_link { bucket_add | bucket_remove }`
-    /// and six `work_admin` bucket actions, +1,280 bytes) with it.
-    /// Measured at 78,993 on 2026-10-07 after login profiles
-    /// (`new_session { profile }` and `restart_session { profile }`, +91
-    /// bytes).
-    /// Measured at 79,584 on 2026-10-07 after merging `main` (79,093) into
-    /// missions (`work { missions | mission }` and five `work_link`
-    /// mission actions, +491 bytes): exactly the two sides' sum.
-    /// Measured at 80,099 on 2026-10-07 after the mission graph (`work_link
-    /// { dep | hold | propose_tree | accept_many | undo_accept }` and their
-    /// arguments, +515 bytes).
-    /// Measured at 80,557 on 2026-10-08 after a run's evidence and typed
-    /// done_when (`work_link { done_when | verify }` and their arguments,
-    /// +458 bytes).
-    /// Measured at 81,694 on 2026-10-08 after the mission loop (`work_link
-    /// { mission_start | mission_plan | mission_grant | mission_revoke |
-    /// retry | card_decide | missions_pause_all }` and their arguments,
-    /// +1,137 bytes).
-    /// Measured at 81,951 on 2026-10-08 after task editing (`work_link
-    /// { edit }` and its `assignees` argument, +257 bytes).
-    /// Measured at 81,648 on 2026-10-08 after merging `main` (80,099) into
-    /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
-    /// sides' sum).
-    /// Measured at 83,243 on 2026-10-08 after merging `main` (81,694) into
-    /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
-    /// sides' sum).
-    /// Measured at 83,534 on 2026-10-08 after merging `main` (81,951, task
-    /// editing) into chat forms (the `ask` tool): 34 bytes above the two
-    /// sides' sum.
-    /// Measured at 85,601 on 2026-10-08 after debug devices (the
-    /// `debug_devices` tool, one entry by `action`, +1,967 bytes).
-    /// Measured at 86,158 on 2026-10-08 after Lost and found's adopt (the
-    /// `adopt_session` tool, +557 bytes).
-    /// Measured at 86,625 on 2026-10-08 after merging `main` (86,158) into
-    /// the Files tab's `repo_blame` and `repo_branches`' `merged` note.
-    /// Measured at 86,933 on 2026-10-08 after the redesign's
-    /// `touch_session_viewed` (step 2.3, +308 bytes over main's 86,625).
-    const BUDGET_BYTES: usize = 87_033;
+    /// Definition bytes per tool served to the master token (the widest
+    /// surface). Measured at 87,031 bytes for 113 tools (770 a tool) on
+    /// 2026-10-08. Raise it only from a measurement the failure prints,
+    /// and say in the commit message what was measured and when.
+    const BYTES_PER_TOOL: usize = 790;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -3964,6 +3859,7 @@ fn the_served_definition_budget_stays_bounded() {
         (tools.len(), bytes)
     }
     let (served, bytes) = definition_bytes(&Caller::master());
+    let budget = served * BYTES_PER_TOOL;
     let (ro_served, ro_bytes) = definition_bytes(&host_caller("h", TokenMode::Readonly));
     for (label, (n, b)) in [
         ("master", (served, bytes)),
@@ -3989,17 +3885,18 @@ fn the_served_definition_budget_stays_bounded() {
     // quotes one of these, so the next one has a figure to quote rather than
     // a baseline inherited from an older entry.
     println!(
-        "master surface measured at {bytes} bytes of the {BUDGET_BYTES} budget \
-         ({} bytes of headroom)",
-        BUDGET_BYTES.saturating_sub(bytes)
+        "master surface measured at {bytes} bytes for {served} tools ({} a tool), \
+         of the {budget} budget ({} bytes of headroom)",
+        bytes / served.max(1),
+        budget.saturating_sub(bytes)
     );
     assert!(
-        bytes <= BUDGET_BYTES,
-        "the tool surface grew to {bytes} bytes, over the {BUDGET_BYTES} budget: \
-         trim a description, or raise the constant on purpose — to {} (the \
-         measurement plus the customary 100 bytes of headroom), and say in the \
-         commit message what was measured and when",
-        bytes + 100
+        bytes <= budget,
+        "the tool surface grew to {bytes} bytes for {served} tools, over the {budget} \
+         budget ({BYTES_PER_TOOL} a tool): trim a description, or raise \
+         BYTES_PER_TOOL on purpose — to {} (the measurement plus 10 bytes a tool), \
+         and say in the commit message what was measured and when",
+        bytes / served.max(1) + 10
     );
     assert!(
         ro_bytes < bytes / 2,

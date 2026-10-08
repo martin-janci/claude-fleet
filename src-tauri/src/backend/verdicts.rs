@@ -767,6 +767,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("get_form", Verdict::Routed { tool: "ask" }),
     ("answer_form", Verdict::Routed { tool: "ask" }),
     ("decline_form", Verdict::Routed { tool: "ask" }),
+    ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "list_debug_devices",
         Verdict::Routed {

@@ -252,7 +252,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--fg);
-    font-size: 0.78rem;
+    font-size: 11px;
     padding: 0.25rem 0.45rem;
     flex: 0 0 auto;
   }
@@ -279,7 +279,7 @@
     border: none;
     color: var(--fg);
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: 11px;
     padding: 0.34rem 0.4rem;
     text-align: left;
   }
@@ -301,7 +301,7 @@
     flex: 0 0 auto;
     width: 0.95rem;
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .ficon {
     flex: 0 0 auto;
@@ -318,7 +318,7 @@
     line-height: 1.1rem;
     text-align: center;
     border-radius: 3px;
-    font-size: 0.66rem;
+    font-size: 11px;
     font-weight: 700;
   }
   .b-mod {
@@ -372,7 +372,7 @@
     border: 1px solid var(--border);
     border-radius: 4px;
     color: var(--fg);
-    font-size: 0.78rem;
+    font-size: 11px;
     font-family: inherit;
     resize: vertical;
     padding: 0.25rem 0.4rem;
@@ -385,7 +385,7 @@
     border-radius: 4px;
     color: var(--fg);
     cursor: pointer;
-    font-size: 0.78rem;
+    font-size: 11px;
     padding: 0.25rem 0.5rem;
     text-align: center;
   }

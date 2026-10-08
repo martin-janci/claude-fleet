@@ -312,7 +312,7 @@
     border: none;
     border-radius: 4px;
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.74rem;
+    font-size: 11px;
     line-height: 1.5;
     color: var(--fg-muted);
     text-align: left;
@@ -357,7 +357,7 @@
   .dur {
     flex: 0 0 auto;
     margin-left: auto;
-    font-size: 0.7rem;
+    font-size: 11px;
     opacity: 0.8;
   }
   .x {
@@ -376,7 +376,7 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--bg-pane);
-    font-size: 0.74rem;
+    font-size: 11px;
   }
   .detail-error {
     display: flex;
@@ -392,7 +392,7 @@
     padding: 0.3rem 0.6rem;
     border-bottom: 1px solid var(--border);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .path {
     min-width: 0;
@@ -412,7 +412,7 @@
     flex: 0 0 auto;
     padding: 0 6px;
     border-radius: 9px;
-    font-size: 0.66rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
   }
@@ -444,7 +444,7 @@
     border-radius: 4px;
     background: var(--bg);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     line-height: 1.5;
   }
   .code .row {
@@ -512,7 +512,7 @@
     gap: 0.4rem;
     padding: 0.08rem 0;
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -531,7 +531,7 @@
     align-items: center;
     gap: 0.45rem;
     padding: 0.12rem 0;
-    font-size: 0.76rem;
+    font-size: 11px;
   }
   .todos li.completed {
     color: var(--fg-muted);
@@ -578,7 +578,7 @@
     margin: 0.2rem 0 0.4rem 1.15rem;
     color: var(--fg-muted);
     font-style: italic;
-    font-size: 0.74rem;
+    font-size: 11px;
   }
   .detail .muted {
     margin-left: 0;
@@ -588,7 +588,7 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 0.72rem;
+    font-size: 11px;
     cursor: pointer;
   }
   @media (prefers-reduced-motion: reduce) {
