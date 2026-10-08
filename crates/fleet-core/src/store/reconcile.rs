@@ -1139,6 +1139,8 @@ mod tests {
             visibility: crate::store::VISIBILITY_UNCLAIMED.into(),
             claude_profile: None,
             agent: crate::store::AGENT_CLAUDE.into(),
+            origin: None,
+            origin_ref: None,
             pending_form: None,
             parent_session_id: None,
             tags: Vec::new(),

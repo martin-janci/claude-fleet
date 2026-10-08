@@ -410,6 +410,8 @@ fn sample_session_row() -> SessionRow {
         visibility: fleet_core::store::VISIBILITY_UNCLAIMED.into(),
         claude_profile: None,
         agent: fleet_core::store::AGENT_CLAUDE.into(),
+        origin: None,
+        origin_ref: None,
         pending_form: None,
         parent_session_id: None,
         tags: vec!["review".into()],

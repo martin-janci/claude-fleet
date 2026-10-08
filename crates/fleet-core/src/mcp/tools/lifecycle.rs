@@ -315,7 +315,7 @@ impl FleetTools {
         &self,
         Extension(caller): Extension<Caller>,
         Parameters(SpawnReviewParams {
-            args,
+            mut args,
             confirm_nonce,
         }): Parameters<SpawnReviewParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -348,6 +348,10 @@ impl FleetTools {
             ),
             &caller,
         )?;
+        args.origin = Some({
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            super::fleet::origin_for(&caller, &s)
+        });
         let row = sessions::spawn_review(args, &self.store, &self.ssh)
             .await
             .map_err(to_mcp_err)?;
