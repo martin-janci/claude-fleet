@@ -2279,7 +2279,7 @@
         {/if}
         {/if}
         {#if closedForm && !pendingForm}
-          <FormCard formId={closedForm} sessionName={session.tmux_name} blocked={null} closed ondismiss={() => (closedForm = null)} />
+          <FormCard formId={closedForm} sessionName={session.friendly_name ?? session.tmux_name} blocked={null} closed ondismiss={() => (closedForm = null)} />
         {/if}
       </div>
     </div>

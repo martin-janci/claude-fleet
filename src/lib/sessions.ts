@@ -172,7 +172,7 @@ export interface SessionRow {
     question: string | null;
     options: { n: number; label: string; selected: boolean }[];
   } | null;
-  // Chat forms (migration 112): the form this session's agent asked and is
+  // Chat forms (migration 117): the form this session's agent asked and is
   // waiting on. Optional: an older hub sends none.
   pending_form?: { form_id: string; title: string } | null;
   /** The session's primary work link (migration 046), set through the work

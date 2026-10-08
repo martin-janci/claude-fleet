@@ -58,3 +58,14 @@ describe('a field named like an Object.prototype member', () => {
     expect(visibleSteps(odd, { constructor: 'x' }).map((s) => s.title)).toEqual(['a', 'b']);
   });
 });
+
+describe('unknown keys', () => {
+  it('are reported in sorted order, as the Rust validator does', () => {
+    const r = checkAnswers(spec, { zz: 1, aa: 2, mm: 3 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      const unknown = r.problems.filter((p) => p.problem === 'is not a field of this form');
+      expect(unknown.map((p) => p.field)).toEqual(['aa', 'mm', 'zz']);
+    }
+  });
+});

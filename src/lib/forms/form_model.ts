@@ -126,7 +126,7 @@ export function checkAnswers(
 ): { ok: true; answers: Values; secrets: string[] } | { ok: false; problems: FieldProblem[] } {
   const w = walk(spec, values);
   const known = new Set(spec.steps.flatMap((s) => s.fields.map((f) => f.name)));
-  for (const k of Object.keys(values)) {
+  for (const k of Object.keys(values).sort()) {
     if (!known.has(k)) w.problems.push({ field: k, problem: 'is not a field of this form' });
   }
   if (w.problems.length > 0) return { ok: false, problems: w.problems };
