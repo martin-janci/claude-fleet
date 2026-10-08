@@ -1726,6 +1726,46 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests.",
+      "key": "decide.jev.sibling_repos",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: sibling repository",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
       "key": "decide.jev.quick_answer",
       "kind": {
@@ -2888,6 +2928,11 @@
               "type": "field"
             },
             {
+              "hint": "Pre-ticks the other repository a ticket start also needs; you still press Start.",
+              "key": "decide.jev.sibling_repos",
+              "type": "field"
+            },
+            {
               "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission.",
               "key": "decide.jev.quick_answer",
               "type": "field"
@@ -3286,7 +3331,7 @@
               "type": "field"
             },
             {
-              "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. A new person gets a device in Settings → Devices (Pair a device, for them).",
+              "text": "A member's devices are fenced to the org: they see its work and what is shared with it, and their own sessions. Adding a member offers a pairing code for their device; Pair a device mints another.",
               "tone": "info",
               "type": "notice"
             }
@@ -3514,6 +3559,67 @@
       ],
       "spec": "fleet.page/1",
       "title": "People"
+    },
+    {
+      "id": "settings.federation",
+      "intro": "Other fleets' hubs this hub is linked to. Sessions on both sides can message each other through the link. Linking and unlinking need this device to be trusted.",
+      "layout": "master_detail",
+      "parent": "settings",
+      "resource": "peer_link",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "title",
+              "type": "field"
+            },
+            {
+              "key": "state",
+              "type": "field"
+            },
+            {
+              "key": "role",
+              "type": "field"
+            },
+            {
+              "key": "url",
+              "type": "field"
+            },
+            {
+              "key": "last_error",
+              "type": "field"
+            }
+          ],
+          "title": "Link"
+        },
+        {
+          "items": [
+            {
+              "key": "latency",
+              "type": "field"
+            },
+            {
+              "key": "messages_today",
+              "type": "field"
+            },
+            {
+              "key": "messages_total",
+              "type": "field"
+            },
+            {
+              "key": "pending",
+              "type": "field"
+            },
+            {
+              "key": "last_exchange_at",
+              "type": "field"
+            }
+          ],
+          "title": "Traffic"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Federation"
     },
     {
       "id": "settings.updates",
@@ -5447,7 +5553,7 @@
           "type": "time"
         }
       ],
-      "help": "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Peer hub links and updater tokens are managed on the hub.",
+      "help": "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Links to other fleets' hubs are under Federation; updater tokens are managed on the hub.",
       "id": "device",
       "id_field": "name",
       "label": "Device",
@@ -5974,6 +6080,170 @@
         "report": false
       },
       "variant_by": "kind"
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "url",
+            {
+              "from": "param",
+              "name": "url"
+            }
+          ],
+          [
+            "code",
+            {
+              "from": "param",
+              "name": "code"
+            }
+          ]
+        ],
+        "command": "link_peer_hub",
+        "envelope": "args",
+        "id": "peer_link.add",
+        "label": "Link a hub",
+        "params": [
+          {
+            "label": "Hub address",
+            "max": 512,
+            "name": "url",
+            "placeholder": "https://hub.example.com",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Link code",
+            "name": "code",
+            "required": true,
+            "type": "secret"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "unlink_peer_hub",
+        "confirm": "Sessions here can no longer message that fleet, and messages waiting for it fail back to their senders. Linking again needs a new code.",
+        "envelope": "args",
+        "id": "peer_link.remove",
+        "label": "Unlink",
+        "params": [],
+        "report": false
+      },
+      "empty": "No linked hubs. Ask the other fleet's owner for a link code (fleet-hub peer pair on their hub), then Link a hub.",
+      "fields": [
+        {
+          "help": "The other fleet's id once it has answered, else its hub's address.",
+          "id": "title",
+          "label": "Fleet",
+          "max": 256,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "How the last exchange went.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "connected",
+              "Connected"
+            ],
+            [
+              "retrying",
+              "Retrying"
+            ],
+            [
+              "refused",
+              "Refused"
+            ],
+            [
+              "incompatible",
+              "Incompatible"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "Which hub opens the connection: this one dials out, or the other dials in.",
+          "id": "role",
+          "label": "Direction",
+          "options": [
+            [
+              "dialer",
+              "We dial"
+            ],
+            [
+              "listener",
+              "They dial"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The hub this one dials; a link the other side dials has none.",
+          "id": "url",
+          "label": "Address",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "The round trip of the last exchange this hub dialed.",
+          "id": "latency",
+          "label": "Latency",
+          "max": 32,
+          "type": "text"
+        },
+        {
+          "help": "Carried either way since midnight (UTC).",
+          "id": "messages_today",
+          "label": "Messages today",
+          "type": "count"
+        },
+        {
+          "help": "Carried either way since the link was made.",
+          "id": "messages_total",
+          "label": "Messages in all",
+          "type": "count"
+        },
+        {
+          "help": "Messages queued for the other fleet.",
+          "id": "pending",
+          "label": "Waiting",
+          "type": "count"
+        },
+        {
+          "help": "When the hubs last traded messages.",
+          "id": "last_exchange_at",
+          "label": "Last exchange",
+          "type": "time"
+        },
+        {
+          "help": "Why the last exchange failed, while it is failing.",
+          "id": "last_error",
+          "label": "Last error",
+          "max": 512,
+          "type": "text"
+        }
+      ],
+      "help": "Other fleets' hubs this hub exchanges messages with: sessions here can message sessions there, and back. Each link shows how it is doing and what it carried.",
+      "id": "peer_link",
+      "id_field": "id",
+      "label": "Linked hub",
+      "list": "list_peer_links",
+      "plural": "Linked hubs",
+      "title_field": "title"
     }
   ],
   "sources": [

@@ -757,12 +757,12 @@ fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
 /// `resume_claude_session_id`, the given conversation, launched exactly as
 /// `recreate_pane_command` would. A shell session has no id.
 pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, String) {
-    if args.kind.as_deref() == Some("shell") {
+    let Some(agent) = crate::agent_adapter::for_kind(args.kind.as_deref().unwrap_or("work")) else {
         return (
             None,
             crate::tmux::shell_pane_command(args.start_command.as_deref()),
         );
-    }
+    };
     // `model` / `effort` are also stored on the row (`store_launch`), so a
     // later recreate / restart / repair / move launches with them again.
     let launch = crate::tmux::ClaudeLaunch {
@@ -773,15 +773,15 @@ pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, 
     match args.resume_claude_session_id.as_deref() {
         Some(id) => (
             Some(id.to_string()),
-            crate::tmux::pane_command_with(
-                Some(id).filter(|id| crate::validate::claude_session_id(id).is_ok()),
+            agent.launch_command(
+                Some(id).filter(|id| agent.valid_conversation_id(id)),
                 &args.name,
                 &launch,
             ),
         ),
         None => {
-            let id = uuid::Uuid::new_v4().to_string();
-            let pane = crate::tmux::pane_command_with(Some(&id), &args.name, &launch);
+            let id = agent.mint_conversation_id();
+            let pane = agent.launch_command(Some(&id), &args.name, &launch);
             (Some(id), pane)
         }
     }
@@ -2007,11 +2007,11 @@ pub(crate) fn recreate_pane_command(
     tmux_name: &str,
     launch: &crate::tmux::ClaudeLaunch,
 ) -> String {
-    if kind == "shell" {
+    let Some(agent) = crate::agent_adapter::for_kind(kind) else {
         return crate::tmux::shell_pane_command(None);
-    }
-    let id = claude_session_id.filter(|id| crate::validate::claude_session_id(id).is_ok());
-    crate::tmux::pane_command_with(id, tmux_name, launch)
+    };
+    let id = claude_session_id.filter(|id| agent.valid_conversation_id(id));
+    agent.launch_command(id, tmux_name, launch)
 }
 
 /// Store `launch` as the session's own (every part, `None` included).

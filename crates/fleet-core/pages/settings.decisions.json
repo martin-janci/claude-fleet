@@ -49,6 +49,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.sibling_repos",
+          "hint": "Pre-ticks the other repository a ticket start also needs; you still press Start."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.quick_answer",
           "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission."
         },

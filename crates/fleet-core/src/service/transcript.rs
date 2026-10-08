@@ -2351,7 +2351,7 @@ pub async fn fetch_transcript_after(
 ) -> Result<TranscriptDelta, IpcError> {
     let script = transcript_read_script(&args)?;
     let text = read_tail(&args, &script, ssh).await?;
-    let turns = parse_conversation(&text);
+    let turns = crate::agent_adapter::claude().parse_transcript(&text);
     let max_chars = args.max_chars.clamp(1, MAX_MAX_CHARS);
     let window = renderable(&turns);
 
@@ -2465,7 +2465,7 @@ pub async fn fetch_conversation(
     // The Conversation tab may ask for a wider window than the MCP text
     // tool's cap; its own ceiling applies here.
     let mut conv = trim_conversation(
-        parse_conversation(&text),
+        crate::agent_adapter::claude().parse_transcript(&text),
         args.turns.max(1),
         args.max_chars.clamp(1, CONV_MAX_CHARS_CEILING),
     );

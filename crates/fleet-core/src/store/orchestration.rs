@@ -32,6 +32,9 @@ pub const MISSION_DONE_WHEN_ROW_MAX_CHARS: usize = 500;
 pub const MISSION_ROLE_MAX_CHARS: usize = 40;
 /// Member items per mission (decision O10).
 pub const MISSION_ITEM_CAP: i64 = 30;
+/// Member items of a `plan` mission, which the loop never runs: a plan
+/// people and their own agents work through, tracked here as a graph.
+pub const PLAN_MISSION_ITEM_CAP: i64 = 200;
 /// Event rows kept per mission before the oldest fold into a digest.
 pub const MISSION_EVENT_CAP: i64 = 5000;
 /// An event's JSON payload, in bytes.
@@ -39,8 +42,24 @@ pub const MISSION_EVENT_PAYLOAD_MAX: usize = 4096;
 /// The autonomy a mission may ask for: L0..=L3.
 pub const MISSION_LEVEL_MAX: i64 = 3;
 
-/// `finite` ends when its done_when holds; `continuous` keeps running (O8).
-pub const MISSION_MODES: [&str; 2] = ["finite", "continuous"];
+/// `finite` ends when its done_when holds; `continuous` keeps running (O8);
+/// `plan` tracks a plan the loop never runs (no steps, cards, planner or
+/// grant), so it may hold [`PLAN_MISSION_ITEM_CAP`] items.
+pub const MISSION_MODES: [&str; 3] = ["finite", "continuous", "plan"];
+
+/// Whether the loop (orchestration O4–O8) runs `mode` at all.
+pub fn mode_runs_loop(mode: &str) -> bool {
+    mode != "plan"
+}
+
+/// How many members a mission in `mode` may hold.
+pub fn mission_item_cap(mode: &str) -> i64 {
+    if mode_runs_loop(mode) {
+        MISSION_ITEM_CAP
+    } else {
+        PLAN_MISSION_ITEM_CAP
+    }
+}
 /// The stored lifecycle, in order.
 pub const MISSION_STATES: [&str; 6] = [
     "draft",
@@ -619,6 +638,18 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Every work item that belongs to a mission, as `(item id, mission
+    /// id)`: the Work view's group by mission (redesign step 6.2). The
+    /// caller fences which missions it may name.
+    pub fn mission_membership(&self) -> Result<Vec<(i64, i64)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, orchestration_project_id FROM work_items \
+             WHERE orchestration_project_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Every mission: live ones (draft, active, paused) first, then by last
     /// change. The caller fences by org and owner.
     pub fn list_missions(&self) -> Result<Vec<MissionRow>, IpcError> {
@@ -668,6 +699,23 @@ impl Store {
             Some(m) => check_mode(m)?.to_string(),
             None => before.mode.clone(),
         };
+        if mode != before.mode {
+            // A plan may hold more than the loop runs: leaving `plan` keeps
+            // the loop's cap (O10).
+            let members: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM work_items WHERE orchestration_project_id = ?1 \
+                   AND (?2 <> 'continuous' OR status_category <> 'done')",
+                rusqlite::params![id, mode],
+                |r| r.get(0),
+            )?;
+            let cap = mission_item_cap(&mode);
+            if members > cap {
+                return Err(invalid(format!(
+                    "{} holds {members} items; a {mode} mission holds at most {cap}",
+                    before.name
+                )));
+            }
+        }
         let level = match p.level {
             Some(l) => check_level(l)?,
             None => before.level,
@@ -943,19 +991,21 @@ impl Store {
 
     /// Refuse `n` more members for mission `id`: a finished mission takes
     /// none, and no mission holds more than [`MISSION_ITEM_CAP`] (a
-    /// continuous one counts its open members only).
-    pub(super) fn check_mission_room(&self, id: i64, n: usize) -> Result<(), IpcError> {
+    /// continuous one counts its open members only; a plan may hold
+    /// [`PLAN_MISSION_ITEM_CAP`]).
+    pub(crate) fn check_mission_room(&self, id: i64, n: usize) -> Result<(), IpcError> {
         let m = self.require_mission(id)?;
         refuse_final(&m)?;
         let counted: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM work_items WHERE orchestration_project_id = ?1 \
-               AND (?2 = 'finite' OR status_category <> 'done')",
+               AND (?2 <> 'continuous' OR status_category <> 'done')",
             rusqlite::params![id, m.mode],
             |r| r.get(0),
         )?;
-        if counted + n as i64 > MISSION_ITEM_CAP {
+        let cap = mission_item_cap(&m.mode);
+        if counted + n as i64 > cap {
             return Err(invalid(format!(
-                "{} already holds {counted} of {MISSION_ITEM_CAP} items; split it into \
+                "{} already holds {counted} of {cap} items; split it into \
                  another mission",
                 m.name
             )));
