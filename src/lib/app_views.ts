@@ -180,3 +180,9 @@ export function agentChordLabel(isMac: boolean): string {
 export function workViewChordLabel(isMac: boolean): string {
   return isMac ? '⌘⇧W' : 'Ctrl+Shift+W';
 }
+
+/** Whether the task board shows over the terminal (sprints design
+ *  2026-09-28 §6c). The Work view's Board button opens it; App closes it
+ *  when another overlay (Files, Assets, Hosts) or the Session tab takes
+ *  the slot, and on Esc. */
+export const workBoardOpen = writable(false);

@@ -362,6 +362,8 @@ export const ROUTED_ACTIONS = [
   'dismiss_reopened',
   'name_session_work',
   'rename_work_item',
+  // The board: a native item's status, set by dragging its card.
+  'set_work_status',
   // The Work view (work graph M14): every write is `work_link { … }` on the
   // hub, so a paired desktop sends them while the link is up.
   'set_primary_work',

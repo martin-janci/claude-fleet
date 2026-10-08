@@ -308,6 +308,9 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // Shared work context (design 2026-09-29): a task or subtask a person
     // writes, and a person's decision on an agent's proposal.
     ("create_work_task", Verdict::Routed { tool: "work_link" }),
+    // The board (sprints design 2026-09-28 §6c): a person's status for a
+    // native item, set by dragging its card to a column.
+    ("set_work_status", Verdict::Routed { tool: "work_link" }),
     (
         "accept_work_proposal",
         Verdict::Routed { tool: "work_link" },

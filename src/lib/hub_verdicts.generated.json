@@ -225,6 +225,7 @@
     "set_work_done_when",
     "set_work_hold",
     "set_work_project_trust",
+    "set_work_status",
     "setting_history",
     "setting_proposals",
     "spawn_review",
