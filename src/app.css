@@ -27,6 +27,8 @@
   --accent-fg: #ffffff;
   --accent-soft: #e7eefe;
   --ring: var(--accent);
+  /* The ring on a field AI filled, until a person touches it (manual ai.md). */
+  --ai-pre: var(--accent);
   /* Status: the full colour is text; soft, faint and line tint chips and banners. */
   --status-working: #3157c9;
   --status-waiting: #8f520b;
@@ -194,6 +196,8 @@
     --accent-fg: #0b1220;
     --accent-soft: #1c2735;
     --ring: var(--accent);
+    /* The ring on a field AI filled, until a person touches it (manual ai.md). */
+    --ai-pre: var(--accent);
     /* Status: the full colour is text; soft, faint and line tint chips and banners. */
     --status-working: #7fa3ff;
     --status-waiting: #d29b4a;
@@ -271,6 +275,8 @@
   --accent-fg: #ffffff;
   --accent-soft: #e7eefe;
   --ring: var(--accent);
+  /* The ring on a field AI filled, until a person touches it (manual ai.md). */
+  --ai-pre: var(--accent);
   /* Status: the full colour is text; soft, faint and line tint chips and banners. */
   --status-working: #3157c9;
   --status-waiting: #8f520b;
@@ -347,6 +353,8 @@
   --accent-fg: #0b1220;
   --accent-soft: #1c2735;
   --ring: var(--accent);
+  /* The ring on a field AI filled, until a person touches it (manual ai.md). */
+  --ai-pre: var(--accent);
   /* Status: the full colour is text; soft, faint and line tint chips and banners. */
   --status-working: #7fa3ff;
   --status-waiting: #d29b4a;
