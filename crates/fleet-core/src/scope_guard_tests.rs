@@ -710,6 +710,16 @@ const SCOPE_GUARDS: &[Guard] = &[
     // ---- service/work/view.rs -------------------------------------------
     Guard {
         file: "crates/fleet-core/src/service/work/view.rs",
+        func: "blocked_on",
+        nth: 0,
+        code: "g.scope.is_all() || g.item_org(i).is_some_and(|o| g.scope.sees_org(Some(o)))",
+        verdict: Verdict::OrgBoundary,
+        why: "whether a scoped caller is told the id of a blocking work item \
+              in another org (redesign 6.3); an item is the org's work data, \
+              and the item still blocks when it is not named",
+    },
+    Guard {
+        file: "crates/fleet-core/src/service/work/view.rs",
         func: "native_work",
         nth: 0,
         code: "if !scope.is_all() && !label.is_some_and(|(_, visible)| *visible) {",
