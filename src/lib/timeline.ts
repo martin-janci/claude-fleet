@@ -46,6 +46,8 @@ const OPS_KINDS = new Set([
   'recreated',
   'gc_killed',
   'playbook_applied',
+  // PR shepherd (`service::pr_shepherd`): `<condition>:<outcome>`.
+  'pr_shepherd',
   'mcp_call',
   'message_sent',
   // Fix round 1 (task-13-14): the sender's notice that a message it sent

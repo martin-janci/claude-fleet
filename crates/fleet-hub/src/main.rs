@@ -25,6 +25,7 @@ mod reports;
 mod serve;
 mod session;
 mod settings;
+mod shepherd;
 mod tls;
 mod tracker;
 mod update;
@@ -187,6 +188,15 @@ enum Cmd {
     Settings {
         #[command(subcommand)]
         cmd: settings::SettingsCmd,
+        #[command(flatten)]
+        opts: HubOptions,
+    },
+    /// The PR shepherd: grant a project a standing rule (watch, nudge or
+    /// merge), revoke one or all, and read what it did. Writes the database
+    /// directly, as the person at this console; no control API action can.
+    Shepherd {
+        #[command(subcommand)]
+        cmd: shepherd::ShepherdCmd,
         #[command(flatten)]
         opts: HubOptions,
     },
@@ -546,6 +556,7 @@ async fn main() -> ExitCode {
         Cmd::Decide { cmd, opts } => decide::run(cmd, &opts, &env).await,
         Cmd::Settings { cmd, opts } => settings::run(cmd, &opts, &env),
         Cmd::Guides { cmd, opts } => guides::run(cmd, &opts, &env),
+        Cmd::Shepherd { cmd, opts } => shepherd::run(cmd, &opts, &env),
         Cmd::Update { cmd, opts } => update::run(cmd, &opts, &env).await,
         Cmd::Reports {
             limit,
