@@ -15,7 +15,7 @@
    "y": 0,
    "w": 1440,
    "h": 900,
-   "title": "Inbox \u00b7 only what needs you, session in focus",
+   "title": "Inbox · only what needs you, session in focus",
    "expand": "fill"
   },
   "Work.dc.html": {
@@ -23,7 +23,7 @@
    "y": 0,
    "w": 1440,
    "h": 900,
-   "title": "Work \u00b7 tasks with filters open",
+   "title": "Work · tasks with filters open",
    "expand": "fill"
   },
   "Automation.dc.html": {
@@ -31,7 +31,7 @@
    "y": 0,
    "w": 1440,
    "h": 900,
-   "title": "Automation \u00b7 routines, agents, runs",
+   "title": "Automation · routines, agents, runs",
    "expand": "fill"
   },
   "Accounts.dc.html": {
@@ -47,7 +47,7 @@
    "y": 1000,
    "w": 1440,
    "h": 900,
-   "title": "Session \u00b7 terminals 0\u2026N beside the agent tab",
+   "title": "Session · terminals 0…N beside the agent tab",
    "expand": "fill"
   },
   "Sessions.dc.html": {
@@ -55,7 +55,7 @@
    "y": 1000,
    "w": 1440,
    "h": 900,
-   "title": "Sessions \u00b7 all sessions, view options, shared with me",
+   "title": "Sessions · all sessions, view options, shared with me",
    "expand": "fill"
   },
   "Agent.dc.html": {
@@ -63,7 +63,7 @@
    "y": 1000,
    "w": 1440,
    "h": 900,
-   "title": "Session \u00b7 Claude Code agent tab",
+   "title": "Session · Claude Code agent tab",
    "expand": "fill"
   },
   "Files.dc.html": {
@@ -71,7 +71,7 @@
    "y": 1000,
    "w": 1440,
    "h": 900,
-   "title": "Session \u00b7 Files: changed, commit, push",
+   "title": "Session · Files: changed, commit, push",
    "expand": "fill"
   },
   "Palette.dc.html": {
@@ -79,7 +79,7 @@
    "y": 2000,
    "w": 1440,
    "h": 900,
-   "title": "\u2318K palette, scoped to the session",
+   "title": "⌘K palette, scoped to the session",
    "expand": "fill"
   },
   "NewSession.dc.html": {
@@ -87,7 +87,7 @@
    "y": 2000,
    "w": 1440,
    "h": 900,
-   "title": "New session \u00b7 every 0.5.3 option kept",
+   "title": "New session · every 0.5.3 option kept",
    "expand": "fill"
   },
   "Toolkit.dc.html": {
@@ -95,7 +95,7 @@
    "y": 2000,
    "w": 1440,
    "h": 900,
-   "title": "Toolkit \u00b7 skills synced across hosts",
+   "title": "Toolkit · skills synced across hosts",
    "expand": "fill"
   },
   "Settings.dc.html": {
@@ -103,7 +103,7 @@
    "y": 2000,
    "w": 1440,
    "h": 900,
-   "title": "Settings \u00b7 layout, motion, density",
+   "title": "Settings · layout, motion, density",
    "expand": "fill"
   },
   "Missions.dc.html": {
@@ -111,7 +111,7 @@
    "y": 3000,
    "w": 1440,
    "h": 900,
-   "title": "Work \u203a Missions \u00b7 plan by wave, cards, autonomy",
+   "title": "Work › Missions · plan by wave, cards, autonomy",
    "expand": "fill"
   },
   "MissionControl.dc.html": {
@@ -119,7 +119,7 @@
    "y": 4100,
    "w": 1440,
    "h": 900,
-   "title": "Control \u00b7 coordinator chat, Today tab, views panel",
+   "title": "Control · coordinator chat, Today tab, views panel",
    "expand": "fill"
   },
   "MCViews.dc.html": {
@@ -127,7 +127,7 @@
    "y": 4100,
    "w": 1440,
    "h": 900,
-   "title": "Control \u00b7 Library and Pull requests views, deep links",
+   "title": "Control · Library and Pull requests views, deep links",
    "expand": "fill"
   },
   "MCSession.dc.html": {
@@ -135,7 +135,7 @@
    "y": 4100,
    "w": 1440,
    "h": 900,
-   "title": "Control \u00b7 a session opened in the panel",
+   "title": "Control · a session opened in the panel",
    "expand": "fill"
   },
   "MCTasks.dc.html": {
@@ -143,7 +143,7 @@
    "y": 4100,
    "w": 1440,
    "h": 900,
-   "title": "Control \u00b7 tasks in the chat + Tasks view",
+   "title": "Control · tasks in the chat + Tasks view",
    "expand": "fill"
   },
   "Components.dc.html": {
@@ -151,7 +151,7 @@
    "y": 5200,
    "w": 1440,
    "h": 900,
-   "title": "Conversation components \u00b7 form, wizard, progress, results, errors",
+   "title": "Conversation components · form, wizard, progress, results, errors",
    "expand": "fill"
   },
   "Wizard.dc.html": {
@@ -159,7 +159,7 @@
    "y": 5200,
    "w": 1440,
    "h": 900,
-   "title": "Wizard \u00b7 add a host, with live checks",
+   "title": "Wizard · add a host, with live checks",
    "expand": "fill"
   },
   "Tour.dc.html": {
@@ -167,7 +167,7 @@
    "y": 5200,
    "w": 1440,
    "h": 900,
-   "title": "Tutorial \u00b7 first-run tour and Get started checklist",
+   "title": "Tutorial · first-run tour and Get started checklist",
    "expand": "fill"
   },
   "Guide.dc.html": {
@@ -175,7 +175,7 @@
    "y": 5200,
    "w": 1440,
    "h": 900,
-   "title": "Guide \u00b7 step-by-step, changes real settings",
+   "title": "Guide · step-by-step, changes real settings",
    "expand": "fill"
   },
   "Tidy.dc.html": {
@@ -183,7 +183,7 @@
    "y": 6300,
    "w": 1440,
    "h": 900,
-   "title": "Tidy up \u00b7 failed never lands here",
+   "title": "Tidy up · failed never lands here",
    "expand": "fill"
   },
   "Today.dc.html": {
@@ -191,7 +191,7 @@
    "y": 6300,
    "w": 1440,
    "h": 900,
-   "title": "Today \u00b7 daily triage and standup",
+   "title": "Today · daily triage and standup",
    "expand": "fill"
   },
   "SessionDetails.dc.html": {
@@ -199,7 +199,7 @@
    "y": 6300,
    "w": 1440,
    "h": 900,
-   "title": "Session \u00b7 Details tab, full",
+   "title": "Session · Details tab, full",
    "expand": "fill"
   },
   "TaskDetail.dc.html": {
@@ -207,7 +207,7 @@
    "y": 6300,
    "w": 1440,
    "h": 900,
-   "title": "Task detail \u00b7 with the start menu open",
+   "title": "Task detail · with the start menu open",
    "expand": "fill"
   },
   "Review.dc.html": {
@@ -215,7 +215,7 @@
    "y": 7300,
    "w": 1440,
    "h": 900,
-   "title": "Work \u203a Review \u00b7 confirm session \u2194 ticket",
+   "title": "Work › Review · confirm session ↔ ticket",
    "expand": "fill"
   },
   "Board.dc.html": {
@@ -223,7 +223,7 @@
    "y": 7300,
    "w": 1440,
    "h": 900,
-   "title": "Work \u203a Board \u00b7 drag between tracker columns",
+   "title": "Work › Board · drag between tracker columns",
    "expand": "fill"
   },
   "FilesTree.dc.html": {
@@ -231,7 +231,7 @@
    "y": 7300,
    "w": 1440,
    "h": 900,
-   "title": "Files \u00b7 Tree and file viewer",
+   "title": "Files · Tree and file viewer",
    "expand": "fill"
   },
   "FilesHistory.dc.html": {
@@ -239,7 +239,7 @@
    "y": 7300,
    "w": 1440,
    "h": 900,
-   "title": "Files \u00b7 History graph and Branches",
+   "title": "Files · History graph and Branches",
    "expand": "fill"
   },
   "HostDetail.dc.html": {
@@ -247,7 +247,7 @@
    "y": 8500,
    "w": 1440,
    "h": 900,
-   "title": "Host detail \u00b7 health, resources, lost & found",
+   "title": "Host detail · health, resources, lost & found",
    "expand": "fill"
   },
   "Assets.dc.html": {
@@ -255,7 +255,7 @@
    "y": 8500,
    "w": 1440,
    "h": 900,
-   "title": "Toolkit \u203a Assets \u00b7 layers and changesets",
+   "title": "Toolkit › Assets · layers and changesets",
    "expand": "fill"
   },
   "AddProject.dc.html": {
@@ -263,7 +263,7 @@
    "y": 8500,
    "w": 1440,
    "h": 900,
-   "title": "Add project \u00b7 from GitHub, URL, folder, new",
+   "title": "Add project · from GitHub, URL, folder, new",
    "expand": "fill"
   },
   "Dialogs.dc.html": {
@@ -271,7 +271,7 @@
    "y": 8500,
    "w": 1440,
    "h": 900,
-   "title": "Dialogs \u00b7 Fork, Resume, Send prompt, Kill, Move, Review, Background, Rules",
+   "title": "Dialogs · Fork, Resume, Send prompt, Kill, Move, Review, Background, Rules",
    "expand": "fill"
   },
   "AgentStates.dc.html": {
@@ -279,7 +279,7 @@
    "y": 9500,
    "w": 1440,
    "h": 900,
-   "title": "Fleet agent \u00b7 confirms and six blocked states",
+   "title": "Fleet agent · confirms and six blocked states",
    "expand": "fill"
   },
   "SettingsHub.dc.html": {
@@ -287,7 +287,7 @@
    "y": 9500,
    "w": 1440,
    "h": 900,
-   "title": "Settings \u203a Hub & sync \u00b7 pairing and Control API tokens",
+   "title": "Settings › Hub & sync · pairing and Control API tokens",
    "expand": "fill"
   },
   "SettingsMore.dc.html": {
@@ -295,7 +295,7 @@
    "y": 9500,
    "w": 1440,
    "h": 900,
-   "title": "Settings \u00b7 Notifications, Presets, Updates, Shortcuts",
+   "title": "Settings · Notifications, Presets, Updates, Shortcuts",
    "expand": "fill"
   },
   "States.dc.html": {
@@ -303,7 +303,7 @@
    "y": 9500,
    "w": 1440,
    "h": 900,
-   "title": "States \u00b7 offline, empty, first run, loading, no results",
+   "title": "States · offline, empty, first run, loading, no results",
    "expand": "fill"
   },
   "Toasts.dc.html": {
@@ -319,7 +319,7 @@
    "y": 10700,
    "w": 1440,
    "h": 900,
-   "title": "Watch view \u00b7 a shared session, read-only",
+   "title": "Watch view · a shared session, read-only",
    "expand": "fill"
   },
   "Light.dc.html": {
@@ -327,7 +327,7 @@
    "y": 10700,
    "w": 1440,
    "h": 900,
-   "title": "Light mode \u00b7 Inbox with a session",
+   "title": "Light mode · Inbox with a session",
    "expand": "fill"
   },
   "Motion.dc.html": {
@@ -335,7 +335,7 @@
    "y": 10700,
    "w": 1440,
    "h": 900,
-   "title": "Motion \u00b7 four moments frame by frame",
+   "title": "Motion · four moments frame by frame",
    "expand": "fill"
   },
   "OrgOverview.dc.html": {
@@ -343,7 +343,7 @@
    "y": 11900,
    "w": 1440,
    "h": 900,
-   "title": "Organisation \u00b7 overview and switcher",
+   "title": "Organisation · overview and switcher",
    "expand": "fill"
   },
   "OrgMembers.dc.html": {
@@ -351,7 +351,7 @@
    "y": 11900,
    "w": 1440,
    "h": 900,
-   "title": "Organisation \u00b7 members and roles",
+   "title": "Organisation · members and roles",
    "expand": "fill"
   },
   "OrgDevices.dc.html": {
@@ -359,7 +359,7 @@
    "y": 11900,
    "w": 1440,
    "h": 900,
-   "title": "Organisation \u00b7 devices",
+   "title": "Organisation · devices",
    "expand": "fill"
   },
   "OrgSpend.dc.html": {
@@ -367,7 +367,7 @@
    "y": 11900,
    "w": 1440,
    "h": 900,
-   "title": "Organisation \u00b7 spend, budgets, settings",
+   "title": "Organisation · spend, budgets, settings",
    "expand": "fill"
   },
   "Sharing.dc.html": {
@@ -375,7 +375,7 @@
    "y": 12900,
    "w": 1440,
    "h": 900,
-   "title": "Sharing \u00b7 presence and grants",
+   "title": "Sharing · presence and grants",
    "expand": "fill"
   },
   "Federation.dc.html": {
@@ -383,7 +383,7 @@
    "y": 12900,
    "w": 1440,
    "h": 900,
-   "title": "Federation \u00b7 linked hubs",
+   "title": "Federation · linked hubs",
    "expand": "fill"
   },
   "DebugDevices.dc.html": {
@@ -399,7 +399,7 @@
    "y": 3000,
    "w": 1440,
    "h": 900,
-   "title": "Work \u203a a finished mission + empty and landing states",
+   "title": "Work › a finished mission + empty and landing states",
    "expand": "fill"
   },
   "SettingsSections.dc.html": {
@@ -407,7 +407,7 @@
    "y": 12900,
    "w": 1440,
    "h": 900,
-   "title": "Settings \u00b7 Voice, Downloads, Decisions, Playbooks and other sections",
+   "title": "Settings · Voice, Downloads, Decisions, Playbooks and other sections",
    "expand": "fill"
   },
   "AIPatterns.dc.html": {
@@ -415,7 +415,7 @@
    "y": 3000,
    "w": 1440,
    "h": 900,
-   "title": "AI patterns \u00b7 Proposed by Jev, Drafted, never AI",
+   "title": "AI patterns · Proposed by Jev, Drafted, never AI",
    "expand": "fill"
   },
   "LogoMotion.dc.html": {
@@ -423,7 +423,7 @@
    "y": 14000,
    "w": 1440,
    "h": 900,
-   "title": "Logo motion \u00b7 12 behaviours of the Orbit mark",
+   "title": "Logo motion · 12 behaviours of the Orbit mark",
    "expand": "fill"
   },
   "Loaders.dc.html": {
@@ -431,7 +431,7 @@
    "y": 14000,
    "w": 1440,
    "h": 900,
-   "title": "Particle loaders \u00b7 12 futuristic loaders, one job each",
+   "title": "Particle loaders · 12 futuristic loaders, one job each",
    "expand": "fill"
   },
   "LoadersInUse.dc.html": {
@@ -439,7 +439,7 @@
    "y": 14000,
    "w": 1440,
    "h": 900,
-   "title": "Loaders in use \u00b7 which loader goes where",
+   "title": "Loaders in use · which loader goes where",
    "expand": "fill"
   },
   "Startup.dc.html": {
@@ -447,7 +447,7 @@
    "y": 14000,
    "w": 1440,
    "h": 900,
-   "title": "Startup \u00b7 loaders by stage + where else they go",
+   "title": "Startup · loaders by stage + where else they go",
    "expand": "fill"
   },
   "LoadersInFlows.dc.html": {
@@ -464,6 +464,78 @@
    "w": 1440,
    "h": 900,
    "title": "Wizards built in chat",
+   "expand": "fill"
+  },
+  "MobileNav.dc.html": {
+   "x": 0,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Inbox and navigation",
+   "expand": "fill"
+  },
+  "MobileSession.dc.html": {
+   "x": 1520,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · One session",
+   "expand": "fill"
+  },
+  "MobileControl.dc.html": {
+   "x": 3040,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Control, notifications, chat forms",
+   "expand": "fill"
+  },
+  "MobileNewSession.dc.html": {
+   "x": 4560,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · New session",
+   "expand": "fill"
+  },
+  "MobileWork.dc.html": {
+   "x": 6080,
+   "y": 15240,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Work",
+   "expand": "fill"
+  },
+  "MobileMore.dc.html": {
+   "x": 0,
+   "y": 16260,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Hosts, accounts, files",
+   "expand": "fill"
+  },
+  "MobileSettings.dc.html": {
+   "x": 1520,
+   "y": 16260,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · More, settings, pairing",
+   "expand": "fill"
+  },
+  "MobileStates.dc.html": {
+   "x": 3040,
+   "y": 16260,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Offline and loading",
+   "expand": "fill"
+  },
+  "MobileRecovery.dc.html": {
+   "x": 4560,
+   "y": 16260,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Errors and recovery",
    "expand": "fill"
   }
  },
@@ -524,7 +596,16 @@
   "LoadersInUse.dc.html",
   "Startup.dc.html",
   "LoadersInFlows.dc.html",
-  "ChatWizards.dc.html"
+  "ChatWizards.dc.html",
+  "MobileNav.dc.html",
+  "MobileSession.dc.html",
+  "MobileControl.dc.html",
+  "MobileNewSession.dc.html",
+  "MobileWork.dc.html",
+  "MobileMore.dc.html",
+  "MobileSettings.dc.html",
+  "MobileStates.dc.html",
+  "MobileRecovery.dc.html"
  ],
  "notes": {
   "title": {
@@ -537,7 +618,7 @@
   "mc": {
    "x": 0,
    "y": 3980,
-   "text": "Control: talk to the fleet on the left (\u2318E), Today briefing tab, views on the right for what the chat produced (Library, Pull requests, the session in focus)",
+   "text": "Control: talk to the fleet on the left (⌘E), Today briefing tab, views on the right for what the chat produced (Library, Pull requests, the session in focus)",
    "kind": "title1",
    "maxW": 4500
   },
@@ -580,6 +661,13 @@
    "x": 0,
    "y": 13880,
    "text": "Logo motion and loaders (animated: open a board to see it move)",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "p6": {
+   "x": 0,
+   "y": 15120,
+   "text": "Mobile app (fleet-mobile): Inbox · Sessions · Control · Work · More",
    "kind": "title1",
    "maxW": 4500
   }
