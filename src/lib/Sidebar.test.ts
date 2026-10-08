@@ -879,6 +879,8 @@ describe('Sidebar (sessions-grouped view)', () => {
     await tick(); await tick();
     addProjectRequest.set({});
     await tick(); await tick();
+    // Add project opens on From GitHub (redesign 6.11); this adds by URL.
+    await fireEvent.click(screen.getByTestId('add-mode-clone'));
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'newowner/fresh-repo' } });
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
@@ -1970,7 +1972,8 @@ describe('Sidebar: a hub contract skew', () => {
     await tick(); await tick();
     addProjectRequest.set({});
     await tick(); await tick();
-    // A valid repository would enable Create anywhere else; the blocked hub holds it.
+    // A valid repository would enable Add anywhere else; the blocked hub holds it.
+    await fireEvent.click(screen.getByTestId('add-mode-clone'));
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'acme/widgets' } });
     expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(true);
     const why = screen.getByTestId('add-blocked');

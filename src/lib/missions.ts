@@ -219,6 +219,8 @@ export interface MissionGrant {
   hosts?: string[] | null;
   budget_micros?: number | null;
   max_parallel?: number | null;
+  /** The login its runs bill (redesign 8.7); absent = the host's own. */
+  profile?: string | null;
   created_at: number;
   expires_at: number;
   revoked_at?: number | null;
@@ -662,6 +664,8 @@ export interface GrantInput {
   budget_cents?: number;
   hosts?: string[];
   max_parallel?: number;
+  /** A credential profile on the run's host; omitted = the host's own. */
+  profile?: string;
 }
 
 export function grantMission(missionId: number, g: GrantInput): Promise<Result<MissionGrant>> {
