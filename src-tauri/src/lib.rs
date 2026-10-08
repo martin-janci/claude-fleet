@@ -120,6 +120,9 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 fleet_core::rt::install(tokio::runtime::Handle::current());
             });
+            // The tray and menu-bar icon (redesign 3.17), idle until the
+            // frontend says otherwise.
+            commands::tray::install(app);
             let handle = app.handle().clone();
             // Built concretely and then coerced, rather than built as the
             // trait object: the hub event bridge needs the concrete type. Both
@@ -374,6 +377,7 @@ pub fn run() {
             commands::health::health_check,
             commands::diagnostics::collect_diagnostics,
             commands::diagnostics::open_log_folder,
+            commands::tray::set_tray_state,
             commands::projects::list_projects,
             commands::projects::refresh_projects,
             commands::projects::add_project,

@@ -10,10 +10,13 @@ import { initMotion } from './lib/motion';
 import { installErrorReporting } from './lib/error_report';
 import { selectedSession } from './lib/selection';
 import { trackViewedSession } from './lib/session_viewed';
+import { startTraySync } from './lib/tray_state';
 
 initTheme();
 initMotion();
 installErrorReporting();
 trackViewedSession(selectedSession);
+// The tray and menu-bar icon follows the fleet (redesign 3.17).
+startTraySync();
 const app = mount(App, { target: document.getElementById('app')! });
 export default app;
