@@ -9,6 +9,7 @@
     remote,
     note,
     canCreate,
+    verb = 'Add project',
     oncreate,
     onclose,
     onstop,
@@ -21,6 +22,8 @@
     /** What stopping cannot undo for this request, or null. */
     note: string | null;
     canCreate: boolean;
+    /** The action, as the board words it ("Add project", "Add 2 projects"). */
+    verb?: string;
     oncreate: () => void;
     onclose: () => void;
     onstop: () => void;
@@ -39,7 +42,7 @@
       >{stopping ? 'Stopping…' : remote ? 'Stop waiting' : 'Cancel'}</button>
     {:else}
       <button type="button" onclick={onclose}>Cancel</button>
-      <button type="button" class="primary" data-testid="add-create" onclick={oncreate} disabled={!canCreate}>Create</button>
+      <button type="button" class="primary" data-testid="add-create" onclick={oncreate} disabled={!canCreate}>{verb}</button>
     {/if}
   </div>
   {#if busy && note}

@@ -69,3 +69,48 @@ export function showOsNotification(title: string, body: string, tag?: string): b
     return false;
   }
 }
+
+// ── The hub's notifications matrix (Orbit Fleet 11.9) ──
+//
+// `notify.desktop` / `notify.phone` / `notify.sound` each list the session
+// states that reach that channel; `notify.quiet_hours` ("22:00-07:30", may
+// run past midnight, "" for none) silences every channel except for the
+// states in `notify.quiet_except`. The hub stores them, so the phone reads
+// the same answer through `get_settings`.
+
+export type NotifyChannel = 'desktop' | 'phone' | 'sound';
+export type NotifyState = 'needs_you' | 'failed' | 'blocked' | 'done' | 'routine_failed';
+
+const list = (v: string | undefined) => new Set((v ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+
+/** `"22:00-07:30"` → minutes of the day; null for none or a malformed one. */
+export function parseQuietHours(v: string | undefined): [number, number] | null {
+  const m = /^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/.exec(v ?? '');
+  if (!m) return null;
+  const [h1, m1, h2, m2] = m.slice(1).map(Number);
+  if (h1 > 23 || h2 > 23 || m1 > 59 || m2 > 59) return null;
+  const from = h1 * 60 + m1;
+  const until = h2 * 60 + m2;
+  return from === until ? null : [from, until];
+}
+
+/** Whether `minute` (of the day) falls inside the range, which may wrap
+ *  past midnight. */
+export function inQuietHours(range: [number, number] | null, minute: number): boolean {
+  if (!range) return false;
+  const [from, until] = range;
+  return from < until ? minute >= from && minute < until : minute >= from || minute < until;
+}
+
+/** Whether a notification about `state` may go out on `channel` now, by the
+ *  hub's settings (`fleetSettings`) and this device's clock. */
+export function notificationAllowed(
+  channel: NotifyChannel,
+  state: NotifyState,
+  settings: Record<string, string>,
+  at: Date = new Date(),
+): boolean {
+  if (!list(settings[`notify.${channel}`]).has(state)) return false;
+  const quiet = inQuietHours(parseQuietHours(settings['notify.quiet_hours']), at.getHours() * 60 + at.getMinutes());
+  return !quiet || list(settings['notify.quiet_except']).has(state);
+}

@@ -80,6 +80,7 @@ export const SETTING_KEYS = {
   decideJevWorkLink: 'decide.jev.work_link',
   decideJevStartProject: 'decide.jev.start_project',
   decideJevSiblingRepos: 'decide.jev.sibling_repos',
+  decideJevHostPlacement: 'decide.jev.host_placement',
   decideJevQuickAnswer: 'decide.jev.quick_answer',
   decideJevDuplicate: 'decide.jev.duplicate',
   decideJevUnassigned: 'decide.jev.unassigned',
@@ -97,6 +98,11 @@ export const SETTING_KEYS = {
   updateCheckIntervalSecs: 'update.check_interval_secs',
   budgetOrgDailyUsd: 'budget.org_daily_usd',
   budgetOrgMonthlyUsd: 'budget.org_monthly_usd',
+  notifyDesktop: 'notify.desktop',
+  notifyPhone: 'notify.phone',
+  notifySound: 'notify.sound',
+  notifyQuietHours: 'notify.quiet_hours',
+  notifyQuietExcept: 'notify.quiet_except',
 } as const;
 
 /** Mirror of `settings::DECIDE_MODES`: what a decision feature's mode may be
@@ -253,6 +259,7 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'decide.jev.work_link': 'off',
   'decide.jev.start_project': 'off',
   'decide.jev.sibling_repos': 'off',
+  'decide.jev.host_placement': 'off',
   'decide.jev.quick_answer': 'off',
   'decide.jev.duplicate': 'off',
   'decide.jev.unassigned': 'false',
@@ -270,6 +277,11 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'update.check_interval_secs': '21600',
   'budget.org_daily_usd': '0',
   'budget.org_monthly_usd': '0',
+  'notify.desktop': 'needs_you,failed,blocked,routine_failed',
+  'notify.phone': 'needs_you,failed,routine_failed',
+  'notify.sound': 'needs_you',
+  'notify.quiet_hours': '',
+  'notify.quiet_except': 'failed',
 };
 
 export type FleetSettings = Record<string, string>;

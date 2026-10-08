@@ -25,7 +25,15 @@ vi.mock('./sessions', async () => {
   };
 });
 
+// The device list only feeds the read-only warning (step 5.8): the tests set
+// the store themselves.
+vi.mock('./devices', async () => {
+  const actual = await vi.importActual<typeof import('./devices')>('./devices');
+  return { ...actual, loadDevices: vi.fn(async () => ({ ok: true, value: [] })) };
+});
+
 import ShareSheet from './ShareSheet.svelte';
+import { devices } from './devices';
 import {
   fetchSessionAccess,
   narrowShare,
@@ -78,6 +86,7 @@ beforeEach(() => {
   mockedNarrow.mockReset();
   mockedList.mockReset();
   mockedList.mockResolvedValue({ ok: true, value: [] });
+  devices.set([]);
 });
 
 describe('ShareSheet', () => {
@@ -130,6 +139,22 @@ describe('ShareSheet', () => {
     await fireEvent.click(screen.getByTestId('share-revoke-yes'));
     await settle();
     expect(mockedUnshare).toHaveBeenCalledWith(42, { org: 'Acme' });
+  });
+
+  it('warns before a drive share to someone whose only device is read-only (step 5.8)', async () => {
+    devices.set([
+      { name: 'bea-phone', person: 'bea', mode: 'readonly', trusted: false, created_at: 1, catalogs: [] },
+    ]);
+    render(ShareSheet);
+    await settle();
+    await fireEvent.input(screen.getByTestId('share-person'), { target: { value: 'bea' } });
+    // Watch is all a read-only device can do anyway: nothing to warn about.
+    expect(screen.queryByTestId('share-readonly-warning')).toBeNull();
+    await fireEvent.change(screen.getByTestId('share-level'), { target: { value: 'drive' } });
+    expect(screen.getByTestId('share-readonly-warning').textContent).toContain('bea-phone');
+    // An org share is not one person's devices.
+    await fireEvent.change(screen.getByTestId('share-kind'), { target: { value: 'org' } });
+    expect(screen.queryByTestId('share-readonly-warning')).toBeNull();
   });
 
   it('will not submit an empty recipient', async () => {

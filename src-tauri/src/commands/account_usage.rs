@@ -2,12 +2,12 @@
 //! `service::account_usage_poll`; the fetch itself is
 //! `service::account_usage` (security-reviewed, untouched here).
 //!
-//! Both refuse in remote mode. The cache they read is filled by
-//! `spawn_account_usage_tick`, which a hub client does not start, so
-//! the local answer would be a permanently empty list presented as fact — and
-//! the refresh path SSHes to the host from here. The hub's `usage_report`
-//! tool answers per-session usage, a different shape from
-//! `AccountUsageSnapshot`, so there is nothing to route to.
+//! The cache they read is filled by `spawn_account_usage_tick`, which a hub
+//! client does not start. So paired, `list_account_usage` routes to the
+//! hub's `account_usage` tool (hub contract 11), which serves the hub's own
+//! answers; `refresh_account_usage` and the rest refuse, since a refresh
+//! SSHes to the host from here and this app keeps no history while a hub
+//! owns the fleet.
 
 use crate::backend::FleetBackend;
 use fleet_core::events::EventBus;
@@ -16,6 +16,10 @@ use fleet_core::service::account_limits::{self, CheckAccountHeadroomArgs, Headro
 use fleet_core::service::account_spend::{self, AccountSpend};
 use fleet_core::service::account_usage::{AccountUsageSnapshot, UsageCache};
 use fleet_core::service::account_usage_poll;
+use fleet_core::service::decide::host_placement::{
+    self, ProposeHostArgs, RecordHostStartArgs, SuggestedHost,
+};
+use fleet_core::service::decide::DecideCtx;
 use fleet_core::ssh::SshClient;
 use fleet_core::store::{Store, UsageSnapshotRow};
 use serde::Deserialize;
@@ -43,15 +47,30 @@ pub struct AccountSpendArgs {
     pub account_uuid: Option<String>,
 }
 
-/// Every known account's cached usage snapshot. Never fetches.
+/// Every known account's cached usage snapshot. Never fetches. Paired, the
+/// hub's answers.
 #[tauri::command]
-pub fn list_account_usage(
+pub async fn list_account_usage(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     cache: State<'_, Arc<Mutex<UsageCache>>>,
 ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
-    backend.refuse_local_only("list_account_usage")?;
-    account_usage_poll::list_account_usage(&store, &cache)
+    routed::list_account_usage(&backend, &store, &cache).await
+}
+
+pub(crate) mod routed {
+    use super::*;
+
+    pub async fn list_account_usage(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        cache: &Mutex<UsageCache>,
+    ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.list_account_usage().await,
+            None => account_usage_poll::list_account_usage(store, cache),
+        }
+    }
 }
 
 /// Fetch `account_uuid`'s usage now if the floor allows, else return the
@@ -113,4 +132,39 @@ pub fn account_spend(
 ) -> Result<Vec<AccountSpend>, IpcError> {
     backend.refuse_local_only("account_spend")?;
     account_spend::account_spend(args.since, args.account_uuid.as_deref(), &store)
+}
+
+/// The decision model's host for a new session of a project (redesign step
+/// 4.11, Jev N5 `host_placement`): `Some` only in `assist` when two or more
+/// hosts are left after the limits and the offline ones. Off by default.
+/// Refused in remote mode: the hub owns the decision model and the usage.
+#[tauri::command]
+pub async fn propose_host_placement(
+    args: ProposeHostArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    cache: State<'_, Arc<Mutex<UsageCache>>>,
+) -> Result<Option<SuggestedHost>, IpcError> {
+    backend.refuse_local_only("propose_host_placement")?;
+    let ctx = DecideCtx::jev(Arc::clone(&store));
+    host_placement::propose(&ctx, &cache, &args).await
+}
+
+/// After a person's start of a project landed on a host: marks the decision
+/// model's host proposal confirmed or corrected (best effort, never fails a
+/// start). Refused in remote mode like the proposal.
+#[tauri::command]
+pub fn record_host_placement(
+    args: RecordHostStartArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<bool, IpcError> {
+    backend.refuse_local_only("record_host_placement")?;
+    let s = fleet_core::ipc_error::lock(&store)?;
+    host_placement::record_start(
+        &s,
+        args.project_id,
+        &args.host_alias,
+        fleet_core::store::now_unix(),
+    )
 }

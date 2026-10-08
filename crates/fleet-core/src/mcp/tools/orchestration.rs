@@ -1073,7 +1073,7 @@ impl FleetTools {
         mission_start {mission_id, step?}: take the next steps; retry \
         {item_id, note?}; mission_plan: ask the planner; card_decide \
         {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
-        budget_cents?, hosts?, max_parallel?}; mission_revoke; \
+        budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; \
         missions_pause_all. \
         Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT).")]

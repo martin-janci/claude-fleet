@@ -282,7 +282,10 @@ Index by area (names only; see the reference for details):
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `hide_host`, `provision_hosts`,
-  `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
+  `list_accounts`, `account_usage` (each account's latest plan usage: the
+  5-hour and weekly windows with their reset times, status and when it was
+  fetched, as the hub's usage poll last answered; never fetches; hub
+  contract 11), `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
   on a host the hub reaches over SSH and move the host onto it; a job read
   with `agent_installs`).
@@ -816,7 +819,9 @@ Index by area (names only; see the reference for details):
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under
-  `overlap: skip`, today's budget is spent, or a person skipped it.
+  `overlap: skip`, today's budget is spent, the account its login bills
+  is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
+  usage readings), or a person skipped it.
   `automation.paused` (Pause all) stops the schedule and event fires,
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
@@ -979,12 +984,18 @@ derive from them.
   press_enter`.
 - **`needs_attention.reason`** (on session rows and `/events` frames), most
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
-  which), `stop_failed` (the last turn ended in an API error; re-prompt),
+  which), `host_down` (the session's host was pinged and did not answer),
+  `account_limit` (its account's 5-hour or weekly window is used up and the
+  session is not working), `no_credentials` (its account's login is missing,
+  expired or rejected, and the session is not working), `stop_failed` (the
+  last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),
   `ci_failing` (idle with failing PR checks) and `lifecycle` (a failed or
   pending safe kill, a ghost, a lost row). `since` is when the session
-  entered that state.
+  entered that state. `state` (contract 11) is the attention state the
+  reason puts it in: `action_required`, `failed`, `blocked` (`host_down`,
+  `account_limit`, `no_credentials`) or `paused` (`lifecycle`).
 
 ### Errors and limits
 
@@ -1574,8 +1585,13 @@ automatically on app start.
   with `new_worker`, `restore_host_sessions` (not its `dry_run`),
   `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
   its `safe_kill_session`, and every tool above return
-  `E_CONFIRM_REQUIRED` until a person approves them on the desktop; on a
-  hub, which has no approver, they are refused with `E_FORBIDDEN`. Every
+  `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
+  dialog or Control's cards, and on a hub from the owner's paired device,
+  which lists the waiting calls with `mcp_confirms` (each with `nonce`,
+  `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
+  `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
+  answered or expired). Both are the owner's own device only, never the
+  operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central

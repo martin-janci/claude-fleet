@@ -11,12 +11,14 @@ import { hostChecks } from './host_check';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { NOW, host } from './hosts_fixture';
+import { uiLayout } from './prefs';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 let guardInstalled = false;
 
 beforeEach(() => {
   guardInstalled = false;
+  uiLayout.set('classic');
   hostChecks.set(new Map());
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
@@ -106,5 +108,46 @@ describe('HostDetail: health checklist', () => {
     const prov = screen.getByTestId('detail-reprovision') as HTMLButtonElement;
     expect(run.disabled && prov.disabled).toBe(true);
     expect(run.title).toMatch(/paired client/);
+  });
+
+  it('New shows the Hex field with its own step text while checking and re-provisioning', async () => {
+    uiLayout.set('new');
+    const gates: Array<() => void> = [];
+    const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: unknown) => {
+      if (cmd === 'check_host' || cmd === 'provision_hosts') await new Promise<void>((r) => gates.push(r));
+      return real(cmd, payload);
+    });
+    mount();
+    expect(screen.queryByTestId('detail-check-live')).toBeNull();
+    await fireEvent.click(screen.getByTestId('detail-run-checks'));
+    const live = await screen.findByTestId('detail-check-live');
+    expect(within(live).getByTestId('detail-check-live-step').textContent).toBe(
+      'Checking mercury: tmux, hooks, agents and the guard…',
+    );
+    expect(live.querySelector('[data-testid^="detail-check-loader"]')).toBeTruthy();
+    gates.shift()!();
+    await waitFor(() => expect(screen.queryByTestId('detail-check-live')).toBeNull());
+    await fireEvent.click(screen.getByTestId('detail-reprovision'));
+    expect((await screen.findByTestId('detail-check-live-step')).textContent).toMatch(/^Re-provisioning mercury: /);
+    gates.shift()!();
+    // The re-check after a re-provision shows the checking text again.
+    await waitFor(() => expect(screen.getByTestId('detail-check-live-step').textContent).toMatch(/^Checking mercury/));
+    gates.shift()!();
+    await waitFor(() => expect(screen.queryByTestId('detail-check-live')).toBeNull());
+  });
+
+  it('Classic shows no loader while checking', async () => {
+    let release!: () => void;
+    const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: unknown) => {
+      if (cmd === 'check_host') await new Promise<void>((r) => (release = r));
+      return real(cmd, payload);
+    });
+    mount();
+    await fireEvent.click(screen.getByTestId('detail-run-checks'));
+    await waitFor(() => expect(screen.getByTestId('detail-run-checks').textContent).toBe('checking…'));
+    expect(screen.queryByTestId('detail-check-live')).toBeNull();
+    release();
   });
 });

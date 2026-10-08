@@ -21,6 +21,9 @@
   import { shortcutLabel } from './shortcuts';
   import { accessOf } from './access';
   import { editorBlockedReason, openSessionInEditor } from './editor';
+  import { sessionBlocked, shareSheetFor } from './share';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
 
   interface Props {
     session: SessionRow | null;
@@ -73,6 +76,14 @@
   // Remote - SSH for a session on another host.
   const editorChord = $derived(shortcutLabel('open-in-editor', isMac));
   const editorBlocked = $derived(editorBlockedReason(session, $accessOf(session)));
+  // Share (step 5.8): the app's one Share sheet, gated exactly as the
+  // inspector's Share… is (owner only; the hub link up when paired).
+  const shareBlocked = $derived(
+    session
+      ? (hubActionBlocked('session_share', $hubStatus, $hubConnection) ??
+          $sessionBlocked(session, 'session_share'))
+      : 'No session selected',
+  );
 </script>
 
 <div class="session-head" data-testid="session-head">
@@ -92,6 +103,21 @@
       >
         <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"
           ><path d="M6 4L2 8l4 4M10 4l4 4-4 4" /></svg
+        >
+      </button>
+      <button
+        type="button"
+        class="btn btn--quiet btn--icon share-open"
+        disabled={shareBlocked !== null}
+        title={shareBlocked ?? 'Share this session — watch or drive, revocable, and never a terminal'}
+        aria-label="Share"
+        data-testid="share-from-header"
+        onclick={() => session && shareSheetFor.set(session.id)}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"
+          ><circle cx="6" cy="5.5" r="2.2" /><path d="M2 13c.4-2.3 2-3.6 4-3.6s3.6 1.3 4 3.6" /><path
+            d="M11 4.2a2 2 0 010 3.6M12.2 9.6c1 .5 1.6 1.7 1.8 3.4"
+          /></svg
         >
       </button>
       <button
@@ -208,6 +234,7 @@
     border-bottom-color: var(--accent);
   }
   .editor-open svg,
+  .share-open svg,
   .inspector-toggle svg {
     fill: none;
     stroke: currentColor;

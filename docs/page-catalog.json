@@ -225,6 +225,16 @@
         },
         {
           "add": [],
+          "help": "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
+          "id": "spend_by_person",
+          "item_label": {
+            "type": "person_spend"
+          },
+          "label": "By person",
+          "type": "items"
+        },
+        {
+          "add": [],
           "help": "What its admins should look at: a budget at 80% or past it (Fleet only warns; it never stops a session), a device that may prompt but is not trusted yet (trust it in Settings → Devices), sessions on its hosts nobody has claimed.",
           "id": "needs_admin",
           "item_label": {
@@ -3522,6 +3532,24 @@
     },
     {
       "default_widget": "select",
+      "key": "decide.jev.host_placement",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: session host",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
       "key": "decide.jev.quick_answer",
       "kind": {
         "options": [
@@ -3813,6 +3841,94 @@
       "label": "Org monthly budget",
       "widgets": [
         "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "multiselect",
+      "key": "notify.desktop",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Desktop",
+      "widgets": [
+        "multiselect",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "multiselect",
+      "key": "notify.phone",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Phone",
+      "widgets": [
+        "multiselect",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "multiselect",
+      "key": "notify.sound",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Sound",
+      "widgets": [
+        "multiselect",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "text",
+      "key": "notify.quiet_hours",
+      "kind": {
+        "type": "time_range"
+      },
+      "label": "Quiet hours",
+      "widgets": [
+        "text",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "multiselect",
+      "key": "notify.quiet_except",
+      "kind": {
+        "options": [
+          "needs_you",
+          "failed",
+          "blocked",
+          "done",
+          "routine_failed"
+        ],
+        "type": "choice_set"
+      },
+      "label": "Through quiet hours",
+      "widgets": [
+        "multiselect",
         "readonly"
       ]
     }
@@ -4211,7 +4327,8 @@
     {
       "id": "text",
       "kinds": [
-        "text"
+        "text",
+        "time_range"
       ]
     },
     {
@@ -4245,7 +4362,8 @@
         "path_map",
         "price_map",
         "secs",
-        "text"
+        "text",
+        "time_range"
       ]
     }
   ]
