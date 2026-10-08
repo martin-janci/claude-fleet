@@ -1389,6 +1389,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/117_task_evidence.sql"),
         already_applied: Some(work_items_has_done_when),
     },
+    // Orchestration O4–O6: the loop's cards and a person's grants (new
+    // tables only, so idempotent).
+    Migration::plain(
+        118,
+        include_str!("../../migrations/118_orchestration_loop.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

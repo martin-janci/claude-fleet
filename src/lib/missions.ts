@@ -135,6 +135,129 @@ export interface MissionDetail {
   /** Absent from an older hub. */
   graph?: MissionGraph;
   may_change?: boolean;
+  /** The loop (orchestration O4–O6); absent for a draft or finished one. */
+  plan?: MissionPlan | null;
+}
+
+/** One next step of the loop (`orchestrate::steps::Step`). */
+export interface MissionStep {
+  /** `run` | `retry` | `review` | `test` | `integrate` | `close` | `complete` | `ask`. */
+  kind: string;
+  item_id?: number | null;
+  role?: string | null;
+  reason: string;
+  context?: string | null;
+  /** The loop may take it under a grant; an ask is a person's only. */
+  auto: boolean;
+}
+
+/** One card of the confirm queue (`store::CardRow`). */
+export interface MissionCard {
+  id: number;
+  mission_id: number;
+  decision_id: string;
+  /** `planner` | `loop`. */
+  source: string;
+  kind: string;
+  work_item_id?: number | null;
+  payload?: Record<string, unknown> | null;
+  /** `open` | `applied` | `dismissed` | `refused` | `stale`. */
+  state: string;
+  note?: string | null;
+  created_at: number;
+  decided_at?: number | null;
+  decided_by?: string | null;
+}
+
+/** A person's signature on what the loop may do (`store::GrantRow`). */
+export interface MissionGrant {
+  id: number;
+  mission_id: number;
+  plan_version: number;
+  level: number;
+  granted_by: string;
+  hosts?: string[] | null;
+  budget_micros?: number | null;
+  max_parallel?: number | null;
+  created_at: number;
+  expires_at: number;
+  revoked_at?: number | null;
+}
+
+export interface MissionAutonomy {
+  asked: number;
+  ceiling: number;
+  effective: number;
+  grant?: MissionGrant | null;
+  why: string;
+  enabled: boolean;
+}
+
+export interface MissionPlan {
+  steps?: MissionStep[];
+  cards?: MissionCard[];
+  autonomy: MissionAutonomy;
+  cost_micros: number;
+  counts: { total: number; open: number; last_activity_at?: number | null };
+}
+
+export interface StepResult {
+  step: MissionStep;
+  ok: boolean;
+  detail: string;
+  task_id?: number | null;
+}
+
+/** The key `start_mission_wave` takes for one step (`run:12`). */
+export function stepKey(s: MissionStep): string {
+  return `${s.kind}:${s.item_id ?? 0}`;
+}
+
+/** A step as a short line. */
+export function stepLine(s: MissionStep): string {
+  const verb: Record<string, string> = {
+    run: 'Run',
+    retry: 'Retry',
+    review: 'Review',
+    test: 'Test',
+    integrate: 'Integrate',
+    close: 'Close',
+    complete: 'Complete the mission',
+    ask: 'Ask',
+  };
+  return `${verb[s.kind] ?? s.kind}: ${s.reason}`;
+}
+
+/** What a card asks, in a sentence. */
+export function cardLine(c: MissionCard): string {
+  const p = (c.payload ?? {}) as Record<string, unknown>;
+  const item = c.work_item_id != null ? ` task ${c.work_item_id}` : '';
+  switch (c.kind) {
+    case 'create': {
+      const tree = Array.isArray(p.tree) ? (p.tree as { title?: string }[]) : [];
+      const titles = tree.map((t) => t.title ?? '?');
+      return `Create ${titles.length} task${titles.length === 1 ? '' : 's'}: ${titles.join(', ')}`;
+    }
+    case 'ask':
+      return String(p.question ?? 'A question');
+    case 'add_dep':
+      return `Make${item} wait for ${String(p.depends_on ?? '?')}`;
+    case 'remove_dep':
+      return `Stop${item} waiting for ${String(p.depends_on ?? '?')}`;
+    case 'run':
+      return `Run${item}${p.role ? ` (${String(p.role)})` : ''}`;
+    case 'retry':
+      return `Retry${item}${p.note ? `: ${String(p.note)}` : ''}`;
+    case 'complete':
+      return 'Complete the mission';
+    default:
+      return `${c.kind.replace(/_/g, ' ')}${item}`;
+  }
+}
+
+/** Dollars from micro-USD, two places. */
+export function dollars(micros: number): string {
+  return `$${(micros / 1e6).toFixed(2)}`;
 }
 
 /** What `save_mission` writes; on a change every field is optional. */
@@ -313,6 +436,25 @@ export function eventSentence(e: MissionEvent): string {
     }
     case 'verify':
       return `${String(p.line ?? '')} ${p.ok ? 'checked' : 'found not met'} on task ${e.work_item_id ?? ''}`;
+    case 'step':
+      return `${String(p.step ?? 'step')}: ${String(p.detail ?? '')}`;
+    case 'refused':
+      return `Refused: ${String(p.why ?? p.detail ?? '')}`;
+    case 'planned':
+      return `Asked the planner (${String(p.why ?? '')})`;
+    case 'card':
+      return `Card ${String(p.card_id ?? '')} ${String(p.state ?? '')}`;
+    case 'grant':
+      return `Granted L${String(p.level ?? '?')} for ${String(p.hours ?? '?')} h`;
+    case 'revoked':
+      return 'Grant revoked';
+    case 'budget':
+    case 'no_progress':
+      return `Paused: ${String(p.why ?? '')}`;
+    case 'integration':
+      return `Tasks ${String(p.a ?? '')} and ${String(p.b ?? '')} conflict`;
+    case 'note':
+      return String(p.text ?? 'Note');
     case 'digest':
       return 'Older events, summarised';
     default:
@@ -433,4 +575,63 @@ export function verifyWorkItem(itemId: number, line: string, ok: boolean, note?:
   return invokeCmd<VerifyOutcome>('verify_work_item', {
     args: { item_id: itemId, line, ok, ...(n ? { note: n } : {}) },
   });
+}
+
+/** What `start_mission_wave` answers. */
+export interface StartOutcome {
+  mission_id: number;
+  results?: StepResult[];
+}
+
+/** Take the mission's next steps, or the one `step` names (`run:12`). */
+export function startMissionWave(missionId: number, step?: string): Promise<Result<StartOutcome>> {
+  return changed(
+    invokeCmd<StartOutcome>('start_mission_wave', {
+      args: { mission_id: missionId, ...(step ? { step } : {}) },
+    }),
+  );
+}
+
+export function retryWorkItem(itemId: number, note?: string): Promise<Result<StepResult>> {
+  const n = note?.trim();
+  return changed(invokeCmd<StepResult>('retry_work_item', { args: { item_id: itemId, ...(n ? { note: n } : {}) } }));
+}
+
+export interface PlanOutcome {
+  mission_id: number;
+  cards?: MissionCard[];
+  refused?: string | null;
+}
+
+export function planMission(missionId: number): Promise<Result<PlanOutcome>> {
+  return invokeCmd<PlanOutcome>('plan_mission', { args: { mission_id: missionId } });
+}
+
+/** Apply (`ok`) or dismiss a card; a question is answered with `note`. */
+export function decideMissionCard(cardId: number, ok: boolean, note?: string): Promise<Result<MissionCard>> {
+  const n = note?.trim();
+  return changed(
+    invokeCmd<MissionCard>('decide_mission_card', { args: { card_id: cardId, ok, ...(n ? { note: n } : {}) } }),
+  );
+}
+
+export interface GrantInput {
+  level: number;
+  hours?: number;
+  budget_cents?: number;
+  hosts?: string[];
+  max_parallel?: number;
+}
+
+export function grantMission(missionId: number, g: GrantInput): Promise<Result<MissionGrant>> {
+  return invokeCmd<MissionGrant>('grant_mission', { args: { mission_id: missionId, ...g } });
+}
+
+export function revokeMissionGrant(missionId: number): Promise<Result<number>> {
+  return invokeCmd<number>('revoke_mission_grant', { args: { mission_id: missionId } });
+}
+
+/** Pause every active mission this person may change, and end their grants. */
+export function pauseAllMissions(): Promise<Result<number[]>> {
+  return changed(invokeCmd<number[]>('pause_all_missions', { args: {} }));
 }

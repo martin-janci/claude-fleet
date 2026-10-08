@@ -24,13 +24,24 @@ use std::sync::Mutex;
 /// * `running` — a run of it is queued or running.
 /// * `failed` — its latest run failed and nothing runs it now.
 /// * `held` — a person stopped it.
+/// * `verifying` — its implementation finished and it is not done yet: its
+///   done_when is being checked (orchestration O3), or it waits to close.
 /// * `doing` — in progress outside a run (a person or a session on it).
 /// * `blocked` — it waits for something that failed, for something outside
 ///   the mission, or for something this caller cannot see.
 /// * `waiting` — it waits for work that is still coming.
 /// * `ready` — none of the above: it may start.
-pub const NODE_STATES: [&str; 10] = [
-    "done", "proposed", "rejected", "running", "failed", "held", "doing", "blocked", "waiting",
+pub const NODE_STATES: [&str; 11] = [
+    "done",
+    "proposed",
+    "rejected",
+    "running",
+    "failed",
+    "verifying",
+    "held",
+    "doing",
+    "blocked",
+    "waiting",
     "ready",
 ];
 
@@ -187,7 +198,14 @@ pub fn build(
         let open = tasks
             .iter()
             .any(|t| matches!(t.state.as_str(), "queued" | "running"));
-        let failed = tasks.first().is_some_and(|t| t.state == "failed");
+        // The latest implementation attempt decides between failed and
+        // implemented; a review or test run's verdict is its done_when's.
+        let latest_impl = tasks
+            .iter()
+            .find(|t| matches!(t.role.as_deref(), None | Some("implement")));
+        let failed =
+            latest_impl.is_some_and(crate::service::work::orchestrate::steps::attempt_failed);
+        let implemented = latest_impl.is_some_and(|t| t.state == "done") && !failed;
         let st = if i.status_category == "done" {
             "done"
         } else if i.proposal_state.as_deref() == Some("proposed") {
@@ -198,6 +216,8 @@ pub fn build(
             "running"
         } else if failed {
             "failed"
+        } else if implemented {
+            "verifying"
         } else if i.held_at.is_some() {
             "held"
         } else if i.status_category == "in_progress" {

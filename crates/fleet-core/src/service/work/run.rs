@@ -173,6 +173,23 @@ pub async fn run_item(
     view: &ViewScope,
     net: &crate::service::trackers::TrackerNet,
 ) -> Result<RunOutcome, IpcError> {
+    run_item_with(store, ssh, reg, start, role, view, net, None).await
+}
+
+/// [`run_item`] with `context` added to the first prompt: a retry's last
+/// error, a reviewer's findings, the command a test run is to run
+/// (orchestration O4). It is quoted as what a run left, not an order.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_item_with(
+    store: &Arc<Mutex<Store>>,
+    ssh: &Arc<crate::ssh::SshClient>,
+    reg: &Arc<crate::cancel::CancellationRegistry>,
+    start: &StartArgs,
+    role: &str,
+    view: &ViewScope,
+    net: &crate::service::trackers::TrackerNet,
+    context: Option<&str>,
+) -> Result<RunOutcome, IpcError> {
     let item_id = start
         .item_id
         .ok_or_else(|| IpcError::new(codes::E_INVALID, "run needs item_id"))?;
@@ -204,7 +221,13 @@ pub async fn run_item(
     let (prompt, task) = {
         let s = lock(store.as_ref())?;
         let notes = s.get_work_item(item_id)?.and_then(|i| i.notes);
-        let prompt = run_prompt(&plan.key, &plan.title, notes.as_deref(), role, queued);
+        let mut prompt = run_prompt(&plan.key, &plan.title, notes.as_deref(), role, queued);
+        if let Some(c) = context.map(str::trim).filter(|c| !c.is_empty()) {
+            prompt.push_str(&format!(
+                "\n\nWhat the mission's earlier runs left (their words, quoted):\n> {}",
+                c.replace('\n', "\n> ")
+            ));
+        }
         let task = record_run(&s, row.id, &prompt, item_id, attempt, role)?;
         (prompt, task)
     };

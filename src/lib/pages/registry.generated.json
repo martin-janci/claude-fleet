@@ -146,6 +146,44 @@
       "danger": {
         "level": "none"
       },
+      "default": "true",
+      "help": "Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once.",
+      "key": "orchestrator.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Mission loop",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "true"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "1",
+      "help": "The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks.",
+      "key": "orchestrator.max_level",
+      "kind": {
+        "max": 3,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Highest mission autonomy",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "count",
+      "value": "1"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
       "default": "false",
       "help": "Press Enter for sessions stuck on a \"Press Enter\" prompt. Auth menus, trust prompts and reconnects are always notify-only.",
       "key": "playbooks.press_enter",
@@ -2646,6 +2684,28 @@
             }
           ],
           "title": "Retention"
+        },
+        {
+          "sections": [
+            {
+              "items": [
+                {
+                  "key": "orchestrator.enabled",
+                  "type": "field"
+                },
+                {
+                  "key": "orchestrator.max_level",
+                  "type": "field",
+                  "when": {
+                    "key": "orchestrator.enabled",
+                    "truthy": true
+                  }
+                }
+              ],
+              "title": "Mission loop"
+            }
+          ],
+          "title": "Missions"
         }
       ],
       "title": "Work graph"

@@ -242,6 +242,62 @@ describe('WorkMissions', () => {
     expect(calls('set_work_done_when')[0]).toEqual({ item_id: 11, done_when: ['review', 'ci:test'] });
   });
 
+  it('presses the loop: a wave, a card, a grant and Pause all', async () => {
+    current = mission({ state: 'active', level: 2 });
+    handlers.work_mission = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2'), item(11, 'Refunds')],
+      events: [],
+      may_change: true,
+      graph: { nodes: [{ item_id: 11, state: 'ready', wave: 1 }], waves: 1 },
+      plan: {
+        steps: [
+          { kind: 'run', item_id: 11, role: 'implement', reason: 'Refunds is ready', auto: true },
+          { kind: 'ask', item_id: 12, reason: 'failed twice', auto: false },
+        ],
+        cards: [
+          { id: 7, mission_id: 4, decision_id: 'p', source: 'planner', kind: 'ask', state: 'open', created_at: 1, payload: { question: 'Which gateway?' } },
+          { id: 8, mission_id: 4, decision_id: 'q', source: 'planner', kind: 'run', state: 'applied', created_at: 1 },
+        ],
+        autonomy: { asked: 2, ceiling: 1, effective: 1, why: "L1, the fleet's ceiling", enabled: true },
+        cost_micros: 1_250_000,
+        counts: { total: 1, open: 0 },
+      },
+    });
+    handlers.start_mission_wave = () => ({ mission_id: 4, results: [] });
+    handlers.decide_mission_card = () => ({ id: 7, mission_id: 4, decision_id: 'p', source: 'planner', kind: 'ask', state: 'applied', created_at: 1 });
+    handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 2 });
+    handlers.pause_all_missions = () => [4];
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('missions-pause-all'));
+    await flush();
+    expect(calls('pause_all_missions')).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    expect(screen.getByTestId('mission-autonomy').textContent).toContain('$1.25');
+    expect(screen.getAllByTestId('mission-step')).toHaveLength(2);
+    // An ask is not pressed; only the run is in the wave.
+    expect(screen.getByTestId('mission-start-wave').textContent).toBe('Start wave (1)');
+    await fireEvent.click(screen.getByTestId('mission-start-wave'));
+    await flush();
+    expect(calls('start_mission_wave')[0]).toEqual({ mission_id: 4 });
+    // Only the open card waits; a question needs an answer.
+    expect(screen.getAllByTestId('mission-card')).toHaveLength(1);
+    await fireEvent.click(screen.getByTestId('mission-card-apply'));
+    await flush();
+    expect(calls('decide_mission_card')).toHaveLength(0);
+    await fireEvent.input(screen.getByTestId('mission-card-answer'), { target: { value: 'Stripe' } });
+    await fireEvent.click(screen.getByTestId('mission-card-apply'));
+    await flush();
+    expect(calls('decide_mission_card')[0]).toEqual({ card_id: 7, ok: true, note: 'Stripe' });
+    await fireEvent.click(screen.getByTestId('mission-grant'));
+    await fireEvent.input(screen.getByTestId('mission-grant-budget'), { target: { value: '5' } });
+    await fireEvent.click(screen.getByTestId('mission-grant-save'));
+    await flush();
+    expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, hours: 8, budget_cents: 500 });
+  });
+
   it('hides the controls from someone who may only read', async () => {
     handlers.work_mission = () => ({ mission: current, items: [], events: [], may_change: false });
     render(WorkMissions);

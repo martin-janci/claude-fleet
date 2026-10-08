@@ -26,6 +26,13 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `restore.batch_size` | `4` | 1–16 | Sessions resumed in parallel by Restore lost sessions. |
 | `restore.stagger_ms` | `3000` | 0–60000 ms | Pause between starting each resumed session in a batch restore. |
 
+## orchestrator
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `orchestrator.enabled` | `true` | on / off | Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once. |
+| `orchestrator.max_level` | `1` | 0–3 | The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks. |
+
 ## Playbooks
 
 | Setting | Default | Range | What it does |

@@ -1073,6 +1073,18 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         fleet_core::service::trackers::default_net(),
         ticks_cancel.clone(),
     );
+    // Missions (orchestration O4–O8): the hub owns the store, so its loop
+    // runs here, each mission under its lease (`orchestrator.enabled` is the
+    // kill switch). Stopped with the ticks.
+    let mission_handle = fleet_core::service::work::orchestrate::spawn_mission_tick(
+        fleet_core::service::work::orchestrate::Deps {
+            store: Arc::clone(&store),
+            ssh: Arc::clone(&ssh),
+            reg: Arc::clone(&reg),
+            net: fleet_core::service::trackers::default_net(),
+        },
+        ticks_cancel.clone(),
+    );
     // Assets S1a: rescan stale hosts' assets without anyone pressing Scan.
     // The hub owns its fleet, so it runs this tick (`catalog.scan_check_secs`,
     // `0` = off), exactly like the tracker sync above. Stopped with the ticks.
@@ -1156,6 +1168,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     tick_handles.push(peer_handle);
     tick_handles.push(ready_handle);
     tick_handles.push(update_handle);
+    tick_handles.push(mission_handle);
     if let Some(h) = tracker_handle {
         tick_handles.push(h);
     }

@@ -583,6 +583,13 @@ fn mirror_state(s: &Store, task_id: i64) {
 }
 
 fn note_finished(s: &Store, row: &TaskRow, kind: &str, detail: &str) {
+    // A mission's run ended: its loop looks at it on the next tick
+    // (orchestration O4), not on its timer.
+    if let Some(item) = row.work_item_id {
+        if let Err(e) = s.wake_item_mission(item) {
+            tracing::debug!(task = row.id, error = %e.message, "[tasks] mission not woken");
+        }
+    }
     let detail: String = format!("task={} {}", row.id, detail)
         .chars()
         .take(200)

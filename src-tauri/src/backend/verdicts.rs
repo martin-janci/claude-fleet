@@ -360,6 +360,16 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // Orchestration O3: acceptance conditions and a person's check.
     ("set_work_done_when", Verdict::Routed { tool: "work_link" }),
     ("verify_work_item", Verdict::Routed { tool: "work_link" }),
+    ("start_mission_wave", Verdict::Routed { tool: "work_link" }),
+    ("retry_work_item", Verdict::Routed { tool: "work_link" }),
+    ("plan_mission", Verdict::Routed { tool: "work_link" }),
+    ("decide_mission_card", Verdict::Routed { tool: "work_link" }),
+    ("grant_mission", Verdict::Routed { tool: "work_link" }),
+    (
+        "revoke_mission_grant",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("pause_all_missions", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).

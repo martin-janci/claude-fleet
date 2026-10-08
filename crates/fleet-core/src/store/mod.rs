@@ -22,6 +22,7 @@ mod item_deps;
 mod item_verify;
 mod layers;
 mod local_workspaces;
+mod mission_loop;
 mod nl_census;
 mod orchestration;
 mod org_members;
@@ -96,14 +97,18 @@ pub use local_workspaces::{
     LocalWorkspaceStatus, NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS,
     LOCAL_WORKSPACE_DRIVERS, LOCAL_WORKSPACE_STATES,
 };
+pub use mission_loop::{
+    CardRow, GrantRow, MissionTaskCounts, NewCard, NewGrant, CARDS_OPEN_CAP, CARD_KINDS,
+    CARD_STATES, GRANT_MAX_SECS, MISSION_LEASE_SECS,
+};
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
     NL_CENSUS_MIN_SCHEMA,
 };
 pub use orchestration::{
-    mission_transition_allowed, MissionEventRow, MissionPatch, MissionRepoRow, MissionRow,
-    NewMission, NewMissionEvent, MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES,
-    MISSION_STATES,
+    check_policy, mission_transition_allowed, MissionEventRow, MissionPatch, MissionPolicy,
+    MissionRepoRow, MissionRow, NewMission, NewMissionEvent, MISSION_FINAL_STATES,
+    MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES,
 };
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
