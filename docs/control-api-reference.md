@@ -477,6 +477,12 @@ Truncate a session's transcript into a new conversation: "fork" starts a new ses
 
 Parameters: `anchor_uuid`, `confirm_nonce`, `mode`, `new_worktree`, `session_id`
 
+### `routines`
+
+Routines: a saved prompt that starts a session on a cron schedule, a session event or Run now. list; get {routine_id}: with its last runs; runs {routine_id, limit?}; save {routine, routine_id?}: the whole routine; delete; set_enabled {enabled}; skip_next {skip?}; run_now. Pause all stops the schedule, not run_now. E_NOTFOUND, E_INVALID.
+
+Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
+
 ### `run_prompt`
 
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
@@ -849,6 +855,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::orgs::set_org_setting`
 - `commands::orgs::set_org_member`
 - `commands::orgs::remove_org_member`
+- `commands::orgs::org_member_grants`
 - `commands::orgs::list_orgs`
 - `commands::orgs::org_suggestions`
 - `commands::org_devices::list_devices`
