@@ -579,8 +579,13 @@
   <Attention />
   <ScopeAttention />
   <TrackerAttention />
-  <LinkReview />
-  <TidyReview />
+  <!-- Redesign 1.2: one quiet attention line, "3 links to review · 4 to
+       tidy · 1 reopened", in place of the link bar and the Tidy chips. Each
+       segment opens its own sheet, which wraps onto the lines below. -->
+  <div class="attention-line" data-testid="attention-line">
+    <LinkReview />
+    <TidyReview />
+  </div>
   {#if $sessionFocus && sessionsList}
     <!-- A clicked suggestion: the tree shows only this session. -->
     <div class="focus-bar" data-testid="session-focus-bar" role="status">
@@ -639,6 +644,21 @@
 </header>
 
 <style>
+  .attention-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    padding: 0 0.5rem;
+  }
+  /* "a · b · c": a dot before every segment after the first. The segments
+     belong to LinkReview and TidyReview, hence :global. */
+  .attention-line :global(.al-seg ~ .al-seg)::before {
+    content: '·';
+    margin-right: 0.3rem;
+    color: var(--fg-muted);
+    text-decoration: none;
+    display: inline-block;
+  }
   .sidebar-header {
     flex: 0 0 auto;
     display: flex;

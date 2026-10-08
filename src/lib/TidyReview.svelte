@@ -1,8 +1,8 @@
 <script lang="ts">
   // Work graph M7.3: Tidy up and Reopened, in the attention strip.
   //
-  // - "Tidy up · n" appears only when fleet has something to suggest. It is
-  //   neutral: it never counts toward Needs you. It opens a sheet grouped by
+  // - "n to tidy", a segment of the sidebar's attention line (redesign 1.2),
+  //   appears only when fleet has something to suggest. It is neutral: it never counts toward Needs you. It opens a sheet grouped by
   //   reason, rows preselected, a per-row choice (Safe kill by default for
   //   the kill reasons, Archive only, Snooze 7 d, Never for this work), and
   //   the footer "Tidy n · Cancel". Keyboard: j/k move, space toggles, ↵
@@ -12,7 +12,7 @@
   //   Keep 7 d and Safe kill buttons; Safe kill arms first and acts on the
   //   second click. The backend kills such a session only when its worktree
   //   is clean and pushed, and auto-tidy never does (D19).
-  // - "Reopened · n" (accent) lists work that came back after being done,
+  // - "n reopened" (accent) lists work that came back after being done,
   //   with its past sessions and Resume; it stays until resumed, done again
   //   or dismissed. A newly reopened item also toasts once.
   import { onDestroy, onMount, tick } from 'svelte';
@@ -345,28 +345,26 @@
   });
 </script>
 
-{#if candidates.length > 0 || $reopenedWork.length > 0}
-  <div class="tidy-pills">
-    {#if candidates.length > 0}
-      <button
-        class="pill tidy-pill"
-        data-testid="tidy-pill"
-        title="Finished or duplicate sessions fleet suggests cleaning up — nothing happens until you confirm"
-        onclick={() => void openSheet()}
-      >Tidy up · {candidates.length}</button>
-    {/if}
-    {#if $reopenedWork.length > 0}
-      <button
-        class="pill reopened-pill"
-        data-testid="reopened-pill"
-        title="Work that came back after being done"
-        onclick={() => {
-          reopenedOpen = !reopenedOpen;
-          closeSheet();
-        }}
-      >Reopened · {$reopenedWork.length}</button>
-    {/if}
-  </div>
+<!-- Segments of the sidebar's attention line (SidebarFilters), siblings of
+     the link segment, so the line reads "3 links to review · 4 to tidy". -->
+{#if candidates.length > 0}
+  <button
+    class="al-seg tidy-pill"
+    data-testid="tidy-pill"
+    title="Finished or duplicate sessions fleet suggests cleaning up — nothing happens until you confirm"
+    onclick={() => void openSheet()}
+  >{candidates.length} to tidy</button>
+{/if}
+{#if $reopenedWork.length > 0}
+  <button
+    class="al-seg reopened-pill"
+    data-testid="reopened-pill"
+    title="Work that came back after being done"
+    onclick={() => {
+      reopenedOpen = !reopenedOpen;
+      closeSheet();
+    }}
+  >{$reopenedWork.length} reopened</button>
 {/if}
 
 {#if reopenedOpen}
@@ -374,7 +372,7 @@
     <div class="sheet-head">
       <span>Reopened</span>
       <span class="hint">moved out of done in the tracker</span>
-      <button class="pill" onclick={() => (reopenedOpen = false)}>close</button>
+      <button class="btn btn--quiet" onclick={() => (reopenedOpen = false)}>Close</button>
     </div>
     {#each $reopenedWork as w (w.item_id)}
       <div class="tidy-row" data-testid="reopened-row">
@@ -386,7 +384,7 @@
         {#if w.status_name}<span class="meta">{w.status_name}</span>{/if}
         {#if w.key}<ResumeButton workKey={w.key} />{/if}
         <button
-          class="pill"
+          class="btn btn--quiet is-bounded"
           data-testid="reopened-dismiss"
           disabled={hubActionBlocked('dismiss_reopened', $hubStatus, $hubConnection) !== null}
           onclick={() =>
@@ -419,7 +417,7 @@
         From Today's Stale · {shown.length} of {candidates.length}
         <!-- Its own keys: the sheet's ↵ would otherwise apply, not widen. -->
         <button
-          class="pill"
+          class="btn btn--quiet"
           data-testid="tidy-show-all"
           onkeydown={(e) => e.stopPropagation()}
           onclick={() => (only = null)}>Show all</button
@@ -482,7 +480,7 @@
               >only if clean &amp; pushed</span
             >
             <button
-              class="pill"
+              class="btn btn--quiet is-bounded"
               data-testid="tidy-keep"
               disabled={busy || rowBlocked(c) !== null}
               title={rowBlocked(c) ?? `Leave it out of Tidy up for ${KEEP_DAYS} days`}
@@ -490,7 +488,7 @@
               onclick={() => void applyRow(c, 'keep')}>Keep {KEEP_DAYS} d</button
             >
             <button
-              class="pill"
+              class="btn btn--quiet is-bounded"
               class:armed={armed === c.session_id}
               data-testid="tidy-safe-kill"
               disabled={busy || rowBlocked(c) !== null}
@@ -519,31 +517,44 @@
     {/each}
     <div class="sheet-foot">
       <button
-        class="pill primary"
+        class="btn btn--primary"
         data-testid="tidy-apply"
         disabled={busy || tickedCount === 0 || blocked !== null}
         onclick={() => void apply()}>Tidy {tickedCount}</button
       >
-      <button class="pill" data-testid="tidy-cancel" onclick={closeSheet}>Cancel</button>
+      <button class="btn btn--quiet" data-testid="tidy-cancel" onclick={closeSheet}>Cancel</button>
     </div>
   </div>
 {/if}
 
 <style>
-  .tidy-pills {
-    display: flex;
-    gap: 0.4rem;
-    margin: 0.2rem 0.5rem;
-  }
-  .tidy-pill {
+  /* Segments of the attention line (SidebarFilters' .attention-line). */
+  .al-seg {
+    order: 0;
+    border: none;
+    background: none;
+    padding: 0.1rem 0.15rem;
+    font: inherit;
+    font-size: 0.72rem;
     color: var(--fg-muted);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+  .al-seg:hover {
+    color: var(--fg);
+    text-decoration: underline;
+  }
+  .al-seg:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
   }
   .reopened-pill {
     color: var(--accent, #3b82f6);
-    border-color: var(--accent, #3b82f6);
   }
   .tidy-sheet {
-    margin: 0.25rem 0.5rem;
+    order: 1;
+    flex: 1 0 100%;
+    box-sizing: border-box;
+    margin: 0.25rem 0;
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.3rem;
@@ -607,9 +618,6 @@
   }
   .badge {
     color: var(--accent, #3b82f6);
-  }
-  .primary {
-    font-weight: 600;
   }
   .armed {
     color: var(--usage-warn, #b7791f);
