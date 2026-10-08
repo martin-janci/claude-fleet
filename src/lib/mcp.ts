@@ -67,6 +67,11 @@ export function provisionHosts(rotate = false): Promise<Result<HostProvisionResu
   return invokeCmd<HostProvisionResult[]>('provision_hosts', { rotate });
 }
 
+/** Re-provision one host (Orbit Fleet 4.7, from its detail): no rotation. */
+export function provisionHost(alias: string): Promise<Result<HostProvisionResult[]>> {
+  return invokeCmd<HostProvisionResult[]>('provision_hosts', { rotate: false, host: alias });
+}
+
 // --- per-host tokens ---------------------------------------------------------
 
 /** A host's control-API token row, minus the token itself. Mirrors the

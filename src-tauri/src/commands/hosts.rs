@@ -84,6 +84,24 @@ pub async fn probe_host(
     routed::probe_host(&backend, args, &store, &ssh, &reg).await
 }
 
+/// Orbit Fleet 4.7: the host detail's health checklist read (agents on
+/// PATH, fleet's hooks and the worker guard, tmux). LocalOnly like
+/// `provision_hosts`: it reads a host's `~/.claude/settings.json` over this
+/// app's own SSH, which a paired client does not administer.
+#[tauri::command]
+pub async fn check_host(
+    args: HostAliasArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<fleet_core::service::host_check::HostCheck, IpcError> {
+    backend.refuse_local_only("check_host")?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Ok(fleet_core::service::host_check::check_host(&ssh, &args.alias, now).await)
+}
+
 #[tauri::command]
 pub fn remove_host(
     args: HostAliasArgs,
