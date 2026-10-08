@@ -8,7 +8,7 @@ use super::*;
 pub use crate::service::pane_intel::{PendingInput, PendingOption};
 
 /// The chat form a session's agent is waiting on (chat forms, migration
-/// 115): read by a subselect on `form_requests`, null when none.
+/// 117): read by a subselect on `form_requests`, null when none.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingForm {
     pub form_id: String,

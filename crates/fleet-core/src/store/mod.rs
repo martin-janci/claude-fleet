@@ -19,9 +19,11 @@ mod downloads;
 mod forms;
 mod guides;
 mod hosts_accounts;
+mod item_deps;
 mod layers;
 mod local_workspaces;
 mod nl_census;
+mod orchestration;
 mod org_members;
 mod orgs;
 mod participants;
@@ -82,6 +84,7 @@ pub use decisions::{
 pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
+pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use layers::HostLayerRow;
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
@@ -92,6 +95,11 @@ pub use local_workspaces::{
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
     NL_CENSUS_MIN_SCHEMA,
+};
+pub use orchestration::{
+    mission_transition_allowed, MissionEventRow, MissionPatch, MissionRepoRow, MissionRow,
+    NewMission, NewMissionEvent, MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES,
+    MISSION_STATES,
 };
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
@@ -162,7 +170,10 @@ pub use work_journal::{
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_status::STATUS_CATEGORIES;
-pub use work_tasks::{job_status, NativeItem, Proposal, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX};
+pub use work_tasks::{
+    job_status, NativeItem, Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, PROPOSALS_OPEN_CAP,
+    TASK_KEY_PREFIX,
+};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{

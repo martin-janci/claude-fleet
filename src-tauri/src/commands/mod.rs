@@ -11,6 +11,7 @@ pub mod hosts;
 pub mod hub;
 pub mod local_workspaces;
 pub mod mcp;
+pub mod missions;
 pub mod move_session;
 pub mod mutate;
 pub mod onboarding;

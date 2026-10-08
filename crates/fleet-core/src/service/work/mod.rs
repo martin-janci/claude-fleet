@@ -8,9 +8,11 @@ pub mod buckets;
 pub mod card;
 pub mod describe;
 pub mod detect;
+pub mod graph;
 pub mod handover;
 pub mod harvest;
 pub mod local;
+pub mod missions;
 pub mod nudge;
 pub mod recognize;
 pub mod resolve;
@@ -120,6 +122,12 @@ pub struct WorkArgs {
     /// Bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket_id: Option<i64>,
+    /// Mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
+    /// mission: older events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_event: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -254,6 +262,24 @@ pub struct WorkLinkArgs {
     /// Bucket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bucket_id: Option<i64>,
+    /// Mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_id: Option<i64>,
+    /// mission_save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "object_schema")]
+    pub mission: Option<missions::MissionInput>,
+    /// dep: what `item_id` waits for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<i64>,
+    /// accept_many, undo_accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_ids: Option<Vec<i64>>,
+    /// propose_tree: [{title, notes?, why?, depends_on?: [{entry: n} |
+    /// {item: id}]}].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "array_schema")]
+    pub tree: Option<Vec<crate::store::TreeEntry>>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -365,6 +391,10 @@ pub enum WorkAction {
     Buckets,
     /// One sprint or release with its members.
     Bucket,
+    /// Missions in scope (orchestration O1).
+    Missions,
+    /// One mission with its items and latest events.
+    Mission,
 }
 
 /// Every `work` action, by name — the ONLY place an action is parsed from,
@@ -397,6 +427,8 @@ pub const WORK_ACTIONS: &[(&str, WorkAction)] = &[
     ("org_impact", WorkAction::OrgImpact),
     ("buckets", WorkAction::Buckets),
     ("bucket", WorkAction::Bucket),
+    ("missions", WorkAction::Missions),
+    ("mission", WorkAction::Mission),
 ];
 
 /// Every `work_link` action. The tool refuses any other name before
@@ -438,6 +470,16 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "view_delete",
     "bucket_add",
     "bucket_remove",
+    "mission_save",
+    "mission_state",
+    "mission_repo",
+    "mission_item",
+    "mission_delete",
+    "dep",
+    "hold",
+    "propose_tree",
+    "accept_many",
+    "undo_accept",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -495,6 +537,19 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("delete_work_rule", "work_link", "rule_delete"),
     ("save_work_view", "work_link", "view_save"),
     ("delete_work_view", "work_link", "view_delete"),
+    // Orchestration O1: missions.
+    ("work_missions", "work", "missions"),
+    ("work_mission", "work", "mission"),
+    ("save_mission", "work_link", "mission_save"),
+    ("set_mission_state", "work_link", "mission_state"),
+    ("set_mission_repo", "work_link", "mission_repo"),
+    ("set_mission_item", "work_link", "mission_item"),
+    ("delete_mission", "work_link", "mission_delete"),
+    // Orchestration O2: the mission graph.
+    ("set_work_dep", "work_link", "dep"),
+    ("set_work_hold", "work_link", "hold"),
+    ("accept_work_proposals", "work_link", "accept_many"),
+    ("undo_work_accept", "work_link", "undo_accept"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph

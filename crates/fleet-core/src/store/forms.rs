@@ -1,4 +1,4 @@
-//! Chat forms (`form_requests`, migration 115): a form an agent asked a
+//! Chat forms (`form_requests`, migration 117): a form an agent asked a
 //! person to fill. Every change wakes `form_notify` (the `ask` tool's wait)
 //! and bumps the asking session's `row_version` with a `session:updated`,
 //! because the row carries `pending_form`.

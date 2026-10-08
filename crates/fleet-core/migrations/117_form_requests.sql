@@ -25,4 +25,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_form_requests_one_pending
 CREATE INDEX IF NOT EXISTS idx_form_requests_state
   ON form_requests(state, decided_at);
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (115);
+INSERT OR IGNORE INTO schema_version (version) VALUES (117);

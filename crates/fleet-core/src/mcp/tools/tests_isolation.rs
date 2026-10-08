@@ -2664,6 +2664,181 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Missions (orchestration O1): fenced by the mission's own org, then by
+    // its owner or the org's members. Every client here is the hub's one
+    // person, who owns both; a per-host token proves no person and sees
+    // none, and never writes one.
+    let (mission_a, mission_b) = {
+        let s = fx.t.store.lock().unwrap();
+        let make = |name: &str, org: i64| {
+            s.create_mission(
+                &crate::store::NewMission {
+                    org_id: Some(org),
+                    owner_person_id: Some(PERSON),
+                    name,
+                    goal: "the goal",
+                    ..Default::default()
+                },
+                "person:1",
+            )
+            .unwrap()
+            .id
+        };
+        (
+            make("Alpha mission", ORG_A),
+            make("Bravo mission", fx.org_b),
+        )
+    };
+    m.row(
+        "work",
+        "missions",
+        |_, _| json!({ "action": "missions" }),
+        move |_, who, a| {
+            is_ok(who, a, "missions");
+            let t = text(a);
+            let sees = |id: i64| t.contains(&format!("\"id\":{id},"));
+            match who {
+                Who::BoundA => assert!(sees(mission_a) && !sees(mission_b), "{t}"),
+                Who::BoundB => assert!(sees(mission_b) && !sees(mission_a), "{t}"),
+                w if w.is_host() => assert!(!sees(mission_a) && !sees(mission_b), "{t}"),
+                _ => assert!(sees(mission_a) && sees(mission_b), "{who:?}: {t}"),
+            }
+        },
+    )
+    .await;
+    let unknown_mission = call(
+        &fx,
+        Who::HostA,
+        "work",
+        json!({ "action": "mission", "mission_id": 999_999 }),
+    )
+    .await;
+    m.row(
+        "work",
+        "mission",
+        move |_, _| json!({ "action": "mission", "mission_id": mission_b }),
+        move |_, who, a| match who {
+            Who::HostA | Who::HostB | Who::HostNone | Who::BoundA => {
+                same_as_unknown(a, &unknown_mission, &mission_b.to_string(), "999999")
+            }
+            _ => {
+                is_ok(who, a, "B's mission");
+                assert!(text(a).contains("Bravo mission"), "{who:?}: {a:?}");
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "mission_save",
+        |_, _| {
+            json!({ "action": "mission_save",
+                    "mission": { "name": "New", "goal": "g", "org_id": ORG_B } })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org"),
+                Who::BoundB => is_code(who, a, "E_FORBIDDEN", "a root needs an item"),
+                _ => is_ok(who, a, "mission_save"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "mission_state",
+        move |_, _| json!({ "action": "mission_state", "mission_id": mission_b, "status": "active" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_ok(who, a, "mission_state"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "mission_repo",
+        move |fx, _| {
+            json!({ "action": "mission_repo", "mission_id": mission_b,
+                    "project_id": fx.pid_beta })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_ok(who, a, "mission_repo"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "mission_item",
+        move |fx, _| {
+            json!({ "action": "mission_item", "mission_id": mission_b, "item_id": fx.item_b })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_ok(who, a, "mission_item"),
+            }
+        },
+    )
+    .await;
+    // An A mission with B's ticket: each bound client misses one of the two
+    // as unknown; a caller who sees both is refused the cross-org member.
+    m.row(
+        "work_link",
+        "mission_item",
+        move |fx, _| {
+            json!({ "action": "mission_item", "mission_id": mission_a, "item_id": fx.item_b })
+        },
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA | Who::BoundB => is_code(who, a, "E_NOTFOUND", "outside the org"),
+                _ => is_code(who, a, "E_FORBIDDEN", "cross-org"),
+            }
+        },
+    )
+    .await;
+    // B's mission is active by now: deleting it is refused to whoever may
+    // change it, and unknown to whoever may not see it.
+    m.row(
+        "work_link",
+        "mission_delete",
+        move |_, _| json!({ "action": "mission_delete", "mission_id": mission_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_code(who, a, "E_INVALID", "cancel it first"),
+            }
+        },
+    )
+    .await;
     m.row(
         "work",
         "local_items",
@@ -2787,6 +2962,84 @@ async fn run_matrix(isolate: bool) {
                     Who::Master | Who::ClientFull => {
                         is_code(who, a, "E_NOTFOUND", "unknown proposal")
                     }
+                    _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+                }
+            },
+        )
+        .await;
+    }
+    // ── The mission graph (orchestration O2) ───────────────────────────
+    // A tree is `propose`'s parent question; an edge and a hold are a
+    // person's plan; many decisions at once are still a person's.
+    m.row(
+        "work_link",
+        "propose_tree",
+        move |_, _| {
+            json!({ "action": "propose_tree", "parent": format!("item:{local_a}"),
+                    "tree": [{ "title": "matrix plan" }] })
+        },
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    is_code(who, a, "E_NOTFOUND", "another org's parent")
+                }
+                _ => assert!(
+                    text(a).contains("\"proposal_state\":\"proposed\""),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "dep",
+        move |fx, _| json!({ "action": "dep", "item_id": fx.item_b, "depends_on": fx.item_a }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                Who::BoundA | Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's item"),
+                // Both visible: the store refuses an edge across orgs.
+                _ => is_code(who, a, "E_FORBIDDEN", "cross-org edge"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "hold",
+        move |fx, _| json!({ "action": "hold", "item_id": fx.item_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's item"),
+                _ => is_ok(who, a, "hold"),
+            }
+        },
+    )
+    .await;
+    for action in ["accept_many", "undo_accept"] {
+        m.row(
+            "work_link",
+            action,
+            move |fx, _| json!({ "action": action, "item_ids": [fx.item_b] }),
+            |_, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                match who {
+                    // A ticket is no proposal: the store's answer, once the
+                    // caller is a person who may see it.
+                    Who::Master | Who::ClientFull => is_code(who, a, "E_INVALID", "not a proposal"),
                     _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
                 }
             },

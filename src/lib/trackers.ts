@@ -120,6 +120,8 @@ export interface WorkItemRow {
   proposed_by?: string | null;
   /** The agent's reason (plain text). */
   proposal_why?: string | null;
+  /** When a person put it on hold (orchestration O2). */
+  held_at?: number | null;
 }
 
 /** One `work:*` frame, as the batched handler receives it. */

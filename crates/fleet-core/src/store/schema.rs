@@ -579,6 +579,27 @@ fn sessions_has_claude_profile(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 115.
+fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') \
+         WHERE name = 'orchestration_project_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// `already_applied` guard of migration 116.
+fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'held_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 111.
 fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1335,9 +1356,24 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/114_host_claude_profiles.sql"),
         already_applied: Some(hosts_has_claude_profiles),
     },
+    // Orchestration O1: the mission container, its repos and its event log
+    // (new tables), and work_items.orchestration_project_id (ADD COLUMN,
+    // so guarded on it).
+    Migration {
+        version: 115,
+        sql: include_str!("../../migrations/115_orchestration_projects.sql"),
+        already_applied: Some(work_items_has_orchestration_project),
+    },
+    // Orchestration O2: the dependency graph (a new table) and a person's
+    // hold on an item (ADD COLUMN, so guarded on it).
+    Migration {
+        version: 116,
+        sql: include_str!("../../migrations/116_work_item_deps.sql"),
+        already_applied: Some(work_items_has_held_at),
+    },
     // Chat forms: `form_requests`. A new table and indexes, `IF NOT EXISTS`,
     // safe to re-run.
-    Migration::plain(115, include_str!("../../migrations/115_form_requests.sql")),
+    Migration::plain(117, include_str!("../../migrations/117_form_requests.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
