@@ -3595,6 +3595,10 @@
         {
           "items": [
             {
+              "key": "sync",
+              "type": "field"
+            },
+            {
               "key": "latency",
               "type": "field"
             },
@@ -6099,6 +6103,7 @@
             }
           ]
         ],
+        "busy": "counter-orbit",
         "command": "link_peer_hub",
         "envelope": "args",
         "id": "peer_link.add",
@@ -6197,6 +6202,13 @@
           "label": "Address",
           "max": 512,
           "type": "text"
+        },
+        {
+          "help": "Messages carried today against those still queued, while the queue drains.",
+          "id": "sync",
+          "label": "Syncing",
+          "type": "sync",
+          "unit": "messages"
         },
         {
           "help": "The round trip of the last exchange this hub dialed.",

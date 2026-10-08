@@ -94,6 +94,8 @@ describe('Settings → Devices', () => {
     expect(argsOf('pair_device')).toEqual({ device: 'new-phone', mode: 'full', org: null, person: null });
     expect(screen.getByTestId('pairing-url').textContent).toBe(PAIRING.url);
     expect(screen.getByTestId('pairing-code').textContent).toBe('abc123');
+    // 11.12: a Halo round the code while it waits for the device.
+    expect(screen.getByTestId('pairing-halo').querySelector('[data-loader="halo"]')).toBeTruthy();
     expect(screen.getByTestId('pairing-left').textContent).toBe('10:00');
     expect(screen.getByTestId('pairing-qr').querySelectorAll('rect').length).toBe(1 + qrRects(PAIRING.qr).length);
     await fireEvent.click(screen.getByTestId('pairing-close'));
