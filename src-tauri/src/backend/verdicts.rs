@@ -138,6 +138,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "this app's own log folder, which it has either way",
         },
     ),
+    (
+        "set_tray_state",
+        Verdict::SameInBoth {
+            why: "this window's own tray icon, which it has either way",
+        },
+    ),
     // ── projects ────────────────────────────────────────────────────────────
     (
         "list_projects",

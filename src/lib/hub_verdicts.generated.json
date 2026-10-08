@@ -333,6 +333,7 @@
     "resume_local_workspace",
     "set_local_workspace_driver",
     "set_local_workspace_excludes",
+    "set_tray_state",
     "sync_local_workspace_now",
     "upload_attachments",
     "upload_to_session",
