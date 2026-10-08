@@ -221,6 +221,10 @@ pub enum FieldKind {
     /// edited. An absent value leaves the field out (the caller may not see
     /// spend).
     Money,
+    /// An estimated cost per day, `[{ day, cost_micros }]` oldest first,
+    /// shown as bars with each day's amount; never edited. An absent value
+    /// leaves the field out, as for `money`.
+    MoneySeries,
     /// The record's per-org settings (`OrgSetting` rows: the setting
     /// described with the fleet's value, and the record's own): each one
     /// shown as a settings row that inherits the fleet's value or takes its
@@ -254,6 +258,25 @@ pub enum ItemLabel {
     Device,
     /// An org's member (phase D): their name, then their role.
     Member,
+    /// One of an org's "Needs an admin" (`service::org_needs::AdminNeed`):
+    /// what it is in a line, then why or when, listed rather than chipped.
+    AdminNeed,
+}
+
+/// A line under a field's value where its section shows tiles: a closed
+/// set of formatters over other keys of the record, never a template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Sub {
+    /// The record's budget for this amount, in whole USD at `field`:
+    /// "of $60 budget", or "82% of $750" once something is spent. Nothing
+    /// when there is no budget (`0` or absent).
+    Budget { field: &'static str },
+    /// The count at `field`, then `text` ("2 need you"); nothing at `0`.
+    Count {
+        field: &'static str,
+        text: &'static str,
+    },
 }
 
 /// A badge in the list and the detail header while a field has a value.
@@ -291,6 +314,9 @@ pub struct FieldSpec {
     /// the whole object with it set — the rest kept as it is.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub merge_path: &'static [&'static str],
+    /// Its line under the value in a `tiles` section.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sub: Option<Sub>,
 }
 
 impl FieldSpec {
@@ -309,6 +335,13 @@ impl FieldSpec {
             badge: None,
             confirm: None,
             merge_path: &[],
+            sub: None,
+        }
+    }
+    pub const fn sub(self, sub: Sub) -> Self {
+        FieldSpec {
+            sub: Some(sub),
+            ..self
         }
     }
     pub const fn edit(self, arg: &'static str) -> Self {
@@ -466,16 +499,25 @@ const ORG: ResourceType = ResourceType {
     fields: &[
         FieldSpec::new("name", "Name", "What the scope selector and the Work view call it.", FieldKind::Text { max: 80 }).edit("name"),
         FieldSpec::new("color", "Colour", "Marks its sessions in the sidebar.", FieldKind::Color).edit("color"),
-        FieldSpec::new("session_count", "Sessions", "Its live sessions that you can see.", FieldKind::Count),
+        FieldSpec::new("session_count", "Live sessions", "Its live sessions that you can see.", FieldKind::Count)
+            .sub(Sub::Count { field: "needs_you", text: "need you" }),
         FieldSpec::new("needs_you", "Need you", "Of those, the ones waiting on a person: a question, a permission, a stop.", FieldKind::Count),
-        FieldSpec::new("spent_today_micros", "Spent today", "Estimated cost of its sessions today (UTC). Shown when you can see every session.", FieldKind::Money),
+        FieldSpec::new("spent_today_micros", "Spent today", "Estimated cost of its sessions today (UTC). Shown when you can see every session.", FieldKind::Money)
+            .sub(Sub::Budget { field: "budget_daily_usd" }),
         FieldSpec::new("spent_week_micros", "Last 7 days", "Estimated cost of its sessions over the last 7 days.", FieldKind::Money),
-        FieldSpec::new("spent_month_micros", "This month", "Estimated cost of its sessions this calendar month (UTC).", FieldKind::Money),
+        FieldSpec::new("spent_month_micros", "This month", "Estimated cost of its sessions this calendar month (UTC).", FieldKind::Money)
+            .sub(Sub::Budget { field: "budget_monthly_usd" }),
         FieldSpec::new(
-            "over_budget",
-            "Over budget",
-            "The budgets it has reached. Fleet only warns; it never stops a session.",
-            FieldKind::Items { item_label: ItemLabel::Plain, remove: None, add: &[] },
+            "spend_series",
+            "Last 14 days",
+            "Estimated cost of its sessions on each of the last 14 days (UTC), today last.",
+            FieldKind::MoneySeries,
+        ),
+        FieldSpec::new(
+            "needs_admin",
+            "Needs an admin",
+            "What its admins should look at: a budget at 80% or past it (Fleet only warns; it never stops a session), a device that may prompt but is not trusted yet (trust it in Settings → Devices), sessions on its hosts nobody has claimed.",
+            FieldKind::Items { item_label: ItemLabel::AdminNeed, remove: None, add: &[] },
         ),
         FieldSpec::new(
             "settings",
@@ -1164,7 +1206,7 @@ mod tests {
             if let FieldKind::Items { remove, add, .. } = &f.kind {
                 // The org's catalogs are shown, never changed here: they are
                 // added and removed on Settings → Catalogs.
-                if ["catalogs", "over_budget"].contains(&f.id) {
+                if ["catalogs", "needs_admin"].contains(&f.id) {
                     assert!(remove.is_none() && add.is_empty(), "{}", f.id);
                     continue;
                 }

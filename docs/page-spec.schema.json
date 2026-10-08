@@ -572,6 +572,10 @@
             "$ref": "#/$defs/Item"
           }
         },
+        "tiles": {
+          "description": "A `master_detail` page's overview: its `count` and `money` fields\nshown as tiles (label, value, and the field's `sub` line) rather\nthan rows.",
+          "type": "boolean"
+        },
         "title": {
           "type": "string"
         },
