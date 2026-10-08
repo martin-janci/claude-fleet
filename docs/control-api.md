@@ -789,6 +789,29 @@ Index by area (names only; see the reference for details):
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
   stream. See `docs/hub.md` → *File downloads*.
+- **Routines** — `routines`, by `action` (Orbit Fleet 8.5): a person's
+  saved prompt that starts a session on a cron schedule (`trigger: cron`,
+  five fields read at the `utc_offset_min` the device had when it was
+  saved), on a session timeline event (`trigger: event`, one of `turn_done`,
+  `stop_failure`, `stuck`, `lost`, `task_done`, `task_failed`,
+  `session_restore_failed`, `workspace_repair_failed`, written for a
+  session its owner owns and not started by a routine), or only when a
+  person presses `run_now` (`trigger: manual`). `list`; `get {
+  routine_id }` with its last runs; `runs { routine_id, limit? }`; `save {
+  routine, routine_id? }` writes the whole routine (host, project,
+  `profile` = the account it bills, prompt, `budget_run_micros`,
+  `budget_day_micros`, `overlap: skip | parallel`); `delete`; `set_enabled
+  { enabled }`; `skip_next { skip? }`; `run_now`. Each run's session has
+  origin `routine` and is the routine's owner's; the prompt is its
+  handover. A run is `done` when its session's first turn finishes,
+  `failed` on an error, a lost or removed session, six quiet hours, or a
+  session past the run budget (which also turns the routine off with
+  `paused_reason`), and `skipped` when the last run is still going under
+  `overlap: skip`, today's budget is spent, or a person skipped it.
+  `automation.paused` (Pause all) stops the schedule and event fires,
+  never `run_now`. Read and changed by the owner and the org's admins, read
+  by the org's members, never served to a per-host token; the routine's
+  org is its host's.
 - **Debug devices** — `debug_devices`, by `action`. Android phones and
   emulators, iOS simulators and devices attached to any fleet host,
   inventoried by a scan of that host (`list { refresh? }`, `scan { host? }`,

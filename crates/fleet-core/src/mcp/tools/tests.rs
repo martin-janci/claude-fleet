@@ -2397,6 +2397,7 @@ fn router_sum_serves_every_tool() {
         include_str!("sharing.rs"),
         include_str!("forms.rs"),
         include_str!("devices.rs"),
+        include_str!("routines.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())

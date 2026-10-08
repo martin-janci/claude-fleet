@@ -471,6 +471,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Routines (Orbit Fleet 8.5): a person's own scheduled prompts. Its
+    // run_now starts a session, hence the lifecycle deadline; a host's token
+    // is not served it (`NOT_FOR_HOST_TOKENS`).
+    ToolPolicy {
+        name: "routines",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // Debug devices: a host's Claude uses the devices it may see (its own
     // host's, and those a person shared within its org); a person also
     // labels, shares and forgets them (refused to host tokens in the
@@ -1342,6 +1352,8 @@ pub fn is_client_tool(name: &str) -> bool {
 /// catalog edits and rolls layers out to hosts, so it is refused alike, its
 /// `list` included (R25 amended). `list_downloads` / `remove_download` are a
 /// person's: a host's Claude only sends files.
+/// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
+/// schedule sessions.
 ///
 /// The five sharing surfaces joined them in multi-user M1 (T12) for a
 /// different reason: a per-host token proves no PERSON
@@ -1355,6 +1367,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "changesets",
     "list_downloads",
     "remove_download",
+    "routines",
     "session_share",
     "session_unshare",
     "session_narrow",

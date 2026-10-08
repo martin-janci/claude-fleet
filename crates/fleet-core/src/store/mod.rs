@@ -39,6 +39,7 @@ mod read_cursors;
 mod read_pool;
 mod reconcile;
 mod reports;
+mod routines;
 mod rows;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
@@ -137,6 +138,10 @@ pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
+pub use routines::{
+    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
+    ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+};
 pub use rows::*;
 pub use schema::known_schema_version;
 #[cfg(test)]
