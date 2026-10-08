@@ -148,6 +148,10 @@ pub const PAGE_FILES: &[(&str, &str)] = &[
         "embed.status_footer.json",
         include_str!("../../pages/embed.status_footer.json"),
     ),
+    (
+        "debug_devices.json",
+        include_str!("../../pages/debug_devices.json"),
+    ),
 ];
 
 /// Registered settings that deliberately have no page, and why. Empty

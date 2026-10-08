@@ -69,6 +69,7 @@ recover   restart_session recreate_session repair_session move_session
           dismiss_ghost_session safe_kill_session kill_session
 review    repo_changes repo_diff repo_file repo_tree repo_log
           repo_branches repo_commit repo_commit_diff
+devices   debug_devices
 admin     add_host remove_host probe_host hide_host provision_hosts
           pair_client list_clients revoke_client set_client_trust set_secret
           refresh_projects
@@ -387,6 +388,29 @@ session; the delete only fires after the session's ready marker AND a
 clean-tree check (transitions arrive as row events; `E_SAFE_KILL_IN_PROGRESS`
 means one is already armed). Use it when the worktree may hold unpushed work;
 `delete_worktree` afterwards if the worktree should go too.
+
+## Phones, emulators, simulators — `debug_devices`
+
+Devices plugged into or running on ANY fleet host, driven from your session:
+every command runs on the device's own host. `debug_devices { action: "list" }`
+shows the ones you may use (your host's, and those a person shared); claim one
+before a test run so no other session drives it at the same time:
+
+1. `{ action: "claim", device: "pixel", note: "e2e for PR 12" }` — by id,
+   label, name or serial. `E_CONFLICT` names the holder: pick another device.
+2. `{ action: "install", device, path: "app/build/outputs/apk/debug/app-debug.apk" }`
+   — the app is copied from YOUR host (an `.apk`; a simulator takes a `.app`).
+3. `{ action: "run", device, args: ["shell", "am", "start", "-n", "com.x/.Main"] }`
+   (adb) or `args: ["launch", "com.x"]` (simctl): one command, no shell
+   pipes; the error lists the verbs allowed.
+4. `{ action: "screenshot", device }` returns the screen as an image; `{
+   action: "logs", device, filter: "MyApp:D *:S", contains: "Exception" }`
+   reads `logcat -d` (a simulator: `log show`, `filter` is a predicate).
+5. `{ action: "release", device }` when done (a claim also lapses).
+
+A stopped emulator or simulator: `scan` lists it under `bootable`; `{ action:
+"boot", host, name }` starts it. `unauthorized` means the phone's USB
+debugging prompt waits for a person; say so rather than retrying.
 
 ## Host clipboard — `get_clipboard` / `set_clipboard`
 

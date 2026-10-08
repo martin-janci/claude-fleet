@@ -1398,6 +1398,9 @@ const MIGRATIONS: &[Migration] = &[
     // Chat forms: `form_requests`. A new table and indexes, `IF NOT EXISTS`,
     // safe to re-run.
     Migration::plain(119, include_str!("../../migrations/119_form_requests.sql")),
+    // Debug devices: `debug_devices`, `debug_device_scans` and a host-delete
+    // trigger. New objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(120, include_str!("../../migrations/120_debug_devices.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

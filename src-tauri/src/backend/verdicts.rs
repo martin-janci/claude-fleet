@@ -755,6 +755,48 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("answer_form", Verdict::Routed { tool: "ask" }),
     ("decline_form", Verdict::Routed { tool: "ask" }),
     (
+        "list_debug_devices",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "scan_debug_devices",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "update_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "release_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "forget_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "boot_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "shutdown_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::Routed {
             tool: "set_setting",

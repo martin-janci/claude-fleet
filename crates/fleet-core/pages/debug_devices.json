@@ -1,0 +1,40 @@
+{
+  "spec": "fleet.page/1",
+  "id": "debug_devices",
+  "title": "Debug devices",
+  "layout": "master_detail",
+  "resource": "debug_device",
+  "intro": "Phones, emulators and simulators on your hosts. Set one up once where it is plugged in; sessions use it through fleet's control API (debug_devices), and a shared one from every host of its org.",
+  "sections": [
+    {
+      "title": "Device",
+      "items": [
+        { "type": "field", "key": "title" },
+        { "type": "field", "key": "label" },
+        { "type": "field", "key": "state" },
+        { "type": "field", "key": "host" },
+        { "type": "field", "key": "shared" }
+      ]
+    },
+    {
+      "title": "In use",
+      "items": [
+        { "type": "field", "key": "claimed_by" },
+        { "type": "field", "key": "claim_note" },
+        { "type": "field", "key": "claimed_until" }
+      ]
+    },
+    {
+      "title": "Hardware",
+      "collapsible": true,
+      "items": [
+        { "type": "field", "key": "platform" },
+        { "type": "field", "key": "kind" },
+        { "type": "field", "key": "os_version" },
+        { "type": "field", "key": "model" },
+        { "type": "field", "key": "serial" },
+        { "type": "field", "key": "last_seen_at" }
+      ]
+    }
+  ]
+}

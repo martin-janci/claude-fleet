@@ -134,7 +134,10 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// Raised to 9 for revision 9: chat forms route `list_forms`, `get_form`,
 /// `answer_form` and `decline_form` to the new `ask` tool. A revision-8 hub
 /// serves none of it, so every answer would fail with an unknown tool.
-pub const MIN_HUB_CONTRACT: u32 = 9;
+///
+/// Raised to 10 for revision 10: the Debug devices page routes its seven
+/// commands to the new `debug_devices` tool, which a revision-9 hub lacks.
+pub const MIN_HUB_CONTRACT: u32 = 10;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -149,11 +152,13 @@ pub const MIN_HUB_CONTRACT: u32 = 9;
 /// would make every desktop refuse the hub it ships beside as `TooNew`.
 ///
 /// Raised to 9 with revision 9 (chat forms' `ask` tool), in that lockstep.
-pub const MAX_HUB_CONTRACT: u32 = 9;
+///
+/// Raised to 10 with revision 10 (debug devices' `debug_devices` tool).
+pub const MAX_HUB_CONTRACT: u32 = 10;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `9..=9` today, and unlike the original `0..=1` range this one CAN
+/// are `10..=10` today, and unlike the original `0..=1` range this one CAN
 /// exercise "too old" through a live `u32` (a hub reporting `0`…`3` is below
 /// `4`) — see `tests_contract.rs`, independent of whichever bounds
 /// a future release ships.

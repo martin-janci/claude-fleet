@@ -471,6 +471,18 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Debug devices: a host's Claude uses the devices it may see (its own
+    // host's, and those a person shared within its org); a person also
+    // labels, shares and forgets them (refused to host tokens in the
+    // service). `run` and `install` may take up to 600 s on the device's
+    // host, so the call is bounded like a long-poll.
+    ToolPolicy {
+        name: "debug_devices",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
     // Trusting a client widens what its token can do (unmarked delivery), so
     // it is credential administration like minting and revoking.
     ToolPolicy {

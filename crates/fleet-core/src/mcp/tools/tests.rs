@@ -2393,6 +2393,7 @@ fn router_sum_serves_every_tool() {
         include_str!("downloads.rs"),
         include_str!("sharing.rs"),
         include_str!("forms.rs"),
+        include_str!("devices.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2405,8 +2406,8 @@ fn router_sum_serves_every_tool() {
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
     // claim tools (T12) + the New session picker's `project_picks` /
     // `set_project_pick` + org administration's `org_admin` (phase B) +
-    // chat forms' `ask`.
-    assert_eq!(served, 118);
+    // chat forms' `ask` + debug devices' `debug_devices`.
+    assert_eq!(served, 119);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3931,7 +3932,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 83,534 on 2026-10-08 after merging `main` (81,951, task
     /// editing) into chat forms (the `ask` tool): 34 bytes above the two
     /// sides' sum.
-    const BUDGET_BYTES: usize = 83_634;
+    /// Measured at 85,601 on 2026-10-08 after debug devices (the
+    /// `debug_devices` tool, one entry by `action`, +1,967 bytes).
+    const BUDGET_BYTES: usize = 85_701;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()

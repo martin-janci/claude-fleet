@@ -560,3 +560,14 @@ nothing uses it yet. `update.track` offers `stable` / `beta` only until S2b
 publishes `nightly` (a stored `nightly` resolves to `stable`). S2b
 (nightly), the rest of S4b and S6–S9 are not built; the
 other §13 questions wait on the owner.
+
+Debug devices' first slice is landed (`docs/debug-devices.md`): per-host
+inventory of Android phones, emulators and AVDs, iOS simulators and paired
+iOS devices (migration 120), the `debug_devices` control-API tool (list,
+scan, claim / release, run, install across hosts, logs, screenshot, boot,
+shutdown; configure / forget for a person) and the desktop's Debug devices
+page (the `debug_device` resource, routed to the hub, contract revision
+10). Not built: an adb-server bridge so native tools on one host reach
+another host's devices, live screen and input, physical-iOS logs, and a
+device page in fleet-mobile. None of it has run against real hardware yet:
+the scripts are tested against stub `adb` / `simctl` output.

@@ -3637,6 +3637,88 @@
       ],
       "spec": "fleet.page/1",
       "title": "Claude accounts"
+    },
+    {
+      "id": "debug_devices",
+      "intro": "Phones, emulators and simulators on your hosts. Set one up once where it is plugged in; sessions use it through fleet's control API (debug_devices), and a shared one from every host of its org.",
+      "layout": "master_detail",
+      "resource": "debug_device",
+      "sections": [
+        {
+          "items": [
+            {
+              "key": "title",
+              "type": "field"
+            },
+            {
+              "key": "label",
+              "type": "field"
+            },
+            {
+              "key": "state",
+              "type": "field"
+            },
+            {
+              "key": "host",
+              "type": "field"
+            },
+            {
+              "key": "shared",
+              "type": "field"
+            }
+          ],
+          "title": "Device"
+        },
+        {
+          "items": [
+            {
+              "key": "claimed_by",
+              "type": "field"
+            },
+            {
+              "key": "claim_note",
+              "type": "field"
+            },
+            {
+              "key": "claimed_until",
+              "type": "field"
+            }
+          ],
+          "title": "In use"
+        },
+        {
+          "collapsible": true,
+          "items": [
+            {
+              "key": "platform",
+              "type": "field"
+            },
+            {
+              "key": "kind",
+              "type": "field"
+            },
+            {
+              "key": "os_version",
+              "type": "field"
+            },
+            {
+              "key": "model",
+              "type": "field"
+            },
+            {
+              "key": "serial",
+              "type": "field"
+            },
+            {
+              "key": "last_seen_at",
+              "type": "field"
+            }
+          ],
+          "title": "Hardware"
+        }
+      ],
+      "spec": "fleet.page/1",
+      "title": "Debug devices"
     }
   ],
   "resources": [
@@ -5325,6 +5407,295 @@
         "params": [],
         "report": false
       }
+    },
+    {
+      "actions": [
+        {
+          "bind": [
+            [
+              "host",
+              {
+                "from": "record",
+                "name": "host"
+              }
+            ]
+          ],
+          "command": "scan_debug_devices",
+          "envelope": "args",
+          "id": "debug_device.rescan",
+          "label": "Rescan host",
+          "params": [],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "release_debug_device",
+          "confirm": "Whoever holds it loses the claim; another session may then use the device.",
+          "envelope": "args",
+          "id": "debug_device.release",
+          "label": "Release claim",
+          "params": [],
+          "report": false
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "boot_debug_device",
+          "envelope": "args",
+          "id": "debug_device.boot",
+          "label": "Start",
+          "params": [],
+          "report": false,
+          "variants": [
+            "emulator",
+            "simulator"
+          ]
+        },
+        {
+          "bind": [
+            [
+              "id",
+              {
+                "from": "record",
+                "name": "id"
+              }
+            ]
+          ],
+          "command": "shutdown_debug_device",
+          "confirm": "Anything running on it stops.",
+          "envelope": "args",
+          "id": "debug_device.shutdown",
+          "label": "Stop",
+          "params": [],
+          "report": false,
+          "variants": [
+            "emulator",
+            "simulator"
+          ]
+        }
+      ],
+      "delete": {
+        "bind": [
+          [
+            "id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "forget_debug_device",
+        "confirm": "It leaves the list with its label and sharing. A device still attached comes back on the next scan.",
+        "envelope": "args",
+        "id": "debug_device.forget",
+        "label": "Forget",
+        "params": [],
+        "report": false
+      },
+      "empty": "No debug devices yet. Plug a phone into a host (USB debugging on), start an emulator or boot a simulator; hosts are scanned every few minutes, or rescan one now.",
+      "fields": [
+        {
+          "help": "Its label, or the name it reports.",
+          "id": "title",
+          "label": "Device",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "edit": "label",
+          "help": "Your name for it, used by sessions to pick it; empty uses its own name.",
+          "id": "label",
+          "label": "Label",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "help": "The host it is attached to; every command runs there.",
+          "id": "host",
+          "label": "Host",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "Android or iOS.",
+          "id": "platform",
+          "label": "Platform",
+          "options": [
+            [
+              "android",
+              "Android"
+            ],
+            [
+              "ios",
+              "iOS"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "A physical device, an Android emulator or an iOS simulator.",
+          "id": "kind",
+          "label": "Kind",
+          "options": [
+            [
+              "physical",
+              "Device"
+            ],
+            [
+              "emulator",
+              "Emulator"
+            ],
+            [
+              "simulator",
+              "Simulator"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "What the host's last scan saw.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "online",
+              "Online"
+            ],
+            [
+              "booted",
+              "Booted"
+            ],
+            [
+              "booting",
+              "Starting"
+            ],
+            [
+              "offline",
+              "Offline"
+            ],
+            [
+              "unauthorized",
+              "Not authorized"
+            ],
+            [
+              "shutdown",
+              "Stopped"
+            ],
+            [
+              "missing",
+              "Missing"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The version it runs.",
+          "id": "os_version",
+          "label": "OS",
+          "max": 64,
+          "type": "text"
+        },
+        {
+          "help": "The hardware model it reports.",
+          "id": "model",
+          "label": "Model",
+          "max": 128,
+          "type": "text"
+        },
+        {
+          "help": "What adb, simctl or devicectl address it by.",
+          "id": "serial",
+          "label": "Serial",
+          "max": 256,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "text": "shared",
+            "when": "true"
+          },
+          "confirm": "Sessions on every host of its org will be able to install and launch apps on it, and on a simulator that runs them on its Mac.",
+          "default": false,
+          "edit": "shared",
+          "help": "Sessions on other hosts of this host's org may use it; off, only sessions on its own host do.",
+          "id": "shared",
+          "label": "Shared",
+          "on_off": false,
+          "type": "bool"
+        },
+        {
+          "help": "Who is using it now; nobody else may until the claim ends.",
+          "id": "claimed_by",
+          "label": "Claimed by",
+          "max": 256,
+          "type": "text"
+        },
+        {
+          "help": "What the claim says it is for.",
+          "id": "claim_note",
+          "label": "For",
+          "max": 200,
+          "type": "text"
+        },
+        {
+          "help": "When the claim lapses unless its holder keeps using it.",
+          "id": "claimed_until",
+          "label": "Claim ends",
+          "type": "time"
+        },
+        {
+          "help": "When a scan last found it.",
+          "id": "last_seen_at",
+          "label": "Last seen",
+          "type": "time"
+        }
+      ],
+      "help": "Phones, emulators and simulators plugged into or running on your hosts. Each is used where it is attached; a shared one can be used by sessions on every host of its org through fleet's control API.",
+      "id": "debug_device",
+      "id_field": "id",
+      "label": "Debug device",
+      "list": "list_debug_devices",
+      "plural": "Debug devices",
+      "title_field": "title",
+      "update": {
+        "bind": [
+          [
+            "id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "update_debug_device",
+        "envelope": "args",
+        "id": "debug_device.update",
+        "label": "Apply",
+        "params": [],
+        "report": false
+      },
+      "variant_by": "kind"
     }
   ],
   "sources": [

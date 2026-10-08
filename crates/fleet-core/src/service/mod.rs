@@ -19,6 +19,7 @@ pub mod catalog;
 pub mod claude_print;
 pub mod clipboard;
 pub mod context;
+pub mod debug_devices;
 pub mod decide;
 pub mod delivery;
 pub mod diagnostics;

@@ -377,6 +377,21 @@ bullet for the area you are about to change.
   the database, a log or the audit row (`ask`'s `values` is rendered
   `<N fields>`). Regenerate `docs/form-spec.schema.json` with
   `REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`.
+- **Debug devices** (guide `docs/debug-devices.md`; `service/debug_devices/`,
+  `store/debug_devices.rs`, migration 120, `mcp/tools/devices.rs`, contract
+  revision 10): a scan runs `scripts::scan_script` on a host (adb,
+  emulator, `xcrun simctl` / `devicectl`) and `debug_devices_apply_scan`
+  upserts by `(host_alias, dev_key)`; an unseen device turns `missing`,
+  keeping a person's label and `shared`. `list` is cache-first and rescans
+  hosts older than `STALE_SECS` in the background. Every operation runs on
+  the device's host through `run_shell_bounded`; `run` takes a closed verb
+  set per tool (`ADB_VERBS`, `SIMCTL_VERBS`, `DEVICECTL_VERBS`), never a
+  host path; `install` relays an app between hosts with `carry::chunk_script`
+  and `run_with_stdin`. Reach: a person by org scope; a per-host token its
+  own host's devices plus `shared` ones on hosts of its org; `configure` /
+  `forget` are a person's. Claims are advisory leases in the row. The
+  desktop's Debug devices page is the `debug_device` resource; its seven
+  commands route to the hub's `debug_devices` tool.
 - **File downloads** (spec
   `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
   095, contract revision 7): `send_file { session_id, path }` (a host's

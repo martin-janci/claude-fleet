@@ -1237,3 +1237,60 @@ pub struct SessionClaimParams {
     /// Whose it becomes, by person name. The person must already exist.
     pub person: String,
 }
+
+/// `debug_devices`: one tool, by `action`, so the served definition stays
+/// one entry.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DebugDevicesParams {
+    /// list | scan | claim | release | run | install | logs | screenshot |
+    /// boot | shutdown | configure | forget (configure, forget: a person).
+    pub action: String,
+    /// An id, label, name or serial (`host/<that>`).
+    #[serde(default)]
+    pub device: Option<String>,
+    /// scan: one host. boot: `name`'s host. install: where `path` is.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// boot: a stopped device from scan's `bootable`.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// list: scan first.
+    #[serde(default)]
+    pub refresh: Option<bool>,
+    /// run: e.g. ["shell","pm","list","packages"].
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// run: ≤ 600 s.
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
+    /// install: .apk, .app or .ipa.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// install: allow an Android downgrade.
+    #[serde(default)]
+    pub downgrade: Option<bool>,
+    /// logs: ≤ 2000.
+    #[serde(default)]
+    pub lines: Option<u32>,
+    /// logs (simulator).
+    #[serde(default)]
+    pub since_s: Option<u32>,
+    /// logs: logcat filterspec or simulator predicate.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// logs: only lines holding this.
+    #[serde(default)]
+    pub contains: Option<String>,
+    /// claim: seconds (1800).
+    #[serde(default)]
+    pub claim_s: Option<i64>,
+    /// claim: what for.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// configure: "" clears.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// configure: other hosts of its org may use it.
+    #[serde(default)]
+    pub shared: Option<bool>,
+}

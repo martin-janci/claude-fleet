@@ -14,6 +14,7 @@ mod catalog;
 mod changesets;
 mod clients;
 mod conversations;
+mod debug_devices;
 mod decisions;
 mod downloads;
 mod forms;
@@ -78,6 +79,7 @@ pub use clients::{
     LINE_SEPARATORS,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
+pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
 pub use decisions::{
     is_decision_word, DecisionKeyStatus, DecisionRunFilter, DecisionRunRow, DecisionStatRow,
     NewDecisionRun, RunScope, DECISION_BENCH_SUBJECT, DECISION_CALL_FAILURES, DECISION_FALLBACKS,

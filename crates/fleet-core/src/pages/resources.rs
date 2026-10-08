@@ -914,7 +914,87 @@ const PERSON_RESOURCE: ResourceType = ResourceType {
 };
 
 /// Every resource type.
-pub const RESOURCES: &[ResourceType] = &[ORG, TRACKER, CATALOG, DEVICE_RESOURCE, PERSON_RESOURCE];
+const DEBUG_DEVICE_ID: (&str, Bind) = ("id", Bind::Record("id"));
+
+/// `DebugDevice.platform`, `.kind` and `.state` as `service::debug_devices`
+/// says them.
+const DEBUG_PLATFORMS: &[(&str, &str)] = &[("android", "Android"), ("ios", "iOS")];
+const DEBUG_KINDS: &[(&str, &str)] = &[
+    ("physical", "Device"),
+    ("emulator", "Emulator"),
+    ("simulator", "Simulator"),
+];
+const DEBUG_STATES: &[(&str, &str)] = &[
+    ("online", "Online"),
+    ("booted", "Booted"),
+    ("booting", "Starting"),
+    ("offline", "Offline"),
+    ("unauthorized", "Not authorized"),
+    ("shutdown", "Stopped"),
+    ("missing", "Missing"),
+];
+
+const DEBUG_DEVICE: ResourceType = ResourceType {
+    id: "debug_device",
+    label: "Debug device",
+    plural: "Debug devices",
+    help: "Phones, emulators and simulators plugged into or running on your hosts. Each is used where it is attached; a shared one can be used by sessions on every host of its org through fleet's control API.",
+    list: "list_debug_devices",
+    id_field: "id",
+    title_field: "title",
+    color_field: None,
+    empty: "No debug devices yet. Plug a phone into a host (USB debugging on), start an emulator or boot a simulator; hosts are scanned every few minutes, or rescan one now.",
+    fields: &[
+        FieldSpec::new("title", "Device", "Its label, or the name it reports.", FieldKind::Text { max: 128 }),
+        FieldSpec::new("label", "Label", "Your name for it, used by sessions to pick it; empty uses its own name.", FieldKind::Text { max: 64 }).edit("label"),
+        FieldSpec::new("host", "Host", "The host it is attached to; every command runs there.", FieldKind::Text { max: 128 }),
+        FieldSpec::new("platform", "Platform", "Android or iOS.", FieldKind::Choice { options: DEBUG_PLATFORMS }).badge(Badge::Label),
+        FieldSpec::new("kind", "Kind", "A physical device, an Android emulator or an iOS simulator.", FieldKind::Choice { options: DEBUG_KINDS }),
+        FieldSpec::new("state", "State", "What the host's last scan saw.", FieldKind::Choice { options: DEBUG_STATES }).badge(Badge::Label),
+        FieldSpec::new("os_version", "OS", "The version it runs.", FieldKind::Text { max: 64 }),
+        FieldSpec::new("model", "Model", "The hardware model it reports.", FieldKind::Text { max: 128 }),
+        FieldSpec::new("serial", "Serial", "What adb, simctl or devicectl address it by.", FieldKind::Text { max: 256 }),
+        FieldSpec::new(
+            "shared",
+            "Shared",
+            "Sessions on other hosts of this host's org may use it; off, only sessions on its own host do.",
+            FieldKind::Bool { on_off: false, default: false },
+        )
+        .edit("shared")
+        .badge(Badge::True { text: "shared" })
+        .confirm("Sessions on every host of its org will be able to install and launch apps on it, and on a simulator that runs them on its Mac."),
+        FieldSpec::new("claimed_by", "Claimed by", "Who is using it now; nobody else may until the claim ends.", FieldKind::Text { max: 256 }),
+        FieldSpec::new("claim_note", "For", "What the claim says it is for.", FieldKind::Text { max: 200 }),
+        FieldSpec::new("claimed_until", "Claim ends", "When the claim lapses unless its holder keeps using it.", FieldKind::Time),
+        FieldSpec::new("last_seen_at", "Last seen", "When a scan last found it.", FieldKind::Time),
+    ],
+    create: None,
+    update: Some(ActionSpec::new("debug_device.update", "Apply", "update_debug_device", &[DEBUG_DEVICE_ID])),
+    delete: Some(
+        ActionSpec::new("debug_device.forget", "Forget", "forget_debug_device", &[DEBUG_DEVICE_ID])
+            .confirm("It leaves the list with its label and sharing. A device still attached comes back on the next scan."),
+    ),
+    actions: &[
+        ActionSpec::new("debug_device.rescan", "Rescan host", "scan_debug_devices", &[("host", Bind::Record("host"))]),
+        ActionSpec::new("debug_device.release", "Release claim", "release_debug_device", &[DEBUG_DEVICE_ID])
+            .confirm("Whoever holds it loses the claim; another session may then use the device."),
+        ActionSpec::new("debug_device.boot", "Start", "boot_debug_device", &[DEBUG_DEVICE_ID]).variants(&["emulator", "simulator"]),
+        ActionSpec::new("debug_device.shutdown", "Stop", "shutdown_debug_device", &[DEBUG_DEVICE_ID])
+            .variants(&["emulator", "simulator"])
+            .confirm("Anything running on it stops."),
+    ],
+    create_flow: None,
+    variant_by: Some("kind"),
+};
+
+pub const RESOURCES: &[ResourceType] = &[
+    ORG,
+    TRACKER,
+    CATALOG,
+    DEVICE_RESOURCE,
+    PERSON_RESOURCE,
+    DEBUG_DEVICE,
+];
 
 pub fn resource(id: &str) -> Option<&'static ResourceType> {
     RESOURCES.iter().find(|r| r.id == id)
@@ -1088,6 +1168,7 @@ mod tests {
                 "assign_host_org",
                 "assign_tracker_org",
                 "bind_device_org",
+                "boot_debug_device",
                 "catalog_add_catalog",
                 "catalog_admit_catalog",
                 "catalog_list_catalogs",
@@ -1098,24 +1179,30 @@ mod tests {
                 "flow_cancel",
                 "flow_start",
                 "flow_submit",
+                "forget_debug_device",
                 "grant_device_catalog",
+                "list_debug_devices",
                 "list_devices",
                 "list_orgs",
                 "list_people",
                 "list_trackers",
                 "pair_device",
+                "release_debug_device",
                 "remove_org",
                 "remove_org_member",
                 "remove_org_rule",
                 "remove_tracker",
                 "rename_person",
                 "revoke_device",
+                "scan_debug_devices",
                 "set_device_person",
                 "set_device_trust",
                 "set_org_member",
                 "set_org_setting",
                 "set_tracker_credential",
+                "shutdown_debug_device",
                 "test_tracker",
+                "update_debug_device",
                 "update_org",
                 "update_tracker",
                 "work_retention_sweep",
