@@ -54,6 +54,7 @@ mod repo;
 mod routines;
 mod session_ops;
 mod sharing;
+mod start_rules;
 mod support;
 #[cfg(test)]
 mod tests;
@@ -368,6 +369,7 @@ impl FleetTools {
             + Self::devices_router()
             + Self::prs_router()
             + Self::routines_router()
+            + Self::start_rules_router()
     }
 }
 
