@@ -76,6 +76,10 @@ impl RepairTickConfig {
             interval_secs: settings::get_secs(s, settings::REPAIR_TICK_INTERVAL_SECS),
         }
     }
+
+    fn period(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.interval_secs)
+    }
 }
 
 /// Where a candidate's worktree should be.
@@ -561,7 +565,11 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
         let Ok(s) = store.lock() else {
             return false;
         };
-        RepairTickConfig::from_store(&s)
+        let cfg = RepairTickConfig::from_store(&s);
+        if cfg.enabled && !crate::service::loops::gate_in("repair", &s, Some(cfg.period())) {
+            return false;
+        }
+        cfg
     };
     if !cfg.enabled {
         return false;
@@ -591,6 +599,7 @@ pub fn maybe_run(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> bool {
             ssh,
         };
         let report = run_with(&store, &exec, &cfg, now_unix()).await;
+        crate::service::loops::report("repair", Ok::<_, String>(()), Some(cfg.period()));
         if report.attempted > 0 {
             tracing::info!(
                 "[repair-tick] repaired={} failed={} backed_off={} over_cap={}",

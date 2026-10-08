@@ -114,7 +114,7 @@
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
-    font-size: 0.65rem;
+    font-size: 11px;
     font-family: var(--font-mono, ui-monospace, monospace);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
@@ -164,11 +164,11 @@
     background: var(--ok, #22c55e);
   }
   .stale {
-    font-size: 0.6rem;
+    font-size: 11px;
     opacity: 0.8;
   }
   .prov {
-    font-size: 0.58rem;
+    font-size: 11px;
     font-weight: 600;
     opacity: 0.7;
     margin-right: 0.15rem;

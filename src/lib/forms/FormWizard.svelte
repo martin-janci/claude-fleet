@@ -246,19 +246,19 @@
 
 <style>
   .wizard { display: flex; flex-direction: column; gap: 0.6rem; }
-  .count { font-size: 0.72rem; color: var(--fg-muted); }
+  .count { font-size: 11px; color: var(--fg-muted); }
   h6 { margin: 0; font-size: 0.9rem; }
   .intro { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
   label, .label { font-size: 0.82rem; }
   .check { display: flex; gap: 0.35rem; align-items: flex-start; }
   input:not([type='checkbox']), select, textarea { font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; }
-  .help { font-size: 0.72rem; color: var(--fg-muted); }
-  .err { font-size: 0.75rem; color: var(--usage-crit); }
+  .help { font-size: 11px; color: var(--fg-muted); }
+  .err { font-size: 11px; color: var(--usage-crit); }
   .row { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .options { display: flex; flex-direction: column; gap: 0.15rem; }
   .opt { display: flex; gap: 0.45rem; align-items: center; text-align: left; font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; border: 1px solid transparent; border-radius: 4px; background: none; color: inherit; cursor: pointer; }
   .opt:hover:not(:disabled) { background: var(--bg-hover); }
   .opt.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .kbd { font-size: 0.7rem; line-height: 1; padding: 0.1rem 0.3rem; border: 1px solid var(--border); border-radius: 3px; color: var(--fg-muted); }
+  .kbd { font-size: 11px; line-height: 1; padding: 0.1rem 0.3rem; border: 1px solid var(--border); border-radius: 3px; color: var(--fg-muted); }
 </style>

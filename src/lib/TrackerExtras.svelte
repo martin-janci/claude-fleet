@@ -186,7 +186,7 @@
   }
   .hint {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .err {
@@ -206,6 +206,6 @@
   .conf,
   .why {
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
 </style>

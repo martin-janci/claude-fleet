@@ -442,6 +442,7 @@ import { sessions } from './sessions';
 import { isGeneratedName } from './names';
 import { get } from 'svelte/store';
 import { selectedSession } from './selection';
+import { expectAccessible } from './a11y_check';
 
 function okRow(over: Partial<sessionsModule.SessionRow> = {}): sessionsModule.SessionRow {
   return {
@@ -1891,5 +1892,15 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     expect(shown[0].message).toContain('dev-abc-7');
     sessionsModule.sessions.set([]);
     clearToasts();
+  });
+});
+
+describe('NewSessionDialog accessibility (7.2)', () => {
+  it('passes the axe and audit checks; the type picker is a named group of toggles', async () => {
+    const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    const group = screen.getByRole('group', { name: 'Type' });
+    expect(group.querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
+    await expectAccessible(container);
   });
 });

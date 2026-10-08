@@ -26,6 +26,12 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `restore.batch_size` | `4` | 1–16 | Sessions resumed in parallel by Restore lost sessions. |
 | `restore.stagger_ms` | `3000` | 0–60000 ms | Pause between starting each resumed session in a batch restore. |
 
+## automation
+
+| Setting | Default | Range | What it does |
+|---|---|---|---|
+| `automation.paused` | `false` | on / off | Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused. |
+
 ## orchestrator
 
 | Setting | Default | Range | What it does |

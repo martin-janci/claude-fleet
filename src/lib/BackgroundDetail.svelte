@@ -120,7 +120,7 @@
   }
   .bg-kind {
     flex: 0 0 auto;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .bg-label {
@@ -129,7 +129,7 @@
   }
   .bg-status {
     flex: 0 0 auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .bg-status[data-status='running'] {
@@ -143,7 +143,7 @@
   }
   .bg-dur {
     flex: 0 0 auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .bg-worker {
@@ -171,7 +171,7 @@
   .bg-report-head {
     display: flex;
     gap: 0.4rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .bg-output {
@@ -180,7 +180,7 @@
     gap: 0.4rem;
     flex-wrap: wrap;
     margin-top: 1rem;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .bg-output code {

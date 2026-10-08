@@ -1024,6 +1024,7 @@
           {#if briefOn}
             <textarea
               class="brief"
+              aria-label="Brief for Claude"
               data-testid="ticket-brief"
               rows="6"
               value={briefText}
@@ -1057,11 +1058,13 @@
       <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
     {/if}
 
-    <label for="kind-picker">Type</label>
-    <div class="kind-row" id="kind-picker" role="group">
+    <!-- A group, not a labelable control: it is named by aria-labelledby. -->
+    <span class="field-label" id="kind-picker-label">Type</span>
+    <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label">
       <button
         class="kind-pick"
         class:active={chosenKind === 'work'}
+        aria-pressed={chosenKind === 'work'}
         data-testid="kind-work"
         onclick={() => onPickKind('work')}
       >
@@ -1070,6 +1073,7 @@
       <button
         class="kind-pick"
         class:active={chosenKind === 'shell'}
+        aria-pressed={chosenKind === 'shell'}
         data-testid="kind-shell"
         onclick={() => onPickKind('shell')}
       >
@@ -1141,7 +1145,9 @@
       }}
     />
 
-    <label for="wt-picker">Worktree</label>
+    <!-- Not a <label>: the picker is a listbox, which a label cannot name
+         (it names itself with ariaLabel). -->
+    <span class="field-label" aria-hidden="true">Worktree</span>
     {#if worktreeStatus}
       <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
     {/if}
@@ -1242,7 +1248,7 @@
      scrolls instead of squeezing them toward zero. :global so it reaches
      PickerList's root too. */
   .fields > :global(*) { flex-shrink: 0; }
-  label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
+  label, .field-label { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;
     padding: 0.3rem 0.4rem;
@@ -1255,7 +1261,7 @@
   .name-row { display: flex; gap: 0.3rem; }
   .work-note {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .work-note .dup { color: var(--fg); }
@@ -1292,7 +1298,7 @@
     min-width: 0;
   }
   .kind-pick {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.7rem;
     border: 1px solid var(--border);
     background: transparent;
@@ -1303,16 +1309,16 @@
   .kind-pick.active { color: var(--fg); border-color: var(--accent); }
   .preview {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview .k { text-transform: uppercase; font-size: 0.65rem; margin-right: 0.3rem; }
+  .preview .k { text-transform: uppercase; font-size: 11px; margin-right: 0.3rem; }
   .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
-  .wt-status { font-size: 0.72rem; color: var(--fg-muted); margin: 0 0 0.2rem; }
+  .wt-status { font-size: 11px; color: var(--fg-muted); margin: 0 0 0.2rem; }
   .wt-status.err { color: var(--danger); }
   .actions {
     display: flex;
@@ -1323,8 +1329,8 @@
     padding-top: 0.2rem;
     border-top: 1px solid var(--border);
   }
-  .actions .hint { margin-right: auto; font-size: 0.68rem; color: var(--fg-muted); }
-  .hub-create-note { font-size: 0.68rem; color: var(--fg-muted); text-align: right; }
+  .actions .hint { margin-right: auto; font-size: 11px; color: var(--fg-muted); }
+  .hub-create-note { font-size: 11px; color: var(--fg-muted); text-align: right; }
   .actions button {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
@@ -1350,12 +1356,12 @@
   .brief {
     font: inherit;
     font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     width: 100%;
     box-sizing: border-box;
     resize: vertical;
   }
   .small {
-    font-size: 0.7rem;
+    font-size: 11px;
   }
 </style>

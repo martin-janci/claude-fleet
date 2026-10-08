@@ -407,6 +407,10 @@ fn sample_health() -> Health {
             spent_micros: 31_000_000,
             budget_micros: 30_000_000,
         }],
+        // Redesign 8.1: no client reads the loop registry yet, so it stays
+        // out of the contract (empty and false are not sent).
+        loops: Vec::new(),
+        automation_paused: false,
     }
 }
 

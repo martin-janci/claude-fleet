@@ -105,7 +105,7 @@
     align-items: baseline;
     gap: 0.4rem;
     min-width: 0;
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .sub-type {
@@ -122,7 +122,7 @@
   .sub-dur {
     flex: 0 0 auto;
     margin-left: auto;
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   .sub-dur.muted {
     font-style: italic;
@@ -130,7 +130,7 @@
   }
   .sub-status {
     flex: 0 0 auto;
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   /* Without a duration beside it the status is the first thing on the
      right, so it takes over pushing the group there. */
@@ -147,7 +147,7 @@
     border: none;
     color: var(--accent);
     font: inherit;
-    font-size: 0.7rem;
+    font-size: 11px;
     cursor: pointer;
   }
   .sub-open:hover {
@@ -175,7 +175,7 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 0.75rem;
+    font-size: 11px;
     cursor: pointer;
   }
 </style>

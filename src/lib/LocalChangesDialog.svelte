@@ -161,7 +161,7 @@
 
     <div class="actions">
       <div class="row">
-        <select bind:value={intent} data-testid="lw-ask-intent" disabled={busy}>
+        <select bind:value={intent} aria-label="What to ask Claude" data-testid="lw-ask-intent" disabled={busy}>
           {#each ASK_INTENTS as i (i.intent)}
             <option value={i.intent}>{i.label}</option>
           {/each}
@@ -233,7 +233,7 @@
 
 <style>
   .muted { margin: 0; color: var(--fg-muted); font-size: 0.85rem; }
-  .small { font-size: 0.78rem; }
+  .small { font-size: 11px; }
   .split {
     display: grid;
     grid-template-columns: minmax(14rem, 1fr) 2fr;
@@ -274,7 +274,7 @@
   .file code { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .st { font-family: var(--mono); color: var(--fg-muted); width: 1.4rem; flex: none; }
   .origin {
-    font-size: 0.68rem;
+    font-size: 11px;
     padding: 0 0.35rem;
     border-radius: 3px;
     border: 1px solid var(--border);

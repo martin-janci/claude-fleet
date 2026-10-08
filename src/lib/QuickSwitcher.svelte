@@ -30,7 +30,8 @@
   import AccountPill from './AccountPill.svelte';
   import { uiLayout } from './prefs';
   import type { PickerItem } from './PickerList.svelte';
-  import { sessions, type SessionRow } from './sessions';
+  import { sessions, sessionsAnswered, type SessionRow } from './sessions';
+  import Loader from './Loader.svelte';
   import { projects } from './projects';
   import { hosts } from './hosts';
   import { requestAssetsView, requestHostsView } from './app_views';
@@ -160,6 +161,17 @@
     ),
   );
   const ticketRows = $derived(ticketEntries(tickets, ticketBadges));
+  // Step 3.13: what the switcher holds shows at once; until the first
+  // session list answers, one line says which hosts it is still hearing
+  // from, with the kit's Dot wave (it appears only after 400 ms).
+  const stillHearing = $derived.by(() => {
+    if ($sessionsAnswered) return null;
+    const names = $hosts.filter((h) => !h.hidden).map((h) => h.alias);
+    if (names.length === 0) return 'Sessions still arriving';
+    const shown = names.slice(0, 3).join(', ');
+    const more = names.length > 3 ? ` and ${names.length - 3} more` : '';
+    return `Still hearing from ${shown}${more}`;
+  });
   // Step 3.9: `>` commands, `#` tasks and tickets, `@` hosts.
   const prefix = $derived(splitPrefix(query));
   const lookupRow = $derived(
@@ -948,6 +960,12 @@
         </div>
       {/if}
     </div>
+    {#if mode !== 'new' && stillHearing}
+      <div class="still-hearing" data-testid="switcher-still-hearing" role="status">
+        <Loader name="dot-wave" size={40} stage={false} />
+        <span>{stillHearing}</span>
+      </div>
+    {/if}
     <div class="hint">
       {#if mode === 'new'}
         <span>↵ open</span>
@@ -1041,7 +1059,7 @@
   }
   .mode-chip {
     flex: 0 0 auto;
-    font-size: 0.75rem;
+    font-size: 11px;
     font-weight: 600;
     padding: 0.15rem 0.5rem;
     border-radius: var(--radius-sm);
@@ -1085,11 +1103,19 @@
   .ib.on {
     color: var(--accent);
   }
+  .still-hearing {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3);
+    color: var(--fg-muted);
+    font-size: 11px;
+  }
   .hint {
     display: flex;
     flex-wrap: wrap;
     gap: 0.8rem;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
 </style>

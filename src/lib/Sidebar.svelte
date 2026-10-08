@@ -1431,6 +1431,7 @@
               title="Sessions whose tag, branch or worktree names {g.key}"
               role="button"
               tabindex="0"
+              aria-expanded={!isCollapsed}
               onclick={() => toggleWorkCollapse(g.key)}
               onkeydown={(e) => {
                 if (!fromRowItself(e)) return;
@@ -1481,6 +1482,7 @@
                   data-testid="work-done"
                   role="button"
                   tabindex="0"
+                  aria-expanded={openDone.has(g.key)}
                   onclick={() => (openDone = toggleIn(openDone, g.key))}
                   onkeydown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') openDone = toggleIn(openDone, g.key);
@@ -1518,6 +1520,7 @@
               title="Past work on {pg.key}: no session is running it"
               role="button"
               tabindex="0"
+              aria-expanded={isOpen}
               onclick={() => (openPast = toggleIn(openPast, pg.key))}
               onkeydown={(e) => {
                 if (!fromRowItself(e)) return;
@@ -1587,6 +1590,7 @@
               title={row.project.base_path}
               role="button"
               tabindex="0"
+              aria-expanded={!isCollapsed}
               onclick={() => toggleCollapse(row.project.id)}
               onkeydown={(e) => onKeyProject(e, row.project.id)}
             >
@@ -1961,7 +1965,7 @@
   }
   .caret {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     width: 0.7rem;
     text-align: center;
     transition: transform var(--dur-fast) ease;
@@ -2003,7 +2007,7 @@
   .work-title {
     margin-left: 0.4rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -2012,7 +2016,7 @@
     align-items: center;
     gap: 0.3rem;
     padding: 0.1rem 0.5rem 0.1rem 1.6rem;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     cursor: pointer;
   }
@@ -2022,7 +2026,7 @@
     opacity: 0.6;
   }
   .work-reopened {
-    font-size: 0.68rem;
+    font-size: 11px;
     color: var(--accent, #3b82f6);
     white-space: nowrap;
   }
@@ -2034,7 +2038,7 @@
     position: absolute;
     right: 0.5rem;
     top: 0.15rem;
-    font-size: 0.62rem;
+    font-size: 11px;
     padding: 0 0.3rem;
     border: 1px solid var(--border);
     border-radius: 999px;
@@ -2048,7 +2052,7 @@
     align-items: center;
     gap: 0.4rem;
     padding: 0.15rem 0.5rem 0.15rem 1.6rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     opacity: 0.85;
   }
@@ -2066,24 +2070,24 @@
     text-overflow: ellipsis;
   }
   .past-note {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .past-purged {
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--danger, #e5534b);
   }
   .purge-work {
     margin: 0.5rem 0 0;
   }
   .work-pr {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
   }
   .count {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     padding: 0.05rem 0.4rem;
     border-radius: 999px;
@@ -2121,7 +2125,7 @@
   .unclaimed-note {
     margin: 0 0 0.25rem;
     padding: 0 0.4rem;
-    font-size: 0.68rem;
+    font-size: 11px;
     line-height: 1.4;
     color: var(--fg-muted);
   }
@@ -2131,11 +2135,11 @@
     justify-content: space-between;
     gap: 0.5rem;
     padding: 0.5rem 0.6rem;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .inbox-rest .muted { color: var(--fg-muted); }
   .section-header {
-    font-size: 0.65rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -2153,7 +2157,7 @@
   }
   .section-toggle .caret {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     width: 0.7rem;
     text-align: center;
     transition: transform var(--dur-fast) ease;

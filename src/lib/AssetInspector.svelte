@@ -1,4 +1,5 @@
 <script lang="ts">
+  import ListLoading from './ListLoading.svelte';
   import { untrack } from 'svelte';
   import Inspector from './Inspector.svelte';
   import AssetDetail from './AssetDetail.svelte';
@@ -273,7 +274,7 @@
     {#if asset && tab === 'history'}
       <div class="pad" data-testid="inspector-history">
         {#if !history || (history.rows === null && history.error === null)}
-          <p class="muted">Loading…</p>
+          <ListLoading />
         {:else if history.error}
           <p class="error">{history.error}</p>
         {:else if history.rows && history.rows.length === 0}

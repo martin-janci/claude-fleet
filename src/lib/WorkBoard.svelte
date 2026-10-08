@@ -419,7 +419,7 @@
     align-items: center;
     margin: 0;
     padding: 8px 10px 4px;
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -444,7 +444,7 @@
   .empty {
     margin: 0;
     padding: 0 10px 10px;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .card {
     width: 100%;
@@ -477,7 +477,7 @@
     background: var(--bg);
     color: var(--fg-muted);
     font: inherit;
-    font-size: 0.75rem;
+    font-size: 11px;
     cursor: pointer;
     opacity: 0;
   }
@@ -511,7 +511,7 @@
     align-items: center;
   }
   .tb {
-    font-size: 0.62rem;
+    font-size: 11px;
     border: 1px solid var(--border);
     border-radius: 3px;
     padding: 0 0.2rem;
@@ -519,14 +519,14 @@
   }
   .key {
     font-family: var(--mono);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .lock {
-    font-size: 0.65rem;
+    font-size: 11px;
   }
   .needs {
     color: var(--usage-crit, #c62828);
-    font-size: 0.55rem;
+    font-size: 11px;
     margin-left: auto;
   }
   .title {
@@ -545,7 +545,7 @@
     flex-wrap: wrap;
     gap: 0 8px;
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .meta > span {
     white-space: nowrap;
@@ -554,7 +554,7 @@
     color: var(--accent);
   }
   .live {
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--usage-ok);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -562,7 +562,7 @@
   }
   .card-err {
     margin: 2px 2px 0;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--usage-crit, #c62828);
   }
   .ghost {

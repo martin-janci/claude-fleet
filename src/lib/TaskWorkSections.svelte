@@ -217,7 +217,7 @@
     gap: 6px;
     align-items: center;
     margin: 0 0 6px;
-    font-size: 0.72rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -265,11 +265,11 @@
   }
   .key {
     font-family: var(--mono);
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .chip {
-    font-size: 0.7rem;
+    font-size: 11px;
     border-radius: 999px;
     padding: 0 6px;
     white-space: nowrap;
@@ -358,7 +358,7 @@
     margin: 0;
   }
   .small {
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .err {
     color: var(--usage-crit, #c62828);
