@@ -400,6 +400,20 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "queued_prompts",
+            "queued_prompts",
+            json!({ "session_id": 7 }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::queued_prompts(
+                    b,
+                    fleet_core::service::sessions::QueuedPromptsArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_hosts",
             "list_hosts",
             json!({}),
@@ -2923,6 +2937,42 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "queue_prompt",
+            "queue_prompt",
+            json!({ "session_id": 7, "prompt": "rebase on main" }),
+            r#"{"session_id":7,"delivered":false,"queued_id":3}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::queue_prompt(
+                    b,
+                    fleet_core::service::sessions::QueuePromptArgs {
+                        session_id: 7,
+                        prompt: "rebase on main".into(),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Taking a prompt back is the same tool with `cancel` set.
+        (
+            "cancel_queued_prompt",
+            "queued_prompts",
+            json!({ "session_id": 7, "cancel": 3 }),
+            "[]",
+            Box::new(|b, s, _h| {
+                block_on(commands::sessions::routed::cancel_queued_prompt(
+                    b,
+                    fleet_core::service::sessions::CancelQueuedPromptArgs {
+                        session_id: 7,
+                        id: 3,
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),

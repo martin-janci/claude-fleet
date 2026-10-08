@@ -10054,6 +10054,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // because `to_addr` can name the same row by address.
     ("send_message", &["Drive"]),
     ("send_prompt", &["Drive"]),
+    ("queue_prompt", &["Drive"]),
+    ("queued_prompts", &["Drive"]),
     ("session_conversations", &["Read"]),
     ("session_history", &["Read"]),
     ("wait_for_reply", &["Read"]),

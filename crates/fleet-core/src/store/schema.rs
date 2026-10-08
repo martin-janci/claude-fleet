@@ -1544,6 +1544,13 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/132_peer_link_traffic.sql"),
         already_applied: Some(peer_links_has_msgs_total),
     },
+    // Orbit Fleet 5.10, Send prompt: `deferred_prompts`, prompts typed in
+    // once a busy session is idle. New objects only, `IF NOT EXISTS`, safe
+    // to re-run.
+    Migration::plain(
+        133,
+        include_str!("../../migrations/133_deferred_prompts.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

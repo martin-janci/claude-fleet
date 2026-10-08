@@ -47,7 +47,7 @@ use fleet_core::service::sessions::{
     TouchSessionViewedArgs,
 };
 use fleet_core::ssh::SshClient;
-use fleet_core::store::{SessionRow, Store};
+use fleet_core::store::{DeferredPromptRow, SessionRow, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
@@ -191,6 +191,36 @@ pub async fn send_prompt(
     ssh: State<'_, Arc<SshClient>>,
 ) -> Result<(), IpcError> {
     routed::send_prompt(&backend, args, &store, &ssh).await
+}
+
+/// Send prompt's "busy sessions get it when they are idle" (step 5.10).
+#[tauri::command]
+pub async fn queue_prompt(
+    args: sessions::QueuePromptArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<sessions::QueuePromptResult, IpcError> {
+    routed::queue_prompt(&backend, args, &store, &ssh).await
+}
+
+#[tauri::command]
+pub async fn queued_prompts(
+    args: sessions::QueuedPromptsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<DeferredPromptRow>, IpcError> {
+    routed::queued_prompts(&backend, args, &store).await
+}
+
+/// Take back a waiting prompt; answers what is still waiting.
+#[tauri::command]
+pub async fn cancel_queued_prompt(
+    args: sessions::CancelQueuedPromptArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<DeferredPromptRow>, IpcError> {
+    routed::cancel_queued_prompt(&backend, args, &store).await
 }
 
 #[tauri::command]
@@ -754,6 +784,53 @@ pub(crate) mod routed {
                 Ok(())
             }
             None => sessions::send_prompt(args, store, ssh).await,
+        }
+    }
+
+    pub async fn queue_prompt(
+        backend: &FleetBackend,
+        args: sessions::QueuePromptArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<sessions::QueuePromptResult, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("queue_prompt", &args).await,
+            None => sessions::queue_prompt(args, store, ssh).await,
+        }
+    }
+
+    pub async fn queued_prompts(
+        backend: &FleetBackend,
+        args: sessions::QueuedPromptsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<DeferredPromptRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("queued_prompts", &args).await,
+            None => sessions::queued_prompts(args, store),
+        }
+    }
+
+    /// The hub's `queued_prompts { cancel }` takes the prompt back and lists
+    /// what is left; standalone does the same two steps.
+    pub async fn cancel_queued_prompt(
+        backend: &FleetBackend,
+        args: sessions::CancelQueuedPromptArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<DeferredPromptRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => {
+                // The command's row names the `queued_prompts` tool.
+                hub.route(
+                    "cancel_queued_prompt",
+                    &serde_json::json!({ "session_id": args.session_id, "cancel": args.id }),
+                )
+                .await
+            }
+            None => {
+                let session_id = args.session_id;
+                sessions::cancel_queued_prompt(args, store)?;
+                sessions::queued_prompts(sessions::QueuedPromptsArgs { session_id }, store)
+            }
         }
     }
 

@@ -341,6 +341,18 @@ Pull requests sessions opened, newest first, with state, CI, merge time and open
 
 Parameters: `action`, `limit`, `project_id`, `state`
 
+### `queue_prompt`
+
+Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
+
+Parameters: `prompt`, `raw`, `session_id`
+
+### `queued_prompts`
+
+A session's prompts from queue_prompt still waiting, and any whose typing failed. cancel=<id> takes one back instead.
+
+Parameters: `cancel`, `session_id`
+
 ### `quick_replies`
 
 Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults; not a host token or the operator). Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.
@@ -897,6 +909,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
+- `commands::sessions::queue_prompt`
+- `commands::sessions::queued_prompts`
+- `commands::sessions::cancel_queued_prompt`
 - `commands::sessions::recreate_session`
 - `commands::sessions::restore_host_sessions`
 - `commands::sessions::discover_lost_sessions`
