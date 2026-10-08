@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import {
     sessions,
     hasNoPane,
@@ -57,6 +57,7 @@
   import { accessOf } from './access';
   import { shareSheetFor, sessionBlocked } from './share';
   import { hubConnection } from './hub_connection';
+  import { sessionActionRequest, takeSessionAction, type SessionActionId } from './session_actions';
 
   let { session }: { session: SessionRow } = $props();
 
@@ -563,6 +564,33 @@
     await tick();
     selectSession(r.value, { follow: true });
   }
+  // A row's ⋯ menu or right-click asked for an action on this session
+  // (redesign step 3.10, `session_actions.ts`): run it as this pane's own
+  // button would, with the same gate, confirm and dialog.
+  const rowActions: Record<SessionActionId, { blocked: () => string | null; run: () => void }> = {
+    label: { blocked: () => setFriendlyNameBlocked, run: beginLabelEdit },
+    rename: { blocked: () => renameBlocked, run: beginRename },
+    restart: { blocked: () => restartBlocked, run: askRestart },
+    repair: { blocked: () => (repairing ? 'Repairing…' : repairBlocked), run: askRepair },
+    send_prompt: { blocked: () => sendPromptBlocked, run: openComposer },
+    review: { blocked: () => reviewBlocked, run: () => (reviewOpen = true) },
+    recreate: { blocked: () => recreateBlocked, run: askRecreate },
+    move: { blocked: () => moveBlocked, run: openMove },
+    share: { blocked: () => shareBlocked, run: openShare },
+    remove_from_list: { blocked: () => dismissAgentBlocked, run: () => void onRemoveFromList() },
+    safe_remove: { blocked: () => inspectSafeKillBlocked, run: () => void askSafeKill() },
+    kill: { blocked: () => killBlocked, run: askKill },
+  };
+  $effect(() => {
+    const r = $sessionActionRequest;
+    if (!r || r.sessionId !== session.id) return;
+    untrack(() => {
+      const taken = takeSessionAction(session.id);
+      if (!taken || taken.action === 'details') return;
+      const a = rowActions[taken.action];
+      if (a.blocked() === null) a.run();
+    });
+  });
 </script>
 
 <article class="details" data-testid="session-details">
