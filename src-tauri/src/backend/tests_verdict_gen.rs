@@ -256,57 +256,18 @@ fn doc_table_names_the_argument_shape_and_the_refusal_for_the_routed_unless_row(
     assert!(row.contains("otherwise routes to `repair_session`"));
 }
 
-// ── summary_sentence ─────────────────────────────────────────────────────
+// ── the generated block's lead line ─────────────────────────────────────
 
 #[test]
-fn summary_sentence_reports_todays_bucket_counts() {
-    // The shape this file is pinned to: "Of the 123 commands, 35 route to a
-    // hub tool, 1 routes except for one argument shape, 73 refuse, and 14
-    // are the same in both modes; the full table is
-    // `src-tauri/src/backend/verdicts.rs`." Pinned literally so a
-    // regression in the verb-pluralisation logic is caught even if the real
-    // counts drift.
-    assert_eq!(
-        summary_sentence(123, 35, 1, 73, 14),
-        "Of the 123 commands, 35 route to a hub tool, 1 routes except for one argument shape, \
-         73 refuse, and 14 are the same in both modes; the full table is \
-         `src-tauri/src/backend/verdicts.rs`."
-    );
-}
-
-#[test]
-fn summary_sentence_pluralises_every_bucket_independently() {
-    // Every bucket at exactly 1: every verb goes singular.
-    assert_eq!(
-        summary_sentence(4, 1, 1, 1, 1),
-        "Of the 4 commands, 1 routes to a hub tool, 1 routes except for one argument shape, \
-         1 refuses, and 1 is the same in both modes; the full table is \
-         `src-tauri/src/backend/verdicts.rs`."
-    );
-    // Every bucket at 0 or 2+: every verb goes plural (0 reads as plural,
-    // same as English "0 commands").
-    assert_eq!(
-        summary_sentence(0, 0, 0, 0, 0),
-        "Of the 0 commands, 0 route to a hub tool, 0 route except for one argument shape, \
-         0 refuse, and 0 are the same in both modes; the full table is \
-         `src-tauri/src/backend/verdicts.rs`."
-    );
-}
-
-#[test]
-fn render_doc_table_includes_the_summary_sentence_with_real_counts() {
-    let lists = verdict_lists();
+fn render_doc_table_states_no_count() {
+    // A count above the table changed with every command added, so every
+    // open PR conflicted with every merge to main. The lead line names the
+    // full table instead.
     let table = render_doc_table();
-    let expected = summary_sentence(
-        VERDICTS.len(),
-        lists.routed.len(),
-        lists.routed_unless.len(),
-        lists.local_only.len(),
-        lists.same_in_both.len(),
-    );
+    assert!(table.contains(TABLE_LEAD));
     assert!(
-        table.contains(&expected),
-        "generated table is missing the summary sentence:\n{expected}"
+        !table.contains("Of the "),
+        "a count is back in the generated block"
     );
 }
 
