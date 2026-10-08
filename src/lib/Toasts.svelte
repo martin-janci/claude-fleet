@@ -96,7 +96,7 @@
   }
   .toast.error { border-left-color: var(--danger); }
   .toast.success { border-left-color: var(--status-done); }
-  .toast.warning { border-left-color: #e0a030; }
+  .toast.warning { border-left-color: var(--status-waiting); }
   .toast.info { border-left-color: var(--accent); }
   .code {
     flex: 0 0 auto;

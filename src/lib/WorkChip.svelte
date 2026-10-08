@@ -158,10 +158,10 @@
     background: var(--fg-muted);
   }
   .dot-progress {
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
   }
   .dot-done {
-    background: var(--ok, #22c55e);
+    background: var(--status-done);
   }
   .stale {
     font-size: 11px;

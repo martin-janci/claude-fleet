@@ -1606,6 +1606,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "the same as pty_write",
         },
     ),
+    (
+        "open_session_in_editor",
+        Verdict::SameInBoth {
+            why: "the same story as pty_open: VS Code and the `ssh` that asks the pane \
+                  for its folder are this machine's, built from the alias and tmux name \
+                  passed in; it reads no state.db and the hub is not in the path",
+        },
+    ),
     // ── the voice relay's microphone claim ──────────────────────────────────
     (
         "voice_claim",

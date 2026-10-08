@@ -319,6 +319,7 @@
     "mcp_pending_confirms",
     "open_local_workspace",
     "open_log_folder",
+    "open_session_in_editor",
     "pause_local_workspace",
     "pick_attachments",
     "pty_close",

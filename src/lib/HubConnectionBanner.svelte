@@ -82,10 +82,10 @@
     align-items: center;
     gap: 0.8rem;
     padding: 0.35rem 0.8rem;
-    background: #5a3a12;
-    color: #ffe2b8;
+    background: var(--waiting-faint);
+    color: var(--fg);
     font-size: 0.8rem;
-    border-bottom: 1px solid #8a5a1c;
+    border-bottom: 1px solid var(--waiting-line);
   }
   .text {
     flex: 1;
