@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.5.4] - 2026-10-08
+
+### Added
+- Orbit Fleet name and app icon
+- **ui:** status, type and spacing tokens; one status palette with the phone
+- **conversation:** draw task reports and fleet-ui blocks as cards
+- **devices:** debug devices — inventory per host, a control-API tool, and a page
+- **work:** the worker guard and mission wakes from the tracker and CI
+
+### Changed
+- **devices:** pin only the stub's Android device in the stub-adb scan test
+- **devices:** run the stub-adb and copy-script tests on Unix only
+
+### Fixed
+- **planner:** read the command array out of prose or a fenced answer
+
 ## [0.5.3] - 2026-10-08
 
 ### Added
@@ -2958,6 +2974,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.5.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.4
 [0.5.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.3
 [0.5.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.2
 [0.5.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.1
