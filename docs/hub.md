@@ -1554,6 +1554,9 @@ connection, with about one round-trip of latency.
 1. On the hub that will listen: `fleet-hub pair --mode peer --name <label>`.
 2. On the hub that will dial: `fleet-hub peer add https://<other-hub> <code>`.
    `fleet-hub peer list` shows the link `connected` within a few seconds.
+   From a desktop paired to that hub, Settings → Federation → Link a hub does
+   the same (a trusted full device), and lists each link's state, latency and
+   messages carried.
 
 Pair only a hub you trust: the **first** peer token to claim a given (never
 linked) fleet id gets that link, and no other token can claim the same fleet
@@ -3230,7 +3233,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 324 commands, 229 route to a hub tool, 1 routes except for one argument shape, 51 refuse, and 43 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 327 commands, 232 route to a hub tool, 1 routes except for one argument shape, 51 refuse, and 43 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |

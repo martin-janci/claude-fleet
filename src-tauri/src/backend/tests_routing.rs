@@ -698,6 +698,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "list_peer_links",
+            "list_peer_links",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::federation::routed::list_peer_links(b, s)).map(|_| ())
+            }),
+        ),
+        (
             "get_form",
             "ask",
             json!({ "get": "f_a" }),
@@ -2024,6 +2033,35 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     };
 
     vec![
+        (
+            "link_peer_hub",
+            "link_peer",
+            json!({ "url": "https://hub.other.example", "code": "AB12-CD34" }),
+            "null",
+            Box::new(|b, _, _| {
+                block_on(commands::federation::routed::link_peer_hub(
+                    b,
+                    commands::federation::LinkPeerHubArgs {
+                        url: "https://hub.other.example".into(),
+                        code: "AB12-CD34".into(),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unlink_peer_hub",
+            "unlink_peer",
+            json!({ "id": 1 }),
+            r#"{"id":1,"failed_messages":0}"#,
+            Box::new(|b, _, _| {
+                block_on(commands::federation::routed::unlink_peer_hub(
+                    b,
+                    commands::federation::UnlinkPeerHubArgs { id: 1 },
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Declarative pages P6: a write the hub records as this device.
         (
             "set_fleet_setting",
@@ -5833,6 +5871,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/debug_devices.rs",
         include_str!("../commands/debug_devices.rs"),
+    ),
+    (
+        "commands/federation.rs",
+        include_str!("../commands/federation.rs"),
     ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (

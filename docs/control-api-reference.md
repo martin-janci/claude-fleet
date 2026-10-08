@@ -167,6 +167,12 @@ Kill a session: a tmux session, or a background agent row (`bg:<uuid>`, kind `bg
 
 Parameters: `confirm_nonce`, `force`, `host_alias`, `name`, `session_id`
 
+### `link_peer`
+
+Link this hub to another fleet's hub: redeem a peer code minted there (fleet-hub pair --mode peer) against its https URL. Answers the new link; it connects within seconds. The master, or the hub owner's trusted full device.
+
+Parameters: `code`, `url`
+
 ### `list_accounts`
 
 The cached Claude accounts seen across hosts.
@@ -649,6 +655,12 @@ Mark a session viewed now: the turns it has finished read as seen. Returns the r
 
 Parameters: `session_id`
 
+### `unlink_peer`
+
+Remove a link to another fleet's hub by its id: messages waiting for it fail back to their senders. The master, or the hub owner's trusted full device.
+
+Parameters: `id`
+
 ### `update_admin`
 
 Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, or refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.
@@ -903,6 +915,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::forms::get_form`
 - `commands::forms::answer_form`
 - `commands::forms::decline_form`
+- `commands::federation::list_peer_links`
+- `commands::federation::link_peer_hub`
+- `commands::federation::unlink_peer_hub`
 - `commands::debug_devices::list_debug_devices`
 - `commands::debug_devices::scan_debug_devices`
 - `commands::debug_devices::update_debug_device`
