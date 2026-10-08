@@ -3286,6 +3286,10 @@
             {
               "key": "spend_series",
               "type": "field"
+            },
+            {
+              "key": "spend_by_person",
+              "type": "field"
             }
           ],
           "title": "Spend"
@@ -4096,6 +4100,16 @@
           "id": "spend_series",
           "label": "Last 14 days",
           "type": "money_series"
+        },
+        {
+          "add": [],
+          "help": "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
+          "id": "spend_by_person",
+          "item_label": {
+            "type": "person_spend"
+          },
+          "label": "By person",
+          "type": "items"
         },
         {
           "add": [],

@@ -1592,6 +1592,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/137_grant_profile.sql"),
         already_applied: Some(grants_have_profile),
     },
+    // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
+    // new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        138,
+        include_str!("../../migrations/138_usage_daily_person.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

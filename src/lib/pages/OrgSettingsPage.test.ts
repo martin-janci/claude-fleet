@@ -136,6 +136,31 @@ describe('an org’s spend and its own settings', () => {
     expect(items[1].textContent).toContain('paired 2 h ago');
   });
 
+  it('splits the spend by person, nobody’s last (11.8)', async () => {
+    route([
+      {
+        ...acme,
+        spend_by_person: [
+          { person_id: 2, name: 'Martin', today_micros: 18_400_000, week_micros: 121_000_000, month_micros: 402_000_000 },
+          { today_micros: 3_900_000, week_micros: 19_000_000, month_micros: 50_000_000 },
+        ],
+      },
+    ]);
+    render(ResourcePage, { props: { page, resource } });
+    const rows = await screen.findAllByTestId('item-spend_by_person');
+    expect(rows.map((r) => r.textContent)).toEqual([
+      expect.stringMatching(/Martin.*\$18\.40.*\$121\.00.*\$402\.00/),
+      expect.stringMatching(/Routines, missions and unclaimed.*\$3\.90/),
+    ]);
+  });
+
+  it('never shows part of the spend by person: no table without the key', async () => {
+    route([acme]);
+    render(ResourcePage, { props: { page, resource } });
+    await waitFor(() => expect(screen.getByTestId('tile-spent_today_micros')).toBeTruthy());
+    expect(screen.queryByTestId('record-field-spend_by_person')).toBeNull();
+  });
+
   it('leaves the spend and settings out when the hub does not send them', async () => {
     route([{ ...acme, spent_today_micros: undefined, spent_week_micros: undefined, spent_month_micros: undefined, settings: undefined, over_budget: undefined, spend_series: undefined, needs_admin: undefined }]);
     render(ResourcePage, { props: { page, resource } });

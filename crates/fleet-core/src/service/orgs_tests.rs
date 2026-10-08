@@ -915,3 +915,47 @@ fn members_carry_shares_since_and_their_devices_for_an_administrator() {
     assert!(json.get("devices").is_none(), "{json}");
     assert!(json.get("shares_since").is_some(), "{json}");
 }
+
+/// Redesign 11.8: spend by person is all or nothing. The fleet's
+/// administrator who sees every session gets the table; an org's own admin
+/// (who does not see every session on the hub) and anyone else get no key
+/// at all, never a cut-down table.
+#[test]
+fn spend_by_person_goes_only_to_an_administrator_who_sees_every_session() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let org = {
+        let s = st.lock().unwrap();
+        s.add_org("Acme", None, false).unwrap().id
+    };
+    let d = &org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap()[0];
+    assert_eq!(d.spend_by_person.as_deref(), Some(&[][..]));
+
+    // An org admin sees the org's own figures but not this table: with a
+    // second org's session on the hub, they do not see every session.
+    {
+        let s = st.lock().unwrap();
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        s.upsert_host("h").unwrap();
+        s.set_host_org("h", Some(beta)).unwrap();
+        s.upsert_session("other", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+    }
+    let org_admin = AdminView::Person {
+        roles: [(org, "admin".to_string())].into_iter().collect(),
+    };
+    let scope = OrgScope::Host {
+        alias: "elsewhere".into(),
+        org: Some(org),
+        isolated: Default::default(),
+    };
+    for (view, who) in [
+        (org_admin, "an org admin"),
+        (AdminView::Other, "anyone else"),
+    ] {
+        let all = org_details(&st, &vs(&scope), view).unwrap();
+        let d = all.iter().find(|d| d.org.id == org).expect(who);
+        assert!(d.spend_by_person.is_none(), "{who}");
+        let json = serde_json::to_value(d).unwrap();
+        assert!(json.get("spend_by_person").is_none(), "{who}: {json}");
+    }
+}
