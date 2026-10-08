@@ -1389,6 +1389,7 @@ where
         model: None,
         effort: None,
         profile: None,
+        agent: None,
         // Whose the started session is (multi-user M1, T5): the caller who
         // asked for the start (`StartArgs::owner`, filled from `Caller` at
         // the tool), and the hub's own person only for a path that genuinely
@@ -1397,7 +1398,6 @@ where
         // `work_link { start }` created a session owned by the HUB's owner:
         // readable by somebody who did not ask for it, and `null` in the
         // answer to the person who did (T8 drops the row they may not see).
-        agent: None,
         owner_person_id: plan
             .owner
             .or_else(|| crate::service::sessions::hub_personal_owner(store)),

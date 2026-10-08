@@ -545,12 +545,12 @@ impl FleetTools {
                         model: None,
                         effort: None,
                         profile: None,
+                        agent: None,
                         // The requester's owner (above), else this
                         // connection's own person. A dispatch with no
                         // requester is somebody asking fleet directly, so it
                         // is theirs; a per-host token resolves to neither and
                         // the worker lands `unclaimed`.
-                        agent: None,
                         owner_person_id: requester_owner.or_else(|| {
                             lock(self.reader())
                                 .ok()

@@ -558,13 +558,13 @@ impl OperatorHost for LiveHost {
                 model: None,
                 effort: None,
                 profile: None,
+                agent: None,
                 // Whose the operator's session is (multi-user M1, T5): the
                 // hub's own person. The UX agent is fleet acting for whoever
                 // runs this hub, and its session has to be readable by them —
                 // `unclaimed` would hide the agent's own session from the
                 // person it works for. See
                 // `crate::service::sessions::hub_personal_owner`.
-                agent: None,
                 owner_person_id: crate::service::sessions::hub_personal_owner(&self.store),
             },
             &self.store,

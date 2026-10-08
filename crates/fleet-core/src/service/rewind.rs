@@ -852,6 +852,7 @@ async fn rewind_conversation_with(
                     model: launch.model.clone(),
                     effort: launch.effort.clone(),
                     profile: launch.profile.clone(),
+                    agent: None,
                     // Multi-user M1 (T5, spec §4.3 invariant 6): a fork
                     // inherits the SOURCE's owner, never the forker's. The
                     // fork is a permanent verbatim copy of the source's
@@ -861,7 +862,6 @@ async fn rewind_conversation_with(
                     // source-inheritance is both the safe answer and the only
                     // expressible one. Forking a session you do not own is
                     // refused at the gate: it is an `own` operation.
-                    agent: None,
                     owner_person_id: sess.owner_person_id,
                 })
                 .await;
