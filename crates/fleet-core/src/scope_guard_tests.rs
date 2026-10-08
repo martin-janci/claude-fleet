@@ -852,7 +852,8 @@ const SCOPE_GUARDS: &[Guard] = &[
         nth: 3,
         code: "if caller.host_alias.is_some() || caller.is_scoped() {",
         verdict: Verdict::OrgBoundary,
-        why: "the decision envelope is the hub's own business",
+        why: "the decision envelope and the loops' errors are the hub's own \
+              business",
     },
     Guard {
         file: "crates/fleet-core/src/mcp/tools/fleet.rs",

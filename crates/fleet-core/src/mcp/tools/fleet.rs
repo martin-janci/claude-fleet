@@ -17,7 +17,9 @@ impl FleetTools {
         peer_links_total. \
         hosts[]: per host disk_home_pct/disk_low, claude_behind, \
         agent_behind, hooks_silent. decide (master only): Jev's last \
-        hour, degraded if its breaker is open or >20% failed.")]
+        hour, degraded if its breaker is open or >20% failed. loops[]: \
+        each background job's last and next run and result \
+        (ok/error/paused); automation_paused.")]
     pub(super) async fn fleet_health(
         &self,
         Extension(caller): Extension<Caller>,
@@ -127,8 +129,15 @@ impl FleetTools {
         // or an org-bound client gets none of it.
         // This is the org boundary, not a privacy fence: whether this caller is inside an org
         // boundary at all, and the decision envelope is outside every one of them.
+        // So is a background loop's error (redesign 8.1), the hub's own
+        // text about any host or tracker: such a caller gets that it failed.
         if caller.host_alias.is_some() || caller.is_scoped() {
             h.decide = None;
+            for l in &mut h.loops {
+                if l.last_error.is_some() {
+                    l.last_error = Some("failed (details on the hub)".into());
+                }
+            }
         }
         // An agent reads it: a tracker's error is the tracker's text.
         h.trackers.fence_errors();

@@ -2167,6 +2167,18 @@
     },
     {
       "default_widget": "switch",
+      "key": "automation.paused",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Pause all automation",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "orchestrator.enabled",
       "kind": {
         "type": "bool"

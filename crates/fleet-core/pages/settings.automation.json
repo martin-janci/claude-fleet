@@ -7,6 +7,15 @@
   "intro": "Playbooks, the idle-session GC and workspace repair run from the background tick. Everything here is off by default.",
   "sections": [
     {
+      "title": "Pause all",
+      "items": [
+        {
+          "type": "field",
+          "key": "automation.paused"
+        }
+      ]
+    },
+    {
       "title": "Playbooks",
       "items": [
         {

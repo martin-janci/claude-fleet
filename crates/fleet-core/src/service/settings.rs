@@ -308,6 +308,9 @@ pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_STAGGER_MS: &str = "restore.stagger_ms";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
+/// Pause all (redesign 8.1): every loop that acts on its own skips its
+/// passes while on (`service::loops`); the loops that only observe go on.
+pub const AUTOMATION_PAUSED: &str = "automation.paused";
 /// Orchestration O4–O6: the missions' loop runs at all (the kill switch).
 pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
 /// Orchestration O6: the highest autonomy any mission's loop may take,
@@ -634,6 +637,13 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Ms)
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        AUTOMATION_PAUSED,
+        "false",
+        Kind::Bool,
+        "Pause all automation",
+        "Stop every background job that acts on its own: missions, garbage collection, playbooks, repairs, tracker, catalog and folder syncs, and host refreshes. Reconcile, usage and update checks keep running, and health shows each job as paused.",
+    ),
     Spec::new(
         ORCHESTRATOR_ENABLED,
         "true",
