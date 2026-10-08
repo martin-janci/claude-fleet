@@ -2305,3 +2305,249 @@ fn a_task_carries_what_is_proposed_about_it() {
     );
     assert!(task_of(&p, "TK-3").proposals.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Redesign step 6.2: a named assignee, a tracker column, and group by org,
+// person, mission, account or repo.
+
+/// A tracker item with its own column and assignees.
+fn item_with(w: &W, ext: &str, key: &str, column: &str, category: &str, who: &[&str]) -> i64 {
+    w.st.lock()
+        .unwrap()
+        .upsert_tracker_item(
+            w.tracker,
+            &TrackerItemWrite {
+                external_id: ext.into(),
+                key: Some(key.into()),
+                title: key.into(),
+                status_name: column.into(),
+                status_category: category.into(),
+                containers: vec!["TP".into()],
+                assignees: who.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .id
+}
+
+fn by(group_by: &str) -> WorkTreeFilters {
+    WorkTreeFilters {
+        group_by: Some(group_by.into()),
+        ..Default::default()
+    }
+}
+
+/// The section header of `key`'s task in a page.
+fn group_of<'a>(p: &'a TreePage, key: &str) -> &'a GroupRef {
+    &task_of(p, key).group
+}
+
+#[test]
+fn a_tree_query_filters_by_tracker_column_and_by_a_named_assignee() {
+    let w = world();
+    item_with(
+        &w,
+        "10",
+        "TK-10",
+        "QA Review",
+        "in_progress",
+        &["Ana Novak"],
+    );
+    item_with(
+        &w,
+        "11",
+        "TK-11",
+        "In Progress",
+        "in_progress",
+        &["Ben", "ana novak"],
+    );
+    item_with(&w, "12", "TK-12", "qa review", "in_progress", &[]);
+    let all = &OrgScope::All;
+
+    // The column is the tracker's own name, any case; the category filter
+    // could not tell QA Review from In Progress.
+    let p = page(
+        &w,
+        all,
+        WorkTreeFilters {
+            status_name: Some("QA review".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(keys(&p), vec!["TK-10", "TK-12"]);
+    assert!(p.tasks.iter().all(|t| t
+        .status_name
+        .as_deref()
+        .unwrap()
+        .eq_ignore_ascii_case("qa review")));
+
+    // A named person, any case, among several assignees.
+    let p = page(
+        &w,
+        all,
+        WorkTreeFilters {
+            assignee: Some(" ANA NOVAK ".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(keys(&p), vec!["TK-10", "TK-11"]);
+
+    // Both at once narrow to their intersection.
+    let p = page(
+        &w,
+        all,
+        WorkTreeFilters {
+            assignee: Some("ana novak".into()),
+            status_name: Some("QA Review".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(keys(&p), vec!["TK-10"]);
+}
+
+#[test]
+fn a_tree_query_groups_by_org_person_and_repo() {
+    let w = world();
+    item_with(&w, "10", "TK-10", "QA Review", "in_progress", &["Ana"]);
+    link(&w, w.s1, w.t1, true);
+    let all = &OrgScope::All;
+
+    // org: one section per org.
+    let p = page(&w, all, by("org"));
+    assert!(p.tasks.iter().all(|t| t.group.id == "org"));
+    assert_eq!(p.groups.len(), 1);
+    assert_eq!(p.groups[0].org_id, Some(w.org_a));
+    assert_eq!(p.groups[0].count as usize, p.tasks.len());
+
+    // person: the first assignee; nobody is `none`, last.
+    let p = page(&w, all, by("person"));
+    assert_eq!(group_of(&p, "TK-10").id, "person:ana");
+    assert_eq!(group_of(&p, "TK-10").label, "Ana");
+    assert_eq!(group_of(&p, "TK-1").id, "none");
+    assert_eq!(p.groups.last().unwrap().group.id, "none");
+
+    // repo: the repo its sessions run in.
+    let p = page(&w, all, by("repo"));
+    assert_eq!(group_of(&p, "TK-1").id, "repo:acme/api");
+    assert_eq!(group_of(&p, "TK-3").id, "none");
+
+    // A section of a grouping reads by itself with `group`.
+    let p = page(
+        &w,
+        all,
+        WorkTreeFilters {
+            group: Some("person:ana".into()),
+            ..by("person")
+        },
+    );
+    assert_eq!(keys(&p), vec!["TK-10"]);
+}
+
+#[test]
+fn a_tree_query_groups_by_mission_and_names_only_missions_the_caller_reads() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        let m = s
+            .create_mission(
+                &crate::store::NewMission {
+                    org_id: Some(w.org_a),
+                    owner_person_id: None,
+                    root_item_id: None,
+                    name: "Ship login",
+                    goal: "Login works",
+                    non_goals: None,
+                    done_when: &[],
+                    mode: None,
+                    level: None,
+                },
+                "fleet",
+            )
+            .unwrap();
+        s.set_mission_item(m.id, w.t1, true, "fleet").unwrap();
+        let other = s
+            .create_mission(
+                &crate::store::NewMission {
+                    org_id: Some(w.org_b),
+                    owner_person_id: None,
+                    root_item_id: None,
+                    name: "Beta's secret",
+                    goal: "Elsewhere",
+                    non_goals: None,
+                    done_when: &[],
+                    mode: None,
+                    level: None,
+                },
+                "fleet",
+            )
+            .unwrap();
+        s.set_mission_item(other.id, w.t2, true, "fleet").unwrap();
+    }
+    let p = page(&w, &OrgScope::All, by("mission"));
+    assert_eq!(group_of(&p, "TK-1").label, "Ship login");
+    assert!(group_of(&p, "TK-1").id.starts_with("mission:"));
+    assert_eq!(group_of(&p, "TK-3").id, "none");
+
+    // Org A's client sees TK-2 but not Beta's mission: no name, no section.
+    let p = page(&w, &strict(w.org_a), by("mission"));
+    assert_eq!(group_of(&p, "TK-1").label, "Ship login");
+    assert_eq!(group_of(&p, "TK-2").id, "none");
+    let dump = serde_json::to_string(&p).unwrap();
+    assert!(!dump.contains("Beta's secret"), "{dump}");
+}
+
+#[test]
+fn a_tree_query_groups_by_the_account_its_sessions_run_on() {
+    let w = world();
+    {
+        let s = w.st.lock().unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acc-1".into(),
+            email: Some("dev@acme.example".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        // Probed, but nothing to name it by.
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acc-2".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let pid = s.upsert_project("acme", "api", "/src/api").unwrap();
+        s.upsert_session("one", "h1", Some(pid), None, 1, 1, "running", Some("acc-1"))
+            .unwrap();
+        s.upsert_session("two", "h1", Some(pid), None, 1, 1, "running", Some("acc-2"))
+            .unwrap();
+    }
+    link(&w, w.s1, w.t1, true);
+    link(&w, w.s2, w.t2, true);
+    let p = page(&w, &OrgScope::All, by("account"));
+    assert_eq!(group_of(&p, "TK-1").id, "account:acc-1");
+    assert_eq!(group_of(&p, "TK-1").label, "dev@acme.example");
+    // An account with no name is still a section, by its id.
+    assert_eq!(group_of(&p, "TK-2").label, "Account acc-2");
+    assert_eq!(group_of(&p, "TK-3").id, "none");
+}
+
+#[test]
+fn an_unknown_grouping_is_refused_not_ignored() {
+    let w = world();
+    let err = tree(
+        &w.st,
+        &vs(&OrgScope::All),
+        &TreeArgs {
+            filters: by("colour"),
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.code, codes::E_INVALID);
+    assert!(err.message.contains("group_by"), "{}", err.message);
+    // The default grouping is the task's own group, as before.
+    let p = page(&w, &OrgScope::All, by("group"));
+    assert_eq!(
+        p.tasks,
+        page(&w, &OrgScope::All, WorkTreeFilters::default()).tasks
+    );
+}

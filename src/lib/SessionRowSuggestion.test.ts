@@ -8,6 +8,7 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import SessionRowItem from './SessionRowItem.svelte';
+import { uiLayout } from './prefs';
 import { hosts } from './hosts';
 import { session } from './hosts_fixture';
 import type { SessionRow, SessionWork } from './sessions';
@@ -94,6 +95,37 @@ describe('a row with a link suggestion', () => {
     expect(chip.textContent).toContain('?');
     expect(chip.title).toContain('suggested from the prompt · rule R5');
     expect(screen.queryByTestId('work-chip')).toBeNull();
+  });
+
+  it("marks the decision model's suggestion with ✦ and names Jev, with its confidence in the evidence (6.8)", async () => {
+    const jev = { ...suggestion, source: 'jev', strength: 'inferred', rule: 'R12' };
+    vi.mocked(invoke).mockImplementation(async (cmd: string) =>
+      cmd === 'session_work_links'
+        ? [{ ...link, source: 'jev', rule: 'R12', evidence: [{ signal: 'jev', rule: 'R12', text: 'ABC-99', note: '82%', at: 1_790_000_000 }] }]
+        : null,
+    );
+    uiLayout.set('new');
+    render(SessionRowItem, { props: props(row({ work_suggested: jev })) });
+    const chip = screen.getByTestId('work-suggestion');
+    expect(chip.dataset.proposed).toBe('jev');
+    expect(screen.getByTestId('work-suggestion-proposed').textContent).toBe('\u2726');
+    expect(chip.textContent).not.toContain('?');
+    expect(chip.title.startsWith('Proposed by Jev · ')).toBe(true);
+    expect(chip.title).toContain('proposed by Jev from the first prompt · rule R12');
+    await fireEvent.click(chip);
+    await tick();
+    await tick();
+    const ev = await screen.findByTestId('why-evidence');
+    expect(ev.textContent).toMatch(/Jev proposed ABC-99 from the first prompt at \d\d:\d\d \(82%\) · R12/);
+    uiLayout.set('classic');
+  });
+
+  it("keeps Classic's ? on the decision model's suggestion (6.8 parity)", () => {
+    uiLayout.set('classic');
+    render(SessionRowItem, { props: props(row({ work_suggested: { ...suggestion, source: 'jev', rule: 'R12' } })) });
+    const chip = screen.getByTestId('work-suggestion');
+    expect(chip.dataset.proposed).toBeUndefined();
+    expect(chip.textContent).toContain('?');
   });
 
   it('opens the evidence popover from the chip and confirms', async () => {

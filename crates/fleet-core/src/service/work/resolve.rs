@@ -24,6 +24,7 @@
 //! | R9u | a person cleared (unlinked) a link a state signal named, and that signal's value is unchanged | the state candidate is dropped before resolving (`detect`, not here; migration 070): not re-made from the same branch / PR; events still count |
 //!
 //! | R11 | an agent's inference, answering the classification nudge (`agent_inferred`, M4.6) | a pre-selected suggestion, never confirmed; decays at the next conversation boundary |
+//! | R12 | the decision model's answer (`jev`, J1 `work_link` in assist, redesign 6.8) | the same as R11: a pre-selected suggestion a person confirms, never linked by itself |
 //!
 //! R10 (reviews and workers inherit the parent's primary) is M2.2's carry.
 
@@ -86,6 +87,10 @@ pub enum Signal {
     /// The agent's answer to the classification nudge (M4.6): an event,
     /// never a decision.
     AgentInferred,
+    /// The decision model's choice for a session no rule could link (J1
+    /// `work_link` in assist, [`crate::service::decide::work_link`]): an
+    /// event, never a decision.
+    Jev,
 }
 
 impl Signal {
@@ -98,13 +103,22 @@ impl Signal {
             Signal::PromptUrl => "url",
             Signal::PromptKey | Signal::PromptIssue => "prompt",
             Signal::AgentInferred => "agent_inferred",
+            Signal::Jev => "jev",
         }
     }
 }
 
 /// Link sources the resolver itself writes. A link with any other source is
 /// a decision (a person's, an agent's, or a carry) and is never changed here.
-pub const AUTO_SOURCES: &[&str] = &["branch", "pr", "trailer", "url", "prompt", "agent_inferred"];
+pub const AUTO_SOURCES: &[&str] = &[
+    "branch",
+    "pr",
+    "trailer",
+    "url",
+    "prompt",
+    "agent_inferred",
+    "jev",
+];
 
 /// One line of a link's explanation, stored denormalised on the link (C13).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +501,10 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
             // a person decides. Ahead of R8: an ambiguous key is still only
             // ever a suggestion, and pre-selecting it is the agent's claim.
             ("R11", false, true)
+        } else if c.signal == Signal::Jev {
+            // R12: the decision model's answer reads like the agent's guess,
+            // and is held to the same: a person decides.
+            ("R12", false, true)
         } else if c.ambiguous {
             ("R8", false, false)
         } else if url {
@@ -549,7 +567,7 @@ pub fn resolve(input: &ResolveInput) -> Vec<LinkChange> {
         for l in &input.links {
             let event = matches!(
                 l.source.as_str(),
-                "prompt" | "url" | "trailer" | "agent_inferred"
+                "prompt" | "url" | "trailer" | "agent_inferred" | "jev"
             );
             if l.state == "suggested"
                 && event

@@ -283,6 +283,11 @@ pub async fn run_link(
         let Some(result) = outcome else { continue };
         match result {
             Ok(resp) => {
+                // The Federation page's numbers (Orbit Fleet 11.5): what this
+                // exchange carried either way, and — when it did not park, so
+                // its duration is the round trip and not a wait — its latency.
+                let carried = req.send.len() + resp.messages.len();
+                let latency_ms = (!parks).then(|| started.elapsed().as_millis() as i64);
                 // G3: a parked call that came back empty before the floor did
                 // not wait at all — whoever answered it will answer the next
                 // one the same way. Only the backoff breaks that spin.
@@ -290,7 +295,17 @@ pub async fn run_link(
                     && resp.messages.is_empty()
                     && resp.results.is_empty()
                     && started.elapsed() < EMPTY_POLL_FLOOR;
-                match settle(&fence, &ssh, &link, &own, &req, resp).await {
+                let settled = settle(&fence, &ssh, &link, &own, &req, resp).await;
+                if matches!(settled, Ok(Settled::Ok | Settled::Short(_))) {
+                    if let Ok(s) = lock(&store) {
+                        if let Err(e) =
+                            s.record_peer_traffic(link_id, carried, latency_ms, now_unix())
+                        {
+                            tracing::debug!(link_id, error = %e.message, "[peer] could not count the exchange");
+                        }
+                    }
+                }
+                match settled {
                     Ok(Settled::Ok) if empty_at_once => {
                         first = false;
                         tracing::debug!(

@@ -37,12 +37,18 @@
 pub mod bench;
 pub mod haiku;
 pub mod jev;
+pub mod sibling_repos;
+#[cfg(test)]
+mod sibling_repos_tests;
 pub mod start_project;
 #[cfg(test)]
 mod start_project_tests;
 pub mod status_map;
 #[cfg(test)]
 mod tests;
+pub mod work_link;
+#[cfg(test)]
+mod work_link_tests;
 
 pub use jev::{
     Answer, BackendError, DecisionBackend, JevBackend, JevRequest, JevResponse, NoulCriteria,
@@ -80,16 +86,24 @@ pub enum Feature {
     WorkLink,
     /// Pre-selecting the repository of a task's first start (K1).
     StartProject,
+    /// Pre-ticking the sibling repository a ticket start also needs (N3).
+    SiblingRepos,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 3] = [Feature::StatusMap, Feature::WorkLink, Feature::StartProject];
+    pub const ALL: [Feature; 4] = [
+        Feature::StatusMap,
+        Feature::WorkLink,
+        Feature::StartProject,
+        Feature::SiblingRepos,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Feature::StatusMap => "status_map",
             Feature::WorkLink => "work_link",
             Feature::StartProject => "start_project",
+            Feature::SiblingRepos => "sibling_repos",
         }
     }
 
@@ -103,6 +117,7 @@ impl Feature {
             Feature::StatusMap => settings::DECIDE_JEV_STATUS_MAP,
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
+            Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
         }
     }
 }

@@ -870,6 +870,32 @@ pub fn on_agent_inference(
     run(s, &st, &tv, vec![c])
 }
 
+/// The decision model's answer for a session no rule could link (J1
+/// `work_link` in assist, [`crate::service::decide::work_link`]): one
+/// [`Signal::Jev`] event through the same resolver run as the agent's
+/// inference, which makes it a pre-selected suggestion (R12) and keeps R9.
+/// `target` is normalised (`ABC-7`); `tracker_id` binds it to the item.
+/// The model's confidence rides the evidence's note (`82%`), which Review
+/// and the row's popover show beside "Proposed by Jev".
+pub fn on_jev_proposal(
+    s: &Store,
+    session_id: i64,
+    target: &str,
+    tracker_id: Option<i64>,
+    confidence_pct: Option<u8>,
+) -> Result<bool, IpcError> {
+    let Some(st) = subject_state(s, session_id)? else {
+        return Ok(false);
+    };
+    let tv = tracker_view(s, st.repo.clone())?;
+    let now = crate::service::catalog::now_secs();
+    let mut ev = evidence(Signal::Jev, target, now, st.claude_session_id.as_deref());
+    ev.note = confidence_pct.map(|p| format!("{p}%"));
+    let mut c = candidate(target.to_string(), Signal::Jev, Strength::Inferred, ev);
+    c.tracker_id = tracker_id;
+    run(s, &st, &tv, vec![c])
+}
+
 /// `decider` confirmed or rejected suggestion `link_id`; the link records
 /// who ([`Store::decide_work_link`]). A person confirming a branch
 /// suggestion counts toward the project's automatic trust
@@ -897,6 +923,21 @@ pub fn decide_as(
     decider: Decider,
 ) -> Result<bool, IpcError> {
     let link = s.decide_work_link_as(session_id, link_id, confirm, take_primary, decider)?;
+    if decider == Decider::Person {
+        // J1 (redesign 6.8): a person's answer is the label of the decision
+        // model's proposal about this session, whichever link it was on.
+        let now = crate::service::catalog::now_secs();
+        if let Err(e) = crate::service::decide::work_link::record_decision(
+            s,
+            session_id,
+            link.rule.as_deref(),
+            link.item_id,
+            confirm,
+            now,
+        ) {
+            tracing::warn!("[decide] work_link follow-up not recorded: {}", e.message);
+        }
+    }
     let mut trusted_now = false;
     if confirm && decider == Decider::Person && matches!(link.rule.as_deref(), Some("R3b" | "R4")) {
         if let Some(pid) = s.detection_state(session_id)?.and_then(|st| st.project_id) {
