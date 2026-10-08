@@ -23,7 +23,6 @@
   import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
-  import NewSessionDialog from './NewSessionDialog.svelte';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
@@ -50,6 +49,7 @@
   } from './app_views';
   import { hintAnchor } from './hints';
   import { openNewSessionPicker } from './switcher_request';
+  import { requestNewSession } from './new_session_request';
   import { setProjectPick } from './project_picks';
   import { detectMac } from './terminal_keys';
   import {
@@ -871,12 +871,9 @@
         ),
   );
 
-  let dialogProject: ProjectTreeRow | null = $state(null);
   let showAddProject = $state(false);
   /** Clone URL the switcher's Add row hands over, prefilled in the dialog. */
   let initialCloneUrl: string | undefined = $state(undefined);
-  /** Host to preselect in NewSessionDialog: where Add project put the project. */
-  let dialogHost: string | undefined = $state(undefined);
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
 
   // Add project ROUTES to the hub now (the clone runs on the host through the
@@ -903,12 +900,13 @@
   const openAddHost = () => requestHostsView();
   const openNewSession = () => openNewSessionPicker();
 
-  // A project row's own `+`: straight to NewSessionDialog for that project.
+  // A project row's own `+`: straight to New session for that project.
   // (The switcher's New session mode is the one place a project is picked.)
+  // The dialog is App's one mount, reached through `newSessionRequest`
+  // (redesign 1.9): the Sidebar no longer mounts a second copy.
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
-    dialogHost = undefined;
-    dialogProject = p;
+    requestNewSession({ project: p });
   }
 
   // The switcher's Add row asks for the Add project dialog (App-level stores
@@ -928,18 +926,8 @@
     // (quietly: they asked to add a project, not to save a picker choice).
     void setProjectPick(row.project.owner, row.project.repo, { vis: 'keep' }, { quiet: true });
     showAddProject = false;
-    dialogHost = host;
-    dialogProject = row;
-  }
-
-  function onCreated(s: SessionRow) {
-    dialogProject = null;
-    // Auto-focus the just-created session in the center/terminal panes.
-    selectSessionExplicitly(s);
-  }
-
-  function onCancel() {
-    dialogProject = null;
+    // Preselect the host Add project put it on.
+    requestNewSession({ project: row, initialHost: host });
   }
 
   function toggleCollapse(projectId: number) {
@@ -1619,9 +1607,6 @@
   />
 {/if}
 
-{#if dialogProject}
-  <NewSessionDialog project={dialogProject} initialHost={dialogHost} onCreate={onCreated} {onCancel} />
-{/if}
 
 {#if pendingKill}
   <KillDialog

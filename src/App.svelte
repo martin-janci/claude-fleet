@@ -873,8 +873,8 @@
 <!-- Cmd/Ctrl+K / Cmd/Ctrl+P, and the one place a project is picked for a new
      session (the sidebar's "+ New session" and the Hosts view's `n` open it
      in New session mode). Its rows publish a request that mounts the dialog
-     here; the Sidebar's own dialog mount remains for a project row's `+` and
-     for Add project. -->
+     here. Since redesign 1.9 this is the only mount: a project row's `+` and
+     Add project publish the same request. -->
 <QuickSwitcher />
 {#if $newSessionRequest}
   <NewSessionDialog
