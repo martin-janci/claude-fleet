@@ -385,6 +385,17 @@ bullet for the area you are about to change.
   the database, a log or the audit row (`ask`'s `values` is rendered
   `<N fields>`). Regenerate `docs/form-spec.schema.json` with
   `REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`.
+- **Runs** (Orbit Fleet 8.3; `store/runs.rs`, `service/runs.rs`,
+  `mcp/tools/runs.rs`, migration 140 (indexes only), desktop `list_runs` →
+  hub `runs`): one `UNION ALL` over `tasks`, `orchestration_events` (only
+  `MISSION_RUN_EVENTS`), `decision_runs` (never `bench`), `aux_usage` and
+  `routine_runs`, newest first. Each branch carries its own time, filter and reach clauses
+  on its own indexed columns (`the_union_walks_its_indexes` pins the plan),
+  so `total` and the page agree. The column mapping per source is written
+  on its branch constant. `store/` takes the reach as ids
+  (`RunsReach`); `service::runs::reach` derives them from the `ViewScope`
+  (sessions it sees, missions and routines it may read, whole-fleet
+  spend).
 - **Debug devices** (guide `docs/debug-devices.md`; `service/debug_devices/`,
   `store/debug_devices.rs`, migration 120, `mcp/tools/devices.rs`, contract
   revision 10): a scan runs `scripts::scan_script` on a host (adb,

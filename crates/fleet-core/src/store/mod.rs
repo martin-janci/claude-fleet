@@ -47,6 +47,7 @@ mod reconcile;
 mod reports;
 mod routines;
 mod rows;
+mod runs;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
 mod schema;
@@ -158,6 +159,10 @@ pub use routines::{
     ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
 };
 pub use rows::*;
+pub use runs::{
+    RunRow, RunsFilter, RunsReach, MISSION_RUN_EVENTS, RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT,
+    RUN_KINDS, RUN_OUTCOMES, RUN_SOURCES,
+};
 pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;

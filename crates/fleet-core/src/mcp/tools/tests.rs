@@ -2400,6 +2400,7 @@ fn router_sum_serves_every_tool() {
         include_str!("prs.rs"),
         include_str!("routines.rs"),
         include_str!("presence.rs"),
+        include_str!("runs.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -10336,6 +10337,18 @@ pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
          the session each row came out of — the same `own` tier `send_file` \
          gates one row with. A `session_id` this caller does not own matches \
          no row rather than refusing, so it is no existence oracle either",
+    ),
+    (
+        "runs",
+        "a FILTER, not a gate on one named row: `session_id` narrows WHICH \
+         runs to list, and every branch of the union is then cut in SQL by \
+         `service::runs::reach` — a task only when the caller sees every \
+         session it names (`task_visible_in_scope_pure` less its pane-proof \
+         clause), a mission's rows only when `sees_mission`, a Jev or summary \
+         run only when it sees the session it was about, and rows that belong \
+         to no session or mission only with whole-fleet spend. A `session_id` \
+         this caller may not see matches no row rather than refusing, so it \
+         is no existence oracle",
     ),
     (
         "peer_exchange",
