@@ -5,7 +5,8 @@ use fleet_core::service::add_project::GithubRepo;
 use fleet_core::service::health::{Health, HubHealth, TrackerHealth, TrackersHealth};
 use fleet_core::service::projects::ProjectTreeRow;
 use fleet_core::service::repo_read::{
-    Branch, ChangedFile, Commit, CommitDetail, FileContent, FileDiff, GitRef, RepoTree,
+    BlameHunk, Branch, ChangedFile, Commit, CommitDetail, FileBlame, FileContent, FileDiff, GitRef,
+    RepoTree,
 };
 use fleet_core::service::tick::ReconcileStats;
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
@@ -852,6 +853,25 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             ahead: 1,
             behind: 2,
             tip_hash: "abc123".into(),
+            merged: true,
+        }),
+    );
+    let hunk = BlameHunk {
+        start: 1,
+        lines: 2,
+        hash: "abc123".into(),
+        author: "a".into(),
+        time: 1,
+        summary: "s".into(),
+        uncommitted: false,
+    };
+    put("BlameHunk", wire_keys(&hunk));
+    put(
+        "FileBlame",
+        wire_keys(&FileBlame {
+            path: "a.rs".into(),
+            hunks: vec![hunk],
+            truncated: false,
         }),
     );
     put("GitRef", wire_keys(&sample_git_ref()));
