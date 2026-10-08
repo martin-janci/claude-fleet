@@ -279,4 +279,58 @@ describe('ResumeDialog', () => {
       args: { key: 'ABC-1', mode: 'last', link_id: 5, host_alias: null, brief: null },
     });
   });
+
+  it('lists the earlier sessions and re-plans for the one picked (step 5.10)', async () => {
+    const asked: (number | null)[] = [];
+    vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
+      const args = (a as { args: { link_id: number | null } }).args;
+      if (cmd === 'work_resume_plan') {
+        asked.push(args.link_id);
+        const link = args.link_id ?? 5;
+        return plan({
+          link_id: link,
+          host_alias: link === 5 ? 'h' : 'g',
+          candidates: [
+            { link_id: 5, name: 'Receipt totals rounding', host_alias: 'h', conversations: 2, ended_at: Math.floor(Date.now() / 1000) - 3 * 86400 },
+            { link_id: 4, name: 'First attempt', host_alias: 'g', resumable: false },
+          ],
+          modes: [
+            { mode: 'last', ok: link === 5, reason: 'its conversation is gone' },
+            { mode: 'brief', ok: true },
+            { mode: 'fresh', ok: true },
+          ],
+        });
+      }
+      return null;
+    });
+    render(ResumeDialog, { props: { workKey: 'PD-2412', onclose: () => {} } });
+    await settle();
+    expect(screen.getByText('This work has 2 earlier sessions. Pick one to continue.')).toBeTruthy();
+    expect((screen.getByTestId('resume-candidate-5') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByTestId('resume-candidate-5').closest('label')).toHaveTextContent('h · 3 d ago · 2 conversations');
+    expect(screen.getByTestId('resume-candidate-4').closest('label')).toHaveTextContent('conversation gone');
+    await fireEvent.click(screen.getByTestId('resume-candidate-4'));
+    await settle();
+    // The re-plan for link 4, then the brief it now defaults to, also for 4.
+    expect(asked[0]).toBeNull();
+    expect(asked.slice(1).length).toBeGreaterThan(0);
+    expect(asked.slice(1).every((l) => l === 4)).toBe(true);
+    expect(screen.getByTestId('resume-where')).toHaveTextContent('Lands on g');
+    expect((screen.getByTestId('resume-mode-brief') as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('Start fresh instead switches to a fresh start', async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_resume_plan')
+        return plan({ modes: [{ mode: 'last', ok: true }, { mode: 'brief', ok: true }, { mode: 'fresh', ok: true }] });
+      return null;
+    });
+    render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
+    await settle();
+    await fireEvent.click(screen.getByTestId('resume-fresh-instead'));
+    await settle();
+    expect((screen.getByTestId('resume-mode-fresh') as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByTestId('resume-start')).toHaveTextContent('Fresh');
+    expect(screen.queryByTestId('resume-fresh-instead')).toBeNull();
+  });
 });

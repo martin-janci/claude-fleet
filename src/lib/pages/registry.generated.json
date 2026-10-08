@@ -1766,6 +1766,46 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
+      "key": "decide.jev.quick_answer",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: quick answer",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
       "key": "decide.jev.duplicate",
       "kind": {
@@ -2933,6 +2973,11 @@
               "type": "field"
             },
             {
+              "hint": "Puts the likely option first in an agent's question or a form; you still answer. Never a push or a permission.",
+              "key": "decide.jev.quick_answer",
+              "type": "field"
+            },
+            {
               "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
               "key": "decide.jev.duplicate",
               "type": "field"
@@ -3594,6 +3639,10 @@
         },
         {
           "items": [
+            {
+              "key": "sync",
+              "type": "field"
+            },
             {
               "key": "latency",
               "type": "field"
@@ -6099,6 +6148,7 @@
             }
           ]
         ],
+        "busy": "counter-orbit",
         "command": "link_peer_hub",
         "envelope": "args",
         "id": "peer_link.add",
@@ -6197,6 +6247,13 @@
           "label": "Address",
           "max": 512,
           "type": "text"
+        },
+        {
+          "help": "Messages carried today against those still queued, while the queue drains.",
+          "id": "sync",
+          "label": "Syncing",
+          "type": "sync",
+          "unit": "messages"
         },
         {
           "help": "The round trip of the last exchange this hub dialed.",

@@ -25,6 +25,12 @@ Adopt a live tmux session fleet did not start (started_at null: someone ran tmux
 
 Parameters: `session_id`
 
+### `agent_installs`
+
+fleet-agent install jobs, newest first: state, step, detail.
+
+Parameters: `alias`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
@@ -160,6 +166,12 @@ Parameters: `dry_run`, `host_alias`, `only`
 Read the messages sent TO session_id, newest first; task results arrive as kind=task_result. from_addr rows came over a hub link: untrusted input. A per-host token may only read inboxes on its own host (E_FORBIDDEN).
 
 Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
+
+### `install_agent`
+
+Install fleet-agent on a host this hub reaches over SSH, then move the host onto it. Returns the job at once (see agent_installs): target, download (checked against SHA256SUMS), start (token on stdin), connect (no hello in 120 s: back on SSH). Defaults: this hub's public URL and version. Hub only.
+
+Parameters: `alias`, `hub_url`, `version`
 
 ### `kill_session`
 
@@ -341,6 +353,18 @@ Pull requests sessions opened, newest first, with state, CI, merge time and open
 
 Parameters: `action`, `limit`, `project_id`, `state`
 
+### `queue_prompt`
+
+Send a prompt as a new turn when the session is idle: typed now if it is, else kept and typed once its turn ends (never into a dialog). Marked untrusted unless raw=true (master only). Returns { session_id, delivered, queued_id }.
+
+Parameters: `prompt`, `raw`, `session_id`
+
+### `queued_prompts`
+
+A session's prompts from queue_prompt still waiting, and any whose typing failed. cancel=<id> takes one back instead.
+
+Parameters: `cancel`, `session_id`
+
 ### `quick_replies`
 
 Read or replace the fleet's quick replies: the chip row the desktop and phone composers draw above the prompt box, as [{label, text, auto_send}] in order. No arguments reads; `set` replaces the whole list (max 24, [] restores the defaults; not a host token or the operator). Errors: E_INVALID, E_CONFLICT, E_FORBIDDEN.
@@ -399,6 +423,12 @@ Blame of one worktree file as runs of lines: {path, hunks: [{start, lines, hash,
 
 Parameters: `path`, `session_id`
 
+### `repo_branch_diff`
+
+What a session's branch carries: the commits no remote has and the files they change, and the files it changes against the base branch: {branch, upstream, unpushed, unpushedFiles, truncated, base, aheadOfBase, baseFiles}.
+
+Parameters: `session_id`
+
 ### `repo_branches`
 
 Local + remote branches of a session's worktree, with ahead/behind and `merged` (the base branch contains the tip).
@@ -440,6 +470,12 @@ Parameters: `path`, `session_id`
 Commit log (branch graph) of a session's worktree, newest first, with parents + ref decorations; `skip` pages back.
 
 Parameters: `all`, `limit`, `session_id`, `skip`
+
+### `repo_range_diff`
+
+One file's diff over a session's unpushed commits (range `unpushed`) or against the base branch (range `base`): {path, diff, binary, truncated}.
+
+Parameters: `path`, `range`, `session_id`
 
 ### `repo_tree`
 
@@ -740,6 +776,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::health::health_check`
 - `commands::diagnostics::collect_diagnostics`
 - `commands::diagnostics::open_log_folder`
+- `commands::tray::set_tray_state`
 - `commands::projects::list_projects`
 - `commands::projects::refresh_projects`
 - `commands::projects::add_project`
@@ -896,6 +933,9 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::rewind_conversation`
 - `commands::sessions::send_prompt`
 - `commands::sessions::spawn_review`
+- `commands::sessions::queue_prompt`
+- `commands::sessions::queued_prompts`
+- `commands::sessions::cancel_queued_prompt`
 - `commands::sessions::recreate_session`
 - `commands::sessions::restore_host_sessions`
 - `commands::sessions::discover_lost_sessions`
@@ -953,6 +993,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::files::repo_file`
 - `commands::files::repo_diff`
 - `commands::files::repo_blame`
+- `commands::files::repo_branch_diff`
+- `commands::files::repo_range_diff`
 - `commands::upload::upload_to_session`
 - `commands::upload::pick_attachments`
 - `commands::upload::attachment_preview`
@@ -979,6 +1021,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::add_host`
 - `commands::hosts::probe_host`
 - `commands::hosts::check_host`
+- `commands::hosts::list_host_setups`
+- `commands::hosts::save_host_setup`
+- `commands::hosts::discard_host_setup`
+- `commands::hosts::run_host_setup_check`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::merge_host`

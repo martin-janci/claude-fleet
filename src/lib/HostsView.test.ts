@@ -934,6 +934,16 @@ describe('HostsView: the Hosts table (Layout: New)', () => {
     expect(table()).toBeTruthy();
   });
 
+  it('+ Add host opens the add-host wizard; Classic keeps the picker (4.9)', async () => {
+    uiLayout.set('new');
+    mount();
+    await tick();
+    await fireEvent.click(screen.getByTestId('hosts-add'));
+    await waitFor(() => expect(screen.getByTestId('add-host-wizard')).toBeTruthy());
+    expect(calls('list_host_setups')).toHaveLength(1);
+    expect(screen.queryByTestId('picker-row')).toBeNull();
+  });
+
   it('a preselected host opens straight in its detail', async () => {
     uiLayout.set('new');
     mount({ preselect: 'mefistos' });

@@ -253,7 +253,11 @@ Read [`docs/architecture.md`](docs/architecture.md) before changing a subsystem 
 - Take a new migration's number from `origin/main`, not your checkout:
   `git ls-tree --name-only origin/main crates/fleet-core/migrations/ | tail -1`.
   `scripts/check-migration-numbers.sh` (the pre-push hook, `verify.sh full`)
-  fails a number main already used.
+  fails a number main already used. When main takes yours first, merge
+  `origin/main` and run `scripts/renumber-migrations.sh`: it resolves the
+  MIGRATIONS conflict and moves the branch's migrations to the next free
+  numbers. `migrations_are_contiguous_from_one` allows no gap, so a branch
+  cannot hold a number ahead of main's next free one.
 
 ## Status & known issues
 

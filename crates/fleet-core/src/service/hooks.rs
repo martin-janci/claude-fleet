@@ -1223,6 +1223,8 @@ fn apply_stop_hook(
     if steps_backstop {
         crate::service::work::harvest::spawn_harvest_steps(store, ssh, row_id, &session_id);
     }
+    // The turn is over: a prompt queued while it ran goes in now (step 5.10).
+    crate::service::sessions::deferred::spawn_deliver_after_stop(store, ssh, row_id);
     spawn_refresh_context(store, ssh, row_id);
     Ok(())
 }

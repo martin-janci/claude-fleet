@@ -18,9 +18,11 @@ mod clients;
 mod conversations;
 mod debug_devices;
 mod decisions;
+mod deferred_prompts;
 mod downloads;
 mod forms;
 mod guides;
+mod host_setup;
 mod hosts_accounts;
 mod item_deps;
 mod item_verify;
@@ -92,9 +94,11 @@ pub use decisions::{
     DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
     DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
+pub use deferred_prompts::{DeferredPromptRow, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
+pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{
     normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,

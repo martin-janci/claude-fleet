@@ -535,6 +535,9 @@ pub const DECIDE_JEV_START_PROJECT: &str = "decide.jev.start_project";
 /// `sibling_repos`' mode (pre-ticking the sibling repository a ticket start
 /// also needs, N3).
 pub const DECIDE_JEV_SIBLING_REPOS: &str = "decide.jev.sibling_repos";
+/// `quick_answer`'s mode (J5: the likely option first in an agent's
+/// question or a chat form, redesign step 10.9).
+pub const DECIDE_JEV_QUICK_ANSWER: &str = "decide.jev.quick_answer";
 /// `duplicate`'s mode (flagging a proposed task that may duplicate an
 /// existing one, K4).
 pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
@@ -1281,6 +1284,15 @@ pub const SPECS: &[Spec] = &[
         Kind::Choice(DECIDE_MODES),
         "Jev: sibling repository",
         "Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_QUICK_ANSWER,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: quick answer",
+        "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
@@ -2445,6 +2457,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
+        assert_eq!(resolve(DECIDE_JEV_QUICK_ANSWER, None), "off");
         assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
         assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");
         // `auto` is not offered yet (D36), nor is a free-text model.

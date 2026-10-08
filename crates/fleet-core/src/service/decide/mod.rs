@@ -40,6 +40,9 @@ pub mod duplicate;
 mod duplicate_tests;
 pub mod haiku;
 pub mod jev;
+pub mod quick_answer;
+#[cfg(test)]
+mod quick_answer_tests;
 pub mod sibling_repos;
 #[cfg(test)]
 mod sibling_repos_tests;
@@ -91,16 +94,19 @@ pub enum Feature {
     StartProject,
     /// Pre-ticking the sibling repository a ticket start also needs (N3).
     SiblingRepos,
+    /// The likely option first in an agent's question or a form (J5).
+    QuickAnswer,
     /// Flagging a proposed task that may duplicate an existing one (K4).
     Duplicate,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 5] = [
+    pub const ALL: [Feature; 6] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
         Feature::SiblingRepos,
+        Feature::QuickAnswer,
         Feature::Duplicate,
     ];
 
@@ -110,6 +116,7 @@ impl Feature {
             Feature::WorkLink => "work_link",
             Feature::StartProject => "start_project",
             Feature::SiblingRepos => "sibling_repos",
+            Feature::QuickAnswer => "quick_answer",
             Feature::Duplicate => "duplicate",
         }
     }
@@ -125,6 +132,7 @@ impl Feature {
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
             Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
+            Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
         }
     }

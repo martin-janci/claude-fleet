@@ -11,6 +11,7 @@ import {
   startBlockedBy,
   suggestedProjectId,
   projectProposal,
+  siblingProposal,
   type StartPreview,
 } from './start_preview';
 
@@ -135,5 +136,14 @@ describe('suggestedProjectId', () => {
   it('hands the chip the same answer', () => {
     expect(projectProposal(missing())).toEqual({ value: '3', source: 'jev', confidence_pct: 90 });
     expect(projectProposal(missing({ missing: 'host' }))).toBeNull();
+  });
+});
+
+describe('siblingProposal (3.12 N3)', () => {
+  it('reads Jev\'s sibling only with a planned project', () => {
+    const p = preview({ missing: null, suggested_sibling: { project_id: 2, confidence_pct: 70 } });
+    expect(siblingProposal(p)).toEqual({ value: '2', source: 'jev', confidence_pct: 70 });
+    expect(siblingProposal({ ...p, missing: 'host' })).toBeNull();
+    expect(siblingProposal({ ...p, suggested_sibling: null })).toBeNull();
   });
 });

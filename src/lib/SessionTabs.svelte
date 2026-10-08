@@ -14,6 +14,7 @@
   // this file only draws them and says which is current.
   import type { SessionRow } from './sessions';
   import { sessionAgent } from './sessions';
+  import AgentMark from './AgentMark.svelte';
   import { AGENT_LABELS, STATE_LABELS } from './row_groups';
   import { attentionState } from './attention';
   import { attentionIdleMinutes } from './notify';
@@ -57,6 +58,7 @@
       ? attentionState(session, { idleSecs: $attentionIdleMinutes * 60, now: Math.floor(Date.now() / 1000) })
       : null,
   );
+  const agent = $derived(session ? sessionAgent(session) : null);
   const agentLabel = $derived(session ? (AGENT_LABELS[sessionAgent(session)] ?? 'Terminal') : 'Terminal');
   const prNumber = $derived(session?.pr_url?.match(/\/pull\/(\d+)/)?.[1] ?? null);
 
@@ -127,7 +129,11 @@
           disabled={!session || disabled[t.id] !== undefined}
           title={!session ? 'No session selected' : (disabled[t.id] ?? (t.chord ? `${t.label} (${t.chord})` : t.label))}
           data-testid="stab-{t.id}"
-          onclick={() => onselect(t.id)}>{t.label}</button
+          onclick={() => onselect(t.id)}
+          >{#if t.id === 'agent' && agent}<AgentMark {agent} />{/if}{t.label}{#if t.chord}<span
+              class="of-kbd"
+              aria-hidden="true">{t.chord}</span
+            >{/if}</button
         >
       {/each}
     </div>
@@ -191,6 +197,11 @@
   .bar .tab-strip { border-bottom: 0; }
   .grow { flex: 1 1 auto; }
   .tab-strip__tab:disabled { opacity: 0.5; cursor: default; }
+  .tab-strip__tab[role='tab'] {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
   .tab-strip__tab.fleet[aria-pressed='true'] {
     color: var(--fg);
     font-weight: 500;
