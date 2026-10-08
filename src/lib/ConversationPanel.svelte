@@ -110,6 +110,7 @@
   import { getCurrentWebview } from '@tauri-apps/api/webview';
   import { pointInRect, dropPoint } from './geometry';
   import Markdown from './MarkdownView.svelte';
+  import RichText from './RichText.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import SpiralLoader from './SpiralLoader.svelte';
   import { selectSessionExplicitly } from './selection';
@@ -1047,6 +1048,9 @@
   const gone = $derived(viewing !== null && errorCode === 'E_NO_TRANSCRIPT');
   const empty = $derived(gone ? 'Transcript no longer on host' : emptyStateText(errorCode, !!session.claude_session_id));
   const canPrompt = $derived(!hasNoPane(session));
+  // A reply's cards (rich_blocks.ts) act by filling this composer, so they
+  // act only where it is drawn and holds the conversation on screen.
+  const cardsAct = $derived(showComposer && canPrompt && bgEntry === null && viewing === null);
   const emptyHint = $derived(
     gone
       ? 'The host no longer keeps this conversation’s transcript file.'
@@ -2025,7 +2029,7 @@
                 {#each groups as g, j (j)}
                   {#if g.kind === 'text'}
                     <div class="text" data-testid="conv-text">
-                      <Markdown source={g.text} />
+                      <RichText source={g.text} sessionId={cardsAct ? session.id : null} />
                     </div>
                   {:else if g.kind === 'tools'}
                     <!-- One structure for a lone call and a folded group, so a

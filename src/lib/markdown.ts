@@ -66,7 +66,7 @@ const TABLE_SEP = /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?$/;
 
 /** An opening code fence: its marker and language, or null. The info
  *  string may not hold a backtick (as before). */
-function fenceOpen(line: string): { marker: string; lang: string } | null {
+export function fenceOpen(line: string): { marker: string; lang: string } | null {
   const m = FENCE.exec(line);
   if (!m || m[2].includes('`')) return null;
   return { marker: m[1], lang: /^\s*([^\s`]*)/.exec(m[2])![1] };
@@ -151,7 +151,7 @@ function parseBlocks(lines: string[], depth: number): Block[] {
   return out;
 }
 
-function isClosingFence(line: string, marker: string): boolean {
+export function isClosingFence(line: string, marker: string): boolean {
   const trimmed = line.trim();
   return trimmed.length >= marker.length && trimmed === marker[0].repeat(trimmed.length);
 }
