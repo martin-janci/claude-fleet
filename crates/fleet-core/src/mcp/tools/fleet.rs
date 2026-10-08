@@ -243,6 +243,17 @@ impl FleetTools {
         ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Each Claude account's latest plan usage: 5-hour \
+        and weekly utilization with reset times, status, fetched_at. Never \
+        fetches.")]
+    pub(super) async fn account_usage(&self) -> Result<CallToolResult, McpError> {
+        audit("account_usage", "");
+        ok_json_compact(
+            &crate::service::account_usage_poll::served_account_usage(self.reader())
+                .map_err(to_mcp_err)?,
+        )
+    }
+
     #[tool(description = "Read or replace the fleet's quick replies: the \
         chip row the desktop and phone composers draw above the prompt box, \
         as [{label, text, auto_send}] in order. No arguments reads; `set` \

@@ -166,8 +166,8 @@ fn a_listed_row_carries_why_it_needs_a_person_and_nothing_when_it_does_not() {
 
     assert_eq!(
         json(blocked_row).get("needs_attention"),
-        Some(&serde_json::json!({ "reason": "waiting", "since": 1 })),
-        "the reason and since are on the row"
+        Some(&serde_json::json!({ "reason": "waiting", "since": 1, "state": "action_required" })),
+        "the reason, since and state are on the row"
     );
     assert!(
         json(calm_row).get("needs_attention").is_none(),

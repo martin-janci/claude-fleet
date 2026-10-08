@@ -2,12 +2,12 @@
 //! `service::account_usage_poll`; the fetch itself is
 //! `service::account_usage` (security-reviewed, untouched here).
 //!
-//! Both refuse in remote mode. The cache they read is filled by
-//! `spawn_account_usage_tick`, which a hub client does not start, so
-//! the local answer would be a permanently empty list presented as fact — and
-//! the refresh path SSHes to the host from here. The hub's `usage_report`
-//! tool answers per-session usage, a different shape from
-//! `AccountUsageSnapshot`, so there is nothing to route to.
+//! The cache they read is filled by `spawn_account_usage_tick`, which a hub
+//! client does not start. So paired, `list_account_usage` routes to the
+//! hub's `account_usage` tool (hub contract 11), which serves the hub's own
+//! answers; `refresh_account_usage` and the rest refuse, since a refresh
+//! SSHes to the host from here and this app keeps no history while a hub
+//! owns the fleet.
 
 use crate::backend::FleetBackend;
 use fleet_core::events::EventBus;
@@ -43,15 +43,30 @@ pub struct AccountSpendArgs {
     pub account_uuid: Option<String>,
 }
 
-/// Every known account's cached usage snapshot. Never fetches.
+/// Every known account's cached usage snapshot. Never fetches. Paired, the
+/// hub's answers.
 #[tauri::command]
-pub fn list_account_usage(
+pub async fn list_account_usage(
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     cache: State<'_, Arc<Mutex<UsageCache>>>,
 ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
-    backend.refuse_local_only("list_account_usage")?;
-    account_usage_poll::list_account_usage(&store, &cache)
+    routed::list_account_usage(&backend, &store, &cache).await
+}
+
+pub(crate) mod routed {
+    use super::*;
+
+    pub async fn list_account_usage(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        cache: &Mutex<UsageCache>,
+    ) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.list_account_usage().await,
+            None => account_usage_poll::list_account_usage(store, cache),
+        }
+    }
 }
 
 /// Fetch `account_uuid`'s usage now if the floor allows, else return the

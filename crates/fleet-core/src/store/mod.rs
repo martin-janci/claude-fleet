@@ -567,6 +567,21 @@ impl Store {
         })
     }
 
+    /// What the fleet knows beyond a session's own row — down hosts,
+    /// accounts at a limit or without a login — as this store's bus follows
+    /// it (step 2.6, [`EventBus::attention_facts`]). Empty off the hub, which
+    /// is the row-only classification. Every hub site that decides
+    /// `needs_attention` reads it here, beside `health.context_red_pct`.
+    pub fn attention_facts(&self) -> crate::service::attention::Facts {
+        self.bus.inner.attention_facts()
+    }
+
+    /// Each account's latest usage answer as this store's bus follows it
+    /// ([`EventBus::account_usage`]). Empty off the hub.
+    pub fn bus_account_usage(&self) -> Vec<crate::service::account_usage::AccountUsageSnapshot> {
+        self.bus.inner.account_usage()
+    }
+
     /// An in-memory store for a test. Its database is a copy of one that went
     /// through every migration once per test process
     /// ([`migrated_template_copy`]); `migrate()` then runs on the copy as

@@ -282,7 +282,10 @@ Index by area (names only; see the reference for details):
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `hide_host`, `provision_hosts`,
-  `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
+  `list_accounts`, `account_usage` (each account's latest plan usage: the
+  5-hour and weekly windows with their reset times, status and when it was
+  fetched, as the hub's usage poll last answered; never fetches; hub
+  contract 11), `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
   on a host the hub reaches over SSH and move the host onto it; a job read
   with `agent_installs`).
@@ -981,12 +984,18 @@ derive from them.
   press_enter`.
 - **`needs_attention.reason`** (on session rows and `/events` frames), most
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
-  which), `stop_failed` (the last turn ended in an API error; re-prompt),
+  which), `host_down` (the session's host was pinged and did not answer),
+  `account_limit` (its account's 5-hour or weekly window is used up and the
+  session is not working), `no_credentials` (its account's login is missing,
+  expired or rejected, and the session is not working), `stop_failed` (the
+  last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),
   `ci_failing` (idle with failing PR checks) and `lifecycle` (a failed or
   pending safe kill, a ghost, a lost row). `since` is when the session
-  entered that state.
+  entered that state. `state` (contract 11) is the attention state the
+  reason puts it in: `action_required`, `failed`, `blocked` (`host_down`,
+  `account_limit`, `no_credentials`) or `paused` (`lifecycle`).
 
 ### Errors and limits
 

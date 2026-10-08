@@ -153,4 +153,15 @@
 //!   `shutdown_debug_device`) to the hub's new `debug_devices` tool. A
 //!   revision-9 hub serves none of it, so the page would fail every read
 //!   with an unknown tool.
-pub const CONTRACT_REVISION: u32 = 10;
+//! - **11** — *new enum variants and new tools*: the Orbit Fleet redesign's
+//!   M2 (steps 2.1–2.8). `needs_attention.reason` gains `host_down`,
+//!   `account_limit` and `no_credentials` (step 2.4, decided from the facts
+//!   the hub's bus follows), and `needs_attention` carries the attention
+//!   `state` beside the reason; a phone that decodes the reason as a closed
+//!   enum fails the row on the first new one. The desktop routes
+//!   `touch_session_viewed` (step 2.3) and `repo_blame` to tools a
+//!   revision-10 hub does not serve, `list_account_usage` to the new
+//!   `account_usage` tool, and `update_device` to an `org_admin` action it
+//!   does not know. Session rows also carry `agent`,
+//!   `origin`, `last_viewed_at`, `turn_outcome` and `proposals` (additive).
+pub const CONTRACT_REVISION: u32 = 11;

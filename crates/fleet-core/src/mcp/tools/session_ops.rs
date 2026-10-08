@@ -76,7 +76,7 @@ impl FleetTools {
         // would be erased by the frontend's wholesale row merge — which,
         // fail-closed, would shut the OWNER's own terminal on the next
         // routine update.
-        let (controller, scope, context_red_pct) = {
+        let (controller, scope, context_red_pct, facts) = {
             let s = lock(reader).map_err(to_mcp_err)?;
             let controller = s
                 .get_controller()
@@ -85,6 +85,7 @@ impl FleetTools {
                 controller,
                 caller.view_scope(&s).map_err(to_mcp_err)?,
                 crate::service::health::context_red_pct(&s),
+                s.attention_facts(),
             )
         };
         let tagged = rows
@@ -128,7 +129,7 @@ impl FleetTools {
                 // it is the difference between a phone fetching 44 rows to
                 // find 3 and fetching 3.
                 if let Some(want) = p.needs_attention {
-                    if crate::service::attention::needs_attention_with(row, context_red_pct)
+                    if crate::service::attention::needs_attention_in(row, context_red_pct, &facts)
                         .is_some()
                         != want
                     {
@@ -141,7 +142,7 @@ impl FleetTools {
                 let is_controller = controller
                     .as_ref()
                     .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
-                SessionWithController::with_threshold(is_controller, row, context_red_pct)
+                SessionWithController::with_threshold(is_controller, row, context_red_pct, &facts)
             })
             // `limit` applies AFTER the filters so a filtered page is a real
             // page of matches, not the first N rows of the whole fleet.
@@ -314,7 +315,7 @@ impl FleetTools {
         // Scoped so the store guard is released before
         // `stored_local_fleet_id` takes it again below — `Store` is a plain
         // (non-reentrant) `std::sync::Mutex`.
-        let (row, is_controller, context_red_pct) = {
+        let (row, is_controller, context_red_pct, facts) = {
             let s = lock(self.reader()).map_err(to_mcp_err)?;
             // The WHOLE scope, org and person (multi-user M1): a row this
             // caller may not see must not match, and must not appear among
@@ -331,7 +332,7 @@ impl FleetTools {
                 .as_ref()
                 .is_some_and(|(h, t)| *h == row.host_alias && *t == row.tmux_name);
             let context_red_pct = crate::service::health::context_red_pct(&s);
-            (row, is_controller, context_red_pct)
+            (row, is_controller, context_red_pct, s.attention_facts())
         };
         // Reported, never minted: `whoami` is a read, and a readonly token
         // can call it — a read must not write (final review, Minor 7). Null
@@ -343,6 +344,7 @@ impl FleetTools {
             is_controller,
             row,
             context_red_pct,
+            &facts,
         ))
         .map_err(|e| McpError::internal_error(format!("serialize result: {e}"), None))?;
         if let serde_json::Value::Object(map) = &mut payload {
