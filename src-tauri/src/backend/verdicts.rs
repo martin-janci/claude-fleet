@@ -817,6 +817,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
+        "session_presence",
+        Verdict::Routed {
+            tool: "session_presence",
+        },
+    ),
+    (
         "list_debug_devices",
         Verdict::Routed {
             tool: "debug_devices",
@@ -1132,9 +1138,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",
-        Verdict::LocalOnly {
-            instead: "this app does not poll account usage while a hub owns the fleet, so \
-                      the cache is empty; read usage on the hub",
+        Verdict::Routed {
+            tool: "account_usage",
         },
     ),
     (
@@ -1156,6 +1161,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
                       it cannot tell which account has headroom; start the session as usual",
+        },
+    ),
+    (
+        "propose_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model and the account usage are the hub's while it owns \
+                      the fleet; pick the host as usual",
+        },
+    ),
+    (
+        "record_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model's runs are recorded on the hub that owns the fleet; \
+                      nothing to record here",
         },
     ),
     (

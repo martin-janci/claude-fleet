@@ -282,7 +282,10 @@ Index by area (names only; see the reference for details):
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `hide_host`, `provision_hosts`,
-  `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
+  `list_accounts`, `account_usage` (each account's latest plan usage: the
+  5-hour and weekly windows with their reset times, status and when it was
+  fetched, as the hub's usage poll last answered; never fetches; hub
+  contract 11), `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above), `install_agent` (install `fleet-agent`
   on a host the hub reaches over SSH and move the host onto it; a job read
   with `agent_installs`).
@@ -322,6 +325,14 @@ Index by area (names only; see the reference for details):
   claim is `fleet-hub session claim <id> --person <name>`, beside
   `fleet-hub session unclaimed`. Sharing never confers a terminal: a
   terminal is this machine's own SSH, which no revoke could reach.
+- **Presence** (redesign 11.7b) — `session_presence` (`session_id`,
+  `leaving?`): say you have a session open, again every `heartbeat_secs`
+  (20), and once with `leaving: true` when you close it; the answer is who
+  has it open now, `{ person_id, name, device?, since, you? }` per device.
+  Watch reach. The owner sees everyone; anyone else sees the owner and
+  themselves, never another grantee. The hub keeps it in memory only, so a
+  report lapses 45 s after its last heartbeat and a restart forgets it. A
+  per-host token is refused it.
 - **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
   presets the desktop and the phone both draw above their text box, in list
   order, each with `auto_send`: a tap sends at once rather than filling the
@@ -818,10 +829,20 @@ Index by area (names only; see the reference for details):
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under
+<<<<<<< origin/main
   `overlap: skip`, today's budget is spent, the account its login bills
   is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
   usage readings), or a person skipped it.
   `automation.paused` (Pause all) stops the schedule and event fires,
+=======
+  `overlap: skip`, today's budget is spent, or a person skipped it.
+  A finished run also carries an `outcome` (8.10): `did_work`, `nothing`,
+  `failed` or `needs_person`, with `outcome_source` `exit` (a failed run,
+  which nothing overrides), `rule` (an open question or a wedged session is
+  `needs_person`, a pull request `did_work`) or `jev`; a run no rule can
+  read has none until Jev answers. A `nothing` run marks its session seen,
+  so it stays out of the Inbox. `automation.paused` (Pause all) stops the schedule and event fires,
+>>>>>>> HEAD
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
   org is its host's.
@@ -983,12 +1004,18 @@ derive from them.
   press_enter`.
 - **`needs_attention.reason`** (on session rows and `/events` frames), most
   urgent first: `waiting` (blocked on a dialog), `stuck` (`stuck_kind` says
-  which), `stop_failed` (the last turn ended in an API error; re-prompt),
+  which), `host_down` (the session's host was pinged and did not answer),
+  `account_limit` (its account's 5-hour or weekly window is used up and the
+  session is not working), `no_credentials` (its account's login is missing,
+  expired or rejected, and the session is not working), `stop_failed` (the
+  last turn ended in an API error; re-prompt),
   `failed` (a pane-less agent reported failure), `context_full` (context at or
   past `health.context_red_pct`), `stale_working` (the demotion above),
   `ci_failing` (idle with failing PR checks) and `lifecycle` (a failed or
   pending safe kill, a ghost, a lost row). `since` is when the session
-  entered that state.
+  entered that state. `state` (contract 11) is the attention state the
+  reason puts it in: `action_required`, `failed`, `blocked` (`host_down`,
+  `account_limit`, `no_credentials`) or `paused` (`lifecycle`).
 
 ### Errors and limits
 

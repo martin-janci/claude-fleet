@@ -13,6 +13,7 @@
   import ProposedBy from '../ProposedBy.svelte';
   import { preselect } from '../ai_proposal';
   import { QUICK_ANSWER, risky } from '../quick_answer';
+  import Loader from '../Loader.svelte';
 
   let {
     spec,
@@ -20,8 +21,11 @@
     disabled = false,
     serverProblems = [],
     proposal = null,
+    initial = {},
+    sending = 'Sending…',
     onsubmit,
     onunplaced,
+    oncancel,
   }: {
     spec: FormSpec;
     /** Jev's likely option for one choice (step 10.9): shown first and
@@ -30,9 +34,16 @@
     busy?: boolean;
     disabled?: boolean;
     serverProblems?: FieldProblem[];
+    /** Starting values over the spec's own defaults (a wizard opened with
+     *  what the screen already knows). Read once, as the defaults are. */
+    initial?: Values;
+    /** The last button while `busy`, after a Comet (step 10.12). */
+    sending?: string;
     onsubmit: (values: Values) => void;
     /** Server problems whose field is on no visible step (nowhere to show them). */
     onunplaced?: (problems: FieldProblem[]) => void;
+    /** A quiet Cancel at the row's start (a wizard in a dialog). */
+    oncancel?: () => void;
   } = $props();
   const uid = $props.id();
 
@@ -46,7 +57,7 @@
   // The spec of one form never changes under the wizard (FormCard unmounts the
   // wizard while it loads another form), so the starting values are read once on purpose.
   // svelte-ignore state_referenced_locally
-  let values = $state<Values>(defaults(spec));
+  let values = $state<Values>({ ...defaults(spec), ...initial });
   let index = $state(0);
   const steps = $derived(visibleSteps(spec, values));
   const step = $derived(steps[Math.min(index, steps.length - 1)]);
@@ -72,9 +83,17 @@
     values = { ...values, [name]: v };
   }
 
+  // Whether `busy` is this wizard's own submit (the card is also busy while
+  // it declines, and that is not "Sending…").
+  let sent = $state(false);
+  $effect(() => {
+    if (!busy) sent = false;
+  });
+
   /** Only what a visible field holds is sent: a hidden step's values stay
    *  behind, as the backend would drop them anyway. */
   function submit() {
+    sent = true;
     const shown = new Set(steps.flatMap((s) => s.fields.map((f) => f.name)));
     const out: Values = {};
     for (const [k, v] of Object.entries(values)) if (shown.has(k)) out[k] = v;
@@ -273,12 +292,15 @@
     {/each}
   {/if}
   <div class="row">
+    {#if oncancel}
+      <button type="button" class="cancel" data-testid="form-cancel" disabled={busy} onclick={oncancel}>Cancel</button>
+    {/if}
     {#if index > 0}
       <button type="button" data-testid="form-back" disabled={busy} onclick={() => (index -= 1)}>Back</button>
     {/if}
     {#if last}
       <button type="button" class="primary" data-testid="form-submit" disabled={off || !ready} onclick={submit}>
-        {spec.submit ?? 'Submit'}
+        {#if busy && sent}<Loader name="comet" size={12} class="btn-loader" />{sending}{:else}{spec.submit ?? 'Submit'}{/if}
       </button>
     {:else}
       <button type="button" class="primary" data-testid="form-next" disabled={off || !ready} onclick={() => (index += 1)}>Next</button>
@@ -298,6 +320,7 @@
   .help { font-size: 11px; color: var(--fg-muted); }
   .err { font-size: 11px; color: var(--usage-crit); }
   .row { display: flex; gap: 0.4rem; justify-content: flex-end; }
+  .row .cancel { margin-right: auto; }
   .options { display: flex; flex-direction: column; gap: 0.15rem; }
   .opt { display: flex; gap: 0.45rem; align-items: center; text-align: left; font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; border: 1px solid transparent; border-radius: 4px; background: none; color: inherit; cursor: pointer; }
   .opt:hover:not(:disabled) { background: var(--bg-hover); }

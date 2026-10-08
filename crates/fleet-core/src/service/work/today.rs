@@ -151,7 +151,12 @@ fn stale_reason(row: &SessionRow, now: i64) -> Option<&'static str> {
     }
 }
 
-fn session_of(row: &SessionRow, now: i64, context_red_pct: f64) -> TodaySession {
+fn session_of(
+    row: &SessionRow,
+    now: i64,
+    context_red_pct: f64,
+    facts: &crate::service::attention::Facts,
+) -> TodaySession {
     TodaySession {
         id: row.id,
         name: row
@@ -161,7 +166,7 @@ fn session_of(row: &SessionRow, now: i64, context_red_pct: f64) -> TodaySession 
             .unwrap_or_else(|| row.tmux_name.clone()),
         host_alias: row.host_alias.clone(),
         org_id: row.org_id,
-        attention: crate::service::attention::needs_attention_with(row, context_red_pct)
+        attention: crate::service::attention::needs_attention_in(row, context_red_pct, facts)
             .filter(|a| a.reason.state().counts_toward_badge())
             .map(|a| a.reason.as_str().into()),
         stale: stale_reason(row, now).map(str::to_string),
@@ -182,11 +187,33 @@ pub fn digest(
     since: i64,
     context_red_pct: f64,
 ) -> Today {
+    digest_in(
+        rows,
+        done,
+        ended,
+        now,
+        since,
+        context_red_pct,
+        &crate::service::attention::Facts::default(),
+    )
+}
+
+/// [`digest`], with what the fleet knows beyond the rows (step 2.6): a
+/// session on a down host or a limited account is in Needs you as Blocked.
+pub fn digest_in(
+    rows: &[SessionRow],
+    done: &[DoneItem],
+    ended: &[EndedWork],
+    now: i64,
+    since: i64,
+    context_red_pct: f64,
+    facts: &crate::service::attention::Facts,
+) -> Today {
     // Group by work key; no-work sessions by bucket.
     let mut by_key: BTreeMap<String, (TodayGroup, Vec<TodaySession>)> = BTreeMap::new();
     let mut no_work: Vec<TodaySession> = Vec::new();
     for row in rows {
-        let s = session_of(row, now, context_red_pct);
+        let s = session_of(row, now, context_red_pct, facts);
         match row.work.as_ref().and_then(|w| w.key.clone()) {
             Some(key) => {
                 let w = row.work.as_ref().cloned().unwrap_or_default();
@@ -456,7 +483,8 @@ pub fn today(
         });
     }
     let red = crate::service::health::context_red_pct(&s);
-    Ok(digest(&rows, &done, &ended, now, since, red))
+    let facts = s.attention_facts();
+    Ok(digest_in(&rows, &done, &ended, now, since, red, &facts))
 }
 
 #[cfg(test)]

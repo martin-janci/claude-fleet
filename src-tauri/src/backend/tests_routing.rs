@@ -428,6 +428,19 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
         (
+            "list_account_usage",
+            "account_usage",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                block_on(commands::account_usage::routed::list_account_usage(
+                    b, s, &cache,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_projects",
             "list_projects",
             json!({ "summary": false }),
@@ -467,6 +480,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     commands::projects::ListGithubReposArgs {
                         host_alias: "trn".into(),
+                        owner: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_github_repos",
+            "list_github_repos",
+            json!({ "host_alias": "trn", "owner": "papaya-pos" }),
+            r#"[{"name_with_owner":"papaya-pos/receipts","is_private":true}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::projects::routed::list_github_repos(
+                    b,
+                    commands::projects::ListGithubReposArgs {
+                        host_alias: "trn".into(),
+                        owner: Some("papaya-pos".into()),
                     },
                     s,
                     h,
@@ -695,6 +727,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     s,
                     Some(4),
                     Some("pending".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // `leaving` is skipped when false, so a heartbeat is the session id
+        // alone; the hub learns the device from the connection, never here.
+        (
+            "session_presence",
+            "session_presence",
+            json!({ "session_id": 42 }),
+            r#"{"session_id":42,"viewers":[{"person_id":3,"name":"jane","since":1700000000}],"heartbeat_secs":20}"#,
+            Box::new(|b, _, _| {
+                block_on(commands::presence::routed::session_presence(
+                    b,
+                    fleet_core::service::presence::SessionPresenceArgs {
+                        session_id: 42,
+                        leaving: false,
+                    },
                 ))
                 .map(|_| ())
             }),
@@ -6109,6 +6159,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/federation.rs"),
     ),
     ("commands/prs.rs", include_str!("../commands/prs.rs")),
+    (
+        "commands/presence.rs",
+        include_str!("../commands/presence.rs"),
+    ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",

@@ -37,6 +37,7 @@ g init -q -b work
 sql 1 init > "$T/r/$D/001_init.sql"
 schema > "$T/r/$SCHEMA"
 printf '//! Store helpers (migration 1 made the first table).\n' > "$T/r/crates/fleet-core/src/store/doc.rs"
+mkdir -p "$T/r/src"; printf 'base\n' > "$T/r/src/page.ts"
 g add -A && g commit -qm main
 g update-ref refs/remotes/origin/main HEAD
 
@@ -44,6 +45,7 @@ sql 2 tasks > "$T/r/$D/002_tasks.sql"
 schema '    // tasks
     Migration::plain(2, include_str!("../../migrations/002_tasks.sql")),' > "$T/r/$SCHEMA"
 printf '//! Store helpers (migration 1 made the first table).\n//! `tasks` (migration 2) holds the work.\n' > "$T/r/crates/fleet-core/src/store/doc.rs"
+printf 'branch\n' > "$T/r/src/page.ts"
 g add -A && g commit -qm "branch: 002_tasks"
 
 g checkout -q --detach origin/main
@@ -54,6 +56,7 @@ schema '    // assets
         sql: include_str!("../../migrations/002_assets.sql"),
         already_applied: Some(has_assets),
     },' > "$T/r/$SCHEMA"
+printf 'main\n' > "$T/r/src/page.ts"
 g add -A && g commit -qm "main: 002_assets"
 g update-ref refs/remotes/origin/main HEAD
 g checkout -q work
@@ -76,7 +79,8 @@ has "branch entry renumbered" 'Migration::plain(3, include_str!("../../migration
 if awk '/002_assets/{a=NR} /003_tasks/{b=NR} END{exit !(a && b && a < b)}' "$T/r/$SCHEMA"; then ok "main's entry first"; else bad "main's entry first" "$(cat "$T/r/$SCHEMA")"; fi
 has "the branch's doc comment follows" '`tasks` (migration 3)' crates/fleet-core/src/store/doc.rs
 has "main's doc comment does not" 'migration 1 made' crates/fleet-core/src/store/doc.rs
-if [[ -z "$(g diff --name-only --diff-filter=U)" ]]; then ok "nothing left unmerged"; else bad "unmerged paths" "$(g diff --name-only --diff-filter=U)"; fi
+if [[ "$(g diff --name-only --diff-filter=U)" == "src/page.ts" ]]; then ok "an unrelated conflict stays unmerged"; else bad "unmerged paths" "$(g diff --name-only --diff-filter=U)"; fi
+printf 'both\n' > "$T/r/src/page.ts"; g add src/page.ts
 
 out="$(cd "$T/r" && bash "$S" 2>&1)"
 if [[ "$out" == *"003_tasks.sql: already 3"* ]]; then ok "a second run changes nothing"; else bad "second run" "$out"; fi

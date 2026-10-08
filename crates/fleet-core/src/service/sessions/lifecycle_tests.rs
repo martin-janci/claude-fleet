@@ -1153,7 +1153,13 @@ fn a_resume_id_is_used_for_both_the_pane_command_and_the_stored_id() {
     );
     assert_eq!(
         pane,
-        recreate_pane_command("work", Some(RESUME_ID), "dev-z", &Default::default())
+        recreate_pane_command(
+            "work",
+            "claude",
+            Some(RESUME_ID),
+            "dev-z",
+            &Default::default()
+        )
     );
 }
 
@@ -1183,7 +1189,13 @@ fn model_and_effort_ride_on_every_launch_in_the_chain() {
     let (cid, pane) = claude_id_and_pane_cmd(&args_named("dev-z", Some(RESUME_ID)));
     assert_eq!(
         pane,
-        recreate_pane_command("work", cid.as_deref(), "dev-z", &Default::default())
+        recreate_pane_command(
+            "work",
+            "claude",
+            cid.as_deref(),
+            "dev-z",
+            &Default::default()
+        )
     );
 }
 
@@ -1800,11 +1812,13 @@ fn the_agent_settles_against_the_kind() {
         settle(Some("claude"), Some("review")),
         ok(Some("claude"), Some("review"))
     );
+    // Codex (12.2) starts; its row is written `codex` by `new_session`.
+    assert_eq!(settle(Some("codex"), None), ok(Some("codex"), None));
     // Contradictions are invalid, reserved agents unsupported, others invalid.
     for (agent, kind, code) in [
         ("shell", Some("work"), E_INVALID),
         ("claude", Some("shell"), E_INVALID),
-        ("codex", None, E_UNSUPPORTED),
+        ("codex", Some("shell"), E_INVALID),
         ("agy", Some("work"), E_UNSUPPORTED),
         ("gemini", None, E_INVALID),
         ("Claude", None, E_INVALID),
@@ -1823,6 +1837,39 @@ fn the_agent_settles_against_the_kind() {
     args.agent = Some("shell".into());
     args.effort = Some("high".into());
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+    // Codex takes a model and an effort, but has no login profiles.
+    let mut args = args_named("dev-z", None);
+    args.agent = Some("codex".into());
+    args.model = Some("gpt-6.1-sol".into());
+    args.effort = Some("xhigh".into());
+    assert!(normalize_launch(&mut args).is_ok());
+    args.profile = Some("work".into());
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+}
+
+/// A new Codex session starts bare (Codex names its own conversation, so
+/// there is no id to record), and a restart, recreate or repair of a Codex
+/// row resumes Codex, not Claude.
+#[test]
+fn a_codex_session_launches_codex() {
+    use super::lifecycle::claude_id_and_pane_cmd;
+    let mut args = args_named("dev-cx", None);
+    args.agent = Some("codex".into());
+    args.model = Some("gpt-6-luna".into());
+    let (id, pane) = claude_id_and_pane_cmd(&args);
+    assert_eq!(id, None);
+    assert!(
+        pane.starts_with("codex --dangerously-bypass-approvals-and-sandbox -m 'gpt-6-luna'"),
+        "{pane}"
+    );
+    let id = "01a11dac-6e90-7da0-81c9-280b14a35226";
+    let pane = recreate_pane_command("work", "codex", Some(id), "dev-cx", &Default::default());
+    assert!(pane.starts_with(&format!("codex resume '{id}'")), "{pane}");
+    let pane = recreate_pane_command("work", "codex", None, "dev-cx", &Default::default());
+    assert!(pane.starts_with("codex resume --last"), "{pane}");
+    // A Claude row is unchanged.
+    let pane = recreate_pane_command("work", "claude", Some(id), "dev-cx", &Default::default());
+    assert!(pane.contains(&format!("cl --resume '{id}'")), "{pane}");
 }
 
 /// Recreate on a remote host whose checkout was deleted clones it back into

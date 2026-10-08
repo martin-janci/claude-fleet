@@ -30,6 +30,7 @@
 //! too frequent for a row each.
 
 pub mod cron;
+pub mod outcome;
 pub mod tick;
 
 use crate::ipc_error::{codes, lock, IpcError};

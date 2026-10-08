@@ -583,6 +583,9 @@ pub struct AddProjectParams {
 pub struct ListGithubReposParams {
     /// Host whose `gh` login lists the repositories.
     pub host_alias: String,
+    /// A GitHub user or organisation to list instead of the login's own.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

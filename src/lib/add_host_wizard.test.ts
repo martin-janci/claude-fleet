@@ -5,7 +5,9 @@ import {
   agentLines,
   attentionChecks,
   canAdvance,
+  checkLoader,
   checkRows,
+  discoveryLoader,
   checksComplete,
   nextLabel,
   resumeLine,
@@ -66,5 +68,16 @@ describe('add-host wizard', () => {
   it('says where a saved draft was left', () => {
     const d: HostSetup = { ssh_alias: 'merc', alias: 'mercury', step: 2, checks: [], answers: {}, created_at: 1, updated_at: 2 };
     expect(resumeLine(d)).toBe('mercury (merc) · step 2 of 5, Check the host');
+  });
+});
+
+describe('live loaders (4.13)', () => {
+  it('Sonar waits for SSH, the Hex field checks the rest, Radar discovers', () => {
+    expect(checkLoader(null, 'mercury')).toBeNull();
+    expect(checkLoader('ssh', 'mercury')).toEqual({ name: 'sonar', text: 'Waiting for mercury to answer…' });
+    for (const k of CHECK_KEYS.filter((k) => k !== 'ssh')) expect(checkLoader(k, 'mercury')?.name).toBe('hex-field');
+    expect(new Set(CHECK_KEYS.map((k) => checkLoader(k, 'm')!.text)).size).toBe(CHECK_KEYS.length);
+    expect(checkLoader('ssh', '  ')!.text).toBe('Waiting for the host to answer…');
+    expect(discoveryLoader().name).toBe('radar');
   });
 });

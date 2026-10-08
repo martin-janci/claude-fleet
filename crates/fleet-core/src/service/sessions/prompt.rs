@@ -553,7 +553,7 @@ pub(super) fn record_prompt_outcome(
     // recreate / restart launches with it (`recreate_pane_command`).
     // The session's agent decides which lines switch it (12.1).
     let agent = (!crate::store::has_no_pane(&row.kind))
-        .then(|| crate::agent_adapter::for_kind(&row.kind))
+        .then(|| crate::agent_adapter::for_session(&row.kind, Some(&row.agent)))
         .flatten();
     if let Some(agent) = agent {
         use crate::agent_adapter::LaunchSwitch;
