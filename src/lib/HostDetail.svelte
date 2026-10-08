@@ -39,6 +39,9 @@
   import AccountNickname from './AccountNickname.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
   import EmbedSlot from './pages/EmbedSlot.svelte';
+  import { inventory } from './assets';
+  import { provisionHost } from './mcp';
+  import { CHECK_GLYPH, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
 
   let {
     host,
@@ -61,6 +64,8 @@
     oneditdone,
     onreprobe,
     onrefreshusage,
+    onnewsession,
+    hubVersion = null,
   }: {
     host: HostRow;
     account: AccountRow | null;
@@ -82,7 +87,47 @@
     oneditdone: () => void;
     onreprobe: () => void;
     onrefreshusage: () => void;
+    /** Orbit Fleet 4.7: "New session here". Absent: the button is not shown. */
+    onnewsession?: () => void;
+    /** The version a fleet-agent should match (the hub's when paired). */
+    hubVersion?: string | null;
   } = $props();
+
+  // Orbit Fleet 4.7: the health checklist. Run on demand (an SSH round trip
+  // per host; never on every selection move), remembered per host.
+  let checking = $state(false);
+  let provisioning = $state(false);
+  const lastCheck = $derived($hostChecks.get(host.alias) ?? null);
+  const checklist = $derived(checklistRows({ host, check: lastCheck, inventory: $inventory, hubVersion }));
+  const checkBlocked = $derived(hubBlock('check_host', $hubStatus));
+  const provisionBlocked = $derived(hubBlock('provision_hosts', $hubStatus));
+  const reprovisionAdvised = $derived(needsReprovision(checklist, host));
+
+  async function runChecks() {
+    if (checkBlocked !== null || checking) return;
+    checking = true;
+    const r = await runHostCheck(host.alias);
+    checking = false;
+    if (!r.ok) pushError(r.error, `Checking ${host.alias} failed`);
+  }
+
+  async function reprovision() {
+    if (provisionBlocked !== null || provisioning) return;
+    provisioning = true;
+    const r = await provisionHost(host.alias);
+    provisioning = false;
+    if (!r.ok) {
+      pushError(r.error, `Re-provisioning ${host.alias} failed`);
+      return;
+    }
+    const mine = r.value.find((x) => x.host === host.alias);
+    if (mine && mine.status === 'failed') {
+      push({ kind: 'error', message: `Re-provisioning ${host.alias} failed: ${mine.detail ?? 'no detail'}` });
+      return;
+    }
+    push({ kind: 'success', message: `${host.alias} re-provisioned` });
+    if (checkBlocked === null) void runChecks();
+  }
 
   let confirm = $state<'rotate' | 'remove' | 'restore' | null>(null);
   let busy = $state(false);
@@ -434,6 +479,54 @@
       <p class="attention" data-testid="detail-attention">{attention.glyph} {attention.title}</p>
     {/if}
   </header>
+
+  <!-- Orbit Fleet 4.7: health checklist, re-provision, new session here -->
+  <section class="block" aria-label="Health checklist" data-testid="detail-checklist">
+    <div class="check-head">
+      <h3>Health checklist</h3>
+      <span class="muted" data-testid="detail-checked-at"
+        >{lastCheck ? `checked ${formatAge(now - lastCheck.checked_at)} ago` : 'not checked yet'}</span
+      >
+      <span class="grow"></span>
+      <button
+        type="button"
+        class="small"
+        disabled={checking || checkBlocked !== null}
+        title={checkBlocked ?? ''}
+        data-testid="detail-run-checks"
+        onclick={runChecks}>{checking ? 'checking…' : 'Run checks'}</button
+      >
+    </div>
+    <ul class="checklist">
+      {#each checklist as row (row.key)}
+        <li data-testid="detail-check-row" data-key={row.key} data-state={row.state}>
+          <span class="check-glyph" aria-hidden="true">{CHECK_GLYPH[row.state]}</span>
+          <span class="check-label">{row.label}</span>
+          <span class="check-detail">{row.detail}</span>
+        </li>
+      {/each}
+    </ul>
+    <div class="actions">
+      <button
+        type="button"
+        class="action"
+        class:advised={reprovisionAdvised}
+        disabled={provisioning || provisionBlocked !== null}
+        title={provisionBlocked ?? 'Write fleet’s hooks, skills and CLAUDE.md block to this host again'}
+        data-testid="detail-reprovision"
+        onclick={reprovision}>{provisioning ? 're-provisioning…' : 'Re-provision this host'}</button
+      >
+      {#if onnewsession}
+        <button
+          type="button"
+          class="action"
+          disabled={!host.reachable && !isLocal}
+          data-testid="detail-new-session-here"
+          onclick={onnewsession}><kbd>n</kbd> New session here</button
+        >
+      {/if}
+    </div>
+  </section>
 
   <!-- 2. Usage -->
   <section class="block">
@@ -855,4 +948,17 @@
     border: 1px solid var(--border);
     border-radius: 3px;
   }
+  .check-head { display: flex; align-items: baseline; gap: 0.5rem; }
+  .check-head h3 { margin: 0; }
+  .grow { flex: 1; }
+  .checklist { list-style: none; margin: 0.4rem 0; padding: 0; font-size: 0.8rem; }
+  .checklist li { display: grid; grid-template-columns: 1.2rem 9rem 1fr; gap: 0.4rem; padding: 0.15rem 0; }
+  .checklist li[data-state='ok'] .check-glyph { color: var(--usage-ok); }
+  .checklist li[data-state='warn'] .check-glyph,
+  .checklist li[data-state='warn'] .check-detail { color: var(--usage-warn); }
+  .checklist li[data-state='fail'] .check-glyph,
+  .checklist li[data-state='fail'] .check-detail { color: var(--usage-crit); }
+  .checklist li[data-state='unknown'] .check-detail,
+  .checklist li[data-state='na'] .check-detail { color: var(--fg-muted); }
+  .action.advised { border-color: var(--usage-warn); }
 </style>

@@ -936,6 +936,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::list_accounts`
 - `commands::hosts::add_host`
 - `commands::hosts::probe_host`
+- `commands::hosts::check_host`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::merge_host`

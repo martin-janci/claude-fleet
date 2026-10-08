@@ -32,6 +32,7 @@ pub mod guides;
 pub mod health;
 pub mod hooks;
 pub mod hooks_install;
+pub mod host_check;
 pub mod hosts;
 pub mod hub;
 pub mod local_sync;

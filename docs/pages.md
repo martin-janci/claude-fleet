@@ -6,9 +6,12 @@ the page and in what order. Everything else comes from the registries in
 and each data source's shape. A renderer turns the file into the page. The
 design is `docs/superpowers/specs/2026-09-28-declarative-pages-design.md`.
 
-In the app, every page appears in Settings. The left-hand list shows
-"General" (the hand-written panels), the Settings overview and its pages,
-then any other top-level page such as Usage. The search box above it finds
+In the app, every page appears in Settings. The left-hand list is the one
+Settings tree (`src/lib/settings_tree.ts`, redesign step 7.1): groups such as
+General, Sessions, Work and System, each leaf a hand-written panel, a page,
+or one section of a page (Voice is the Voice section of Limits). A page the
+tree does not name still shows: nested under its parent's leaf, or in a
+"More" group at the end. The search box above it finds
 any setting by its label, key, help text or tags. `@modified` lists the
 settings that differ from their default, and `@tag:experimental` (or
 another tag) filters by tag. Choosing a result opens its page and tab and
@@ -26,6 +29,9 @@ registries don't know.
 3. Run `cargo test -p fleet-core pages::`. Each problem is reported with the
    page and where in it, for example
    `settings.work › tab 1 › section 2 › item 3: `work.nope` is not a registered setting`.
+4. Give it a leaf in `SETTINGS_TREE` (`src/lib/settings_tree.ts`) when it
+   should not just sit under its parent. `settings_tree.test.ts` fails a
+   page that no leaf reaches, and a leaf naming a section the page lacks.
 
 The two generated files are what you write a spec against:
 
