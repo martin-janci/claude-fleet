@@ -11,6 +11,8 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { openTask, readErrorText, type TaskDetail } from './work_view';
+  import WorkButton from './WorkButton.svelte';
+  import { uiLayout } from './prefs';
   import type { Result } from './result';
 
   let { detail, part = 'all' }: { detail: TaskDetail; part?: 'all' | 'work' | 'steps' } = $props();
@@ -94,7 +96,10 @@
               >from a proposal</span
             >{/if}
           <span class="spacer"></span>
-          {#if s.status === 'todo' && s.live_sessions === 0}
+          {#if s.status === 'todo' && s.live_sessions === 0 && $uiLayout === 'new'}
+            <!-- Redesign 6.6: the same split button as a task row. -->
+            <WorkButton task={{ ...s, sessions: [] }} />
+          {:else if s.status === 'todo' && s.live_sessions === 0}
             <button
               class="btn"
               type="button"

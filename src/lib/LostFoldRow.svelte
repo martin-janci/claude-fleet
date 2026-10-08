@@ -181,7 +181,7 @@
     font-size: 0.65rem;
     width: 0.7rem;
     text-align: center;
-    transition: transform 0.1s ease;
+    transition: transform var(--dur-fast) ease;
     display: inline-block;
   }
   .caret.collapsed { transform: rotate(-90deg); }
