@@ -12,6 +12,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
+  import { openInEditorIfAllowed } from './lib/editor';
   import { todayOpen } from './lib/today';
   import {
     bumpWorkChanged,
@@ -905,6 +906,7 @@
     else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
     else if (chord === 'today') todayOpen.update((v) => !v);
     else if (chord === 'inspector') toggleInspector();
+    else if (chord === 'open-in-editor') void openInEditorIfAllowed($selectedSession, selAccess);
     else if (chord === 'work-view') {
       sidebarCollapsed = false;
       toggleSidebarView();

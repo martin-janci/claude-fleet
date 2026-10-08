@@ -1042,6 +1042,7 @@ Frontend commands registered in `src/lib.rs`:
 - `pty::pty_resize`
 - `pty::pty_close`
 - `pty::pty_drain`
+- `commands::editor::open_session_in_editor`
 - `commands::voice::voice_claim`
 - `commands::voice::voice_release`
 - `cancel_command`
