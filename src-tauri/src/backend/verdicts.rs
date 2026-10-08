@@ -1046,6 +1046,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "account_spend",
+        Verdict::LocalOnly {
+            instead: "this app collects no usage while a hub owns the fleet, so its store \
+                      has no spend per account; read usage on the hub",
+        },
+    ),
+    (
         "account_usage_history",
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
