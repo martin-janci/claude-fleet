@@ -1766,6 +1766,46 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests.",
+      "key": "decide.jev.host_placement",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: session host",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests.",
       "key": "decide.jev.quick_answer",
       "kind": {
@@ -3136,6 +3176,11 @@
             {
               "hint": "Pre-ticks the other repository a ticket start also needs; you still press Start.",
               "key": "decide.jev.sibling_repos",
+              "type": "field"
+            },
+            {
+              "hint": "Pre-selects a new session's host when two or more online hosts under their limit are left; you press Create.",
+              "key": "decide.jev.host_placement",
               "type": "field"
             },
             {

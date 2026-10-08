@@ -1152,6 +1152,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "propose_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model and the account usage are the hub's while it owns \
+                      the fleet; pick the host as usual",
+        },
+    ),
+    (
+        "record_host_placement",
+        Verdict::LocalOnly {
+            instead: "the decision model's runs are recorded on the hub that owns the fleet; \
+                      nothing to record here",
+        },
+    ),
+    (
         "refresh_account_usage",
         Verdict::LocalOnly {
             instead: "it reads the account's usage over this machine's SSH connection to the \
