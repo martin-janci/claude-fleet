@@ -163,6 +163,9 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'fg', bg: 'accent-soft', min: 4.5, note: 'a selected row title, and the draft over a drag tint' },
   { fg: 'fg-2', bg: 'chip-bg', min: 4.5, note: 'chip text' },
   { fg: 'fg', bg: 'count-bg', min: 4.5, note: 'count badges' },
+  { fg: 'fg-2', bg: 'count-bg', min: 4.5, note: '.count-badge text' },
+  { fg: 'status-working', bg: 'chip-bg', min: 4.5, note: '.state-chip--working' },
+  { fg: 'status-idle', bg: 'chip-bg', min: 4.5, note: '.state-chip--idle' },
   // Action and focus.
   { fg: 'accent', bg: 'bg', min: 3, note: 'focus ring' },
   { fg: 'ring', bg: 'bg', min: 3, note: 'the focus ring alias' },
