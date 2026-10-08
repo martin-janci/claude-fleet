@@ -42,6 +42,7 @@ mod read_cursors;
 mod read_pool;
 mod reconcile;
 mod reports;
+mod routines;
 mod rows;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
@@ -116,9 +117,9 @@ pub use nl_census::{
     NL_CENSUS_MIN_SCHEMA,
 };
 pub use orchestration::{
-    check_policy, mission_transition_allowed, MissionEventRow, MissionPatch, MissionPolicy,
-    MissionRepoRow, MissionRow, NewMission, NewMissionEvent, MISSION_FINAL_STATES,
-    MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES,
+    check_policy, mission_item_cap, mission_transition_allowed, mode_runs_loop, MissionEventRow,
+    MissionPatch, MissionPolicy, MissionRepoRow, MissionRow, NewMission, NewMissionEvent,
+    MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES, PLAN_MISSION_ITEM_CAP,
 };
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
@@ -145,6 +146,10 @@ pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
+pub use routines::{
+    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
+    ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+};
 pub use rows::*;
 pub use schema::known_schema_version;
 #[cfg(test)]

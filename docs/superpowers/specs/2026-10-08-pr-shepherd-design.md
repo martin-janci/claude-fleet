@@ -40,7 +40,7 @@ the context, the worktree and the branch. It is sent as fleet's own prompt
 
 An episode is one condition on one pushed commit:
 `(session, head_oid, condition)`, a row in `pr_shepherd_episodes`
-(migration 130). The shepherd acts on an episode once. A push is a new
+(migration 133). The shepherd acts on an episode once. A push is a new
 head and so a new episode, which is what makes "fix, push, still red"
 get one more nudge and "nothing changed" get none.
 
@@ -91,7 +91,7 @@ write, and `fleet_health.loops` shows its last run.
 
 ## Steps
 
-1. **Backend core** (this change): migration 130, `store/pr_shepherd.rs`,
+1. **Backend core** (this change): migration 133, `store/pr_shepherd.rs`,
    `service/pr_shepherd/` (pure planner, prompts, injected executor), the
    reconcile tick, `fleet-hub shepherd grant | revoke | pause-all | status`,
    the `pr_shepherd` timeline kind, the `pr_shepherd` loop (8.1's registry).

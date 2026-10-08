@@ -126,7 +126,7 @@ pub fn plan_steps(input: &StepInput<'_>) -> Vec<Step> {
     let m = input.mission;
     let p = &m.policy;
     let mut steps: Vec<Step> = Vec::new();
-    if m.state != "active" {
+    if m.state != "active" || !crate::store::mode_runs_loop(&m.mode) {
         return steps;
     }
     let root = m.root_item_id;

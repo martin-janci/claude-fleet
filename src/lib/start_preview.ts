@@ -48,6 +48,10 @@ export interface StartPreview {
   /** The same pre-selection as a proposal (redesign 2.8): feature
    *  `start_project`, value `p<id>`. */
   proposal?: DecisionProposal | null;
+  /** With a planned project: the sibling repository (one the key ran in
+   *  before) Jev proposes the task also needs (N3, assist). A pre-tick
+   *  only; the person still presses Start. */
+  suggested_sibling?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
 }
 
 /** Jev's K1 answer as the shared chip reads it (redesign 3.12), when the

@@ -42,6 +42,9 @@ export interface AnswerView {
   /** A multi-select question: a choice's key toggles its box, and nothing
    *  is answered until the card moves on (`MULTI_CONTINUE_KEY`). */
   multi: boolean;
+  /** The tool call a permission dialog asks about, shown in mono on the
+   *  card; null when the pane shows none. */
+  detail: string | null;
   /** True when this came from a probe (seconds old) rather than the row. */
   live: boolean;
 }
@@ -72,6 +75,7 @@ export function pendingInputFor(a: {
     question: dialog.question,
     options: dialog.options.map((o) => ({ ...o, key: answerKeyFor(o.n) })),
     multi: dialog.multi === true,
+    detail: dialog.detail ?? null,
     live,
   };
 }

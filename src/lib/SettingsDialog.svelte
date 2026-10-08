@@ -1156,7 +1156,7 @@
   .hook-desc {
     margin: 0;
     font-size: 12px;
-    color: var(--text-secondary, #888);
+    color: var(--fg-muted);
   }
 
   .hub-scope {

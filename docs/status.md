@@ -317,7 +317,17 @@ active mission its `running | blocked | waiting` phase. An agent proposes a
 plan with `work_link { propose_tree }`, whose proposals join the parent's
 mission; a person takes it with `accept_many` and can `undo_accept` within
 10 minutes while nothing has touched it. The Missions tab lists tasks by
-wave. O3 is built: a run's prompt asks for a fenced JSON report after its
+wave; in the New layout its Graph view draws them as lanes (repo, assignee or
+none) × waves with the dependency arrows, the critical path and the progress
+per lane and wave (`src/lib/mission_graph.ts`), read-only. A mission in
+`plan` mode is tracked, never run: the loop takes no step, card, planner run
+or grant on it, and it holds up to 200 tasks (`PLAN_MISSION_ITEM_CAP`) where
+a finite or continuous one holds 30. Import plan (`work_link { mission_import
+}`, `service/work/plan_import.rs`) reads a markdown plan's step tables
+(`#`, `Step`, `Needs`, optional `Lane` / `Status`, plus a `Lane | Steps in
+order` table) into the mission: each step a local task titled `<step>
+<title>` with its lane as its assignee, its needs as edges; importing again
+updates them in place. O3 is built: a run's prompt asks for a fenced JSON report after its
 done marker, stored as `tasks.result_json` (the worker's word), and when the
 run finishes fleet reads the commits and changed files from git in the
 worker's checkout into `tasks.evidence_json` (migration 117,
@@ -395,7 +405,7 @@ Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.f
 
 PR shepherd, step 1 of 5, is built and does nothing until a person grants a
 rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
-migration 130 (`pr_shepherd_rules`, `pr_shepherd_episodes`),
+migration 133 (`pr_shepherd_rules`, `pr_shepherd_episodes`),
 `service/pr_shepherd/` on the reconcile tick (loop `pr_shepherd`, stopped by
 `automation.paused`). For a project with a rule it
 reads each session's `pr_evidence` and, once per conflict / behind / red CI

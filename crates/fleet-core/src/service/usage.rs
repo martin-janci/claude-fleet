@@ -655,7 +655,7 @@ pub fn plan_delta(
     let today = now.div_euclid(SECS_PER_DAY);
     let from_zero = read.mode != ReadMode::Cont;
     let fresh = from_zero || read.start < rule.until;
-    let mut by_day: BTreeMap<(i64, bool), UsageTotals> = BTreeMap::new();
+    let mut by_day: BTreeMap<(i64, bool, Option<String>), UsageTotals> = BTreeMap::new();
     for dm in &read.by_day {
         let mut t = dm.totals;
         t.cost_micros = dm
@@ -666,14 +666,18 @@ pub fn plan_delta(
             .unwrap_or(0);
         let day = dm.day.as_deref().and_then(day_number).unwrap_or(today);
         let backfill = fresh && rule.is_history(day, now);
-        by_day.entry((day, backfill)).or_default().add(&t);
+        by_day
+            .entry((day, backfill, dm.model.clone()))
+            .or_default()
+            .add(&t);
     }
     let by_day = by_day
         .into_iter()
-        .map(|((day, backfill), totals)| DayDelta {
+        .map(|((day, backfill, model), totals)| DayDelta {
             day,
             totals,
             backfill,
+            model,
         })
         .collect();
     UsageDelta {

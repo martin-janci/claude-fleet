@@ -9,6 +9,7 @@
 //! dependency on the Tauri runtime and are directly unit-testable.
 
 pub mod account_limits;
+pub mod account_spend;
 pub mod account_usage;
 pub mod account_usage_poll;
 pub mod add_project;
@@ -25,6 +26,7 @@ pub mod decide;
 pub mod delivery;
 pub mod diagnostics;
 pub mod downloads;
+pub mod editor;
 pub mod evidence;
 pub mod forms;
 pub mod fresh;
@@ -69,6 +71,7 @@ pub mod repo_mutate;
 pub mod repo_read;
 pub mod reports;
 pub mod rewind;
+pub mod routines;
 pub mod safe_kill;
 pub mod sessions;
 pub mod settings;

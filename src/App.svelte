@@ -12,6 +12,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
+  import { openInEditorIfAllowed } from './lib/editor';
   import { todayOpen } from './lib/today';
   import {
     bumpWorkChanged,
@@ -98,6 +99,7 @@
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
   import StatusBarMark from './lib/StatusBarMark.svelte';
+  import ShellHeader from './lib/ShellHeader.svelte';
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
@@ -905,6 +907,7 @@
     else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
     else if (chord === 'today') todayOpen.update((v) => !v);
     else if (chord === 'inspector') toggleInspector();
+    else if (chord === 'open-in-editor') void openInEditorIfAllowed($selectedSession, selAccess);
     else if (chord === 'work-view') {
       sidebarCollapsed = false;
       toggleSidebarView();
@@ -1042,6 +1045,10 @@
   />
 {/if}
 
+{#if $uiLayout === 'new'}
+  <!-- Redesign 3.17: the Main board's header, above everything else. -->
+  <ShellHeader mac={isMac} />
+{/if}
 {#if $hubStatus.remote}
   <HubConnectionBanner hubUrl={$hubStatus.url} />
 {/if}
@@ -1051,7 +1058,7 @@
     hubUrl={$hubStatus.configured_url}
     onsettings={() => settingsOpen.set(true)} />
 {/if}
-<main class="layout" style="grid-template-columns: {gridTemplate};">
+<main class="layout" class:with-header={$uiLayout === 'new'} style="grid-template-columns: {gridTemplate};">
   {#if $uiLayout === 'new'}
     <AppRail {isMac} onselect={onRailSelect} />
   {/if}
@@ -1427,6 +1434,10 @@
     height: calc(100vh - var(--status-h));
     width: 100vw;
     background: var(--bg);
+  }
+  /* The new layout's header (3.17) occupies --header-h above the grid. */
+  .layout.with-header {
+    height: calc(100vh - var(--status-h) - var(--header-h));
   }
   .status {
     /* border-box: --status-h is the occupied height, border included. */

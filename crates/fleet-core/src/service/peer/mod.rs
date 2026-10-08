@@ -5,6 +5,7 @@
 pub mod apply;
 pub mod backoff;
 pub mod dial;
+pub mod link;
 pub mod listen;
 pub mod supervisor;
 pub mod validate;

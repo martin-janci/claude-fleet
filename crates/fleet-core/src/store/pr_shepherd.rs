@@ -1,4 +1,4 @@
-//! PR shepherd rows (migration 130): the standing rule a person grants per
+//! PR shepherd rows (migration 133): the standing rule a person grants per
 //! project and the episodes the shepherd recorded. The planner and the
 //! runner are `service::pr_shepherd`; the design is
 //! `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`.

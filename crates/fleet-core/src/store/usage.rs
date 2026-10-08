@@ -324,25 +324,44 @@ impl Store {
             rusqlite::params![session_id],
             |r| r.get(0),
         )?;
-        let book = |day: i64, backfill: bool, t: &UsageTotals| -> Result<(), rusqlite::Error> {
+        // Redesign 4.2: and again keyed by the session's account and the
+        // slice's model, for cost per account and per model.
+        let account: Option<String> = self.conn.query_row(
+            "SELECT account_uuid FROM sessions WHERE id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )?;
+        let account = account.unwrap_or_default();
+        let book = |day: i64,
+                    backfill: bool,
+                    slice_model: Option<&str>,
+                    t: &UsageTotals|
+         -> Result<(), rusqlite::Error> {
             self.add_usage_daily(day, host_alias, backfill, t)?;
             if let Some(org) = org {
                 self.add_usage_daily_org(day, org, backfill, t)?;
             }
-            Ok(())
+            self.add_usage_daily_account(day, &account, slice_model.unwrap_or(""), backfill, t)
         };
         if d.by_day.is_empty() {
             if !daily.is_zero() {
-                book(today, false, &daily)?;
+                book(today, false, model.as_deref(), &daily)?;
             }
         } else if d.reset {
-            for (day, backfill, t) in split_reset_growth(daily, &d.by_day, today) {
-                book(day, backfill, &t)?;
+            for (day, backfill, slice_model, t) in
+                split_reset_growth(daily, &d.by_day, today, model.as_deref())
+            {
+                book(day, backfill, slice_model, &t)?;
             }
         } else {
             for slice in &d.by_day {
                 if !slice.totals.is_zero() {
-                    book(slice.day, slice.backfill, &slice.totals)?;
+                    book(
+                        slice.day,
+                        slice.backfill,
+                        slice.model.as_deref(),
+                        &slice.totals,
+                    )?;
                 }
             }
         }
@@ -379,6 +398,92 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Add `t` to one `usage_daily_account` row (migration 130), keyed
+    /// `(day, account_uuid, model, backfill)`; `''` for an unknown account or
+    /// model.
+    fn add_usage_daily_account(
+        &self,
+        day: i64,
+        account_uuid: &str,
+        model: &str,
+        backfill: bool,
+        t: &UsageTotals,
+    ) -> Result<(), rusqlite::Error> {
+        self.conn.execute(
+            "INSERT INTO usage_daily_account (day, account_uuid, model, backfill, input_tokens, \
+             output_tokens, cache_write_tokens, cache_read_tokens, cost_micros) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT(day, account_uuid, model, backfill) DO UPDATE SET \
+             input_tokens = input_tokens + excluded.input_tokens, \
+             output_tokens = output_tokens + excluded.output_tokens, \
+             cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens, \
+             cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens, \
+             cost_micros = cost_micros + excluded.cost_micros",
+            rusqlite::params![
+                day,
+                account_uuid,
+                model,
+                backfill as i64,
+                t.input_tokens,
+                t.output_tokens,
+                t.cache_write_tokens,
+                t.cache_read_tokens,
+                t.cost_micros
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// LIVE spend (backfill rows left out) per account and model over
+    /// `since_day..` (UTC day numbers), optionally for one account: the
+    /// rows behind the Accounts page's cost (redesign step 4.2), ordered by
+    /// account then model. `''` names an unknown account or model.
+    pub fn account_model_cost_since(
+        &self,
+        since_day: i64,
+        account_uuid: Option<&str>,
+    ) -> Result<Vec<AccountModelCost>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT account_uuid, model, SUM(input_tokens), SUM(output_tokens), \
+             SUM(cache_write_tokens), SUM(cache_read_tokens), SUM(cost_micros) \
+             FROM usage_daily_account \
+             WHERE day >= ?1 AND backfill = 0 AND (?2 IS NULL OR account_uuid = ?2) \
+             GROUP BY account_uuid, model ORDER BY account_uuid, model",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![since_day, account_uuid], |r| {
+            Ok(AccountModelCost {
+                account_uuid: r.get(0)?,
+                model: r.get(1)?,
+                totals: UsageTotals {
+                    input_tokens: r.get(2)?,
+                    output_tokens: r.get(3)?,
+                    cache_write_tokens: r.get(4)?,
+                    cache_read_tokens: r.get(5)?,
+                    cost_micros: r.get(6)?,
+                },
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// One account's LIVE spend per UTC day over `since_day..`, in
+    /// micro-USD, every model summed: `day → cost_micros`, days with no row
+    /// left out.
+    pub fn account_live_cost_by_day(
+        &self,
+        account_uuid: &str,
+        since_day: i64,
+    ) -> Result<std::collections::BTreeMap<i64, i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT day, SUM(cost_micros) FROM usage_daily_account \
+             WHERE account_uuid = ?1 AND day >= ?2 AND backfill = 0 GROUP BY day",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![account_uuid, since_day], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
     }
 
     /// Each org's LIVE spend (backfill rows left out: that is history a
@@ -483,14 +588,15 @@ impl Store {
 /// row already held) over the pass's day slices. Live slices take their
 /// share first, newest day first, so today's real spend stays live; what is
 /// left goes to the backfill slices, newest first; any remainder (rounding
-/// between the per-model and per-day prices) to today's live row. No slice
-/// takes more of a field than it counted. Returns the non-zero
-/// `(day, backfill, totals)` bookings.
-fn split_reset_growth(
+/// between the per-model and per-day prices) to today's live row under
+/// `last_model`. No slice takes more of a field than it counted. Returns the
+/// non-zero `(day, backfill, model, totals)` bookings.
+fn split_reset_growth<'a>(
     growth: UsageTotals,
-    slices: &[DayDelta],
+    slices: &'a [DayDelta],
     today: i64,
-) -> Vec<(i64, bool, UsageTotals)> {
+    last_model: Option<&'a str>,
+) -> Vec<(i64, bool, Option<&'a str>, UsageTotals)> {
     let mut order: Vec<&DayDelta> = slices.iter().collect();
     order.sort_by_key(|s| (s.backfill, std::cmp::Reverse(s.day)));
     let mut left = growth;
@@ -509,11 +615,11 @@ fn split_reset_growth(
             cost_micros: take(&mut left.cost_micros, s.totals.cost_micros),
         };
         if !t.is_zero() {
-            out.push((s.day, s.backfill, t));
+            out.push((s.day, s.backfill, s.model.as_deref(), t));
         }
     }
     if !left.is_zero() {
-        out.push((today, false, left));
+        out.push((today, false, last_model, left));
     }
     out
 }
@@ -848,11 +954,13 @@ mod tests {
                     day: 20_714,
                     totals: t(100),
                     backfill: true,
+                    model: None,
                 },
                 DayDelta {
                     day: 20_716,
                     totals: t(7),
                     backfill: false,
+                    model: None,
                 },
             ],
             backfill_until: None,
@@ -935,11 +1043,13 @@ mod tests {
                     day: today - 2,
                     totals: t(100),
                     backfill: true,
+                    model: None,
                 },
                 DayDelta {
                     day: today,
                     totals: t(7),
                     backfill: false,
+                    model: None,
                 },
             ],
             backfill_until: Some(5),
@@ -973,27 +1083,215 @@ mod tests {
                 day: 1,
                 totals: t(5),
                 backfill: true,
+                model: None,
             },
             DayDelta {
                 day: 2,
                 totals: t(5),
                 backfill: true,
+                model: None,
             },
             DayDelta {
                 day: 3,
                 totals: t(2),
                 backfill: false,
+                model: None,
             },
         ];
         assert_eq!(
-            split_reset_growth(t(9), &slices, 3),
-            vec![(3, false, t(2)), (2, true, t(5)), (1, true, t(2))],
+            split_reset_growth(t(9), &slices, 3, None),
+            vec![
+                (3, false, None, t(2)),
+                (2, true, None, t(5)),
+                (1, true, None, t(2))
+            ],
             "live first, then history newest first"
         );
         assert_eq!(
-            split_reset_growth(t(14), &slices, 3).last(),
-            Some(&(3, false, t(2))),
-            "a remainder past every slice books live today"
+            split_reset_growth(t(14), &slices, 3, Some("opus")).last(),
+            Some(&(3, false, Some("opus"), t(2))),
+            "a remainder past every slice books live today, under the last model"
         );
+    }
+
+    /// Redesign 4.2: every pass books `usage_daily_account` beside
+    /// `usage_daily`, split by the session's account and each slice's
+    /// model, so per (day, backfill) the account rows add up to the host
+    /// rows: a plain pass, a dated pass with two models, history, a reset
+    /// and a session with no account yet.
+    #[test]
+    fn usage_daily_account_rolls_up_to_the_usage_daily_totals() {
+        let s = Store::open_in_memory().unwrap();
+        for acct in ["acc-a", "acc-b"] {
+            s.upsert_account(&AccountRow {
+                uuid: acct.into(),
+                email: None,
+                display_name: None,
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: Some(1),
+                nickname: None,
+                has_extra_usage: false,
+            })
+            .unwrap();
+        }
+        s.upsert_host("h1").unwrap();
+        s.upsert_host("h2").unwrap();
+        let mut ids = Vec::new();
+        for (name, host, acct) in [
+            ("a", "h1", Some("acc-a")),
+            ("b", "h1", Some("acc-b")),
+            ("c", "h2", Some("acc-a")),
+            ("d", "h2", None),
+        ] {
+            s.upsert_session(name, host, None, None, 1, 1, "running", None)
+                .unwrap();
+            let id = s.get_session(name, host).unwrap().unwrap().id;
+            s.conn
+                .execute(
+                    "UPDATE sessions SET account_uuid = ?1 WHERE id = ?2",
+                    rusqlite::params![acct, id],
+                )
+                .unwrap();
+            ids.push((id, host));
+        }
+        let t = |n: i64| UsageTotals {
+            input_tokens: n,
+            output_tokens: 2 * n,
+            cache_write_tokens: 3 * n,
+            cache_read_tokens: 4 * n,
+            cost_micros: 10 * n,
+        };
+        let today = 20_716;
+        let now = today * 86_400 + 5;
+        let slice = |day: i64, n: i64, backfill: bool, model: Option<&str>| DayDelta {
+            day,
+            totals: t(n),
+            backfill,
+            model: model.map(str::to_string),
+        };
+        let pass = |reset: bool, offset: i64, by_day: Vec<DayDelta>, plain: i64| {
+            let mut totals = t(plain);
+            for d in &by_day {
+                totals.add(&d.totals);
+            }
+            UsageDelta {
+                reset,
+                totals,
+                model: Some("claude-opus-5".into()),
+                offset,
+                source: "x.jsonl".into(),
+                last_msg_id: None,
+                last_msg_usage: None,
+                now,
+                by_day,
+                backfill_until: None,
+            }
+        };
+        // a: no day lines, books today under the session's model.
+        s.apply_usage(ids[0].0, ids[0].1, &pass(false, 10, vec![], 3))
+            .unwrap();
+        // b: two models today and history two days back.
+        s.apply_usage(
+            ids[1].0,
+            ids[1].1,
+            &pass(
+                false,
+                10,
+                vec![
+                    slice(today - 2, 50, true, Some("claude-sonnet-5")),
+                    slice(today, 4, false, Some("claude-opus-5")),
+                    slice(today, 6, false, Some("claude-sonnet-5")),
+                ],
+                0,
+            ),
+        )
+        .unwrap();
+        // c: same account as a, on another host, a line with no model.
+        s.apply_usage(
+            ids[2].0,
+            ids[2].1,
+            &pass(false, 10, vec![slice(today - 1, 5, false, None)], 0),
+        )
+        .unwrap();
+        // c again: a rewrite whose growth splits over its slices.
+        s.apply_usage(
+            ids[2].0,
+            ids[2].1,
+            &pass(
+                true,
+                20,
+                vec![
+                    slice(today - 1, 5, false, None),
+                    slice(today, 9, false, Some("claude-haiku-5")),
+                ],
+                0,
+            ),
+        )
+        .unwrap();
+        // d: no account known yet.
+        s.apply_usage(ids[3].0, ids[3].1, &pass(false, 10, vec![], 7))
+            .unwrap();
+
+        let sum = |sql: &str| -> Vec<(i64, i64, UsageTotals)> {
+            let mut stmt = s.conn.prepare(sql).unwrap();
+            stmt.query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    UsageTotals {
+                        input_tokens: r.get(2)?,
+                        output_tokens: r.get(3)?,
+                        cache_write_tokens: r.get(4)?,
+                        cache_read_tokens: r.get(5)?,
+                        cost_micros: r.get(6)?,
+                    },
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+        };
+        let cols = "day, backfill, SUM(input_tokens), SUM(output_tokens), \
+                    SUM(cache_write_tokens), SUM(cache_read_tokens), SUM(cost_micros)";
+        let by_host = sum(&format!(
+            "SELECT {cols} FROM usage_daily GROUP BY day, backfill ORDER BY day, backfill"
+        ));
+        let by_account = sum(&format!(
+            "SELECT {cols} FROM usage_daily_account GROUP BY day, backfill ORDER BY day, backfill"
+        ));
+        assert_eq!(by_host.len(), 3, "{by_host:?}");
+        assert_eq!(by_account, by_host);
+
+        let cost = |acct: &str| -> Vec<(String, i64)> {
+            s.account_model_cost_since(0, Some(acct))
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.model, r.totals.cost_micros))
+                .collect()
+        };
+        assert_eq!(
+            cost("acc-a"),
+            vec![
+                ("".into(), 50),
+                ("claude-haiku-5".into(), 90),
+                ("claude-opus-5".into(), 30)
+            ]
+        );
+        assert_eq!(
+            cost("acc-b"),
+            vec![("claude-opus-5".into(), 40), ("claude-sonnet-5".into(), 60)],
+            "the backfill day is history, not spend"
+        );
+        assert_eq!(cost(""), vec![("claude-opus-5".into(), 70)]);
+        assert_eq!(
+            s.account_live_cost_by_day("acc-a", today - 1).unwrap(),
+            [(today - 1, 50), (today, 120)].into_iter().collect()
+        );
+        assert!(s
+            .account_model_cost_since(today + 1, None)
+            .unwrap()
+            .is_empty());
     }
 }

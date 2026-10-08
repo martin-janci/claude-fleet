@@ -736,11 +736,11 @@
     color: var(--fg-muted);
   }
   .warn {
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .err,
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .error p {
     margin: 0 0 0.4rem;
