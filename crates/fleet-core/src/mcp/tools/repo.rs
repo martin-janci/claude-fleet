@@ -721,4 +721,56 @@ impl FleetTools {
             .map_err(to_mcp_err)?;
         ok_json(&v)
     }
+
+    #[tool(description = "What a session's branch carries: the commits no \
+        remote has and the files they change, and the files it changes \
+        against the base branch: {branch, upstream, unpushed, unpushedFiles, \
+        truncated, base, aheadOfBase, baseFiles}.")]
+    pub(super) async fn repo_branch_diff(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<repo::SessionIdArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_branch_diff",
+            &format!("session_id={}", args.session_id),
+        );
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
+        let v = repo_read::repo_branch_diff(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
+
+    #[tool(description = "One file's diff over a session's unpushed commits \
+        (range `unpushed`) or against the base branch (range `base`): {path, \
+        diff, binary, truncated}.")]
+    pub(super) async fn repo_range_diff(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<repo_read::RepoRangeDiffArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "repo_range_diff",
+            &format!(
+                "session_id={} path={} range={:?}",
+                args.session_id, args.path, args.range
+            ),
+        );
+        self.resolve_row_person_gated(
+            &caller,
+            args.session_id,
+            Reach::Read,
+            "the session whose worktree to read",
+        )?;
+        let v = repo_read::repo_range_diff(args, &self.store, &self.ssh)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&v)
+    }
 }

@@ -377,7 +377,7 @@ Index by area (names only; see the reference for details):
   `resume_claude_session_id`).
 - **Worktree files & git (read-only)** — `repo_changes`, `repo_tree`,
   `repo_file`, `repo_diff`, `repo_blame`, `repo_log`, `repo_branches`,
-  `repo_commit`, `repo_commit_diff`.
+  `repo_commit`, `repo_commit_diff`, `repo_branch_diff`, `repo_range_diff`.
 - **Host clipboard** — `get_clipboard`, `set_clipboard`.
 - **Asset catalog** — `list_assets` (catalog assets with per-host drift
   state, unmanaged assets and parse problems; the personal catalog only
