@@ -254,18 +254,30 @@ fn project(payload: &serde_json::Value, fields: &[String]) -> serde_json::Value 
 /// — so every non-empty entry is accepted and the `ready` frame echoes the
 /// list back. A client that misspells one sees it in the echo rather than in a
 /// column that is silently always absent.
+///
+/// Bounded: at most [`QUERY_LIST_MAX`] distinct entries of at most
+/// [`QUERY_ENTRY_MAX`] bytes. The request line may run to ~400 KB, and every
+/// frame of the stream is projected against this list key by key, so ~200k
+/// entries turned each session event into ~10M string compares per stream.
+/// What is kept is what the `ready` frame echoes.
 fn wanted_fields(q: &EventsQuery) -> Option<Vec<String>> {
-    let asked: Vec<String> = q
-        .fields
-        .as_deref()
-        .unwrap_or("")
-        .split(',')
-        .map(str::trim)
-        .filter(|f| !f.is_empty())
-        .map(str::to_string)
-        .collect();
+    let mut asked: Vec<String> = Vec::new();
+    for f in q.fields.as_deref().unwrap_or("").split(',').map(str::trim) {
+        if asked.len() == QUERY_LIST_MAX {
+            break;
+        }
+        if !f.is_empty() && f.len() <= QUERY_ENTRY_MAX && !asked.iter().any(|a| a == f) {
+            asked.push(f.to_string());
+        }
+    }
     (!asked.is_empty()).then_some(asked)
 }
+
+/// The most distinct entries `?fields=` / `?kinds=` keep. A session row has
+/// about sixty columns, and there are fewer kinds than that.
+const QUERY_LIST_MAX: usize = 128;
+/// The longest `?fields=` / `?kinds=` entry kept; no column or kind comes near.
+const QUERY_ENTRY_MAX: usize = 64;
 
 /// A frame id: this hub's generation and the event's position in it.
 ///
@@ -314,15 +326,31 @@ struct RequestedKinds {
 /// `?kinds=` and `?kinds=,,` mean "everything" rather than "nothing" — a
 /// filter that silently matches no event is the harder failure to diagnose.
 fn wanted_kinds(q: &EventsQuery) -> RequestedKinds {
-    let asked: Vec<String> = q
-        .kinds
-        .as_deref()
-        .unwrap_or("")
-        .split(',')
-        .map(str::trim)
-        .filter(|k| !k.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect();
+    // Bounded as `wanted_fields` is: the unknown ones are written to the log
+    // on every request, and a ~400 KB `?kinds=` of junk was a ~400 KB WARN
+    // line each time, in a log that rotates by day, not by size.
+    let mut asked: Vec<String> = Vec::new();
+    for k in q.kinds.as_deref().unwrap_or("").split(',').map(str::trim) {
+        if asked.len() == QUERY_LIST_MAX {
+            break;
+        }
+        if k.is_empty() {
+            continue;
+        }
+        let k = if k.len() > QUERY_ENTRY_MAX {
+            let mut end = QUERY_ENTRY_MAX;
+            while !k.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &k[..end])
+        } else {
+            k.to_string()
+        };
+        let k = k.to_ascii_lowercase();
+        if !asked.contains(&k) {
+            asked.push(k);
+        }
+    }
     if asked.is_empty() {
         return RequestedKinds {
             accepted: None,
@@ -1775,6 +1803,42 @@ mod tests {
         // and have nothing to project.
         let scalar = serde_json::json!(3);
         assert_eq!(project(&scalar, &fields), scalar);
+    }
+
+    #[test]
+    fn a_query_list_is_bounded_and_distinct() {
+        let many = (0..10_000)
+            .map(|i| format!("f{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let q = EventsQuery {
+            kinds: Some(format!("{many},session,session,{}", "x".repeat(10_000))),
+            fields: Some(format!("id,id,{},{many}", "y".repeat(500))),
+            since: None,
+        };
+        let fields = wanted_fields(&q).unwrap();
+        assert_eq!(fields.len(), QUERY_LIST_MAX);
+        assert_eq!(fields[0], "id");
+        assert_eq!(
+            fields[1], "f0",
+            "a duplicate and an over-long entry are dropped"
+        );
+        let RequestedKinds { accepted, unknown } = wanted_kinds(&q);
+        assert!(unknown.len() <= QUERY_LIST_MAX);
+        assert!(unknown
+            .iter()
+            .all(|k| k.len() <= QUERY_ENTRY_MAX + '…'.len_utf8()));
+        assert!(accepted.unwrap().len() <= 1);
+        // Few and short: unchanged.
+        let q = EventsQuery {
+            kinds: Some("session,host,session".into()),
+            fields: None,
+            since: None,
+        };
+        assert_eq!(
+            wanted_kinds(&q).accepted,
+            Some(vec!["session".to_string(), "host".to_string()])
+        );
     }
 
     #[test]

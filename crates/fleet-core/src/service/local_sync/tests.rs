@@ -1302,3 +1302,41 @@ async fn a_paired_desktop_asks_the_hubs_session() {
     .unwrap_err();
     assert_eq!(e.code, codes::E_NOTFOUND);
 }
+
+/// The home folder, anything above it and the disk root are refused: the
+/// first pass would copy all of it into the remote worktree.
+#[test]
+fn a_folder_that_is_or_holds_home_is_refused() {
+    let base = tempfile::tempdir().unwrap();
+    let home = base.path().join("users/me");
+    let project = home.join("code/app");
+    std::fs::create_dir_all(&project).unwrap();
+    let refuse = |p: &std::path::Path| super::refuse_broad_folder(p, Some(&home));
+
+    assert!(refuse(&project).is_ok());
+    for bad in [
+        home.clone(),
+        base.path().join("users"),
+        std::path::PathBuf::from("/"),
+    ] {
+        assert_eq!(
+            refuse(&bad).unwrap_err().code,
+            codes::E_INVALID,
+            "{}",
+            bad.display()
+        );
+    }
+    // `..` back up to home is refused before anything resolves it.
+    assert_eq!(
+        refuse(&project.join("../..")).unwrap_err().code,
+        codes::E_INVALID
+    );
+    #[cfg(unix)]
+    {
+        let link = base.path().join("link-to-home");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        assert_eq!(refuse(&link).unwrap_err().code, codes::E_INVALID);
+    }
+    // No home known: only the root and `..` are refused.
+    assert!(super::refuse_broad_folder(&home, None).is_ok());
+}

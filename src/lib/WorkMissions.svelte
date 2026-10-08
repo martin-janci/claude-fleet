@@ -1,9 +1,9 @@
 <script lang="ts">
   // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
   // tab. A mission is a goal over a root task: its member tasks, the repos
-  // it may run in, its lifecycle and its log. Nothing runs on its own yet
-  // (the loop is O4/O5); this is where a person writes the goal down and
-  // gathers the work.
+  // it may run in, its lifecycle and its log, and its loop (O4–O8): the
+  // next steps a person presses (Start wave), the confirm queue of the
+  // planner's cards, and the grant that lets the loop act by itself.
   //
   // Text a person or a tracker wrote (names, goals, task titles) is rendered
   // as text, never as markup.
@@ -38,6 +38,24 @@
     setWorkHold,
     undoWorkAccept,
     wavesOf,
+    attemptLine,
+    checkGlyph,
+    checkable,
+    setWorkDoneWhen,
+    verificationLabel,
+    verifyWorkItem,
+    cardLine,
+    decideMissionCard,
+    dollars,
+    grantMission,
+    pauseAllMissions,
+    planMission,
+    retryWorkItem,
+    revokeMissionGrant,
+    startMissionWave,
+    stepKey,
+    stepLine,
+    type MissionCard,
     type GraphNode,
     type Mission,
     type MissionDetail,
@@ -98,6 +116,24 @@
     await act(setWorkDep(itemId, dependsOn, on));
   }
 
+  // The task whose condition lines are being edited, and their text.
+  let condsFor = $state<number | null>(null);
+  let condText = $state('');
+
+  function editConds(itemId: number) {
+    condsFor = itemId;
+    condText = (itemById.get(itemId)?.done_when ?? []).join('\n');
+  }
+
+  async function saveConds() {
+    if (condsFor == null) return;
+    if (await act(setWorkDoneWhen(condsFor, doneWhenRows(condText)))) condsFor = null;
+  }
+
+  async function check(itemId: number, line: string, ok: boolean) {
+    await act(verifyWorkItem(itemId, line, ok));
+  }
+
   async function setHold(itemId: number, on: boolean) {
     await act(setWorkHold(itemId, on));
   }
@@ -110,6 +146,71 @@
   async function undoAccept() {
     const ids = lastAccepted;
     if (await act(undoWorkAccept(ids))) lastAccepted = [];
+  }
+  // The loop (orchestration O4–O6).
+  const plan = $derived(detail?.plan ?? null);
+  const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
+  const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open'));
+  let answers = $state<Record<number, string>>({});
+  let granting = $state(false);
+  let grantLevel = $state(2);
+  let grantHours = $state(8);
+  let grantBudget = $state('');
+
+  /** A short report of what a press did, failures first. */
+  function reportSteps(results: { ok: boolean; detail: string }[] | undefined) {
+    const bad = (results ?? []).filter((r) => !r.ok);
+    if (bad.length > 0) notice = bad.map((r) => r.detail).join(' · ');
+    else if ((results ?? []).length === 0) notice = 'Nothing to start right now.';
+  }
+
+  async function startWave(step?: string) {
+    if (!mission) return;
+    const out = await act(startMissionWave(mission.id, step));
+    if (out) reportSteps(out.results);
+  }
+
+  async function retry(itemId: number) {
+    const out = await act(retryWorkItem(itemId));
+    if (out && !out.ok) notice = out.detail;
+  }
+
+  async function askPlanner() {
+    if (!mission) return;
+    const out = await act(planMission(mission.id));
+    if (out?.refused) notice = `The planner's answer was refused: ${out.refused}`;
+  }
+
+  async function decide(c: MissionCard, ok: boolean) {
+    const note = c.kind === 'ask' && ok ? (answers[c.id] ?? '').trim() : undefined;
+    if (c.kind === 'ask' && ok && !note) {
+      notice = 'Write an answer first.';
+      return;
+    }
+    const out = await act(decideMissionCard(c.id, ok, note));
+    if (out?.state === 'refused') notice = out.note ?? 'Refused';
+  }
+
+  async function grant() {
+    if (!mission) return;
+    const cents = Math.round(Number(grantBudget) * 100);
+    const out = await act(
+      grantMission(mission.id, {
+        level: grantLevel,
+        hours: grantHours,
+        ...(grantBudget.trim() && cents > 0 ? { budget_cents: cents } : {}),
+      }),
+    );
+    if (out) granting = false;
+  }
+
+  async function revokeGrant() {
+    if (mission) await act(revokeMissionGrant(mission.id));
+  }
+
+  async function pauseAll() {
+    const out = await act(pauseAllMissions());
+    if (out) notice = out.length ? `Paused ${out.length} mission${out.length === 1 ? '' : 's'}.` : 'No active mission to pause.';
   }
   const mayChange = $derived(!!detail?.may_change && !!mission && !isFinal(mission.state));
   const moves = $derived(mission ? (MISSION_MOVES[mission.state] ?? []) : []);
@@ -349,6 +450,85 @@
         {/if}
       {/if}
 
+      {#if plan}
+        <section class="loop" data-testid="mission-loop">
+          <p class="muted small" data-testid="mission-autonomy">
+            L{plan.autonomy.effective}: {plan.autonomy.why} · spent {dollars(plan.cost_micros)}{#if plan.autonomy.grant?.budget_micros}
+              of {dollars(plan.autonomy.grant.budget_micros)}{/if} · {plan.counts.open} running
+          </p>
+          {#if mayChange}
+            <div class="row">
+              {#if mission.state === 'active' && pressable.length > 0}
+                <button class="btn" type="button" disabled={busy || changeBlocked} data-testid="mission-start-wave" onclick={() => void startWave()}
+                  >Start wave ({pressable.length})</button
+                >
+              {/if}
+              <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-plan" onclick={() => void askPlanner()}
+                >Ask the planner</button
+              >
+              {#if plan.autonomy.grant}
+                <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-revoke" onclick={() => void revokeGrant()}
+                  >End the grant (L{plan.autonomy.grant.level}, until {new Date(plan.autonomy.grant.expires_at * 1000).toLocaleString()})</button
+                >
+              {:else}
+                <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-grant" onclick={() => (granting = !granting)}
+                  >Grant…</button
+                >
+              {/if}
+            </div>
+            {#if granting}
+              <form class="row" data-testid="mission-grant-form" onsubmit={(e) => (e.preventDefault(), void grant())}>
+                <label class="field inline"
+                  >Level
+                  <select bind:value={grantLevel}>
+                    <option value={1}>L1 · I press every step</option>
+                    <option value={2}>L2 · runs, retries, reviews</option>
+                    <option value={3}>L3 · also creates tasks</option>
+                  </select></label
+                >
+                <label class="field inline">Hours <input type="number" min="1" max="168" bind:value={grantHours} class="role" /></label>
+                <label class="field inline">Budget $ <input placeholder="none" bind:value={grantBudget} class="role" data-testid="mission-grant-budget" /></label>
+                <button class="btn" type="submit" disabled={busy} data-testid="mission-grant-save">Sign</button>
+              </form>
+            {/if}
+          {/if}
+          {#if (plan.steps ?? []).length > 0}
+            <ul class="steps" aria-label="Next steps" data-testid="mission-steps">
+              {#each plan.steps ?? [] as st (stepKey(st))}
+                <li data-testid="mission-step" data-kind={st.kind}>
+                  <span>{stepLine(st)}</span>
+                  {#if mayChange && mission.state === 'active' && st.kind !== 'ask'}
+                    <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} onclick={() => void startWave(stepKey(st))}>Go</button>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+          {#if openCards.length > 0}
+            <h4>Waiting for you</h4>
+            <ul class="cards" data-testid="mission-cards">
+              {#each openCards as c (c.id)}
+                <li data-testid="mission-card" data-kind={c.kind}>
+                  <span class="muted small">{c.source === 'planner' ? 'Planner' : 'Fleet'}</span>
+                  <span>{cardLine(c)}</span>
+                  {#if detail.may_change}
+                    {#if c.kind === 'ask'}
+                      <input placeholder="Your answer" bind:value={answers[c.id]} data-testid="mission-card-answer" />
+                    {/if}
+                    <button class="btn btn--chip" type="button" disabled={busy || changeBlocked} data-testid="mission-card-apply" onclick={() => void decide(c, true)}
+                      >{c.kind === 'ask' ? 'Answer' : 'Apply'}</button
+                    >
+                    <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="mission-card-dismiss" onclick={() => void decide(c, false)}
+                      >Dismiss</button
+                    >
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      {/if}
+
       <h4>Tasks</h4>
       {#if mayChange && proposals.length > 0}
         <div class="row proposals" data-testid="mission-proposals">
@@ -380,6 +560,48 @@
                     {#if (n.waiting_for ?? []).length > 0}
                       <span class="muted small" data-testid="mission-waits">waits for {(n.waiting_for ?? []).map(titleOf).join(', ')}</span>
                     {/if}
+                    {#if n.attempt}
+                      <span class="muted small" data-testid="mission-attempt" title={n.attempt.summary ?? ''}
+                        >{attemptLine(n.attempt)}</span
+                      >
+                    {/if}
+                    {#if n.verification}
+                      <span class="vbadge v-{n.verification.state}" data-testid="mission-verified"
+                        >{verificationLabel(n.verification.state)}</span
+                      >
+                      <ul class="checks" data-testid="mission-checks">
+                        {#each n.verification.checks as c (c.line)}
+                          <li class="c-{c.state}">
+                            <span class="glyph" aria-label={c.state}>{checkGlyph(c.state)}</span>
+                            <span class="line">{c.line}</span>
+                            <span class="muted small">{c.detail}</span>
+                            {#if detail?.may_change && checkable(c)}
+                              <button
+                                class="btn btn--chip"
+                                type="button"
+                                disabled={busy}
+                                data-testid="mission-check"
+                                onclick={() => void check(n.item_id, c.line, true)}>Met</button
+                              >
+                            {/if}
+                          </li>
+                        {/each}
+                      </ul>
+                    {/if}
+                    {#if condsFor === n.item_id}
+                      <form class="conds" onsubmit={(e) => (e.preventDefault(), void saveConds())}>
+                        <textarea
+                          rows="3"
+                          placeholder={'ci\nreview\ntest:cargo test\nperson'}
+                          bind:value={condText}
+                          data-testid="mission-conds-text"
+                        ></textarea>
+                        <span class="row">
+                          <button class="btn" type="submit" disabled={busy} data-testid="mission-conds-save">Save</button>
+                          <button class="btn btn--quiet" type="button" onclick={() => (condsFor = null)}>Cancel</button>
+                        </span>
+                      </form>
+                    {/if}
                     {#if mayChange && (n.depends_on ?? []).length > 0}
                       <span class="deps">
                         {#each n.depends_on ?? [] as d (d)}
@@ -395,6 +617,17 @@
                       </span>
                     {/if}
                   </span>
+                  {#if mayChange && condsFor !== n.item_id}
+                    <button
+                      class="btn btn--quiet btn--icon"
+                      type="button"
+                      aria-label="Done when…"
+                      title="Done when: the conditions that verify this task"
+                      disabled={busy}
+                      data-testid="mission-conds"
+                      onclick={() => editConds(n.item_id)}>☑</button
+                    >
+                  {/if}
                   {#if it.id === mission.root_item_id}
                     <span class="muted small">root</span>
                   {:else if mayChange}
@@ -414,6 +647,17 @@
                         <option value="">after…</option>
                         {#each choices as c (c.id)}<option value={c.id}>{c.title}</option>{/each}
                       </select>
+                    {/if}
+                    {#if n.state === 'failed' && mission.state === 'active'}
+                      <button
+                        class="btn btn--quiet btn--icon"
+                        type="button"
+                        aria-label="Retry"
+                        title="Try again, with the last failure in the prompt"
+                        disabled={busy || changeBlocked}
+                        data-testid="mission-retry"
+                        onclick={() => void retry(it.id)}>↻</button
+                      >
                     {/if}
                     {#if n.state !== 'done'}
                       <button
@@ -524,6 +768,11 @@
         </form>
       {:else}
         <button class="btn" type="button" disabled={saveBlocked} data-testid="mission-new" onclick={() => (creating = true)}>New mission</button>
+        {#if missions.some((m) => m.state === 'active')}
+          <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
+            >Pause all</button
+          >
+        {/if}
       {/if}
     </div>
     {#if error}
@@ -554,6 +803,10 @@
 </div>
 
 <style>
+  .loop { display: flex; flex-direction: column; gap: 0.3rem; border-left: 2px solid var(--border, #8884); padding-left: 0.5rem; }
+  .steps, .cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+  .steps li, .cards li { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+  .cards input { flex: 1 1 8rem; min-width: 0; }
   .missions { display: flex; flex-direction: column; gap: 0.5rem; padding: 0.5rem; font-size: 0.85rem; }
   .bar, .row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .create { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; }
@@ -604,6 +857,14 @@
   .dep-pick { max-width: 7rem; font-size: 0.75rem; }
   .wave { display: flex; flex-direction: column; gap: 0.1rem; }
   .wave-head { font-size: 0.7rem; color: var(--fg-muted); margin-top: 0.3rem; }
+  .vbadge { font-size: 0.7rem; align-self: flex-start; padding: 0 0.35rem; border: 1px solid var(--border); border-radius: 999px; }
+  .vbadge.v-verified { color: #3fae5a; border-color: #3fae5a; }
+  .vbadge.v-failed { color: #e64a4a; border-color: #e64a4a; }
+  .checks li { display: flex; gap: 0.3rem; align-items: baseline; border: none; padding: 0; font-size: 0.75rem; }
+  .checks .line { font-family: var(--font-mono, monospace); }
+  .checks .c-pass .glyph { color: #3fae5a; }
+  .checks .c-fail .glyph { color: #e64a4a; }
+  .conds { display: flex; flex-direction: column; gap: 0.2rem; margin-top: 0.2rem; }
   .proposals { padding: 0.3rem 0.4rem; border: 1px dashed var(--border); border-radius: 4px; }
   .muted { color: var(--fg-muted); margin: 0; }
   .small { font-size: 0.75rem; }

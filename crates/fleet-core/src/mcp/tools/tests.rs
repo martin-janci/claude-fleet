@@ -3913,10 +3913,20 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 80,099 on 2026-10-07 after the mission graph (`work_link
     /// { dep | hold | propose_tree | accept_many | undo_accept }` and their
     /// arguments, +515 bytes).
+    /// Measured at 80,557 on 2026-10-08 after a run's evidence and typed
+    /// done_when (`work_link { done_when | verify }` and their arguments,
+    /// +458 bytes).
+    /// Measured at 81,694 on 2026-10-08 after the mission loop (`work_link
+    /// { mission_start | mission_plan | mission_grant | mission_revoke |
+    /// retry | card_decide | missions_pause_all }` and their arguments,
+    /// +1,137 bytes).
     /// Measured at 81,648 on 2026-10-08 after merging `main` (80,099) into
     /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
     /// sides' sum).
-    const BUDGET_BYTES: usize = 81_748;
+    /// Measured at 83,243 on 2026-10-08 after merging `main` (81,694) into
+    /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
+    /// sides' sum).
+    const BUDGET_BYTES: usize = 83_343;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -6831,7 +6841,7 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     assert_eq!(
         result_json(&out).as_array().unwrap().len(),
         3,
-        "session_history negative limit without fresh_for must stay SQLite's own unlimited"
+        "session_history negative limit without fresh_for means as many as allowed (bounded_limit)"
     );
 
     let out = t
@@ -6871,7 +6881,7 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     assert_eq!(
         result_json(&out).as_array().unwrap().len(),
         3,
-        "inbox negative limit without fresh_for must stay SQLite's own unlimited"
+        "inbox negative limit without fresh_for means as many as allowed (bounded_limit)"
     );
 }
 
@@ -10814,6 +10824,7 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // gate; a tree is `propose`'s, stored in the proposing session's name.
     ("work_link", "dep", &["Drive"]),
     ("work_link", "hold", &["Drive"]),
+    ("work_link", "done_when", &["Drive"]),
     ("work_link", "propose_tree", &["Drive"]),
     // The two conversation-addressed arms of the `own` tier: a resume
     // replays the whole transcript into a new session, a summary stores a
@@ -11070,8 +11081,53 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ),
     (
         "work_link",
+        "verify",
+        "a person's check of a work ITEM's condition; refused outright to a \
+         per-host token and a bound client, as `accept` is",
+    ),
+    (
+        "work_link",
         "mission_delete",
         "a draft or finished mission; its items stay",
+    ),
+    (
+        "work_link",
+        "mission_start",
+        "a mission's next steps, taken by its owner or an org admin; a run \
+         goes through the start path under the caller's scope",
+    ),
+    (
+        "work_link",
+        "mission_plan",
+        "asks the mission's planner; cards, not sessions, come back",
+    ),
+    (
+        "work_link",
+        "mission_grant",
+        "a person's signature on what a mission's loop may do; refused \
+         outright to every scoped caller, as `accept` is",
+    ),
+    (
+        "work_link",
+        "mission_revoke",
+        "ends a mission's grants; its owner or an org admin only",
+    ),
+    (
+        "work_link",
+        "retry",
+        "another attempt at a mission's ITEM, by whoever may change the \
+         mission; a run goes through the start path under the caller's scope",
+    ),
+    (
+        "work_link",
+        "card_decide",
+        "a person's decision on a mission's card; refused outright to every \
+         scoped caller, as `accept` is",
+    ),
+    (
+        "work_link",
+        "missions_pause_all",
+        "pauses the missions the caller may change; answers their ids",
     ),
     (
         "work",

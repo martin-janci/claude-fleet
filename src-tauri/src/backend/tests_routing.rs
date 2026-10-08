@@ -3386,6 +3386,169 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "set_work_done_when",
+            "work_link",
+            json!({ "session_id": null, "action": "done_when", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "done_when": ["review"] }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::set_work_done_when(
+                    b,
+                    commands::missions::SetWorkDoneWhenArgs {
+                        item_id: 3,
+                        done_when: vec!["review".into()],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "verify_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "verify", "key": null, "item_id": 3,
+                    "link_id": null, "source": null, "line": "review", "ok": true }),
+            r#"{"item_id":3,"changed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::verify_work_item(
+                    b,
+                    commands::missions::VerifyWorkItemArgs {
+                        item_id: 3,
+                        line: "review".into(),
+                        ok: true,
+                        note: None,
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // ── the mission loop (orchestration O4–O6) ──────────────────────
+        (
+            "start_mission_wave",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_start", "item_id": null,
+                    "mission_id": 1, "step": "run:3" }),
+            r#"{"mission_id":1,"results":[]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::start_mission_wave(
+                    b,
+                    commands::missions::StartMissionWaveArgs {
+                        mission_id: 1,
+                        step: Some("run:3".into()),
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "retry_work_item",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "retry", "item_id": 3, "note": "smaller" }),
+            r#"{"step":{"kind":"retry","item_id":3,"reason":"r","auto":false},"ok":true,"detail":"d"}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::retry_work_item(
+                    b,
+                    commands::missions::RetryWorkItemArgs {
+                        item_id: 3,
+                        note: Some("smaller".into()),
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "plan_mission",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_plan", "item_id": null, "mission_id": 1 }),
+            r#"{"mission_id":1}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::plan_mission(
+                    b,
+                    commands::missions::MissionIdArgs { mission_id: 1 },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "decide_mission_card",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "card_decide", "item_id": null, "card_id": 5, "ok": false }),
+            r#"{"id":5,"mission_id":1,"decision_id":"d","source":"planner","kind":"run","state":"dismissed","created_at":1}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::decide_mission_card(
+                    b,
+                    commands::missions::DecideMissionCardArgs {
+                        card_id: 5,
+                        ok: false,
+                        note: None,
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "grant_mission",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_grant", "item_id": null, "mission_id": 1,
+                    "level": 2, "hours": 4, "budget_cents": 500 }),
+            r#"{"id":1,"mission_id":1,"plan_version":1,"level":2,"granted_by":"fleet","created_at":1,"expires_at":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::grant_mission(
+                    b,
+                    commands::missions::GrantMissionArgs {
+                        mission_id: 1,
+                        level: 2,
+                        hours: Some(4),
+                        budget_cents: Some(500),
+                        ..Default::default()
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "revoke_mission_grant",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_revoke", "item_id": null, "mission_id": 1 }),
+            "1",
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::revoke_mission_grant(
+                    b,
+                    commands::missions::MissionIdArgs { mission_id: 1 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "pause_all_missions",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "missions_pause_all", "item_id": null }),
+            "[1]",
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::pause_all_missions(
+                    b,
+                    commands::missions::PauseAllMissionsArgs {},
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── multi-user M1 (T13): the three sharing mutations ─────────────
         //
         // `level` crosses as the string the user chose and is validated by

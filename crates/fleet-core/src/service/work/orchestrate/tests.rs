@@ -1,0 +1,359 @@
+//! The mission loop: autonomy, grants, cards, a person's steps and one
+//! tick (orchestration O4–O8).
+
+use super::*;
+use crate::mcp::auth::{Caller, ClientRef, TokenMode};
+use crate::net::https::FakeTransport;
+use crate::service::work::missions::{self, MissionInput};
+use crate::store::{TaskReport, TreeEntry};
+
+struct Fx {
+    deps: Deps,
+    me: ViewScope,
+    m: MissionRow,
+    root: i64,
+}
+
+fn person(store: &Mutex<Store>, id: i64) -> ViewScope {
+    Caller {
+        host_alias: None,
+        client: Some(ClientRef {
+            id: 7,
+            name: "phone".into(),
+            trusted: false,
+            org_id: None,
+            person_id: Some(id),
+        }),
+        mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
+    }
+    .view_scope(&lock(store).unwrap())
+    .unwrap()
+}
+
+fn host(store: &Mutex<Store>) -> ViewScope {
+    Caller {
+        host_alias: Some("h".into()),
+        client: None,
+        mode: TokenMode::Full,
+        pane: None,
+        is_personal_owner: false,
+    }
+    .view_scope(&lock(store).unwrap())
+    .unwrap()
+}
+
+fn by_id(action: &str, id: i64) -> WorkLinkArgs {
+    WorkLinkArgs {
+        action: action.into(),
+        mission_id: Some(id),
+        ..Default::default()
+    }
+}
+
+/// An active level-2 mission of ana's, with its root.
+fn fixture() -> Fx {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let ana = lock(&store).unwrap().create_person("ana", None).unwrap().id;
+    let me = person(&store, ana);
+    let m = missions::save(
+        &WorkLinkArgs {
+            action: "mission_save".into(),
+            mission: Some(MissionInput {
+                name: Some("m".into()),
+                goal: Some("g".into()),
+                level: Some(2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        &store,
+        &me,
+    )
+    .unwrap();
+    let m = missions::set_state(
+        &WorkLinkArgs {
+            status: Some("active".into()),
+            ..by_id("mission_state", m.id)
+        },
+        &store,
+        &me,
+    )
+    .unwrap();
+    let root = m.root_item_id.unwrap();
+    let deps = Deps {
+        store,
+        ssh: Arc::new(crate::ssh::SshClient::new()),
+        reg: CancellationRegistry::new(),
+        net: TrackerNet::fake(Arc::new(FakeTransport::new())),
+    };
+    Fx { deps, me, m, root }
+}
+
+fn member(fx: &Fx, title: &str) -> i64 {
+    let s = lock(&fx.deps.store).unwrap();
+    let made = s
+        .propose_tree(
+            fx.root,
+            &[TreeEntry {
+                title: title.into(),
+                ..Default::default()
+            }],
+            "t",
+        )
+        .unwrap();
+    s.accept_proposals(&[made[0].id]).unwrap();
+    made[0].id
+}
+
+fn mission_now(fx: &Fx) -> MissionRow {
+    lock(&fx.deps.store)
+        .unwrap()
+        .get_mission(fx.m.id)
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn autonomy_is_the_least_of_ceiling_level_and_grant() {
+    let fx = fixture();
+    let s = lock(&fx.deps.store).unwrap();
+    let a = autonomy(&s, &fx.m, 0).unwrap();
+    assert_eq!((a.asked, a.ceiling, a.effective), (2, 1, 1));
+    s.set_setting(settings::ORCHESTRATOR_MAX_LEVEL, "3")
+        .unwrap();
+    let a = autonomy(&s, &fx.m, 0).unwrap();
+    assert_eq!(a.effective, 1);
+    assert!(a.why.contains("without a grant"), "{}", a.why);
+    drop(s);
+    grant(
+        &WorkLinkArgs {
+            level: Some(3),
+            hours: Some(2),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(
+        autonomy(&s, &fx.m, now_unix()).unwrap().effective,
+        2,
+        "the mission asks for 2"
+    );
+    s.set_setting(settings::ORCHESTRATOR_ENABLED, "false")
+        .unwrap();
+    let a = autonomy(&s, &fx.m, now_unix()).unwrap();
+    assert_eq!((a.effective, a.enabled), (0, false));
+}
+
+#[test]
+fn only_a_person_signs_a_grant_and_revoking_ends_it() {
+    let fx = fixture();
+    let args = |level: i64, hours: u32| WorkLinkArgs {
+        level: Some(level),
+        hours: Some(hours),
+        ..by_id("mission_grant", fx.m.id)
+    };
+    let h = host(&fx.deps.store);
+    assert_eq!(
+        grant(&args(2, 1), &fx.deps.store, &h).unwrap_err().code,
+        codes::E_FORBIDDEN
+    );
+    assert_eq!(
+        grant(&args(4, 1), &fx.deps.store, &fx.me).unwrap_err().code,
+        codes::E_INVALID
+    );
+    assert_eq!(
+        grant(&args(2, 24 * 8), &fx.deps.store, &fx.me)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    let g = grant(&args(2, 1), &fx.deps.store, &fx.me).unwrap();
+    assert_eq!(g.level, 2);
+    assert_eq!(
+        revoke(&by_id("mission_revoke", fx.m.id), &fx.deps.store, &fx.me).unwrap(),
+        1
+    );
+    let s = lock(&fx.deps.store).unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+}
+
+#[test]
+fn pause_all_pauses_what_the_caller_may_change_and_revokes_its_grants() {
+    let fx = fixture();
+    grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    let bo = lock(&fx.deps.store)
+        .unwrap()
+        .create_person("bo", None)
+        .unwrap()
+        .id;
+    let bo = person(&fx.deps.store, bo);
+    assert!(pause_all(&fx.deps.store, &bo).unwrap().is_empty());
+    assert_eq!(pause_all(&fx.deps.store, &fx.me).unwrap(), vec![fx.m.id]);
+    assert_eq!(mission_now(&fx).state, "paused");
+    let s = lock(&fx.deps.store).unwrap();
+    assert!(s.live_mission_grant(fx.m.id, now_unix()).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn a_person_closes_an_implemented_item_and_the_mission_completes() {
+    let fx = fixture();
+    let item = member(&fx, "one");
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        let t = s.insert_task(None, None, "go", "n-1").unwrap();
+        s.set_task_run(t.id, item, 1, "implement").unwrap();
+        let t = s.get_task(t.id).unwrap().unwrap();
+        let report = TaskReport {
+            summary: "did it".into(),
+            outcome: "done".into(),
+            ..Default::default()
+        };
+        crate::service::tasks::complete_task_reported(&s, &t, "", Some(&report)).unwrap();
+    }
+    let plan = {
+        let m = mission_now(&fx);
+        let s = lock(&fx.deps.store).unwrap();
+        plan_for(&s, &m).unwrap().unwrap()
+    };
+    let key = format!("close:{item}");
+    assert!(
+        plan.steps.iter().any(|s| s.key() == key),
+        "{:?}",
+        plan.steps
+    );
+    // A step that is not next is refused.
+    let e = start(
+        &WorkLinkArgs {
+            step: Some("run:999".into()),
+            ..by_id("mission_start", fx.m.id)
+        },
+        &fx.deps,
+        &fx.me,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID_STATE);
+    let out = start(
+        &WorkLinkArgs {
+            step: Some(key),
+            ..by_id("mission_start", fx.m.id)
+        },
+        &fx.deps,
+        &fx.me,
+    )
+    .await
+    .unwrap();
+    assert!(out.results[0].ok, "{:?}", out.results);
+    let steps = {
+        let m = mission_now(&fx);
+        let s = lock(&fx.deps.store).unwrap();
+        plan_for(&s, &m).unwrap().unwrap().steps
+    };
+    assert!(steps.iter().any(|s| s.kind == "complete"), "{steps:?}");
+    let out = start(&by_id("mission_start", fx.m.id), &fx.deps, &fx.me)
+        .await
+        .unwrap();
+    assert!(out.results.iter().all(|r| r.ok), "{:?}", out.results);
+    assert_eq!(mission_now(&fx).state, "completed");
+}
+
+#[tokio::test]
+async fn a_card_is_decided_once_and_never_by_an_agent() {
+    let fx = fixture();
+    let item = member(&fx, "one");
+    let card = lock(&fx.deps.store)
+        .unwrap()
+        .add_card(
+            fx.m.id,
+            &NewCard {
+                decision_id: "t:1",
+                source: "planner",
+                kind: "hold",
+                work_item_id: Some(item),
+                payload: None,
+            },
+        )
+        .unwrap()
+        .unwrap();
+    let args = |ok: bool| WorkLinkArgs {
+        action: "card_decide".into(),
+        card_id: Some(card.id),
+        ok: Some(ok),
+        ..Default::default()
+    };
+    let h = host(&fx.deps.store);
+    assert_eq!(
+        decide_card(&args(true), &fx.deps, &h)
+            .await
+            .unwrap_err()
+            .code,
+        codes::E_FORBIDDEN
+    );
+    let c = decide_card(&args(true), &fx.deps, &fx.me).await.unwrap();
+    assert_eq!(c.state, "applied");
+    assert!(lock(&fx.deps.store)
+        .unwrap()
+        .get_work_item(item)
+        .unwrap()
+        .unwrap()
+        .held_at
+        .is_some());
+    assert_eq!(
+        decide_card(&args(false), &fx.deps, &fx.me)
+            .await
+            .unwrap_err()
+            .code,
+        codes::E_INVALID_STATE
+    );
+}
+
+#[tokio::test]
+async fn a_tick_takes_the_lease_and_sets_the_next_wake() {
+    let fx = fixture();
+    let now = now_unix();
+    {
+        let s = lock(&fx.deps.store).unwrap();
+        assert_eq!(s.missions_due(now).unwrap(), vec![fx.m.id]);
+    }
+    // No host for the planner: the tick says so in the log and goes on.
+    tick_once(&fx.deps, now).await;
+    let m = mission_now(&fx);
+    assert!(
+        m.next_wake_at.is_some_and(|w| w > now),
+        "{:?}",
+        m.next_wake_at
+    );
+    let s = lock(&fx.deps.store).unwrap();
+    assert!(s.missions_due(now).unwrap().is_empty());
+    // A finished task wakes it again.
+    s.wake_mission(fx.m.id).unwrap();
+    assert_eq!(s.missions_due(now_unix() + 1).unwrap(), vec![fx.m.id]);
+}
+
+#[test]
+fn a_continuous_mission_wakes_on_its_timer() {
+    let mut m = fixture().m;
+    let idle = MissionTaskCounts::default();
+    assert_eq!(next_wake(&m, &idle, 100), 100 + IDLE_RECHECK_SECS);
+    m.mode = "continuous".into();
+    m.policy.wake_every_secs = Some(600);
+    assert_eq!(next_wake(&m, &idle, 100), 700);
+    let busy = MissionTaskCounts {
+        open: 1,
+        ..Default::default()
+    };
+    assert_eq!(next_wake(&m, &busy, 100), 100 + RUNNING_RECHECK_SECS);
+}

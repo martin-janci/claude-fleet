@@ -66,10 +66,14 @@ fn token_from_pair_response(raw: &[u8]) -> Result<String, String> {
              operator to `fleet-hub client revoke {name}`"
         ));
     }
-    v["token"]
+    let token = v["token"]
         .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| "the other hub sent no token".into())
+        .ok_or_else(|| "the other hub sent no token".to_string())?;
+    // Checked here, where it arrives, as well as where it is sent: a token
+    // with a CR/LF in it would add headers to every exchange with this peer.
+    fleet_core::http_client::check_bearer(token)
+        .map_err(|_| "the other hub sent a token no request can carry".to_string())?;
+    Ok(token.to_string())
 }
 
 /// `fleet-hub peer add <url> <code> [--insecure]`: redeem a peer pairing code
@@ -225,6 +229,16 @@ mod tests {
             token_from_pair_response(raw).unwrap_err().contains("peer"),
             "a non-peer code is refused"
         );
+    }
+
+    /// The token goes into a hand-written `Authorization` header on every
+    /// exchange with this peer: one carrying a CR/LF is refused on arrival.
+    #[test]
+    fn a_token_that_would_break_a_header_is_refused() {
+        let raw = b"HTTP/1.1 200 OK\r\n\r\n\
+                    {\"token\":\"abc\\r\\nX-Evil: 1\",\"mode\":\"peer\"}";
+        let e = token_from_pair_response(raw).unwrap_err();
+        assert!(!e.contains("abc"), "must never repeat the token: {e}");
     }
 
     /// G15: redeeming a code minted for a `full`/`readonly` client still

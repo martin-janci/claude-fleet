@@ -365,7 +365,7 @@ pub fn mcp_pending_confirms(guards: State<'_, McpGuards>) -> Result<Vec<PendingC
 ///
 /// Only supports `host_alias == "local"` — remote hosts get their hook block
 /// from `provision_hosts`, which also sets up the tunnel the hook needs.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn install_fleet_hook(
     host_alias: String,
     backend: State<'_, Arc<FleetBackend>>,

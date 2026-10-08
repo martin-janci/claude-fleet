@@ -20,8 +20,10 @@ mod forms;
 mod guides;
 mod hosts_accounts;
 mod item_deps;
+mod item_verify;
 mod layers;
 mod local_workspaces;
+mod mission_loop;
 mod nl_census;
 mod orchestration;
 mod org_members;
@@ -42,6 +44,7 @@ mod schema;
 mod session_grants;
 mod sessions;
 mod setting_review;
+mod task_report;
 mod tasks;
 #[cfg(test)]
 mod test_support;
@@ -85,6 +88,10 @@ pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
+pub use item_verify::{
+    normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,
+    VERIFY_NOTE_MAX_CHARS,
+};
 pub use layers::HostLayerRow;
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
@@ -92,14 +99,18 @@ pub use local_workspaces::{
     LocalWorkspaceStatus, NewLocalConflict, NewLocalWorkspace, SideSeen, LOCAL_CONFLICT_KINDS,
     LOCAL_WORKSPACE_DRIVERS, LOCAL_WORKSPACE_STATES,
 };
+pub use mission_loop::{
+    CardRow, GrantRow, MissionTaskCounts, NewCard, NewGrant, CARDS_OPEN_CAP, CARD_KINDS,
+    CARD_STATES, GRANT_MAX_SECS, MISSION_LEASE_SECS,
+};
 pub use nl_census::{
     CensusItem, CensusJournal, CensusPair, CensusPrompt, NL_CENSUS_JOURNAL_KINDS,
     NL_CENSUS_MIN_SCHEMA,
 };
 pub use orchestration::{
-    mission_transition_allowed, MissionEventRow, MissionPatch, MissionRepoRow, MissionRow,
-    NewMission, NewMissionEvent, MISSION_FINAL_STATES, MISSION_ITEM_CAP, MISSION_MODES,
-    MISSION_STATES,
+    check_policy, mission_transition_allowed, MissionEventRow, MissionPatch, MissionPolicy,
+    MissionRepoRow, MissionRow, NewMission, NewMissionEvent, MISSION_FINAL_STATES,
+    MISSION_ITEM_CAP, MISSION_MODES, MISSION_STATES,
 };
 pub use org_members::{
     effective_device, role_receives_shares, validate_org_role, DeviceOrg, OrgMemberRow, NO_ORG,
@@ -135,6 +146,10 @@ pub use sessions::PromptAckState;
 pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
     SETTING_AUDIT_KEEP,
+};
+pub use task_report::{
+    EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
+    EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,
 };
 pub(crate) use tracker_items::ItemUpsertOutcome;
 pub use tracker_items::{github_covers, tracker_claims, ItemMeta, TrackerItemWrite, UpsertOutcome};

@@ -1087,12 +1087,50 @@ fn normalize_local_path(p: &str) -> Result<String, IpcError> {
             format!("{expanded} is a file, not a folder"),
         ));
     }
+    refuse_broad_folder(path, crate::home::home_dir().as_deref())?;
     let trimmed = expanded.trim_end_matches(['/', '\\']);
     Ok(if trimmed.is_empty() {
         expanded
     } else {
         trimmed.to_string()
     })
+}
+
+/// Refuse a folder that is the filesystem root, the home folder, or any
+/// folder above it. The first pass copies every local-only file to the
+/// remote worktree, where an agent may commit and push it: `~/` (one slip in
+/// the folder field) sent `~/.ssh`, `~/.aws` and every browser profile into
+/// a repo, and wrote the remote's files back into the home folder. A path
+/// with `..` is refused too, so the check sees the folder that is meant.
+fn refuse_broad_folder(path: &Path, home: Option<&Path>) -> Result<(), IpcError> {
+    use std::path::Component;
+    if path.components().any(|c| c == Component::ParentDir) {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "choose the folder without '..' in its path",
+        ));
+    }
+    // Resolved where it exists, so a symlink to the home folder is seen as it.
+    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if real.parent().is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "choose a project folder, not the root of the disk",
+        ));
+    }
+    if let Some(home) = home {
+        let home = std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf());
+        if home.starts_with(&real) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!(
+                    "{} is your home folder or holds it; choose the project's own folder",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl LocalSync {

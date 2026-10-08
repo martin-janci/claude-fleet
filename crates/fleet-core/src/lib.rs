@@ -15,6 +15,8 @@ pub mod app_version;
 pub mod cancel;
 pub mod claude_agents;
 pub mod claude_cli;
+#[cfg(test)]
+mod desktop_command_tests;
 pub mod events;
 #[cfg(test)]
 mod fleet_e2e_tests;
