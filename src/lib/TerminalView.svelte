@@ -111,10 +111,15 @@
     void closeTerm();
   });
 
+  /** The id this pane's PTY lives under in the backend's PTY map
+   *  (`pty.rs`). One pane, one id: the agent's terminal. Shell terminals get
+   *  ids of their own (step 5.3), so opening one never replaces this. */
+  const PTY_ID = 'agent';
+
   /** Forward bytes to the PTY. A rejection (PTY gone, host dropped) used to be
    *  swallowed; now it surfaces once — the toast store dedupes repeats. */
   function writePty(data: string) {
-    void invoke('pty_write', { args: { data } }).catch((e) => {
+    void invoke('pty_write', { args: { id: PTY_ID, data } }).catch((e) => {
       pushError(toIpcError(e), 'Terminal input failed');
     });
   }
@@ -567,6 +572,7 @@
       try {
         await invoke('pty_open', {
           args: {
+            id: PTY_ID,
             session_name: sess.tmux_name,
             host_alias: sess.host_alias,
             cols: dim.cols,
@@ -591,10 +597,10 @@
       }
       if (standDown()) {
         // The attach landed after the pane let go of it. Nobody will drain it
-        // and the backend keeps exactly one PTY, so close it — no newer open
+        // and the backend keeps one PTY per id, so close it — no newer open
         // can have taken over, they are serialized by `opening`.
         try {
-          await invoke('pty_close');
+          await invoke('pty_close', { args: { id: PTY_ID } });
         } catch {
           /* nothing to undo */
         }
@@ -622,7 +628,7 @@
       postAttachTimer = setTimeout(() => {
         postAttachTimer = null;
         if (!ptyOpen) return;
-        void invoke('pty_resize', { args: { cols: lastCols, rows: lastRows } }).catch(() => {});
+        void invoke('pty_resize', { args: { id: PTY_ID, cols: lastCols, rows: lastRows } }).catch(() => {});
       }, 150);
     } finally {
       opening = false;
@@ -681,7 +687,7 @@
     renderVersion++;
     lastResizeAt = Date.now();
     if (ptyOpen) {
-      void invoke('pty_resize', { args: { cols: next.cols, rows: next.rows } }).catch(() => {});
+      void invoke('pty_resize', { args: { id: PTY_ID, cols: next.cols, rows: next.rows } }).catch(() => {});
     }
   }
 
@@ -717,7 +723,7 @@
     const drainingInto = screen;
     let result: PtyDrainResult;
     try {
-      result = await invoke<PtyDrainResult>('pty_drain');
+      result = await invoke<PtyDrainResult>('pty_drain', { args: { id: PTY_ID } });
     } catch {
       return false;
     }
@@ -870,7 +876,7 @@
     if (ptyOpen) {
       ptyOpen = false;
       try {
-        await invoke('pty_close');
+        await invoke('pty_close', { args: { id: PTY_ID } });
       } catch {
         /* nothing to undo */
       }

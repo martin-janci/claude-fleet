@@ -209,6 +209,8 @@ const REASONS = {
     'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
   refresh_account_usage:
     'it reads the account’s usage over this machine’s SSH connection to the host',
+  account_usage_history:
+    'this app does not poll account usage while a hub owns the fleet, so it keeps no history',
   set_account_nickname:
     'the nickname lives in the hub’s database and there is no tool to set it',
 

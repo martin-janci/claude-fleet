@@ -937,6 +937,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::set_account_nickname`
 - `commands::account_usage::list_account_usage`
 - `commands::account_usage::refresh_account_usage`
+- `commands::account_usage::account_usage_history`
 - `commands::mcp::mcp_status`
 - `commands::mcp::mcp_configure`
 - `commands::mcp::install_fleet_hook`

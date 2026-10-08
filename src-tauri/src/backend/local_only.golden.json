@@ -1,4 +1,5 @@
 {
+  "account_usage_history": "account_usage_history is not available while this desktop is a window onto https://hub.example.com; this app does not poll account usage while a hub owns the fleet, so it keeps no history; read usage on the hub",
   "add_host": "add_host is not available while this desktop is a window onto https://hub.example.com; registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub`",
   "add_tracker": "add_tracker is not available while this desktop is a window onto https://hub.example.com; trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add|set-credential|test`",
   "catalog_spawn_author_session": "catalog_spawn_author_session is not available while this desktop is a window onto https://hub.example.com; an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine",

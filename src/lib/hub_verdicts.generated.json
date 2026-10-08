@@ -1,5 +1,6 @@
 {
   "local_only": [
+    "account_usage_history",
     "add_host",
     "add_tracker",
     "catalog_spawn_author_session",

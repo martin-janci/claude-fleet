@@ -1008,6 +1008,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "account_usage_history",
+        Verdict::LocalOnly {
+            instead: "this app does not poll account usage while a hub owns the fleet, so \
+                      it keeps no history; read usage on the hub",
+        },
+    ),
+    (
         "refresh_account_usage",
         Verdict::LocalOnly {
             instead: "it reads the account's usage over this machine's SSH connection to the \
@@ -1522,10 +1529,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     (
         "pty_write",
         Verdict::SameInBoth {
-            why: "acts on the one pty THIS process opened, and pty_open is the same in \
-                  both modes, so there is one answer either way; E_PTY_CLOSED when \
-                  nothing is attached, which includes every session the pane declined \
-                  to attach",
+            why: "acts on a pty THIS process opened, named by the id it was opened \
+                  under, and pty_open is the same in both modes, so there is one answer \
+                  either way; E_PTY_CLOSED when nothing is attached under that id, which \
+                  includes every session the pane declined to attach",
         },
     ),
     (
