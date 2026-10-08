@@ -1055,10 +1055,23 @@ where
         args.link_id,
         args.host_alias.as_deref(),
         reads,
-        // `internal()`: the brief is the LANDING host's reader (work graph
-        // M5), and the person fence has already been applied by the gate
-        // that chose this plan.
-        &crate::service::view_scope::ViewScope::internal(),
+        // The CALLER's reader, not `internal()` (round-2 review, #445 V3).
+        //
+        // This is the one `resume` path that WRITES a brief into a session,
+        // and it used to hand `gather_stored` `ViewScope::internal()` —
+        // `person: None` — which turns T9c's person fence off wholesale. The
+        // justification was that "the person fence has already been applied
+        // by the gate that chose this plan", and it does not hold: the gate
+        // asks about ONE conversation while the brief gathers the whole work
+        // key, so journal entries, summaries and handovers belonging to other
+        // people were composed into a brief and written where the caller
+        // reads it. The sibling READ paths (`resume_plan`, `work { context }`)
+        // already pass the caller's own view, which is the asymmetry that
+        // gave it away.
+        //
+        // `reader` is this function's own parameter, so there was never a
+        // reader missing here to justify the carve-out.
+        reader,
     )
     .await?;
     // A per-host token resumes only onto its own host.

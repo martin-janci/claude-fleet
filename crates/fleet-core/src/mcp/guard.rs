@@ -2513,11 +2513,6 @@ mod tests {
         assert_eq!(redact_args(tracker.as_object()), "tracker_id=1");
     }
 
-    /// The audit row is written before any tool validates its arguments, so
-    /// an unvalidated value must not be able to end the line and forge a
-    /// second one. Control characters AND the three separators
-    /// `char::is_control` misses become spaces.
-    #[test]
     /// A secret nested inside another argument is dropped, exactly as a
     /// top-level one is.
     ///
@@ -2557,6 +2552,11 @@ mod tests {
         assert!(!r.contains("abc"), "{r}");
     }
 
+    /// The audit row is written before any tool validates its arguments, so
+    /// an unvalidated value must not be able to end the line and forge a
+    /// second one. Control characters AND the three separators
+    /// `char::is_control` misses become spaces.
+    #[test]
     fn redact_args_keeps_the_summary_on_one_line() {
         let args = serde_json::json!({
             "name": "phone\npair_client by master: name=evil",

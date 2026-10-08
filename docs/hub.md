@@ -368,19 +368,31 @@ upgrade before the hub is touched (point `FLEET_HUB_DATA` at the right
 directory) — it never migrates without a backup. An upgrade never prunes an older
 version's `pre-<version>-*.db` (see *Backups*).
 
-**Order across the three binaries.** Today (contract 7 on both sides,
-proto 1 on both sides) the order is a habit: hub, then desktop, then the
-agents. When a release bumps `CONTRACT_REVISION`, upgrade the **hub first,
-then the desktop in the same window** — there is no mixed window, the desktop
-refuses with `E_HUB_CONTRACT` until it is updated, hooks and the phone keep
-working meanwhile. When a release bumps `PROTO_VERSION`, upgrade the **hub
-first**; the release holds `MIN_SUPPORTED_PROTO` at the previous value so an
-older `fleet-agent` keeps connecting until it is reinstalled. A hub upgrade
-never needs the agents restarted.
+**Order across the three binaries — and the phone is a fourth.** Today
+(contract 8 on both sides, proto 1 on both sides) the order is: hub, then
+desktop, then the agents. When a release bumps `CONTRACT_REVISION`, upgrade the
+**hub first, then the desktop in the same window** — there is no mixed window,
+the desktop refuses with `E_HUB_CONTRACT` until it is updated.
 
-**Upgrading to multi-user M1 is three steps, not two.** That release takes
-`CONTRACT_REVISION` to 7, so the first two are the rule above — hub, then the
-desktop, in the same window. The third is **a full re-provisioning of every
+**A `CONTRACT_REVISION` bump also stops every phone until fleet-mobile ships a
+build that knows the new number.** The phone is not exempt: `MAX_HUB_CONTRACT`
+in fleet-mobile's `net/HubContract.kt` mirrors the desktop's maximum, and a hub
+above it is `ContractVerdict.AppTooOld` — the app clears its capabilities and
+shows "This app is too old for this hub". So a bump is a **mobile release
+too**, cut in the same window, and `MAX_HUB_CONTRACT` must be raised to match
+before the hub is upgraded in anger. Hooks do keep working meanwhile; the phone
+does not. (This paragraph said the opposite until 0.4.8 shipped contract 8
+against a phone pinned at 7.)
+
+When a release bumps `PROTO_VERSION`, upgrade the **hub first**; the release
+holds `MIN_SUPPORTED_PROTO` at the previous value so an older `fleet-agent`
+keeps connecting until it is reinstalled. A hub upgrade never needs the agents
+restarted.
+
+**Upgrading to multi-user M1 is four steps, not two.** That release takes
+`CONTRACT_REVISION` to 8, so the first two are the rule above — hub, then the
+desktop, in the same window — and a fleet-mobile build at `MAX_HUB_CONTRACT`
+8 is a third, because every earlier phone refuses the hub outright. The third is **a full re-provisioning of every
 host**: `provision_hosts` from a client, or `fleet-hub provision --host <alias>`
 per host, and *not* `--content-only`, which by contract never rewrites
 `~/.claude.json`. Until a host is re-provisioned its agents send no
