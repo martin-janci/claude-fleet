@@ -755,10 +755,14 @@ Index by area (names only; see the reference for details):
   `peer` token long-polls it to trade messages and acknowledgements; the one
   tool a peer token reaches, and no other token reaches it, so it is listed
   to peer tokens only), `list_peer_links` (this hub's links to other fleets'
-  hubs — fleet, role, state, pending count, last exchange and error, never a
-  token; a read, but master token only, since it names other fleets — the
-  `fleet-hub peer add|list|remove` commands drive the same links straight on
-  `state.db`).
+  hubs — fleet, role, state, pending count, last exchange and error, the
+  last round trip and the messages carried today and in all, never a token;
+  a read for the master and the hub owner's own device, since it names other
+  fleets), `link_peer` / `unlink_peer` (link a hub with the one-time code its
+  owner minted, or remove a link and fail what waits for it; the master or
+  the owner's trusted full device). Settings → Federation shows and drives
+  them from a paired desktop; the `fleet-hub peer add|list|remove` commands
+  drive the same links straight on `state.db`.
 - **Updates** — `update_status` (the fleet's application updates: the
   verified release channel, each target's reported version and phase with
   what the hub would tell it now, per-component counts and the operator's

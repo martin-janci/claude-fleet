@@ -769,6 +769,22 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("get_form", Verdict::Routed { tool: "ask" }),
     ("answer_form", Verdict::Routed { tool: "ask" }),
     ("decline_form", Verdict::Routed { tool: "ask" }),
+    // Settings → Federation (Orbit Fleet 11.5): the hub's links to other
+    // fleets' hubs. The master's and the hub owner's own device's; changing
+    // a link also needs that device trusted (the tool checks).
+    (
+        "list_peer_links",
+        Verdict::Routed {
+            tool: "list_peer_links",
+        },
+    ),
+    ("link_peer_hub", Verdict::Routed { tool: "link_peer" }),
+    (
+        "unlink_peer_hub",
+        Verdict::Routed {
+            tool: "unlink_peer",
+        },
+    ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "list_debug_devices",

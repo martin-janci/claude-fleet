@@ -2541,20 +2541,19 @@ fn readonly_tools_are_client_tools_or_the_documented_list_clients_exception() {
     // guard.rs's own doc comment on READONLY_TOOLS: `list_clients` is the
     // one tool that is BOTH master-only (ADMIN_TOOLS) and readable by a
     // readonly token (READONLY_TOOLS) — every OTHER tool a readonly caller
-    // may reach must also be something a full client may reach. `list_peer_links`
-    // is the same shape for the same reason (it names other fleets), and so
-    // is `get_settings` (it names hosts and their paths).
+    // may reach must also be something a full client may reach, unless it is a
+    // person's device tool: `get_settings` (it names hosts and their paths)
+    // and `list_peer_links` (it names other fleets).
     for name in guard::READONLY_TOOLS {
         assert!(
             guard::CLIENT_TOOLS.contains(name)
                 || *name == "list_clients"
-                || *name == "list_peer_links"
                 || matches!(
                     guard::policy(name).map(|p| p.access),
                     Some(guard::Access::Person | guard::Access::PersonDevice)
                 ),
             "{name} is in READONLY_TOOLS but is neither in CLIENT_TOOLS nor the \
-             documented list_clients/list_peer_links special case or a person's \
+             documented list_clients special case or a person's \
              device tool (the fleet's settings, declarative pages P6)"
         );
     }
@@ -2787,23 +2786,94 @@ fn list_clients_is_master_only() {
     assert!(enforce_admin(&Caller::master(), "list_clients").is_ok());
 }
 
-/// `list_peer_links` names every fleet this hub is linked to — the same
-/// "who else can see this" reasoning as `list_clients` above, so it gets the
-/// same master-only gate even though the read mutates nothing.
+/// Settings → Federation (11.5): the fleet's links to other hubs belong to
+/// its owner, so the master and the owner's own paired device reach them;
+/// a host's token, an org-bound device, a colleague's device and a peer hub's
+/// token never do. Linking and unlinking are writes on top of that: a
+/// readonly device is refused at the mode gate, and an untrusted full device
+/// by the tools themselves.
 #[test]
-fn list_peer_links_is_master_only() {
-    assert!(enforce_admin(&Caller::master(), "list_peer_links").is_ok());
-    for (label, c) in every_caller_kind() {
-        if c.is_master() {
-            continue;
+fn peer_links_reach_the_owner_and_never_a_host_an_org_or_a_peer() {
+    let can = |c: &Caller, t: &str| {
+        enforce_mode(c, t)
+            .and_then(|()| enforce_admin(c, t))
+            .is_ok()
+            && present::visible_to(c, t)
+    };
+    let master = Caller::master();
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let phone_ro = client_caller("phone", TokenMode::Readonly);
+    let refused = [
+        ("host", host_caller("hosta", TokenMode::Full)),
+        (
+            "org-bound",
+            org_bound(client_caller("acme", TokenMode::Full)),
+        ),
+        (
+            "colleague",
+            another_person(client_caller("ada", TokenMode::Full)),
+        ),
+        ("peer", client_caller("hub-b", TokenMode::Peer)),
+        (
+            "updater",
+            client_caller("fleet-updater", TokenMode::Updater),
+        ),
+    ];
+    for t in ["list_peer_links", "link_peer", "unlink_peer"] {
+        assert!(can(&master, t), "{t}: the master");
+        assert!(can(&laptop, t), "{t}: the owner's device");
+        for (label, c) in &refused {
+            assert!(!can(c, t), "{t}: never a {label}");
         }
-        assert!(
-            enforce_mode(&c, "list_peer_links")
-                .and_then(|()| enforce_admin(&c, "list_peer_links"))
-                .is_err(),
-            "{label}"
-        );
     }
+    assert!(can(&phone_ro, "list_peer_links"), "a readonly device reads");
+    for t in ["link_peer", "unlink_peer"] {
+        assert!(!can(&phone_ro, t), "{t}: a write");
+    }
+}
+
+#[tokio::test]
+async fn linking_a_hub_needs_a_trusted_full_device_and_checks_before_dialing() {
+    use super::peer::{LinkPeerParams, UnlinkPeerParams};
+    let (tools, _guards, _store) = client_tools();
+    let link = |url: &str| LinkPeerParams {
+        url: url.into(),
+        code: "AB12CD34".into(),
+    };
+    let laptop = client_caller("laptop", TokenMode::Full);
+    let e = tools
+        .link_peer(
+            Extension(laptop.clone()),
+            Parameters(link("https://b.example")),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&e), "E_FORBIDDEN", "an untrusted device: {e:?}");
+    let e = tools
+        .unlink_peer(Extension(laptop), Parameters(UnlinkPeerParams { id: 1 }))
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&e), "E_FORBIDDEN", "unlink too: {e:?}");
+
+    // Trusted, it reaches the link's own checks, which refuse a plain-http
+    // hub before any request leaves.
+    let trusted_laptop = trusted(client_caller("laptop", TokenMode::Full));
+    let e = tools
+        .link_peer(
+            Extension(trusted_laptop.clone()),
+            Parameters(link("http://b.example")),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&e), "E_INVALID", "{e:?}");
+    let e = tools
+        .unlink_peer(
+            Extension(trusted_laptop),
+            Parameters(UnlinkPeerParams { id: 99 }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&e), "E_NOTFOUND", "no such live link: {e:?}");
 }
 
 #[tokio::test]
