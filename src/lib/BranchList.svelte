@@ -139,7 +139,7 @@
     color: var(--fg-muted); cursor: pointer; font-size: 11px; padding: 0 0.4rem;
   }
   .bactions button:hover { color: var(--fg); border-color: var(--accent); }
-  .bactions button.del:hover { color: #f85149; border-color: #f85149; }
+  .bactions button.del:hover { color: var(--status-failed); border-color: var(--status-failed); }
   .hint { color: var(--fg-muted); padding: 0.5rem 0.7rem; }
   .hint.err { color: var(--danger); }
 </style>

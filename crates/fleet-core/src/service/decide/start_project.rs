@@ -93,6 +93,22 @@ pub struct SuggestedProject {
     pub run_id: Option<i64>,
 }
 
+impl SuggestedProject {
+    /// This pre-selection as a [`DecisionProposal`] (step 2.8): what Jev
+    /// proposes for the task's start, `p<id>` (the question's option).
+    pub fn proposal(&self) -> crate::store::DecisionProposal {
+        crate::store::DecisionProposal {
+            feature: Feature::StartProject.as_str().to_string(),
+            value: option_of(self.project_id),
+            source: "jev".to_string(),
+            reason: None,
+            confidence_pct: self.confidence_pct,
+            run_id: self.run_id,
+            at: None,
+        }
+    }
+}
+
 /// PURE: a confidence in whole percent.
 fn pct(c: Option<f64>) -> Option<u8> {
     c.map(|c| (c.clamp(0.0, 1.0) * 100.0).round() as u8)

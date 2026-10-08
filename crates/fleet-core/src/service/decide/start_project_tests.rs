@@ -260,3 +260,21 @@ async fn no_candidates_asks_nothing() {
     assert_eq!(ask(&w.ctx(&fake), &input).await, None);
     assert_eq!(fake.calls(), 0);
 }
+
+/// Step 2.8: a start's pre-selection is also a proposal in the one shape
+/// every row carries.
+#[test]
+fn a_suggested_project_is_a_start_project_proposal() {
+    let p = SuggestedProject {
+        project_id: 12,
+        confidence_pct: Some(76),
+        run_id: Some(3),
+    }
+    .proposal();
+    assert_eq!(
+        (p.feature.as_str(), p.value.as_str(), p.source.as_str()),
+        ("start_project", "p12", "jev")
+    );
+    assert_eq!((p.confidence_pct, p.run_id), (Some(76), Some(3)));
+    assert_eq!(project_of(&p.value), Some(12));
+}

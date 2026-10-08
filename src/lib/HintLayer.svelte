@@ -99,7 +99,7 @@
   }
   .gotit {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
     border: none;
     border-radius: 6px;
     padding: 4px 10px;
@@ -109,7 +109,7 @@
   .x {
     background: none;
     border: none;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     font-size: 11px;
     cursor: pointer;
   }

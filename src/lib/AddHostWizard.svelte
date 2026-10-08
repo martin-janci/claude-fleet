@@ -357,7 +357,7 @@
     display: inline-flex; align-items: center; justify-content: center; font-size: 0.8rem;
   }
   .current .num { border-color: var(--accent); }
-  .done .num { border-color: var(--ok, var(--accent)); color: var(--ok, var(--accent)); }
+  .done .num { border-color: var(--status-done); color: var(--status-done); }
   .note { margin-top: auto; font-size: 0.8rem; color: var(--fg-muted); }
   .body { display: flex; flex-direction: column; gap: 0.6rem; min-width: 0; }
   .count { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
@@ -379,7 +379,7 @@
   .checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
   .check { display: grid; grid-template-columns: 1.2rem 1fr auto; gap: 0.5rem; align-items: baseline; font-size: 0.85rem; }
   .check .detail { color: var(--fg-muted); font-size: 0.8rem; }
-  .check.ok .glyph { color: var(--ok, var(--accent)); }
+  .check.ok .glyph { color: var(--status-done); }
   .check.warn .glyph, .check.warn .detail { color: var(--usage-warn); }
   .check.fail .glyph, .check.fail .detail { color: var(--usage-crit); }
   .check.pending, .check.na { color: var(--fg-muted); }
