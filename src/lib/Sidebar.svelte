@@ -29,7 +29,7 @@
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter, effectiveHostFilter, hosts } from './hosts';
-  import { bulkTargets, sessionBlocked } from './share';
+  import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
   import {
     effectiveScope,
     scopeFilter,
@@ -96,6 +96,8 @@
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import KillDialog from './KillDialog.svelte';
+  import { archiveBlocked, archiveSessions, undoArchive } from './kill_check';
   import BulkPromptDialog from './BulkPromptDialog.svelte';
   import NameWorkDialog from './NameWorkDialog.svelte';
   import SidebarFilters from './SidebarFilters.svelte';
@@ -384,6 +386,8 @@
   let selectMode = $state(false);
   let selectedIds: Set<number> = $state(new Set());
   let bulkKillOpen = $state(false);
+  /** Which bulk press opened the Kill dialog: Kill or Clean up (step 1.7). */
+  let bulkKillMode = $state<'kill' | 'cleanup'>('kill');
   let bulkPromptOpen = $state(false);
   const selectedRows = $derived($sessions.filter((s) => selectedIds.has(s.id)));
 
@@ -474,6 +478,49 @@
    */
   const bulkKillTargets = $derived(bulkTargets(selectedRows, 'kill_session', $sessionBlocked));
   const bulkPromptTargets = $derived(bulkTargets(selectedRows, 'send_prompt', $sessionBlocked));
+
+  /** Clean up was accepted. A direct remove already dropped the row, so
+   *  its layout is forgotten and the pane stops attaching to it; a Safe
+   *  remove finishes later through the agent and keeps both until then. */
+  function cleanedUp(removed: SessionRow[]) {
+    pendingKill = null;
+    for (const r of removed) forgetSessionUi(r.host_alias, r.tmux_name);
+    const cur = $selectedSession;
+    if (cur && removed.some((r) => sameSession(cur, r))) selectSession(null);
+  }
+
+  /** Bulk Archive (step 1.7): the selected sessions with work go to their
+   *  work's Done, with Undo. Nothing is killed. */
+  async function bulkArchive() {
+    const rows = bulkTargets(selectedRows, 'tidy_apply', $sessionBlocked);
+    const r = await archiveSessions(rows);
+    if (!r.ok) {
+      pushError(r.error, 'Archive failed');
+      return;
+    }
+    clearSelected();
+    const { archived, skipped } = r.value;
+    const left = skipped.length > 0 ? ` · ${skipped.length} left as they were (${[...new Set(skipped.map((x) => x.why))].join(', ')})` : '';
+    if (archived.length === 0) {
+      push({ message: `Nothing archived${left}`, kind: 'info' });
+      return;
+    }
+    push({
+      message: `Archived ${archived.length} session${archived.length === 1 ? '' : 's'}${left}`,
+      kind: 'success',
+      action: {
+        label: 'Undo',
+        run: () => void undoArchive(archived.filter((id) => $sessionIdBlocked(id, 'unarchive_session_work') === null)),
+      },
+    });
+  }
+  const bulkArchiveBlocked = $derived(archiveBlocked(selectedRows));
+  /** Clean up's targets: the rows this person may Safe remove (`own`). */
+  const bulkCleanUpTargets = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
+  const bulkCleanUpBlocked = $derived(
+    hubActionBlocked('safe_kill_session', $hubStatus, $hubConnection) ??
+      (selectedRows.length > 0 && bulkCleanUpTargets.length === 0 ? 'None of the selected sessions is yours to clean up.' : null),
+  );
 
   async function confirmBulkKill() {
     bulkKillOpen = false;
@@ -1211,7 +1258,11 @@
     {toggleSelectMode}
     selectedCount={selectedIds.size}
     onBulkSend={() => (bulkPromptOpen = true)}
-    onBulkKill={() => (bulkKillOpen = true)}
+    onBulkKill={() => ((bulkKillMode = 'kill'), (bulkKillOpen = true))}
+    onBulkCleanUp={() => ((bulkKillMode = 'cleanup'), (bulkKillOpen = true))}
+    onBulkArchive={() => void bulkArchive()}
+    {bulkArchiveBlocked}
+    {bulkCleanUpBlocked}
     {clearSelected}
   />
 
@@ -1582,38 +1633,35 @@
 {/if}
 
 {#if pendingKill}
-  <ConfirmDialog
-    title="Kill session?"
-    confirmLabel="Kill"
-    danger
-    onconfirm={confirmKill}
+  <KillDialog
+    targets={[pendingKill]}
+    onkill={confirmKill}
+    oncleaned={cleanedUp}
     oncancel={cancelKill}
     confirmTestId="confirm-kill"
-  >
-    This will kill the tmux session <code>{pendingKill.tmux_name}</code> on
-    <code>{pendingKill.host_alias}</code> and lose any running claude state inside it. Continue?
-  </ConfirmDialog>
+  />
 {/if}
 
 {#if bulkKillOpen}
-  <ConfirmDialog
-    title="Kill {bulkKillTargets.length} session{bulkKillTargets.length === 1 ? '' : 's'}?"
-    confirmLabel="Kill all"
-    danger
-    onconfirm={confirmBulkKill}
+  <KillDialog
+    targets={bulkKillMode === 'cleanup' ? bulkCleanUpTargets : bulkKillTargets}
+    mode={bulkKillMode}
+    onkill={confirmBulkKill}
+    oncleaned={(removed) => {
+      bulkKillOpen = false;
+      clearSelected();
+      cleanedUp(removed);
+    }}
     oncancel={() => (bulkKillOpen = false)}
     confirmTestId="confirm-bulk-kill"
   >
-    {#if bulkKillTargets.length === 0}
-      <span data-testid="bulk-kill-none"
-        >None of the selected sessions is yours to kill — a session shared with you
-        can be watched or driven, never killed.</span
-      >
-    {:else}
-      This will kill
-      {#each bulkKillTargets as r, i (r.id)}{i > 0 ? ', ' : ''}<code>{r.tmux_name}</code> on <code>{r.host_alias}</code>{/each}
-      and lose any running claude state inside them. Continue?
-      {#if bulkKillTargets.length < selectedRows.length}
+    {#snippet notes()}
+      {#if bulkKillTargets.length === 0}
+        <span data-testid="bulk-kill-none"
+          >None of the selected sessions is yours to kill — a session shared with you
+          can be watched or driven, never killed.</span
+        >
+      {:else if bulkKillTargets.length < selectedRows.length}
         <!-- Said out loud rather than silently dropped: the count in the title
              no longer matches the selection, and the reason is a rule. -->
         <span data-testid="bulk-kill-skipped"
@@ -1624,8 +1672,8 @@
             : 's are'} not yours to kill and will be left alone.</span
         >
       {/if}
-    {/if}
-  </ConfirmDialog>
+    {/snippet}
+  </KillDialog>
 {/if}
 
 {#if bulkPromptOpen}
