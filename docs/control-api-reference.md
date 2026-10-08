@@ -117,7 +117,7 @@ Ensure the UX agent's operator session exists on a reachable host; returns its r
 
 ### `fleet_health`
 
-Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed.
+Backend health: app and schema version, database readiness, the cached fleet roll-up, per-host reverse-tunnel health (tunnels_flapping: supervised but crash-looping, so the Control API is unreachable from that host), and ESTIMATED token usage and cost (micro-USD) per host and UTC day for 7 days, and trackers (each ok/degraded/failing, failures in a row, last error and success; detection_backlog: suggestions undecided for detection_backlog_days). A per-host token sees its own host's usage and its org's trackers. hub: uptime and last reconcile pass; tunnels_mode none|reverse; peer_links_total. hosts[]: per host disk_home_pct/disk_low, claude_behind, agent_behind, hooks_silent. decide (master only): Jev's last hour, degraded if its breaker is open or >20% failed. loops[]: each background job's last and next run and result (ok/error/paused); automation_paused.
 
 ### `forget_project`
 

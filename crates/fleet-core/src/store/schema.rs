@@ -630,7 +630,7 @@ fn host_tokens_has_rotated_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 127.
+/// `already_applied` guard of migration 128.
 fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('peer_links') WHERE name = 'msgs_total'",
@@ -1507,8 +1507,8 @@ const MIGRATIONS: &[Migration] = &[
     // Orbit Fleet 11.5, the Federation page: a link's latency and message
     // counts on `peer_links` (four ADD COLUMNs, guarded on the last).
     Migration {
-        version: 127,
-        sql: include_str!("../../migrations/127_peer_link_traffic.sql"),
+        version: 128,
+        sql: include_str!("../../migrations/128_peer_link_traffic.sql"),
         already_applied: Some(peer_links_has_msgs_total),
     },
 ];

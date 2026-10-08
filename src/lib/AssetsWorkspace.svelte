@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
+  import ListLoading from './ListLoading.svelte';
   import { tick, untrack, type Snippet } from 'svelte';
   import AssetsRail from './AssetsRail.svelte';
   import AssetsInbox from './AssetsInbox.svelte';
@@ -604,7 +606,7 @@
         {/if}
         {#if readOnly}
           <button type="button" class="btn btn--quiet" onclick={onrefresh} disabled={busy !== '' || loading} data-testid="assets-hub-refresh"
-            >{loading ? 'Loading…' : 'Refresh'}</button
+            >{#if loading}<Loader name="comet" size={12} class="btn-loader" />{/if}{loading ? 'Loading…' : 'Refresh'}</button
           >
         {/if}
         <button type="button" class="btn btn--quiet" onclick={onscan} disabled={busy !== '' || scanDisabled} data-testid="assets-scan"
@@ -723,7 +725,7 @@
           onimport={(i) => onimport(i)}
         />
       {:else}
-        <p class="muted pad">Loading…</p>
+        <ListLoading />
       {/if}
     </div>
   </div>
@@ -815,6 +817,4 @@
   .error { margin: 0; padding: 4px 14px; color: var(--usage-crit); }
   .scan-result { margin: 0; padding: 4px 14px; font-size: 12px; color: var(--fg-muted); }
   .problems { margin: 0; padding: 4px 14px 4px 32px; font-size: 12px; }
-  .muted { color: var(--fg-muted); }
-  .pad { padding: 14px; }
 </style>

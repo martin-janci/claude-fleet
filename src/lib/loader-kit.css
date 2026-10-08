@@ -85,3 +85,9 @@
   animation: none !important;
   transform: rotate(calc(var(--ofl-p) * 360deg));
 }
+
+/* A Comet before a busy button's label ("Saving…"), redesign step 3.13. Its
+ * box is held from the first frame, so the label does not shift at 400 ms. */
+.btn-loader {
+  margin-right: 0.35em;
+}

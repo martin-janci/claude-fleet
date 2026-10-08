@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import Badge from './Badge.svelte';
   import { opTone, outcomeTone } from './assets_visual';
   import { cardMayApply, cardOwns } from './assets_cards';
@@ -180,7 +181,7 @@
               onclick={() => planAnyway(h.host_alias)}
               disabled={replanning}
               data-testid={`plan-anyway-${h.host_alias}-${h.harness}`}
-            >{replanning ? 'Planning…' : 'Plan anyway'}</button>
+            >{#if replanning}<Loader name="comet" size={12} class="btn-loader" />{/if}{replanning ? 'Planning…' : 'Plan anyway'}</button>
           {:else if h.detail}
             <span class="detail">{h.detail}</span>
           {/if}
@@ -252,7 +253,7 @@
         onclick={apply}
         disabled={applying || applicableCount === 0 || summary !== null}
         data-testid="plan-apply"
-      >{applying ? 'Applying…' : 'Apply'}</button>
+      >{#if applying}<Loader name="comet" size={12} class="btn-loader" />{/if}{applying ? 'Applying…' : 'Apply'}</button>
     </div>
   {/if}
 </section>
