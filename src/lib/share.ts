@@ -125,6 +125,8 @@ const SESSION_TIER = {
 
   // ── writes that are not in that list: `drive` ──────────────────────────
   send_prompt: 'drive',
+  answer_form: 'drive',
+  decline_form: 'drive',
   // `send_message { deliver, submit }` is a pane write by another route, so
   // refusing it to a driver while allowing `send_prompt` would be theatre.
   send_message: 'drive',

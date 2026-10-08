@@ -27,6 +27,10 @@ vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
   return { ...actual, sendPrompt: vi.fn() };
 });
+vi.mock('./forms/forms', async () => ({
+  ...(await vi.importActual<typeof import('./forms/forms')>('./forms/forms')),
+  getForm: vi.fn(async () => ({ ok: false, error: { code: 'E_NOTFOUND', message: 'x' } })),
+}));
 vi.mock('./selection', async () => {
   const actual = await vi.importActual<typeof import('./selection')>('./selection');
   return { ...actual, selectSession: vi.fn(), selectSessionExplicitly: vi.fn() };
@@ -1453,6 +1457,16 @@ describe('ConversationPanel live indicator', () => {
     expect(banner.textContent).toContain('Do you want to proceed?');
     await fireEvent.click(screen.getByTestId('conv-open-terminal'));
     expect(onOpenTerminal).toHaveBeenCalled();
+  });
+
+  it('a session waiting on a form shows the form card instead of the indicator', async () => {
+    mockedConv.mockReturnValue(ok(conv()));
+    render(ConversationPanel, {
+      session: session({ claude_status: 'working', pending_form: { form_id: 'f_a', title: 'Deploy' } }),
+      visible: true,
+    });
+    await settle();
+    expect(screen.getByTestId('form-card')).toBeTruthy();
   });
 
   it('a blocked row with a dialog shows the answer card instead of the bare banner', async () => {

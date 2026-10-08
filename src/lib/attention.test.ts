@@ -234,6 +234,11 @@ describe('outcome display', () => {
 describe('triage rank', () => {
   const opts = { idleSecs: 1800, now: 10_000 };
 
+  it('a session waiting on a form is waiting, even while its tool call runs', () => {
+    const r = row({ claude_status: 'working', pending_form: { form_id: 'f_a', title: 'T' } });
+    expect(classify(r, opts)).toBe('waiting');
+  });
+
   it('classifies every bucket reachable from today\'s fields', () => {
     expect(classify(row({ claude_status: 'blocked' }), opts)).toBe('waiting');
     expect(classify(row({ stuck_kind: 'oom' }), opts)).toBe('stuck');

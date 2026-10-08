@@ -691,6 +691,10 @@ describe('lastEventLabel / mergeEvents / statusChip', () => {
 });
 
 describe('tool helpers', () => {
+  it('names the fleet ask tool a Form', () => {
+    expect(toolVerb('mcp__claude-fleet__ask')).toBe('Form');
+  });
+
   it('verbs', () => {
     expect(toolVerb('Bash')).toBe('Run');
     expect(toolVerb('MultiEdit')).toBe('Edit');

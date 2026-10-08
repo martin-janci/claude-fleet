@@ -199,6 +199,12 @@ describe('SessionRowItem action gate (multi-user M1)', () => {
     expect(screen.queryByTestId('answer-card')).toBeNull();
   });
 
+  it('a session waiting on a form shows the row chip', async () => {
+    render(SessionRowItem, { props: baseProps(live({ pending_form: { form_id: 'f_a', title: 'Deploy' } })) });
+    await tick();
+    expect(screen.getByTestId('row-form-chip')).toBeInTheDocument();
+  });
+
   it('the answer card is there for the owner and for a driver', async () => {
     setMyGrants(1, []);
     const { unmount } = render(SessionRowItem, { props: baseProps(asking()) });

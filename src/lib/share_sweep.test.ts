@@ -819,6 +819,37 @@ const EXEMPT_SITES: Record<string, readonly Exemption[]> = {
       ],
     },
   ],
+  './forms/FormCard.svelte': [
+    {
+      writer: 'answerForm',
+      action: 'answer_form',
+      sites: ['await answerForm(formId, values)'],
+      why:
+        'The card is given a form id, never the row, so it cannot ask for itself; the access half ' +
+        'arrives as the `blocked` prop, which ConversationPanel computes from the row it holds ' +
+        '(`hubActionBlocked` ?? `$sessionBlocked`), and the card refuses to write while it is set.',
+      pins: [
+        { file: './forms/FormCard.svelte', needle: 'blocked: string | null;' },
+        { file: './forms/FormCard.svelte', needle: 'if (blocked) return;' },
+        { file: './ConversationPanel.svelte', needle: "$sessionBlocked(session, 'answer_form')" },
+        { file: './ConversationPanel.svelte', needle: 'blocked={formBlocked}' },
+      ],
+    },
+    {
+      writer: 'declineForm',
+      action: 'decline_form',
+      sites: ['await declineForm(formId, note)'],
+      why:
+        'Same as `answerForm`: `decline_form` is `drive` too, and the one `blocked` prop gates both ' +
+        'writes of the card.',
+      pins: [
+        { file: './forms/FormCard.svelte', needle: 'blocked: string | null;' },
+        { file: './forms/FormCard.svelte', needle: 'if (blocked) return;' },
+        { file: './ConversationPanel.svelte', needle: "$sessionBlocked(session, 'answer_form')" },
+        { file: './ConversationPanel.svelte', needle: 'blocked={formBlocked}' },
+      ],
+    },
+  ],
 };
 
 /** The text of the statement the call at `at` lives in: from the start of its

@@ -328,6 +328,8 @@ export const ROUTED_ACTIONS = [
   // Multi-harness F3a: a host's Codex choice is a catalog_admin action too.
   'catalog_set_host_harnesses',
   'send_prompt',
+  'answer_form',
+  'decline_form',
   'kill_session',
   'safe_kill_session',
   'rename_session',
