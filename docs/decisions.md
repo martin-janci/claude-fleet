@@ -336,6 +336,36 @@ Choice over those same candidates (or `unsure`).
 Code: `service/decide/start_project.rs`, `preview_start_decided` in
 `service/trackers/tickets.rs`; card K1 in the test map.
 
+## `sibling_repos` — the other repository a ticket start also needs (N3)
+
+A ticket's start in the New session dialog offers *Also start in <repo>* for
+the projects the key ran in before (ended links' project and live sessions
+on the key), other than the chosen one and system projects, newest first.
+With `decide.jev.sibling_repos` on and a planned project, Jev is asked one
+Choice: which ONE of those candidates the same task also needs changes in
+(`p<id>`), `none`, or `unsure`.
+
+- **What is sent.** The task's key and title, the first 1,000 characters of
+  its cached description, the chosen repository's `owner/repo` and each
+  candidate's, redacted. Nothing from the repositories.
+- **Shadow.** Asked off the preview's path and only recorded, with `none`
+  (nothing pre-ticked today) as the baseline.
+- **Assist.** The preview waits for the one call (`decide.jev.timeout_ms`)
+  and carries the answer as `suggested_sibling` (confidence 50% or more) for
+  the dialog to pre-tick. You still press Start.
+- **Asked once per input.** The same task, chosen repository and candidates
+  reuse the decided run for 14 days.
+- **Follow-up.** Your start (single or multi-repo) marks the proposal you
+  were shown `confirmed` when its sibling was among the repositories you
+  started, else `corrected` to the sibling you did start or `none`. An
+  agent's start, and a shadow answer nobody saw, mark nothing.
+- **What is recorded.** Subject `work_start_siblings` `item:<id>`, or
+  `key:<HMAC>` for a key no tracker knows.
+
+Code: `service/decide/sibling_repos.rs`, `sibling_candidates` and
+`preview_start_decided` in `service/trackers/tickets.rs`; step 3.12 of the
+redesign's transition plan.
+
 ## `work_link` — the work item of a session no rule could link (J1)
 
 When three turns of a conversation have gone by and nothing linked the
@@ -383,6 +413,7 @@ in the test map.
 | `decide.jev.status_map` | `off` | `off` / `shadow` / `assist` | Proposing a status category for an Asana section. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.start_project` | `off` | `off` / `shadow` / `assist` | Pre-selecting the repository of a task's first start. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |

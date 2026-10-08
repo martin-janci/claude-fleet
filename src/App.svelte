@@ -102,6 +102,9 @@
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
   import StatusBarMark from './lib/StatusBarMark.svelte';
   import ShellHeader from './lib/ShellHeader.svelte';
+  import StartupSplash from './lib/StartupSplash.svelte';
+  import UpdateReveal from './lib/UpdateReveal.svelte';
+  import { markStartup, startCatchUp, takeUpdateReveal, trackActivity } from './lib/startup';
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
@@ -203,6 +206,10 @@
   let unlistenEvents: UnlistenFn | null = null;
   let unlistenVoice: UnlistenFn | null = null;
   let showWelcome = $state(false);
+  // Redesign step 3.15: the version to reveal once after an update.
+  let revealVersion = $state<string | null>(null);
+  let stopActivity: (() => void) | null = null;
+  let stopCatchUp: (() => void) | null = null;
   // File downloads: the footer button and its sheet.
   let showDownloads = $state(false);
   const unseenDownloads = $derived(unseen($downloads));
@@ -223,6 +230,8 @@
   let trackerRefresh: ReturnType<typeof setInterval> | null = null;
   onDestroy(() => {
     if (trackerRefresh) clearInterval(trackerRefresh);
+    stopActivity?.();
+    stopCatchUp?.();
   });
 
   // `work:*` frames: trackers and their first sync. When a tracker finishes
@@ -258,6 +267,9 @@
   }
 
   onMount(async () => {
+    // Before anything is awaited: whether this launch is warm (no splash)
+    // is decided from the stamp the last run left.
+    stopActivity = trackActivity();
     // FIRST, and awaited: the rest of this function branches on it. A hub
     // client must not poll account usage (the backend refuses it, so it would
     // be an error toast on every launch for a panel that does not apply), and
@@ -267,12 +279,15 @@
     // bug report, and `versionLine` says less rather than guessing when it
     // is missing. Before the `unavailable` return below, so a window that
     // reaches no hub at all can still say which app it is.
-    void loadAppVersion();
+    void loadAppVersion().then(() => (revealVersion = takeUpdateReveal(get(appVersion))));
     // A hub is configured but this launch could not use it. The backend owns
     // nothing and refuses every fleet command, so each load below would only
     // add an error toast under the banner that already explains all of them.
     // The window shows that banner and the way to Settings, and nothing else.
-    if (get(hubStatus).unavailable) return;
+    if (get(hubStatus).unavailable) {
+      markStartup('done');
+      return;
+    }
     // Only a hub client has a live link to lose; see HubConnectionBanner.
     if (get(hubStatus).remote) void startHubConnection();
     const hr0 = await healthCheck();
@@ -328,10 +343,18 @@
       // closing an attached PTY depends on this frame arriving.
       onGrantChanged: applyGrantChanges,
     });
+    markStartup('backend');
     const [pr, sr, hr, ar] = await Promise.all([
       loadProjects(),
-      loadSessions(),
-      loadHosts(),
+      // Each marks its startup stage as it lands (step 3.15).
+      loadSessions().then((r) => {
+        markStartup('sessions');
+        return r;
+      }),
+      loadHosts().then((r) => {
+        markStartup('hosts');
+        return r;
+      }),
       loadAccounts(),
       // This client's own person id and grant set (multi-user M1). Awaited
       // with the lists because `restoreLastSession()` below selects a row and
@@ -357,6 +380,8 @@
       reportBootstrap('accounts', ar),
     ].filter((f): f is string => f !== null);
     if (failures.length > 0) bootstrapError = `startup load failed — ${failures.join(', ')}`;
+    markStartup('done');
+    stopCatchUp = startCatchUp(get(hosts));
     // Sessions are loaded now — re-open the one the user last had selected.
     // Only when the list actually arrived: on a failed fetch the store is
     // empty, and restoreLastSession() would take that as "the session is
@@ -1072,6 +1097,10 @@
 {#if $uiLayout === 'new'}
   <!-- Redesign 3.17: the Main board's header, above everything else. -->
   <ShellHeader mac={isMac} />
+  <StartupSplash onhubsettings={() => settingsOpen.set(true)} />
+  {#if revealVersion}
+    <UpdateReveal version={revealVersion} onclose={() => (revealVersion = null)} />
+  {/if}
 {/if}
 {#if $hubStatus.remote}
   <HubConnectionBanner hubUrl={$hubStatus.url} />

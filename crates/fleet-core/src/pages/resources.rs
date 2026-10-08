@@ -852,7 +852,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
     id: "device",
     label: "Device",
     plural: "Devices",
-    help: "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Peer hub links and updater tokens are managed on the hub.",
+    help: "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Links to other fleets' hubs are under Federation; updater tokens are managed on the hub.",
     list: "list_devices",
     id_field: "name",
     title_field: "name",
@@ -1047,6 +1047,57 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
     variant_by: Some("kind"),
 };
 
+/// `PeerLinkSummary.role` and `.state` as `store::peer_links` says them.
+const PEER_ROLES: &[(&str, &str)] = &[("dialer", "We dial"), ("listener", "They dial")];
+const PEER_STATES: &[(&str, &str)] = &[
+    ("connected", "Connected"),
+    ("retrying", "Retrying"),
+    ("refused", "Refused"),
+    ("incompatible", "Incompatible"),
+];
+
+/// Orbit Fleet 11.5: this fleet's links to other fleets' hubs. Federation is
+/// hub to hub, so the desktop shows its hub's links (`list_peer_links`
+/// routes) and links a new hub through it with the one-time code that hub's
+/// owner minted (`fleet-hub peer pair` there).
+const PEER_LINK: ResourceType = ResourceType {
+    id: "peer_link",
+    label: "Linked hub",
+    plural: "Linked hubs",
+    help: "Other fleets' hubs this hub exchanges messages with: sessions here can message sessions there, and back. Each link shows how it is doing and what it carried.",
+    list: "list_peer_links",
+    id_field: "id",
+    title_field: "title",
+    color_field: None,
+    empty: "No linked hubs. Ask the other fleet's owner for a link code (fleet-hub peer pair on their hub), then Link a hub.",
+    fields: &[
+        FieldSpec::new("title", "Fleet", "The other fleet's id once it has answered, else its hub's address.", FieldKind::Text { max: 256 }),
+        FieldSpec::new("state", "State", "How the last exchange went.", FieldKind::Choice { options: PEER_STATES }).badge(Badge::Label),
+        FieldSpec::new("role", "Direction", "Which hub opens the connection: this one dials out, or the other dials in.", FieldKind::Choice { options: PEER_ROLES }),
+        FieldSpec::new("url", "Address", "The hub this one dials; a link the other side dials has none.", FieldKind::Text { max: 512 }),
+        FieldSpec::new("latency", "Latency", "The round trip of the last exchange this hub dialed.", FieldKind::Text { max: 32 }),
+        FieldSpec::new("messages_today", "Messages today", "Carried either way since midnight (UTC).", FieldKind::Count),
+        FieldSpec::new("messages_total", "Messages in all", "Carried either way since the link was made.", FieldKind::Count),
+        FieldSpec::new("pending", "Waiting", "Messages queued for the other fleet.", FieldKind::Count),
+        FieldSpec::new("last_exchange_at", "Last exchange", "When the hubs last traded messages.", FieldKind::Time),
+        FieldSpec::new("last_error", "Last error", "Why the last exchange failed, while it is failing.", FieldKind::Text { max: 512 }),
+    ],
+    create: Some(
+        ActionSpec::new("peer_link.add", "Link a hub", "link_peer_hub", &[("url", Bind::Param("url")), ("code", Bind::Param("code"))]).params(&[
+            param("url", "Hub address", text(512, "https://hub.example.com"), true),
+            param("code", "Link code", ParamKind::Secret, true),
+        ]),
+    ),
+    update: None,
+    delete: Some(
+        ActionSpec::new("peer_link.remove", "Unlink", "unlink_peer_hub", &[("id", Bind::Record("id"))])
+            .confirm("Sessions here can no longer message that fleet, and messages waiting for it fail back to their senders. Linking again needs a new code."),
+    ),
+    actions: &[],
+    create_flow: None,
+    variant_by: None,
+};
+
 pub const RESOURCES: &[ResourceType] = &[
     ORG,
     TRACKER,
@@ -1054,6 +1105,7 @@ pub const RESOURCES: &[ResourceType] = &[
     DEVICE_RESOURCE,
     PERSON_RESOURCE,
     DEBUG_DEVICE,
+    PEER_LINK,
 ];
 
 pub fn resource(id: &str) -> Option<&'static ResourceType> {
@@ -1245,9 +1297,11 @@ mod tests {
                 "forget_debug_device",
                 "grant_device_catalog",
                 "install_debug_device",
+                "link_peer_hub",
                 "list_debug_devices",
                 "list_devices",
                 "list_orgs",
+                "list_peer_links",
                 "list_people",
                 "list_trackers",
                 "pair_device",
@@ -1265,6 +1319,7 @@ mod tests {
                 "set_tracker_credential",
                 "shutdown_debug_device",
                 "test_tracker",
+                "unlink_peer_hub",
                 "update_debug_device",
                 "update_device",
                 "update_org",

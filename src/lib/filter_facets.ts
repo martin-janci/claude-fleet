@@ -102,7 +102,7 @@ export function clearWorkFilterPatch(id: SessionFacetId): Partial<WorkFilters> |
 
 // ── Work view ──
 
-export type WorkFacetId = 'org' | 'tracker' | 'status' | 'mine' | 'has' | 'review' | 'query';
+export type WorkFacetId = 'org' | 'tracker' | 'status' | 'status_name' | 'mine' | 'assignee' | 'has' | 'review' | 'query';
 
 export interface WorkFacetNames {
   orgName?: (id: number) => string | undefined;
@@ -121,7 +121,9 @@ export function workFacets(f: WorkTreeFilters, names: WorkFacetNames = {}): (Fac
     out.push({ id: 'tracker', label: `Tracker: ${t}` });
   }
   if (n.status !== undefined) out.push({ id: 'status', label: `Status: ${WORK_STATUS_LABELS[n.status]}` });
+  if (n.status_name) out.push({ id: 'status_name', label: `Column: ${n.status_name}` });
   if (n.mine) out.push({ id: 'mine', label: 'Assigned to me' });
+  if (n.assignee) out.push({ id: 'assignee', label: `Assignee: ${n.assignee}` });
   if (n.has !== undefined) out.push({ id: 'has', label: `Sessions: ${HAS_FILTER_LABELS[n.has]}` });
   if (n.review) out.push({ id: 'review', label: 'To review' });
   if (n.query) out.push({ id: 'query', label: `Search: “${n.query}”` });
