@@ -588,10 +588,10 @@
   }
   h1 { margin: 0; font-size: 1rem; }
   .summary { font-variant-numeric: tabular-nums; }
-  .cadence { color: var(--fg-muted); font-size: 0.75rem; }
+  .cadence { color: var(--fg-muted); font-size: 11px; }
   .grow { flex: 1; }
   .head-btn {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.55rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -614,7 +614,7 @@
   .legend {
     padding: 0.5rem 1rem;
     border-bottom: 1px solid var(--border);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .legend dl {
     display: grid;
@@ -626,13 +626,13 @@
   .legend dd { margin: 0; color: var(--fg-muted); }
   kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     white-space: pre;
   }
   .notice {
     margin: 0;
     padding: 0.3rem 1rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border-bottom: 1px solid var(--border);
   }

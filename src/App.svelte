@@ -1419,7 +1419,7 @@
     padding: 0 0.75rem;
     background: var(--bg-pane);
     border-top: 1px solid var(--border);
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
     display: flex;
     align-items: center;
@@ -1528,7 +1528,7 @@
     border-radius: 5px 5px 0 0;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.74rem;
+    font-size: 11px;
     padding: 0.25rem 0.8rem;
   }
   .view-tab:hover:not(:disabled) { color: var(--fg); }
@@ -1564,7 +1564,7 @@
     border-radius: 999px;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.1rem 0.6rem;
   }
   .subtab:hover:not(:disabled) { color: var(--fg); }
@@ -1588,7 +1588,7 @@
   }
   .hosts-tab kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     margin-left: 0.25rem;
   }

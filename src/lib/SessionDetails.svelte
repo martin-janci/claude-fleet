@@ -1245,13 +1245,13 @@
     border-radius: 4px;
     outline: none;
   }
-  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 0.75rem; flex-wrap: wrap; }
+  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 11px; flex-wrap: wrap; }
   .friendly { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
   .chip {
     padding: 0.1rem 0.4rem;
     border-radius: 999px;
     border: 1px solid;
-    font-size: 0.65rem;
+    font-size: 11px;
     white-space: nowrap;
   }
   .last-prompt {
@@ -1274,7 +1274,7 @@
     border-radius: 999px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 0.65rem;
+    font-size: 11px;
   }
   .status-running { background: rgba(60, 180, 90, 0.18); color: rgba(80, 200, 110, 1); }
   .status-frozen { background: rgba(110, 160, 230, 0.18); color: rgba(140, 180, 240, 1); }
@@ -1288,7 +1288,7 @@
   }
   .meta dt {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
@@ -1297,7 +1297,7 @@
 
   .block h3 {
     margin: 0 0 0.4rem 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1462,7 +1462,7 @@
     max-height: 9rem;
     overflow-y: auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .dirty-list li {
     display: flex;
@@ -1476,7 +1476,7 @@
     flex: 0 0 auto;
     white-space: pre;
   }
-  .small { font-size: 0.75rem; }
+  .small { font-size: 11px; }
   .confirm-actions button {
     font-size: 0.85rem;
     padding: 0.3rem 0.8rem;
@@ -1498,7 +1498,7 @@
     margin-top: 0.6rem;
   }
   .related h3 {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1532,7 +1532,7 @@
   }
   .related .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
@@ -1540,7 +1540,7 @@
   }
   .related .account {
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -1549,11 +1549,11 @@
   }
   .related .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   .related .age {
     color: var(--fg-muted);
-    font-size: 0.7rem;
+    font-size: 11px;
   }
   /* The status as a word (7.2): the bare dot it replaces had no style, so
      it showed nothing and said nothing. */

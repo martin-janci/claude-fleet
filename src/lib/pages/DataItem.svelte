@@ -155,7 +155,7 @@
     min-width: 8rem;
   }
   .stat-label {
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .stat-value {
@@ -188,12 +188,12 @@
   }
   .copy {
     font: inherit;
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.78rem;
+    font-size: 11px;
   }
   th,
   td {
@@ -215,7 +215,7 @@
     margin: 0;
   }
   .err {
-    font-size: 0.78rem;
+    font-size: 11px;
     color: var(--usage-crit);
   }
 </style>

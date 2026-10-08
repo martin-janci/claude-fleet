@@ -153,7 +153,7 @@
     text-align: left;
     font-weight: 500;
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
     padding: 0.25rem 0.5rem 0.25rem 0;
     border-bottom: 1px solid var(--border);
   }
@@ -172,7 +172,7 @@
   }
   .rotated {
     display: block;
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .act {
     text-align: right;

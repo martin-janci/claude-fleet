@@ -74,7 +74,7 @@
 </span>
 
 <style>
-  .host { color: var(--fg-muted); font-size: 0.75rem; }
+  .host { color: var(--fg-muted); font-size: 11px; }
   .chip.live { color: var(--accent, inherit); border-color: currentColor; }
   .chip.live[data-state='failed'], .chip.live[data-state='partial'] { color: var(--danger); }
 </style>

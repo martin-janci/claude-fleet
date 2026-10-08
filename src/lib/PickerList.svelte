@@ -188,7 +188,7 @@
   }
   .group {
     padding: 0.35rem 0.6rem 0.1rem;
-    font-size: 0.65rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -230,7 +230,7 @@
     text-overflow: ellipsis;
   }
   .desc {
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -238,7 +238,7 @@
   }
   .meta {
     flex-shrink: 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
@@ -247,7 +247,7 @@
   }
   .chip {
     flex-shrink: 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.05rem 0.45rem;
     border-radius: var(--radius-pill);
     background: var(--accent-soft);
@@ -256,7 +256,7 @@
   .kbd {
     margin-left: 0.4rem;
     font: inherit;
-    font-size: 0.65rem;
+    font-size: 11px;
     padding: 0 0.25rem;
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -280,7 +280,7 @@
     visibility: hidden;
   }
   .badge {
-    font-size: 0.62rem;
+    font-size: 11px;
     font-weight: 600;
     padding: 0 0.25rem;
     margin-right: 0.35rem;

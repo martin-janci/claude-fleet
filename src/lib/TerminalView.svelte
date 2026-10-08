@@ -1444,7 +1444,7 @@
     align-items: center;
   }
   .reconnect-banner button {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.15rem 0.5rem;
     background: transparent;
     border: 1px solid currentColor;
@@ -1470,7 +1470,7 @@
   .size {
     margin-left: auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     padding: 0.1rem 0.4rem;
     border: 1px solid var(--border);
@@ -1478,14 +1478,14 @@
   }
   .counters {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     padding: 0.1rem 0.4rem;
     border: 1px solid var(--border);
     border-radius: 4px;
   }
   .reconnect {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.5rem;
     border: 1px solid var(--border);
     background: transparent;

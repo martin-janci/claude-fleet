@@ -71,7 +71,7 @@
 <style>
   .insp { display: flex; flex-direction: column; min-height: 0; height: 100%; background: var(--bg); }
   .ih { display: grid; gap: 4px; padding: 12px 14px 0; }
-  .eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--fg-muted); }
+  .eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--fg-muted); }
   .ititle { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -0.01em; overflow-wrap: anywhere; }
   .itabs { display: flex; gap: 14px; margin-top: 8px; padding: 0 14px; border-bottom: 1px solid var(--border); }
   .itabs button {

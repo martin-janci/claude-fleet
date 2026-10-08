@@ -665,7 +665,7 @@
     flex-wrap: wrap;
   }
   .kind {
-    font-size: 0.68rem;
+    font-size: 11px;
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0 0.35rem;
@@ -692,12 +692,12 @@
   .why {
     margin: 0.1rem 0 0 1.4rem;
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .fail {
     margin: 0.1rem 0 0 1.4rem;
     color: var(--usage-crit, #c62828);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .actions {
     margin: 0.25rem 0 0 1.4rem;
