@@ -33,7 +33,7 @@
     width: 40px;
     height: 40px;
     border-radius: 10px;
-    background: linear-gradient(135deg, #2563eb, #60a5fa);
+    background: linear-gradient(135deg, var(--accent), var(--loader-accent));
   }
   h2 {
     margin: 0;
@@ -41,7 +41,7 @@
   }
   p {
     margin: 0;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     font-size: 0.9rem;
     line-height: 1.5;
   }
@@ -58,12 +58,12 @@
   }
   .primary {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
     border: none;
   }
   .ghost {
     background: transparent;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     border: 1px solid var(--border);
   }
 </style>

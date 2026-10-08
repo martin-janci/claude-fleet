@@ -15,6 +15,7 @@
     type SessionEvent,
   } from './timeline';
   import { onTimelineEvent } from './live_events';
+  import Skeleton from './states/Skeleton.svelte';
 
   // Matches the backend's SESSION_EVENTS_CAP (store/rows.rs): the pushed-event
   // list is capped the same way the fetched one is.
@@ -123,7 +124,7 @@
   </div>
 
   {#if loading}
-    <p class="muted">Loading…</p>
+    <Skeleton />
   {:else if error}
     <p class="err" data-testid="timeline-error">{error}</p>
   {:else if shown.length === 0}
@@ -159,14 +160,14 @@
   }
   h3 {
     margin: 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
   .chips { display: flex; gap: 0.25rem; flex-wrap: wrap; }
   .chip {
-    font-size: 0.65rem;
+    font-size: 11px;
     padding: 0.1rem 0.45rem;
     border-radius: 999px;
     border: 1px solid var(--border);
@@ -182,7 +183,7 @@
     padding: 0;
     max-height: 18rem;
     overflow-y: auto;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .ev {
     display: grid;
@@ -206,6 +207,6 @@
     white-space: nowrap;
     color: var(--fg-muted);
   }
-  .muted { color: var(--fg-muted); font-style: italic; font-size: 0.75rem; margin: 0; }
-  .err { color: var(--danger); font-size: 0.75rem; margin: 0; }
+  .muted { color: var(--fg-muted); font-style: italic; font-size: 11px; margin: 0; }
+  .err { color: var(--danger); font-size: 11px; margin: 0; }
 </style>

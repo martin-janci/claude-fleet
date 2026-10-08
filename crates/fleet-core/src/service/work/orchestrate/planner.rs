@@ -13,7 +13,7 @@
 //! propose a bad command, which a person or the policy refuses.
 
 use super::steps::Step;
-use crate::service::claude_print;
+use crate::service::claude_print::{self, parse_envelope, Envelope};
 use crate::service::work::graph::MissionGraph;
 use crate::shell::quote;
 use crate::store::{CardRow, MissionEventRow, MissionRow, TreeEntry, TreeRef, WorkItemRow};
@@ -334,10 +334,12 @@ depends_on}; remove_dep {item_id, depends_on}; run {item_id, role?: implement | 
 {question, options?}; complete {evidence?}; note {text}. Use [] when nothing needs judgment.";
 
 /// PURE: the planner's script: `claude -p` locked down, the prompt and the
-/// snapshot as its one argument, its answer after the tag line.
+/// snapshot as its one argument, its answer after the tag line. The answer
+/// is `--output-format json`'s envelope, so the run's cost can be booked
+/// (redesign 8.2); [`planner_answer`] takes the model's text out of it.
 pub fn planner_script(model: &str, prompt: &str) -> String {
     let claude = format!(
-        "claude -p --model {} {} {}",
+        "claude -p --model {} --output-format json {} {}",
         quote(model),
         claude_print::isolation_flags(),
         quote(prompt),
@@ -361,6 +363,16 @@ pub enum PlannerOutput {
     NoClaude,
     Ran(String),
     Nothing,
+}
+
+/// PURE: the model's text and the run's usage from what the planner
+/// printed. No envelope (a cut reply, an older `claude`): the text as it
+/// is, usage unknown.
+pub fn planner_answer(ran: String) -> (String, Option<Envelope>) {
+    match parse_envelope(&ran) {
+        Some(env) => (env.result.clone(), Some(env)),
+        None => (ran, None),
+    }
 }
 
 pub fn parse_planner_output(stdout: &str) -> PlannerOutput {

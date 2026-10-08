@@ -41,7 +41,7 @@
 
 <style>
   .blurb {
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .link {

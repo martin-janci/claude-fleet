@@ -272,7 +272,7 @@
     background: none;
     padding: 0.1rem 0.15rem;
     font: inherit;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     cursor: pointer;
     border-radius: var(--radius-sm);
@@ -295,11 +295,11 @@
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     outline: none;
   }
   .review-sheet:focus-visible {
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
   }
   .review-head {
     display: flex;
@@ -308,7 +308,7 @@
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     flex: 1;
   }
   .review-row {
@@ -320,7 +320,7 @@
     border-radius: 4px;
   }
   .review-row.cursor {
-    background: var(--bg-hover, rgba(127, 127, 127, 0.15));
+    background: var(--bg-hover);
   }
   .key {
     font-family: var(--font-mono, ui-monospace, monospace);

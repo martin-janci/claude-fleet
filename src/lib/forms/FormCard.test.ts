@@ -49,13 +49,13 @@ describe('FormCard', () => {
 
     const next = () => screen.getByTestId('form-next');
     expect(screen.getByTestId('form-submit')).toBeDisabled();
-    await fireEvent.change(screen.getByTestId('form-field-env'), { target: { value: 'prod' } });
+    await fireEvent.click(screen.getByTestId('form-field-env-prod'));
     await fireEvent.click(screen.getByTestId('form-field-extra'));
     expect(await screen.findByTestId('form-step-count')).toHaveTextContent('Step 1 of 2');
     await fireEvent.click(next());
     expect(screen.getByTestId('form-step-title')).toHaveTextContent('More');
     await fireEvent.click(screen.getByTestId('form-back'));
-    expect((screen.getByTestId('form-field-env') as HTMLSelectElement).value).toBe('prod');
+    expect(screen.getByTestId('form-field-env-prod')).toHaveAttribute('aria-checked', 'true');
     await fireEvent.click(next());
     await fireEvent.input(screen.getByTestId('form-field-pw'), { target: { value: 'hunter2' } });
     await fireEvent.click(screen.getByTestId('form-submit'));
@@ -74,7 +74,7 @@ describe('FormCard', () => {
       };
     });
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
-    await fireEvent.change(await screen.findByTestId('form-field-env'), { target: { value: 'stg' } });
+    await fireEvent.click(await screen.findByTestId('form-field-env-stg'));
     await fireEvent.click(screen.getByTestId('form-field-extra'));
     await fireEvent.click(screen.getByTestId('form-next'));
     await fireEvent.input(screen.getByTestId('form-field-pw'), { target: { value: 'hunter2' } });
@@ -93,7 +93,7 @@ describe('FormCard', () => {
       throw { code: 'E_INVALID', message: 'env: bad', details: { problems: [{ field: 'env', problem: 'must be one of the options' }] } };
     });
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
-    await fireEvent.change(await screen.findByTestId('form-field-env'), { target: { value: 'stg' } });
+    await fireEvent.click(await screen.findByTestId('form-field-env-stg'));
     await fireEvent.click(screen.getByTestId('form-field-extra'));
     await fireEvent.click(screen.getByTestId('form-next'));
     await fireEvent.input(screen.getByTestId('form-field-pw'), { target: { value: 'hunter2' } });
@@ -109,7 +109,7 @@ describe('FormCard', () => {
       throw { code: 'E_INVALID', message: 'x', details: { problems: [{ field: 'ghost', problem: 'is not a field of this form' }] } };
     });
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
-    await fireEvent.change(await screen.findByTestId('form-field-env'), { target: { value: 'stg' } });
+    await fireEvent.click(await screen.findByTestId('form-field-env-stg'));
     await fireEvent.click(screen.getByTestId('form-submit'));
     expect(await screen.findByTestId('form-error')).toHaveTextContent('ghost: is not a field of this form');
   });
@@ -120,12 +120,12 @@ describe('FormCard', () => {
       throw { code: 'E_INVALID', message: 'x', details: { problems: [{ field: 'env', problem: 'must be one of the options' }] } };
     });
     const { rerender } = render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
-    await fireEvent.change(await screen.findByTestId('form-field-env'), { target: { value: 'stg' } });
+    await fireEvent.click(await screen.findByTestId('form-field-env-stg'));
     await fireEvent.click(screen.getByTestId('form-submit'));
     await screen.findByTestId('form-problem-env');
     await fireEvent.click(screen.getByTestId('form-decline'));
     await rerender({ formId: 'f_b', sessionName: 'dev', blocked: null });
-    await screen.findByTestId('form-field-env');
+    await screen.findByTestId('form-field-env-stg');
     expect(screen.queryByTestId('form-problem-env')).toBeNull();
     expect(screen.queryByTestId('form-decline-note')).toBeNull();
   });
@@ -134,9 +134,9 @@ describe('FormCard', () => {
     inv.mockImplementation(async () => view());
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
     render(FormCard, { props: { formId: 'f_b', sessionName: 'dev', blocked: null } });
-    await waitFor(() => expect(screen.getAllByTestId('form-field-env')).toHaveLength(2));
-    const [a, b] = screen.getAllByTestId('form-field-env');
-    expect(a.id).not.toBe(b.id);
+    await waitFor(() => expect(screen.getAllByRole('radiogroup')).toHaveLength(2));
+    const [a, b] = screen.getAllByRole('radiogroup').map((g) => g.getAttribute('aria-labelledby'));
+    expect(a).not.toBe(b);
   });
 
   it('declines with a reason', async () => {
@@ -152,13 +152,107 @@ describe('FormCard', () => {
     inv.mockImplementation(async () => view());
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: 'You can watch this session, not drive it.' } });
     expect(await screen.findByTestId('form-blocked')).toHaveTextContent('not drive it');
-    expect(screen.getByTestId('form-field-env')).toBeDisabled();
+    expect(screen.getByTestId('form-field-env-stg')).toBeDisabled();
     expect(screen.queryByTestId('form-decline')).toBeNull();
   });
 
   it('says how a closed form ended', async () => {
     inv.mockImplementation(async () => view({ state: 'answered', answered_by: 'phone (device)' }));
     render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null, closed: true } });
-    expect(await screen.findByTestId('form-outcome')).toHaveTextContent('Deploy: answered by phone (device)');
+    const r = await screen.findByTestId('form-outcome');
+    expect(r).toHaveTextContent('Deploy');
+    expect(screen.getByTestId('form-ended')).toHaveTextContent('answered by phone (device)');
+  });
+
+  // ── Step 10.1: receipt, 1–9, expiry ──────────────────────────────────
+  it('collapses to a receipt with the answer summary once answered, the answers behind Show answers', async () => {
+    inv.mockImplementation(async (cmd: string) =>
+      cmd === 'get_form'
+        ? view()
+        : view({ state: 'answered', answered_by: 'Martin', decided_at: Math.floor(Date.now() / 1000), answers: { env: 'prod', extra: false } }),
+    );
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    await fireEvent.click(await screen.findByTestId('form-field-env-prod'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
+    expect(await screen.findByTestId('form-ended')).toHaveTextContent('answered by Martin · now');
+    expect(screen.queryByTestId('form-card')).toBeNull();
+    expect(screen.getByTestId('form-summary')).toHaveTextContent('Production · more options off');
+    expect(screen.queryByTestId('form-answers')).toBeNull();
+    await fireEvent.click(screen.getByTestId('form-show-answers'));
+    expect(screen.getByTestId('form-answers')).toHaveTextContent('EnvProduction');
+  });
+
+  it('a declined receipt keeps the note; an expired one says no one answered', async () => {
+    inv.mockImplementation(async () => view({ state: 'declined', answered_by: 'Martin', note: 'Not today' }));
+    const { unmount } = render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    expect(await screen.findByTestId('form-note')).toHaveTextContent('“Not today”');
+    expect(screen.queryByTestId('form-show-answers')).toBeNull();
+    unmount();
+    inv.mockImplementation(async () => view({ state: 'expired' }));
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null, closed: true } });
+    expect(await screen.findByTestId('form-outcome')).toHaveTextContent('No answer in 24 h.');
+    expect(screen.getByTestId('form-ended')).toHaveTextContent('expired');
+  });
+
+  it('shows when a pending form expires', async () => {
+    inv.mockImplementation(async () => view({ created_at: Math.floor(Date.now() / 1000) - (24 * 3600 - 9 * 60 - 30) }));
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    expect(await screen.findByTestId('form-expires')).toHaveTextContent('expires in 9 min');
+  });
+
+  it('numbers the step’s only choice and 1–9 pick from it', async () => {
+    inv.mockImplementation(async () => view());
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    const prod = await screen.findByTestId('form-field-env-prod');
+    expect(prod).toHaveTextContent('2');
+    await fireEvent.keyDown(window, { key: '2' });
+    expect(prod).toHaveAttribute('aria-checked', 'true');
+    // a digit past the options, or typed into a field, picks nothing
+    await fireEvent.keyDown(window, { key: '7' });
+    expect(prod).toHaveAttribute('aria-checked', 'true');
+    const input = document.createElement('input');
+    document.body.append(input);
+    await fireEvent.keyDown(input, { key: '1' });
+    input.remove();
+    expect(prod).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('takes no digits while blocked, with two choices on the step, or under a question card', async () => {
+    const two = view();
+    two.spec.steps[0].fields.push({ name: 'zone', type: 'select', label: 'Zone', options: [['a', 'A'], ['b', 'B']] });
+    inv.mockImplementation(async () => two);
+    const { unmount } = render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    const stg = await screen.findByTestId('form-field-env-stg');
+    expect(stg).not.toHaveTextContent('1');
+    await fireEvent.keyDown(window, { key: '1' });
+    expect(stg).toHaveAttribute('aria-checked', 'false');
+    unmount();
+
+    inv.mockImplementation(async () => view());
+    const card = document.createElement('div');
+    card.dataset.testid = 'answer-card';
+    document.body.append(card);
+    const second = render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    await fireEvent.keyDown(window, { key: '1' });
+    expect(await screen.findByTestId('form-field-env-stg')).toHaveAttribute('aria-checked', 'false');
+    card.remove();
+    second.unmount();
+
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: 'You can watch this session, not drive it.' } });
+    await screen.findByTestId('form-blocked');
+    await fireEvent.keyDown(window, { key: '1' });
+    expect(screen.getByTestId('form-field-env-stg')).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('picking the chosen option of an optional choice clears it', async () => {
+    const opt = view();
+    opt.spec.steps[0].fields[0].required = false;
+    inv.mockImplementation(async () => opt);
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    const stg = await screen.findByTestId('form-field-env-stg');
+    await fireEvent.click(stg);
+    expect(stg).toHaveAttribute('aria-checked', 'true');
+    await fireEvent.click(stg);
+    expect(stg).toHaveAttribute('aria-checked', 'false');
   });
 });

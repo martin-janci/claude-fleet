@@ -2,6 +2,7 @@ import { writable } from 'svelte/store';
 import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import type { DecisionProposal } from './proposals';
 
 /** The `claude_status` vocabulary (pane_intel `ClaudeStatus`). Anything the
  *  backend has not classified arrives as `null`. */
@@ -58,6 +59,9 @@ export interface PrEvidence {
   state?: string;
   checks: CheckSummary;
 }
+
+/** `sessions.turn_outcome` (migration 129). */
+export type TurnOutcome = 'finished' | 'asked' | 'stuck' | 'working' | 'unsure';
 
 /** `sessions.origin` (migration 124). */
 export type SessionOrigin = 'person' | 'operator' | 'mission' | 'background' | 'token' | 'routine';
@@ -240,6 +244,12 @@ export interface SessionRow {
    *  seconds. A turn that ended after it is unread; absent for a row nobody
    *  has opened since fleet found it. */
   last_viewed_at?: number | null;
+  /** What a finished turn came to when hooks said nothing (migration 129,
+   *  J2 in step 5.11); a hook event always wins over it. */
+  turn_outcome?: TurnOutcome | null;
+  /** What a rule, Jev or an LLM proposes about the session, one per
+   *  feature (redesign 2.8). Absent when nothing proposes anything. */
+  proposals?: DecisionProposal[];
   /** A digest of the versions and ids of the session's live (non-ended)
    *  work links (work graph M14): it moves whenever any of them changes —
    *  added, removed, primary, state — a secondary link too. Absent = 0 (no
@@ -384,6 +394,12 @@ export const resetTombstonesForTests = rows.resetTombstonesForTests;
  *  row as a fresh alert. */
 export const sessionsLoaded = writable<boolean>(false);
 
+/** True once the first `list_sessions` has answered, either way. Until then
+ *  the fleet is still arriving (redesign step 3.13: the empty pane shows the
+ *  Particle swarm and ⌘K says which hosts it is still hearing from); a
+ *  failed first load ends the wait too, so a loader never outlives it. */
+export const sessionsAnswered = writable<boolean>(false);
+
 // Sidebar filter — when false, background (`kind === 'bg'`) sessions are
 // hidden from the tree. Defaults to true (shown). Persisted across restarts.
 const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -420,6 +436,7 @@ sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 // within the configured interval, so window-focus reloads stay cheap.
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
+  sessionsAnswered.set(true);
   if (r.ok) {
     // The list owns ORDER (the backend's `ORDER BY last_activity_at DESC`);
     // events own CONTENT. Rebuilding from the current store's position would

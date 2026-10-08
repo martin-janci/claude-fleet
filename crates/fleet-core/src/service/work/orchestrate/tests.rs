@@ -343,6 +343,59 @@ async fn a_tick_takes_the_lease_and_sets_the_next_wake() {
     assert_eq!(s.missions_due(now_unix() + 1).unwrap(), vec![fx.m.id]);
 }
 
+/// Redesign 8.2: a planner run adds a cost row with its origin, and the
+/// budget brake counts it with the workers' spend.
+#[test]
+fn a_planner_run_adds_a_cost_row_the_budget_brake_counts() {
+    let fx = fixture();
+    let raw = r#"{"type":"result","subtype":"success","is_error":false,"result":"[]","total_cost_usd":0.0125,"usage":{"input_tokens":900,"output_tokens":40}}"#;
+    let (answer, usage) = planner::planner_answer(raw.to_string());
+    assert_eq!(answer, "[]", "the model's text, out of the envelope");
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(s.mission_cost_micros(fx.m.id).unwrap(), 0);
+    book_planner_run(&s, &fx.m, "h", "sonnet", usage.as_ref(), 100);
+    let rows = s.mission_aux_usage(fx.m.id).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (
+            rows[0].origin.as_str(),
+            rows[0].host_alias.as_str(),
+            rows[0].model.as_str()
+        ),
+        ("planner", "h", "sonnet")
+    );
+    assert_eq!(
+        (rows[0].input_tokens, rows[0].output_tokens),
+        (Some(900), Some(40))
+    );
+    assert_eq!(rows[0].cost_micros, 12_500);
+    assert_eq!(s.mission_cost_micros(fx.m.id).unwrap(), 12_500);
+    // A reply with no envelope is still a run: booked at 0.
+    let (answer, usage) = planner::planner_answer("[]".to_string());
+    assert_eq!((answer.as_str(), usage.is_none()), ("[]", true));
+    book_planner_run(&s, &fx.m, "h", "sonnet", None, 101);
+    assert_eq!(s.mission_aux_usage(fx.m.id).unwrap().len(), 2);
+    assert_eq!(s.mission_cost_micros(fx.m.id).unwrap(), 12_500);
+}
+
+/// Redesign 8.1: Pause all stops the mission loop before it takes a lease.
+#[tokio::test]
+async fn pause_all_stops_the_mission_tick() {
+    let fx = fixture();
+    let now = now_unix();
+    settings::set(
+        &lock(&fx.deps.store).unwrap(),
+        settings::AUTOMATION_PAUSED,
+        "true",
+    )
+    .unwrap();
+    tick_once(&fx.deps, now).await;
+    let m = mission_now(&fx);
+    assert_eq!(m.next_wake_at, fx.m.next_wake_at, "the tick did nothing");
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(s.missions_due(now).unwrap(), vec![fx.m.id], "still due");
+}
+
 #[test]
 fn a_continuous_mission_wakes_on_its_timer() {
     let mut m = fixture().m;

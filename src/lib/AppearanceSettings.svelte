@@ -106,7 +106,7 @@
   .lbl { font-size: 0.85rem; font-weight: 600; }
   .hook-desc {
     margin: 2px 0 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .pref :global(.seg-group) { flex: 0 0 auto; min-width: 180px; }

@@ -6,6 +6,7 @@
   // reversible actions are plain buttons (hide shows an Undo toast);
   // `Rotate token…` and `Remove host…` sit at the bottom, have no keyboard
   // shortcut, and confirm with Cancel focused, stating the consequence.
+  import HostOffline from './states/HostOffline.svelte';
   import type { HostRow } from './hosts';
   import { deleteHost, setHostHarnesses, codexModeOf, harnessesFor, type HarnessMode } from './hosts';
   import type { AccountRow } from './accounts';
@@ -20,9 +21,9 @@
     type SessionRow,
   } from './sessions';
   import { selectSessionExplicitly } from './selection';
-  import { claudeStatusLabel, stuckKindLabel } from './attention';
+  import { claudeStatusLabel, stuckStatus } from './attention';
   import { formatAge, hookHealthLabel, type HookHealth } from './hook_health';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import { hideHostWithUndo, rotateToken, setTokenMode, showHost, viewHostSessions } from './host_actions';
   import { pushError, push } from './toasts';
   import {
@@ -317,7 +318,7 @@
   }
 
   function sessionState(s: SessionRow): string {
-    if (s.stuck_kind) return `stuck: ${stuckKindLabel(s.stuck_kind)}`;
+    if (s.stuck_kind) return stuckStatus(s.stuck_kind);
     if (s.status === 'ghost') return 'ghost';
     return claudeStatusLabel(s.claude_status) || s.status;
   }
@@ -449,6 +450,17 @@
         >{#if probing}probing…{:else}<kbd>r</kbd> Re-probe{/if}</button
       >
     </div>
+    {#if !host.reachable && !isLocal}
+      <!-- The states kit: an offline host is said here, in its own pane. -->
+      <HostOffline
+        alias={host.alias}
+        lastSeen={host.last_pinged_at}
+        {now}
+        sessions={hostSessions.length}
+        ontry={onreprobe}
+        trying={probing}
+        tryBlocked={reprobeBlocked} />
+    {/if}
     <dl class="facts">
       {#if host.ssh_alias}
         <dt>ssh</dt><dd data-testid="detail-ssh">{host.ssh_alias}</dd>
@@ -632,7 +644,7 @@
                 <div class="d-main">
                   <span class="d-cwd">{c.cwd}</span>
                   {#if c.git_branch}<span class="muted">{c.git_branch}</span>{/if}
-                  <span class="muted">{timeAgo(c.transcript_mtime, now * 1000)}</span>
+                  <span class="muted">{shortAge(c.transcript_mtime, now)}</span>
                   {#if rankLabel(c.rank_hint)}<span class="badge">{rankLabel(c.rank_hint)}</span>{/if}
                   {#if c.derived_tmux_name}<span class="muted">{c.derived_tmux_name}</span>{/if}
                 </div>
@@ -848,7 +860,7 @@
   h2 { margin: 0; font-size: 1.1rem; }
   h3 {
     margin: 0 0 0.35rem;
-    font-size: 0.7rem;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -857,10 +869,10 @@
   .status.off { color: var(--usage-warn); }
   .muted { color: var(--fg-muted); }
   .health { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem; font-size: 0.8rem; }
-  .meter { width: 6rem; height: 0.4rem; background: var(--bg-muted, #333); border-radius: 0.2rem; overflow: hidden; flex-shrink: 0; }
-  .fill { height: 100%; background: var(--ok, #3a3); }
-  .meter[data-level='warn'] .fill { background: var(--warn, #ca3); }
-  .meter[data-level='crit'] .fill { background: var(--danger, #c33); }
+  .meter { width: 6rem; height: 0.4rem; background: var(--track); border-radius: 0.2rem; overflow: hidden; flex-shrink: 0; }
+  .fill { height: 100%; background: var(--status-done); }
+  .meter[data-level='warn'] .fill { background: var(--status-waiting); }
+  .meter[data-level='crit'] .fill { background: var(--danger); }
   .facts {
     display: grid;
     grid-template-columns: max-content 1fr;
@@ -895,7 +907,7 @@
   .d-main { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; flex: 1; min-width: 0; }
   .d-cwd { font-variant-numeric: tabular-nums; }
   .badge {
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0 0.35rem;
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -924,12 +936,12 @@
     border: 1px solid var(--border);
     color: var(--fg);
     border-radius: 4px;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .action,
   .small {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.6rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -942,7 +954,7 @@
   .action.danger { color: var(--usage-crit); border-color: var(--usage-crit); }
   kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.65rem;
+    font-size: 11px;
     padding: 0 0.2rem;
     border: 1px solid var(--border);
     border-radius: 3px;

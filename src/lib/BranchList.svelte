@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Branch } from './history';
+  import Skeleton from './states/Skeleton.svelte';
 
   let {
     branches,
@@ -57,7 +58,7 @@
     {/if}
   </div>
   {#if loading}
-    <p class="hint">Loading…</p>
+    <Skeleton />
   {:else if error}
     <p class="hint err">{error}</p>
   {:else}
@@ -105,7 +106,7 @@
   .bbar { padding: 0.4rem 0.5rem; display: flex; gap: 0.4rem; align-items: center; }
   .new, .chip {
     background: transparent; border: 1px solid var(--border); border-radius: 4px;
-    color: var(--fg); cursor: pointer; font-size: 0.74rem; padding: 0.2rem 0.5rem;
+    color: var(--fg); cursor: pointer; font-size: 11px; padding: 0.2rem 0.5rem;
   }
   .new:disabled { opacity: 0.5; cursor: not-allowed; }
   .chip { color: var(--fg-muted); border-radius: 999px; }
@@ -116,7 +117,7 @@
   .del-merged { margin-left: auto; }
   .del-merged:not(:disabled):hover { color: var(--danger); border-color: var(--danger); }
   .group-label {
-    color: var(--fg-muted); font-size: 0.68rem; text-transform: uppercase;
+    color: var(--fg-muted); font-size: 11px; text-transform: uppercase;
     padding: 0.4rem 0.6rem 0.2rem;
   }
   .gnote { text-transform: none; }
@@ -128,17 +129,17 @@
   .bname { flex: 1 1 auto; font-family: var(--mono, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cur .bname { color: var(--accent); }
   .merged {
-    flex: 0 0 auto; color: var(--fg-muted); font-size: 0.68rem;
+    flex: 0 0 auto; color: var(--fg-muted); font-size: 11px;
     border: 1px solid var(--border); border-radius: 999px; padding: 0 0.4rem;
   }
-  .track { flex: 0 0 auto; color: var(--fg-muted); font-size: 0.72rem; }
+  .track { flex: 0 0 auto; color: var(--fg-muted); font-size: 11px; }
   .bactions { flex: 0 0 auto; visibility: hidden; display: flex; gap: 0.3rem; }
   .bactions button {
     background: transparent; border: 1px solid var(--border); border-radius: 3px;
-    color: var(--fg-muted); cursor: pointer; font-size: 0.7rem; padding: 0 0.4rem;
+    color: var(--fg-muted); cursor: pointer; font-size: 11px; padding: 0 0.4rem;
   }
   .bactions button:hover { color: var(--fg); border-color: var(--accent); }
-  .bactions button.del:hover { color: #f85149; border-color: #f85149; }
+  .bactions button.del:hover { color: var(--status-failed); border-color: var(--status-failed); }
   .hint { color: var(--fg-muted); padding: 0.5rem 0.7rem; }
   .hint.err { color: var(--danger); }
 </style>

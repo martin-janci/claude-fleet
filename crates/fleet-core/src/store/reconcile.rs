@@ -677,6 +677,38 @@ impl Store {
         Ok(())
     }
 
+    /// Upsert the PR one session's probe saw (redesign 6.4). The session's
+    /// row was written just before, so its id and name are read back here; a
+    /// row the stale-sighting guard refused to revive records nothing.
+    fn record_session_pr_in_tx(
+        tx: &rusqlite::Connection,
+        host_alias: &str,
+        sess: &ReconcileSession<'_>,
+        url: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let Some(row) = fetch_session(tx, sess.tmux_name, host_alias)? else {
+            return Ok(());
+        };
+        if row.lost_at.is_some() {
+            return Ok(());
+        }
+        let name = row.friendly_name.as_deref().unwrap_or(&row.tmux_name);
+        Self::upsert_pull_request_in_tx(
+            tx,
+            url,
+            sess.ci_status.as_deref(),
+            sess.pr_evidence.as_ref(),
+            super::PrSeenBy {
+                session_id: row.id,
+                session_name: name,
+                host_alias,
+                project_id: row.project_id,
+            },
+            now_unix(),
+        )?;
+        Ok(())
+    }
+
     fn touch_project_last_session_at_in_tx(
         tx: &rusqlite::Connection,
         project_id: i64,
@@ -953,6 +985,11 @@ impl Store {
                         pr_evidence_json.as_deref(),
                         &mut out,
                     )?;
+                    // Redesign 6.4: the PR this pass saw on the session's
+                    // branch, kept in `pull_requests` past the session.
+                    if let (true, Some(url)) = (sess.pr_observed, sess.pr_url.as_deref()) {
+                        Self::record_session_pr_in_tx(tx, spec.alias, sess, url)?;
+                    }
                     if let Some(pid) = sess.project_id {
                         let latest = project_touch.entry(pid).or_insert(0);
                         *latest = (*latest).max(sess.last_activity_at);
@@ -1142,6 +1179,8 @@ mod tests {
             origin: None,
             origin_ref: None,
             last_viewed_at: None,
+            turn_outcome: None,
+            proposals: Vec::new(),
             pending_form: None,
             parent_session_id: None,
             tags: Vec::new(),
@@ -1356,6 +1395,76 @@ mod tests {
             intel_observed: true,
             ..Default::default()
         }
+    }
+
+    /// Redesign 6.4: reconcile records the PR a session's probe saw in
+    /// `pull_requests`, marks it merged when the probe says so, and the row
+    /// outlives the session.
+    #[test]
+    fn reconcile_marks_a_pr_merged_and_keeps_it_past_the_session() {
+        let (mut store, _bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        let pid = store.upsert_project("o", "r", "/base/r").unwrap();
+        let url = "https://github.com/o/r/pull/9";
+        let ev = |state: &str, merged_at: Option<i64>| crate::service::outcome::PrEvidence {
+            state: Some(state.into()),
+            title: Some("Add PRs view".into()),
+            head_ref: Some("feat/prs".into()),
+            merged_at,
+            ..Default::default()
+        };
+        let pass = |store: &mut Store, ts: i64, sessions: &[ReconcileSession<'_>]| {
+            let keep: Vec<String> = sessions.iter().map(|s| s.tmux_name.to_string()).collect();
+            store
+                .apply_host_reconcile(HostReconcile {
+                    sessions,
+                    keep: &keep,
+                    ..empty_probe("alpha", ts)
+                })
+                .unwrap();
+        };
+        let open = vec![ReconcileSession {
+            pr_url: Some(url.into()),
+            ci_status: Some("pending".into()),
+            pr_observed: true,
+            pr_evidence: Some(ev("OPEN", None)),
+            ..live_session("s1", pid, 10)
+        }];
+        pass(&mut store, 1, &open);
+        let sid = store.get_session("s1", "alpha").unwrap().unwrap().id;
+        let rows = store.list_pull_requests(&["OPEN"]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id, Some(sid), "the session that opened it");
+        assert_eq!(rows[0].project_id, Some(pid));
+        assert_eq!(rows[0].number, Some(9));
+        assert_eq!(rows[0].title.as_deref(), Some("Add PRs view"));
+        assert_eq!(rows[0].merged_at, None);
+
+        // A pass that did not probe the PR changes nothing.
+        let unprobed = vec![live_session("s1", pid, 11)];
+        pass(&mut store, 2, &unprobed);
+        assert_eq!(store.list_pull_requests(&["OPEN"]).unwrap().len(), 1);
+
+        let merged = vec![ReconcileSession {
+            pr_url: Some(url.into()),
+            ci_status: Some("passing".into()),
+            pr_observed: true,
+            pr_evidence: Some(ev("MERGED", Some(1_791_460_800))),
+            ..live_session("s1", pid, 12)
+        }];
+        pass(&mut store, 3, &merged);
+        assert!(store.list_pull_requests(&["OPEN"]).unwrap().is_empty());
+        let m = store.list_pull_requests(&["MERGED"]).unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].merged_at, Some(1_791_460_800));
+        assert_eq!(m[0].ci_status.as_deref(), Some("passing"));
+
+        // The session goes; the merged PR stays listed.
+        store
+            .conn_ref()
+            .execute("DELETE FROM sessions WHERE id = ?1", [sid])
+            .unwrap();
+        assert_eq!(store.list_pull_requests(&["MERGED"]).unwrap().len(), 1);
     }
 
     /// `stale_demoted_at` is a server-only `SessionRow` field (migration

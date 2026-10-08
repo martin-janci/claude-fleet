@@ -45,6 +45,10 @@ pub struct GcConfig {
 }
 
 impl GcConfig {
+    fn period(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.sweep_interval_secs)
+    }
+
     pub fn from_store(s: &Store) -> Self {
         Self {
             enabled: settings::get_bool(s, settings::GC_ENABLED),
@@ -480,7 +484,12 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
     let _flight = begin_flight()?;
     let cfg = {
         let s = store.lock().ok()?;
-        GcConfig::from_store(&s)
+        let cfg = GcConfig::from_store(&s);
+        // Pause all (redesign 8.1) stops every GC write, retention included.
+        if !crate::service::loops::gate_in("gc", &s, Some(cfg.period())) {
+            return None;
+        }
+        cfg
     };
     // Deliberately NOT gated on `cfg.enabled` here: that flag opts a fleet
     // into the destructive session-idle killer, but `sweep_with` also runs
@@ -505,6 +514,7 @@ pub async fn maybe_sweep(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) -> Opt
         ssh: Arc::clone(ssh),
     };
     let report = sweep_with(store, &exec, &cfg, now_unix()).await;
+    crate::service::loops::report("gc", Ok::<_, String>(()), Some(cfg.period()));
     if report != GcReport::default() {
         // Only when the sweep acted: a no-op sweep stays silent.
         tracing::info!(
@@ -540,6 +550,24 @@ mod tests {
     /// spawned single-flight (`spawn_sweep`), mirroring
     /// `service::usage`'s `only_one_collection_pass_is_in_flight`. A second
     /// spawn while one sweep is still running must do nothing.
+    /// Redesign 8.1: Pause all stops the sweep before it writes anything.
+    #[tokio::test]
+    async fn pause_all_stops_the_sweep() {
+        let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+        settings::set(&store.lock().unwrap(), settings::AUTOMATION_PAUSED, "true").unwrap();
+        let ssh = Arc::new(SshClient::new());
+        assert!(maybe_sweep(&store, &ssh).await.is_none());
+        let gc = crate::service::loops::registry()
+            .snapshot()
+            .into_iter()
+            .find(|l| l.name == "gc")
+            .unwrap();
+        assert_eq!(
+            gc.result.as_deref(),
+            Some(crate::service::loops::RESULT_PAUSED)
+        );
+    }
+
     #[test]
     fn only_one_sweep_pass_is_in_flight() {
         let first = begin_flight().expect("no pass running");
@@ -611,6 +639,8 @@ mod tests {
             origin: None,
             origin_ref: None,
             last_viewed_at: None,
+            turn_outcome: None,
+            proposals: Vec::new(),
             pending_form: None,
             parent_session_id: None,
             tags: Vec::new(),

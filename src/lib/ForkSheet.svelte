@@ -16,6 +16,7 @@
   // so uncommitted changes stay with this session, and the note says so.
   // A hub older than this build answers E_UNSUPPORTED for it; that is shown
   // as "update the hub", with Same worktree still one click away.
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { rewindConversation } from './sessions';
@@ -156,7 +157,7 @@
       class="primary"
       data-testid="fork-confirm"
       disabled={!canSubmit}
-      onclick={() => void fork()}>{busy ? 'Forking…' : 'Fork'}</button
+      onclick={() => void fork()}>{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Forking…' : 'Fork'}</button
     >
   </div>
 </Modal>
@@ -165,7 +166,7 @@
   .hint {
     margin: 0 0 0.6rem;
     font-size: 0.85em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .choices {
     border: none;
@@ -191,7 +192,7 @@
     line-height: 1.3;
   }
   .recommended {
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
     font-size: 0.85em;
   }
   .new-worktree-fields {
@@ -202,20 +203,20 @@
   }
   .new-worktree-fields label {
     font-size: 0.8em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .note {
     margin: 0.2rem 0 0;
     font-size: 0.8em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .problem {
     margin: 0.2rem 0 0;
     font-size: 0.8em;
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
   .err {
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
   .actions {
     display: flex;

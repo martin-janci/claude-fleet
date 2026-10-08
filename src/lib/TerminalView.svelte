@@ -13,7 +13,8 @@
   import { hintAnchor } from './hints';
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
-  import { repairSession, hasNoPane, showFriendlyNames } from './sessions';
+  import { repairSession, hasNoPane, showFriendlyNames, sessionsAnswered } from './sessions';
+  import Loader from './Loader.svelte';
   import { displayName } from './attention';
   import { keyToBytes, detectMac } from './terminal_keys';
   import { createDrainLoop } from './terminal_drain';
@@ -1341,7 +1342,7 @@
       <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px" data-testid="terminal-ctx-menu">
         <button onclick={ctxCopy} disabled={!selAnchor || !selFocus}>Copy</button>
         <button onclick={ctxPaste}>Paste</button>
-        <button onclick={ctxSelectAll}>Select All</button>
+        <button onclick={ctxSelectAll}>Select all</button>
       </div>
     {/if}
     {#if openError}
@@ -1362,6 +1363,13 @@
   </div>
 {:else}
   <div class="empty" data-testid="terminal-empty">
+    {#if !$sessionsAnswered}
+      <!-- Redesign step 3.13: the first fleet overview. Until the first
+           session list answers, the pane says the fleet is arriving rather
+           than asking for a pick from a list that is not there yet. -->
+      <Loader name="particle-swarm" size={160} testid="fleet-arriving" />
+      <p class="empty-msg">Hosts and sessions arriving…</p>
+    {:else}
     <!-- Stroke-only terminal-window icon: traffic lights + chevron prompt with
          a cursor underscore. currentColor lets it ride the theme's muted fg. -->
     <svg
@@ -1383,6 +1391,7 @@
       <line x1="27" y1="44" x2="42" y2="44" />
     </svg>
     <p class="empty-msg">Select a session to attach a terminal.</p>
+    {/if}
   </div>
 {/if}
 
@@ -1435,7 +1444,7 @@
     align-items: center;
   }
   .reconnect-banner button {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.15rem 0.5rem;
     background: transparent;
     border: 1px solid currentColor;
@@ -1461,7 +1470,7 @@
   .size {
     margin-left: auto;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     padding: 0.1rem 0.4rem;
     border: 1px solid var(--border);
@@ -1469,14 +1478,14 @@
   }
   .counters {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     padding: 0.1rem 0.4rem;
     border: 1px solid var(--border);
     border-radius: 4px;
   }
   .reconnect {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.2rem 0.5rem;
     border: 1px solid var(--border);
     background: transparent;

@@ -2303,6 +2303,18 @@
     },
     {
       "default_widget": "switch",
+      "key": "automation.paused",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Pause all automation",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "orchestrator.enabled",
       "kind": {
         "type": "bool"
@@ -2717,6 +2729,20 @@
       "widgets": [
         "number",
         "duration",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "accounts.pause_at",
+      "kind": {
+        "max": 100,
+        "min": 50,
+        "type": "int"
+      },
+      "label": "Ask before starting at",
+      "widgets": [
+        "number",
         "readonly"
       ]
     },

@@ -32,6 +32,7 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 import { shareSheetFor } from './share';
+import { expectAccessible } from './a11y_check';
 
 const sampleSession = {
   id: 1,
@@ -360,7 +361,7 @@ describe('SessionDetails outcome + triage fields (W2 Track D)', () => {
     });
     await tick();
     const chip = screen.getByTestId('details-stuck');
-    expect(chip).toHaveTextContent('stuck: trust prompt');
+    expect(chip).toHaveTextContent('Failed · trust prompt');
     expect(chip).toHaveTextContent('2m');
     // Stuck outranks claude_status.
     expect(screen.queryByTestId('details-claude-status')).toBeNull();
@@ -424,7 +425,7 @@ describe('SessionDetails outcome + triage fields (W2 Track D)', () => {
       props: { session: { ...sampleSession, claude_status: 'blocked', context_pct: 91 } },
     });
     await tick();
-    expect(screen.getByTestId('details-claude-status')).toHaveTextContent('blocked');
+    expect(screen.getByTestId('details-claude-status')).toHaveTextContent('Needs you');
     const ctx = screen.getByTestId('details-context');
     expect(ctx).toHaveTextContent('91%');
     expect(ctx).toHaveAttribute('data-level', 'crit');
@@ -1167,5 +1168,16 @@ describe('SessionDetails action hierarchy (redesign 1.5)', () => {
     await tick();
     expect(screen.getByTestId('confirm-kill-details')).toBeTruthy();
     expect(vi.mocked(mockedInvoke).mock.calls.some((c) => c[0] === 'kill_session')).toBe(false);
+  });
+});
+
+describe('SessionDetails accessibility (7.2)', () => {
+  it('passes the axe and audit checks', async () => {
+    hosts.set([
+      { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
+    ]);
+    const { container } = render(SessionDetails, { props: { session: sampleSession } });
+    await screen.findByTestId('session-host');
+    await expectAccessible(container);
   });
 });

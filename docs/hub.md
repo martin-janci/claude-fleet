@@ -636,17 +636,6 @@ no reverse tunnel for it.
 
 ### Set it up
 
-**A host the hub already reaches over SSH** needs none of the steps below:
-`install_agent { alias: "laptop" }` (Orbit Fleet 4.9) runs them as one job.
-The host downloads the release for its platform and checks it against
-`SHA256SUMS`, installs `~/.local/bin/fleet-agent`, takes its token on stdin
-into `fleet-agent install --user` (no systemd: `fleet-agent run` under
-`nohup`, which does not survive a reboot), and the host moves onto the agent
-once it says hello; no hello within 120 s puts it back on SSH.
-`agent_installs` shows each job's step and outcome. `FLEET_AGENT_DIST` on the
-hub replaces the GitHub release URL (a mirror). The steps below are for a
-host the hub cannot reach.
-
 1. **Register the host as an agent host.** From an MCP client holding the
    master token:
    `add_host { alias: "laptop", ssh_alias: "laptop", transport: "agent" }`.
@@ -3241,7 +3230,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 327 commands, 229 route to a hub tool, 1 routes except for one argument shape, 55 refuse, and 42 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Every command below refuses in hub client mode; the full table, with the commands that route to a hub tool, is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -3249,6 +3238,7 @@ Of the 327 commands, 229 route to a hub tool, 1 routes except for one argument s
 | `add_host` | registering a host is fleet administration, which the hub reserves for its own operator — add it there with `fleet-hub` |
 | `add_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
 | `catalog_spawn_author_session` | an author session is a Claude session started in the catalog's checkout on the machine that owns it, and the hub has no tool that starts one; edit the assets from this panel, or start a session in the checkout on the hub's machine |
+| `check_account_headroom` | this app does not poll account usage while a hub owns the fleet, so it cannot tell which account has headroom; start the session as usual |
 | `check_host` | the health checklist reads a host's settings over this app's own SSH; repair a host's hooks from the hub with `fleet-hub provision --host <alias>` |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |

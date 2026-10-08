@@ -994,9 +994,13 @@ pub fn spawn_tracker_sync(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
+            if !crate::service::loops::gate("trackers", &store, Some(period)) {
+                continue;
+            }
             if let Some(passes) = sync.run_pass(&store).await {
                 let _ = status_map.after_pass(&passes);
             }
+            crate::service::loops::report("trackers", Ok::<_, String>(()), Some(period));
         }
     }))
 }

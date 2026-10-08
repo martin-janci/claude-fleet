@@ -187,20 +187,20 @@
     margin-bottom: 4px;
   }
   .top b {
-    font-size: 0.72rem;
+    font-size: 11px;
     letter-spacing: 0.04em;
     text-transform: uppercase;
   }
   .x {
     background: none;
     border: none;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     cursor: pointer;
     font-size: 0.85rem;
   }
   .prog {
-    font-size: 0.7rem;
-    color: var(--fg-muted, #777);
+    font-size: 11px;
+    color: var(--fg-muted);
     margin-bottom: 7px;
   }
   .pbar {
@@ -238,7 +238,7 @@
     opacity: 0.8;
   }
   .step.muted .body {
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
   }
   .ic {
     width: 17px;
@@ -248,12 +248,12 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.7rem;
+    font-size: 11px;
     margin-top: 1px;
   }
   .ic.done {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
   }
   .ic.active {
     border: 1.5px solid var(--accent);
@@ -268,35 +268,35 @@
     gap: 1px;
   }
   .opt {
-    font-size: 0.6rem;
-    color: var(--fg-muted, #777);
+    font-size: 11px;
+    color: var(--fg-muted);
     border: 1px solid var(--border);
     border-radius: 9px;
     padding: 0 5px;
     margin-left: 6px;
   }
   .sub {
-    font-size: 0.68rem;
-    color: var(--fg-muted, #777);
+    font-size: 11px;
+    color: var(--fg-muted);
   }
   .badge {
-    font-size: 0.62rem;
+    font-size: 11px;
     padding: 1px 6px;
     border-radius: 10px;
     margin-top: 3px;
     align-self: flex-start;
   }
   .badge.up {
-    background: #e7f6ec;
-    color: #1a7f37;
+    background: var(--done-soft);
+    color: var(--status-done);
   }
   .badge.warn {
-    background: #fdf1e3;
-    color: #b06a00;
+    background: var(--waiting-soft);
+    color: var(--status-waiting);
   }
   .err {
-    font-size: 0.7rem;
-    color: #c0392b;
+    font-size: 11px;
+    color: var(--status-failed);
     margin: 6px 0 0;
   }
   .done-msg {
@@ -306,7 +306,7 @@
   .dismiss-all {
     font-size: 0.8rem;
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
     border: none;
     border-radius: 6px;
     padding: 5px 10px;
@@ -317,8 +317,8 @@
     align-items: center;
     gap: 8px;
     padding: 4px 0 4px 26px;
-    font-size: 0.68rem;
-    color: var(--fg-muted, #777);
+    font-size: 11px;
+    color: var(--fg-muted);
     border-top: 1px solid var(--border);
     flex-wrap: wrap;
   }
@@ -328,22 +328,22 @@
     gap: 4px;
   }
   .mcp-lbl {
-    font-size: 0.62rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     opacity: 0.7;
   }
   .mcp-token {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.68rem;
+    font-size: 11px;
   }
   .mcp-copy {
     background: transparent;
     border: 1px solid var(--border);
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     cursor: pointer;
     padding: 1px 6px;
-    font-size: 0.62rem;
+    font-size: 11px;
     border-radius: 4px;
     margin-left: auto;
   }

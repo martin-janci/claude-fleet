@@ -133,6 +133,9 @@
   --control-h-lg: 28px;
   --header-h: 44px;
   --rail-w: 68px;
+  /* The New layout's inspector beside the session (step 3.5). */
+  --inspector-min: 280px;
+  --inspector-max: 320px;
   --list-w: 340px;
   --settings-nav-w: 240px;
   --prose-max: 720px;
@@ -424,6 +427,17 @@
   --dur-fast: 0ms;
   --dur-base: 0ms;
   --dur-slow: 0ms;
+}
+
+/* The 24 px target floor (WCAG 2.5.8, redesign step 7.2): every control a
+   pointer aims at is at least --control-h on each side. Zero specificity,
+   so a component's own larger size wins; a component that sets a smaller
+   min-height or min-width on a control fails a11y_floor.test.ts. Inline
+   text links (`.link`, `.link-btn`, markdown links) sit in a sentence and
+   take WCAG's inline exception. */
+:where(button, [role='button'], [role='tab'], [role='menuitem'], [role='menuitemradio'], [role='menuitemcheckbox'], select, summary):where(:not(.link, .link-btn, .md-link, .md-link-inert)) {
+  min-block-size: var(--control-h);
+  min-inline-size: var(--control-h);
 }
 
 /* One focus style for everything focusable, at zero specificity so any

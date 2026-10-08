@@ -162,7 +162,7 @@
   }
   .row.head {
     cursor: default;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -174,18 +174,18 @@
   .host { display: flex; flex-direction: column; gap: 0.1rem; min-width: 0; }
   .name { display: flex; align-items: baseline; gap: 0.4rem; min-width: 0; }
   .alias { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .glyph { font-size: 0.65rem; }
+  .glyph { font-size: 11px; }
   .row.off .glyph { color: var(--fg-muted); }
-  .muted, .machine { color: var(--fg-muted); font-size: 0.7rem; }
+  .muted, .machine { color: var(--fg-muted); font-size: 11px; }
   .machine { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mono { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .warn, .needs, .update { color: var(--usage-warn); }
   .crit, .failed { color: var(--usage-crit); }
   .accounts { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .attention { font-size: 0.75rem; cursor: help; }
+  .attention { font-size: 11px; cursor: help; }
   .open-cell { text-align: right; }
   .open {
-    font-size: 0.75rem;
+    font-size: 11px;
     padding: 0.15rem 0.5rem;
     border: 1px solid var(--border);
     border-radius: 4px;

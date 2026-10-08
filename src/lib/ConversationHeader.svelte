@@ -7,6 +7,7 @@
     contextMeter,
     conversationTitle,
     relativeTime,
+    backgroundStatusWord,
     statusChip,
     switcherEntries,
     switcherLabel,
@@ -14,7 +15,7 @@
     type ConversationSummary,
   } from './conversation';
   import type { TurnIndexEntry } from './conversation_nav';
-  import { contextColor } from './attention';
+  import { claudeStatusLabel, contextColor } from './attention';
 
   // The find and turn-index state lives in ConversationPanel (it owns the
   // thread and the scroller); the header only renders the controls and
@@ -321,7 +322,7 @@
         >{#if meter.tokensLabel}<span class="ctx-tokens">{meter.tokensLabel}</span>{/if}</span
       >
     {/if}
-    {#if status}<span class="tag status" data-testid="conv-status" data-status={status} title="Status: {status}"><span class="status-dot" aria-hidden="true"></span><span class="status-word">{status}</span></span>{/if}
+    {#if status}<span class="tag status" data-testid="conv-status" data-status={status} title="Status: {status}"><span class="status-dot" aria-hidden="true"></span><span class="status-word">{status === 'compacting' ? 'Working · compacting' : claudeStatusLabel(status)}</span></span>{/if}
     {#if model}<span class="tag tag--mono" data-testid="conv-model">{model}</span>{/if}
     {#if lastEvent}<span class="tag last-event" data-testid="conv-last-event">{lastEvent}</span>{/if}
     </div>
@@ -378,7 +379,7 @@
                   <li>
                     <button type="button" data-testid="conv-background-item" onclick={() => onPickBackground(e)}>
                       <span class="ti-label">{e.kind} · {e.label}</span>
-                      <span class="bg-item-status" data-status={e.status}>{e.status}</span>
+                      <span class="bg-item-status" data-status={e.status}>{backgroundStatusWord(e.status)}</span>
                     </button>
                   </li>
                 {/each}
@@ -443,7 +444,7 @@
   .caret {
     flex: 0 0 auto;
     color: var(--fg-muted);
-    font-size: 9px;
+    font-size: 11px;
   }
   .dot {
     flex: 0 0 auto;
@@ -495,7 +496,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--fg-muted);
-    font-size: 0.74rem;
+    font-size: 11px;
   }
   .facts,
   .find-inline {
@@ -579,7 +580,7 @@
     background: none;
     color: var(--fg);
     font: inherit;
-    font-size: 0.78rem;
+    font-size: 11px;
     text-align: left;
     cursor: pointer;
   }
@@ -610,7 +611,7 @@
   }
   .bg-group {
     padding: 0.3rem 0.65rem 0.15rem;
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -622,7 +623,7 @@
   }
   .bg-item-status {
     margin-left: auto;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .bg-item-status[data-status='running'] {

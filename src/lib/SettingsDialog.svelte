@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
   import ShortcutSettings from './ShortcutSettings.svelte';
   import { DEFAULT_LEAF, leafById, leafForPage, resolveSection, type PanelId } from './settings_tree';
@@ -662,7 +663,7 @@
             data-testid="hub-code"
             aria-label="Pairing code" />
           <button onclick={doPair} disabled={!hubPairable} data-testid="hub-pair">
-            {hubBusy ? 'Pairing…' : 'Pair'}
+            {#if hubBusy}<Loader name="comet" size={12} class="btn-loader" />{/if}{hubBusy ? 'Pairing…' : 'Pair'}
           </button>
         </div>
       {/if}
@@ -944,6 +945,13 @@
     </div>
 
     <div class="panel" hidden={panel !== 'diagnostics'} data-testid="settings-panel-diagnostics">
+    <!-- Redesign step 3.13: About gets the Wordmark reveal. It sits with
+         Diagnostics, the section that already names the version, until the
+         Settings tree (7.1) gives About a leaf of its own. -->
+    <section class="block about" data-testid="about-section">
+      <Loader name="wordmark-reveal" size={184} delay={0} label="Orbit Fleet" testid="about-wordmark" />
+      <p class="hook-desc" data-testid="about-version">Orbit Fleet {$appVersion ?? ''}</p>
+    </section>
     <section class="block" data-testid="diagnostics-section">
       <div class="section-header">
         <h4>Diagnostics</h4>
@@ -960,7 +968,7 @@
           disabled={diagBusy}
           data-testid="copy-diagnostics"
         >
-          {diagBusy ? 'Collecting…' : 'Copy diagnostics'}
+          {#if diagBusy}<Loader name="comet" size={12} class="btn-loader" />{/if}{diagBusy ? 'Collecting…' : 'Copy diagnostics'}
         </button>
         <button class="hook-btn" onclick={onOpenLogFolder} data-testid="open-log-folder">
           Open log folder
@@ -1095,7 +1103,7 @@
   }
   .hosts-line h4 {
     margin: 0;
-    font-size: 0.75rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -1103,7 +1111,7 @@
   .hosts-summary { flex: 1; font-size: 0.8rem; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
   .hosts-line kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
 
@@ -1148,7 +1156,7 @@
   .hook-desc {
     margin: 0;
     font-size: 12px;
-    color: var(--text-secondary, #888);
+    color: var(--fg-muted);
   }
 
   .hub-scope {
