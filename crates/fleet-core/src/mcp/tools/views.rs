@@ -109,6 +109,7 @@ pub(super) const PHONE_SESSION_FIELDS: &[&str] = &[
     "last_turn_at",
     "needs_attention",
     "org_id",
+    "pending_form",
     "pending_input",
     "project_id",
     "safe_kill_state",

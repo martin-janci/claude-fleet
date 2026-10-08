@@ -4965,6 +4965,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_turn_at",
             "needs_attention",
             "org_id",
+            "pending_form",
             "pending_input",
             "project_id",
             "safe_kill_state",

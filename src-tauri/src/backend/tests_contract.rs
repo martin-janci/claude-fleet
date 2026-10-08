@@ -93,6 +93,10 @@ pub(crate) fn sample_session() -> SessionRow {
         visibility: fleet_core::store::VISIBILITY_PRIVATE.into(),
         // Some, so the golden pins the name the sidebar reads.
         claude_profile: Some("work".into()),
+        pending_form: Some(fleet_core::store::PendingForm {
+            form_id: "f_x".into(),
+            title: "T".into(),
+        }),
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -993,11 +997,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty-three keys nothing else would notice losing. Its list is a literal
+/// sixty-five keys nothing else would notice losing. Its list is a literal
 /// here, not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty_four() {
+fn a_session_rows_wire_names_are_these_exact_sixty_five() {
     let expected = [
         "account_uuid",
         "ci_status",
@@ -1030,6 +1034,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_four() {
         "org_id",
         "owner_person_id",
         "parent_session_id",
+        "pending_form",
         "pending_input",
         "pr_url",
         "project_id",
@@ -1065,7 +1070,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_four() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 64, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 65, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

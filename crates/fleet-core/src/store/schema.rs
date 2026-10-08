@@ -1335,6 +1335,9 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/114_host_claude_profiles.sql"),
         already_applied: Some(hosts_has_claude_profiles),
     },
+    // Chat forms: `form_requests`. A new table and indexes, `IF NOT EXISTS`,
+    // safe to re-run.
+    Migration::plain(115, include_str!("../../migrations/115_form_requests.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
@@ -1818,6 +1821,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
             instance: super::next_instance(),
         };
@@ -1887,6 +1891,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
             instance: super::next_instance(),
         };
@@ -2116,6 +2121,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
             instance: super::next_instance(),
         }
@@ -3437,6 +3443,7 @@ mod tests {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             peer_generations: Default::default(),
             instance: super::next_instance(),
         };
