@@ -1,5 +1,5 @@
 //! The add-host wizard's saved drafts and the fleet-agent install jobs
-//! (migration 131, Orbit Fleet 4.9). The rules (which checks run, how an
+//! (migration 134, Orbit Fleet 4.9). The rules (which checks run, how an
 //! install proceeds) are in `service::host_setup` and
 //! `service::agent_install`; this is the rows.
 

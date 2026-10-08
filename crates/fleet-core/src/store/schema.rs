@@ -640,6 +640,16 @@ fn host_tokens_has_rotated_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 132.
+fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('peer_links') WHERE name = 'msgs_total'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 117.
 fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1525,10 +1535,26 @@ const MIGRATIONS: &[Migration] = &[
         130,
         include_str!("../../migrations/130_usage_daily_account.sql"),
     ),
+    // Orbit Fleet 8.5: routines and their runs (two new tables).
+    Migration::plain(131, include_str!("../../migrations/131_routines.sql")),
+    // Orbit Fleet 11.5, the Federation page: a link's latency and message
+    // counts on `peer_links` (four ADD COLUMNs, guarded on the last).
+    Migration {
+        version: 132,
+        sql: include_str!("../../migrations/132_peer_link_traffic.sql"),
+        already_applied: Some(peer_links_has_msgs_total),
+    },
+    // Orbit Fleet 5.10, Send prompt: `deferred_prompts`, prompts typed in
+    // once a busy session is idle. New objects only, `IF NOT EXISTS`, safe
+    // to re-run.
+    Migration::plain(
+        133,
+        include_str!("../../migrations/133_deferred_prompts.sql"),
+    ),
     // Orbit Fleet 4.9: the add-host wizard's saved drafts (`host_setups`)
     // and the fleet-agent install jobs (`agent_installs`). New tables only,
     // `IF NOT EXISTS`, safe to re-run.
-    Migration::plain(131, include_str!("../../migrations/131_host_setup.sql")),
+    Migration::plain(134, include_str!("../../migrations/134_host_setup.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

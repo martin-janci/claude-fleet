@@ -320,13 +320,17 @@ pub async fn set_org_member(
 }
 
 /// Phase D: take a person out of an org; what was shared with them on its
-/// sessions goes too unless `keep_grants`.
+/// sessions goes too unless `keep_grants`. Redesign 11.2's dialog says it
+/// with `grants`: `revoke` (the default), `narrow` (each Drive share becomes
+/// Watch, then they leave with their shares) or `keep`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoveOrgMemberArgs {
     pub org_id: i64,
     pub person_id: i64,
     #[serde(default)]
     pub keep_grants: Option<bool>,
+    #[serde(default)]
+    pub grants: Option<String>,
 }
 
 #[tauri::command]
@@ -335,14 +339,30 @@ pub async fn remove_org_member(
     args: RemoveOrgMemberArgs,
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<serde_json::Value, IpcError> {
-    routed::remove_org_member(
+    routed::remove_org_member_choosing(&backend, &store, args).await
+}
+
+/// Redesign 11.2: how many live shares TO a member stand on the org's
+/// sessions, as `{ watch, drive }` — what the remove dialog asks about.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OrgMemberArgs {
+    pub org_id: i64,
+    pub person_id: i64,
+}
+
+#[tauri::command]
+pub async fn org_member_grants(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: OrgMemberArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<serde_json::Value, IpcError> {
+    routed::org_member_grants(
         &backend,
         &store,
         OrgAdminArgs {
             org_id: Some(args.org_id),
             person_id: Some(args.person_id),
-            keep_grants: args.keep_grants,
-            ..OrgAdminArgs::new("remove_member")
+            ..OrgAdminArgs::new("member_grants")
         },
     )
     .await
@@ -427,6 +447,70 @@ pub(crate) mod routed {
     ) -> Result<serde_json::Value, IpcError> {
         match backend.hub() {
             Some(hub) => hub.route("remove_org_member", &args).await,
+            None => local(&args, store),
+        }
+    }
+
+    /// [`super::remove_org_member`]: `grants` said with the actions every
+    /// hub that has `remove_member` already knows.
+    pub async fn remove_org_member_choosing(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: RemoveOrgMemberArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        let member = |action: &str| OrgAdminArgs {
+            org_id: Some(args.org_id),
+            person_id: Some(args.person_id),
+            ..OrgAdminArgs::new(action)
+        };
+        let keep = match args.grants.as_deref() {
+            None => args.keep_grants,
+            Some("revoke") => Some(false),
+            Some("keep") => Some(true),
+            Some("narrow") => {
+                // Narrowed first, then removed keeping them: an older hub
+                // never sees `grants`, only two actions it already has.
+                let narrowed =
+                    remove_org_member(backend, store, member("narrow_member_grants")).await?;
+                let mut out = remove_org_member(
+                    backend,
+                    store,
+                    OrgAdminArgs {
+                        keep_grants: Some(true),
+                        ..member("remove_member")
+                    },
+                )
+                .await?;
+                if let Some(o) = out.as_object_mut() {
+                    o.insert("narrowed".into(), narrowed["narrowed"].clone());
+                }
+                return Ok(out);
+            }
+            Some(other) => {
+                return Err(IpcError::new(
+                    fleet_core::ipc_error::codes::E_INVALID,
+                    format!("grants is revoke, narrow or keep, not {other:?}"),
+                ))
+            }
+        };
+        remove_org_member(
+            backend,
+            store,
+            OrgAdminArgs {
+                keep_grants: keep,
+                ..member("remove_member")
+            },
+        )
+        .await
+    }
+
+    pub async fn org_member_grants(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: OrgAdminArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("org_member_grants", &args).await,
             None => local(&args, store),
         }
     }

@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 mod activity;
 mod adopt;
 mod claim;
+pub mod deferred;
 mod discover;
 mod lifecycle;
 mod paths;
@@ -43,6 +44,7 @@ mod tests;
 pub use self::activity::*;
 pub use self::adopt::*;
 pub use self::claim::*;
+pub use self::deferred::*;
 pub use self::discover::*;
 pub use self::lifecycle::*;
 // `paths` has no `pub` item — its widest is `pub(crate)` — so the re-export

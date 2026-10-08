@@ -18,6 +18,7 @@ mod clients;
 mod conversations;
 mod debug_devices;
 mod decisions;
+mod deferred_prompts;
 mod downloads;
 mod forms;
 mod guides;
@@ -42,6 +43,7 @@ mod read_cursors;
 mod read_pool;
 mod reconcile;
 mod reports;
+mod routines;
 mod rows;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
@@ -92,6 +94,7 @@ pub use decisions::{
     DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
     DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
+pub use deferred_prompts::{DeferredPromptRow, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
@@ -143,6 +146,10 @@ pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};
 pub use read_cursors::CursorRow;
 pub use read_pool::{read_via, ReadPool, READ_POOL_SIZE};
 pub use reports::{ReportFilter, ReportRow};
+pub use routines::{
+    NewRoutineRun, RoutineFields, RoutineRow, RoutineRunRow, ROUTINE_LEASE_SECS, ROUTINE_OVERLAPS,
+    ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
+};
 pub use rows::*;
 pub use schema::known_schema_version;
 #[cfg(test)]

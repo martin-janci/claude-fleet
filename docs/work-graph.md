@@ -224,7 +224,16 @@ including tasks with no session at all — as reads of the `work` tool
   count under the filters), and the orgs and trackers the caller sees.
   Filters: `org` (an id or `"none"`), `tracker` (an id, `"local"` or
   `"ref"`), `status`, `mine`, `has` (`active` / `past_only` / `none` /
-  `suggested`), `review`, `query`, `group`, `archived`. A task is
+  `suggested`), `review`, `query`, `group`, `archived`, and (redesign
+  step 6.2) `assignee` (one person by name, any case), `status_name` (one
+  tracker column, the tracker's own status name, any case) and `group_by`:
+  what a section under each org is, `group` (the default: a person, rule,
+  tracker container, repo or key), `org` (one section per org), `person`
+  (the first assignee), `mission` (named only when the caller may read the
+  mission), `account` (the account its sessions run on, an active one
+  first) or `repo`. A task with nothing to group by sits in `none`, last;
+  `group` then names a section of that grouping. An unknown `group_by` is
+  refused; a hub from before 6.2 ignores all three. A task is
   *archived* when it has no active session and is done, or every one of
   its links (at least one of them past) is archived, judged over every
   link of the task, not only the ones the caller sees. The tree hides

@@ -11,6 +11,11 @@ pub struct CpalSource {
     /// Told about start / stop / error / revocation for the UI
     /// (`voice:state`).
     pub on_state: std::sync::Arc<dyn Fn(&'static str, Option<String>) + Send + Sync>,
+    /// Told how loud each chunk sent to the relay was, 0.0–1.0
+    /// (`voice:state` with `state: "level"`), for the UI's Sonar. Only the
+    /// cpal capture (macOS, Windows) records; elsewhere it is unused.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    pub on_level: std::sync::Arc<dyn Fn(f32) + Send + Sync>,
 }
 
 impl CpalSource {
@@ -31,6 +36,7 @@ impl VoiceSource for CpalSource {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let on_state = self.on_state.clone();
+        let on_level = self.on_level.clone();
         // cpal's Stream is !Send on macOS: it lives on its own thread until
         // the guard's sender drops.
         std::thread::Builder::new()
@@ -62,6 +68,7 @@ impl VoiceSource for CpalSource {
                             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                                 buf.extend(conv.push(data));
                                 if buf.len() >= 3_200 {
+                                    on_level(super::resample::level(&buf));
                                     // Contended only while an error takes the sender.
                                     if let Ok(sink) = sink.try_lock() {
                                         if let Some(tx) = sink.as_ref() {

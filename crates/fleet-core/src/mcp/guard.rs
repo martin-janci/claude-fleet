@@ -488,6 +488,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Routines (Orbit Fleet 8.5): a person's own scheduled prompts. Its
+    // run_now starts a session, hence the lifecycle deadline; a host's token
+    // is not served it (`NOT_FOR_HOST_TOKENS`).
+    ToolPolicy {
+        name: "routines",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Lifecycle,
+    },
     // Debug devices: a host's Claude uses the devices it may see (its own
     // host's, and those a person shared within its org); a person also
     // labels, shares and forgets them (refused to host tokens in the
@@ -719,6 +729,22 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // messaging.rs
     ToolPolicy {
         name: "send_prompt",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Typed later, when the session is idle: a pane write like send_prompt.
+    ToolPolicy {
+        name: "queue_prompt",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Lists a session's waiting prompts, or takes one back (`cancel`).
+    ToolPolicy {
+        name: "queued_prompts",
         access: Access::Client,
         readonly: false,
         confirm: false,
@@ -1212,14 +1238,33 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // Names other fleets: master-only, like list_clients — a paired client
-    // or per-host token must not enumerate what this hub is linked to.
-    // Read-only, so it gets the same two-flags-answer-different-questions
-    // treatment as `list_clients` above.
+    // Names other fleets: the master and the hub owner's own device (Orbit
+    // Fleet 11.5, the Federation page) — a per-host token, an org-bound
+    // client and a second person's device must not enumerate what this hub
+    // is linked to. Read-only, so it gets the same
+    // two-flags-answer-different-questions treatment as `list_clients`
+    // above.
     ToolPolicy {
         name: "list_peer_links",
-        access: Access::Master,
+        access: Access::Person,
         readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Change this hub's links (11.5): the same gate, and a device must also
+    // be trusted and full (`peer_writer` in the tool). `link_peer` dials the
+    // other hub's /pair, bounded at 20 s by `peer::link`.
+    ToolPolicy {
+        name: "link_peer",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "unlink_peer",
+        access: Access::Person,
+        readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
     },
@@ -1368,6 +1413,8 @@ pub fn is_client_tool(name: &str) -> bool {
 /// catalog edits and rolls layers out to hosts, so it is refused alike, its
 /// `list` included (R25 amended). `list_downloads` / `remove_download` are a
 /// person's: a host's Claude only sends files.
+/// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
+/// schedule sessions.
 ///
 /// The five sharing surfaces joined them in multi-user M1 (T12) for a
 /// different reason: a per-host token proves no PERSON
@@ -1381,6 +1428,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "changesets",
     "list_downloads",
     "remove_download",
+    "routines",
     "session_share",
     "session_unshare",
     "session_narrow",
