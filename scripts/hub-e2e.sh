@@ -840,7 +840,7 @@ ask_rpc() {  # like rpc, with the pane header an agent's MCP entry sends
 FORM='{"spec":"fleet.form/1","title":"E2E","steps":[{"title":"One","fields":[{"name":"color","type":"select","label":"Color","required":true,"options":[["red","Red"],["blue","Blue"]]},{"name":"pw","type":"secret","label":"Password"}]}]}'
 ASK_OUT="$ROOT/ask.out"
 ( ask_rpc "{\"form\":$FORM,\"timeout_s\":60}" > "$ASK_OUT" ) &
-ASK_PID=$!
+ASK_PID=$!; MU_PIDS="$MU_PIDS $ASK_PID"
 FID=""
 for _ in $(seq 1 50); do
   FID=$(tool "$PC" "$PUB" "$TOKC" ask '{"list":{"state":"pending"}}' | grep -o 'f_[0-9A-Za-z]\{16\}' | head -1)
@@ -848,6 +848,13 @@ for _ in $(seq 1 50); do
   python3 -c 'import time; time.sleep(0.2)'
 done
 check "an agent's ask opens a pending form" '[ -n "$FID" ]' "no pending form listed"
+if [ -z "$FID" ]; then
+  kill "$ASK_PID" 2>/dev/null; wait "$ASK_PID" 2>/dev/null
+  for n in "a host token cannot answer a form" "the master answers it" "the agent's call returns the answers" \
+           "the secret is not in the agent's result" "the secret file is on the host, 0600"; do
+    bad "$n" "skipped: no pending form was listed ($(head -c 300 "$ASK_OUT" 2>/dev/null))"
+  done
+else
 deny=$(ask_rpc "{\"answer\":\"$FID\",\"values\":{\"color\":\"red\"}}")
 check "a host token cannot answer a form" 'echo "$deny" | grep -q E_FORBIDDEN' "$deny"
 ans=$(tool "$PC" "$PUB" "$TOKC" ask "{\"answer\":\"$FID\",\"values\":{\"color\":\"blue\",\"pw\":\"e2e-secret\"}}")
@@ -857,6 +864,7 @@ check "the agent's call returns the answers" 'grep -q "blue" "$ASK_OUT" && grep 
 check "the secret is not in the agent's result" '! grep -q "e2e-secret" "$ASK_OUT"' "$(cat "$ASK_OUT")"
 SECRET="$AHOME/.cache/claude-fleet/forms/$FID/pw"
 check "the secret file is on the host, 0600" '[ "$(filemode "$SECRET")" = 600 ] && [ "$(cat "$SECRET")" = e2e-secret ]' "$(ls -l "$SECRET" 2>&1)"
+fi
 
 tool "$PC" "$PUB" "$TOKC" send_prompt "{\"session_id\":${S1:-0},\"prompt\":\"echo sum-\$((40+2))\"}" >/dev/null
 until_ok 50 'tool "$PC" "$PUB" "$TOKC" capture_session "{\"session_id\":${S1:-0}}" | grep -q "sum-42"'

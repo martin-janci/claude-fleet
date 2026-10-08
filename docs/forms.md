@@ -12,7 +12,8 @@ back as the result of the agent's tool call. The design is
     ask { form: <fleet.form/1>, why: "one sentence", timeout_s: 600 }
 
 - Only from inside a fleet session: the per-host token and `X-Fleet-Pane`
-  prove which session asks; anything else is `E_NOT_A_SESSION`. A
+  identify which session asks (see *What a token can see*); anything else is
+  `E_NOT_A_SESSION`. A
   `readonly` token cannot call `ask` at all.
 - One open form per session (`E_CONFLICT` names the open one).
 - The call waits up to 600 s. `{status: "pending", form_id}` means the
@@ -22,6 +23,10 @@ back as the result of the agent's tool call. The design is
 
 Results: `answered` (with `answers`, `secrets`, `answered_by`), `pending`,
 `declined` (with the person's `note`), `cancelled`, `expired` (24 h).
+
+An `answered` result that carries secrets also says: "Delete each secret
+file once you have used it." A decided form's row is kept 7 days, then
+purged (once its secret directory is gone).
 
 ## The format
 
@@ -116,16 +121,20 @@ the TypeScript validators both run them (the Rust test reads them with
 A `secret` field's value never reaches the agent or any log. It is written
 to `~/.cache/claude-fleet/forms/<form_id>/<field>` on the session's host
 (0600); the result's `secrets` maps the field to that path. Read it, use
-it, delete it. Fleet removes the directory once the session is gone or a
-week after the answer.
+it, delete it: the agent cleans up its own files. Fleet removes the
+directory too, once the session is a ghost or deleted, or a week after the
+answer.
 
 The answer records, durably and before the first file is written, that
 secrets may be on the host (`secrets_on_host`). The tick sweep removes the
-directory of every such form whose session is gone or whose answer is a
-week old, and retries a failed removal on a later tick. Per pass it skips a
+directory of every such form whose session is a ghost or deleted, or whose
+answer is a week old, and retries a failed removal on a later tick. Per pass it skips a
 host after one failure (the rest of that host's forms wait for the next
 pass) and removes at most 20 directories, so a slow fleet cannot stretch
-the tick.
+the tick. A form with secrets outlives its session's deletion (a trigger
+cancels it if it was pending, clears its answers and keeps the row under
+the negated session id, so a recycled session id never inherits it); a
+form without secrets goes with its session.
 
 ## Who answers
 

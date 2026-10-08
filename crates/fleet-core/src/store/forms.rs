@@ -200,7 +200,9 @@ impl Store {
     }
 
     /// `(form_id, host_alias)` of every form whose secret directory should
-    /// go: its session is a ghost, or it was decided before `decided_before`.
+    /// go: its session is a ghost or deleted (the delete trigger of migration 117
+    /// keeps a form with secrets under the negated session id, which matches
+    /// no session), or it was decided before `decided_before`.
     pub fn forms_to_sweep(&self, decided_before: i64) -> Result<Vec<(String, String)>> {
         let mut st = self.conn.prepare(
             "SELECT f.form_id, f.host_alias FROM form_requests f
@@ -247,6 +249,11 @@ mod tests {
             .unwrap()
     }
 
+    fn seed_other(s: &Store) -> i64 {
+        s.upsert_session("other", "h", None, None, 1, 1, "running", None)
+            .unwrap()
+    }
+
     fn new<'a>(form_id: &'a str, session_id: i64) -> NewForm<'a> {
         NewForm {
             form_id,
@@ -278,6 +285,65 @@ mod tests {
             "the merge guard sees it"
         );
         assert_eq!(bus.names(), vec!["session:updated"]);
+    }
+
+    #[test]
+    fn a_form_without_secrets_goes_with_its_deleted_session() {
+        let (s, _) = store_with_recorder();
+        let sid = seed(&s);
+        s.insert_form(&new("f_one", sid)).unwrap();
+        s.delete_session(sid).unwrap();
+        assert_eq!(s.form("f_one").unwrap(), None);
+    }
+
+    #[test]
+    fn a_form_with_secrets_outlives_its_deleted_session_for_the_sweep() {
+        let (s, _) = store_with_recorder();
+        let sid = seed(&s);
+        s.insert_form(&new("f_one", sid)).unwrap();
+        s.mark_form_secrets_pending("f_one").unwrap();
+        s.insert_form(&new("f_two", seed_other(&s))).unwrap();
+        s.delete_session(sid).unwrap();
+        let row = s.form("f_one").unwrap().expect("kept for the sweep");
+        assert_eq!(row.session_id, -sid);
+        assert_eq!(row.state, "cancelled", "a pending form is cancelled");
+        assert_eq!(row.answers, None);
+        assert_eq!(row.why, None);
+        assert!(row.decided_at.is_some());
+        assert!(row.secrets_on_host);
+        assert_eq!(
+            s.forms_to_sweep(0).unwrap(),
+            vec![("f_one".into(), "h".into())]
+        );
+        assert!(
+            s.form("f_two").unwrap().is_some(),
+            "another session's form is untouched"
+        );
+        // Swept and old: the purge takes it.
+        s.mark_form_swept("f_one").unwrap();
+        assert_eq!(s.purge_forms(i64::MAX).unwrap(), 1);
+        assert_eq!(s.form("f_one").unwrap(), None);
+    }
+
+    #[test]
+    fn a_session_reusing_the_deleted_id_never_sees_the_orphaned_form() {
+        let (s, _) = store_with_recorder();
+        let sid = seed(&s);
+        s.insert_form(&new("f_one", sid)).unwrap();
+        s.mark_form_secrets_pending("f_one").unwrap();
+        s.delete_session(sid).unwrap();
+        let reused = s
+            .upsert_session("again", "h", None, None, 2, 2, "running", None)
+            .unwrap();
+        assert_eq!(reused, sid, "sessions.id is reused");
+        assert_eq!(
+            s.get_session_by_id(reused).unwrap().unwrap().pending_form,
+            None
+        );
+        assert_eq!(s.pending_form_of_session(reused).unwrap(), None);
+        assert!(s.forms(Some(reused), None).unwrap().is_empty());
+        // And it can ask its own form: the orphan is not "pending".
+        s.insert_form(&new("f_new", reused)).unwrap();
     }
 
     #[test]
