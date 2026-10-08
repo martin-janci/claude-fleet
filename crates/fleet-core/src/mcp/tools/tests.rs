@@ -990,6 +990,60 @@ fn set_secret_value_never_reaches_the_persisted_audit_trail() {
     assert_eq!(detail, "set_secret by master: host_alias=mefistos name=FOO");
 }
 
+/// SEC: `ask { answer, values }` carries a form's secret fields in `values`.
+/// The audit row goes onto the controller's timeline and out to every client
+/// as `session:event`; neither may ever hold a value. The audit keeps the
+/// fact (how many fields), not the content.
+#[test]
+fn ask_values_never_reach_the_audit_row_or_the_announced_event() {
+    struct Capture(Mutex<Vec<String>>);
+    impl crate::events::EventBus for Capture {
+        fn emit(&self, e: &crate::events::RowChange) {
+            if let crate::events::RowChange::SessionEventAdded(ev) = e {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(ev.detail.clone().unwrap_or_default());
+            }
+        }
+    }
+    let bus = Arc::new(Capture(Mutex::new(Vec::new())));
+    let store = Arc::new(Mutex::new(
+        Store::open_with_bus_in_memory(bus.clone()).unwrap(),
+    ));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({
+        "answer": "f_x",
+        "values": { "pw": "hunter2-unique-zz", "user": "ada-unique-yy" }
+    });
+    persist_audit(&store, "ask", args.as_object(), &Caller::master());
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    let detail = events
+        .iter()
+        .find(|e| e.kind == "mcp_call")
+        .expect("mcp_call event")
+        .detail
+        .clone()
+        .unwrap();
+    assert!(!detail.contains("hunter2-unique-zz"), "{detail}");
+    assert!(!detail.contains("ada-unique-yy"), "{detail}");
+    assert_eq!(detail, "ask by master: answer=f_x values=<2 fields>");
+    let announced = bus.0.lock().unwrap().clone();
+    assert!(
+        !announced.is_empty() && announced.iter().all(|d| !d.contains("unique-")),
+        "{announced:?}"
+    );
+}
+
 /// SEC: a linked hub's message bodies ride `peer_exchange`'s `send` array,
 /// and `redact_args` only redacts top-level string keys — an array is
 /// rendered as raw JSON, so up to the summary cap of a peer's body would
@@ -2338,6 +2392,7 @@ fn router_sum_serves_every_tool() {
         include_str!("updates.rs"),
         include_str!("downloads.rs"),
         include_str!("sharing.rs"),
+        include_str!("forms.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2349,8 +2404,9 @@ fn router_sum_serves_every_tool() {
     );
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
     // claim tools (T12) + the New session picker's `project_picks` /
-    // `set_project_pick` + org administration's `org_admin` (phase B).
-    assert_eq!(served, 117);
+    // `set_project_pick` + org administration's `org_admin` (phase B) +
+    // chat forms' `ask`.
+    assert_eq!(served, 118);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3866,7 +3922,16 @@ fn the_served_definition_budget_stays_bounded() {
     /// +1,137 bytes).
     /// Measured at 81,951 on 2026-10-08 after task editing (`work_link
     /// { edit }` and its `assignees` argument, +257 bytes).
-    const BUDGET_BYTES: usize = 82_051;
+    /// Measured at 81,648 on 2026-10-08 after merging `main` (80,099) into
+    /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
+    /// sides' sum).
+    /// Measured at 83,243 on 2026-10-08 after merging `main` (81,694) into
+    /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
+    /// sides' sum).
+    /// Measured at 83,534 on 2026-10-08 after merging `main` (81,951, task
+    /// editing) into chat forms (the `ask` tool): 34 bytes above the two
+    /// sides' sum.
+    const BUDGET_BYTES: usize = 83_634;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -4982,6 +5047,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_turn_at",
             "needs_attention",
             "org_id",
+            "pending_form",
             "pending_input",
             "project_id",
             "safe_kill_state",
@@ -9992,6 +10058,10 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("safe_kill_session", &["Own"]),
     ("set_friendly_name", &["Drive"]),
     ("spawn_review", &["Own"]),
+    // forms.rs
+    // `list` and `get` and `wait` read the form's session; `answer` and
+    // `decline` drive it.
+    ("ask", &["Drive", "Read"]),
     // messaging.rs
     // `Read` to read, `Drive` when `mark_read` advances the row's cursor.
     ("inbox", &["Drive", "Read"]),
@@ -10400,6 +10470,9 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
         // reason: without this line `send_file`'s handler is invisible and
         // its `SESSION_REACH` row reads as stale.
         "downloads.rs",
+        // Chat forms: `ask`'s list/get/wait read the form's session, its
+        // answer/decline drive it.
+        "forms.rs",
     ] {
         let src = std::fs::read_to_string(dir.join(file)).expect("read a tool file");
         let code = src
@@ -17836,6 +17909,262 @@ async fn org_admin_lists_for_a_device_and_changes_only_for_a_trusted_one() {
         store.lock().unwrap().active_client_tokens().unwrap().len(),
         1
     );
+}
+
+// ---- chat forms: the `ask` tool ---------------------------------------------
+
+fn small_form() -> serde_json::Value {
+    serde_json::json!({ "spec": "fleet.form/1", "title": "Pick", "steps": [
+        { "title": "One", "fields": [ { "name": "x", "type": "text", "label": "X", "required": true } ] } ] })
+}
+
+fn ask_p() -> AskParams {
+    AskParams {
+        form: None,
+        why: None,
+        wait: None,
+        cancel: None,
+        list: None,
+        get: None,
+        answer: None,
+        values: None,
+        decline: None,
+        note: None,
+        timeout_s: None,
+    }
+}
+
+#[tokio::test]
+async fn an_agent_asks_a_person_answers_and_the_agent_gets_the_answers() {
+    let g = gate_fixture();
+    let (a_row, ada) = (g.a_row, g.ada);
+    let t = test_tools(g.store);
+    let asking = t.ask(
+        Extension(pane_caller(Some("%7"))),
+        Parameters(AskParams {
+            form: Some(small_form()),
+            timeout_s: Some(30),
+            ..ask_p()
+        }),
+    );
+    let answering = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let id = t
+            .store
+            .lock()
+            .unwrap()
+            .pending_form_of_session(a_row)
+            .unwrap()
+            .unwrap()
+            .form_id;
+        let values = serde_json::from_value(serde_json::json!({ "x": "hello" })).unwrap();
+        let answered = t
+            .ask(
+                Extension(device_of(ada, ada)),
+                Parameters(AskParams {
+                    answer: Some(id),
+                    values: Some(values),
+                    ..ask_p()
+                }),
+            )
+            .await;
+        assert!(answered.is_ok(), "{answered:?}");
+    };
+    let (out, ()) = tokio::join!(asking, answering);
+    let out = out.expect("the agent's call returns");
+    let body = text_of(&out.content[0]);
+    assert!(
+        body.contains("\"answered\"") && body.contains("hello"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_caller_that_is_no_session_cannot_ask() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    for caller in [Caller::master(), pane_caller(None)] {
+        let err = t
+            .ask(
+                Extension(caller),
+                Parameters(AskParams {
+                    form: Some(small_form()),
+                    ..ask_p()
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(&err), "E_NOT_A_SESSION");
+    }
+}
+
+#[tokio::test]
+async fn a_host_token_never_answers_not_even_its_own_form() {
+    let g = gate_fixture();
+    let a_row = g.a_row;
+    let t = test_tools(g.store);
+    let id = crate::service::forms::open(&t.store, a_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let values = serde_json::from_value(serde_json::json!({ "x": "y" })).unwrap();
+    let err = t
+        .ask(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(AskParams {
+                answer: Some(id.clone()),
+                values: Some(values),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+    let err = t
+        .ask(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(AskParams {
+                decline: Some(id),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+}
+
+#[tokio::test]
+async fn someone_elses_session_form_is_not_answerable() {
+    let g = gate_fixture();
+    let (b_row, ada) = (g.b_row, g.ada);
+    let t = test_tools(g.store);
+    let id = crate::service::forms::open(&t.store, b_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let values = serde_json::from_value(serde_json::json!({ "x": "y" })).unwrap();
+    let err = t
+        .ask(
+            Extension(device_of(ada, ada)),
+            Parameters(AskParams {
+                answer: Some(id),
+                values: Some(values),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        ["E_FORBIDDEN", "E_NOTFOUND"].contains(&err_code(&err).as_str()),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_is_the_asking_sessions_or_the_masters_alone() {
+    let g = gate_fixture();
+    let (a_row, b_row, ada) = (g.a_row, g.b_row, g.ada);
+    let t = test_tools(g.store);
+    let a_form = crate::service::forms::open(&t.store, a_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let b_form = crate::service::forms::open(&t.store, b_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let cancel = |id: &str| AskParams {
+        cancel: Some(id.to_string()),
+        ..ask_p()
+    };
+    // A host token whose pane proves ada's row (`%7`) cannot withdraw the
+    // form of another session on the same host.
+    let err = t
+        .ask(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(cancel(&b_form)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+    // A host token that proves no session cannot cancel anything either.
+    let err = t
+        .ask(Extension(pane_caller(None)), Parameters(cancel(&a_form)))
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+    // A paired device is not the master, even for its own person's session.
+    let err = t
+        .ask(Extension(device_of(ada, ada)), Parameters(cancel(&a_form)))
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+    for id in [&a_form, &b_form] {
+        assert_eq!(
+            crate::service::forms::get(&t.store, id).unwrap().state,
+            "pending",
+            "a refused cancel changes nothing"
+        );
+    }
+    // The asking session itself, and the master, can.
+    t.ask(
+        Extension(pane_caller(Some("%7"))),
+        Parameters(cancel(&a_form)),
+    )
+    .await
+    .expect("the asking session withdraws its own form");
+    t.ask(Extension(Caller::master()), Parameters(cancel(&b_form)))
+        .await
+        .expect("the master withdraws any form");
+}
+
+#[tokio::test]
+async fn list_returns_only_the_forms_of_sessions_the_caller_can_read() {
+    let g = gate_fixture();
+    let (a_row, b_row, ada) = (g.a_row, g.b_row, g.ada);
+    let t = test_tools(g.store);
+    let a_form = crate::service::forms::open(&t.store, a_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let b_form = crate::service::forms::open(&t.store, b_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let listed = |out: CallToolResult| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(text_of(&out.content[0])).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["form_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let list = || AskParams {
+        list: Some(AskListFilter::default()),
+        ..ask_p()
+    };
+    let ids = listed(
+        t.ask(Extension(device_of(ada, ada)), Parameters(list()))
+            .await
+            .unwrap(),
+    );
+    assert!(ids.contains(&a_form), "{ids:?}");
+    assert!(
+        !ids.contains(&b_form),
+        "bob's form is not ada's to see: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn exactly_one_action_per_call() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    let err = t
+        .ask(
+            Extension(Caller::master()),
+            Parameters(AskParams {
+                get: Some("f_a".into()),
+                decline: Some("f_a".into()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_INVALID");
 }
 
 /// `since_turn` is bounded before the subtraction: `i64::MIN` overflowed it.

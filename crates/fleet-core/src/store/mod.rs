@@ -16,6 +16,7 @@ mod clients;
 mod conversations;
 mod decisions;
 mod downloads;
+mod forms;
 mod guides;
 mod hosts_accounts;
 mod item_deps;
@@ -84,6 +85,7 @@ pub use decisions::{
     DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
 pub use downloads::{DownloadRow, NewDownload};
+pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{
@@ -221,6 +223,10 @@ pub struct Store {
     /// embedding and needs no new `RowChange` variant, so no contract golden
     /// or `events.ts` allowlist entry moves.
     message_notify: Arc<tokio::sync::Notify>,
+    /// Signalled after a `form_requests` change, so `ask`'s wait wakes on an
+    /// answer instead of polling. Not the event bus, for `message_notify`'s
+    /// reasons.
+    form_notify: Arc<tokio::sync::Notify>,
     /// Per hub link, the generation of its latest `peer_exchange` — so a
     /// parked listener handler a newer exchange superseded can return at
     /// once. Process-local on purpose, like `kills`: it only has to outlive
@@ -458,6 +464,7 @@ fn migrated_template_copy() -> Result<Connection> {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         };
@@ -493,6 +500,7 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         };
@@ -532,6 +540,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(crate::events::NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         })
@@ -559,6 +568,7 @@ impl Store {
             bus: StoreBus::new(bus),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         };
@@ -583,6 +593,7 @@ impl Store {
             bus: StoreBus::new(Arc::new(NoopEventBus)),
             kills: Default::default(),
             message_notify: Arc::new(tokio::sync::Notify::new()),
+            form_notify: Arc::new(tokio::sync::Notify::new()),
             instance: next_instance(),
             peer_generations: Default::default(),
         };

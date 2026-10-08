@@ -1,0 +1,109 @@
+use super::forms::*;
+use serde_json::{json, Map, Value};
+
+fn cases(rel: &str) -> Value {
+    serde_json::from_str(&crate::repo_files::read(rel)).expect(rel)
+}
+
+#[test]
+fn every_shared_spec_case_reports_exactly_its_problems() {
+    let doc = cases("docs/form-examples/specs.json");
+    for case in doc["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let want: Vec<String> = serde_json::from_value(case["problems"].clone()).unwrap();
+        let got = match parse(&case["spec"]) {
+            Ok(_) => vec![],
+            Err(p) => p,
+        };
+        assert_eq!(got, want, "case {name:?}");
+    }
+}
+
+#[test]
+fn every_shared_answer_case_agrees() {
+    let doc = cases("docs/form-examples/answers.json");
+    let form = parse(&doc["spec"]).expect("the answers spec is valid");
+    for case in doc["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let values: Map<String, Value> = serde_json::from_value(case["values"].clone()).unwrap();
+        match check_answers(&form, &values) {
+            Ok(a) => {
+                assert_eq!(Value::Object(a.values), case["answers"], "case {name:?}");
+                let secrets: Vec<&str> = a.secrets.keys().map(String::as_str).collect();
+                let want: Vec<&str> = case["secrets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect();
+                assert_eq!(secrets, want, "case {name:?}");
+            }
+            Err(p) => {
+                assert_eq!(
+                    serde_json::to_value(&p).unwrap(),
+                    case["problems"],
+                    "case {name:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_secrets_value_is_kept_apart_from_the_answers() {
+    let form = parse(&json!({ "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "A", "fields": [ { "name": "pw", "type": "secret", "label": "P", "required": true } ] } ] }))
+    .unwrap();
+    let values: Map<String, Value> = serde_json::from_value(json!({ "pw": "hunter2" })).unwrap();
+    let a = check_answers(&form, &values).unwrap();
+    assert!(a.values.is_empty(), "never in the answers: {:?}", a.values);
+    assert_eq!(a.secrets.get("pw").map(String::as_str), Some("hunter2"));
+}
+
+#[test]
+fn debug_names_a_secret_but_never_prints_its_value() {
+    let mut a = Answers::default();
+    a.secrets.insert("pw".into(), "hunter2".into());
+    let shown = format!("{a:?}");
+    assert!(shown.contains("pw"), "{shown}");
+    assert!(!shown.contains("hunter2"), "{shown}");
+}
+
+#[test]
+fn an_oversized_spec_is_refused_before_parsing() {
+    let big = "x".repeat(MAX_SPEC_BYTES);
+    let err = parse(&json!({ "spec": "fleet.form/1", "title": big, "steps": [] })).unwrap_err();
+    assert!(
+        err[0].contains("bytes, over the 16384 a form may have"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn unknown_keys_are_refused() {
+    let err = parse(&json!({ "spec": "fleet.form/1", "title": "T", "colour": "red", "steps": [] }))
+        .unwrap_err();
+    assert!(err[0].starts_with("not a fleet.form/1 spec:"), "{err:?}");
+}
+
+fn repo_path(rel: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(rel)
+}
+
+#[test]
+fn form_docs_are_current() {
+    let schema = rmcp::schemars::schema_for!(FormSpec);
+    let text = serde_json::to_string_pretty(&schema).unwrap() + "\n";
+    let path = repo_path("docs/form-spec.schema.json");
+    if std::env::var("REGEN_FORM_DOCS").is_ok() {
+        std::fs::write(&path, &text).expect("write");
+        panic!("wrote docs/form-spec.schema.json — read the diff, then run again without REGEN_FORM_DOCS");
+    }
+    assert!(
+        std::fs::read_to_string(&path).unwrap_or_default() == text,
+        "\n\ndocs/form-spec.schema.json is out of date with crates/fleet-core/src/pages/forms.rs. Regenerate with:\n  \
+REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current\n"
+    );
+}

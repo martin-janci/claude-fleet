@@ -7,6 +7,14 @@ use super::*;
 /// tail); re-exported here so `SessionRow` can name them.
 pub use crate::service::pane_intel::{PendingInput, PendingOption};
 
+/// The chat form a session's agent is waiting on (chat forms, migration
+/// 119): read by a subselect on `form_requests`, null when none.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PendingForm {
+    pub form_id: String,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectRow {
     pub id: i64,
@@ -345,6 +353,10 @@ pub struct SessionRow {
     /// `~/.claude-profiles/<name>` on its host. `None` = the host's own login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_profile: Option<String>,
+    /// The form this session's agent asked and is waiting on. `serde(default)`
+    /// so an older hub's row (without it) still parses.
+    #[serde(default)]
+    pub pending_form: Option<PendingForm>,
 }
 
 /// `sessions.visibility` (migration 100): private to its owner, and to the
@@ -498,7 +510,10 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      (SELECT COALESCE(SUM(l.version * 1000003 + l.id), 0) FROM work_links l \
         JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
        WHERE p.session_id = sessions.id AND l.ended_at IS NULL) AS work_rev, \
-     pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile"
+     pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile, \
+     (SELECT json_object('form_id', f.form_id, 'title', json_extract(f.spec, '$.title')) \
+        FROM form_requests f WHERE f.session_id = sessions.id AND f.state = 'pending') \
+       AS pending_form"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -608,6 +623,9 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         owner_person_id: row.get(64)?,
         visibility: row.get(65)?,
         claude_profile: row.get(66)?,
+        pending_form: row
+            .get::<_, Option<String>>(67)?
+            .and_then(|j| serde_json::from_str(&j).ok()),
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).

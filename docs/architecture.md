@@ -369,6 +369,14 @@ bullet for the area you are about to change.
   as `catalog:kind/name` (a result without one is personal's). `a` / `s` /
   `e` / `i` act from the list or the Inspector only, and the layout narrows
   (rail to icons under 1100 px, the Inspector under the list under 860 px).
+- **Chat forms** (spec `docs/superpowers/specs/2026-10-07-chat-forms-design.md`,
+  guide `docs/forms.md`; `pages/forms.rs`, `store/forms.rs`,
+  `service/forms.rs`, the `ask` tool in `mcp/tools/forms.rs`, migration 119,
+  `src/lib/forms/`): an agent opens a `fleet.form/1` form in its session's
+  chat; a person answers; secret fields go to the host as files, never into
+  the database, a log or the audit row (`ask`'s `values` is rendered
+  `<N fields>`). Regenerate `docs/form-spec.schema.json` with
+  `REGEN_FORM_DOCS=1 cargo fleet-test -- form_docs_are_current`.
 - **File downloads** (spec
   `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
   095, contract revision 7): `send_file { session_id, path }` (a host's

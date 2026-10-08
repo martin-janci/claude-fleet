@@ -703,6 +703,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "session_conversations" => fx.t.session_conversations(ext, p!()).await,
         "send_message" => fx.t.send_message(ext, p!()).await,
         "wait_for_reply" => fx.t.wait_for_reply(ext, p!()).await,
+        // ---- forms.rs -----------------------------------------------------
+        "ask" => fx.t.ask(ext, p!()).await,
         "inbox" => fx.t.inbox(ext, p!()).await,
         "peer_status" => fx.t.peer_status(ext, p!()).await,
         "peer_exchange" => fx.t.peer_exchange(ext, p!()).await,
@@ -1616,6 +1618,35 @@ async fn run_matrix() {
         "peer_exchange",
         |_, _| json!({ "proto": 1, "fleet_id": "peer-fleet" }),
         |_| Out::Code(codes::E_FORBIDDEN),
+    )
+    .await;
+
+    // `ask` reaches a session through the form's row, not a `session_id`
+    // argument: `get` reads it, `decline` (a person's call; a host token is
+    // refused before the gate) drives it. One pending form on the private
+    // row serves both, `get` first because `decline` finishes it.
+    let form_id = crate::service::forms::open(
+        &fx.t.store,
+        fx.row,
+        &json!({ "spec": "fleet.form/1", "title": "Pick", "steps": [
+            { "title": "One", "fields": [ { "name": "x", "type": "text", "label": "X" } ] } ] }),
+        None,
+    )
+    .expect("a form opens on the private row")
+    .form_id;
+    m.gated("ask", Reach::Read, |_, _| json!({ "get": form_id }))
+        .await;
+    m.at(
+        "ask",
+        Reach::Drive,
+        |_, _| json!({ "decline": form_id }),
+        |who| {
+            if who.is_host() {
+                Out::Code(codes::E_FORBIDDEN)
+            } else {
+                tier(Reach::Drive, who)
+            }
+        },
     )
     .await;
 

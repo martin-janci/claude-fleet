@@ -227,6 +227,16 @@ pub fn spawn_reconcile_tick(
                 if lifted > 0 {
                     tracing::debug!("reconcile tick: {lifted} stale working stamp(s) lifted");
                 }
+                // Chat forms: expire unanswered ones, drop old rows, and
+                // remove secret files nobody needs from their hosts.
+                let now = unix_now();
+                let forms = service::forms::expire_and_purge(store, now);
+                let swept = service::forms::sweep_secret_dirs(store, &**ssh, now).await;
+                if forms + swept > 0 {
+                    tracing::debug!(
+                        "reconcile tick: {forms} form row(s) aged, {swept} secret dir(s) removed"
+                    );
+                }
                 // Wave 2 Track D: lifecycle automation rides the same tick, after
                 // the pass so it sees fresh `stuck_kind` / `idle_since` stamps.
                 // Both are opt-in through settings and cheap when off. Their

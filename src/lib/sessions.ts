@@ -177,6 +177,9 @@ export interface SessionRow {
      *  with the ticks kept (see `AnswerPrompt.svelte`). Absent = false. */
     multi?: boolean;
   } | null;
+  // Chat forms (migration 119): the form this session's agent asked and is
+  // waiting on. Optional: an older hub sends none.
+  pending_form?: { form_id: string; title: string } | null;
   /** The session's primary work link (migration 046), set through the work
    *  commands (`work.ts`). Absent from a hub older than the work graph. */
   work?: SessionWork | null;

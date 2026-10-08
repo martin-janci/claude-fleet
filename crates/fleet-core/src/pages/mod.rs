@@ -17,11 +17,14 @@
 pub mod actions;
 pub mod catalog;
 pub mod flows;
+pub mod forms;
 pub mod model;
 pub mod resources;
 pub mod sources;
 pub mod validate;
 
+#[cfg(test)]
+mod forms_tests;
 #[cfg(test)]
 mod tests;
 

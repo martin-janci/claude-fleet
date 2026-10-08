@@ -1,0 +1,96 @@
+{
+  "_about": "Shared answer cases for fleet.form/1. Rust (forms_tests.rs) and TS (form_model.test.ts) must agree exactly.",
+  "spec": {
+    "spec": "fleet.form/1", "title": "New project",
+    "steps": [
+      { "title": "Basics", "fields": [
+        { "name": "name", "type": "text", "label": "Name", "required": true, "max_len": 10 },
+        { "name": "kind", "type": "select", "label": "Kind", "options": [["web", "Web app"], ["cli", "CLI"]] },
+        { "name": "tags", "type": "multiselect", "label": "Tags", "options": [["a", "A"], ["b", "B"], ["c", "C"]] },
+        { "name": "port", "type": "number", "label": "Port", "integer": true, "min": 1, "max": 65535 },
+        { "name": "db", "type": "bool", "label": "Database" },
+        { "name": "agree", "type": "bool", "label": "I agree", "required": true } ] },
+      { "title": "Database", "when": { "field": "db", "truthy": true }, "fields": [
+        { "name": "engine", "type": "select", "label": "Engine", "required": true, "options": [["pg", "Postgres"], ["sqlite", "SQLite"]] },
+        { "name": "db_pass", "type": "secret", "label": "Password", "when": { "field": "engine", "eq": "pg" } } ] },
+      { "title": "Features", "when": { "field": "tags", "eq": "b" }, "fields": [
+        { "name": "features", "type": "multiselect", "label": "Features", "required": true, "options": [["x", "X"], ["y", "Y"]] } ] },
+      { "title": "Notes", "fields": [
+        { "name": "web_note", "type": "text", "label": "Web note", "when": { "field": "kind", "in": ["web"] } },
+        { "name": "no_db_note", "type": "text", "label": "No-database note", "when": { "field": "db", "truthy": false } },
+        { "name": "both_note", "type": "text", "label": "Both note", "when": { "all": [ { "field": "kind", "eq": "web" }, { "field": "db", "truthy": true } ] } },
+        { "name": "either_note", "type": "text", "label": "Either note", "when": { "any": [ { "field": "kind", "eq": "cli" }, { "field": "port", "eq": 8080 } ] } },
+        { "name": "not_note", "type": "text", "label": "Not-web note", "when": { "not": { "field": "kind", "eq": "web" } } },
+        { "name": "tag_note", "type": "text", "label": "Tag note", "when": { "field": "tags", "in": ["a", "c"] } } ] }
+    ]
+  },
+  "cases": [
+    {
+      "name": "everything filled, the database step shown",
+      "values": { "name": "my-app", "kind": "web", "tags": ["c", "a"], "port": 8080, "db": true, "agree": true, "engine": "pg", "db_pass": "s3cret" },
+      "answers": { "name": "my-app", "kind": "web", "tags": ["a", "c"], "port": 8080, "db": true, "agree": true, "engine": "pg" },
+      "secrets": ["db_pass"]
+    },
+    {
+      "name": "the database step hidden drops its values",
+      "values": { "name": "x", "db": false, "agree": true, "engine": "pg", "db_pass": "s3cret" },
+      "answers": { "name": "x", "db": false, "agree": true },
+      "secrets": []
+    },
+    {
+      "name": "a blank required text and an unticked consent",
+      "values": { "name": "   ", "agree": false },
+      "problems": [ { "field": "name", "problem": "is required" }, { "field": "agree", "problem": "is required" } ]
+    },
+    {
+      "name": "wrong shapes and bounds",
+      "values": { "name": "far too long a name", "kind": "tui", "tags": ["a", "z"], "port": 80.5, "db": "yes", "agree": true },
+      "problems": [
+        { "field": "name", "problem": "is longer than 10 characters" },
+        { "field": "kind", "problem": "must be one of the options" },
+        { "field": "tags", "problem": "must be a list of the options" },
+        { "field": "port", "problem": "must be a whole number" },
+        { "field": "db", "problem": "must be on or off" }
+      ]
+    },
+    {
+      "name": "a number under its minimum, and a field the form does not have",
+      "values": { "name": "x", "port": 0, "agree": true, "colour": "red" },
+      "problems": [ { "field": "port", "problem": "must be at least 1" }, { "field": "colour", "problem": "is not a field of this form" } ]
+    },
+    {
+      "name": "the database step shown but its required select empty",
+      "values": { "name": "x", "db": true, "agree": true },
+      "problems": [ { "field": "engine", "problem": "is required" } ]
+    },
+    {
+      "name": "in, truthy false and a hidden note: web, no database",
+      "values": { "name": "x", "kind": "web", "db": false, "agree": true, "web_note": "w", "no_db_note": "n", "both_note": "b", "either_note": "e", "not_note": "nn" },
+      "answers": { "name": "x", "kind": "web", "db": false, "agree": true, "web_note": "w", "no_db_note": "n" },
+      "secrets": []
+    },
+    {
+      "name": "any, not and a hidden field inside a shown step: cli, sqlite drops the password",
+      "values": { "name": "x", "kind": "cli", "port": 8080, "db": true, "agree": true, "engine": "sqlite", "db_pass": "s3cret", "web_note": "w", "no_db_note": "n", "both_note": "b", "either_note": "e", "not_note": "nn" },
+      "answers": { "name": "x", "kind": "cli", "port": 8080, "db": true, "agree": true, "engine": "sqlite", "either_note": "e", "not_note": "nn" },
+      "secrets": []
+    },
+    {
+      "name": "all and a multiselect read by in: web with a database, tag a",
+      "values": { "name": "x", "kind": "web", "tags": ["a"], "db": true, "agree": true, "engine": "pg", "both_note": "b", "tag_note": "t", "either_note": "e", "not_note": "nn" },
+      "answers": { "name": "x", "kind": "web", "tags": ["a"], "db": true, "agree": true, "engine": "pg", "both_note": "b", "tag_note": "t" },
+      "secrets": []
+    },
+    {
+      "name": "a multiselect read by eq shows its step, and is normalised; in does not match tag b",
+      "values": { "name": "x", "tags": ["b"], "agree": true, "features": ["y", "x"], "tag_note": "t" },
+      "answers": { "name": "x", "tags": ["b"], "agree": true, "features": ["x", "y"] },
+      "secrets": []
+    },
+    {
+      "name": "a required multiselect left empty",
+      "values": { "name": "x", "tags": ["b"], "agree": true, "features": [] },
+      "problems": [ { "field": "features", "problem": "is required" } ]
+    }
+  ]
+}

@@ -731,6 +731,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::LongPoll,
     },
+    // forms.rs — chat forms: an agent's `ask { form | wait }` is a bounded
+    // wait (≤ 600 s), the rest are quick. Answering is a person's (refused to
+    // host tokens in the tool).
+    ToolPolicy {
+        name: "ask",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
     ToolPolicy {
         name: "session_transcript",
         access: Access::Client,
@@ -1917,6 +1927,10 @@ const REDACT_KEYS: &[&str] = &[
 /// length still leaks information about a secret). `secret` is `work_admin`'s
 /// tracker credential, for the same reason.
 const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret"];
+/// Argument keys whose value is an object of person-typed answers (`ask`'s
+/// `values` may carry a form's secret fields): only the field count is kept,
+/// as `<N fields>`, never a name or a value.
+const COUNT_KEYS: &[&str] = &["values"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// Replace every character that could end a line downstream — see
@@ -1959,7 +1973,13 @@ pub fn redact_args(args: Option<&serde_json::Map<String, serde_json::Value>>) ->
             continue;
         }
         let v = &map[k];
-        let rendered = if REDACT_KEYS.contains(&k.as_str()) {
+        let rendered = if COUNT_KEYS.contains(&k.as_str()) {
+            match v {
+                serde_json::Value::Object(o) => format!("<{} fields>", o.len()),
+                serde_json::Value::Null => "null".to_string(),
+                _ => "<redacted>".to_string(),
+            }
+        } else if REDACT_KEYS.contains(&k.as_str()) {
             match v {
                 serde_json::Value::String(s) => format!("<{} chars>", s.chars().count()),
                 serde_json::Value::Null => "null".to_string(),
@@ -2017,6 +2037,8 @@ mod tests {
             "apply_sync",
             // Writes a secret value; master-only.
             "set_secret",
+            // Opens, withdraws, answers and declines chat forms.
+            "ask",
             "no_such_tool",
         ] {
             assert!(!is_readonly_tool(t), "{t} must be mutating");
@@ -2471,6 +2493,10 @@ mod tests {
         // `work_admin`'s tracker credential: dropped entirely.
         let tracker = serde_json::json!({ "secret": "ATATT-unique-9", "tracker_id": 1 });
         assert_eq!(redact_args(tracker.as_object()), "tracker_id=1");
+        // `ask`'s `values` are person-typed answers (secret form fields):
+        // only the count is kept, no name and no value.
+        let ask = serde_json::json!({ "answer": "f_x", "values": { "pw": "hunter2-unique" } });
+        assert_eq!(redact_args(ask.as_object()), "answer=f_x values=<1 fields>");
     }
 
     /// The audit row is written before any tool validates its arguments, so

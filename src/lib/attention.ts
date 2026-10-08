@@ -178,7 +178,7 @@ export interface TriageRank {
 /** A2: `waiting_for` will distinguish permission, question and elicitation.
  *  Until then a blocked session is the only thing known to await the user. */
 function isWaiting(s: SessionRow): boolean {
-  return s.claude_status === 'blocked';
+  return s.claude_status === 'blocked' || s.pending_form != null;
 }
 
 /** A2: needs `last_viewed_at`, so nothing is done-unread yet. */

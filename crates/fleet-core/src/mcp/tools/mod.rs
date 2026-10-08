@@ -40,6 +40,7 @@ use std::sync::{Arc, Mutex};
 mod assets;
 mod downloads;
 mod fleet;
+mod forms;
 mod lifecycle;
 mod list_changed;
 mod messaging;
@@ -360,6 +361,7 @@ impl FleetTools {
             + Self::updates_router()
             + Self::downloads_router()
             + Self::sharing_router()
+            + Self::forms_router()
     }
 }
 

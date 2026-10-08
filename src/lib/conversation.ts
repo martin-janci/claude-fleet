@@ -619,6 +619,7 @@ const TOOL_VERBS: Record<string, string> = {
   WebFetch: 'Fetch',
   WebSearch: 'Search web',
   TodoWrite: 'Update todos',
+  'mcp__claude-fleet__ask': 'Form',
 };
 
 /** The short verb a tool line leads with; `mcp__srv__tool` → `srv · tool`. */

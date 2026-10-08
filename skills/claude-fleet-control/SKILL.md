@@ -217,6 +217,15 @@ one-to-many use `broadcast_prompt { host?, project_id?, status?, prompt }` —
 `status` filters on `claude_status` (e.g. `"idle"`); work sessions only,
 controller excluded.
 
+### Asking the person a form
+
+`ask { form, why }` opens a `fleet.form/1` form in YOUR session's chat and
+waits ≤ 600 s for the answers. Use it instead of AskUserQuestion when the
+person may not be at the terminal or the input has several fields or
+steps. `pending` → call `ask { wait: form_id }` again. A secret field
+comes back as a file path: use the file, then delete it. Format and
+limits: `docs/forms.md`.
+
 ## Tasks, subtasks and proposals (shared work context)
 
 - `work_link { action: "create", title, parent?: "item:<id>", project_id?, notes? }` — a native task `TASK-<id>`, or a subtask under `parent`. A standalone task needs the desktop or the master token; a per-host token may add subtasks under a task its own sessions work on.

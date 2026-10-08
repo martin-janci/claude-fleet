@@ -920,6 +920,10 @@
             {/if}
           </div>
         {/if}
+        {#if sess.pending_form}
+          <!-- Chat forms: the agent waits on a form; the row's own click opens the conversation. -->
+          <span class="form-chip" data-testid="row-form-chip" title={sess.pending_form.title}>Form waiting</span>
+        {/if}
         {#if answerView && promptBlocked === null}
           <!-- Claude is asking this row a question. The "Needs you" filter
                shows exactly these rows, so the answer belongs here and not
@@ -1208,6 +1212,18 @@
     color: var(--fg-muted);
     flex-shrink: 0;
     white-space: nowrap;
+  }
+  .form-chip {
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 0.05rem 0.28rem;
+    border-radius: 3px;
+    border: 1px solid color-mix(in srgb, var(--usage-warn) 45%, transparent);
+    color: var(--usage-warn);
+    flex-shrink: 0;
+    white-space: nowrap;
+    align-self: flex-start;
   }
   .inactive-chip {
     background: color-mix(in srgb, var(--fg-muted) 18%, transparent);

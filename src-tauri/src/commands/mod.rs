@@ -4,6 +4,7 @@ pub mod cancel;
 pub mod diagnostics;
 pub mod downloads;
 pub mod files;
+pub mod forms;
 pub mod health;
 pub mod history;
 pub mod hosts;

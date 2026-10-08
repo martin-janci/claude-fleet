@@ -130,7 +130,11 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 /// may read and no way to read it. Refusing that hub with the skew banner
 /// says what to do (update the hub); leaving it `InRange` would ship a
 /// sharing UI that silently does nothing.
-pub const MIN_HUB_CONTRACT: u32 = 8;
+///
+/// Raised to 9 for revision 9: chat forms route `list_forms`, `get_form`,
+/// `answer_form` and `decline_form` to the new `ask` tool. A revision-8 hub
+/// serves none of it, so every answer would fail with an unknown tool.
+pub const MIN_HUB_CONTRACT: u32 = 9;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -143,11 +147,13 @@ pub const MIN_HUB_CONTRACT: u32 = 8;
 /// Raised to 8 with revision 8 (multi-user M1's five sharing tools), in that
 /// lockstep: this build's own `fleet-hub` reports 8, and leaving this at 7
 /// would make every desktop refuse the hub it ships beside as `TooNew`.
-pub const MAX_HUB_CONTRACT: u32 = 8;
+///
+/// Raised to 9 with revision 9 (chat forms' `ask` tool), in that lockstep.
+pub const MAX_HUB_CONTRACT: u32 = 9;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
-/// are `8..=8` today, and unlike the original `0..=1` range this one CAN
+/// are `9..=9` today, and unlike the original `0..=1` range this one CAN
 /// exercise "too old" through a live `u32` (a hub reporting `0`…`3` is below
 /// `4`) — see `tests_contract.rs`, independent of whichever bounds
 /// a future release ships.

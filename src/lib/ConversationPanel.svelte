@@ -18,6 +18,7 @@
   import { requestOpenPath, OPEN_PATH_CONTEXT, type OpenPathFn } from './app_views';
   import { sendPrompt, hasNoPane, sessions, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
+  import FormCard from './forms/FormCard.svelte';
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
@@ -647,6 +648,30 @@
           rowPending: session.pending_input,
           probe: liveProbe,
         }),
+  );
+
+  // Chat forms: the form this session's agent waits on. `closedForm` keeps
+  // the last one for a line saying how it ended, once the row drops it.
+  const pendingForm = $derived(viewing === null ? (session.pending_form ?? null) : null);
+  let closedForm = $state<string | null>(null);
+  let lastFormId: string | null = null;
+  let lastFormSessionId: number | null = null;
+  $effect(() => {
+    const id = session.pending_form?.form_id ?? null;
+    if (session.id !== lastFormSessionId) {
+      // This panel is one instance across sessions: a different session is
+      // not a form that closed, and its predecessor's line does not follow.
+      lastFormSessionId = session.id;
+      closedForm = null;
+      lastFormId = id;
+      return;
+    }
+    if (lastFormId && id === null) closedForm = lastFormId;
+    if (id !== null) closedForm = null;
+    lastFormId = id;
+  });
+  const formBlocked = $derived(
+    hubActionBlocked('answer_form', $hubStatus, $hubConnection) ?? $sessionBlocked(session, 'answer_form'),
   );
 
   // What the running turn is doing right now (the current conversation only:
@@ -2200,7 +2225,12 @@
           {/each}
         {/if}
         {#if viewing === null}
-        {#if answerView && writeBlocked === null}
+        {#if pendingForm}
+          <FormCard
+            formId={pendingForm.form_id}
+            sessionName={session.friendly_name ?? session.tmux_name}
+            blocked={formBlocked} />
+        {:else if answerView && writeBlocked === null}
           <!-- Hidden rather than disabled when this client may not write to
                the session (multi-user M1), the same shape `SessionRowItem`
                uses for the same card: it is a set of answer BUTTONS, each one
@@ -2247,6 +2277,9 @@
             <code>session_activity</code>. The status above still follows the session row. Update the hub to get it back.
           </p>
         {/if}
+        {/if}
+        {#if closedForm && !pendingForm}
+          <FormCard formId={closedForm} sessionName={session.friendly_name ?? session.tmux_name} blocked={null} closed ondismiss={() => (closedForm = null)} />
         {/if}
       </div>
     </div>

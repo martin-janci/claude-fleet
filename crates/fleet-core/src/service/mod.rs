@@ -24,6 +24,7 @@ pub mod delivery;
 pub mod diagnostics;
 pub mod downloads;
 pub mod evidence;
+pub mod forms;
 pub mod fresh;
 pub mod gc;
 pub mod guides;
