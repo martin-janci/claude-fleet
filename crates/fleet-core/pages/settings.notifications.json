@@ -1,0 +1,26 @@
+{
+  "spec": "fleet.page/1",
+  "id": "settings.notifications",
+  "title": "Notifications",
+  "parent": "settings",
+  "layout": "category",
+  "intro": "What reaches you, and where. The hub keeps these, so the desktop and the phone follow the same matrix and the same quiet hours.",
+  "sections": [
+    {
+      "title": "Where each state reaches you",
+      "matrix": true,
+      "items": [
+        { "type": "field", "key": "notify.desktop" },
+        { "type": "field", "key": "notify.phone" },
+        { "type": "field", "key": "notify.sound" }
+      ]
+    },
+    {
+      "title": "Quiet hours",
+      "items": [
+        { "type": "field", "key": "notify.quiet_hours" },
+        { "type": "field", "key": "notify.quiet_except" }
+      ]
+    }
+  ]
+}

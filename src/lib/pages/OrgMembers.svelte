@@ -10,12 +10,14 @@
   import { buildArgs, type ActionSpec, type ResourceRecord } from './resources';
   import {
     memberPairing,
+    memberSessionsWord,
     orgMemberGrants,
     pairMemberDevice,
     type GrantsOnRemove,
     type MemberGrants,
     type OrgMember,
   } from '../orgs';
+  import { uiLayout } from '../prefs';
 
   let {
     record,
@@ -42,6 +44,10 @@
   const orgId = $derived(Number(record.id));
   const orgName = $derived(String(record.name ?? 'the org'));
   const showDevices = $derived(members.some((m) => m.devices !== undefined));
+  // Redesign 11.7c, New layout: each member's live sessions, the ones you
+  // may not open counted and never named.
+  const showSessions = $derived($uiLayout === 'new' && members.some((m) => (m.live_sessions ?? 0) > 0));
+  const PRIVATE_TITLE = 'Private: you see that it exists, not what it is';
   const nameOf = (m: OrgMember) => m.display_name || m.name;
 
   /** Since when an org share reaches them, in words. */
@@ -130,6 +136,7 @@
         <th scope="col">Person</th>
         <th scope="col">Role</th>
         {#if showDevices}<th scope="col">Devices</th>{/if}
+        {#if showSessions}<th scope="col">Sessions</th>{/if}
         <th scope="col" title="An org share made before this day does not reach them">Sees shares since</th>
         {#if !readonly}<th scope="col"><span class="sr">Actions</span></th>{/if}
       </tr>
@@ -142,6 +149,10 @@
           </td>
           <td>{m.role}</td>
           {#if showDevices}<td class="dim" data-testid="member-devices">{m.devices?.length ? m.devices.join(', ') : 'none'}</td>{/if}
+          {#if showSessions}<td
+              data-testid="member-sessions"
+              title={(m.private_sessions ?? 0) > 0 ? PRIVATE_TITLE : undefined}>{memberSessionsWord(m)}</td
+            >{/if}
           <td data-testid="member-shares-since">{sharesSince(m)}</td>
           {#if !readonly}
             <td class="acts">

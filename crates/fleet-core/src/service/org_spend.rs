@@ -100,6 +100,63 @@ pub fn series(s: &Store, org: i64, now: i64) -> Vec<SpendDay> {
         .collect()
 }
 
+/// One person's share of an org's live spend (redesign 11.8), in
+/// micro-USD; `person_id` absent is nobody's: routines, missions and
+/// sessions nobody claimed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonSpend {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person_id: Option<i64>,
+    /// Their display name, else their name; absent for nobody's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub today_micros: i64,
+    pub week_micros: i64,
+    pub month_micros: i64,
+}
+
+/// Org `org`'s live spend at `now` by person, for everyone who spent in
+/// the month or the week: most this month first, nobody's last. The rows
+/// add up to the org's own figures; the caller decides whether to show them
+/// at all ([`sees_all_spend`]), never which.
+pub fn by_person(s: &Store, org: i64, now: i64) -> Vec<PersonSpend> {
+    let today = now.div_euclid(SECS_PER_DAY);
+    let read = |since: i64| s.org_person_live_cost_since(org, since).unwrap_or_default();
+    let (day, week, month) = (read(today), read(today - 6), read(month_start_day(today)));
+    let mut ids: Vec<i64> = week.keys().chain(month.keys()).copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut out: Vec<PersonSpend> = ids
+        .into_iter()
+        .map(|id| {
+            let person = (id != 0).then_some(id);
+            let name = person
+                .and_then(|p| s.get_person(p).ok().flatten())
+                .map(|p| p.display_name.unwrap_or(p.name));
+            PersonSpend {
+                person_id: person,
+                name: name.or_else(|| person.map(|p| format!("person {p}"))),
+                today_micros: day.get(&id).copied().unwrap_or(0),
+                week_micros: week.get(&id).copied().unwrap_or(0),
+                month_micros: month.get(&id).copied().unwrap_or(0),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        (
+            a.person_id.is_none(),
+            std::cmp::Reverse(a.month_micros),
+            std::cmp::Reverse(a.week_micros),
+        )
+            .cmp(&(
+                b.person_id.is_none(),
+                std::cmp::Reverse(b.month_micros),
+                std::cmp::Reverse(b.week_micros),
+            ))
+    });
+    out
+}
+
 /// How many days the calendar month of `day` has.
 pub fn days_in_month(day: i64) -> i64 {
     let start = month_start_day(day);
@@ -259,5 +316,95 @@ mod tests {
             reached(got, (0, 5)),
             vec![(Period::Monthly, 5_000_000, 5_000_000)]
         );
+    }
+
+    /// Redesign 11.8: each session's spend is booked to its owner as well;
+    /// the rows add up to the org's figures, most this month first and
+    /// nobody's (no owner) last.
+    #[test]
+    fn spend_by_person_adds_up_to_the_orgs_and_puts_nobody_last() {
+        let s = Store::open_in_memory().unwrap();
+        s.insert_host("a", Some("a")).unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_host_org("a", Some(org)).unwrap();
+        let ada = s.create_person("ada", Some("Ada L")).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        let session = |name: &str, owner: Option<i64>| {
+            let id = s
+                .upsert_session(name, "a", None, None, 1, 1, "running", None)
+                .unwrap();
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET owner_person_id = ?1 WHERE id = ?2",
+                    rusqlite::params![owner, id],
+                )
+                .unwrap();
+            id
+        };
+        let (a, b, routine) = (
+            session("x", Some(ada)),
+            session("y", Some(bob)),
+            session("z", None),
+        );
+        let today = crate::service::usage::day_number("2026-10-20").unwrap();
+        let book = |id: i64, day: i64, micros: i64| {
+            s.apply_usage(
+                id,
+                "a",
+                &UsageDelta {
+                    reset: false,
+                    totals: UsageTotals {
+                        cost_micros: micros,
+                        input_tokens: 1,
+                        ..Default::default()
+                    },
+                    model: None,
+                    offset: id * 1_000 + day + micros,
+                    source: "s.jsonl".into(),
+                    last_msg_id: None,
+                    last_msg_usage: None,
+                    now: day * SECS_PER_DAY + 10,
+                    by_day: Vec::new(),
+                    backfill_until: None,
+                },
+            )
+            .unwrap();
+        };
+        book(a, today - 10, 4_000_000); // this month, not this week
+        book(a, today, 1_000_000);
+        book(b, today - 2, 2_000_000);
+        book(routine, today, 9_000_000);
+        let now = today * SECS_PER_DAY + 100;
+        let rows = by_person(&s, org, now);
+        let line = |r: &PersonSpend| {
+            (
+                r.name.clone(),
+                r.today_micros,
+                r.week_micros,
+                r.month_micros,
+            )
+        };
+        assert_eq!(
+            rows.iter().map(line).collect::<Vec<_>>(),
+            vec![
+                (Some("Ada L".into()), 1_000_000, 1_000_000, 5_000_000),
+                (Some("bob".into()), 0, 2_000_000, 2_000_000),
+                (None, 9_000_000, 9_000_000, 9_000_000),
+            ]
+        );
+        assert_eq!(rows[2].person_id, None);
+        let total = spend_by_org(&s, now)[&org];
+        let sum = |f: fn(&PersonSpend) -> i64| rows.iter().map(f).sum::<i64>();
+        assert_eq!(
+            (
+                sum(|r| r.today_micros),
+                sum(|r| r.week_micros),
+                sum(|r| r.month_micros)
+            ),
+            (total.today_micros, total.week_micros, total.month_micros)
+        );
+        // Removing the org takes its person roll-up with it.
+        s.remove_org(org).unwrap();
+        assert!(by_person(&s, org, now).is_empty());
     }
 }

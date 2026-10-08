@@ -401,6 +401,10 @@ pub struct SessionRow {
 /// agent adapters land (redesign step 12.1), the only agent fleet launches.
 pub const AGENT_CLAUDE: &str = "claude";
 
+/// `sessions.agent` (migration 121): Google's Antigravity CLI (`agy`),
+/// launched through `agent_adapter::Agy` (redesign step 12.3).
+pub const AGENT_AGY: &str = "agy";
+
 /// `sessions.agent` (migration 121): no agent, a plain login shell
 /// (`kind = 'shell'`).
 pub const AGENT_SHELL: &str = "shell";
@@ -408,7 +412,7 @@ pub const AGENT_SHELL: &str = "shell";
 /// Every value migration 121's `CHECK` admits. `codex` and `agy` are
 /// reserved for the adapters: a row may carry them, `new_session` refuses
 /// them until fleet can launch them.
-pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, "codex", "agy", AGENT_SHELL];
+pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, "codex", AGENT_AGY, AGENT_SHELL];
 
 /// [`SessionRow::agent`] when a frame carries no `agent` key: a hub built
 /// before migration 121, whose sessions all run Claude Code.

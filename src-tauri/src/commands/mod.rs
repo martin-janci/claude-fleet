@@ -22,6 +22,7 @@ pub mod operator;
 pub mod org_devices;
 pub mod orgs;
 pub mod pages;
+pub mod presence;
 pub mod projects;
 pub mod prs;
 pub mod quick_replies;

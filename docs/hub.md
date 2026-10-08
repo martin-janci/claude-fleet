@@ -2215,12 +2215,21 @@ options, and without it the view is a list a phone can read but not act on —
 answering that dialog is the one thing a pager exists for. `needs_attention`
 is there for the mirror of that reason: projected away, the view would hand a
 phone the columns to re-derive the answer instead of the answer. Its reasons,
-most urgent first (`service/attention.rs`): `waiting`, `stuck`, `stop_failed`,
+most urgent first (`service/attention.rs`): `waiting`, `stuck`, `host_down`
+(the session's host was pinged and did not answer), `account_limit` (its
+account's 5-hour or weekly window is used up and the session is not
+working), `no_credentials` (its account's login is missing, expired or
+rejected, and the session is not working), `stop_failed`,
 `failed`, `context_full` (at or past `health.context_red_pct`),
 `stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
 with no activity; it lifts on the next hook, when its terminal is opened,
 when the row works again, or after `reconcile.stale_working_ttl_secs`),
-`ci_failing` and `lifecycle`. `tags`
+`ci_failing` and `lifecycle`. The three after `stuck` are decided from what
+the hub's event bus follows of hosts and account usage, not from the row, so
+every site that stamps `needs_attention` (`list_sessions`, `/events`, Today,
+the org counts, the work view) agrees. Beside the reason, `state` (contract
+11) is the attention state it puts the session in: `action_required`,
+`failed`, `blocked` (the three above) or `paused` (`lifecycle`). `tags`
 is there because the phone's tag editor starts from them and
 `set_session_tags` replaces the whole list: without them a phone that added
 one tag deleted the rest. `work` (the primary work link: key, title) is the
@@ -3185,11 +3194,12 @@ standalone exactly as before.
   setting; the marker exists for text an agent produced.
 - **Destructive confirmations are answered on the hub.** With
   `mcp.confirm_destructive` on, `kill_session`, `delete_worktree`,
-  `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`. The
-  desktop's confirmation dialog answers *its own* queue, which is empty in
-  this mode. Approve it on the hub — this window will follow: the approved
-  change arrives over the hub's event stream like any other, so there is
-  nothing to refresh.
+  `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`, and the
+  request waits in the hub's queue. The desktop's dialog and Control's
+  cards list and answer that queue (`mcp_confirms`, `answer_mcp_confirm`)
+  and follow it live through `confirm:changed`; the approved change then
+  arrives over the hub's event stream like any other. A hub older than
+  these tools has no queue to show: the dialog stays empty, as before.
 - **Fleet administration is refused.** A client is not the fleet's
   administrator, so those controls are disabled in the interface with the
   reason rather than failing at the click. *What a hub client refuses* below
@@ -3269,15 +3279,16 @@ Every command below refuses in hub client mode; the full table, with the command
 | `hide_host` | hiding a host is fleet administration, which the hub reserves for its own operator — hide it there with `fleet-hub` |
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
-| `list_account_usage` | this app does not poll account usage while a hub owns the fleet, so the cache is empty; read usage on the hub |
 | `list_host_setups` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
 | `merge_host` | merging one host's rows into another is fleet administration, which the hub reserves for its own operator — run it there with `fleet-hub host merge <from> <into>` |
 | `probe_ssh_alias` | it SSHes from this machine to preview a host for the Add-host dialog; the hub is the one that must be able to reach it |
+| `propose_host_placement` | the decision model and the account usage are the hub's while it owns the fleet; pick the host as usual |
 | `provision_hosts` | it rewrites every host's hook block to report to this app; provision from the hub with `fleet-hub provision [--host <alias>] [--content-only]` |
 | `purge_project` | it deletes Claude Code state on every host over this machine's SSH connections and the hub exposes no tool for it; purge from the hub |
+| `record_host_placement` | the decision model's runs are recorded on the hub that owns the fleet; nothing to record here |
 | `refresh_account_usage` | it reads the account's usage over this machine's SSH connection to the host; refresh it on the hub |
 | `remove_host` | removing a host is fleet administration, which the hub reserves for its own operator — remove it there with `fleet-hub` |
 | `remove_tracker` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |
@@ -3560,22 +3571,21 @@ deliberately.
   too; a leftover sidecar is tightened on the next open.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
-  UI confirmation dialog. A hub has no UI to show that dialog to — leave the
-  setting off (its default) on a hub; if it is on, a request needing
-  confirmation is refused (`E_CONFIRM_REQUIRED`) with no way to approve it,
-  and the hub logs a warning naming the tool and nonce. A `state.db` copied
-  from a desktop can carry it switched on; `fleet-hub serve` logs a warning
-  at startup when it is.
+  UI confirmation dialog. On a hub the request waits for the owner's paired
+  device instead (`mcp_confirms`, `answer_mcp_confirm`) and expires after
+  ten minutes unanswered; leave the setting off (its default) unless one of
+  your devices will answer. A `state.db` copied from a desktop can carry it
+  switched on; `fleet-hub serve` logs a warning at startup when it is.
 - **The operator's starts and kills.** The UX agent's operator session
   must have its session starts and restarts (`new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task` with
   `new_worker`, `restore_host_sessions` other than a `dry_run`,
   `recreate_session`, `restart_session`, `work_link` `start` / `resume`)
   and kills approved by a person, whatever
-  `mcp.confirm_destructive` says (work graph M9.7, decision D12). A hub has
-  no approver, so an operator homed on a hub-served fleet is refused those
-  calls (`E_FORBIDDEN`, "no approver") and says so; the person does them from
-  the sidebar.
+  `mcp.confirm_destructive` says (work graph M9.7, decision D12). On a hub
+  the call waits in the hub's queue until the owner approves it from a
+  paired device (redesign step 9.2: a card in Control's transcript, or the
+  dialog); the operator can neither list nor answer that queue.
 - **Rotating tokens.** `fleet-hub token regenerate` mints a fresh master
   token — reconfigure every client afterward. For host tokens, call
   `provision_hosts { rotate: true }` (from any client), which re-provisions

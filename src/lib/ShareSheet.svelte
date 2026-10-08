@@ -41,6 +41,8 @@
   import { shareSheetFor, sessionBlocked } from './share';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
+  import { devices, loadDevices } from './devices';
+  import { readOnlyRecipient } from './share_devices';
 
   const id = $derived($shareSheetFor);
   const session = $derived(id === null ? undefined : $sessions.find((s) => s.id === id));
@@ -116,8 +118,19 @@
     error = null;
     grants = null;
     listError = null;
-    if (forId !== null) void load(forId);
+    if (forId !== null) {
+      void load(forId);
+      // Only feeds the read-only warning (step 5.8); a client the hub will
+      // not list devices for keeps the list it had and warns about nobody.
+      void loadDevices();
+    }
   });
+
+  /** Step 5.8: a drive share to someone whose every paired device is
+   *  read-only can never send a prompt — say so before it is made. */
+  const readOnlyWarning = $derived(
+    kind === 'person' && level === 'drive' ? readOnlyRecipient(person, $devices) : null,
+  );
 
   // Nothing to show: the row left the store (killed, reaped, or — on a paired
   // desktop — revoked out from under us).
@@ -254,6 +267,9 @@
             onclick={doShare}>{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Sharing…' : 'Share'}</button
           >
         </div>
+        {#if readOnlyWarning}
+          <p class="warn" role="status" data-testid="share-readonly-warning">{readOnlyWarning}</p>
+        {/if}
         <!-- Phase D: an org share is a grant to the org's members of today
              (see the comment at the top of this file). -->
         <p class="note" data-testid="share-org-note">
@@ -382,6 +398,11 @@
   .row input {
     flex: 1 1 10rem;
     min-width: 0;
+  }
+  .warn {
+    margin: 0.3rem 0 0;
+    font-size: 0.85em;
+    color: var(--status-waiting);
   }
   .note {
     margin: 0.3rem 0 0;

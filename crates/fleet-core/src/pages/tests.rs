@@ -718,3 +718,44 @@ fn a_guide_is_a_short_list_of_distinct_steps() {
     }));
     assert!(messages(&[tabs]).contains("steps are sections, not tabs"));
 }
+
+fn matrix(items: Value) -> Page {
+    page(json!({
+        "spec": "fleet.page/1", "id": "t", "title": "T", "layout": "category",
+        "sections": [{ "title": "S", "matrix": true, "items": items }]
+    }))
+}
+
+/// 11.9: a matrix is choice-set settings over one set of options, at least
+/// two of them, each with its default widget.
+#[test]
+fn a_matrix_holds_choice_sets_over_the_same_options() {
+    let ok = matrix(json!([
+        { "type": "field", "key": "notify.desktop" },
+        { "type": "field", "key": "notify.phone" }
+    ]));
+    assert_eq!(messages(&[ok]), "");
+    for (items, want) in [
+        (
+            json!([{ "type": "field", "key": "notify.desktop" }]),
+            "at least two columns",
+        ),
+        (
+            json!([
+                { "type": "field", "key": "notify.desktop" },
+                { "type": "field", "key": "gc.enabled" }
+            ]),
+            "choice-set settings fields only",
+        ),
+        (
+            json!([
+                { "type": "field", "key": "notify.desktop" },
+                { "type": "field", "key": "notify.phone", "widget": "text" }
+            ]),
+            "choice-set settings fields only",
+        ),
+    ] {
+        let got = messages(&[matrix(items)]);
+        assert!(got.contains(want), "{got}");
+    }
+}

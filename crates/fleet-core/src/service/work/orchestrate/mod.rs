@@ -276,6 +276,8 @@ fn start_for(
         // The run's session is the mission's, whoever pressed Go
         // (migration 124): the origin chip names the mission.
         origin: Some(crate::store::SessionOrigin::mission(m.id)),
+        // The login the grant names (redesign 8.7); none, the host's own.
+        profile: grant.and_then(|g| g.profile.clone()),
         ..Default::default()
     })
 }
@@ -1116,7 +1118,7 @@ pub async fn plan_now(
 }
 
 /// `work_link { action: mission_grant, mission_id, level, hours, budget_cents?,
-/// hosts?, max_parallel? }`: a person signs what the loop may do by itself,
+/// hosts?, max_parallel?, profile? }`: a person signs what the loop may do by itself,
 /// for this plan, until it expires. Never an agent's: the scope must be a
 /// person's own, and the mission theirs to change.
 pub fn grant(
@@ -1149,6 +1151,13 @@ pub fn grant(
             .take(20)
             .collect::<Vec<_>>()
     });
+    let profile = args
+        .profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| crate::validate::claude_profile(p).map(|()| p.to_string()))
+        .transpose()?;
     let s = lock(store)?;
     let m = changeable(&s, scope, id)?;
     not_a_plan(&m)?;
@@ -1168,6 +1177,7 @@ pub fn grant(
             hosts,
             budget_micros: args.budget_cents.map(|c| c * 10_000),
             max_parallel: args.max_parallel.map(|p| p as i64),
+            profile: profile.clone(),
             expires_at: now_unix() + hours * 3600,
         },
     )?;
@@ -1177,7 +1187,7 @@ pub fn grant(
         "grant",
         &who,
         None,
-        serde_json::json!({ "level": level, "hours": hours, "budget_cents": args.budget_cents }),
+        serde_json::json!({ "level": level, "hours": hours, "budget_cents": args.budget_cents, "profile": profile }),
     );
     s.wake_mission(id)?;
     Ok(g)
@@ -1309,6 +1319,90 @@ fn planner_wanted(
     Ok(None)
 }
 
+/// The steps that start a worker session.
+const RUN_STEPS: &[&str] = &["run", "retry", "review", "test", "integrate"];
+
+/// The account a loop run of `step` would bill, when it is at or past
+/// `accounts.pause_at` (redesign 8.7): on the grant's first host, else the
+/// host the project last ran on (where the start would land), under the
+/// grant's login. `None` when the run's host cannot be told yet: the start
+/// then decides, as before.
+fn run_over_limit(
+    s: &Store,
+    m: &MissionRow,
+    step: &Step,
+    grant: Option<&GrantRow>,
+    now: i64,
+) -> Result<Option<crate::service::account_limits::OverLimit>, IpcError> {
+    let Some(item_id) = step.item_id else {
+        return Ok(None);
+    };
+    let Ok(start) = start_for(s, m, item_id, &Actor::Loop, grant) else {
+        return Ok(None);
+    };
+    let host = match start.host_alias {
+        Some(h) => Some(h),
+        None => match start.project_id {
+            Some(p) => s.last_host_for_project(p)?,
+            None => None,
+        },
+    };
+    let Some(host) = host else {
+        return Ok(None);
+    };
+    crate::service::account_limits::over_limit(s, &host, start.profile.as_deref(), now)
+}
+
+/// Drop the loop's run steps whose account is over the line (redesign 8.7):
+/// they wait, the mission stays active, and the next pass looks again. One
+/// `account_limit` event says why, not one per pass.
+fn hold_runs_over_limit(
+    s: &Store,
+    m: &MissionRow,
+    grant: Option<&GrantRow>,
+    steps: &mut Vec<Step>,
+    now: i64,
+) -> Result<(), IpcError> {
+    let mut why: Option<String> = None;
+    let mut kept = Vec::with_capacity(steps.len());
+    for st in steps.drain(..) {
+        if st.auto && RUN_STEPS.contains(&st.kind.as_str()) {
+            if let Some(over) = run_over_limit(s, m, &st, grant, now)? {
+                why.get_or_insert_with(|| over.reason());
+                continue;
+            }
+        }
+        kept.push(st);
+    }
+    *steps = kept;
+    let Some(why) = why else {
+        return Ok(());
+    };
+    let said = s
+        .mission_events(m.id, None, 1)?
+        .into_iter()
+        .next()
+        .is_some_and(|e| {
+            e.kind == "account_limit"
+                && e.payload
+                    .as_ref()
+                    .and_then(|p| p.get("why"))
+                    .and_then(|w| w.as_str())
+                    == Some(why.as_str())
+        });
+    if !said {
+        event(
+            s,
+            m.id,
+            "account_limit",
+            "loop",
+            None,
+            serde_json::json!({ "why": why }),
+        );
+    }
+    Ok(())
+}
+
 /// One pass over one mission, under its lease.
 pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
     let (m, a, steps, counts) = {
@@ -1360,9 +1454,12 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
             s.release_mission_lease(id, Some(now + IDLE_RECHECK_SECS), Some(now))?;
             return Ok(());
         }
-        let steps = steps_for(&s, &m, &a)?;
+        let mut steps = steps_for(&s, &m, &a)?;
         for st in steps.iter().filter(|st| st.kind == "ask") {
             ask_card(&s, id, st)?;
+        }
+        if a.effective >= AUTO_LEVEL {
+            hold_runs_over_limit(&s, &m, a.grant.as_ref(), &mut steps, now)?;
         }
         (m, a, steps, counts)
     };

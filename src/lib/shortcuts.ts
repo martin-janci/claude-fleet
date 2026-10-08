@@ -141,7 +141,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { status: 'planned', step: '5.5' }),
   row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { status: 'planned', step: '5.5' }),
   row('global', 'go-to-file', 'Go to file (Files tab only)',
-    split(['Alt+Meta+P'], ['Ctrl+Alt+P']), { status: 'planned', step: '5.3' }),
+    split(['Alt+Meta+P'], ['Ctrl+Alt+P'])),
   // Step 3.8: the list keys that work from anywhere outside a text field
   // (Sidebar, ShortcutSheet). ⌘1–9 is Mac-only: off the Mac Ctrl+digit and
   // Alt+digit belong to the terminal and the window manager.

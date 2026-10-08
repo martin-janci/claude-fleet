@@ -400,6 +400,7 @@ pub const HOST_BOUND_HIDDEN_KINDS: &[&str] = &[
     "grant",
     "download",
     "local_workspace",
+    "confirm",
 ];
 
 /// Narrow the requested kinds for a host-bound caller; everyone else keeps
@@ -556,6 +557,15 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
             (`RowChange::LocalWorkspaceChanged(i64)`). Links live on the desktop that made \
             them and are never served by a hub, so a hub's stream never carries one; \
             host-bound hidden besides",
+        ),
+    ),
+    (
+        "confirm",
+        KindFence::NoSessionContent(
+            "nothing: `RowChange::ConfirmChanged` is an empty object. What is waiting is \
+            read through `mcp_confirms`, which answers the hub's personal owner on their \
+            own paired device only; anyone else learns that SOME confirmation queue moved \
+            and nothing more. Host-bound hidden besides",
         ),
     ),
 ];

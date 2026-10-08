@@ -243,6 +243,17 @@ impl FleetTools {
         ok_json_compact(&hosts::list_accounts(&self.store).map_err(to_mcp_err)?)
     }
 
+    #[tool(description = "Each Claude account's latest plan usage: 5-hour \
+        and weekly utilization with reset times, status, fetched_at. Never \
+        fetches.")]
+    pub(super) async fn account_usage(&self) -> Result<CallToolResult, McpError> {
+        audit("account_usage", "");
+        ok_json_compact(
+            &crate::service::account_usage_poll::served_account_usage(self.reader())
+                .map_err(to_mcp_err)?,
+        )
+    }
+
     #[tool(description = "Read or replace the fleet's quick replies: the \
         chip row the desktop and phone composers draw above the prompt box, \
         as [{label, text, auto_send}] in order. No arguments reads; `set` \
@@ -794,6 +805,43 @@ impl FleetTools {
         ok_json_compact(&out)
     }
 
+    // ---- confirmations on the owner's device (redesign step 9.2) ----
+    //
+    // A call that must wait for a person (the operator's starts and kills,
+    // M9.7) parks a nonce in `guards.confirms`. On a desktop its own dialog
+    // and Control's cards answer it; on a hub nobody was there to, so these
+    // two let the owner's paired device list and answer the hub's queue.
+    // The operator never answers its own request.
+
+    #[tool(description = "Calls waiting for your OK (the agent's starts \
+        and kills), oldest first.")]
+    pub(super) async fn mcp_confirms(
+        &self,
+        Extension(caller): Extension<Caller>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("mcp_confirms", "");
+        refuse_operator_answer(&caller)?;
+        ok_json_compact(&self.guards.confirms.pending())
+    }
+
+    #[tool(description = "Approve or deny one waiting call by its nonce; \
+        false when it was already answered or expired.")]
+    pub(super) async fn answer_mcp_confirm(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<AnswerMcpConfirmParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("answer_mcp_confirm", &format!("approved={}", p.approved));
+        refuse_operator_answer(&caller)?;
+        let answered = self.guards.confirms.resolve(&p.nonce, p.approved);
+        if answered {
+            if let Ok(s) = lock(&self.store) {
+                s.bus_confirm_changed();
+            }
+        }
+        ok_json_compact(&answered)
+    }
+
     #[tool(description = "The settings page specs, data source shapes, \
         resources and page actions a device renders.")]
     pub(super) async fn list_pages(&self) -> Result<CallToolResult, McpError> {
@@ -1153,6 +1201,21 @@ pub(super) fn settings_actor(caller: &Caller) -> SettingsWho {
 /// proposal) is the master's, or a trusted device's (declarative pages P6):
 /// trust is the operator vouching that the device is a person's own
 /// (`fleet-hub client trust`). An agent's client proposes instead.
+/// The operator asks; a person answers. `Access::PersonDevice` already
+/// keeps the operator's token out (it has no person), and this says so
+/// where the rule matters, so a later access change cannot let the agent
+/// approve itself.
+fn refuse_operator_answer(caller: &Caller) -> Result<(), McpError> {
+    if caller.is_operator() {
+        return Err(mcp_err(
+            "E_FORBIDDEN",
+            "the agent asks for confirmation; a person answers it",
+            None,
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn settings_writer(caller: &Caller, who: &SettingsWho) -> Result<(), McpError> {
     match who {
         SettingsWho::ControlApi => Ok(()),
