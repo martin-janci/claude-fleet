@@ -2153,3 +2153,117 @@ fn an_untitled_task_borrows_its_first_sessions_name() {
     // A titled task never borrows.
     assert!(!task_of(&p, "TK-1").title_derived);
 }
+
+/// Redesign step 6.3: a task with an unmet dependency is Blocked, outside a
+/// mission too, and stops being Blocked once what it waits for is done.
+#[test]
+fn a_task_waiting_on_unfinished_work_is_blocked_until_it_is_done() {
+    let w = world();
+    lock(&w.st)
+        .unwrap()
+        .add_item_dep(w.t1, w.t2, "person", "test")
+        .unwrap();
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    let t1 = task_of(&p, "TK-1");
+    assert!(t1.blocked);
+    assert_eq!(t1.blocked_by, vec![format!("item:{}", w.t2)]);
+    assert!(
+        !task_of(&p, "TK-2").blocked,
+        "the dependency itself waits on nothing"
+    );
+    assert!(!task_of(&p, "TK-3").blocked);
+
+    // TK-2 is done: nothing blocks TK-1 any more.
+    lock(&w.st)
+        .unwrap()
+        .upsert_tracker_item(
+            w.tracker,
+            &TrackerItemWrite {
+                external_id: "2".into(),
+                key: Some("TK-2".into()),
+                title: "Audit log".into(),
+                status_name: "Done".into(),
+                status_category: "done".into(),
+                containers: vec!["TP".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let p = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            archived: Some(true),
+            ..Default::default()
+        },
+    );
+    let t1 = task_of(&p, "TK-1");
+    assert!(!t1.blocked);
+    assert!(t1.blocked_by.is_empty());
+}
+
+/// Redesign step 6.3: a done task is never Blocked, whatever it waits for.
+#[test]
+fn a_done_task_is_not_blocked() {
+    let w = world();
+    let s = lock(&w.st).unwrap();
+    s.add_item_dep(w.t2, w.t3, "person", "test").unwrap();
+    s.upsert_tracker_item(
+        w.tracker,
+        &TrackerItemWrite {
+            external_id: "2".into(),
+            key: Some("TK-2".into()),
+            title: "Audit log".into(),
+            status_name: "Done".into(),
+            status_category: "done".into(),
+            containers: vec!["TP".into()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    drop(s);
+    let p = page(
+        &w,
+        &OrgScope::All,
+        WorkTreeFilters {
+            archived: Some(true),
+            ..Default::default()
+        },
+    );
+    assert!(!task_of(&p, "TK-2").blocked);
+}
+
+/// Redesign step 6.3: a task's cost is the spend of its sessions, each
+/// counted once, and the org's group header sums its tasks.
+#[test]
+fn a_tasks_cost_sums_its_sessions_and_the_group_header_sums_its_tasks() {
+    let w = world();
+    {
+        let s = lock(&w.st).unwrap();
+        for (id, micros) in [(w.s1, 1_250_000), (w.s2, 500_000)] {
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET usage_cost_micros = ?1 WHERE id = ?2",
+                    rusqlite::params![micros, id],
+                )
+                .unwrap();
+        }
+    }
+    link(&w, w.s1, w.t1, true);
+    link(&w, w.s2, w.t1, false);
+    link(&w, w.s2, w.t2, true);
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(task_of(&p, "TK-1").cost_micros, 1_750_000);
+    assert_eq!(task_of(&p, "TK-2").cost_micros, 500_000);
+    assert_eq!(task_of(&p, "TK-3").cost_micros, 0);
+    let org_total: i64 = p
+        .groups
+        .iter()
+        .filter(|g| g.org_id == Some(w.org_a))
+        .map(|g| g.cost_micros)
+        .sum();
+    assert_eq!(org_total, 2_250_000);
+    // A scope that cannot see the sessions sees no spend either.
+    let p = page(&w, &strict(w.org_b), WorkTreeFilters::default());
+    assert!(p.tasks.iter().all(|t| t.cost_micros == 0));
+}
