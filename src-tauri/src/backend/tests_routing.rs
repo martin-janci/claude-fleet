@@ -704,6 +704,16 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "mcp_pending_confirms",
+            "mcp_confirms",
+            json!({}),
+            r#"[{"nonce":"n","tool":"kill_session","summary":"","caller":"client:ux-agent","operator":true,"asked_at":1}]"#,
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_pending_confirms(b, &guards)).map(|_| ())
+            }),
+        ),
+        (
             "list_debug_devices",
             "debug_devices",
             json!({ "action": "list" }),
@@ -2258,6 +2268,22 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     s,
                     "f_a".into(),
                     Some("later".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "mcp_confirm",
+            "answer_mcp_confirm",
+            json!({ "nonce": "n", "approved": true }),
+            "true",
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_confirm(
+                    b,
+                    &guards,
+                    "n".into(),
+                    true,
                 ))
                 .map(|_| ())
             }),

@@ -1532,8 +1532,13 @@ automatically on app start.
   with `new_worker`, `restore_host_sessions` (not its `dry_run`),
   `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
   its `safe_kill_session`, and every tool above return
-  `E_CONFIRM_REQUIRED` until a person approves them on the desktop; on a
-  hub, which has no approver, they are refused with `E_FORBIDDEN`. Every
+  `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
+  dialog or Control's cards, and on a hub from the owner's paired device,
+  which lists the waiting calls with `mcp_confirms` (each with `nonce`,
+  `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
+  `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
+  answered or expired). Both are the owner's own device only, never the
+  operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central

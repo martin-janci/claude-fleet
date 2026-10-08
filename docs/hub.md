@@ -3171,11 +3171,12 @@ standalone exactly as before.
   setting; the marker exists for text an agent produced.
 - **Destructive confirmations are answered on the hub.** With
   `mcp.confirm_destructive` on, `kill_session`, `delete_worktree`,
-  `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`. The
-  desktop's confirmation dialog answers *its own* queue, which is empty in
-  this mode. Approve it on the hub — this window will follow: the approved
-  change arrives over the hub's event stream like any other, so there is
-  nothing to refresh.
+  `move_session` and `cancel_task` come back `E_CONFIRM_REQUIRED`, and the
+  request waits in the hub's queue. The desktop's dialog and Control's
+  cards list and answer that queue (`mcp_confirms`, `answer_mcp_confirm`)
+  and follow it live through `confirm:changed`; the approved change then
+  arrives over the hub's event stream like any other. A hub older than
+  these tools has no queue to show: the dialog stays empty, as before.
 - **Fleet administration is refused.** A client is not the fleet's
   administrator, so those controls are disabled in the interface with the
   reason rather than failing at the click. *What a hub client refuses* below
@@ -3542,22 +3543,21 @@ deliberately.
   too; a leftover sidecar is tightened on the next open.
 - **`mcp.confirm_destructive`.** This desktop setting gates destructive
   tools (`broadcast_prompt`, `kill_session`, `delete_worktree`, …) behind a
-  UI confirmation dialog. A hub has no UI to show that dialog to — leave the
-  setting off (its default) on a hub; if it is on, a request needing
-  confirmation is refused (`E_CONFIRM_REQUIRED`) with no way to approve it,
-  and the hub logs a warning naming the tool and nonce. A `state.db` copied
-  from a desktop can carry it switched on; `fleet-hub serve` logs a warning
-  at startup when it is.
+  UI confirmation dialog. On a hub the request waits for the owner's paired
+  device instead (`mcp_confirms`, `answer_mcp_confirm`) and expires after
+  ten minutes unanswered; leave the setting off (its default) unless one of
+  your devices will answer. A `state.db` copied from a desktop can carry it
+  switched on; `fleet-hub serve` logs a warning at startup when it is.
 - **The operator's starts and kills.** The UX agent's operator session
   must have its session starts and restarts (`new_session`,
   `new_shell_session`, `new_bg_session`, `spawn_review`, `dispatch_task` with
   `new_worker`, `restore_host_sessions` other than a `dry_run`,
   `recreate_session`, `restart_session`, `work_link` `start` / `resume`)
   and kills approved by a person, whatever
-  `mcp.confirm_destructive` says (work graph M9.7, decision D12). A hub has
-  no approver, so an operator homed on a hub-served fleet is refused those
-  calls (`E_FORBIDDEN`, "no approver") and says so; the person does them from
-  the sidebar.
+  `mcp.confirm_destructive` says (work graph M9.7, decision D12). On a hub
+  the call waits in the hub's queue until the owner approves it from a
+  paired device (redesign step 9.2: a card in Control's transcript, or the
+  dialog); the operator can neither list nor answer that queue.
 - **Rotating tokens.** `fleet-hub token regenerate` mints a fresh master
   token — reconfigure every client afterward. For host tokens, call
   `provision_hosts { rotate: true }` (from any client), which re-provisions

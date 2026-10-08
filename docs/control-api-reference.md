@@ -29,6 +29,12 @@ Parameters: `session_id`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
 
+### `answer_mcp_confirm`
+
+Approve or deny one waiting call by its nonce; false when it was already answered or expired.
+
+Parameters: `approved`, `nonce`
+
 ### `apply_sync`
 
 Apply a plan_sync plan: writes files with compare-and-swap, backs up overwritten files, merges config (files end up mode 0600), installs plugins, writes the managed manifest, then re-scans. Master token only; requires confirmation. restart_required marks hosts whose Claude must be restarted.
@@ -240,6 +246,10 @@ Parameters: `limit`, `requester_session_id`, `state`
 Git worktrees fleet knows about, with their alive-session occupants (0 = free to delete via delete_worktree). Returns {total, worktrees}: total counts every match. Narrow with project_id / host_alias: a fleet-wide call answers hundreds of rows.
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
+
+### `mcp_confirms`
+
+Calls waiting for your OK (the agent's starts and kills), oldest first.
 
 ### `merge_host`
 

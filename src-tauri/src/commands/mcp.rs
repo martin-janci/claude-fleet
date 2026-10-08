@@ -13,6 +13,7 @@ use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::lock;
 use fleet_core::ipc_error::{codes, IpcError};
+use fleet_core::mcp::guard::ConfirmRequest;
 use fleet_core::mcp::settings::{ensure_master_token, McpSettings};
 use fleet_core::mcp::{self, McpGuards, McpRuntime};
 use fleet_core::service::hooks_install;
@@ -335,32 +336,76 @@ pub async fn rotate_host_token(
 // ---------------------------------------------------------------------------
 
 /// Answer a `mcp:confirm-required` prompt. Returns `false` when the nonce is
-/// unknown or expired (the agent will be handed a fresh one on retry).
+/// unknown or expired (the agent will be handed a fresh one on retry). On a
+/// hub-backed desktop the waiting call sits in the hub's queue, so the answer
+/// goes there (`answer_mcp_confirm`, redesign step 9.2).
 #[tauri::command]
-pub fn mcp_confirm(
+pub async fn mcp_confirm(
     nonce: String,
     approved: bool,
+    backend: State<'_, Arc<FleetBackend>>,
     guards: State<'_, McpGuards>,
 ) -> Result<bool, IpcError> {
-    Ok(guards.confirms.resolve(&nonce, approved))
+    routed::mcp_confirm(&backend, &guards, nonce, approved).await
 }
 
-#[derive(Serialize)]
-pub struct PendingConfirm {
-    pub nonce: String,
-    pub tool: String,
-}
-
-/// Outstanding confirmation requests (oldest first) — lets the desktop
-/// re-render its queue after a reload.
+/// Outstanding confirmation requests in full (oldest first): what the
+/// dialog and Control's confirm cards (redesign step 9.2) show after a
+/// reload or a `confirm:changed`, with the summary the person approves. The
+/// hub's queue on a hub-backed desktop (`mcp_confirms`).
 #[tauri::command]
-pub fn mcp_pending_confirms(guards: State<'_, McpGuards>) -> Result<Vec<PendingConfirm>, IpcError> {
-    Ok(guards
-        .confirms
-        .pending_tools()
-        .into_iter()
-        .map(|(nonce, tool)| PendingConfirm { nonce, tool })
-        .collect())
+pub async fn mcp_pending_confirms(
+    backend: State<'_, Arc<FleetBackend>>,
+    guards: State<'_, McpGuards>,
+) -> Result<Vec<ConfirmRequest>, IpcError> {
+    routed::mcp_pending_confirms(&backend, &guards).await
+}
+
+pub(crate) mod routed {
+    use super::*;
+    use serde_json::json;
+
+    pub async fn mcp_confirm(
+        backend: &FleetBackend,
+        guards: &McpGuards,
+        nonce: String,
+        approved: bool,
+    ) -> Result<bool, IpcError> {
+        match backend.hub() {
+            Some(hub) => older_hub(
+                hub.route(
+                    "mcp_confirm",
+                    &json!({ "nonce": nonce, "approved": approved }),
+                )
+                .await,
+                false,
+            ),
+            None => Ok(guards.confirms.resolve(&nonce, approved)),
+        }
+    }
+
+    /// A hub from before the confirm tools (contract < 14) refuses them as a
+    /// protocol error. It also refused every call that needed a person, so
+    /// its queue is empty: answer what this desktop answered before routing.
+    fn older_hub<T>(r: Result<T, IpcError>, before: T) -> Result<T, IpcError> {
+        match r {
+            Err(e) if e.code == codes::E_HUB_PROTOCOL => Ok(before),
+            r => r,
+        }
+    }
+
+    pub async fn mcp_pending_confirms(
+        backend: &FleetBackend,
+        guards: &McpGuards,
+    ) -> Result<Vec<ConfirmRequest>, IpcError> {
+        match backend.hub() {
+            Some(hub) => older_hub(
+                hub.route("mcp_pending_confirms", &json!({})).await,
+                Vec::new(),
+            ),
+            None => Ok(guards.confirms.pending()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

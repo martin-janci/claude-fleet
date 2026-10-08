@@ -1806,7 +1806,7 @@ impl FleetTools {
                 ConfirmState::Unknown => {} // expired / replayed — issue a fresh one
             }
         }
-        let req = confirms.request(tool, summary, &caller.label());
+        let req = confirms.request_from(tool, summary, &caller.label(), caller.is_operator());
         (self.guards.notify)(&req);
         Err(mcp_err(
             codes::E_CONFIRM_REQUIRED,
