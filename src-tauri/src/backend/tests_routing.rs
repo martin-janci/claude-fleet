@@ -1719,6 +1719,24 @@ fn org_admin_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "org_member_grants",
+            "org_admin",
+            json!({ "action": "member_grants", "org_id": 1, "person_id": 3 }),
+            r#"{"watch":4,"drive":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::org_member_grants(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person_id: Some(3),
+                        ..OrgAdminArgs::new("member_grants")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "set_org_setting",
             "org_admin",
             json!({ "action": "set_org_setting", "org_id": 1, "key": "budget.org_daily_usd", "value": "5" }),
@@ -3622,6 +3640,31 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "import_mission_plan",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_import", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "mission_id": 4,
+                    "plan": [{ "step": "1.1", "title": "Schema", "lane": "A", "needs": ["0.9"] }] }),
+            r#"{"created":1,"updated":0,"unchanged":0,"deps_added":0,"deps_removed":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::import_mission_plan(
+                    b,
+                    commands::missions::ImportMissionPlanArgs {
+                        mission_id: 4,
+                        plan: vec![fleet_core::service::work::plan_import::PlanRow {
+                            step: "1.1".into(),
+                            title: "Schema".into(),
+                            lane: Some("A".into()),
+                            needs: vec!["0.9".into()],
+                            status: None,
+                        }],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "delete_mission",
             "work_link",
             json!({ "session_id": null, "action": "mission_delete", "key": null, "item_id": null,
@@ -4405,6 +4448,47 @@ fn the_sharing_commands_address_a_session_by_id_and_nothing_reusable() {
     )
     .expect("unknown keys are ignored, as every args struct in this file does");
     assert_eq!(keys(&a), want(&["session_id", "person"]));
+}
+
+/// Redesign 11.2: removing a member standalone says what happened to their
+/// shares in the local store, for each of the dialog's three choices.
+#[test]
+fn standalone_remove_member_takes_each_grants_choice() {
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+    let (org, people) = {
+        let s = st.lock().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        let people: Vec<i64> = ["ann", "ben", "cy"]
+            .iter()
+            .map(|n| {
+                let p = s.create_person(n, None).unwrap().id;
+                s.set_org_member(org, p, "member", None).unwrap();
+                p
+            })
+            .collect();
+        (org, people)
+    };
+    let remove = |person_id: i64, grants: &str| {
+        block_on(commands::orgs::routed::remove_org_member_choosing(
+            &local,
+            &st,
+            commands::orgs::RemoveOrgMemberArgs {
+                org_id: org,
+                person_id,
+                grants: Some(grants.into()),
+                ..Default::default()
+            },
+        ))
+    };
+    assert_eq!(
+        remove(people[0], "narrow").unwrap(),
+        json!({ "removed": true, "revoked_grants": 0, "narrowed": 0 })
+    );
+    assert_eq!(remove(people[1], "keep").unwrap()["removed"], true);
+    assert_eq!(remove(people[2], "revoke").unwrap()["removed"], true);
+    assert_eq!(remove(people[2], "all").unwrap_err().code, codes::E_INVALID);
+    assert!(st.lock().unwrap().org_members(org).unwrap().is_empty());
 }
 
 /// The work-link commands answer from the local store when standalone.

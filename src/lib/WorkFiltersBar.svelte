@@ -16,7 +16,7 @@
   import { hubConnection } from './hub_connection';
   import ActiveFilters from './ActiveFilters.svelte';
   import FiltersSection from './FiltersSection.svelte';
-  import { WORK_GROUPS } from './filter_schema';
+  import { WORK_GROUPS, type WorkGroupChoice } from './filter_schema';
   import { uiLayout } from './prefs';
   import FilterChipGroup from './FilterChipGroup.svelte';
   import { withoutWorkFacet, workFacets, type WorkFacetId } from './filter_facets';
@@ -51,7 +51,35 @@
     /** The Work tab's List layout: its Done section always reads archived
      *  tasks, so the Archived switch does nothing there. */
     listLayout = false,
-  }: { orgs: WorkTreeOrg[]; trackers: WorkTreeTracker[]; searchDebounceMs?: number; listLayout?: boolean } = $props();
+    /** The assignees and tracker columns of the tasks loaded (step 6.2):
+     *  the chips a named-person and a column filter offer. */
+    people = [],
+    columns = [],
+  }: {
+    orgs: WorkTreeOrg[];
+    trackers: WorkTreeTracker[];
+    searchDebounceMs?: number;
+    listLayout?: boolean;
+    people?: readonly string[];
+    columns?: readonly string[];
+  } = $props();
+
+  // A chip for the value on now, even when no task loaded carries it.
+  const withCurrent = (names: readonly string[], cur: string | undefined) =>
+    cur && !names.some((n) => n.toLowerCase() === cur.toLowerCase()) ? [...names, cur] : names;
+  const peopleChips = $derived(withCurrent(people, $workViewFilters.assignee));
+  const columnChips = $derived(withCurrent(columns, $workViewFilters.status_name));
+  // The Group control: List, or Grouped with each org's sections by
+  // `group_by` (redesign step 6.2).
+  const groupChoice: WorkGroupChoice = $derived($workLayout === 'list' ? 'list' : ($workViewFilters.group_by ?? 'group'));
+  function onGroup(id: WorkGroupChoice) {
+    if (id === 'list') {
+      workLayout.set('list');
+      return;
+    }
+    workLayout.set('grouped');
+    set({ group_by: id === 'group' ? undefined : id });
+  }
 
   const saveBlocked = $derived(hubActionBlocked('save_work_view', $hubStatus, $hubConnection));
   const deleteBlocked = $derived(hubActionBlocked('delete_work_view', $hubStatus, $hubConnection));
@@ -351,6 +379,30 @@
         />
 {/snippet}
 
+{#snippet columnChipGroup()}
+  {#if columnChips.length > 0}
+    <FilterChipGroup
+      label="Tracker column"
+      value={f.status_name?.toLowerCase() ?? ''}
+      options={[{ id: '', label: 'Any' }, ...columnChips.map((c) => ({ id: c.toLowerCase(), label: c }))]}
+      testidFor={(id) => (id === '' ? 'work-filter-column-any' : `work-filter-column-${id}`)}
+      onchange={(id) => set({ status_name: id === '' ? undefined : columnChips.find((c) => c.toLowerCase() === id) })}
+    />
+  {/if}
+{/snippet}
+
+{#snippet assigneeChipGroup()}
+  {#if peopleChips.length > 0}
+    <FilterChipGroup
+      label="Assignee"
+      value={f.assignee?.toLowerCase() ?? ''}
+      options={[{ id: '', label: 'Anyone' }, ...peopleChips.map((p) => ({ id: p.toLowerCase(), label: p }))]}
+      testidFor={(id) => (id === '' ? 'work-filter-assignee-any' : `work-filter-assignee-${id}`)}
+      onchange={(id) => set({ assignee: id === '' ? undefined : peopleChips.find((p) => p.toLowerCase() === id) })}
+    />
+  {/if}
+{/snippet}
+
 {#snippet statusChips()}
         <FilterChipGroup
           label="Status"
@@ -403,6 +455,8 @@
     <h3>Work</h3>
     <div data-testid="work-filter-tracker">{@render trackerChips()}</div>
     <div data-testid="work-filter-status">{@render statusChips()}</div>
+    <div data-testid="work-filter-column">{@render columnChipGroup()}</div>
+    <div data-testid="work-filter-assignee">{@render assigneeChipGroup()}</div>
     <div data-testid="work-filter-has">{@render hasChips()}</div>
   </section>
   <section>
@@ -429,9 +483,9 @@
       panelTestid="work-filter-panel"
       clearTestid="work-filter-panel-clear"
       doneTestid="work-filters-done"
-      groupValue={$workLayout}
+      groupValue={groupChoice}
       groupOptions={WORK_GROUPS}
-      ongroup={(id) => workLayout.set(id)}
+      ongroup={onGroup}
       groupTestid="work-group-select"
       onclearall={clearAll}
       bind:open={panelOpen}
@@ -492,6 +546,8 @@
       <section data-testid="work-filter-org">{@render orgChips()}</section>
       <section data-testid="work-filter-tracker">{@render trackerChips()}</section>
       <section data-testid="work-filter-status">{@render statusChips()}</section>
+      {#if columnChips.length > 0}<section data-testid="work-filter-column">{@render columnChipGroup()}</section>{/if}
+      {#if peopleChips.length > 0}<section data-testid="work-filter-assignee">{@render assigneeChipGroup()}</section>{/if}
       <section data-testid="work-filter-has">{@render hasChips()}</section>
       <section>{@render archivedSwitch()}</section>
       <div class="panel-foot">

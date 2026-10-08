@@ -1185,6 +1185,27 @@ pub struct UpdateAdminParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RoutinesParams {
+    /// list | get | runs | save | delete | set_enabled | skip_next | run_now.
+    pub action: String,
+    /// Every action but list, and save of a change.
+    #[serde(default)]
+    pub routine_id: Option<i64>,
+    /// save: the whole routine.
+    #[serde(default)]
+    pub routine: Option<crate::service::routines::RoutineInput>,
+    /// set_enabled.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// skip_next: false takes the skip back (default true).
+    #[serde(default)]
+    pub skip: Option<bool>,
+    /// runs: how many, newest first (default 20, at most 200).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RemoveDownloadParams {
     /// The download's id (`list_downloads`).
     pub id: i64,

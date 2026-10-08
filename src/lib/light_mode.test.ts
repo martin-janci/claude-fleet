@@ -36,16 +36,6 @@ const EXEMPT: Record<string, string> = {
  */
 const PENDING: Record<string, { literals: string[]; undeclared: string[] }> = {
   'App.svelte': { literals: ['.status .err { color: #e64a4a; }'], undeclared: [] },
-  'lib/Sidebar.svelte': {
-    literals: [
-      'background: var(--accent, #3b82f6);',
-      'background: var(--ok, #22c55e);',
-      'color: var(--accent, #3b82f6);',
-      'color: var(--danger, #e5534b);',
-      'color: var(--color-error, #f44336);',
-    ],
-    undeclared: ['--ok', '--color-error'],
-  },
 };
 
 /** Black and white used as shade, never as a surface or text colour. */

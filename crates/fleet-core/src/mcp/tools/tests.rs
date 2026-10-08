@@ -2398,6 +2398,7 @@ fn router_sum_serves_every_tool() {
         include_str!("forms.rs"),
         include_str!("devices.rs"),
         include_str!("prs.rs"),
+        include_str!("routines.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -11014,6 +11015,12 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "work_link",
         "mission_delete",
         "a draft or finished mission; its items stay",
+    ),
+    (
+        "work_link",
+        "mission_import",
+        "a plan's steps as new local tasks under the mission's root, by its \
+         owner or an org admin; it touches no session",
     ),
     (
         "work_link",

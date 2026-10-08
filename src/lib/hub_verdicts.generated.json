@@ -1,5 +1,6 @@
 {
   "local_only": [
+    "account_spend",
     "account_usage_history",
     "add_host",
     "add_tracker",
@@ -147,6 +148,7 @@
     "grant_device_catalog",
     "grant_mission",
     "health_check",
+    "import_mission_plan",
     "install_debug_device",
     "kill_session",
     "link_session_work",
@@ -172,6 +174,7 @@
     "new_bg_session",
     "new_session",
     "operator_status",
+    "org_member_grants",
     "org_suggestions",
     "pair_device",
     "pause_all_missions",

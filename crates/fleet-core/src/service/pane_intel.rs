@@ -245,6 +245,12 @@ pub struct PendingInput {
     /// the wire when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub multi: bool,
+    /// What a permission dialog asks to run, as the tool-call line above it
+    /// draws it (`Bash(git push -u origin main)`), so the approval card can
+    /// show the exact command beside the answers. Left off the wire when the
+    /// pane shows none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// Why a pane showing a Claude Code dialog is waiting on the user.
@@ -558,6 +564,8 @@ struct Dialog {
     options: Vec<PendingOption>,
     /// A multi-select question: see [`PendingInput::multi`].
     multi: bool,
+    /// See [`PendingInput::detail`].
+    detail: Option<String>,
 }
 
 impl Dialog {
@@ -593,6 +601,10 @@ impl Dialog {
                 })
                 .collect(),
             multi: self.multi,
+            detail: self
+                .detail
+                .as_deref()
+                .map(|d| d.chars().take(PENDING_DETAIL_MAX).collect()),
         }
     }
 }
@@ -604,6 +616,31 @@ const PENDING_QUESTION_MAX: usize = 300;
 const PENDING_LABEL_MAX: usize = 200;
 /// Cap on the number of options `PendingInput` carries.
 const PENDING_OPTIONS_MAX: usize = 16;
+/// Cap on `PendingInput.detail`'s length.
+const PENDING_DETAIL_MAX: usize = 300;
+
+/// The tool call a permission dialog asks about: the last `⏺ Tool(args)` /
+/// `● Tool(args)` line above the dialog, without its bullet. Taken only when
+/// the dialog's top rule (a decoration-only line, after blank lines at most)
+/// sits right under it, so a tool call further up the scrollback, with prose
+/// or another dialog between, never labels this one.
+fn tool_call_detail(lines: &[&str], end: usize) -> Option<String> {
+    let header = (0..end).rev().find(|&i| lines[i].starts_with(['⏺', '●']))?;
+    let next = (header + 1..end).find(|&i| !lines[i].is_empty())?;
+    if !lines[next].chars().all(is_decoration) {
+        return None;
+    }
+    let call = lines[header].trim_start_matches(['⏺', '●']).trim();
+    let name_len = call.find('(')?;
+    if name_len == 0
+        || !call[..name_len]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    Some(call.to_string())
+}
 
 /// A pane line without surrounding whitespace or box-drawing borders, so a
 /// boxed dialog (`│ ❯ 1. Yes   │`) reads like an unboxed one.
@@ -831,11 +868,17 @@ fn detect_dialog(stripped: &str) -> Option<Dialog> {
             ..o.option
         })
         .collect();
+    let detail = if kind == WaitingFor::Permission {
+        tool_call_detail(&lines, dialog_end)
+    } else {
+        None
+    };
     Some(Dialog {
         kind,
         prompt: question.or(selected),
         options,
         multi,
+        detail,
     })
 }
 
@@ -1543,16 +1586,72 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
                 checked: false,
             }],
             multi: false,
+            detail: None,
         };
         let json = serde_json::to_string(&single).expect("serialize");
         assert!(
-            !json.contains("multi") && !json.contains("checked"),
+            !json.contains("multi") && !json.contains("checked") && !json.contains("detail"),
             "{json}"
         );
         let old =
             r#"{"kind":"input","question":null,"options":[{"n":1,"label":"A","selected":true}]}"#;
         let back: PendingInput = serde_json::from_str(old).expect("old row");
-        assert!(!back.multi && !back.options[0].checked);
+        assert!(!back.multi && !back.options[0].checked && back.detail.is_none());
+    }
+
+    fn detail_of(text: &str) -> Option<String> {
+        analyze(text).pending_input.and_then(|p| p.detail)
+    }
+
+    /// The approval card shows what it approves (redesign 5.9): the tool-call
+    /// line right above each permission dialog, bullet dropped.
+    #[test]
+    fn permission_dialogs_carry_the_tool_call_they_ask_about() {
+        for (name, text, want) in [
+            (
+                "permission_bash",
+                include_str!("testdata/pane_intel/permission_bash.txt"),
+                "Bash(ls)",
+            ),
+            (
+                "permission_statusline_below",
+                include_str!("testdata/pane_intel/permission_statusline_below.txt"),
+                "Bash(ls)",
+            ),
+            (
+                "permission_edit_boxed",
+                include_str!("testdata/pane_intel/permission_edit_boxed.txt"),
+                "Update(src/service/health.rs)",
+            ),
+            (
+                "permission_create_footer",
+                include_str!("testdata/pane_intel/permission_create_footer.txt"),
+                "Write(docs/notes.md)",
+            ),
+        ] {
+            assert_eq!(detail_of(text).as_deref(), Some(want), "{name}");
+        }
+    }
+
+    /// A question has no tool call, and a tool call with prose between it
+    /// and the dialog is someone else's: neither labels the card.
+    #[test]
+    fn detail_is_absent_for_questions_and_for_a_tool_call_further_up() {
+        assert_eq!(
+            detail_of(include_str!("testdata/pane_intel/question_ask_user.txt")),
+            None
+        );
+        let stale = "⏺ Bash(rm -rf build)\n\n⏺ Done. Now the push.\n\n────────\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n";
+        let p = analyze(stale).pending_input.expect("a dialog");
+        assert_eq!(p.detail, None);
+        let long = format!(
+            "⏺ Bash(echo {})\n────────\n Do you want to proceed?\n ❯ 1. Yes\n   2. No\n",
+            "x".repeat(400)
+        );
+        assert_eq!(
+            detail_of(&long).map(|d| d.chars().count()),
+            Some(PENDING_DETAIL_MAX)
+        );
     }
 
     #[test]
@@ -1663,11 +1762,16 @@ Enter to select · ↑/↓ to navigate · Esc to cancel
                 })
                 .collect(),
             multi: false,
+            detail: Some("d".repeat(500)),
         };
         let p = dialog.pending_input();
         assert_eq!(p.question.as_deref().map(|q| q.chars().count()), Some(300));
         assert_eq!(p.options.len(), 16);
         assert!(p.options.iter().all(|o| o.label.chars().count() == 200));
+        assert_eq!(
+            p.detail.map(|d| d.chars().count()),
+            Some(PENDING_DETAIL_MAX)
+        );
     }
 
     #[test]
