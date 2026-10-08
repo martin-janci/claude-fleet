@@ -636,6 +636,17 @@ no reverse tunnel for it.
 
 ### Set it up
 
+**A host the hub already reaches over SSH** needs none of the steps below:
+`install_agent { alias: "laptop" }` (Orbit Fleet 4.9) runs them as one job.
+The host downloads the release for its platform and checks it against
+`SHA256SUMS`, installs `~/.local/bin/fleet-agent`, takes its token on stdin
+into `fleet-agent install --user` (no systemd: `fleet-agent run` under
+`nohup`, which does not survive a reboot), and the host moves onto the agent
+once it says hello; no hello within 120 s puts it back on SSH.
+`agent_installs` shows each job's step and outcome. `FLEET_AGENT_DIST` on the
+hub replaces the GitHub release URL (a mirror). The steps below are for a
+host the hub cannot reach.
+
 1. **Register the host as an agent host.** From an MCP client holding the
    master token:
    `add_host { alias: "laptop", ssh_alias: "laptop", transport: "agent" }`.
@@ -3246,6 +3257,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `check_host` | the health checklist reads a host's settings over this app's own SSH; repair a host's hooks from the hub with `fleet-hub provision --host <alias>` |
 | `check_local_prereqs` | the onboarding checklist is about running a fleet from this machine, which the hub is doing instead |
 | `decide_status_map_proposal` | the decision model's Asana section proposals are tracker administration: applying one writes the tracker's section map through the hub's work_admin, master-only, and a paired client is never the fleet's administrator; decide them on the hub with `fleet-hub decide proposals apply\|reject` |
+| `discard_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `discard_kill_session` | the hub exposes no tool that discards a worktree and kills in one step; use safe_kill_session, or do it from the hub |
 | `discover_hosts` | it reads this machine's ~/.ssh/config, not the hub's — register hosts on the hub itself with `fleet-hub` or a standalone app |
 | `dismiss_agent_session` | use Kill instead: the hub's kill_session removes an inactive agent from the list exactly as this would. It is not routed here because the two differ on a WORKING agent, which this refuses and kill_session stops |
@@ -3258,6 +3270,7 @@ Every command below refuses in hub client mode; the full table, with the command
 | `inspect_safe_kill` | it inspects the worktree over this machine's SSH connection and the hub exposes no tool for it; retire the session from the hub |
 | `install_fleet_hook` | the hook it installs points at this app's control API, which is not running; install it from the hub |
 | `list_account_usage` | this app does not poll account usage while a hub owns the fleet, so the cache is empty; read usage on the hub |
+| `list_host_setups` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `list_host_tokens` | these are this app's own per-host tokens, not the hub's; list them on the hub |
 | `mcp_configure` | starting a second control API against a fleet the hub already owns is the failure remote mode exists to prevent; configure the hub's |
 | `mcp_status` | this app runs no embedded control API while a hub owns the fleet; the hub is the control API |
@@ -3281,6 +3294,8 @@ Every command below refuses in hub client mode; the full table, with the command
 | `repo_stage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_unstage` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `rotate_host_token` | it re-provisions the host to report to this app; rotate the token on the hub |
+| `run_host_setup_check` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
+| `save_host_setup` | the add-host wizard adds a host of this machine's ~/.ssh/config and checks it over this app's own SSH; the hub adds hosts with `add_host` and installs fleet-agent with `install_agent` |
 | `set_account_nickname` | the nickname lives in the hub's database and there is no tool to set it; rename the account on the hub |
 | `set_host_token_mode` | these are this app's own per-host tokens, not the hub's; change the mode on the hub |
 | `set_tracker_credential` | trackers and their credentials are fleet administration: the hub's work_admin is master-only, and a paired client is never the fleet's administrator; configure them on the hub with `fleet-hub tracker add\|set-credential\|test` |

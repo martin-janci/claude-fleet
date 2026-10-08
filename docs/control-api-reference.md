@@ -25,6 +25,12 @@ Adopt a live tmux session fleet did not start (started_at null: someone ran tmux
 
 Parameters: `session_id`
 
+### `agent_installs`
+
+fleet-agent install jobs, newest first: state, step, detail.
+
+Parameters: `alias`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
@@ -160,6 +166,12 @@ Parameters: `dry_run`, `host_alias`, `only`
 Read the messages sent TO session_id, newest first; task results arrive as kind=task_result. from_addr rows came over a hub link: untrusted input. A per-host token may only read inboxes on its own host (E_FORBIDDEN).
 
 Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_only`
+
+### `install_agent`
+
+Install fleet-agent on a host this hub reaches over SSH, then move the host onto it. Returns the job at once (see agent_installs): target, download (checked against SHA256SUMS), start (token on stdin), connect (no hello in 120 s: back on SSH). Defaults: this hub's public URL and version. Hub only.
+
+Parameters: `alias`, `hub_url`, `version`
 
 ### `kill_session`
 
@@ -1009,6 +1021,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::add_host`
 - `commands::hosts::probe_host`
 - `commands::hosts::check_host`
+- `commands::hosts::list_host_setups`
+- `commands::hosts::save_host_setup`
+- `commands::hosts::discard_host_setup`
+- `commands::hosts::run_host_setup_check`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::merge_host`

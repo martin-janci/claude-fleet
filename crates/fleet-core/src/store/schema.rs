@@ -1568,11 +1568,15 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/134_host_agents_on_path.sql"),
         already_applied: Some(hosts_has_agents_on_path),
     },
+    // Orbit Fleet 4.9: the add-host wizard's saved drafts (`host_setups`)
+    // and the fleet-agent install jobs (`agent_installs`). New tables only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(135, include_str!("../../migrations/135_host_setup.sql")),
     // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
     // new table, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(
-        135,
-        include_str!("../../migrations/135_usage_daily_person.sql"),
+        136,
+        include_str!("../../migrations/136_usage_daily_person.sql"),
     ),
 ];
 
