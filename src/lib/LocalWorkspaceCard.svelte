@@ -211,7 +211,7 @@
           disabled={busy}
           data-testid="lw-review"
           onclick={() => (reviewing = true)}
-        >Review changes</button>
+        >Review changes…</button>
         {#if localN > 0}
           <button
             class="ghost small"
@@ -230,7 +230,7 @@
     {:else}
       <div class="row">
         <button class="ghost small" disabled={busy} data-testid="lw-review" onclick={() => (reviewing = true)}
-          >Review changes</button
+          >Review changes…</button
         >
       </div>
     {/if}
@@ -333,7 +333,7 @@
         disabled={busy}
         data-testid="lw-disconnect"
         onclick={() => (confirmDisconnect = true)}
-      >Disconnect</button>
+      >Disconnect…</button>
       <button class="ghost" data-testid="lw-overview-open" onclick={() => (overview = true)}
         >All local workspaces…</button
       >
@@ -402,14 +402,14 @@
   .lw { display: flex; flex-direction: column; gap: 0.4rem; }
   .lw h3 {
     margin: 0 0 0.2rem 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
   .hint { margin: 0; font-size: 0.85rem; color: var(--fg-muted); line-height: 1.4; }
   .muted { margin: 0; color: var(--fg-muted); font-size: 0.85rem; }
-  .small { font-size: 0.78rem; }
+  .small { font-size: 11px; }
   .row { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; }
   .path {
     flex: 1;
@@ -431,7 +431,7 @@
     border-radius: 5px;
     cursor: pointer;
   }
-  .ghost.small { font-size: 0.78rem; padding: 0.15rem 0.5rem; }
+  .ghost.small { font-size: 11px; padding: 0.15rem 0.5rem; }
   .ghost:hover:not(:disabled) { border-color: var(--accent); }
   .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
   button:disabled { opacity: 0.55; cursor: default; }
@@ -464,7 +464,7 @@
   .cbtns { display: inline-flex; gap: 0.3rem; margin-left: auto; }
   .driver, .activity { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; font-size: 0.85rem; }
   .activity span { color: var(--usage-warn); }
-  .chip { font-size: 0.75rem; border: 1px solid var(--border); border-radius: 3px; padding: 0.05rem 0.4rem; }
+  .chip { font-size: 11px; border: 1px solid var(--border); border-radius: 3px; padding: 0.05rem 0.4rem; }
   .driver-developer { border-color: var(--usage-warn); color: var(--usage-warn); }
   .driver-agent { border-color: var(--accent); color: var(--accent); }
   .excludes textarea {

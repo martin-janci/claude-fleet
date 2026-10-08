@@ -87,7 +87,7 @@
         <button type="button" class="btn btn--primary" data-testid="drift-take" disabled={busy || !diff} onclick={() => onapply([take.position])}>Take {host}'s version into {catalog}</button>
       {/if}
       {#if restore}
-        <button type="button" class="btn" data-testid="drift-restore" disabled={busy || !diff} onclick={() => (confirming = true)}>Restore catalog version on {host} (backs up)</button>
+        <button type="button" class="btn" data-testid="drift-restore" disabled={busy || !diff} title="Keeps a .fleet-bak copy on {host}" onclick={() => (confirming = true)}>Restore catalog version on {host}…</button>
       {/if}
       <span class="muted small">Taking it makes a commit you can undo. Restoring keeps a .fleet-bak copy on {host}.</span>
     </div>

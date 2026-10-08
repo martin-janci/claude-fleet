@@ -361,7 +361,7 @@ describe('SessionDetails outcome + triage fields (W2 Track D)', () => {
     });
     await tick();
     const chip = screen.getByTestId('details-stuck');
-    expect(chip).toHaveTextContent('stuck: trust prompt');
+    expect(chip).toHaveTextContent('Failed · trust prompt');
     expect(chip).toHaveTextContent('2m');
     // Stuck outranks claude_status.
     expect(screen.queryByTestId('details-claude-status')).toBeNull();
@@ -425,7 +425,7 @@ describe('SessionDetails outcome + triage fields (W2 Track D)', () => {
       props: { session: { ...sampleSession, claude_status: 'blocked', context_pct: 91 } },
     });
     await tick();
-    expect(screen.getByTestId('details-claude-status')).toHaveTextContent('blocked');
+    expect(screen.getByTestId('details-claude-status')).toHaveTextContent('Needs you');
     const ctx = screen.getByTestId('details-context');
     expect(ctx).toHaveTextContent('91%');
     expect(ctx).toHaveAttribute('data-level', 'crit');

@@ -758,16 +758,16 @@
   .steps li[data-state='done'] .mark::before { content: '✓'; }
   .steps li[data-state='warned'] .mark::before { content: '!'; }
   .steps li[data-state='failed'] .mark::before { content: '✕'; }
-  .detail { margin-left: auto; color: var(--fg-muted); font-size: 0.75rem; }
+  .detail { margin-left: auto; color: var(--fg-muted); font-size: 11px; }
   .summary li { padding: 0.15rem 0; }
   .warnings { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.4rem; }
   .warn-head { color: #d29b4a; font-size: 0.85rem; margin: 0; }
   .warn, .details p { font-size: 0.8rem; color: var(--fg-muted); margin: 0.15rem 0; }
   .details { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.4rem; }
-  pre { white-space: pre-wrap; font-size: 0.75rem; }
+  pre { white-space: pre-wrap; font-size: 11px; }
   .clean-paths { list-style: none; margin: 0.4rem 0; padding: 0; font-size: 0.8rem; max-height: 8rem; overflow-y: auto; }
   .clean-paths li { padding: 0.1rem 0; }
-  .clean-paths code { font-size: 0.75rem; }
+  .clean-paths code { font-size: 11px; }
   .buttons { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; }
   .buttons .danger { color: var(--danger); }
 </style>

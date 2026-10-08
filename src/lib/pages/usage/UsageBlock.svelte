@@ -191,7 +191,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   header {
     display: flex;
@@ -200,7 +200,7 @@
     gap: 0.35rem;
   }
   .title {
-    font-size: 0.7rem;
+    font-size: 11px;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
   }
@@ -208,7 +208,7 @@
   .meta { color: var(--fg-muted); }
   .refresh {
     margin-left: auto;
-    font-size: 0.7rem;
+    font-size: 11px;
     padding: 0.1rem 0.45rem;
     border: 1px solid var(--border);
     border-radius: 4px;
@@ -220,7 +220,7 @@
   .refresh:disabled { color: var(--fg-muted); cursor: default; }
   kbd {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.65rem;
+    font-size: 11px;
     padding: 0 0.2rem;
     border: 1px solid var(--border);
     border-radius: 3px;
@@ -248,10 +248,10 @@
     border: none;
     background: none;
     padding: 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--accent);
     cursor: pointer;
   }
   .disclosure { color: var(--fg-muted); }
-  footer { color: var(--fg-muted); font-size: 0.7rem; }
+  footer { color: var(--fg-muted); font-size: 11px; }
 </style>

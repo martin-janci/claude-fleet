@@ -183,14 +183,14 @@
 
 <style>
   .wizard { display: flex; flex-direction: column; gap: 0.6rem; }
-  .count { font-size: 0.72rem; color: var(--fg-muted); }
+  .count { font-size: 11px; color: var(--fg-muted); }
   h6 { margin: 0; font-size: 0.9rem; }
   .intro { margin: 0; font-size: 0.8rem; color: var(--fg-muted); }
   .field { display: flex; flex-direction: column; gap: 0.2rem; }
   label, .label { font-size: 0.82rem; }
   .check { display: flex; gap: 0.35rem; align-items: flex-start; }
   input:not([type='checkbox']), select, textarea { font: inherit; font-size: 0.82rem; padding: 0.25rem 0.4rem; }
-  .help { font-size: 0.72rem; color: var(--fg-muted); }
-  .err { font-size: 0.75rem; color: var(--usage-crit); }
+  .help { font-size: 11px; color: var(--fg-muted); }
+  .err { font-size: 11px; color: var(--usage-crit); }
   .row { display: flex; gap: 0.4rem; justify-content: flex-end; }
 </style>

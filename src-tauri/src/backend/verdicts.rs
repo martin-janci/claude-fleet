@@ -783,6 +783,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "unlink_peer",
         },
     ),
+    ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "list_debug_devices",
         Verdict::Routed {

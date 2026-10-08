@@ -52,5 +52,5 @@
   .crit { color: var(--usage-crit); border-color: color-mix(in srgb, var(--usage-crit) 45%, var(--control-border)); }
   .accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--control-border)); }
   .muted { color: var(--fg-muted); background: var(--bg-pane); }
-  .glyph { font-size: 10px; }
+  .glyph { font-size: 11px; }
 </style>

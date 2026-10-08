@@ -1,7 +1,7 @@
 // Redesign step 3.13: loaders in the new shell. One loader per screen: while
 // the first session list is out, the empty pane shows the Particle swarm and
-// nothing else animates; once it answers, the pane asks for a pick and no
-// loader is left on screen.
+// nothing else animates; once it answers, the pane asks for a pick and the
+// only mark left is the status bar's idle Breathe (step 3.14), not a wait.
 import { render, screen, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import App from './App.svelte';
@@ -69,12 +69,12 @@ describe('App: loaders in the new shell (redesign 3.13)', () => {
     expect(shownLoaders().map((l) => l.dataset.loader)).toEqual(['particle-swarm']);
   });
 
-  it('leaves no loader on screen once the first list answers', async () => {
+  it('once the first list answers, leaves only the status bar’s idle Breathe (3.14)', async () => {
     render(App);
     await screen.findByTestId('fleet-arriving', {}, { timeout: 2000 });
     answer([session('mefistos', 'dev-mef', { project_id: null })]);
     await waitFor(() => expect(screen.queryByTestId('fleet-arriving')).toBeNull());
     expect(screen.getByText('Select a session to attach a terminal.')).toBeInTheDocument();
-    expect(shownLoaders()).toEqual([]);
+    await waitFor(() => expect(shownLoaders().map((l) => l.dataset.loader)).toEqual(['breathe']));
   });
 });

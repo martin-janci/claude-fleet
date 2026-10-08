@@ -163,6 +163,7 @@
     "list_peer_links",
     "list_people",
     "list_projects",
+    "list_pull_requests",
     "list_sessions",
     "list_tasks",
     "list_trackers",

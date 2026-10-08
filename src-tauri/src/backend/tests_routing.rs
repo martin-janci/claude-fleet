@@ -686,6 +686,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "list_pull_requests",
+            "prs",
+            json!({ "action": "list", "state": "open" }),
+            r#"{"items":[],"total":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::prs::routed::list_pull_requests(
+                    b,
+                    s,
+                    fleet_core::service::prs::PrsArgs {
+                        action: "list".into(),
+                        state: Some("open".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_debug_devices",
             "debug_devices",
             json!({ "action": "list" }),
@@ -5876,6 +5894,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/federation.rs",
         include_str!("../commands/federation.rs"),
     ),
+    ("commands/prs.rs", include_str!("../commands/prs.rs")),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",
