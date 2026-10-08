@@ -829,6 +829,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::org_devices::pair_device`
 - `commands::org_devices::revoke_device`
 - `commands::org_devices::set_device_trust`
+- `commands::org_devices::update_device`
 - `commands::org_devices::bind_device_org`
 - `commands::org_devices::set_device_person`
 - `commands::org_devices::grant_device_catalog`

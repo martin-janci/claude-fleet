@@ -1869,6 +1869,24 @@ fn org_admin_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "update_device",
+            "org_admin",
+            json!({ "action": "rename_device", "device": "phone", "name": "Ada's phone" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::update_device(
+                    b,
+                    s,
+                    commands::org_devices::UpdateDeviceArgs {
+                        device: "phone".into(),
+                        name: Some("Ada's phone".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "bind_device_org",
             "org_admin",
             json!({ "action": "bind_device", "device": "phone", "org": "Acme" }),

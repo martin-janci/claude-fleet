@@ -48,9 +48,10 @@ use std::sync::Mutex;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
 #[schemars(crate = "rmcp::schemars", rename = "OrgAdminParams")]
 pub struct OrgAdminArgs {
-    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed
+    /// list_orgs|add_org|update_org|remove_org|add_rule|remove_rule|assign_host|unassign_host|assign_tracker|set_org_setting|list_devices|pair_device|revoke_device|set_device_trust|rename_device|set_device_mode|bind_device|set_device_person|grant_catalog|list_people|rename_person|disable_person|list_members|set_member|remove_member|member_grants|revoke_member_grants|narrow_member_grants|set_hub_org|set_admins_see_unclaimed
     pub action: String,
-    /// Org name (add/update_org), or a person's new name (rename_person).
+    /// Org name (add/update_org), or a person's or device's new name
+    /// (rename_person, rename_device).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The org acted on (or bound to).
@@ -95,7 +96,7 @@ pub struct OrgAdminArgs {
     /// A paired device, by name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
-    /// full|readonly (pair_device).
+    /// full|readonly (pair_device, set_device_mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// Its prompts reach agents unmarked.
@@ -202,6 +203,8 @@ pub enum Action {
     PairDevice,
     RevokeDevice,
     SetDeviceTrust,
+    RenameDevice,
+    SetDeviceMode,
     BindDevice,
     SetDevicePerson,
     GrantCatalog,
@@ -231,6 +234,8 @@ impl Action {
             "pair_device" => Action::PairDevice,
             "revoke_device" => Action::RevokeDevice,
             "set_device_trust" => Action::SetDeviceTrust,
+            "rename_device" => Action::RenameDevice,
+            "set_device_mode" => Action::SetDeviceMode,
             "bind_device" => Action::BindDevice,
             "set_device_person" => Action::SetDevicePerson,
             "grant_catalog" => Action::GrantCatalog,
@@ -534,6 +539,8 @@ fn check(s: &Store, action: Action, args: &OrgAdminArgs, me: Me<'_>) -> Result<(
         Action::PairDevice
         | Action::RevokeDevice
         | Action::SetDeviceTrust
+        | Action::RenameDevice
+        | Action::SetDeviceMode
         | Action::GrantCatalog => Ok(()),
         Action::BindDevice => Err(forbidden("which org a device is bound to")),
         Action::SetDevicePerson => Err(forbidden("whose device it is")),
@@ -955,6 +962,31 @@ pub fn run(
             };
             require_org_device(&s, &row, me)?;
             s.set_client_trust(&row.name, on)?;
+            device_json(&s, &row.name, me)
+        }
+        Action::RenameDevice => {
+            let to = need(&args.name, name, "name")?;
+            // A new name takes nothing away, so the device in hand may be
+            // renamed too: its streams re-read who they are.
+            let row = device_row(&s, need(&args.device, name, "device")?, Me::LOCAL, "")?;
+            require_org_device(&s, &row, me)?;
+            let renamed = s.rename_client_token(&row.name, to)?;
+            tracing::info!(from = %row.name, to = %renamed.name, "[org_admin] renamed a device");
+            device_json(&s, &renamed.name, me)
+        }
+        Action::SetDeviceMode => {
+            let mode = need(&args.mode, name, "mode")?.trim();
+            let device = need(&args.device, name, "device")?;
+            // As with trust: only read-only takes access away, so only that
+            // is refused for the device in hand.
+            let row = if mode == "full" {
+                device_row(&s, device, Me::LOCAL, "")?
+            } else {
+                device_row(&s, device, me, "making read-only")?
+            };
+            require_org_device(&s, &row, me)?;
+            s.set_client_mode(&row.name, mode)?;
+            tracing::info!(client = %row.name, mode, "[org_admin] set a device's mode");
             device_json(&s, &row.name, me)
         }
         Action::BindDevice => {

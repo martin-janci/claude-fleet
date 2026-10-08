@@ -811,9 +811,11 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
     color_field: None,
     empty: "No paired devices. Pair a phone or a browser with Pair a device.",
     fields: &[
-        FieldSpec::new("name", "Name", "What it was paired as; fixed once paired.", FieldKind::Text { max: 64 }),
-        FieldSpec::new("mode", "Mode", "Full drives sessions; read-only watches.", FieldKind::Choice { options: DEVICE_MODES }).badge(Badge::Label),
-        FieldSpec::new("this_device", "This device", "The device you are using now. It cannot revoke, untrust, bind or hand over itself.", FieldKind::Bool { on_off: false, default: false })
+        FieldSpec::new("name", "Name", "How the apps and the audit name it. Its grants, catalogs and person follow a new name.", FieldKind::Text { max: 64 }).edit("name"),
+        FieldSpec::new("mode", "Mode", "Full drives sessions; read-only watches. A viewer's device stays read-only whatever it says here.", FieldKind::Choice { options: DEVICE_MODES })
+            .edit("mode")
+            .badge(Badge::Label),
+        FieldSpec::new("this_device", "This device", "The device you are using now. It cannot revoke, untrust, bind, hand over or make itself read-only.", FieldKind::Bool { on_off: false, default: false })
             .badge(Badge::True { text: "this device" }),
         FieldSpec::new(
             "trusted",
@@ -865,7 +867,7 @@ const DEVICE_RESOURCE: ResourceType = ResourceType {
         ])
         .result(ResultView::Pairing),
     ),
-    update: Some(ActionSpec::new("device.update", "Apply", "set_device_trust", &[DEVICE])),
+    update: Some(ActionSpec::new("device.update", "Apply", "update_device", &[DEVICE])),
     delete: Some(
         ActionSpec::new("device.revoke", "Revoke", "revoke_device", &[DEVICE])
             .confirm("Its next request is refused and the name is free again. Pair it again to bring it back."),
@@ -1196,13 +1198,13 @@ mod tests {
                 "revoke_device",
                 "scan_debug_devices",
                 "set_device_person",
-                "set_device_trust",
                 "set_org_member",
                 "set_org_setting",
                 "set_tracker_credential",
                 "shutdown_debug_device",
                 "test_tracker",
                 "update_debug_device",
+                "update_device",
                 "update_org",
                 "update_tracker",
                 "work_retention_sweep",
