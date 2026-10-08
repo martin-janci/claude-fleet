@@ -7,7 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
-import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel } from './sessions';
+import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel, sessionAgent } from './sessions';
 import type { SessionRow } from './sessions';
 
 beforeEach(() => {
@@ -424,5 +424,15 @@ describe('optimistic merge guard', () => {
     );
     await loadSessions();
     expect(get(sessions).map((s) => s.id)).toEqual([2, 1]);
+  });
+});
+
+describe('sessionAgent', () => {
+  it('reads the row, and an older hub\'s missing field from the kind', () => {
+    expect(sessionAgent({ agent: 'codex', kind: 'work' })).toBe('codex');
+    expect(sessionAgent({ agent: 'shell', kind: 'shell' })).toBe('shell');
+    expect(sessionAgent({ kind: 'work' })).toBe('claude');
+    expect(sessionAgent({ kind: 'bg' })).toBe('claude');
+    expect(sessionAgent({ kind: 'shell' })).toBe('shell');
   });
 });

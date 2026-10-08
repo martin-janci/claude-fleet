@@ -20,6 +20,7 @@ fn args(
         model: None,
         effort: None,
         profile: None,
+        agent: None,
         owner_person_id: None,
     }
 }
