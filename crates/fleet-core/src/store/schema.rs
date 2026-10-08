@@ -1572,11 +1572,15 @@ const MIGRATIONS: &[Migration] = &[
     // and the fleet-agent install jobs (`agent_installs`). New tables only,
     // `IF NOT EXISTS`, safe to re-run.
     Migration::plain(135, include_str!("../../migrations/135_host_setup.sql")),
+    // PR shepherd: a person's standing rule per project and one row per
+    // problem the shepherd saw on a session's PR (two CREATE TABLE IF NOT
+    // EXISTS, idempotent as written).
+    Migration::plain(136, include_str!("../../migrations/136_pr_shepherd.sql")),
     // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
     // new table, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(
-        136,
-        include_str!("../../migrations/136_usage_daily_person.sql"),
+        137,
+        include_str!("../../migrations/137_usage_daily_person.sql"),
     ),
 ];
 

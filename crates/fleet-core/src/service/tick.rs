@@ -261,6 +261,17 @@ pub fn spawn_reconcile_tick(
                     }
                     service::loops::report("playbooks", Ok::<_, String>(()), Some(period));
                 }
+                // PR shepherd: projects a person granted a rule for get their
+                // sessions' conflicting or red PRs recorded, and nudged at
+                // `nudge`. No rule, no work: one indexed read and out. Stops
+                // while `automation.paused` is on.
+                if service::loops::gate("pr_shepherd", store, Some(period)) {
+                    let n = service::pr_shepherd::run(store, ssh).await;
+                    if n > 0 {
+                        tracing::info!("reconcile tick: recorded {n} PR shepherd episode(s)");
+                    }
+                    service::loops::report("pr_shepherd", Ok::<_, String>(()), Some(period));
+                }
                 // Step 5.10: a prompt queued for a busy session goes in once the
                 // session is idle; the Stop hook delivers it first, this catches
                 // a hook that never came. Detached and single-flight.

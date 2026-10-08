@@ -1,4 +1,4 @@
--- 136: `usage_daily_person`, an org's daily spend split by the person whose
+-- 137: `usage_daily_person`, an org's daily spend split by the person whose
 -- session it was (Orbit Fleet redesign step 11.8, docs/ux/2026-10-08-orbit-
 -- fleet-redesign/transition-plan.md): the org page's "By person" table.
 --
@@ -25,4 +25,4 @@ CREATE TABLE IF NOT EXISTS usage_daily_person (
     PRIMARY KEY (day, org_id, person_id, backfill)
 );
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (136);
+INSERT OR IGNORE INTO schema_version (version) VALUES (137);

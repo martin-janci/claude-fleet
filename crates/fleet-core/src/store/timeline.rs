@@ -62,6 +62,8 @@ impl Store {
     ///   `notification`, `status_change`, `stop_failure`.
     /// - the tick (`Store::age_out_stale_working`): `stale_working`.
     /// - playbooks (`Store::record_playbook_applied` et al.): `playbook_applied`.
+    /// - PR shepherd (`Store::record_shepherd_episode`): `pr_shepherd` (detail
+    ///   is `<condition>:<outcome>`).
     /// - MCP call audit (`mcp::tools::support`): `mcp_call`.
     pub fn insert_session_event(
         &self,
