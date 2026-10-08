@@ -1876,6 +1876,32 @@
     },
     {
       "default_widget": "switch",
+      "key": "orchestrator.enabled",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Mission loop",
+      "widgets": [
+        "switch",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "number",
+      "key": "orchestrator.max_level",
+      "kind": {
+        "max": 3,
+        "min": 0,
+        "type": "int"
+      },
+      "label": "Highest mission autonomy",
+      "widgets": [
+        "number",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "switch",
       "key": "playbooks.press_enter",
       "kind": {
         "type": "bool"

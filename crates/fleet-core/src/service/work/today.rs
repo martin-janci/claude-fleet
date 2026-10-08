@@ -588,6 +588,7 @@ mod tests {
                 proposed_by: None,
                 proposal_why: None,
                 held_at: None,
+                done_when: Vec::new(),
             },
             org_id: None,
         }

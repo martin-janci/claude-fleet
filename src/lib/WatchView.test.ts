@@ -178,4 +178,23 @@ describe('the watcher’s pane view', () => {
       expect(names().filter((n) => n === 'capture_session').length).toBe(before + 1),
     );
   });
+
+  it('does not stack captures behind one that outlasts the poll interval', async () => {
+    vi.useFakeTimers();
+    try {
+      let release: (v: string) => void = () => {};
+      inv().mockImplementation((cmd: string) => {
+        if (cmd === 'capture_session') return new Promise<string>((r) => (release = r));
+        return Promise.resolve(null);
+      });
+      render(WatchView, { props: { session: makeSession(), access: 'watch' } });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(names().filter((n) => n === 'capture_session').length).toBe(1);
+      release('slow host, finally\n');
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(names().filter((n) => n === 'capture_session').length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

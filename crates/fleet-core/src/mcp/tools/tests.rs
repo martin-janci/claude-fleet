@@ -3857,7 +3857,14 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 80,099 on 2026-10-07 after the mission graph (`work_link
     /// { dep | hold | propose_tree | accept_many | undo_accept }` and their
     /// arguments, +515 bytes).
-    const BUDGET_BYTES: usize = 80_199;
+    /// Measured at 80,557 on 2026-10-08 after a run's evidence and typed
+    /// done_when (`work_link { done_when | verify }` and their arguments,
+    /// +458 bytes).
+    /// Measured at 81,694 on 2026-10-08 after the mission loop (`work_link
+    /// { mission_start | mission_plan | mission_grant | mission_revoke |
+    /// retry | card_decide | missions_pause_all }` and their arguments,
+    /// +1,137 bytes).
+    const BUDGET_BYTES: usize = 81_794;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -4658,11 +4665,13 @@ async fn send_message_with_a_client_msg_id_already_in_flight_is_e_in_flight() {
         .upsert_session("beta", "local", None, None, 0, 0, "running", None)
         .unwrap();
     let t = test_tools(s);
-    // Seeded under `send_message`'s own namespaced key (`send_message:` +
-    // the id), matching what the tool itself reserves under — not the bare
-    // id, which is `send_prompt`'s namespace since fix round 1.
-    let _ =
-        lock_sends(&t.recent_sends).reserve(&Caller::master().label(), "send_message:in-flight");
+    // Seeded under `send_message`'s own key (`send_message:` + sender +
+    // recipient session + recipient address + the id), matching what the
+    // tool itself reserves under.
+    let _ = lock_sends(&t.recent_sends).reserve(
+        &Caller::master().label(),
+        &format!("send_message:{a}:{b}::in-flight"),
+    );
     let e = t
         .send_message(
             Extension(Caller::master()),
@@ -6769,7 +6778,7 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     assert_eq!(
         result_json(&out).as_array().unwrap().len(),
         3,
-        "session_history negative limit without fresh_for must stay SQLite's own unlimited"
+        "session_history negative limit without fresh_for means as many as allowed (bounded_limit)"
     );
 
     let out = t
@@ -6809,7 +6818,7 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     assert_eq!(
         result_json(&out).as_array().unwrap().len(),
         3,
-        "inbox negative limit without fresh_for must stay SQLite's own unlimited"
+        "inbox negative limit without fresh_for means as many as allowed (bounded_limit)"
     );
 }
 
@@ -10745,6 +10754,7 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // gate; a tree is `propose`'s, stored in the proposing session's name.
     ("work_link", "dep", &["Drive"]),
     ("work_link", "hold", &["Drive"]),
+    ("work_link", "done_when", &["Drive"]),
     ("work_link", "propose_tree", &["Drive"]),
     // The two conversation-addressed arms of the `own` tier: a resume
     // replays the whole transcript into a new session, a summary stores a
@@ -11001,8 +11011,53 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
     ),
     (
         "work_link",
+        "verify",
+        "a person's check of a work ITEM's condition; refused outright to a \
+         per-host token and a bound client, as `accept` is",
+    ),
+    (
+        "work_link",
         "mission_delete",
         "a draft or finished mission; its items stay",
+    ),
+    (
+        "work_link",
+        "mission_start",
+        "a mission's next steps, taken by its owner or an org admin; a run \
+         goes through the start path under the caller's scope",
+    ),
+    (
+        "work_link",
+        "mission_plan",
+        "asks the mission's planner; cards, not sessions, come back",
+    ),
+    (
+        "work_link",
+        "mission_grant",
+        "a person's signature on what a mission's loop may do; refused \
+         outright to every scoped caller, as `accept` is",
+    ),
+    (
+        "work_link",
+        "mission_revoke",
+        "ends a mission's grants; its owner or an org admin only",
+    ),
+    (
+        "work_link",
+        "retry",
+        "another attempt at a mission's ITEM, by whoever may change the \
+         mission; a run goes through the start path under the caller's scope",
+    ),
+    (
+        "work_link",
+        "card_decide",
+        "a person's decision on a mission's card; refused outright to every \
+         scoped caller, as `accept` is",
+    ),
+    (
+        "work_link",
+        "missions_pause_all",
+        "pauses the missions the caller may change; answers their ids",
     ),
     (
         "work",
@@ -13105,6 +13160,16 @@ async fn the_inbox_gate_binds_the_master_and_mark_read_needs_drive() {
         before,
         "and the owner's unread view is untouched by the watcher's read"
     );
+    // A readonly token of the owner's reads too, and also leaves it alone:
+    // `inbox` is a readonly tool, the mark is a write.
+    let readonly = Caller {
+        mode: TokenMode::Readonly,
+        ..device_of(ada, ada)
+    };
+    read(readonly, a_row, true)
+        .await
+        .expect("a readonly token reads the inbox");
+    assert_eq!(unread(&t), before, "a readonly token marks nothing read");
     // The OWNER's same default call does advance it.
     read(device_of(ada, ada), a_row, true).await.unwrap();
     assert_eq!(unread(&t), 0, "the owner's read marks read");
@@ -17763,4 +17828,57 @@ async fn org_admin_lists_for_a_device_and_changes_only_for_a_trusted_one() {
         store.lock().unwrap().active_client_tokens().unwrap().len(),
         1
     );
+}
+
+/// `since_turn` is bounded before the subtraction: `i64::MIN` overflowed it.
+#[test]
+fn transcript_turns_bounds_the_client_s_since_turn() {
+    use super::support::transcript_turns;
+    assert_eq!(transcript_turns(5, Some(i64::MIN)), 1);
+    assert_eq!(transcript_turns(5, Some(-1)), 1);
+    assert_eq!(transcript_turns(5, Some(-1_000_000_000_000_000_000)), 1);
+    assert_eq!(transcript_turns(5, Some(99)), 1);
+    assert_eq!(transcript_turns(5, Some(5)), 1);
+    assert_eq!(transcript_turns(5, Some(2)), 3);
+    assert_eq!(transcript_turns(5, None), 1);
+}
+
+/// The dedupe key names the recipient: the same `client_msg_id` to another
+/// session is another message, not a replay of the first one's result.
+#[tokio::test]
+async fn a_client_msg_id_reused_for_another_recipient_still_sends() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let a = s
+        .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let c = s
+        .upsert_session("gamma", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    for to in [b, c] {
+        t.send_message(
+            Extension(Caller::master()),
+            Parameters(send_message_params(a, to, "hello", Some("1"))),
+        )
+        .await
+        .unwrap();
+    }
+    for to in [b, c] {
+        let n: i64 = t
+            .store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages WHERE to_session_id = ?1",
+                rusqlite::params![to],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "session {to} got its message");
+    }
 }

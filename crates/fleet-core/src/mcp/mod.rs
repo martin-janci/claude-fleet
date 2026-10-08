@@ -1291,6 +1291,39 @@ mod tests {
             );
         }
 
+        // A bind that fails after the insert (the org was removed while the
+        // code waited) rolls the whole redemption back: no live, unbound row
+        // that nobody holds the token for, and the name stays free.
+        let doomed_org = store
+            .lock()
+            .unwrap()
+            .add_org("doomed", None, false)
+            .unwrap()
+            .id;
+        let orphaned = pairings.mint(pairing::MintRequest {
+            org_id: Some(doomed_org),
+            ..mint_req("orphan", "full", false)
+        });
+        assert!(store.lock().unwrap().remove_org(doomed_org).unwrap());
+        let failed = round_trip(addr, &pair_req(&orphaned.code, "phone.invalid")).await;
+        assert!(failed.contains("500"), "{failed}");
+        assert!(
+            !store
+                .lock()
+                .unwrap()
+                .active_client_tokens()
+                .unwrap()
+                .iter()
+                .any(|r| r.name == "orphan"),
+            "a failed redemption must leave no client row"
+        );
+        let retry = pairings.mint(mint_req("orphan", "full", false));
+        let retried = round_trip(addr, &pair_req(&retry.code, "phone.invalid")).await;
+        assert!(
+            retried.contains("200 OK"),
+            "the name stays free:\n{retried}"
+        );
+
         // A camera scan opens `GET /pair`, which must explain what to do
         // rather than answer 405. No secret is in it: the code lives in the
         // URL fragment, which a browser never sends.

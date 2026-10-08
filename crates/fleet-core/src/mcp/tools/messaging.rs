@@ -71,7 +71,14 @@ impl FleetTools {
         // that gives up and retries does so DURING that window — which a
         // write-on-success cache does not cover at all: both calls miss, both
         // deliver, and the session gets the prompt twice.
-        let dedupe_id = p.client_msg_id.clone();
+        // The key names the TARGET as well as the id: the label is shared by
+        // every agent behind one host token, so a bare id reused for another
+        // session answered the first call's cached result and never sent.
+        // The `send_prompt:` prefix keeps it apart from `send_message`'s.
+        let dedupe_id = p
+            .client_msg_id
+            .as_deref()
+            .map(|id| format!("send_prompt:{}:{id}", row.id));
         if let Some(id) = dedupe_id.as_deref() {
             match lock_sends(&self.recent_sends).reserve(&label, id) {
                 Reservation::Fresh => {}
@@ -225,12 +232,11 @@ impl FleetTools {
             Reach::Read,
             "the session whose history to read",
         )?;
-        let limit = p.limit.unwrap_or(50);
+        let limit = bounded_limit(p.limit, 50);
 
-        // fresh_for absent: today's default, byte-identical, no cursor
-        // touched — `limit` reaches the store exactly as it always has
-        // (0 => [], negative => SQLite's own "no limit"), so the clamp
-        // below must never run on this path.
+        // fresh_for absent: no cursor touched, and 0 => [] as always. A
+        // negative or huge `limit` no longer reaches SQLite as "no limit":
+        // see `bounded_limit`.
         let Some(reader) = p.fresh_for else {
             let events = {
                 let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -416,7 +422,17 @@ impl FleetTools {
         // of the shared map instead; `send_prompt`'s own key stays bare so
         // its behaviour and tests are untouched.
         let dedupe_id = p.client_msg_id.clone();
-        let dedupe_key = dedupe_id.as_deref().map(|id| format!("send_message:{id}"));
+        // Sender and recipient are in the key too (see `send_prompt`): the
+        // same id from another agent on this host, or to another recipient,
+        // is another message.
+        let dedupe_key = dedupe_id.as_deref().map(|id| {
+            format!(
+                "send_message:{}:{}:{}:{id}",
+                p.from_session_id,
+                p.to_session_id,
+                p.to_addr.as_deref().unwrap_or("")
+            )
+        });
         if let Some(key) = dedupe_key.as_deref() {
             match lock_sends(&self.recent_sends).reserve(&label, key) {
                 Reservation::Fresh => {}
@@ -590,16 +606,17 @@ impl FleetTools {
             Reach::Read,
             "the inbox's session",
         )?;
-        let mark_read = p.mark_read && {
+        // A readonly token reads the inbox (`inbox` is a readonly tool) but
+        // stamping `read_at` is a write, so it is served as a watcher is.
+        let mark_read = p.mark_read && caller.mode != TokenMode::Readonly && {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             super::support::reaches_row(&s, &caller, &row, Reach::Drive)?
         };
-        let limit = p.limit.unwrap_or(50);
+        let limit = bounded_limit(p.limit, 50);
 
-        // fresh_for absent: today's default, byte-identical, no cursor
-        // touched — `limit` reaches `list_inbox` exactly as it always has
-        // (0 => [], negative => SQLite's own "no limit"), so the clamp
-        // below must never run on this path.
+        // fresh_for absent: no cursor touched, and 0 => [] as always. A
+        // negative or huge `limit` no longer reaches SQLite as "no limit":
+        // see `bounded_limit`.
         let Some(reader) = p.fresh_for else {
             let msgs = crate::service::messages::list_inbox(
                 p.session_id,
@@ -766,4 +783,35 @@ fn page_inbox(
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
     Ok((rows, more))
+}
+
+/// The most rows `session_history` / `inbox` answer in one call.
+pub(super) const READ_LIMIT_MAX: i64 = 500;
+
+/// A caller's `limit`, bounded. A negative one used to reach SQLite as `LIMIT
+/// -1`, i.e. no limit at all: any reader (a readonly phone included) could
+/// dump a long-lived session's whole timeline, or its whole inbox with full
+/// bodies, built and serialised under the one store lock every other caller
+/// waits on — and with `mark_read`, stamp all of it read at once. Negative
+/// and over-large both mean "as many as allowed"; 0 still answers nothing.
+pub(super) fn bounded_limit(limit: Option<i64>, default: i64) -> i64 {
+    match limit.unwrap_or(default) {
+        n if n < 0 => READ_LIMIT_MAX,
+        n => n.min(READ_LIMIT_MAX),
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_limit_is_bounded_both_ways() {
+        assert_eq!(bounded_limit(None, 50), 50);
+        assert_eq!(bounded_limit(Some(0), 50), 0);
+        assert_eq!(bounded_limit(Some(7), 50), 7);
+        assert_eq!(bounded_limit(Some(-1), 50), READ_LIMIT_MAX);
+        assert_eq!(bounded_limit(Some(i64::MIN), 50), READ_LIMIT_MAX);
+        assert_eq!(bounded_limit(Some(i64::MAX), 50), READ_LIMIT_MAX);
+    }
 }

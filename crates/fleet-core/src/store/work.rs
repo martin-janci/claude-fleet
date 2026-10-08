@@ -220,6 +220,10 @@ pub struct WorkItemRow {
     /// while set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held_at: Option<i64>,
+    /// Its acceptance condition lines (orchestration O3), typed by prefix:
+    /// see `service::work::verify`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done_when: Vec<String>,
 }
 
 /// One session ↔ work link. `participant_id` is `None` once the retired
@@ -562,12 +566,12 @@ pub(super) const ITEM_COLUMNS: &str =
      tracker_id, external_id, aliases, kind, hierarchy_level, status_name, resolution, parent_id, \
      assignees, iteration, updated_ext, status_changed_at, fetched_at, unavailable_at, \
      unavailable_reason, status_set_by, status_set_at, origin, project_id, notes, task_id, \
-     proposal_state, proposed_by, proposal_why, held_at";
+     proposal_state, proposed_by, proposal_why, held_at, done_when";
 
 /// How many columns [`ITEM_COLUMNS`] names. A query that appends its own
 /// columns after the list indexes them as `ITEM_COLUMN_COUNT + n` — never a
 /// literal, because a literal silently shifts when a column is added here.
-pub(super) const ITEM_COLUMN_COUNT: usize = 33;
+pub(super) const ITEM_COLUMN_COUNT: usize = 34;
 
 /// A JSON array column as a list; anything unreadable is empty.
 fn json_list(raw: Option<String>) -> Vec<String> {
@@ -610,6 +614,7 @@ pub(super) fn map_item(r: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItemRow> {
         proposed_by: r.get(30)?,
         proposal_why: r.get(31)?,
         held_at: r.get(32)?,
+        done_when: json_list(r.get(33)?),
     })
 }
 

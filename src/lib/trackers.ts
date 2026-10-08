@@ -122,6 +122,8 @@ export interface WorkItemRow {
   proposal_why?: string | null;
   /** When a person put it on hold (orchestration O2). */
   held_at?: number | null;
+  /** Its done_when condition lines (orchestration O3). */
+  done_when?: string[];
 }
 
 /** One `work:*` frame, as the batched handler receives it. */

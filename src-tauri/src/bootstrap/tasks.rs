@@ -163,6 +163,20 @@ impl FleetTasks for RealFleetTasks {
         ));
     }
 
+    /// The missions' loop (orchestration O4–O8), each mission under its
+    /// lease; `orchestrator.enabled` is its kill switch.
+    fn start_mission_tick(&self) {
+        std::mem::drop(fleet_core::service::work::orchestrate::spawn_mission_tick(
+            fleet_core::service::work::orchestrate::Deps {
+                store: Arc::clone(&self.store),
+                ssh: Arc::clone(&self.ssh),
+                reg: Arc::clone(&self.reg),
+                net: fleet_core::service::trackers::default_net(),
+            },
+            tokio_util::sync::CancellationToken::new(),
+        ));
+    }
+
     /// Local workspace sync's pass tick, until the app quits.
     fn start_local_sync_tick(&self) {
         spawn_local_sync_tick(&self.local_sync, self.shutdown.clone());

@@ -52,12 +52,25 @@ export function safeHref(raw: string): string | null {
 
 // ─── blocks ──────────────────────────────────────────────────────────────────
 
-const FENCE = /^ {0,3}(`{3,}|~{3,})\s*([^`\s]*)[^`]*$/;
+// The fence and its info string are split in code, not in one pattern: a
+// `\s*([^`\s]*)[^`]*$` tail lets two runs match the same spaces, so a long
+// line of spaces ending in a backtick took quadratic time (~1 s at 40k).
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
 const HR = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}> ?(.*)$/;
 const LIST_ITEM = /^( *)([-*+]|\d{1,9}[.)])[ \t]+(.*)$/;
-const TABLE_SEP = /^ *\|? *:?-+:? *(\| *:?-+:? *)*\|? *$/;
+// Tested against the TRIMMED line, so no space run sits on both sides of
+// an optional `|` (which made a failing separator line quadratic).
+const TABLE_SEP = /^\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?$/;
+
+/** An opening code fence: its marker and language, or null. The info
+ *  string may not hold a backtick (as before). */
+function fenceOpen(line: string): { marker: string; lang: string } | null {
+  const m = FENCE.exec(line);
+  if (!m || m[2].includes('`')) return null;
+  return { marker: m[1], lang: /^\s*([^\s`]*)/.exec(m[2])![1] };
+}
 
 function isBlank(line: string): boolean {
   return line.trim() === '';
@@ -65,7 +78,7 @@ function isBlank(line: string): boolean {
 
 /** A line that starts a new block and therefore ends a paragraph. */
 function startsBlock(line: string): boolean {
-  return FENCE.test(line) || HEADING.test(line) || HR.test(line) || QUOTE.test(line) || LIST_ITEM.test(line);
+  return fenceOpen(line) !== null || HEADING.test(line) || HR.test(line) || QUOTE.test(line) || LIST_ITEM.test(line);
 }
 
 export function parseMarkdown(src: string): Block[] {
@@ -82,14 +95,14 @@ function parseBlocks(lines: string[], depth: number): Block[] {
       continue;
     }
 
-    const fence = FENCE.exec(line);
+    const fence = fenceOpen(line);
     if (fence) {
-      const marker = fence[1];
+      const marker = fence.marker;
       const body: string[] = [];
       i++;
       while (i < lines.length && !isClosingFence(lines[i], marker)) body.push(lines[i++]);
       i++; // the closing fence (or past the end)
-      out.push({ t: 'code', lang: fence[2] ?? '', v: body.join('\n') });
+      out.push({ t: 'code', lang: fence.lang, v: body.join('\n') });
       continue;
     }
 
@@ -122,7 +135,7 @@ function parseBlocks(lines: string[], depth: number): Block[] {
       continue;
     }
 
-    if (line.includes('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+    if (line.includes('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1].trim()) && lines[i + 1].includes('-')) {
       i = parseTable(lines, i, out);
       continue;
     }

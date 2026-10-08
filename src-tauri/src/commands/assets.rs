@@ -268,12 +268,20 @@ pub async fn catalog_delete_asset(
     routed::catalog_delete_asset(&backend, args, &store).await
 }
 
+/// The path must be one the user picked or dropped (SEC-9): the webview never
+/// gets to name a file this process reads, and this one's bytes go into the
+/// catalog repo — and from there to every host the asset syncs to.
 #[tauri::command]
 pub async fn catalog_add_resource(
     backend: State<'_, Arc<FleetBackend>>,
     args: AddResourceArgs,
     store: State<'_, Arc<Mutex<Store>>>,
+    allow: State<'_, Arc<crate::commands::upload::UploadAllowList>>,
 ) -> Result<WriteResult, IpcError> {
+    let picked = std::slice::from_ref(&args.local_path);
+    crate::commands::upload::check_paths_allowed(&allow, picked)?;
+    // One pick authorises one add, as for an upload.
+    allow.consume(picked);
     routed::catalog_add_resource(&backend, args, &store).await
 }
 

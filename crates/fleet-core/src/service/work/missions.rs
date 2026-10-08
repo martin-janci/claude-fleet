@@ -54,6 +54,9 @@ pub struct MissionInput {
     pub level: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<i64>,
+    /// What it asks of its loop (O4); every field optional, defaults kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<crate::store::MissionPolicy>,
 }
 
 /// `work { action: mission, mission_id }`.
@@ -78,6 +81,11 @@ pub struct MissionDetail {
     /// Whether this caller may change it: the UI's buttons, not a fence.
     #[serde(default)]
     pub may_change: bool,
+    /// Its loop (orchestration O4–O6): the next steps, the confirm queue,
+    /// the autonomy that applies and what its workers spent. `None` for a
+    /// draft or a finished mission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<super::orchestrate::MissionPlan>,
 }
 
 fn not_found(id: i64) -> IpcError {
@@ -110,7 +118,7 @@ pub fn may_change_mission(s: &Store, scope: &ViewScope, m: &MissionRow) -> Resul
 }
 
 /// The mission, if `scope` may read it.
-fn visible(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionRow, IpcError> {
+pub(super) fn visible(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionRow, IpcError> {
     match s.get_mission(id)? {
         Some(m) if sees_mission(s, scope, &m)? => Ok(m),
         _ => Err(not_found(id)),
@@ -119,7 +127,7 @@ fn visible(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionRow, IpcError
 
 /// The mission, if `scope` may change it. One it may read but not change
 /// is `E_FORBIDDEN`; one it may not read is unknown.
-fn changeable(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionRow, IpcError> {
+pub(super) fn changeable(s: &Store, scope: &ViewScope, id: i64) -> Result<MissionRow, IpcError> {
     let m = visible(s, scope, id)?;
     if may_change_mission(s, scope, &m)? {
         Ok(m)
@@ -150,7 +158,7 @@ fn actor(scope: &ViewScope) -> String {
     }
 }
 
-fn mission_id(args: &WorkLinkArgs) -> Result<i64, IpcError> {
+pub(super) fn mission_id(args: &WorkLinkArgs) -> Result<i64, IpcError> {
     args.mission_id.ok_or_else(|| {
         IpcError::new(
             codes::E_INVALID,
@@ -190,6 +198,7 @@ pub fn mission(
     let phase = (mission.state == "active").then(|| graph.phase().to_string());
     let events = s.mission_events(id, before_event, MISSION_EVENTS_PAGE)?;
     let may_change = may_change_mission(&s, scope, &mission)?;
+    let plan = super::orchestrate::plan_for(&s, &mission)?;
     Ok(MissionDetail {
         mission,
         items,
@@ -197,6 +206,7 @@ pub fn mission(
         phase,
         graph,
         may_change,
+        plan,
     })
 }
 
@@ -338,6 +348,7 @@ fn update(
             done_when: input.done_when.clone(),
             mode: input.mode.clone(),
             level: input.level,
+            policy: input.policy.clone(),
         },
         &actor(scope),
     )

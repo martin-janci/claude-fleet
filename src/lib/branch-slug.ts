@@ -49,6 +49,9 @@ export function validateBranchName(name: string): string | null {
   if (name.startsWith('-')) return 'Branch names cannot start with -.';
   if (name.startsWith('/') || name.endsWith('/')) return 'Branch names cannot start or end with /.';
   if (name.endsWith('.') || name.endsWith('.lock')) return 'Branch names cannot end with . or .lock.';
+  if (name.split('/').some((seg) => seg.endsWith('.lock'))) {
+    return 'Branch name components cannot end with .lock.';
+  }
   if (name.includes('..') || name.includes('//') || name.includes('@{')) {
     return 'Branch names cannot contain .. // or @{.';
   }

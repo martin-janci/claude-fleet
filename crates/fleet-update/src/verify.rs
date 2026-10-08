@@ -36,6 +36,10 @@ pub enum VerifyError {
         seen: u64,
         got: u64,
     },
+    /// The channel document behind a target has expired. A stale channel
+    /// never names a target (`decide` holds instead), so one that arrives
+    /// with a target is a frozen channel being replayed.
+    Stale,
     /// The decision names a target but carries no evidence for it.
     MissingEvidence,
     /// The manifest's bytes are not the ones the channel lists for the target.
@@ -71,6 +75,9 @@ impl fmt::Display for VerifyError {
                     f,
                     "channel sequence {got} is older than {seen}, already seen (replay)"
                 )
+            }
+            VerifyError::Stale => {
+                write!(f, "the channel document behind the target has expired")
             }
             VerifyError::MissingEvidence => {
                 write!(f, "the decision carries no signed evidence for its target")
@@ -276,6 +283,9 @@ pub fn verify_target(
         seen,
         now,
     )?;
+    if !ch.fresh {
+        return Err(VerifyError::Stale);
+    }
     let m = verify_manifest(manifest.as_bytes(), manifest_sig, keys)?;
     let listed = ch
         .doc

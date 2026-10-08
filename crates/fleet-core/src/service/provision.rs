@@ -170,7 +170,21 @@ fn marker_content() -> String {
     )
 }
 
-/// Prints the git toplevel when `~/.claude/skills` (following a symlink)
+/// Prefixes the probe's answer, so a login banner (`bash -lc` runs the
+/// profile first) is never read as a git toplevel and refused as one.
+const GIT_TOP_PREFIX: &str = "fleet-git-top=";
+
+/// The toplevel [`git_tree_probe_script`] reported, or `""`.
+fn git_top_of(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|l| l.trim_end_matches('\r').strip_prefix(GIT_TOP_PREFIX))
+        .unwrap_or("")
+        .trim()
+}
+
+/// Prints the git toplevel (after [`GIT_TOP_PREFIX`]) when `~/.claude/skills` (following a symlink)
 /// sits inside a work tree AND that tree tracks a file in one of fleet's two
 /// skill dirs, else nothing. A dotfiles checkout that untracks or ignores
 /// them is fine: provisioning then overwrites nothing anyone committed.
@@ -188,7 +202,7 @@ fn git_tree_probe_script() -> String {
         .join(" ");
     format!(
         "cd {} 2>/dev/null && top=$(git rev-parse --show-toplevel 2>/dev/null) \
-         && [ -n \"$(git ls-files -- {dirs} 2>/dev/null)\" ] && echo \"$top\"; true",
+         && [ -n \"$(git ls-files -- {dirs} 2>/dev/null)\" ] && echo \"{GIT_TOP_PREFIX}$top\"; true",
         remote_path(SKILLS_ROOT)
     )
 }
@@ -340,7 +354,7 @@ async fn provision_skills(
         let out = ssh
             .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
             .await?;
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        git_top_of(&String::from_utf8_lossy(&out.stdout)).to_string()
     };
     if !toplevel.is_empty() && !force_git_tree {
         return Err(IpcError::new(
@@ -1054,11 +1068,26 @@ pub fn reestablish_tunnels(
 
 /// Read a file from a host. `local` → `std::fs`; remote → `cat` over SSH.
 /// Missing file → `Ok(String::new())` (caller treats as empty config).
+///
+/// ONLY a missing file is empty. Every caller merges into what this returns
+/// and writes the result back over the file, so a read that failed — ssh
+/// dropped (exit 255), a root-owned 0600 `~/.claude.json` left by `sudo
+/// claude` — must not read as "empty": that rewrote the user's whole Claude
+/// config as `{mcpServers:{…}}`, and skipped its backup because there was
+/// nothing to back up. Bytes that are not UTF-8 are refused for the same
+/// reason: a lossy decode wrote U+FFFD back over them.
 pub async fn read_host_file(ssh: &dyn SshExec, host: &str, path: &str) -> Result<String, IpcError> {
     if host == "local" {
         crate::service::hub::ensure_local_allowed(host)?;
         let expanded = expand_home_local(path)?;
-        return Ok(std::fs::read_to_string(&expanded).unwrap_or_default());
+        return match std::fs::read(&expanded) {
+            Ok(bytes) => host_text(host, path, bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+            Err(e) => Err(IpcError::new(
+                codes::E_PROVISION,
+                format!("read {path} on {host}: {e}"),
+            )),
+        };
     }
     // Outer `quote` makes the whole script cross the SSH boundary as ONE shell
     // word — ssh space-joins argv, so an unquoted multi-word script would be
@@ -1067,7 +1096,38 @@ pub async fn read_host_file(ssh: &dyn SshExec, host: &str, path: &str) -> Result
     let out = ssh
         .run(host, &["bash", "-lc", &script], PROVISION_TIMEOUT)
         .await?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(IpcError::new(
+            codes::E_PROVISION,
+            format!(
+                "read {path} on {host} failed ({}): {}",
+                out.status,
+                crate::logging::redact(stderr.trim())
+            ),
+        ));
+    }
+    host_text(host, path, read_payload(&out.stdout).to_vec())
+}
+
+/// A read file's bytes as text, or an error naming it when they are not UTF-8.
+fn host_text(host: &str, path: &str, bytes: Vec<u8>) -> Result<String, IpcError> {
+    String::from_utf8(bytes).map_err(|_| {
+        IpcError::new(
+            codes::E_PROVISION,
+            format!("{path} on {host} is not UTF-8 text; fleet will not rewrite it"),
+        )
+    })
+}
+
+/// The file's bytes from [`remote_read_script`]'s stdout: what follows the
+/// marker line. `bash -lc` runs the login profile first, and whatever it
+/// prints (a banner, an MOTD) lands ahead of the file; taken whole, it was
+/// written back into `~/.tmux.conf` / `~/.claude/CLAUDE.md` and broke the
+/// JSON parse of `~/.claude.json`. Without a marker (a host that answered
+/// some other way) the stdout is taken as it is.
+fn read_payload(stdout: &[u8]) -> &[u8] {
+    crate::service::move_session::carry::payload(stdout).unwrap_or(stdout)
 }
 
 /// Write a file to a host (creating parent dirs). `local` → fs; remote → a
@@ -1188,6 +1248,44 @@ async fn remove_remote_tmp(ssh: &dyn SshExec, host: &str, tmp_path: &str) {
 /// is truncated in place and tightened to 0600.
 pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
+    let mut f = open_private(path)?;
+    f.write_all(content.as_bytes())?;
+    f.flush()?;
+    Ok(())
+}
+
+/// Replace `path` with `content`, 0600, so a reader (or a crash) sees the old
+/// file or the new one and never a truncated one: written to a tmp file
+/// beside it, then renamed over it ([`place_private_file`], with its copy
+/// fallback for a bind-mounted target). [`write_private_file`] truncates in
+/// place, which is fine for a file nobody else reads; `~/.claude/settings.json`
+/// is read by every Claude Code start, and a crash mid-write left it cut off.
+///
+/// A symlinked `path` (settings kept in a dotfiles repo) is replaced at its
+/// target, so the link survives.
+pub fn replace_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    };
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(format!(".fleet-tmp-{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    if let Err(e) = write_private_file(&tmp, content) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    place_private_file(&tmp, &target, |f, t| std::fs::rename(f, t))
+}
+
+/// Open `path` for writing, truncated, at mode 0600 BEFORE a byte is
+/// written. `mode()` only applies when the file is created, so a
+/// pre-existing 0644 file (an older build's, a restored backup) is tightened
+/// on the open descriptor first; tightening it after the write left the new
+/// secret world-readable in between.
+fn open_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -1195,12 +1293,20 @@ pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Res
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
     }
-    let mut f = opts.open(path)?;
-    f.write_all(content.as_bytes())?;
-    f.flush()?;
-    // `mode()` only applies at creation; tighten a pre-existing file too.
-    set_private_mode(path);
-    Ok(())
+    let f = opts.open(path)?;
+    #[cfg(unix)]
+    if let Err(e) = f.set_permissions(
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    ) {
+        // As `set_private_mode`: a filesystem that refuses chmod (a drvfs
+        // mount) still gets the write; say so rather than fail it.
+        tracing::warn!(
+            path = %path.display(),
+            error = %e,
+            "[provision] chmod 600 failed; the file may be readable by other users"
+        );
+    }
+    Ok(f)
 }
 
 /// A 0600 temp file holding secret content for the duration of an upload;
@@ -1291,7 +1397,11 @@ fn remote_path(path: &str) -> String {
 
 /// Remote `bash -lc` script body that reads `path` (missing file → empty stdout).
 fn remote_read_script(path: &str) -> String {
-    format!("cat {} 2>/dev/null || true", remote_path(path))
+    format!(
+        "printf '\\n%s\\n' {}; if [ -e {p} ]; then cat {p}; fi",
+        crate::service::move_session::carry::OUT_MARKER,
+        p = remote_path(path)
+    )
 }
 
 /// Remote `bash -lc` script body that creates `dir` then writes `content` to `path`.
@@ -1585,8 +1695,92 @@ mod tests {
     fn remote_read_script_targets_home() {
         assert_eq!(
             remote_read_script("~/.claude.json"),
-            "cat \"$HOME\"/'.claude.json' 2>/dev/null || true"
+            "printf '\\n%s\\n' __CF_OUT__; if [ -e \"$HOME\"/'.claude.json' ]; \
+             then cat \"$HOME\"/'.claude.json'; fi"
         );
+    }
+
+    /// Absent is empty and exits 0; present but unreadable exits non-zero, so
+    /// [`read_host_file`] can tell the two apart.
+    #[cfg(unix)]
+    #[test]
+    fn the_read_script_fails_on_a_file_it_cannot_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |p: &std::path::Path| {
+            std::process::Command::new("bash")
+                .args(["-c", &remote_read_script(&p.to_string_lossy())])
+                .output()
+                .unwrap()
+        };
+        let absent = run(&dir.path().join("absent"));
+        assert!(absent.status.success());
+        assert_eq!(read_payload(&absent.stdout), b"");
+        // A directory where the file should be: `cat` fails as it would on
+        // EACCES, and that holds for uid 0 too.
+        let dir_in_the_way = dir.path().join("d");
+        std::fs::create_dir(&dir_in_the_way).unwrap();
+        assert!(!run(&dir_in_the_way).status.success());
+    }
+
+    /// A read that failed is an error, never an empty file: every caller
+    /// merges into the answer and writes it back over the user's config.
+    #[tokio::test]
+    async fn a_failed_read_is_not_an_empty_file() {
+        let fake = fresh_host();
+        fake.unreachable("h1");
+        let err = read_host_file(&fake, "h1", CLAUDE_JSON).await.unwrap_err();
+        assert_eq!(err.code, codes::E_PROVISION);
+
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&remote_read_script(CLAUDE_JSON)),
+            Reply::fail(1, "cat: /home/u/.claude.json: Permission denied"),
+        );
+        let err = read_host_file(&fake, "h1", CLAUDE_JSON).await.unwrap_err();
+        assert!(err.message.contains("Permission denied"), "{}", err.message);
+
+        let fake = fresh_host();
+        fake.on(
+            Match::script(&remote_read_script(CLAUDE_JSON)),
+            Reply::ok("\n__CF_OUT__\n"),
+        );
+        assert_eq!(read_host_file(&fake, "h1", CLAUDE_JSON).await.unwrap(), "");
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_are_refused_not_mangled() {
+        let err = host_text("h1", CLAUDE_MD_PATH, vec![b'a', 0xff, b'b']).unwrap_err();
+        assert_eq!(err.code, codes::E_PROVISION);
+        assert_eq!(
+            host_text("h1", CLAUDE_MD_PATH, b"ok".to_vec()).unwrap(),
+            "ok"
+        );
+    }
+
+    #[test]
+    fn a_login_banner_is_not_part_of_a_read_file() {
+        assert_eq!(
+            read_payload(b"Welcome\n\n__CF_OUT__\n{\"a\":1}"),
+            b"{\"a\":1}"
+        );
+        assert_eq!(read_payload(b"\n__CF_OUT__\n"), b"");
+        assert_eq!(read_payload(b"{\"a\":1}"), b"{\"a\":1}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_read_script_prints_the_marker_then_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("f");
+        std::fs::write(&f, "x\ny\n").unwrap();
+        let out = std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!("echo banner; {}", remote_read_script(&f.to_string_lossy())),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(read_payload(&out.stdout), b"x\ny\n");
     }
 
     #[test]
@@ -1621,6 +1815,25 @@ mod tests {
         let quoted = crate::shell::quote(&s);
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         assert!(quoted.contains("\"$HOME\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_existing_loose_file_is_private_before_the_secret_is_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("token");
+        std::fs::write(&p, "old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let f = open_private(&p).unwrap();
+        assert_eq!(f.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        drop(f);
+        write_private_file(&p, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     /// The local twin of the remote fallback: when the rename fails the way
@@ -2551,6 +2764,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_login_banner_is_not_a_git_toplevel() {
+        assert_eq!(git_top_of("Welcome\n"), "");
+        assert_eq!(git_top_of("Welcome\nfleet-git-top=/home/u\n"), "/home/u");
+        assert_eq!(git_top_of(""), "");
+    }
+
     /// hosts F2, decision B-2: a dotfiles checkout that tracks fleet's skill
     /// dirs is refused unless `provision.force_git_tree`.
     #[tokio::test]
@@ -2558,7 +2778,7 @@ mod tests {
         let fake = fresh_host();
         fake.on(
             Match::script(&git_tree_probe_script()),
-            Reply::ok("/home/fake/dotfiles\n"),
+            Reply::ok("Welcome to h1\nfleet-git-top=/home/fake/dotfiles\n"),
         );
         let err = provision_one(&fake, "h1", &base(), TOKEN)
             .await
@@ -2578,7 +2798,7 @@ mod tests {
         let forced = fresh_host();
         forced.on(
             Match::script(&git_tree_probe_script()),
-            Reply::ok("/home/fake/dotfiles\n"),
+            Reply::ok("Welcome to h1\nfleet-git-top=/home/fake/dotfiles\n"),
         );
         provision_one_with(&forced, "h1", &base(), TOKEN, true)
             .await
@@ -2603,7 +2823,7 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(out.status.success(), "the probe always exits 0");
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
+            git_top_of(&String::from_utf8(out.stdout).unwrap()).to_string()
         };
         let git = |args: &[&str]| {
             let st = crate::proc::std_command("git")

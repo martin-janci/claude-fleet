@@ -232,6 +232,10 @@ describe('relativeTime', () => {
   it('reports days', () => {
     expect(relativeTime('2026-09-11T12:00:00Z', now)).toBe('2d ago');
   });
+
+  it('shows nothing for an unreadable timestamp, never "NaNd ago"', () => {
+    expect(relativeTime('not a date', now)).toBe('');
+  });
 });
 
 /** A `tool` ConvItem with the fields not under test defaulted. */
@@ -575,6 +579,7 @@ describe('formatTokens', () => {
     expect(formatTokens(200_000)).toBe('200k');
     expect(formatTokens(1_000_000)).toBe('1M');
     expect(formatTokens(1_250_000)).toBe('1.25M');
+    expect(formatTokens(999_600)).toBe('1M');
   });
 });
 

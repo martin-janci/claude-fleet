@@ -174,6 +174,13 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_millis(
     fleet_core::mcp::events_route::KEEPALIVE_INTERVAL.as_millis() as u64 * 5 / 2,
 );
 
+/// The largest one event may grow (its unterminated line and its `data:`
+/// lines together) before the stream is dropped and reopened. A row frame is
+/// kilobytes; the bound is for a hub, or whatever answers at its URL, that
+/// sends a line with no end — bytes that also keep `IDLE_TIMEOUT` from ever
+/// firing.
+pub const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
+
 /// A connection that stayed up this long counts as working even if it
 /// carried no row event — a quiet fleet is not a broken one. Longer than
 /// [`IDLE_TIMEOUT`], so a stream that said `ready` and then went silent does
@@ -365,7 +372,7 @@ impl EventBridge {
     async fn pump(&self, mut body: Box<dyn EventStreamBody>) -> StreamEnd {
         let opened = tokio::time::Instant::now();
         let stayed_up = || opened.elapsed() >= HEALTHY_AFTER;
-        let mut decoder = SseDecoder::new();
+        let mut decoder = SseDecoder::bounded(MAX_EVENT_BYTES);
         let mut row_events = false;
         // Whether this connection's `ready` frame has been read yet. A real
         // hub always sends it first, before touching its bus, so nothing
@@ -523,6 +530,16 @@ impl EventBridge {
                         }
                     }
                 }
+            }
+            if decoder.overflowed() {
+                tracing::warn!(
+                    max_bytes = MAX_EVENT_BYTES,
+                    "[hub events] an event outgrew the frame limit; reconnecting"
+                );
+                return StreamEnd::Gap {
+                    delivered: row_events || stayed_up(),
+                    why: "an event from the hub was larger than this window accepts".to_string(),
+                };
             }
         }
     }

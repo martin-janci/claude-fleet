@@ -14,7 +14,9 @@ pub mod harvest;
 pub mod local;
 pub mod missions;
 pub mod nudge;
+pub mod orchestrate;
 pub mod recognize;
+pub mod report;
 pub mod resolve;
 pub mod resume;
 pub mod retention;
@@ -28,6 +30,7 @@ pub mod summary;
 pub mod tidy;
 pub mod today;
 pub mod usage;
+pub mod verify;
 pub mod view;
 
 use crate::ipc_error::{codes, lock, IpcError};
@@ -280,6 +283,36 @@ pub struct WorkLinkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "array_schema")]
     pub tree: Option<Vec<crate::store::TreeEntry>>,
+    /// done_when: the item's condition lines (`[]` clears them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_when: Option<Vec<String>>,
+    /// verify: the condition line checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+    /// verify: whether it is met. card_decide: apply (true) or dismiss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok: Option<bool>,
+    /// mission_start: one step's key (`run:12`); omitted, the whole wave.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// card_decide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<i64>,
+    /// mission_grant: the autonomy signed, 1 to 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<i64>,
+    /// mission_grant: how long it lasts (default 8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hours: Option<u32>,
+    /// mission_grant: what its workers may spend, in cents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_cents: Option<i64>,
+    /// mission_grant: the hosts its runs may use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
+    /// mission_grant: runs at once, at most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<u32>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -480,6 +513,15 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "propose_tree",
     "accept_many",
     "undo_accept",
+    "done_when",
+    "verify",
+    "mission_start",
+    "mission_plan",
+    "mission_grant",
+    "mission_revoke",
+    "retry",
+    "card_decide",
+    "missions_pause_all",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -551,6 +593,16 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_work_hold", "work_link", "hold"),
     ("accept_work_proposals", "work_link", "accept_many"),
     ("undo_work_accept", "work_link", "undo_accept"),
+    // Orchestration O3: acceptance conditions and a person's check.
+    ("set_work_done_when", "work_link", "done_when"),
+    ("verify_work_item", "work_link", "verify"),
+    ("start_mission_wave", "work_link", "mission_start"),
+    ("retry_work_item", "work_link", "retry"),
+    ("plan_mission", "work_link", "mission_plan"),
+    ("decide_mission_card", "work_link", "card_decide"),
+    ("grant_mission", "work_link", "mission_grant"),
+    ("revoke_mission_grant", "work_link", "mission_revoke"),
+    ("pause_all_missions", "work_link", "missions_pause_all"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph
