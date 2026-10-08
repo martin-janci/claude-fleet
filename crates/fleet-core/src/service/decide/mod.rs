@@ -107,7 +107,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 6] = [
+    pub const ALL: [Feature; 7] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
