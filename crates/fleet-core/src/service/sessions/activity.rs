@@ -49,9 +49,13 @@ pub struct ActivityProbe {
     pub pending_input: Option<pane_intel::PendingInput>,
 }
 
-/// PURE: the probe for a captured pane tail.
+/// PURE: the probe for a captured Claude Code pane tail.
 pub fn probe_from_tail(tail: &str) -> ActivityProbe {
-    let agent = crate::agent_adapter::claude();
+    probe_with(crate::agent_adapter::claude(), tail)
+}
+
+/// PURE: the probe for a pane tail, read by the session's agent.
+pub fn probe_with(agent: &dyn crate::agent_adapter::AgentAdapter, tail: &str) -> ActivityProbe {
     let intel = agent.analyze_pane(tail);
     ActivityProbe {
         claude_status: intel.derived_status.map(|s| s.as_str().to_string()),
@@ -89,7 +93,9 @@ pub async fn session_activity(
     let tail = tmux
         .capture_pane_scrollback(&row.tmux_name, ACTIVITY_TAIL_LINES)
         .await?;
-    Ok(probe_from_tail(&tail))
+    let agent = crate::agent_adapter::for_session(&row.kind, Some(&row.agent))
+        .unwrap_or_else(crate::agent_adapter::claude);
+    Ok(probe_with(agent, &tail))
 }
 
 #[cfg(test)]
