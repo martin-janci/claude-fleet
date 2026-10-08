@@ -1215,17 +1215,19 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                       the hub",
         },
     ),
+    // Redesign step 9.2: the operator's calls that wait for a person wait in
+    // the queue of the server they reached, which on a hub-backed desktop is
+    // the hub's. The owner's device lists and answers it there.
     (
         "mcp_confirm",
-        Verdict::SameInBoth {
-            why: "answers this process's own confirm queue, which is empty in remote mode — \
-                  answering nothing is correct",
+        Verdict::Routed {
+            tool: "answer_mcp_confirm",
         },
     ),
     (
         "mcp_pending_confirms",
-        Verdict::SameInBoth {
-            why: "the same queue, the same reason",
+        Verdict::Routed {
+            tool: "mcp_confirms",
         },
     ),
     // ── the UX agent's operator session ─────────────────────────────────────

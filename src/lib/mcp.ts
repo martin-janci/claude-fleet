@@ -117,8 +117,12 @@ export interface ConfirmRequest {
   tool: string;
   /** Redacted argument summary (never a prompt body). */
   summary: string;
-  /** `master` or `host:<alias>` */
+  /** `master`, `host:<alias>` or `client:<name>` */
   caller: string;
+  /** The UX agent's operator asked: a card in Control's transcript (9.2). */
+  operator: boolean;
+  /** Unix seconds; 0 from an older backend. */
+  asked_at: number;
 }
 
 export const MCP_CONFIRM_EVENT = 'mcp:confirm-required';
@@ -128,8 +132,10 @@ export function mcpConfirm(nonce: string, approved: boolean): Promise<Result<boo
   return invokeCmd<boolean>('mcp_confirm', { nonce, approved });
 }
 
-export function mcpPendingConfirms(): Promise<Result<{ nonce: string; tool: string }[]>> {
-  return invokeCmd<{ nonce: string; tool: string }[]>('mcp_pending_confirms');
+/** Outstanding requests, oldest first. An older backend sends only nonce
+ *  and tool; `confirms.ts` fills in the rest. */
+export function mcpPendingConfirms(): Promise<Result<(Partial<ConfirmRequest> & { nonce: string; tool: string })[]>> {
+  return invokeCmd<(Partial<ConfirmRequest> & { nonce: string; tool: string })[]>('mcp_pending_confirms');
 }
 
 /** Build the ready-to-paste MCP client config for an HTTP transport. */
