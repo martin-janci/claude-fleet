@@ -80,6 +80,105 @@ impl Reason {
     }
 }
 
+impl Reason {
+    /// The attention state this reason puts a session in.
+    pub fn state(self) -> State {
+        match self {
+            Reason::Waiting | Reason::Stuck | Reason::ContextFull | Reason::StaleWorking => {
+                State::ActionRequired
+            }
+            Reason::StopFailed | Reason::Failed | Reason::CiFailing => State::Failed,
+            // A ghost, a lost row or a pending safe kill: nobody can answer
+            // it, so it leaves the badge (step 1.1 folds a mass loss into one
+            // Restore row instead).
+            Reason::Lifecycle => State::Paused,
+        }
+    }
+}
+
+/// The seven attention states of the Orbit Fleet redesign (step 0.4), in
+/// urgency order. The twelve triage buckets fold into these, and the badge
+/// counts only the first three. The table is shared with the desktop
+/// through `src/lib/attention_states.json`, which both test suites check.
+///
+/// Not on the wire yet: hub contract 11 (step 2.6) carries the state beside
+/// the reason, and `Blocked` gets its first reasons in step 2.4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    /// A person has to answer or act: shown as "Needs you".
+    ActionRequired,
+    Failed,
+    /// Waiting on something outside the session (a host, credentials, a
+    /// limit, another task); shown as "Needs you" with its reason line.
+    Blocked,
+    Working,
+    Paused,
+    Done,
+    Idle,
+}
+
+impl State {
+    pub const ALL: [State; 7] = [
+        State::ActionRequired,
+        State::Failed,
+        State::Blocked,
+        State::Working,
+        State::Paused,
+        State::Done,
+        State::Idle,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::ActionRequired => "action_required",
+            State::Failed => "failed",
+            State::Blocked => "blocked",
+            State::Working => "working",
+            State::Paused => "paused",
+            State::Done => "done",
+            State::Idle => "idle",
+        }
+    }
+
+    /// Whether a session in this state raises the Needs you badge.
+    pub fn counts_toward_badge(self) -> bool {
+        matches!(self, State::ActionRequired | State::Failed | State::Blocked)
+    }
+}
+
+/// Every triage bucket, in the desktop's `TRIAGE_BUCKETS` order, and its
+/// state. The hub decides the eight [`Reason`]s; `done_unread`, `idle_long`,
+/// `working` and `idle` are the desktop's own buckets, listed so the whole
+/// map lives in one table.
+pub const BUCKET_STATES: [(&str, State); 12] = [
+    ("waiting", State::ActionRequired),
+    ("stuck", State::ActionRequired),
+    ("stop_failed", State::Failed),
+    ("failed", State::Failed),
+    ("context_full", State::ActionRequired),
+    ("stale_working", State::ActionRequired),
+    ("ci_failing", State::Failed),
+    ("done_unread", State::Done),
+    ("lifecycle", State::Paused),
+    ("idle_long", State::Idle),
+    ("working", State::Working),
+    ("idle", State::Idle),
+];
+
+/// A session's attention state: its [`Reason`]'s state when it needs a
+/// person, else `Working` or `Idle` from `claude_status`.
+pub fn state_with(row: &SessionRow, context_red_pct: f64) -> State {
+    match needs_attention_with(row, context_red_pct) {
+        Some(a) => a.reason.state(),
+        // A shell has no agent in it, whatever its status column says.
+        None if row.kind != "shell" && row.claude_status.as_deref() == Some("working") => {
+            State::Working
+        }
+        None => State::Idle,
+    }
+}
+
 /// The one context threshold, when no store is at hand to read
 /// `health.context_red_pct`: `fleet_health.context_red`, `context_full`
 /// here and the desktop's chip all count from the same number.
@@ -443,6 +542,93 @@ mod tests {
                 "src/lib/attention.ts does not name the bucket {}",
                 r.as_str()
             );
+        }
+    }
+
+    /// The shared attention table (redesign step 0.4): the desktop reads
+    /// `src/lib/attention_states.json` at runtime, so it must say exactly
+    /// what this module does, and its rows must classify the same here as
+    /// in `attention.test.ts`.
+    #[test]
+    fn the_shared_attention_table_matches_this_module() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(&crate::repo_files::read("src/lib/attention_states.json"))
+                .unwrap();
+
+        let states: Vec<(String, bool)> = fixture["states"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                (
+                    s["id"].as_str().unwrap().to_string(),
+                    s["counted"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        let ours: Vec<(String, bool)> = State::ALL
+            .iter()
+            .map(|s| (s.as_str().to_string(), s.counts_toward_badge()))
+            .collect();
+        assert_eq!(states, ours, "states in attention_states.json");
+
+        let buckets: Vec<(String, String)> = fixture["buckets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                (
+                    b[0].as_str().unwrap().to_string(),
+                    b[1].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        let ours: Vec<(String, String)> = BUCKET_STATES
+            .iter()
+            .map(|(b, s)| (b.to_string(), s.as_str().to_string()))
+            .collect();
+        assert_eq!(buckets, ours, "buckets in attention_states.json");
+
+        // Each hub reason's state is its bucket's row in the table.
+        let reasons = [
+            Reason::Waiting,
+            Reason::Stuck,
+            Reason::StopFailed,
+            Reason::Failed,
+            Reason::ContextFull,
+            Reason::StaleWorking,
+            Reason::CiFailing,
+            Reason::Lifecycle,
+        ];
+        for r in reasons {
+            let row = BUCKET_STATES.iter().find(|(b, _)| *b == r.as_str());
+            assert_eq!(row.map(|(_, s)| *s), Some(r.state()), "{}", r.as_str());
+        }
+
+        let base = serde_json::to_value(row()).unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let mut v = base.clone();
+            for (k, val) in case["row"].as_object().unwrap() {
+                v[k] = val.clone();
+            }
+            let r: SessionRow = serde_json::from_value(v).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let state = state_with(&r, DEFAULT_CONTEXT_RED_PCT);
+            assert_eq!(state.as_str(), case["state"].as_str().unwrap(), "{name}");
+            assert_eq!(
+                state.counts_toward_badge(),
+                case["counted"].as_bool().unwrap(),
+                "{name}"
+            );
+            // Where the hub decides the bucket, it is the same one.
+            let reason =
+                needs_attention_with(&r, DEFAULT_CONTEXT_RED_PCT).map(|a| a.reason.as_str());
+            let bucket = case["bucket"].as_str().unwrap();
+            if reasons.iter().any(|r| r.as_str() == bucket) {
+                assert_eq!(reason, Some(bucket), "{name}");
+            } else {
+                assert_eq!(reason, None, "{name}");
+            }
         }
     }
 }
