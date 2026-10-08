@@ -280,6 +280,11 @@ pub struct WorkTask {
     /// session that worked on two tasks counts in both.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cost_micros: i64,
+    /// What a rule, Jev or an LLM proposes about this task, one per
+    /// feature (step 2.8): the same shape as `SessionRow::proposals`. Empty,
+    /// and absent on the wire, when nothing proposes anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<crate::store::DecisionProposal>,
 }
 
 /// A section header while a tree read counts it: the group, how many tasks,
@@ -663,6 +668,9 @@ pub(crate) struct Graph {
     pub(crate) job_states: HashMap<i64, String>,
     /// A task's item id → its proposals waiting for a decision.
     pub(crate) open_proposals: HashMap<i64, u32>,
+    /// A task's item id → what a rule, Jev or an LLM proposes about it
+    /// (step 2.8, `WorkTask::proposals`).
+    pub(crate) item_proposals: HashMap<i64, Vec<crate::store::DecisionProposal>>,
     /// The [`proposer_label`] of every session row that SURVIVED the person
     /// fence, or `None` on the ORG-only load — the text half of
     /// [`Self::hidden_sessions`], for `work_items.proposed_by` (multi-user
@@ -801,6 +809,15 @@ impl Graph {
             .into_iter()
             .map(|i| (i.item.id, i))
             .collect();
+        // Machine proposals about an item are about the ITEM (its org's
+        // work data, fenced with the item itself), and carry only ids and
+        // vocabulary words.
+        let item_proposals: HashMap<i64, Vec<crate::store::DecisionProposal>> = s
+            .current_proposals(crate::store::PROPOSAL_SUBJECT_WORK_ITEM)?
+            .into_iter()
+            .filter_map(|(id, v)| Some((id.parse::<i64>().ok()?, v)))
+            .filter(|(id, _)| items.contains_key(id))
+            .collect();
         let mut open_proposals: HashMap<i64, u32> = HashMap::new();
         for i in items.values() {
             if let (Some("proposed"), Some(parent)) =
@@ -876,6 +893,7 @@ impl Graph {
             // `SubtaskView.title` in `native_work`); they are not counted
             // here, since a mirror is never `proposal_state = 'proposed'`.
             open_proposals,
+            item_proposals,
             visible_proposers,
             deps,
             scope: scope.clone(),
@@ -1845,6 +1863,9 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     let open_proposals = item
         .and_then(|i| g.open_proposals.get(&i.item.id).copied())
         .unwrap_or(0);
+    let proposals = item
+        .and_then(|i| g.item_proposals.get(&i.item.id).cloned())
+        .unwrap_or_default();
     let (title, title_derived) = match listed
         .iter()
         .find(|(_, st, _)| *st != "rejected")
@@ -1895,6 +1916,7 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         blocked,
         blocked_by,
         cost_micros,
+        proposals,
     };
     TaskSummary {
         task,
