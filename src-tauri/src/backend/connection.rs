@@ -172,6 +172,9 @@ pub struct HubConnectionStatus {
     sink: Option<Arc<dyn RemoteEventSink>>,
     /// Only ever used to blank itself out of a reason.
     token: String,
+    /// The banner's "Retry now": wakes the bridge out of its backoff wait
+    /// (`hub_retry_now`). See [`super::events::EventBridge::waking_on`].
+    retry: Arc<tokio::sync::Notify>,
 }
 
 /// Hand-written: the token is here only to be redacted, and a `{:?}` must not
@@ -194,6 +197,7 @@ impl HubConnectionStatus {
             confirmed: std::sync::atomic::AtomicBool::new(false),
             sink: None,
             token: String::new(),
+            retry: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -205,6 +209,7 @@ impl HubConnectionStatus {
             confirmed: std::sync::atomic::AtomicBool::new(false),
             sink: Some(sink),
             token: token.to_string(),
+            retry: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -214,6 +219,19 @@ impl HubConnectionStatus {
             .lock()
             .map(|c| c.clone())
             .unwrap_or(HubConnection::Connecting)
+    }
+
+    /// What the bridge waits on beside its backoff, so a person can cut the
+    /// wait short.
+    pub fn retry_handle(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.retry)
+    }
+
+    /// Try the hub again now instead of when the backoff says. Wakes only a
+    /// bridge that is waiting: pressed while connected, it does nothing, and
+    /// it leaves no permit behind to cut a later wait short.
+    pub fn retry_now(&self) {
+        self.retry.notify_waiters();
     }
 
     /// The skew a `ready` frame last judged this hub to be in, if it still

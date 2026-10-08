@@ -237,3 +237,24 @@ fn the_status_debug_hides_the_token() {
     let (s, _) = status("cl_s3cret");
     assert!(!format!("{s:?}").contains("cl_s3cret"));
 }
+
+/// The banner's Retry now wakes a bridge that is waiting, and only that: a
+/// press while nothing waits leaves no permit to cut a later wait short.
+#[tokio::test]
+async fn retry_now_wakes_a_waiting_bridge_and_leaves_no_permit() {
+    let s = HubConnectionStatus::standalone();
+    s.retry_now();
+    let later = s.retry_handle();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), later.notified())
+            .await
+            .is_err(),
+        "a press with nobody waiting is not stored"
+    );
+    let waiting = s.retry_handle();
+    let woken = waiting.notified();
+    s.retry_now();
+    tokio::time::timeout(std::time::Duration::from_secs(1), woken)
+        .await
+        .expect("a waiting bridge is woken");
+}

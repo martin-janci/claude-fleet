@@ -1,6 +1,7 @@
 <script lang="ts" module>
   import type { ChangedFile, RepoTree } from './files';
   import { fileIcon, folderIcon } from './fileicons';
+  import Skeleton from './states/Skeleton.svelte';
 
   interface TreeNode {
     name: string;
@@ -125,7 +126,7 @@
 
   <div class="rows">
     {#if loading}
-      <p class="hint">Loading…</p>
+      <Skeleton />
     {:else if error}
       <p class="hint err">{error}</p>
     {:else if mode === 'changes'}

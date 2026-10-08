@@ -215,7 +215,9 @@ impl FleetTasks for RealFleetTasks {
         )
         // The disconnected banner's signal; the same status `hub_connection`
         // answers from.
-        .reporting_to(Arc::clone(&self.hub_link) as Arc<dyn ConnectionReporter>);
+        .reporting_to(Arc::clone(&self.hub_link) as Arc<dyn ConnectionReporter>)
+        // The banner's "Retry now" (`hub_retry_now`).
+        .waking_on(self.hub_link.retry_handle());
         spawn_event_bridge(bridge);
     }
 
