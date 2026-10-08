@@ -394,8 +394,11 @@ showRowDetails.subscribe((v) => writePref('rows.details', v));
 // Sidebar grouping — `project` (the tree by repository) or `work` (sessions
 // that carry a work key grouped by it first, the rest still under their
 // project; see work_keys.ts). Persisted across restarts.
-export type SidebarGroupBy = 'project' | 'work';
-const isGroupBy = (v: unknown): v is SidebarGroupBy => v === 'project' || v === 'work';
+/** Project and work are trees with their own headers; state, host and agent
+ *  (redesign step 3.6) are flat groups, `row_groups.ts`. */
+export type SidebarGroupBy = 'project' | 'work' | 'state' | 'host' | 'agent';
+const isGroupBy = (v: unknown): v is SidebarGroupBy =>
+  v === 'project' || v === 'work' || v === 'state' || v === 'host' || v === 'agent';
 export const sidebarGroupBy = writable<SidebarGroupBy>(readPref('sidebar.group', 'project', isGroupBy));
 sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 

@@ -9,6 +9,8 @@ import { get } from 'svelte/store';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkTree from './WorkTree.svelte';
+import { uiLayout } from './prefs';
+import { workBoardOpen } from './app_views';
 import { sessions } from './sessions';
 import { selectedSession, selectSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
@@ -167,6 +169,38 @@ describe('WorkTree', () => {
     expect(screen.queryByTestId('work-review')).toBeNull();
     // Every earlier tab is still there.
     for (const t of ['tasks', 'review', 'missions']) expect(screen.getByTestId(`work-tab-${t}`)).toBeTruthy();
+  });
+
+  it('New layout: fixed tabs Tasks, Missions and Board, with Review as a count', async () => {
+    uiLayout.set('new');
+    try {
+      render(WorkTree);
+      await flush();
+      expect(screen.getByTestId('work-tab-tasks')).toBeTruthy();
+      expect(screen.getByTestId('work-tab-missions')).toBeTruthy();
+      expect(screen.queryByTestId('work-tab-review')).toBeNull();
+      // Board is a tab, not a layout chip beside List and Grouped.
+      expect(screen.queryByTestId('work-layout-board')).toBeNull();
+      expect(screen.getByTestId('work-review-count').textContent).toBe('4');
+
+      await fireEvent.click(screen.getByTestId('work-review-count'));
+      await flush();
+      expect(screen.getByTestId('work-review-strip').textContent).toContain('Review: 4 waiting');
+      expect(screen.getByTestId('work-tab-tasks').getAttribute('aria-selected')).toBe('true');
+      await fireEvent.click(screen.getByTestId('work-review-strip-close'));
+      expect(screen.queryByTestId('work-review-strip')).toBeNull();
+
+      await fireEvent.click(screen.getByTestId('work-tab-board'));
+      expect(get(workBoardOpen)).toBe(true);
+      expect(screen.getByTestId('work-tab-board').getAttribute('aria-selected')).toBe('true');
+      expect(screen.getByTestId('work-tab-tasks').getAttribute('aria-selected')).toBe('false');
+      await fireEvent.click(screen.getByTestId('work-tab-missions'));
+      expect(get(workBoardOpen)).toBe(false);
+      expect(screen.getByTestId('work-tab-missions').getAttribute('aria-selected')).toBe('true');
+    } finally {
+      uiLayout.set('classic');
+      workBoardOpen.set(false);
+    }
   });
 
   it('opening a section loads it by itself; Load more pages with its own cursor', async () => {

@@ -106,13 +106,12 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'session-view', 'Flip the Session view (agent tab)',
     split(['Meta+J'], ['Ctrl+Shift+J', 'Meta+J'])),
   row('global', 'agent', 'Open the agent (Control from 9.1)', split(['Meta+E'], ['Ctrl+Shift+E', 'Meta+E'])),
-  row('global', 'settings', 'Settings', split(['Meta+,'], ['Meta+,'])),
+  // Ctrl+, off the Mac is new in 1.9 (keyboard.md); the Super form stays.
+  row('global', 'settings', 'Settings', split(['Meta+,'], ['Ctrl+,', 'Meta+,'])),
   row('global', 'work-view', 'Switch Sessions and Work', split(['Meta+Shift+W'], ['Ctrl+Shift+W'])),
   row('global', 'scope', 'Organisation scope', split(['Meta+Shift+O'], ['Ctrl+Shift+O'])),
   row('global', 'today', 'Today', split(['Meta+Shift+T'], ['Ctrl+Shift+T'])),
   // The design manual's new chords (keyboard.md); ⌥⌘ is Ctrl+Alt elsewhere.
-  row('global', 'settings-ctrl', 'Settings with Ctrl+, on Linux and Windows',
-    split([], ['Ctrl+,']), { status: 'planned', step: '1.9' }),
   row('global', 'open-in-editor', 'Open in VS Code',
     split(['Meta+Shift+E'], ['Ctrl+Alt+E']), { status: 'planned', step: '5.6' }),
   row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B']), { status: 'planned', step: '3.5' }),
