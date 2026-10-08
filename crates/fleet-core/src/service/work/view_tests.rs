@@ -391,6 +391,10 @@ fn a_suggestion_is_distinct_explained_and_decided() {
     assert_eq!(it.kind, "suggestion");
     assert!(!it.why.is_empty());
     assert_eq!(it.alternatives.len(), 1, "TK-2 is the other guess");
+    // Redesign 6.5: detection's confidence, as Review shows it — a key in
+    // passing (R6) is a low guess, well under "Confirm all high-confidence".
+    assert_eq!(it.rule.as_deref(), Some("R6"));
+    assert_eq!(it.confidence, Some(35));
 
     assert_eq!(it.link_version, 1, "a fresh link");
     work_link(
