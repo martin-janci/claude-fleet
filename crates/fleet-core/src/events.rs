@@ -824,7 +824,9 @@ impl BroadcastEventBus {
             None => (seq == self.seq.load(Ordering::Relaxed)).then(Vec::new),
             // The ring must still hold the event AFTER the one the client
             // has, or there is a hole between them.
-            Some(oldest) if oldest <= seq + 1 => {
+            // `seq` is the client's own `Last-Event-ID`, so `+ 1` is checked:
+            // `u64::MAX` overflowed it under the ring's lock.
+            Some(oldest) if seq.checked_add(1).is_some_and(|n| oldest <= n) => {
                 Some(ring.iter().filter(|m| m.seq > seq).cloned().collect())
             }
             Some(_) => None,
@@ -1528,6 +1530,22 @@ mod tests {
             bus.replay_after(bus.generation(), 4).unwrap().is_empty(),
             "a client that is fully caught up has missed nothing"
         );
+    }
+
+    /// The resume point is the client's own number: `u64::MAX` overflowed
+    /// `seq + 1` while the ring's lock was held, poisoning it for every
+    /// later emit. It is refused, and the ring keeps recording.
+    #[tokio::test]
+    async fn a_resume_point_at_u64_max_is_refused_without_poisoning_the_ring() {
+        let bus = BroadcastEventBus::new(16);
+        let _rx = bus.subscribe();
+        bus.emit(&RowChange::SessionKilled(1.into()));
+        assert!(bus.replay_after(bus.generation(), u64::MAX).is_none());
+        bus.emit(&RowChange::SessionKilled(2.into()));
+        let after = bus
+            .replay_after(bus.generation(), 1)
+            .expect("still recording");
+        assert_eq!(after.iter().map(|m| m.seq).collect::<Vec<_>>(), vec![2]);
     }
 
     /// A restarted hub counts from 1 again, so an id minted by the last

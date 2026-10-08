@@ -312,3 +312,11 @@ describe('Timeline component', () => {
     expect(kinds).toEqual(['compact_done', 'turn_done']);
   });
 });
+
+describe('shortDetail on emoji', () => {
+  it('never cuts a surrogate pair in half', () => {
+    const out = shortDetail('a'.repeat(118) + '😀tail');
+    expect(out).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+    expect(out).toBe('a'.repeat(118) + '😀…');
+  });
+});

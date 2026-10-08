@@ -39,6 +39,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.start_project",
+          "hint": "Pre-selects the repository when a task's first start has none; you still press Start."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         }
       ]

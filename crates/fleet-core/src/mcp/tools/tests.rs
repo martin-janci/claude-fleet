@@ -3913,9 +3913,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 80,099 on 2026-10-07 after the mission graph (`work_link
     /// { dep | hold | propose_tree | accept_many | undo_accept }` and their
     /// arguments, +515 bytes).
-    /// Measured at 81,616 on 2026-10-08 after merging `main` (80,099) into
-    /// chat forms (the `ask` tool, +1,517 bytes): exactly the two sides' sum.
-    const BUDGET_BYTES: usize = 81_716;
+    /// Measured at 81,648 on 2026-10-08 after merging `main` (80,099) into
+    /// chat forms (the `ask` tool, +1,517 bytes; 32 bytes above the two
+    /// sides' sum).
+    const BUDGET_BYTES: usize = 81_748;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -4716,11 +4717,13 @@ async fn send_message_with_a_client_msg_id_already_in_flight_is_e_in_flight() {
         .upsert_session("beta", "local", None, None, 0, 0, "running", None)
         .unwrap();
     let t = test_tools(s);
-    // Seeded under `send_message`'s own namespaced key (`send_message:` +
-    // the id), matching what the tool itself reserves under — not the bare
-    // id, which is `send_prompt`'s namespace since fix round 1.
-    let _ =
-        lock_sends(&t.recent_sends).reserve(&Caller::master().label(), "send_message:in-flight");
+    // Seeded under `send_message`'s own key (`send_message:` + sender +
+    // recipient session + recipient address + the id), matching what the
+    // tool itself reserves under.
+    let _ = lock_sends(&t.recent_sends).reserve(
+        &Caller::master().label(),
+        &format!("send_message:{a}:{b}::in-flight"),
+    );
     let e = t
         .send_message(
             Extension(Caller::master()),
@@ -13171,6 +13174,16 @@ async fn the_inbox_gate_binds_the_master_and_mark_read_needs_drive() {
         before,
         "and the owner's unread view is untouched by the watcher's read"
     );
+    // A readonly token of the owner's reads too, and also leaves it alone:
+    // `inbox` is a readonly tool, the mark is a write.
+    let readonly = Caller {
+        mode: TokenMode::Readonly,
+        ..device_of(ada, ada)
+    };
+    read(readonly, a_row, true)
+        .await
+        .expect("a readonly token reads the inbox");
+    assert_eq!(unread(&t), before, "a readonly token marks nothing read");
     // The OWNER's same default call does advance it.
     read(device_of(ada, ada), a_row, true).await.unwrap();
     assert_eq!(unread(&t), 0, "the owner's read marks read");
@@ -18085,4 +18098,57 @@ async fn exactly_one_action_per_call() {
         .await
         .unwrap_err();
     assert_eq!(err_code(&err), "E_INVALID");
+}
+
+/// `since_turn` is bounded before the subtraction: `i64::MIN` overflowed it.
+#[test]
+fn transcript_turns_bounds_the_client_s_since_turn() {
+    use super::support::transcript_turns;
+    assert_eq!(transcript_turns(5, Some(i64::MIN)), 1);
+    assert_eq!(transcript_turns(5, Some(-1)), 1);
+    assert_eq!(transcript_turns(5, Some(-1_000_000_000_000_000_000)), 1);
+    assert_eq!(transcript_turns(5, Some(99)), 1);
+    assert_eq!(transcript_turns(5, Some(5)), 1);
+    assert_eq!(transcript_turns(5, Some(2)), 3);
+    assert_eq!(transcript_turns(5, None), 1);
+}
+
+/// The dedupe key names the recipient: the same `client_msg_id` to another
+/// session is another message, not a replay of the first one's result.
+#[tokio::test]
+async fn a_client_msg_id_reused_for_another_recipient_still_sends() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let a = s
+        .upsert_session("alpha", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let b = s
+        .upsert_session("beta", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let c = s
+        .upsert_session("gamma", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let t = test_tools(s);
+    for to in [b, c] {
+        t.send_message(
+            Extension(Caller::master()),
+            Parameters(send_message_params(a, to, "hello", Some("1"))),
+        )
+        .await
+        .unwrap();
+    }
+    for to in [b, c] {
+        let n: i64 = t
+            .store
+            .lock()
+            .unwrap()
+            .conn_ref()
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages WHERE to_session_id = ?1",
+                rusqlite::params![to],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "session {to} got its message");
+    }
 }

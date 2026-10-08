@@ -113,7 +113,9 @@ export function kindLabel(kind: string): string {
 export function shortDetail(detail: string | null, max = 120): string {
   if (!detail) return '';
   const one = detail.replace(/\s+/g, ' ').trim();
-  return one.length > max ? one.slice(0, max - 1) + '…' : one;
+  // By code point: a UTF-16 cut splits an emoji into a lone surrogate.
+  const chars = one.length > max ? Array.from(one) : null;
+  return chars && chars.length > max ? chars.slice(0, max - 1).join('') + '…' : one;
 }
 
 /** Clock time for today, date + time otherwise. */

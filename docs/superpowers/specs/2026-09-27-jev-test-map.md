@@ -229,6 +229,79 @@ runs. Changing one after seeing results needs a new decision row.
 - A Noul per project.
 - Low volume, weak.
 
+### K1–K5 — candidates found after the test map (owner, 2026-10-07)
+
+A survey of the features landed or designed after 2026-09-27 found five
+more closed-set decisions. The owner accepted all five on 2026-10-07, in
+this order: the phase-0 runs first (they gate every cell), then K1, K5 with
+the picker's phase 2, K2 and K3 as shadow slots in their designs, K4 last.
+Each becomes a full card above when its adapter is built.
+
+#### K1 — the project for a task's first start (`start_project`)
+
+| Field | Plan |
+|---|---|
+| Decision | A start of a task whose key prefix no project has worked on yet: today `start_work` answers `E_AMBIGUOUS` with `missing: "project"` and the 8 most recently used projects (`service/trackers/tickets.rs`), and the person picks in `StartPopover`. Jev pre-selects one of those candidates or abstains |
+| Input | the task's title and description excerpt (redacted), each candidate's `owner/repo`; nothing from the repositories |
+| Candidates | closed: the preview's candidate projects plus `unsure` |
+| Reference | free: the project the person starts in (a confirmed or corrected run) |
+| Baselines | the most recently used project (today's first row); BM25 of the title over `owner/repo` |
+| Acceptance (assist) | accuracy on answered ≥ 0.85 at coverage ≥ 0.50, ≥ 15 points above "first row" |
+| Safety | a pre-selection only; the person still presses Start. Never on the start path: shadow asks after the preview has answered |
+| Setting | `decide.jev.start_project` (`off / shadow / assist`), off |
+| Components | **[built]** `service/decide/start_project.rs` (question `start_project.v1`, subject `work_start` `item:<id>` / `key:<HMAC>`, options `p<id>` + `unsure`, floor 0.5, a decided run reused for 14 days); `tickets::preview_start_decided` (shadow spawned off the path, assist awaited → `suggested_project`), wired in the hub's `work_link { preview_start }` and the standalone desktop's `preview_start_work`; `record_start` marks the assist proposal `confirmed` / `corrected` on a person's start; the popover pre-selects it (`suggestedProjectId`, *Proposed by Jev*). Tests: `service/decide/start_project_tests.rs`, `src/lib/start_preview.test.ts`, `src/lib/WorkTaskDetail.test.ts`. Not built: a phase-0 bench over past first starts |
+
+#### K2 — which operator thread a prompt belongs to (`operator_thread`)
+
+- Where: Mode B (`2026-10-06-task-to-session-flow-design.md` §3.2), for a
+  prompt that names no task key.
+- A Choice over the current thread, the other open threads (title and
+  task key) and `new_topic`.
+- Asked after the prompt is sent, never before; the answer is at most the
+  banner *New topic …? / Send in its thread?*. Its buttons are the labels.
+- Weak spot: short prompts and indirection ("do the same for the other
+  one"); `unsure` must be cheap.
+- Waits on Mode B; built into it as a shadow slot from its first slice.
+
+#### K3 — triage in the mission loop (`mission_triage`)
+
+- Where: the orchestration loop (`2026-10-07-autonomous-orchestration-projects-design.md` §5.3, §6).
+- (a) The worker's outcome `done / partial / blocked / failed` when its
+  JSON report is missing; (b) a failure's next step `retry / split /
+  give_up / ask` as an early exit before the `claude -p` planner.
+- The state carries fleet's own evidence (CI, commits, the last error) next
+  to the worker's text, which is marked untrusted. Jev never proposes
+  `complete` and never marks a `done_when` line verified.
+- Labels: the planner's and the person's decisions in `orchestration_events`.
+- Waits on O2; built as a shadow slot there.
+
+#### K4 — is a new task a duplicate (`task_duplicate`)
+
+- Where: tasks proposed by the brainstorm (C0/C1), the planner's
+  `create_item` and `work_link create`.
+- A Noul "same work as X?" over the top 5 BM25 candidates of the same org;
+  extends J7. The answer is a *possible duplicate of …* line in the
+  approval sheet, never a merge.
+- Waits on bulk creation (C1 / O2).
+
+#### K5 — a task's group in the Work view (`work_placement`)
+
+- Where: placement (`service/work/structure.rs`), for a task no rule and no
+  person has placed.
+- A Choice over the person's groups ∪ `none` ∪ `unsure`; labels from
+  `set_work_placement`. Jev never writes a rule.
+- Built with the project picker's phase 2 (the same "which group" adapter).
+
+#### Not for Jev (found by the same survey)
+
+| Candidate | Why not |
+|---|---|
+| A local task's org (`assign_org`) | moves the org boundary behind a preview token |
+| A mission's `complete` and `done_when` checks | evidence (CI, tests, commits), never an opinion |
+| Decomposing a goal into tasks | generative; the planner's job |
+| The harness for a task | low volume, no labels |
+| A task's size or priority | numbers are a known weak spot; `work_items` has no priority |
+
 ### Weak candidates: not planned, with the reason
 
 | Candidate | Why a rule or another tool wins |

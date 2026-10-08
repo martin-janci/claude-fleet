@@ -976,7 +976,27 @@ async fn copy_transcript(
             format!("rewind failed: {}", stderr.trim()),
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    copy_path_from_stdout(&out.stdout)
+}
+
+/// The copy's path from [`rewind_script`]'s stdout: its LAST non-empty line.
+/// The script runs under `bash -lc`, so a login banner prints ahead of it;
+/// taken whole, the banner became part of the transcript path the session
+/// was rebound to, and the cleanup's `rm` named a file that does not exist.
+fn copy_path_from_stdout(stdout: &[u8]) -> Result<String, IpcError> {
+    let text = String::from_utf8_lossy(stdout);
+    let path = text
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default();
+    if !path.ends_with(".jsonl") {
+        return Err(IpcError::new(
+            codes::E_SHELL,
+            format!("rewind did not report the copy's path: {path:?}"),
+        ));
+    }
+    Ok(path.to_string())
 }
 
 /// Remove the transcript copy this call wrote, after a later step failed.
@@ -990,7 +1010,7 @@ async fn remove_copy(
     new_id: &str,
     session_id: i64,
 ) {
-    if !new_path.ends_with(&format!("/{new_id}.jsonl")) {
+    if new_path.contains('\n') || !new_path.ends_with(&format!("/{new_id}.jsonl")) {
         return;
     }
     let rm = format!("rm -f -- {}", quote(new_path));
@@ -1046,6 +1066,19 @@ async fn undo_new_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_banner_never_becomes_the_copy_s_path() {
+        assert_eq!(
+            copy_path_from_stdout(b"Welcome\n/h/.claude/projects/p/abc.jsonl\n").unwrap(),
+            "/h/.claude/projects/p/abc.jsonl"
+        );
+        assert_eq!(
+            copy_path_from_stdout(b"Welcome\n").unwrap_err().code,
+            codes::E_SHELL
+        );
+        assert!(copy_path_from_stdout(b"").is_err());
+    }
 
     /// Run a generated script against a real file in a temp dir. `bash` in a
     /// test is established here (`crate::shell::tests`, `crate::tmux::tests`).

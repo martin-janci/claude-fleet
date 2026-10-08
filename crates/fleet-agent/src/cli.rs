@@ -196,6 +196,16 @@ pub fn install_plan(
         return Err(env.systemd.refusal());
     }
     Endpoint::parse(&args.hub, args.insecure)?;
+    // The unit runs in the service user's home, not the directory `install`
+    // ran in, so a relative bundle would resolve somewhere else and fail
+    // every start: a unit that restarts forever.
+    if let Some(ca) = args.ca_file.as_deref().filter(|p| !p.is_absolute()) {
+        return Err(format!(
+            "--ca-file {} is relative; pass an absolute path (the service does \
+             not run in this directory)",
+            ca.display()
+        ));
+    }
     let token = read_token(args.token.as_deref(), args.token_file.as_deref(), stdin)?;
     config::check_token(&token).map_err(|e| e.to_string())?;
     let config = Config {
@@ -464,6 +474,41 @@ mod tests {
         let plan = install_plan(&a, &env(false, None), uid_1000, &mut std::io::empty()).unwrap();
         assert_eq!(plan.layout.config_path, PathBuf::from("/srv/agent.json"));
         assert!(!plan.start);
+    }
+
+    #[test]
+    fn install_refuses_a_relative_ca_file() {
+        let with_ca = |ca: &str| {
+            install_args(&[
+                "install",
+                "--hub",
+                "https://hub.example",
+                "--token",
+                "t",
+                "--user",
+                "--ca-file",
+                ca,
+            ])
+        };
+        let err = install_plan(
+            &with_ca("ca.pem"),
+            &env(false, None),
+            uid_1000,
+            &mut std::io::empty(),
+        )
+        .unwrap_err();
+        assert!(err.contains("--ca-file"), "{err}");
+        let plan = install_plan(
+            &with_ca("/etc/fleet/ca.pem"),
+            &env(false, None),
+            uid_1000,
+            &mut std::io::empty(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.config.ca_file,
+            Some(PathBuf::from("/etc/fleet/ca.pem"))
+        );
     }
 
     #[test]

@@ -647,6 +647,17 @@ enum End {
 
 /// Read frames until the agent identifies itself.
 ///
+/// The most of each `hello` string the hub keeps. Real values are a build
+/// string, a host name and an OS name; anything longer is the peer's own
+/// choice, and it is stored on the `hosts` row and pushed to every desktop.
+const HELLO_FIELD_MAX: usize = 128;
+
+/// One `hello` string, bounded and stripped of control and bidi characters
+/// before it is persisted, broadcast or logged.
+fn hello_field(text: &str) -> String {
+    fleet_proto::sanitize_for_log(text, HELLO_FIELD_MAX)
+}
+
 /// Bounded by one heartbeat: an upgrade that never says hello would otherwise
 /// hold a task and a socket for as long as the peer cared to keep the TCP
 /// connection open, without ever appearing in the registry where an operator
@@ -681,9 +692,9 @@ async fn first_hello(
                         os,
                         proto,
                     }) => Ok(AgentHello {
-                        agent_version,
-                        host_name,
-                        os,
+                        agent_version: hello_field(&agent_version),
+                        host_name: hello_field(&host_name),
+                        os: hello_field(&os),
                         proto,
                     }),
                     Ok(other) => Err(format!("the first frame must be hello, got {other:?}")),
@@ -2018,6 +2029,27 @@ mod tests {
         let tx = Arc::new(tokio::sync::watch::Sender::new(0));
         let ticker = BeatSource::Manual(Arc::clone(&tx)).ticker();
         (tx, ticker)
+    }
+
+    /// The hello's strings are peer text that lands on the `hosts` row and
+    /// in every desktop's agent status: bounded, and no escape sequences.
+    #[tokio::test]
+    async fn the_hello_s_strings_are_bounded_and_neutralised() {
+        let (_beats, deadline) = manual_beats();
+        let hostile = format!("1.2.3\n\u{1b}[2J{}", "x".repeat(10_000));
+        let frame = serde_json::json!({
+            "kind": "hello", "proto": 1,
+            "agent_version": hostile, "host_name": hostile, "os": "linux",
+        })
+        .to_string();
+        let mut stream = futures_util::stream::iter([Ok(Message::Text(frame.into()))]);
+        let hello = first_hello(&mut stream, deadline).await.unwrap();
+        for field in [&hello.agent_version, &hello.host_name] {
+            assert!(field.len() <= HELLO_FIELD_MAX, "{}", field.len());
+            assert!(!field.chars().any(char::is_control), "{field:?}");
+            assert!(field.starts_with("1.2.3"));
+        }
+        assert_eq!(hello.os, "linux");
     }
 
     /// NEW-2, deterministically: the hello deadline holds against a peer

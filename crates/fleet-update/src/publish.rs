@@ -225,8 +225,9 @@ fn stamp(doc: &mut ChannelDoc, now: i64, expires_days: i64) {
 
 /// List a published release on a track: the entry is replaced if the
 /// version is already there (a re-run), `current` moves up, and so does
-/// `recommended` — a publisher holds a release back with [`Edit::Recommend`]
-/// afterwards, never by default.
+/// `recommended` on a release's first listing — a publisher holds a release
+/// back with [`Edit::Recommend`] afterwards, never by default, and a re-run
+/// keeps that hold.
 pub fn channel_add(
     doc: Option<ChannelDoc>,
     track: Track,
@@ -244,13 +245,16 @@ pub fn channel_add(
         ));
     }
     let v = release.version.clone();
+    // A re-run (CI retrying a publish) must not undo the publisher's later
+    // `Recommend` hold-back, nor make a withdrawn release recommended.
+    let first_listing = doc.release(&v).is_none() && !doc.is_withdrawn(&v);
     doc.releases.retain(|r| r.version != v);
     doc.releases.push(release);
     doc.releases.sort_by(|a, b| b.version.cmp(&a.version));
     if doc.releases.len() == 1 || v > doc.current {
         doc.current = v.clone();
     }
-    if doc.releases.len() == 1 || v > doc.recommended {
+    if doc.releases.len() == 1 || (first_listing && v > doc.recommended) {
         doc.recommended = v.clone();
     }
     trim(&mut doc, keep);
@@ -548,6 +552,36 @@ mod tests {
         );
         assert_eq!(d.releases[0].version, v("0.4.2"));
         assert!(channel_add(Some(d), Track::Beta, rref("0.4.3"), now, 14, 30).is_err());
+    }
+
+    #[test]
+    fn a_rerun_keeps_a_held_back_or_withdrawn_release_unrecommended() {
+        let now = 1_790_763_120;
+        let mut d = channel_add(None, Track::Stable, rref("0.4.1"), now, 14, 30).unwrap();
+        d = channel_add(Some(d), Track::Stable, rref("0.4.2"), now, 14, 30).unwrap();
+        d = channel_edit(d, Edit::Recommend(v("0.4.1")), now, 14).unwrap();
+
+        // Held back: a re-run of 0.4.2's publish keeps the hold.
+        let held = channel_add(Some(d.clone()), Track::Stable, rref("0.4.2"), now, 14, 30).unwrap();
+        assert_eq!(held.recommended, v("0.4.1"));
+
+        // Withdrawn: a re-run never recommends it again.
+        d = channel_edit(
+            d,
+            Edit::Withdraw {
+                version: v("0.4.2"),
+                reason: "bad migration".into(),
+            },
+            now,
+            14,
+        )
+        .unwrap();
+        let d = channel_add(Some(d), Track::Stable, rref("0.4.2"), now, 14, 30).unwrap();
+        assert_eq!(d.recommended, v("0.4.1"));
+
+        // A genuinely new release still moves recommended up.
+        let d = channel_add(Some(d), Track::Stable, rref("0.4.3"), now, 14, 30).unwrap();
+        assert_eq!(d.recommended, v("0.4.3"));
     }
 
     #[test]

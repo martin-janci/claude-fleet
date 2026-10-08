@@ -219,6 +219,42 @@ pub async fn safe_kill_session(
     })
 }
 
+/// The inspection script for the worktree at `wt`. A `git status` that
+/// fails (a corrupt index, a git too old for an option) exits non-zero
+/// rather than printing an empty dirty list: empty read as "clean", and a
+/// clean-and-pushed tree is offered the remove-without-asking shortcut.
+fn inspect_script(wt: &str) -> String {
+    let wt_q = quote(wt);
+    // Single bash invocation prints three NUL-terminated sections:
+    //   1. porcelain -z dirty list
+    //   2. current branch name
+    //   3. upstream (origin/<branch>) or empty
+    //   4. ahead count (HEAD ahead of upstream) or "-1" when unknown
+    // Separator `\x1e` (RS) is illegal in branch names and unlikely in paths.
+    format!(
+        r#"set +e
+wt={wt_q}
+if [ ! -d "$wt/.git" ] && [ ! -f "$wt/.git" ]; then
+  printf 'ERR\x1enot a git worktree: %s\n' "$wt" 1>&2
+  exit 2
+fi
+porcelain=$(git -C "$wt" status --porcelain=v1 2>/dev/null) || {{
+  printf 'git status failed in %s\n' "$wt" 1>&2
+  exit 3
+}}
+branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
+upstream=$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{{u}}' 2>/dev/null)
+if [ -n "$upstream" ]; then
+  ahead=$(git -C "$wt" rev-list --count "$upstream"..HEAD 2>/dev/null)
+  if [ -z "$ahead" ]; then ahead=-1; fi
+else
+  ahead=-1
+fi
+printf '%s\x1e%s\x1e%s\x1e%s' "$porcelain" "$branch" "$upstream" "$ahead"
+"#
+    )
+}
+
 /// Inspect a worktree-backed session so the UI can decide whether to even
 /// involve Claude. Returns dirty files + ahead-of-upstream info from a single
 /// SSH round trip.
@@ -269,32 +305,7 @@ pub async fn inspect_safe_kill(
         });
     };
 
-    let wt_q = quote(&wt);
-    // Single bash invocation prints three NUL-terminated sections:
-    //   1. porcelain -z dirty list
-    //   2. current branch name
-    //   3. upstream (origin/<branch>) or empty
-    //   4. ahead count (HEAD ahead of upstream) or "-1" when unknown
-    // Separator `\x1e` (RS) is illegal in branch names and unlikely in paths.
-    let script = format!(
-        r#"set +e
-wt={wt_q}
-if [ ! -d "$wt/.git" ] && [ ! -f "$wt/.git" ]; then
-  printf 'ERR\x1enot a git worktree: %s\n' "$wt" 1>&2
-  exit 2
-fi
-porcelain=$(git -C "$wt" status --porcelain=v1 2>/dev/null)
-branch=$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null)
-upstream=$(git -C "$wt" rev-parse --abbrev-ref --symbolic-full-name '@{{u}}' 2>/dev/null)
-if [ -n "$upstream" ]; then
-  ahead=$(git -C "$wt" rev-list --count "$upstream"..HEAD 2>/dev/null)
-  if [ -z "$ahead" ]; then ahead=-1; fi
-else
-  ahead=-1
-fi
-printf '%s\x1e%s\x1e%s\x1e%s' "$porcelain" "$branch" "$upstream" "$ahead"
-"#
-    );
+    let script = inspect_script(&wt);
 
     let out = run_shell(ssh, &args.host_alias, &script).await?;
     if !out.status.success() {
@@ -817,6 +828,42 @@ fn exec_for(host: &str, ssh: &Arc<SshClient>) -> Box<dyn crate::tmux::TmuxExec> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worktree whose `git status` fails is not reported clean: the
+    /// script exits non-zero, which the caller turns into an error and
+    /// `safe_to_remove = false`.
+    #[cfg(unix)]
+    #[test]
+    fn a_failing_git_status_is_not_a_clean_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let wt = dir.path().join("wt");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&wt)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        std::fs::create_dir_all(&wt).unwrap();
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::write(wt.join("f"), "x").unwrap();
+        assert!(git(&["add", "f"]).status.success());
+        let run = || {
+            std::process::Command::new("bash")
+                .args(["-c", &inspect_script(&wt.to_string_lossy())])
+                .output()
+                .unwrap()
+        };
+        let ok = run();
+        assert!(ok.status.success(), "{ok:?}");
+        assert!(String::from_utf8_lossy(&ok.stdout).starts_with("A  f"));
+
+        std::fs::write(wt.join(".git").join("index"), "garbage").unwrap();
+        let broken = run();
+        assert_eq!(broken.status.code(), Some(3), "{broken:?}");
+        assert!(String::from_utf8_lossy(&broken.stderr).contains("git status failed"));
+    }
 
     #[test]
     fn nonce_is_8_hex_chars() {

@@ -1373,7 +1373,7 @@ const MIGRATIONS: &[Migration] = &[
     },
     // Chat forms: `form_requests`. A new table and indexes, `IF NOT EXISTS`,
     // safe to re-run.
-    Migration::plain(117, include_str!("../../migrations/117_form_requests.sql")),
+    Migration::plain(119, include_str!("../../migrations/119_form_requests.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

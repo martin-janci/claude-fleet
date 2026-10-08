@@ -26,6 +26,11 @@ describe('usage formatting', () => {
     expect(formatTokens(4_560_000)).toBe('4.56M');
     expect(formatTokens(245_000_000)).toBe('245.0M');
     expect(formatTokens(2_500_000_000)).toBe('2.50B');
+    // The unit follows the rounded value at every boundary.
+    expect(formatTokens(9_999)).toBe('10k');
+    expect(formatTokens(999_600)).toBe('1.00M');
+    expect(formatTokens(9_999_999)).toBe('10.0M');
+    expect(formatTokens(999_960_000)).toBe('1.00B');
   });
 
   it('formats estimated cost from micro-USD', () => {

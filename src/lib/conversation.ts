@@ -1029,7 +1029,8 @@ export function promptHistory(conv: Conversation | null, outgoing: string[] = []
 
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+  // The unit follows the ROUNDED value: 999_600 is "1M", not "1000k".
+  if (n < 999_500) return `${Math.round(n / 1000)}k`;
   const m = n / 1_000_000;
   return `${Number.isInteger(m) ? m : m.toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}M`;
 }

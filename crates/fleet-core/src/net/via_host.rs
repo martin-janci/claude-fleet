@@ -537,9 +537,15 @@ fn parse_curl(host: &str, raw: &[u8], max_body: u64) -> Result<Response, Transpo
     }
     // A proxy's `200 Connection established` (or a `100 Continue`) comes
     // first: the answer is the LAST header block.
+    // At the START of a line: a header value may itself hold `HTTP/`
+    // (`Via: HTTP/1.1 proxy`), and a block found mid-header has no status
+    // line.
     let text = String::from_utf8_lossy(head);
     let last = text
-        .rfind("HTTP/")
+        .match_indices("HTTP/")
+        .map(|(i, _)| i)
+        .filter(|&i| i == 0 || text.as_bytes()[i - 1] == b'\n')
+        .last()
         .map(|i| &text[i..])
         .ok_or_else(|| TransportError::Protocol(format!("no status line from {host}")))?;
     let mut resp = parse_included(last.as_bytes())
@@ -950,6 +956,25 @@ mod curl_tests {
                 .contains("\n' __fleet_begin__\n"),
             "the script prints the marker"
         );
+    }
+
+    #[tokio::test]
+    async fn a_header_value_holding_http_slash_is_not_a_status_line() {
+        let f = FakeSsh::new();
+        f.on(
+            Match::Any,
+            answer(
+                "200",
+                "HTTP/1.1 200 OK\r\nVia: HTTP/1.1 corp-proxy\r\nretry-after: 3\r\n\r\n",
+                "{}",
+            ),
+        );
+        let r = curl(&f)
+            .send(Request::get("https://jira.corp.example/x"))
+            .await
+            .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.header("retry-after"), Some("3"));
     }
 
     #[tokio::test]

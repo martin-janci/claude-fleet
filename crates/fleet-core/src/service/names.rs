@@ -54,7 +54,7 @@ pub fn slugify(s: &str) -> String {
 /// Make a name acceptable to `validate::tmux_name`: `.` and `:` (tmux's
 /// target separators) become `-`.
 pub fn tmux_safe(s: &str) -> String {
-    s.replace(['.', ':'], "-")
+    s.replace(['.', ':', '#'], "-")
 }
 
 #[derive(serde::Deserialize)]
@@ -230,6 +230,9 @@ mod tests {
         assert_eq!(slugify("  Fix: the login bug! "), "fix-the-login-bug");
         assert_eq!(slugify(""), "");
         assert_eq!(tmux_safe("dev-o-r--v1.2:x"), "dev-o-r--v1-2-x");
+        // A branch may hold `#`; tmux would format-expand it in a new name.
+        assert_eq!(tmux_safe("feat#H.x"), "feat-H-x");
+        assert!(crate::validate::tmux_name(&tmux_safe("x#(id)")).is_ok());
     }
 
     #[test]

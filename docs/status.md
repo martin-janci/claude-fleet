@@ -230,6 +230,11 @@ person's Clear work holds against the unchanged branch / PR (R9u, migration
 `docs/superpowers/specs/2026-09-27-jev-test-map.md`.
 Decisions D31–D47 and what is still open
 are in `docs/superpowers/specs/2026-09-27-jev-language-census-design.md`.
+Five more use cases, K1–K5, were accepted by the owner on 2026-10-07 (test
+map §5): K1 `start_project` next, K5 with the picker's phase 2, K2 and K3 as
+shadow slots in Mode B and the mission loop, K4 last. K1 is built, off
+(`decide.jev.start_project`, `service/decide/start_project.rs`): the start
+popover pre-selects Jev's repository in assist; K2–K5 are not built.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
 recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed.
@@ -329,7 +334,7 @@ resolve on a conflict, and an overview of every link with Clean up stale.
 Symlinks sync as links (their target, never followed; not on a Windows
 desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
-Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 117; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
+Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 119; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
 
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with

@@ -201,6 +201,18 @@ pub fn resolve_data_dir(opts: &HubOptions, env: &HashMap<String, String>) -> Pat
         .unwrap_or_else(default_data_dir)
 }
 
+/// A hub port from a flag, `FLEET_HUB_PORT` or the stored `mcp.port`.
+/// Port 0 parses as a `u16` but means "any free port" to `bind`: the hub
+/// would listen somewhere random while `mcp.port`, provisioned hooks and
+/// every `pair`/`client`/`reports` dial stayed fixed at `:0`. So 1–65535.
+pub fn parse_port(p: &str) -> Result<u16, String> {
+    match p.trim().parse::<u16>() {
+        Ok(0) => Err(format!("port '{p}': must be 1-65535")),
+        Ok(n) => Ok(n),
+        Err(e) => Err(format!("port '{p}': {e}")),
+    }
+}
+
 /// `settings` reads a `settings` row by key (None when there is no store yet).
 pub fn resolve(
     opts: &HubOptions,
@@ -228,7 +240,7 @@ pub fn resolve(
         "FLEET_HUB_PORT",
         settings(fleet_core::mcp::SETTING_PORT),
     )? {
-        Some(p) => p.parse::<u16>().map_err(|e| format!("port '{p}': {e}"))?,
+        Some(p) => parse_port(&p)?,
         None => fleet_core::mcp::DEFAULT_PORT,
     };
 
@@ -1041,6 +1053,17 @@ mod tests {
         assert!(resolve(&opts(), &e, &|_| None)
             .unwrap_err()
             .contains("local_host"));
+        // Port 0 binds a random port while everything else dials `:0`.
+        let mut o = opts();
+        o.port = Some(0);
+        assert!(resolve(&o, &env(&[]), &|_| None)
+            .unwrap_err()
+            .contains("port"));
+        let e = env(&[("FLEET_HUB_PORT", "0")]);
+        assert!(resolve(&opts(), &e, &|_| None)
+            .unwrap_err()
+            .contains("port"));
+        assert_eq!(parse_port(" 4180 "), Ok(4180));
     }
 
     /// hub-ops F3: an https:// public URL waives the plaintext refusal

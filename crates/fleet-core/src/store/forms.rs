@@ -1,4 +1,4 @@
-//! Chat forms (`form_requests`, migration 117): a form an agent asked a
+//! Chat forms (`form_requests`, migration 119): a form an agent asked a
 //! person to fill. Every change wakes `form_notify` (the `ask` tool's wait)
 //! and bumps the asking session's `row_version` with a `session:updated`,
 //! because the row carries `pending_form`.
@@ -200,7 +200,7 @@ impl Store {
     }
 
     /// `(form_id, host_alias)` of every form whose secret directory should
-    /// go: its session is a ghost or deleted (the delete trigger of migration 117
+    /// go: its session is a ghost or deleted (the delete trigger of migration 119
     /// keeps a form with secrets under the negated session id, which matches
     /// no session), or it was decided before `decided_before`.
     pub fn forms_to_sweep(&self, decided_before: i64) -> Result<Vec<(String, String)>> {

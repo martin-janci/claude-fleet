@@ -41,4 +41,4 @@ CREATE TRIGGER IF NOT EXISTS form_requests_session_deleted AFTER DELETE ON sessi
   DELETE FROM form_requests WHERE session_id = OLD.id;
 END;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (117);
+INSERT OR IGNORE INTO schema_version (version) VALUES (119);

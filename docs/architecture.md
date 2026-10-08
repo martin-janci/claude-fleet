@@ -371,7 +371,7 @@ bullet for the area you are about to change.
   (rail to icons under 1100 px, the Inspector under the list under 860 px).
 - **Chat forms** (spec `docs/superpowers/specs/2026-10-07-chat-forms-design.md`,
   guide `docs/forms.md`; `pages/forms.rs`, `store/forms.rs`,
-  `service/forms.rs`, the `ask` tool in `mcp/tools/forms.rs`, migration 117,
+  `service/forms.rs`, the `ask` tool in `mcp/tools/forms.rs`, migration 119,
   `src/lib/forms/`): an agent opens a `fleet.form/1` form in its session's
   chat; a person answers; secret fields go to the host as files, never into
   the database, a log or the audit row (`ask`'s `values` is rendered

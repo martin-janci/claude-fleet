@@ -170,9 +170,14 @@ export interface SessionRow {
   pending_input: {
     kind: 'permission' | 'input';
     question: string | null;
-    options: { n: number; label: string; selected: boolean }[];
+    /** `checked`: ticked, on a multi-select (absent = false, and from a hub
+     *  older than multi-select support). The label never carries the box. */
+    options: { n: number; label: string; selected: boolean; checked?: boolean }[];
+    /** A multi-select question: a digit TOGGLES an option, `Tab` moves on
+     *  with the ticks kept (see `AnswerPrompt.svelte`). Absent = false. */
+    multi?: boolean;
   } | null;
-  // Chat forms (migration 117): the form this session's agent asked and is
+  // Chat forms (migration 119): the form this session's agent asked and is
   // waiting on. Optional: an older hub sends none.
   pending_form?: { form_id: string; title: string } | null;
   /** The session's primary work link (migration 046), set through the work
@@ -289,10 +294,12 @@ export function sessionUsageTokens(s: UsageFields): number {
 export function formatTokens(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n <= 0) return '0';
   if (n < 1_000) return String(Math.round(n));
-  if (n < 10_000) return `${(n / 1_000).toFixed(1)}k`;
-  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
-  if (n < 10_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  // Each step's bound is where its ROUNDED value would reach the next
+  // format, so 999_600 reads "1.00M", never "1000k" (or 9_999 "10.0k").
+  if (n < 9_950) return `${(n / 1_000).toFixed(1)}k`;
+  if (n < 999_500) return `${Math.round(n / 1_000)}k`;
+  if (n < 9_995_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n < 999_950_000) return `${(n / 1_000_000).toFixed(1)}M`;
   return `${(n / 1_000_000_000).toFixed(2)}B`;
 }
 
@@ -874,8 +881,9 @@ export function acceptCommandRow(row: SessionRow | null | undefined): void {
 /**
  * Type `prompt` into a session's REPL and submit it.
  *
- * `opts.keys` presses one key instead — `Enter`, `Escape`, `C-c`, or a digit
- * `1`-`9` that picks that option of a `pending_input` dialog. A key is never
+ * `opts.keys` presses one key instead — `Enter`, `Escape`, `Tab`, `C-c`, or a
+ * digit `1`-`9` that picks that option of a `pending_input` dialog (toggles
+ * it, on a multi-select). A key is never
  * marked untrusted and is never recorded as a prompt, and `prompt` must be
  * empty alongside it (the backend refuses the pair with `E_VALIDATE`).
  * Answering a dialog has to go this way. The text path pastes through
