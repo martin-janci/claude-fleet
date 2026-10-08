@@ -14,6 +14,7 @@
   import { toIpcError } from './result';
   import { push, pushError } from './toasts';
   import { repairSession, hasNoPane, showFriendlyNames, sessionsAnswered } from './sessions';
+  import { splashShown } from './startup';
   import Loader from './Loader.svelte';
   import { displayName } from './attention';
   import { keyToBytes, detectMac } from './terminal_keys';
@@ -1367,7 +1368,11 @@
       <!-- Redesign step 3.13: the first fleet overview. Until the first
            session list answers, the pane says the fleet is arriving rather
            than asking for a pick from a list that is not there yet. -->
-      <Loader name="particle-swarm" size={160} testid="fleet-arriving" />
+      <!-- Under the startup splash (step 3.15) the splash is this screen's
+           one loader; the swarm takes over if the splash steps aside. -->
+      {#if !$splashShown}
+        <Loader name="particle-swarm" size={160} testid="fleet-arriving" />
+      {/if}
       <p class="empty-msg">Hosts and sessions arriving…</p>
     {:else}
     <!-- Stroke-only terminal-window icon: traffic lights + chevron prompt with

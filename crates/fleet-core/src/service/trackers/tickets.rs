@@ -1700,6 +1700,14 @@ pub async fn start_work_unprompted(
                 );
             }
         }
+        // Jev N3's: a single start ticked no sibling.
+        record_sibling_start(
+            store,
+            plan.item_id,
+            &plan.key,
+            plan.project_id,
+            &[plan.project_id],
+        );
     }
     Ok((row, plan, queued))
 }
@@ -1777,6 +1785,56 @@ pub struct StartPreview {
     /// stays for clients that read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<crate::store::DecisionProposal>,
+    /// With a planned project: the sibling repository (one of the projects
+    /// the key ran in before) the decision model proposes the same task
+    /// also needs (Jev N3, `decide.jev.sibling_repos` at `assist`). A
+    /// pre-tick only; the person still starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_sibling: Option<crate::service::decide::sibling_repos::SuggestedSibling>,
+}
+
+/// The projects `key` ran in before, other than `chosen`: ended links'
+/// `snap_project_id` and live sessions linked to the key (under the item's
+/// org, as [`live_work_on`] fences them). Newest first, limited to projects
+/// the fleet still has, system projects left out. The backend's mirror of
+/// the dialog's `siblingCandidates` (`src/lib/multi_start.ts`).
+pub fn sibling_candidates(
+    s: &Store,
+    key: &str,
+    item_org: Option<i64>,
+    chosen: i64,
+) -> Result<Vec<crate::service::decide::start_project::Candidate>, IpcError> {
+    let mut seen: Vec<(i64, i64)> = Vec::new();
+    let mut add = |id: Option<i64>, at: i64| {
+        let Some(id) = id.filter(|&id| id != chosen) else {
+            return;
+        };
+        match seen.iter_mut().find(|(p, _)| *p == id) {
+            Some(had) => had.1 = had.1.max(at),
+            None => seen.push((id, at)),
+        }
+    };
+    for l in s.ended_work_links_for_key(key)? {
+        add(l.snap_project_id, l.ended_at.unwrap_or(l.created_at));
+    }
+    for (_, row) in live_work_on(s, key, item_org)? {
+        add(row.project_id, row.last_activity_at);
+    }
+    // Stable: equal times keep their first-seen order, as the dialog's do.
+    seen.sort_by_key(|&(_, at)| std::cmp::Reverse(at));
+    let mut out = Vec::new();
+    for (id, _) in seen {
+        if let Some(p) = s.get_project(id)? {
+            if !p.system {
+                out.push(crate::service::decide::start_project::Candidate {
+                    project_id: p.id,
+                    owner: p.owner,
+                    repo: p.repo,
+                });
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// [`preview_start`], and when it answers `missing: "project"`, the
@@ -1785,6 +1843,11 @@ pub struct StartPreview {
 /// (one call, bounded by `decide.jev.timeout_ms`) and returned as
 /// `suggested_project`. With the defaults the gate refuses and nothing is
 /// asked. `decide` is `None` where no call may be made.
+///
+/// When the preview has a planned project instead, the same applies to the
+/// sibling repository the task also needs (Jev N3,
+/// `service::decide::sibling_repos`), asked over [`sibling_candidates`] and
+/// returned as `suggested_sibling`.
 pub async fn preview_start_decided(
     store: &Mutex<Store>,
     args: &StartArgs,
@@ -1797,6 +1860,12 @@ pub async fn preview_start_decided(
     let Some(ctx) = decide else {
         return Ok(preview);
     };
+    if preview.missing.is_none() {
+        if let Some(plan) = preview.plan.clone() {
+            suggest_sibling(store, ctx, &mut preview, &plan).await?;
+        }
+        return Ok(preview);
+    }
     if preview.missing.as_deref() != Some("project") {
         return Ok(preview);
     }
@@ -1846,6 +1915,88 @@ pub async fn preview_start_decided(
         None => {}
     }
     Ok(preview)
+}
+
+/// [`preview_start_decided`]'s N3 half: with a planned project, ask
+/// `sibling_repos` over the projects the key ran in before (assist awaited
+/// into `suggested_sibling`, shadow spawned and only recorded).
+async fn suggest_sibling(
+    store: &Mutex<Store>,
+    ctx: &crate::service::decide::DecideCtx,
+    preview: &mut StartPreview,
+    plan: &StartPlan,
+) -> Result<(), IpcError> {
+    use crate::service::decide::{sibling_repos, start_project, Mode};
+    let input = {
+        let s = lock(store)?;
+        let Some(chosen) = s.get_project(plan.project_id)? else {
+            return Ok(());
+        };
+        let org_id = preview
+            .item_id
+            .map(|id| s.item_org(id))
+            .transpose()?
+            .flatten();
+        let candidates = sibling_candidates(&s, &preview.key, org_id, plan.project_id)?;
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        let description = preview
+            .item_id
+            .map(|id| s.work_item_meta(id))
+            .transpose()?
+            .and_then(|m| m.description);
+        sibling_repos::SiblingInput {
+            key: preview.key.clone(),
+            title: preview.title.clone(),
+            item_id: preview.item_id,
+            org_id,
+            description,
+            chosen: start_project::Candidate {
+                project_id: chosen.id,
+                owner: chosen.owner,
+                repo: chosen.repo,
+            },
+            candidates,
+        }
+    };
+    match sibling_repos::mode_for(ctx, &input) {
+        Some(Mode::Assist) => preview.suggested_sibling = sibling_repos::ask(ctx, &input).await,
+        Some(Mode::Shadow) => {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                sibling_repos::ask(&ctx, &input).await;
+            });
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// Jev N3's follow-up after a PERSON's start of `key` in `primary` (and
+/// `started`, every project of it): best effort, never an error.
+fn record_sibling_start(
+    store: &Mutex<Store>,
+    item_id: Option<i64>,
+    key: &str,
+    primary: i64,
+    started: &[i64],
+) {
+    if let Ok(s) = lock(store) {
+        if let Err(e) = crate::service::decide::sibling_repos::record_start(
+            &s,
+            item_id,
+            key,
+            primary,
+            started,
+            crate::store::now_unix(),
+        ) {
+            tracing::warn!(
+                "[decide] sibling_repos follow-up not recorded: {}",
+                e.message
+            );
+        }
+    }
 }
 
 /// Most projects a preview offers to pick from.
@@ -1961,6 +2112,7 @@ pub async fn preview_start(
         checkout: None,
         suggested_project: None,
         proposal: None,
+        suggested_sibling: None,
     };
     let plan = match plan_resolved(store, &planned, view, &ticket) {
         Ok(p) => p,
@@ -2304,6 +2456,13 @@ where
             }
             Err(e) => out.failed.push(StartFailure::of(plan.project_id, &e)),
         }
+    }
+    // Jev N3's follow-up: the repositories a person chose to start the key
+    // in (the first is the dialog's own project, the rest its ticked
+    // siblings) answer a sibling proposal they were shown. What they chose,
+    // not what came up: a sibling that failed to start was still chosen.
+    if args.decider == Decider::Person {
+        record_sibling_start(store, ticket.item_id, &ticket.key, ids[0], &ids);
     }
     Ok(out)
 }

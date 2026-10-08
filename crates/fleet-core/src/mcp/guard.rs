@@ -1205,14 +1205,33 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
-    // Names other fleets: master-only, like list_clients — a paired client
-    // or per-host token must not enumerate what this hub is linked to.
-    // Read-only, so it gets the same two-flags-answer-different-questions
-    // treatment as `list_clients` above.
+    // Names other fleets: the master and the hub owner's own device (Orbit
+    // Fleet 11.5, the Federation page) — a per-host token, an org-bound
+    // client and a second person's device must not enumerate what this hub
+    // is linked to. Read-only, so it gets the same
+    // two-flags-answer-different-questions treatment as `list_clients`
+    // above.
     ToolPolicy {
         name: "list_peer_links",
-        access: Access::Master,
+        access: Access::Person,
         readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Change this hub's links (11.5): the same gate, and a device must also
+    // be trusted and full (`peer_writer` in the tool). `link_peer` dials the
+    // other hub's /pair, bounded at 20 s by `peer::link`.
+    ToolPolicy {
+        name: "link_peer",
+        access: Access::Person,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "unlink_peer",
+        access: Access::Person,
+        readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
     },
