@@ -206,6 +206,6 @@
   }
   .handover.missing,
   .handover.failed {
-    color: var(--warn, #e0a030);
+    color: var(--status-waiting);
   }
 </style>

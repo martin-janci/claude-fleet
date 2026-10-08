@@ -337,7 +337,7 @@
     gap: 6px;
     align-items: center;
     margin: 10px 4px 4px;
-    font-size: 0.7rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -377,7 +377,7 @@
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .tb {
-    font-size: 0.62rem;
+    font-size: 11px;
     border: 1px solid var(--border);
     border-radius: 3px;
     padding: 0 0.2rem;
@@ -422,15 +422,15 @@
     flex: none;
   }
   .needs {
-    color: var(--usage-crit, #c62828);
-    font-size: 0.55rem;
+    color: var(--usage-crit);
+    font-size: 11px;
   }
   .meta {
     display: flex;
     flex-wrap: wrap;
     gap: 0 8px;
     color: var(--fg-muted);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   /* Each fact wraps as a whole in a narrow sidebar, never mid-phrase. */
   .meta > span {
@@ -447,7 +447,7 @@
     padding: 0 3px;
     color: var(--fg-muted);
     font: inherit;
-    font-size: 0.75rem;
+    font-size: 11px;
     cursor: pointer;
     opacity: 0;
   }
@@ -462,18 +462,18 @@
     cursor: not-allowed;
   }
   .chip {
-    font-size: 0.7rem;
+    font-size: 11px;
     border-radius: 999px;
     padding: 0 6px;
     white-space: nowrap;
   }
   .prop {
-    background: color-mix(in srgb, var(--usage-warn, #b45309) 14%, transparent);
-    color: var(--usage-warn, #b45309);
+    background: var(--accent-soft);
+    color: var(--fg);
   }
   .agent {
-    background: color-mix(in srgb, #7c3aed 12%, transparent);
-    color: #7c3aed;
+    background: var(--chip-bg);
+    color: var(--fg-2);
   }
   .children {
     margin: 0 0 4px 24px;
@@ -507,8 +507,8 @@
     border-color: var(--accent);
   }
   .dot--done {
-    background: var(--usage-ok, #2e7d32);
-    border-color: var(--usage-ok, #2e7d32);
+    background: var(--usage-ok);
+    border-color: var(--usage-ok);
   }
   .muted {
     color: var(--fg-muted);
@@ -516,7 +516,7 @@
     margin: 0;
   }
   .err {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     padding: 4px;
     margin: 0;
   }

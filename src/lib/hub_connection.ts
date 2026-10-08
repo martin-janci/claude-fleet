@@ -22,6 +22,47 @@ export type HubConnection =
 
 export const hubConnection = writable<HubConnection>({ state: 'standalone' });
 
+export const isLost = (c: HubConnection): c is Extract<HubConnection, { state: 'reconnecting' | 'offline' }> =>
+  c.state === 'reconnecting' || c.state === 'offline';
+
+/** Redesign step 3.14: when this window lost its link to the hub (ms since
+ *  the epoch), or null while it holds one. Stamped by the first
+ *  `reconnecting` or `offline` (a hub that never answered included), kept
+ *  across the retries after it and across a skew verdict, cleared by
+ *  `connected`. The banner says "Lost … at 14:52" from it and turns its
+ *  Gravity well into Signal lost after SIGNAL_LOST_AFTER_MS. */
+export const lostSince = writable<number | null>(null);
+
+/** How long a lost hub reads as reconnecting before it reads as lost. */
+export const SIGNAL_LOST_AFTER_MS = 6000;
+
+// Follows the store whoever sets it (the bridge's events, the query at
+// mount, a test), so the two can never disagree.
+hubConnection.subscribe((c) => {
+  if (isLost(c)) lostSince.update((t) => t ?? Date.now());
+  else if (c.state === 'connected' || c.state === 'standalone') lostSince.set(null);
+});
+
+/** "14:52", on this machine's clock. */
+function clockTime(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** The lost banner's line, as the design writes it: "Lost the hub at 14:52 ·
+ *  try 3 · your sessions keep running on their hosts". The banner puts the
+ *  reason, the live countdown and Retry now beside it. */
+export function lostLine(c: HubConnection, lostAt: number | null, url: string | null): string | null {
+  if (!isLost(c)) return null;
+  const hub = url ?? 'the hub';
+  const at = lostAt === null ? null : clockTime(lostAt);
+  const head =
+    c.state === 'reconnecting'
+      ? `Lost ${hub}${at ? ` at ${at}` : ''}`
+      : `Cannot reach ${hub}${at ? ` since ${at}` : ''}`;
+  return `${head} · try ${c.attempt} · your sessions keep running on their hosts`;
+}
+
 /** Runs after the backend's event bridge re-listed sessions, hosts, tasks
  * and accounts following a gap it could not replay (`hub:resynced`). The
  * app installs the loaders for the stores whose list tools answer a

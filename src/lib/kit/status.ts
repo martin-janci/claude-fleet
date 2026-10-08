@@ -14,6 +14,13 @@ export const STATE_WORD: Record<OfState, string> = {
   idle: 'Idle',
 };
 
+/** The six status words (manual, content rules): the five states' words,
+ *  plus Paused for an idle row that says why. A status label is one of these,
+ *  optionally followed by " · " and the reason; `copy_lint.test.ts` holds the
+ *  app to it. */
+export const STATUS_WORDS = ['Needs you', 'Working', 'Failed', 'Done', 'Paused', 'Idle'] as const;
+export type StatusWord = (typeof STATUS_WORDS)[number];
+
 /** One answer on a QuestionCard, in the agent's own order. */
 export interface Answer {
   label: string;

@@ -32,7 +32,7 @@
 <style>
   .invalid {
     margin: -0.3em 0 0.7em;
-    font-size: 0.75rem;
+    font-size: 11px;
     color: var(--usage-warn);
   }
 </style>

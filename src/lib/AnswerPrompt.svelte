@@ -480,7 +480,7 @@
     gap: 0.3rem;
     margin: 0.2rem 0 0;
     padding: 0.3rem 0.4rem;
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .answer.compact .question {
     overflow: hidden;

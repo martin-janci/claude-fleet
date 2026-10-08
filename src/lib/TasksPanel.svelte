@@ -206,7 +206,7 @@
   .tasks { display: flex; flex-direction: column; gap: 0.4rem; }
   .tasks h3 {
     margin: 0;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -227,11 +227,11 @@
     padding: 0.05rem 0.4rem;
     border-radius: 999px;
     border: 1px solid;
-    font-size: 0.65rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .id { color: var(--fg-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; }
+  .id { color: var(--fg-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; }
   .parties { display: inline-flex; gap: 0.3rem; align-items: baseline; min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; }
   .arrow { color: var(--fg-muted); }
   .link {
@@ -239,17 +239,17 @@
     color: var(--accent); font-size: 0.8rem; text-decoration: underline; text-underline-offset: 2px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
-  .elapsed { color: var(--fg-muted); font-size: 0.72rem; }
+  .elapsed { color: var(--fg-muted); font-size: 11px; }
   .cancel {
-    font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 4px; cursor: pointer;
+    font-size: 11px; padding: 0.15rem 0.5rem; border-radius: 4px; cursor: pointer;
     border: 1px solid var(--danger); color: var(--danger); background: transparent;
   }
   .cancel:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
   .prompt { margin: 0; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .result, .error {
-    margin: 0; font-size: 0.78rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
+    margin: 0; font-size: 11px; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
     max-height: 5.5rem; overflow: auto; padding: 0.3rem 0.45rem; border-radius: 4px;
   }
-  .result { background: rgba(60, 180, 90, 0.1); color: var(--fg); }
+  .result { background: var(--done-soft); color: var(--fg); }
   .error { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
 </style>

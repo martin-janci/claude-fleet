@@ -777,6 +777,34 @@ fn planner_host(s: &Store, m: &MissionRow, grant: Option<&GrantRow>) -> Result<S
     ))
 }
 
+/// Book a planner run's cost on its mission (redesign 8.2), so the budget
+/// brake counts it. `usage` is `None` when `claude` reported none: the run
+/// is still booked, at 0. A failed write is logged, never the plan's error.
+pub fn book_planner_run(
+    s: &Store,
+    m: &MissionRow,
+    host: &str,
+    model: &str,
+    usage: Option<&crate::service::claude_print::Envelope>,
+    now: i64,
+) {
+    let row = crate::store::NewAuxUsage {
+        origin: crate::store::AUX_ORIGIN_PLANNER,
+        host_alias: host.to_string(),
+        model: model.to_string(),
+        mission_id: Some(m.id),
+        org_id: m.org_id,
+        claude_session_id: None,
+        input_tokens: usage.and_then(|u| u.input_tokens),
+        output_tokens: usage.and_then(|u| u.output_tokens),
+        cost_micros: usage.and_then(|u| u.cost_microusd).unwrap_or(0),
+        at: now,
+    };
+    if let Err(e) = s.insert_aux_usage(&row) {
+        tracing::warn!(mission = m.id, error = %e.message, "[orchestrate] planner cost not booked");
+    }
+}
+
 /// Ask the planner about `m` now, and card its answer.
 pub async fn run_planner(
     deps: &Deps,
@@ -842,7 +870,12 @@ pub async fn run_planner(
     .await?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let answer = match planner::parse_planner_output(&stdout) {
-        PlannerOutput::Ran(a) => a,
+        PlannerOutput::Ran(ran) => {
+            let (answer, usage) = planner::planner_answer(ran);
+            let s = lock(&deps.store)?;
+            book_planner_run(&s, m, &host, &model, usage.as_ref(), now_unix());
+            answer
+        }
         PlannerOutput::NoClaude => {
             return Err(IpcError::new(
                 codes::E_INVALID_STATE,

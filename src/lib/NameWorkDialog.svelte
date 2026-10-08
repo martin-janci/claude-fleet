@@ -211,7 +211,7 @@
 <style>
   .form { display: flex; flex-direction: column; gap: 0.6rem; }
   .field { display: flex; flex-direction: column; gap: 0.25rem; }
-  .field span, legend { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .field span, legend { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.04em; }
   .field input {
     font: inherit;
     padding: 0.35rem 0.5rem;

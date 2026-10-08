@@ -536,7 +536,7 @@
     background: none;
     padding: 0.1rem 0.15rem;
     font: inherit;
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     cursor: pointer;
     border-radius: var(--radius-sm);
@@ -549,7 +549,7 @@
     outline: var(--ring-w) solid var(--ring);
   }
   .reopened-pill {
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
   }
   .tidy-sheet {
     order: 1;
@@ -562,11 +562,11 @@
     display: flex;
     flex-direction: column;
     gap: 0.2rem;
-    font-size: 0.75rem;
+    font-size: 11px;
     outline: none;
   }
   .tidy-sheet:focus-visible {
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
   }
   .sheet-head,
   .sheet-foot {
@@ -580,14 +580,14 @@
   }
   .group-head {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
     padding-top: 0.2rem;
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 0.65rem;
+    font-size: 11px;
     flex: 1;
   }
   .only {
@@ -605,7 +605,7 @@
     border-radius: 4px;
   }
   .tidy-row.cursor {
-    background: var(--bg-hover, rgba(127, 127, 127, 0.15));
+    background: var(--bg-hover);
   }
   .key {
     font-family: var(--font-mono, ui-monospace, monospace);
@@ -614,14 +614,14 @@
     color: var(--fg-muted);
   }
   .warn {
-    color: var(--usage-warn, #b7791f);
-    font-size: 0.65rem;
+    color: var(--usage-warn);
+    font-size: 11px;
   }
   .badge {
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
   }
   .armed {
-    color: var(--usage-warn, #b7791f);
-    border-color: var(--usage-warn, #b7791f);
+    color: var(--usage-warn);
+    border-color: var(--usage-warn);
   }
 </style>

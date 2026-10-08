@@ -112,7 +112,7 @@
     row-gap: 0.15rem;
     min-width: 0;
     padding-left: 0.85rem;
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   /* The line wraps instead of clipping — hiding the prompt preview (or any
@@ -125,7 +125,7 @@
   .sess-details .sep { color: var(--fg-muted); opacity: 0.6; }
   .host-badge {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
@@ -134,7 +134,7 @@
   }
   .sess-secondary,
   .sess-meta {
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--fg-muted);
     overflow: hidden;
     text-overflow: ellipsis;
@@ -148,7 +148,7 @@
     justify-content: center;
     min-width: 2.6rem;
     height: 0.95rem;
-    font-size: 0.6rem;
+    font-size: 11px;
     border: 1px solid;
     border-radius: 3px;
     overflow: hidden;
@@ -164,7 +164,7 @@
   }
   .ctx-pct { position: relative; }
   .cost-badge {
-    font-size: 0.6rem;
+    font-size: 11px;
     flex-shrink: 0;
     white-space: nowrap;
     opacity: 0.75;
@@ -174,12 +174,12 @@
     opacity: 0.45;
   }
   .ci-badge {
-    font-size: 0.6rem;
+    font-size: 11px;
     flex-shrink: 0;
     white-space: nowrap;
   }
   .effort-badge {
-    font-size: 0.6rem;
+    font-size: 11px;
     padding: 0.05rem 0.25rem;
     border-radius: 3px;
     background: color-mix(in srgb, var(--fg) 10%, transparent);
@@ -189,7 +189,7 @@
     text-transform: uppercase;
   }
   .pr-link {
-    font-size: 0.65rem;
+    font-size: 11px;
     color: var(--accent);
     text-decoration: none;
     flex-shrink: 0;

@@ -96,7 +96,7 @@
   input[type='text'],
   select {
     font: inherit;
-    font-size: 0.78rem;
+    font-size: 11px;
     padding: 0.2rem 0.35rem;
   }
 </style>

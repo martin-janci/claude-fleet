@@ -312,7 +312,7 @@
     border: none;
     border-radius: 4px;
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.74rem;
+    font-size: 11px;
     line-height: 1.5;
     color: var(--fg-muted);
     text-align: left;
@@ -357,7 +357,7 @@
   .dur {
     flex: 0 0 auto;
     margin-left: auto;
-    font-size: 0.7rem;
+    font-size: 11px;
     opacity: 0.8;
   }
   .x {
@@ -376,7 +376,7 @@
     border: 1px solid var(--border);
     border-radius: 6px;
     background: var(--bg-pane);
-    font-size: 0.74rem;
+    font-size: 11px;
   }
   .detail-error {
     display: flex;
@@ -392,7 +392,7 @@
     padding: 0.3rem 0.6rem;
     border-bottom: 1px solid var(--border);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
   }
   .path {
     min-width: 0;
@@ -412,7 +412,7 @@
     flex: 0 0 auto;
     padding: 0 6px;
     border-radius: 9px;
-    font-size: 0.66rem;
+    font-size: 11px;
     color: var(--fg-muted);
     border: 1px solid var(--border);
   }
@@ -430,20 +430,10 @@
     color: var(--diff-del-fg);
   }
   .detail {
-    --diff-add-fg: #1a7f37;
-    --diff-del-fg: #cf222e;
-    --diff-add-bg: rgba(46, 160, 67, 0.14);
-    --diff-del-bg: rgba(248, 81, 73, 0.14);
-  }
-  :global(:root[data-theme='dark']) .detail {
-    --diff-add-fg: #3fb950;
-    --diff-del-fg: #f85149;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root:not([data-theme='light'])) .detail {
-      --diff-add-fg: #3fb950;
-      --diff-del-fg: #f85149;
-    }
+    --diff-add-fg: var(--status-done);
+    --diff-del-fg: var(--status-failed);
+    --diff-add-bg: var(--done-soft);
+    --diff-del-bg: var(--failed-soft);
   }
   .code {
     margin: 0 0 0.35rem;
@@ -454,7 +444,7 @@
     border-radius: 4px;
     background: var(--bg);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     line-height: 1.5;
   }
   .code .row {
@@ -522,7 +512,7 @@
     gap: 0.4rem;
     padding: 0.08rem 0;
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 0.72rem;
+    font-size: 11px;
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -541,7 +531,7 @@
     align-items: center;
     gap: 0.45rem;
     padding: 0.12rem 0;
-    font-size: 0.76rem;
+    font-size: 11px;
   }
   .todos li.completed {
     color: var(--fg-muted);
@@ -588,7 +578,7 @@
     margin: 0.2rem 0 0.4rem 1.15rem;
     color: var(--fg-muted);
     font-style: italic;
-    font-size: 0.74rem;
+    font-size: 11px;
   }
   .detail .muted {
     margin-left: 0;
@@ -598,7 +588,7 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 0.72rem;
+    font-size: 11px;
     cursor: pointer;
   }
   @media (prefers-reduced-motion: reduce) {

@@ -183,7 +183,7 @@
   .muted,
   .note {
     color: var(--fg-muted);
-    font-size: 0.75rem;
+    font-size: 11px;
   }
   .note { margin: 0; }
   .intro { margin: 0; font-size: 0.85em; }
@@ -218,7 +218,7 @@
     height: 1.3rem;
     border-radius: 50%;
     border: 1px solid var(--control-border, var(--border));
-    font-size: 0.7rem;
+    font-size: 11px;
     color: var(--fg-muted);
   }
   .step-title { font-weight: 600; }
@@ -269,5 +269,5 @@
   .option:hover:not(:disabled) { background: var(--control-bg-hover, var(--bg)); border-color: var(--accent); }
   .option:disabled { opacity: 0.6; cursor: default; }
   .option-label { font-weight: 600; }
-  .hint { font-size: 0.72rem; color: var(--fg-muted); }
+  .hint { font-size: 11px; color: var(--fg-muted); }
 </style>

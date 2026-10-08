@@ -233,7 +233,7 @@
 
 <style>
   .muted { margin: 0; color: var(--fg-muted); font-size: 0.85rem; }
-  .small { font-size: 0.78rem; }
+  .small { font-size: 11px; }
   .split {
     display: grid;
     grid-template-columns: minmax(14rem, 1fr) 2fr;
@@ -257,7 +257,7 @@
     padding: 0.2rem 0.35rem;
     font-size: 0.8rem;
   }
-  .files li.current { background: var(--bg-hover, rgba(127, 127, 127, 0.12)); }
+  .files li.current { background: var(--bg-hover); }
   .file {
     flex: 1;
     min-width: 0;
@@ -274,7 +274,7 @@
   .file code { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .st { font-family: var(--mono); color: var(--fg-muted); width: 1.4rem; flex: none; }
   .origin {
-    font-size: 0.68rem;
+    font-size: 11px;
     padding: 0 0.35rem;
     border-radius: 3px;
     border: 1px solid var(--border);

@@ -98,12 +98,12 @@
   .body { display: flex; flex-direction: column; gap: 0.6rem; }
   h3 { margin: 0; font-size: 1rem; }
   .who { margin: 0; font-size: 0.85rem; }
-  .muted { margin: 0; font-size: 0.75rem; color: var(--fg-muted); }
+  .muted { margin: 0; font-size: 11px; color: var(--fg-muted); }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .summary {
     margin: 0;
-    font-size: 0.75rem;
-    background: var(--bg-alt, rgba(127, 127, 127, 0.12));
+    font-size: 11px;
+    background: var(--bg-sunk);
     padding: 0.4rem 0.5rem;
     border-radius: 4px;
     white-space: pre-wrap;
