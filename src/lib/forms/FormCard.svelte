@@ -131,6 +131,7 @@
         {busy}
         disabled={blocked !== null}
         serverProblems={problems}
+        proposal={form.proposal ?? null}
         onunplaced={(ps) => (error = ps.map((p) => `${p.field}: ${p.problem}`).join('; '))}
         onsubmit={submit} />
       <div class="foot">

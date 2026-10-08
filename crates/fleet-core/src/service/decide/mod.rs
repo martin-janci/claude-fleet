@@ -37,6 +37,9 @@
 pub mod bench;
 pub mod haiku;
 pub mod jev;
+pub mod quick_answer;
+#[cfg(test)]
+mod quick_answer_tests;
 pub mod sibling_repos;
 #[cfg(test)]
 mod sibling_repos_tests;
@@ -88,14 +91,17 @@ pub enum Feature {
     StartProject,
     /// Pre-ticking the sibling repository a ticket start also needs (N3).
     SiblingRepos,
+    /// The likely option first in an agent's question or a form (J5).
+    QuickAnswer,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 4] = [
+    pub const ALL: [Feature; 5] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
         Feature::SiblingRepos,
+        Feature::QuickAnswer,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -104,6 +110,7 @@ impl Feature {
             Feature::WorkLink => "work_link",
             Feature::StartProject => "start_project",
             Feature::SiblingRepos => "sibling_repos",
+            Feature::QuickAnswer => "quick_answer",
         }
     }
 
@@ -118,6 +125,7 @@ impl Feature {
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
             Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
+            Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
         }
     }
 }
