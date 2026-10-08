@@ -18,7 +18,9 @@
     STEPS,
     agentLines,
     canAdvance,
+    checkLoader,
     checkRows,
+    discoveryLoader,
     discardHostSetup,
     listHostSetups,
     nextLabel,
@@ -31,6 +33,7 @@
     type SetupCheck,
     type WizardAnswers,
   } from './add_host_wizard';
+  import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
 
   let {
@@ -62,6 +65,8 @@
 
   const rows = $derived(checkRows(checks, running));
   const agents = $derived(agentLines(checks));
+  const live = $derived(checkLoader(running, sshAlias));
+  const discovery = discoveryLoader();
   const nextOpen = $derived(canAdvance(step, sshAlias, alias, checks, running !== null));
 
   onMount(async () => {
@@ -214,7 +219,10 @@
         {/if}
         <p class="sub">Pick a host from ~/.ssh/config, or type its SSH alias.</p>
         {#if loading}
-          <p class="muted">Scanning ~/.ssh/config…</p>
+          <div class="live" data-testid="wizard-live" data-loader-name={discovery.name}>
+            <Loader name="radar" size={96} testid="wizard-loader" />
+            <span class="live-step" data-testid="wizard-live-step">{discovery.text}</span>
+          </div>
         {:else if discovered.length}
           <ul class="hosts" role="listbox" aria-label="SSH hosts">
             {#each discovered as h (h.alias)}
@@ -270,6 +278,16 @@
             </li>
           {/each}
         </ul>
+        {#if live}
+          <div class="live" data-testid="wizard-live" data-loader-name={live.name}>
+            {#if live.name === 'sonar'}
+              <Loader name="sonar" size={96} testid="wizard-loader" />
+            {:else}
+              <Loader name="hex-field" size={96} testid="wizard-loader" />
+            {/if}
+            <span class="live-step" data-testid="wizard-live-step" aria-live="polite">{live.text}</span>
+          </div>
+        {/if}
         <button type="button" class="quiet" data-testid="wizard-recheck" disabled={running !== null} onclick={runChecks}
           >Check again</button
         >
@@ -383,6 +401,8 @@
   .check.warn .glyph, .check.warn .detail { color: var(--usage-warn); }
   .check.fail .glyph, .check.fail .detail { color: var(--usage-crit); }
   .check.pending, .check.na { color: var(--fg-muted); }
+  .live { display: flex; align-items: center; gap: 0.75rem; }
+  .live-step { font-size: 0.85rem; color: var(--fg-muted); }
   .hint { font-size: 0.8rem; margin: 0; }
   .summary { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; margin: 0; font-size: 0.85rem; }
   .summary dt { color: var(--fg-muted); }

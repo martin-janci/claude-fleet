@@ -593,6 +593,30 @@ pub trait EventBus: Send + Sync {
     /// keeps its copy of the threshold in step with the store through this.
     /// Every other bus ignores it.
     fn context_red_pct_changed(&self, _pct: f64) {}
+
+    /// What the fleet knows beyond a session's own row (step 2.6): which
+    /// hosts are down, and which accounts are at a usage limit or have no
+    /// login. The hub's [`BroadcastEventBus`] follows it from the host and
+    /// usage events it carries, after [`Self::attention_seeded`]; every
+    /// other bus knows nothing, which is the row-only classification.
+    fn attention_facts(&self) -> crate::service::attention::Facts {
+        crate::service::attention::Facts::default()
+    }
+
+    /// Hand [`Self::attention_facts`] the host rows and usage answers that
+    /// predate this process's events: `fleet-hub serve`'s hosts at startup,
+    /// the usage history `restore_usage` seeds. Not an event. Every bus but
+    /// the hub's ignores it.
+    fn attention_seeded(&self, _hosts: &[HostRow], _usage: &[AccountUsageSnapshot]) {}
+
+    /// Each account's latest usage answer this bus has carried (or was
+    /// seeded with), by account: what the hub's `account_usage` tool serves,
+    /// since the usage tick's cache is not reachable from the control API.
+    /// Only the hub's [`BroadcastEventBus`] follows it; every other bus knows
+    /// none.
+    fn account_usage(&self) -> Vec<AccountUsageSnapshot> {
+        Vec::new()
+    }
 }
 
 /// Silently drops every event. For tests and any context that doesn't need
@@ -668,6 +692,81 @@ pub struct BroadcastEventBus {
     /// refreshes it on every write of the setting
     /// ([`EventBus::context_red_pct_changed`]).
     context_red_pct: AtomicU64,
+    /// The host rows and usage answers [`EventBus::attention_facts`] is
+    /// decided from, followed off the events this bus carries (step 2.6).
+    attention: Mutex<AttentionInputs>,
+}
+
+/// What [`BroadcastEventBus`] knows of the fleet's hosts and accounts, kept
+/// current from `host:*` and `account_usage:updated` frames, and the
+/// [`Facts`](crate::service::attention::Facts) they make.
+#[derive(Default)]
+struct AttentionInputs {
+    hosts: std::collections::BTreeMap<String, HostRow>,
+    usage: std::collections::BTreeMap<String, AccountUsageSnapshot>,
+    /// The facts as last decided, and the unix second they stop holding (the
+    /// earliest limit reset among them): past it they are decided again.
+    facts: Option<(crate::service::attention::Facts, Option<i64>)>,
+}
+
+impl AttentionInputs {
+    /// Take in one event; anything but a host or usage change is ignored.
+    fn observe(&mut self, e: &RowChange) {
+        match e {
+            RowChange::HostAdded(row) | RowChange::HostProbed(row) => {
+                self.hosts.insert(row.alias.clone(), row.clone());
+            }
+            RowChange::HostPinged {
+                alias,
+                last_pinged_at,
+                reachable,
+                ..
+            } => match self.hosts.get_mut(alias) {
+                Some(h) if h.reachable != *reachable || h.last_pinged_at.is_none() => {
+                    h.reachable = *reachable;
+                    h.last_pinged_at = Some(*last_pinged_at);
+                }
+                // A heartbeat that changes nothing the facts read.
+                _ => return,
+            },
+            RowChange::HostRemoved(alias) => {
+                self.hosts.remove(alias);
+            }
+            RowChange::AccountUsageUpdated(snap) => {
+                self.usage.insert(snap.account_uuid.clone(), snap.clone());
+            }
+            _ => return,
+        }
+        self.facts = None;
+    }
+
+    fn seed(&mut self, hosts: &[HostRow], usage: &[AccountUsageSnapshot]) {
+        for h in hosts {
+            self.hosts.insert(h.alias.clone(), h.clone());
+        }
+        for u in usage {
+            self.usage.insert(u.account_uuid.clone(), u.clone());
+        }
+        self.facts = None;
+    }
+
+    fn facts(&mut self, now: i64) -> crate::service::attention::Facts {
+        if let Some((facts, until)) = &self.facts {
+            if until.is_none_or(|at| now < at) {
+                return facts.clone();
+            }
+        }
+        let hosts: Vec<HostRow> = self.hosts.values().cloned().collect();
+        let usage: Vec<AccountUsageSnapshot> = self.usage.values().cloned().collect();
+        let facts = crate::service::attention::Facts::from_fleet(&hosts, &usage, now);
+        let until = facts
+            .limited_accounts
+            .values()
+            .filter_map(|l| l.resets_at)
+            .min();
+        self.facts = Some((facts.clone(), until));
+        facts
+    }
 }
 
 /// Every event name a [`RowChange`] renders to — the exact strings
@@ -801,6 +900,7 @@ impl BroadcastEventBus {
             context_red_pct: AtomicU64::new(
                 crate::service::attention::DEFAULT_CONTEXT_RED_PCT.to_bits(),
             ),
+            attention: Mutex::new(AttentionInputs::default()),
         }
     }
 
@@ -881,7 +981,32 @@ impl EventBus for BroadcastEventBus {
         self.set_context_red_pct(pct);
     }
 
+    fn attention_facts(&self) -> crate::service::attention::Facts {
+        match self.attention.lock() {
+            Ok(mut a) => a.facts(unix_now()),
+            Err(_) => Default::default(),
+        }
+    }
+
+    fn attention_seeded(&self, hosts: &[HostRow], usage: &[AccountUsageSnapshot]) {
+        if let Ok(mut a) = self.attention.lock() {
+            a.seed(hosts, usage);
+        }
+    }
+
+    fn account_usage(&self) -> Vec<AccountUsageSnapshot> {
+        match self.attention.lock() {
+            Ok(a) => a.usage.values().cloned().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     fn emit(&self, e: &RowChange) {
+        // Before anything that can return early: the facts must follow every
+        // host and usage change, listened to or not.
+        if let Ok(mut a) = self.attention.lock() {
+            a.observe(e);
+        }
         // The usual state of a hub nobody has connected a phone to. Checked
         // FIRST because `payload()` serializes a whole store row, and a
         // reconcile pass emits one per session on a busy fleet: without this,
@@ -930,10 +1055,15 @@ impl EventBus for BroadcastEventBus {
         // deserialises the payload straight back into `SessionRow`.
         // `context_full` is judged at `health.context_red_pct`, the same
         // threshold `list_sessions` reads — held on the bus, which has no
-        // store (see `Self::context_red_pct`).
+        // store (see `Self::context_red_pct`) — and the three `Blocked`
+        // reasons from the facts the bus follows (`attention_facts`).
         if let RowChange::SessionCreated(row) | RowChange::SessionUpdated(row) = e {
             if let (Some(att), serde_json::Value::Object(map)) = (
-                crate::service::attention::needs_attention_with(row, self.context_red_pct()),
+                crate::service::attention::needs_attention_in(
+                    row,
+                    self.context_red_pct(),
+                    &self.attention_facts(),
+                ),
                 &mut payload,
             ) {
                 if let Ok(v) = serde_json::to_value(att) {
@@ -1456,6 +1586,107 @@ mod tests {
             "a session that needs nobody carries no key: {}",
             msg.payload
         );
+    }
+
+    /// The three `Blocked` reasons on the stream (step 2.6): the bus follows
+    /// hosts and usage off the frames it carries, so a session on a host a
+    /// probe found down reads `host_down`, one on an account at its limit
+    /// `account_limit`, each with `state: blocked` — and both lift on the
+    /// frame that says so, a heartbeat included.
+    #[tokio::test]
+    async fn the_stream_follows_down_hosts_and_limited_accounts() {
+        use crate::service::account_usage::{
+            AccountUsage, AccountUsageSnapshot, UsageOutcomeKind, Window,
+        };
+        let s = crate::store::Store::open_in_memory().unwrap();
+        s.upsert_host("hosta").unwrap();
+        s.upsert_session("dev", "hosta", None, None, 1, 1, "running", None)
+            .unwrap();
+        let mut row = s.get_session("dev", "hosta").unwrap().expect("row");
+        row.claude_status = Some("idle".into());
+        row.account_uuid = Some("acc".into());
+        let mut host = s.list_hosts().unwrap().remove(0);
+
+        let bus = BroadcastEventBus::new(16);
+        bus.attention_seeded(std::slice::from_ref(&host), &[]);
+        let mut rx = bus.subscribe();
+        let mut attention = |bus: &BroadcastEventBus| {
+            bus.emit(&RowChange::SessionUpdated(row.clone()));
+            loop {
+                let msg = rx.try_recv().expect("a frame");
+                if msg.name == "session:updated" {
+                    return msg.payload.get("needs_attention").cloned();
+                }
+            }
+        };
+        assert_eq!(attention(&bus), None, "a reachable host, no usage known");
+
+        host.reachable = false;
+        host.last_pinged_at = Some(50);
+        bus.emit(&RowChange::HostProbed(host.clone()));
+        let att = attention(&bus).expect("stamped");
+        assert_eq!(att["reason"], "host_down", "{att}");
+        assert_eq!(att["state"], "blocked", "{att}");
+
+        bus.emit(&RowChange::HostPinged {
+            alias: "hosta".into(),
+            last_pinged_at: 60,
+            reachable: true,
+            claude_version_at: None,
+            health: None,
+        });
+        assert_eq!(attention(&bus), None, "the heartbeat that says it is back");
+
+        let snap = |pct: f64| AccountUsageSnapshot {
+            account_uuid: "acc".into(),
+            usage: Some(AccountUsage {
+                five_hour: Some(Window {
+                    utilization: pct,
+                    resets_at: Some(unix_now() + 3_600),
+                }),
+                ..Default::default()
+            }),
+            subscription: None,
+            fetched_at: Some(unix_now()),
+            source_host: None,
+            status: UsageOutcomeKind::Ok,
+            detail: None,
+            next_try_at: 0,
+        };
+        bus.emit(&RowChange::AccountUsageUpdated(snap(100.0)));
+        let att = attention(&bus).expect("stamped");
+        assert_eq!(att["reason"], "account_limit", "{att}");
+        assert_eq!(att["state"], "blocked", "{att}");
+        assert!(bus.attention_facts().limited_accounts.contains_key("acc"));
+
+        bus.emit(&RowChange::AccountUsageUpdated(snap(40.0)));
+        assert_eq!(attention(&bus), None, "the window has room again");
+    }
+
+    /// A store reads its bus's facts, and a read pool following the bus reads
+    /// the same: the sites that decide `needs_attention` off a pooled
+    /// connection must not fall back to the row-only answer (step 2.6).
+    #[test]
+    fn a_store_and_its_read_pool_read_the_bus_facts() {
+        let bus = std::sync::Arc::new(BroadcastEventBus::new(4));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let s = crate::store::Store::open_with_bus(&path, bus.clone()).unwrap();
+        s.upsert_host("hosta").unwrap();
+        s.update_host_probe("hosta", false, None, None, 50).unwrap();
+        assert!(s.attention_facts().down_hosts.contains("hosta"));
+
+        let pool = crate::store::ReadPool::open(&path, 2)
+            .unwrap()
+            .expect("WAL")
+            .following(bus as std::sync::Arc<dyn EventBus>);
+        let reader = pool.get().expect("a connection");
+        assert!(reader
+            .lock()
+            .unwrap()
+            .attention_facts()
+            .down_hosts
+            .contains("hosta"));
     }
 
     /// A row at 90 % context, live and working.

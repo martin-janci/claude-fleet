@@ -57,6 +57,20 @@ impl ReadPool {
         }))
     }
 
+    /// Let every connection answer [`Store::attention_facts`] from `bus`,
+    /// the writer's (step 2.6): the facts are followed on the hub's bus, not
+    /// read from the file, and a pooled `list_sessions` must stamp the same
+    /// `needs_attention` the writer would. Nothing else of the bus is used:
+    /// a read-only connection never writes, so it never emits.
+    pub fn following(mut self, bus: std::sync::Arc<dyn crate::events::EventBus>) -> Self {
+        for c in &mut self.conns {
+            if let Ok(s) = c.get_mut() {
+                s.bus = super::StoreBus::new(std::sync::Arc::clone(&bus));
+            }
+        }
+        self
+    }
+
     /// A connection to read through: the first free one, starting from a
     /// rotating cursor; when all are busy, the cursor's own (a pooled read is
     /// short, so waiting on it is bounded — it never waits on the writer).

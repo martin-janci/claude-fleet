@@ -428,6 +428,19 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             Box::new(|b, s, _| block_on(commands::hosts::routed::list_accounts(b, s)).map(|_| ())),
         ),
         (
+            "list_account_usage",
+            "account_usage",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                let cache = Mutex::new(fleet_core::service::account_usage::UsageCache::new());
+                block_on(commands::account_usage::routed::list_account_usage(
+                    b, s, &cache,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_projects",
             "list_projects",
             json!({ "summary": false }),
@@ -467,6 +480,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     commands::projects::ListGithubReposArgs {
                         host_alias: "trn".into(),
+                        owner: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_github_repos",
+            "list_github_repos",
+            json!({ "host_alias": "trn", "owner": "papaya-pos" }),
+            r#"[{"name_with_owner":"papaya-pos/receipts","is_private":true}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::projects::routed::list_github_repos(
+                    b,
+                    commands::projects::ListGithubReposArgs {
+                        host_alias: "trn".into(),
+                        owner: Some("papaya-pos".into()),
                     },
                     s,
                     h,

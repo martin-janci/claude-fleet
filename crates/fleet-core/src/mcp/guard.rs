@@ -255,6 +255,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Plan usage per account (hub contract 11 follow-up): the same reach as
+    // `list_accounts`, read from what the hub's bus followed.
+    ToolPolicy {
+        name: "account_usage",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The composer's shared chip row. One tool both reads and replaces the
     // list, so it is classified as a write and a `readonly` client cannot
     // call it at all — not even to read. That is deliberate: a readonly

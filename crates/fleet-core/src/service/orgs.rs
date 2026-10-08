@@ -819,7 +819,8 @@ fn counted_rows(
 /// Whether a row waits on a person (`service::attention::needs_attention`).
 fn needs_person(s: &Store) -> impl Fn(&SessionRow) -> bool {
     let red = crate::service::health::context_red_pct(s);
-    move |r: &SessionRow| crate::service::attention::needs_attention_with(r, red).is_some()
+    let facts = s.attention_facts();
+    move |r: &SessionRow| crate::service::attention::needs_attention_in(r, red, &facts).is_some()
 }
 
 /// `org id → (sessions, sessions that need a person)` over `rows`.
@@ -993,6 +994,12 @@ pub struct OrgDetail {
     /// last 14 UTC days, today last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spend_series: Option<Vec<crate::service::org_spend::SpendDay>>,
+    /// Redesign 11.8: the same spend by person (today, 7 days, month), all
+    /// or nothing — only to an administrator who sees every session there
+    /// is, since a person's figure counts their private sessions. Absent
+    /// for anyone else, never cut down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_by_person: Option<Vec<crate::service::org_spend::PersonSpend>>,
     /// Redesign 11.1, for whoever administers it: what its admins should
     /// look at (`service::org_needs`). Absent for anyone else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1357,7 +1364,8 @@ fn org_details_locked(
     // An org admin sees their own org's spend (phases A–C, for that org);
     // the fleet's administrator every org's, when they see every session.
     let now = crate::service::catalog::now_secs();
-    let spend = (any_admin && (!admin || crate::service::org_spend::sees_all_spend(s, view)))
+    let sees_all = any_admin && crate::service::org_spend::sees_all_spend(s, view);
+    let spend = (any_admin && (!admin || sees_all))
         .then(|| crate::service::org_spend::spend_by_org(s, now));
     // Read once, and only when an org's admin is told the count.
     let mut unclaimed: Option<BTreeMap<String, i64>> = None;
@@ -1412,6 +1420,7 @@ fn org_details_locked(
         let mut d = OrgDetail {
             needs_admin,
             spend_series: None,
+            spend_by_person: None,
             members,
             my_role,
             catalogs: catalogs
@@ -1470,6 +1479,11 @@ fn org_details_locked(
                 .map(|(p, ..)| p)
                 .collect();
             d.spend_series = Some(os::series(s, d.org.id, now));
+            // A person's figure is a sum over their sessions, private ones
+            // among them: the whole table or none of it (11.8).
+            if sees_all {
+                d.spend_by_person = Some(os::by_person(s, d.org.id, now));
+            }
             if let Some(needs) = d.needs_admin.as_mut() {
                 let found = crate::service::org_needs::budget_needs(
                     got,

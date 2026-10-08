@@ -1239,6 +1239,10 @@ pub struct GithubRepo {
     pub description: Option<String>,
     pub is_private: bool,
     pub updated_at: Option<String>,
+    /// The repository's main language ("Rust"), shown on its row. Absent
+    /// from an older hub's answer and from a repository GitHub has none for.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 /// `gh repo list --json`'s camelCase wire shape. Kept private and separate
@@ -1251,37 +1255,67 @@ struct GhRepoWire {
     description: Option<String>,
     is_private: bool,
     updated_at: Option<String>,
+    #[serde(default)]
+    primary_language: Option<GhLanguageWire>,
+}
+
+/// `primaryLanguage` is an object (`{"name": "Rust"}`), or null.
+#[derive(serde::Deserialize)]
+struct GhLanguageWire {
+    name: String,
 }
 
 /// Production entry point for the Add-project dialog's browse mode.
 pub async fn list_github_repos(
     host_alias: &str,
+    owner: Option<&str>,
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
 ) -> Result<Vec<GithubRepo>, IpcError> {
-    list_github_repos_with(host_alias, store, &**ssh).await
+    list_github_repos_with(host_alias, owner, store, &**ssh).await
+}
+
+/// The `gh repo list` command for one owner, or for the host's own login
+/// when `owner` is `None`. The owner is checked as a GitHub name before it
+/// is quoted in, so a value like `-rf` never reaches `gh` as a flag.
+fn gh_repo_list_cmd(owner: Option<&str>) -> Result<String, IpcError> {
+    const FIELDS: &str = "nameWithOwner,description,isPrivate,updatedAt,primaryLanguage";
+    match owner {
+        None => Ok(format!("gh repo list --limit 200 --json {FIELDS}")),
+        Some(o) if crate::repo_url::is_component(o, 39) => Ok(format!(
+            "gh repo list {} --limit 200 --json {FIELDS}",
+            quote(o)
+        )),
+        Some(o) => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{o:?} is not a GitHub user or organisation name"),
+        )),
+    }
 }
 
 /// The repositories `gh` can see on `host_alias` — read-only, nothing is
 /// registered or written. `host_alias` must be a registered fleet host (see
-/// [`require_fleet_host`]).
+/// [`require_fleet_host`]). `owner` lists that user's or organisation's
+/// repositories instead of the host login's own (the Add-project dialog's
+/// owner field, redesign step 6.11).
 pub async fn list_github_repos_with(
     host_alias: &str,
+    owner: Option<&str>,
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
 ) -> Result<Vec<GithubRepo>, IpcError> {
     crate::validate::host_alias(host_alias)?;
+    let owner = owner.map(str::trim).filter(|o| !o.is_empty());
+    let cmd = gh_repo_list_cmd(owner)?;
     require_fleet_host(store, host_alias)?;
-    const CMD: &str =
-        "gh repo list --limit 200 --json nameWithOwner,description,isPrivate,updatedAt";
     let out = if host_alias == crate::service::projects::LOCAL_HOST {
         // A short read-only probe: no cancellation is wired for browse mode,
         // so a token that is never fired is the same as having none.
-        run_local_script(CMD, GH_WALL_CLOCK, &CancellationToken::new()).await?
+        run_local_script(&cmd, GH_WALL_CLOCK, &CancellationToken::new()).await?
     } else {
         ssh.run_bounded(
             host_alias,
-            &["bash", "-lc", &quote(CMD)],
+            &["bash", "-lc", &quote(&cmd)],
             CLONE_CONNECT_TIMEOUT,
             GH_WALL_CLOCK,
         )
@@ -1327,6 +1361,7 @@ pub async fn list_github_repos_with(
             description: w.description,
             is_private: w.is_private,
             updated_at: w.updated_at,
+            language: w.primary_language.map(|l| l.name).filter(|n| !n.is_empty()),
         })
         .collect())
 }
@@ -5129,7 +5164,9 @@ mod tests {
                 r#"[{"nameWithOwner":"acme/widget","description":"w","isPrivate":true,"updatedAt":"2026-09-01T10:00:00Z"}]"#,
             ),
         );
-        let repos = list_github_repos_with("vps", &store, &fake).await.unwrap();
+        let repos = list_github_repos_with("vps", None, &store, &fake)
+            .await
+            .unwrap();
         assert_eq!(repos.len(), 1);
         assert_eq!(repos[0].name_with_owner, "acme/widget");
         assert!(repos[0].is_private);
@@ -5144,7 +5181,7 @@ mod tests {
                 "gh: To get started with GitHub CLI, please run: gh auth login",
             ),
         );
-        let err = list_github_repos_with("vps", &store, &bad)
+        let err = list_github_repos_with("vps", None, &store, &bad)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
@@ -5159,7 +5196,7 @@ mod tests {
             Match::script_contains("gh repo list"),
             Reply::fail(127, "bash: line 1: gh: command not found"),
         );
-        let err = list_github_repos_with("vps", &store, &fake)
+        let err = list_github_repos_with("vps", None, &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
@@ -5179,7 +5216,7 @@ mod tests {
             Match::script_contains("gh repo list"),
             Reply::ok("not json at all"),
         );
-        let err = list_github_repos_with("vps", &store, &fake)
+        let err = list_github_repos_with("vps", None, &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_GH);
@@ -5192,7 +5229,7 @@ mod tests {
         let fake = FakeSsh::new();
         fake.with_home("/home/u")
             .on(Match::script_contains("gh repo list"), Reply::ok("[]"));
-        let err = list_github_repos_with("elsewhere", &store, &fake)
+        let err = list_github_repos_with("elsewhere", None, &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_NOTFOUND);
@@ -5220,11 +5257,96 @@ mod tests {
     async fn list_github_repos_validates_the_host_alias_before_any_ssh() {
         let store = store_with_no_projects();
         let fake = FakeSsh::new();
-        let err = list_github_repos_with("-oProxyCommand=evil", &store, &fake)
+        let err = list_github_repos_with("-oProxyCommand=evil", None, &store, &fake)
             .await
             .unwrap_err();
         assert_eq!(err.code, codes::E_INVALID);
         assert!(fake.calls().is_empty());
+    }
+
+    // ── the four sources of the Add-project dialog (redesign 6.11): From
+    // GitHub, Clone a URL, Existing folder and New repo. Clone, folder and
+    // new are covered above; From GitHub is the listing plus a clone of
+    // what it listed, tested here end to end ─────────────────────────────
+
+    #[tokio::test]
+    async fn from_github_lists_an_owners_repos_and_clones_the_one_picked() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u")
+            .on(
+                Match::script_contains("gh repo list"),
+                Reply::ok(
+                    r#"[{"nameWithOwner":"papaya-pos/receipts","description":null,"isPrivate":true,
+                        "updatedAt":"2026-10-08T10:00:00Z","primaryLanguage":{"name":"TypeScript"}},
+                       {"nameWithOwner":"papaya-pos/legacy","description":null,"isPrivate":false,
+                        "updatedAt":null,"primaryLanguage":null}]"#,
+                ),
+            )
+            .on(Match::script_contains("git clone"), Reply::ok(""));
+
+        let repos = list_github_repos_with("vps", Some("papaya-pos"), &store, &fake)
+            .await
+            .unwrap();
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(
+            script.contains("gh repo list 'papaya-pos' --limit 200"),
+            "{script}"
+        );
+        assert!(script.contains("primaryLanguage"), "{script}");
+        assert_eq!(repos[0].language.as_deref(), Some("TypeScript"));
+        assert_eq!(repos[1].language, None);
+
+        // The dialog adds what it listed by its `owner/repo`.
+        let row = add_project_with(
+            AddProjectArgs {
+                host_alias: "vps".into(),
+                source: AddProjectSource::Clone {
+                    url: repos[0].name_with_owner.clone(),
+                },
+                call_id: None,
+            },
+            &store,
+            &fake,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (row.project.owner.as_str(), row.project.repo.as_str()),
+            ("papaya-pos", "receipts")
+        );
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(
+            script.contains("git clone 'git@github.com:papaya-pos/receipts.git'"),
+            "{script}"
+        );
+    }
+
+    #[tokio::test]
+    async fn from_github_refuses_an_owner_that_is_not_a_github_name_before_any_ssh() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        for owner in ["-rf", "a b", "acme;id", &"a".repeat(40)] {
+            let err = list_github_repos_with("vps", Some(owner), &store, &fake)
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, codes::E_INVALID, "{owner}");
+        }
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+    }
+
+    #[tokio::test]
+    async fn from_github_with_a_blank_owner_lists_the_logins_own_repos() {
+        let store = store_with_no_projects();
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u")
+            .on(Match::script_contains("gh repo list"), Reply::ok("[]"));
+        list_github_repos_with("vps", Some("  "), &store, &fake)
+            .await
+            .unwrap();
+        let script = fake.calls_for("vps").last().unwrap().script().unwrap();
+        assert!(script.contains("gh repo list --limit 200"), "{script}");
     }
 
     // ── cancellation end-to-end: `call_id` → `CancellationToken` → the

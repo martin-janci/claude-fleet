@@ -1126,9 +1126,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // ── account usage ───────────────────────────────────────────────────────
     (
         "list_account_usage",
-        Verdict::LocalOnly {
-            instead: "this app does not poll account usage while a hub owns the fleet, so \
-                      the cache is empty; read usage on the hub",
+        Verdict::Routed {
+            tool: "account_usage",
         },
     ),
     (
