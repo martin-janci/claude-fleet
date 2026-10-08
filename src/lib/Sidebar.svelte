@@ -99,6 +99,7 @@
     type TriageBucket,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
+  import { attentionFacts } from './attention_facts';
   import { push, pushError } from './toasts';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
@@ -216,7 +217,7 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
     return () => clearInterval(t);
   });
-  const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec });
+  const attentionOpts = $derived({ idleSecs: $attentionIdleMinutes * 60, now: nowSec, facts: $attentionFacts });
   // The org scope (work graph M5): a view filter composed into every
   // builder below through `rowMatches`. `null` while no scope is chosen or
   // the selector is hidden (fewer than two scopes).

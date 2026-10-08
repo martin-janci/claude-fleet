@@ -7,7 +7,7 @@
   import { selectSessionExplicitly } from './selection';
   import { newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { defaultHost, hosts, isPickableHost } from './hosts';
-  import { readPref, writePref } from './prefs';
+  import { readPref, writePref, uiLayout } from './prefs';
   import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS } from './conversation';
   import { slugifyBranch, finalizeBranchSlug } from './branch-slug';
   import { generateName, nameWords, tmuxNameSuffix } from './names';
@@ -30,6 +30,9 @@
   import { hubConnection } from './hub_connection';
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
+  import ProposedBy from './ProposedBy.svelte';
+  import type { ProposalLike } from './ai_proposal';
+  import { openNewSessionPicker } from './switcher_request';
 
   let {
     project,
@@ -39,6 +42,7 @@
     initialHost,
     ticket,
     autostart = false,
+    proposal = null,
     clock = () => Math.floor(Date.now() / 1000),
     locale,
     timeZone,
@@ -58,6 +62,9 @@
     /** Start at once with the remembered choices (the picker's ⌘↵); the
      *  dialog stays open only if something needs a person. */
     autostart?: boolean;
+    /** What chose `project` (redesign 3.12, K1): shown as the shared chip
+     *  in the New layout; Change re-opens the picker for another one. */
+    proposal?: ProposalLike | null;
     /** Unix seconds for the host chips' usage wording; injectable for tests. */
     clock?: () => number;
     locale?: string;
@@ -947,6 +954,17 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="dialog" onkeydown={onKeydown}>
   <h3>New session — {owner}/{repo}</h3>
+  {#if $uiLayout === 'new'}
+    <ProposedBy
+      {proposal}
+      field="project"
+      testid="new-session-proposed"
+      onchange={() => {
+        onCancel();
+        openNewSessionPicker(initialHost, ticket);
+      }}
+    />
+  {/if}
 
   <div class="fields">
     <label for="friendly-name">Name</label>

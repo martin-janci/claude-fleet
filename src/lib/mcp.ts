@@ -80,7 +80,12 @@ export interface HostTokenInfo {
   host_alias: string;
   /** `full` | `readonly` */
   mode: string;
+  /** When the host's first token was minted. */
   created_at: number;
+  /** The last request the token authenticated, to the minute. */
+  last_used_at?: number | null;
+  /** When a fresh token last replaced the host's. */
+  rotated_at?: number | null;
   /** Set only by `rotate_host_token`: provisioned, but degraded (e.g. a WSL
    *  distribution whose hooks cannot reach this desktop). */
   warning?: string | null;

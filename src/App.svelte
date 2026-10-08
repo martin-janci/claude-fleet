@@ -1005,6 +1005,7 @@
     initialHost={$newSessionRequest.initialHost}
     ticket={$newSessionRequest.ticket}
     autostart={$newSessionRequest.autostart}
+    proposal={$newSessionRequest.proposal}
     onCreate={(s) => {
       clearNewSessionRequest();
       selectSessionExplicitly(s);

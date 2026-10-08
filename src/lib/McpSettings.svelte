@@ -10,8 +10,9 @@
     type HostProvisionResult,
     maskToken,
 } from './mcp';
+  import ControlApiTokens from './ControlApiTokens.svelte';
 
-  let { onProvisioned }: { onProvisioned: () => Promise<void> } = $props();
+  let { onProvisioned, active = true }: { onProvisioned: () => Promise<void>; active?: boolean } = $props();
 
   // --- Control API (MCP) ---
   let mcp: McpStatus | null = $state(null);
@@ -278,6 +279,8 @@
   {/if}
   {#if mcpError}<p class="err">{mcpError}</p>{/if}
 </section>
+
+<ControlApiTokens {active} />
 
 <style>
   .err { color: var(--danger); font-size: 0.8rem; margin: 0; }

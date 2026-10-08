@@ -620,6 +620,16 @@ fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<b
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 126.
+fn host_tokens_has_rotated_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('host_tokens') WHERE name = 'rotated_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 117.
 fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1475,6 +1485,14 @@ const MIGRATIONS: &[Migration] = &[
         version: 125,
         sql: include_str!("../../migrations/125_session_last_viewed.sql"),
         already_applied: Some(sessions_has_last_viewed_at),
+    },
+    // Orbit Fleet 11.4, the Control API tokens table: `last_used_at` and
+    // `rotated_at` on `host_tokens` (two ADD COLUMNs, guarded on the last),
+    // and its update trigger narrowed to leave liveness alone.
+    Migration {
+        version: 126,
+        sql: include_str!("../../migrations/126_host_token_use.sql"),
+        already_applied: Some(host_tokens_has_rotated_at),
     },
 ];
 
@@ -4477,8 +4495,19 @@ mod tests {
         };
         assert_eq!(
             cols("host_tokens"),
-            ["host_alias", "token", "created_at", "mode"],
-            "host_tokens changed: every UPDATE fires its trigger, but check resolve_token"
+            [
+                "host_alias",
+                "token",
+                "created_at",
+                "mode",
+                // Orbit Fleet 11.4 (migration 126): liveness, left out of
+                // auth_epoch_host_tokens_update like client_tokens.last_seen_at.
+                "last_used_at",
+                // Listed in the trigger: a rotation replaces the token.
+                "rotated_at"
+            ],
+            "host_tokens changed: add the column to auth_epoch_host_tokens_update \
+             (migration 126) unless it is liveness-only like last_used_at"
         );
         assert_eq!(
             cols("client_tokens"),

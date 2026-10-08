@@ -361,6 +361,35 @@ async fn authorize(
             }
         }
     }
+    // A host token's "last used" for the Control API tokens table (Orbit
+    // Fleet 11.4): the same once-a-minute, never-wait stamp as a client's,
+    // which moves no auth epoch (migration 126).
+    if let (None, Some(alias)) = (caller.client.as_ref(), caller.host_alias.as_deref()) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let stamp = |s: &crate::store::Store| {
+            if let Err(e) = s.touch_host_token(alias, now) {
+                tracing::debug!(error = %e.message, "[mcp] could not touch host token");
+            }
+        };
+        match state.tokens.as_ref() {
+            Some(cache) => {
+                if cache.host_touch_due(alias, now) {
+                    match state.store.try_lock() {
+                        Ok(s) => stamp(&s),
+                        Err(_) => cache.host_untouch(alias),
+                    }
+                }
+            }
+            None => {
+                if let Ok(s) = state.store.lock() {
+                    stamp(&s);
+                }
+            }
+        }
+    }
     // The pane proof (multi-user M1, R6-i): `X-Fleet-Pane` carries the
     // caller's `$TMUX_PANE`, put there by the `claude-fleet` MCP entry's
     // headers (`service::provision::merge_mcp_entry`). It is read HERE, on
