@@ -10,7 +10,8 @@ import SessionRowItem from './SessionRowItem.svelte';
 import { hosts } from './hosts';
 import { session } from './hosts_fixture';
 import { orgs } from './orgs';
-import type { SessionRow } from './sessions';
+import { selectSession, clearSelection } from './selection';
+import { sessions, type SessionRow } from './sessions';
 
 const noop = () => {};
 const live = (over: Partial<SessionRow> = {}): SessionRow =>
@@ -60,6 +61,28 @@ describe('a session row and its org', () => {
     unmount();
     render(SessionRowItem, { props: props(live()) });
     expect(screen.getByTestId('sess-row').dataset.orgColor).toBeUndefined();
+  });
+
+  it('marks the selected row with an accent bar inside the org stripe, not by tint alone', async () => {
+    const sess = live();
+    sessions.set([sess]);
+    selectSession(sess);
+    try {
+      const { unmount } = render(SessionRowItem, { props: props(sess, { orgColor: '#ff0000' }) });
+      let r = screen.getByTestId('sess-row');
+      expect(r.getAttribute('aria-current')).toBe('true');
+      expect(r.style.boxShadow).toContain('3px');
+      expect(r.style.boxShadow).toContain('inset 5px 0 0 var(--accent)');
+      unmount();
+      render(SessionRowItem, { props: props(sess) });
+      r = screen.getByTestId('sess-row');
+      expect(r.style.boxShadow).toBe('inset 2px 0 0 var(--accent)');
+    } finally {
+      clearSelection();
+    }
+    await tick();
+    expect(screen.getByTestId('sess-row').getAttribute('aria-current')).toBeNull();
+    expect(screen.getByTestId('sess-row').style.boxShadow).toBe('');
   });
 
   it('explains a cross-org refusal with org names, and "Link anyway" retries with the override', async () => {
