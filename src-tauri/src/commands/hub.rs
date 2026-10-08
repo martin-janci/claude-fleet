@@ -84,7 +84,7 @@ pub struct HubPairArgs {
     pub allow_plaintext: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hub_status(
     backend: State<'_, Backend>,
     store: State<'_, Arc<Mutex<Store>>>,
@@ -144,7 +144,7 @@ pub fn hub_connection(
 /// the working and the [`crate::backend::Backend::Unavailable`] case alike.
 ///
 /// The token never leaves the token store: this returns a bool.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hub_stranded_token(
     store: State<'_, Arc<Mutex<Store>>>,
     tokens: State<'_, Arc<dyn TokenStore>>,
@@ -153,7 +153,7 @@ pub fn hub_stranded_token(
 }
 
 /// Forget the pairing. **Revokes nothing** — see the module docs.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hub_disconnect(
     backend: State<'_, Backend>,
     store: State<'_, Arc<Mutex<Store>>>,
