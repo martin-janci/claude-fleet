@@ -96,6 +96,18 @@ describe('NewSessionDialog remote path preview (W5 G3)', () => {
 });
 
 describe('NewSessionDialog', () => {
+  // Moved from Sidebar.test.ts when the Sidebar's own mount went (redesign 1.9).
+  it('a native <dialog> close still closes it (Modal reopen only when the parent declines)', async () => {
+    const onCancel = vi.fn();
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel } });
+    await tick();
+    const dlg = screen.getByRole('dialog', { name: 'New session' }) as HTMLDialogElement;
+    dlg.removeAttribute('open');
+    dlg.dispatchEvent(new Event('close'));
+    await tick(); await tick();
+    expect(onCancel).toHaveBeenCalled();
+  });
+
   it('renders one host-pick button per non-hidden host', async () => {
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();

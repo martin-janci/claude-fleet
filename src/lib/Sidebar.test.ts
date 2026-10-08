@@ -77,6 +77,7 @@ import { resetAccessForTests, setMyGrants } from './access';
 import { trackers } from './trackers';
 import { switcherRequest } from './switcher_request';
 import { addProjectRequest } from './app_views';
+import { newSessionRequest, clearNewSessionRequest } from './new_session_request';
 
 /** Open the sidebar's Filters panel (hosts, recency, work filters, include). */
 async function openFilters() {
@@ -131,6 +132,7 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
 }
 
 beforeEach(() => {
+  clearNewSessionRequest();
   resetTombstonesForTests();
   resetHostTombstones();
   projects.set([]);
@@ -835,7 +837,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(mockedInvoke).toHaveBeenCalledWith('set_project_pick', {
       args: { owner: 'newowner', repo: 'fresh-repo', pinned: false, vis: 'keep', grp: null },
     });
-    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('newowner/fresh-repo');
+    expect(get(newSessionRequest)?.project.project.repo).toBe('fresh-repo');
   });
 
   it('a failed keep write after Add project stays quiet (no toast)', async () => {
@@ -878,7 +880,10 @@ describe('Sidebar (sessions-grouped view)', () => {
     await fireEvent.input(screen.getByTestId('clone-url'), { target: { value: 'newowner/fresh-repo' } });
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
-    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('newowner/fresh-repo');
+    // App's one New session mount opens on it (redesign 1.9): the Sidebar
+    // publishes the request and mounts no dialog of its own.
+    expect(get(newSessionRequest)?.project.project.id).toBe(42);
+    expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull();
     expect(get(projects).some((p) => p.project.id === 42)).toBe(true);
   });
 
@@ -909,20 +914,18 @@ describe('Sidebar (sessions-grouped view)', () => {
     await vi.waitFor(() => expect((screen.getByTestId('add-create') as HTMLButtonElement).disabled).toBe(false));
     await fireEvent.click(screen.getByTestId('add-create'));
     await vi.waitFor(() => expect(screen.queryByTestId('add-project-dialog')).toBeNull());
-    expect(screen.getByRole('heading', { name: /New session/ }).textContent).toContain('me/thing');
-    expect(document.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias')).toBe('local');
+    expect(get(newSessionRequest)?.project.project.id).toBe(43);
+    expect(get(newSessionRequest)?.initialHost).toBe('local');
   });
 
-  it('a native <dialog> close on NewSessionDialog still closes it (Modal reopen only when the parent declines)', async () => {
+  it("a project row's + asks App's one New session dialog for that project (redesign 1.9)", async () => {
     mockBackend(fakeProjects, [sessionFor(1)]);
     render(Sidebar);
     await tick(); await tick();
     await fireEvent.click(screen.getAllByTitle('New session in this project')[0]);
     await tick();
-    const dlg = screen.getByRole('dialog', { name: 'New session' }) as HTMLDialogElement;
-    dlg.removeAttribute('open');
-    dlg.dispatchEvent(new Event('close'));
-    await tick(); await tick();
+    expect(get(newSessionRequest)?.project.project.id).toBe(fakeProjects[0].project.id);
+    expect(get(newSessionRequest)?.initialHost).toBeUndefined();
     expect(screen.queryByRole('dialog', { name: 'New session' })).toBeNull();
   });
 
