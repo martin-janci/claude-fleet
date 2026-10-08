@@ -6,7 +6,9 @@ import StatusBarMark from './StatusBarMark.svelte';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { sessions, sessionsAnswered } from './sessions';
-import { session } from './hosts_fixture';
+import { host, session } from './hosts_fixture';
+import { hosts } from './hosts';
+import { catchingUp, resetStartup, warmStart } from './startup';
 
 const REMOTE = { ...STANDALONE, remote: true, url: 'https://fleet.example.com' };
 const mark = () => screen.queryByTestId('status-mark');
@@ -16,6 +18,9 @@ beforeEach(() => {
   hubConnection.set({ state: 'standalone' });
   sessions.set([session('trn', 'dev-a')]);
   sessionsAnswered.set(true);
+  hosts.set([]);
+  catchingUp.set(new Set());
+  resetStartup();
 });
 
 describe('StatusBarMark', () => {
@@ -66,5 +71,23 @@ describe('StatusBarMark', () => {
     sessionsAnswered.set(false);
     render(StatusBarMark);
     expect(mark()).toBeNull();
+  });
+
+  it('breathes while a warm start re-syncs, where a cold one has its splash (step 3.15)', () => {
+    sessionsAnswered.set(false);
+    warmStart.set(true);
+    render(StatusBarMark);
+    expect(mark()?.dataset.mark).toBe('breathe');
+    expect(mark()).toHaveAttribute('title', 'Re-syncing');
+  });
+
+  it('says a host that had not answered is still connecting, until it does', async () => {
+    hosts.set([host('mac'), host('trn', { reachable: false })]);
+    catchingUp.set(new Set(['trn']));
+    render(StatusBarMark);
+    expect(screen.getByTestId('status-catch-up').textContent).toBe('trn still connecting');
+    hosts.set([host('mac'), host('trn', { reachable: true })]);
+    await tick();
+    expect(screen.queryByTestId('status-catch-up')).toBeNull();
   });
 });

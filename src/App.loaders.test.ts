@@ -11,6 +11,8 @@ import { clearSelection } from './lib/selection';
 import { settingsOpen } from './lib/app_views';
 import { sessionsAnswered, type SessionRow } from './lib/sessions';
 import { fleetAccounts, fleetHosts, session } from './lib/hosts_fixture';
+import { uiLayout } from './lib/prefs';
+import { resetStartup } from './lib/startup';
 
 let original: ((cmd: string, ...rest: unknown[]) => Promise<unknown>) | undefined;
 let inv: ReturnType<typeof vi.fn>;
@@ -27,6 +29,8 @@ beforeEach(async () => {
   settingsOpen.set(false);
   sessionsAnswered.set(false);
   localStorage.clear();
+  resetStartup();
+  uiLayout.set('classic');
   const { invoke } = await import('@tauri-apps/api/core');
   inv = invoke as ReturnType<typeof vi.fn>;
   original = inv.getMockImplementation() as typeof original;
@@ -76,5 +80,27 @@ describe('App: loaders in the new shell (redesign 3.13)', () => {
     await waitFor(() => expect(screen.queryByTestId('fleet-arriving')).toBeNull());
     expect(screen.getByText('Select a session to attach a terminal.')).toBeInTheDocument();
     await waitFor(() => expect(shownLoaders().map((l) => l.dataset.loader)).toEqual(['breathe']));
+  });
+});
+
+describe('App: startup in the new shell (redesign 3.15)', () => {
+  it('a cold start shows the splash as the one loader, then leaves the app loaded under it', async () => {
+    uiLayout.set('new');
+    render(App);
+    const splash = await screen.findByTestId('startup-splash', {}, { timeout: 2000 });
+    await waitFor(() => expect(splash.dataset.stage).toBe('sessions'));
+    await waitFor(() => expect(shownLoaders().map((l) => l.dataset.loader)).toEqual(['assemble']));
+    expect(screen.queryByTestId('fleet-arriving')).toBeNull();
+    answer([session('mefistos', 'dev-mef', { project_id: null })]);
+    await waitFor(() => expect(screen.queryByTestId('startup-splash')).toBeNull());
+    await waitFor(() => expect(shownLoaders().map((l) => l.dataset.loader)).toEqual(['breathe']));
+  });
+
+  it('a warm start shows no splash', async () => {
+    localStorage.setItem('cf:startup:last-active', String(Date.now() - 60_000));
+    uiLayout.set('new');
+    render(App);
+    await screen.findByTestId('fleet-arriving', {}, { timeout: 2000 });
+    expect(screen.queryByTestId('startup-splash')).toBeNull();
   });
 });
