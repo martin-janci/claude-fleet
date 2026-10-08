@@ -8,7 +8,17 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
-import { doneWhenRows, eventSentence, moveLabel, progressLabel, stateLabel, type Mission } from './missions';
+import {
+  doneWhenRows,
+  eventSentence,
+  moveLabel,
+  plannerError,
+  plannerRefusal,
+  progressLabel,
+  stateLabel,
+  withoutConfigKeys,
+  type Mission,
+} from './missions';
 
 type Handler = (args: Record<string, unknown>) => unknown;
 let handlers: Record<string, Handler>;
@@ -75,7 +85,7 @@ describe('WorkMissions', () => {
       const h = handlers[cmd];
       if (!h) return null;
       const v = h((raw as { args: Record<string, unknown> } | undefined)?.args ?? {});
-      if (v instanceof Error) throw { code: 'E_INVALID', message: v.message };
+      if (v instanceof Error) throw { code: (v as Error & { code?: string }).code ?? 'E_INVALID', message: v.message };
       return v;
     });
   });
@@ -240,6 +250,94 @@ describe('WorkMissions', () => {
     await fireEvent.click(screen.getByTestId('mission-conds-save'));
     await flush();
     expect(calls('set_work_done_when')[0]).toEqual({ item_id: 11, done_when: ['review', 'ci:test'] });
+  });
+
+  describe('the planner in words (step 1.3)', () => {
+    const loopDetail = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2')],
+      events: [],
+      may_change: true,
+      plan: {
+        steps: [],
+        cards: [],
+        autonomy: { asked: 3, ceiling: 1, effective: 1, why: "L1, the fleet's ceiling (orchestrator.max_level)", enabled: true },
+        cost_micros: 0,
+        counts: { total: 1, open: 0 },
+      },
+    });
+    const limit = () =>
+      Object.assign(new Error('the planner ran 4 times in the last hour (policy.max_planner_runs_per_hour)'), { code: 'E_LIMIT' });
+
+    it('a failed run says what happened, with Retry and Details, and no settings key', async () => {
+      current = mission({ state: 'active', level: 3 });
+      handlers.work_mission = loopDetail;
+      handlers.plan_mission = limit;
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      expect(screen.getByTestId('mission-autonomy').textContent).not.toContain('orchestrator.');
+      await fireEvent.click(screen.getByTestId('mission-plan'));
+      await flush();
+      const box = screen.getByTestId('mission-planner-error');
+      expect(box.textContent?.replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(
+        `"The planner couldn't run It already ran 4 times in the last hour, the most this mission allows. Try again later. Retry Details ✕"`,
+      );
+      expect(box.textContent).not.toMatch(/policy\.|orchestrator\./);
+      expect(screen.queryByTestId('mission-notice')).toBeNull();
+      // Details keeps the raw code and message.
+      expect(screen.queryByTestId('mission-planner-details-text')).toBeNull();
+      await fireEvent.click(screen.getByTestId('mission-planner-details'));
+      expect(screen.getByTestId('mission-planner-details-text').textContent).toBe(
+        'E_LIMIT · the planner ran 4 times in the last hour (policy.max_planner_runs_per_hour)',
+      );
+      // Retry asks again; a good answer clears the error.
+      handlers.plan_mission = () => ({ mission_id: 4, cards: [] });
+      await fireEvent.click(screen.getByTestId('mission-planner-retry'));
+      await flush();
+      expect(calls('plan_mission')).toHaveLength(2);
+      expect(screen.queryByTestId('mission-planner-error')).toBeNull();
+    });
+
+    it('a refused answer says nothing changed and keeps the reason under Details', async () => {
+      current = mission({ state: 'active', level: 3 });
+      handlers.work_mission = loopDetail;
+      handlers.plan_mission = () => ({ mission_id: 4, cards: [], refused: 'no JSON array of commands: "I think we should"' });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-plan'));
+      await flush();
+      const box = screen.getByTestId('mission-planner-error');
+      expect(box.textContent).toContain("The planner's answer couldn't be used");
+      expect(box.textContent).toContain('Nothing was changed');
+      expect(box.textContent).not.toContain('no JSON array');
+      await fireEvent.click(screen.getByTestId('mission-planner-details'));
+      expect(screen.getByTestId('mission-planner-details-text').textContent).toContain('no JSON array');
+      await fireEvent.click(screen.getByTestId('mission-planner-dismiss'));
+      expect(screen.queryByTestId('mission-planner-error')).toBeNull();
+    });
+
+    it('maps each planner failure to words', () => {
+      expect(plannerError({ code: 'E_INVALID_STATE', message: "claude is not on mac's PATH" }).text).toBe(
+        "Claude Code isn't installed on mac, so the planner has nowhere to run.",
+      );
+      expect(plannerError({ code: 'E_SHELL', message: 'the planner on mac gave no answer' }).text).toContain('on mac finished without an answer');
+      expect(plannerError({ code: 'E_SSH_TIMEOUT', message: 'ssh mac: timed out after 10 s' }).text).toContain("couldn't reach");
+      expect(plannerError({ code: 'E_HUB_UNREACHABLE', message: 'hub down' }).text).toContain("hub didn't answer");
+      expect(plannerError({ code: 'E_INVALID_STATE', message: 'Payments is completed' }).text).toContain('has ended');
+      expect(plannerError({ code: 'E_X', message: 'the mission loop is off (orchestrator.enabled)' }).text).toBe('The mission loop is off.');
+      expect(plannerError({ code: 'E_X', message: 'boom' }).details).toBe('E_X · boom');
+      expect(plannerRefusal('bad').details).toBe('bad');
+    });
+
+    it('takes settings keys out of user text', () => {
+      expect(withoutConfigKeys("L1, the fleet's ceiling (orchestrator.max_level)")).toBe("L1, the fleet's ceiling");
+      expect(withoutConfigKeys('ran 4 times (policy.max_planner_runs_per_hour) today')).toBe('ran 4 times today');
+      expect(withoutConfigKeys('see (this) and (e.g. that)')).toBe('see (this) and (e.g. that)');
+    });
   });
 
   it('presses the loop: a wave, a card, a grant and Pause all', async () => {

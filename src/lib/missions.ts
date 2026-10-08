@@ -635,3 +635,76 @@ export function revokeMissionGrant(missionId: number): Promise<Result<number>> {
 export function pauseAllMissions(): Promise<Result<number[]>> {
   return changed(invokeCmd<number[]>('pause_all_missions', { args: {} }));
 }
+
+// ── Errors in words (redesign step 1.3) ──
+//
+// A planner that could not run, or whose answer was refused, says what
+// happened and what to do in plain words, with Retry; the raw code and
+// message stay one click away under Details. No settings key reaches the
+// user's text: the backend's "(orchestrator.max_level)"-style hints are for
+// the log, and Details still carries them.
+
+/** A failure as the Missions view shows it. */
+export interface HumanError {
+  /** One bold line: what happened. */
+  title: string;
+  /** What it means and what to do next. */
+  text: string;
+  /** The raw code and message, for Details. */
+  details: string;
+}
+
+/** Text with any parenthesised settings key, like "(orchestrator.enabled)"
+ *  or "(policy.max_planner_runs_per_hour)", taken out. */
+export function withoutConfigKeys(text: string): string {
+  return text
+    .replace(/\s*\((?:[a-z][a-z0-9_]*\.)+[a-z][a-z0-9_]*\)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+const capital = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const sentence = (s: string) => {
+  const t = capital(withoutConfigKeys(s));
+  return t && !/[.!?]$/.test(t) ? `${t}.` : t;
+};
+
+/** `plan_mission` failed: why the planner could not run, in words. */
+export function plannerError(e: { code: string; message: string }): HumanError {
+  const details = `${e.code} · ${e.message}`;
+  const title = "The planner couldn't run";
+  const m = e.message;
+  let hit: RegExpMatchArray | null;
+  if (e.code === 'E_LIMIT' && (hit = m.match(/ran (\d+) times? in the last hour/))) {
+    return {
+      title,
+      text: `It already ran ${hit[1]} times in the last hour, the most this mission allows. Try again later.`,
+      details,
+    };
+  }
+  if ((hit = m.match(/^claude is not on (.+?)'s PATH/))) {
+    return { title, text: `Claude Code isn't installed on ${hit[1]}, so the planner has nowhere to run.`, details };
+  }
+  if ((hit = m.match(/^the planner on (.+?) gave no answer/))) {
+    return { title, text: `The planner on ${hit[1]} finished without an answer. Retry, or look at Details.`, details };
+  }
+  if (e.code === 'E_SSH' || e.code === 'E_SSH_TIMEOUT' || e.code === 'E_HOST_OFFLINE') {
+    return { title, text: "Fleet couldn't reach the planner's host. Check that it is online, then retry.", details };
+  }
+  if (e.code === 'E_HUB_UNREACHABLE' || e.code === 'E_HUB_TIMEOUT') {
+    return { title, text: "The hub didn't answer. Your missions are unchanged; retry when it is back.", details };
+  }
+  if (e.code === 'E_INVALID_STATE' && /\bis (completed|failed|cancelled)$/.test(m)) {
+    return { title, text: 'This mission has ended, so there is nothing left to plan.', details };
+  }
+  return { title, text: sentence(m) || 'Something went wrong. Retry, or look at Details.', details };
+}
+
+/** The planner ran but its answer could not be used (`PlanOutcome.refused`). */
+export function plannerRefusal(why: string): HumanError {
+  return {
+    title: "The planner's answer couldn't be used",
+    text: 'Nothing was changed. Retry to ask again; Details shows what was wrong with the answer.',
+    details: why,
+  };
+}
