@@ -140,7 +140,7 @@
 
   function open(t: WorkTask) {
     sidebarView.set('work');
-    openTask(t.task_id);
+    openTask(t.task_id, t.sessions);
   }
 
   // ── Pointer drag ──

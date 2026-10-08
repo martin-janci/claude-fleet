@@ -122,6 +122,8 @@
     [...sections.todo, ...sections.doing, ...(doneOpen ? sections.done : [])].map((n) => n.task.task_id),
   );
 
+  const nodeOf = (id: string) => [...sections.todo, ...sections.doing, ...sections.done].find((n) => n.task.task_id === id);
+
   /** The list's keyboard (task → session spec §2.2): `j` / `k` move the
    *  selection, `s` runs the selected task's Work button, ⇧S opens its
    *  start popover. Never inside a field, a menu or a dialog. */
@@ -135,7 +137,7 @@
       e.preventDefault();
       const next = e.key === 'j' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
       const id = visibleRows[at < 0 ? 0 : next];
-      openTask(id);
+      openTask(id, nodeOf(id)?.task.sessions);
       document.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"] .main`)?.focus();
     } else if ((e.key === 's' || e.key === 'S') && at >= 0) {
       const b = workButtonFor(visibleRows[at]);
@@ -237,7 +239,7 @@
                 class="main"
                 type="button"
                 aria-current={$selectedTaskId === t.task_id ? 'true' : undefined}
-                onclick={() => openTask(t.task_id)}
+                onclick={() => openTask(t.task_id, t.sessions)}
               >
                 <span class="title">
                   {#if t.needs_you}<span class="needs" title="A session needs you" aria-label="needs you">●</span>{/if}
@@ -276,7 +278,7 @@
                 {#each n.children as c (c.task_id)}
                   <li class="child" data-testid="task-child">
                     <span class="dot dot--{c.status_category ?? 'todo'}" aria-hidden="true"></span>
-                    <button class="txt" type="button" onclick={() => openTask(c.task_id)}>{displayTitle(c)}</button>
+                    <button class="txt" type="button" onclick={() => openTask(c.task_id, c.sessions)}>{displayTitle(c)}</button>
                     {#if c.origin === 'agent'}<span class="chip agent" title="A delegated job">agent</span>{:else if c.key}<span class="key">{c.key}</span>{/if}
                   </li>
                 {/each}

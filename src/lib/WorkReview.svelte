@@ -555,7 +555,7 @@
               onchange={() => togglePick(it)}
             />
             <span class="kind kind--{it.kind}" data-testid="work-review-kind">{reviewKindLabel(it.kind)}</span>
-            <button class="link" type="button" title="Open the task" onclick={() => openTask(it.task.task_id)}>{taskLabel(it.task)}</button>
+            <button class="link" type="button" title="Open the task" onclick={() => openTask(it.task.task_id, [{ session_id: it.session_id }])}>{taskLabel(it.task)}</button>
           </div>
           <div class="sub">
             <button class="link muted" type="button" title="Open the session" onclick={() => openSession(it)}
