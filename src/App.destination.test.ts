@@ -8,7 +8,8 @@ import { get } from 'svelte/store';
 import App from './App.svelte';
 import { onboardingDismissed } from './lib/onboarding';
 import { clearToasts } from './lib/toasts';
-import { workBoardOpen, requestHostsView } from './lib/app_views';
+import { workBoardOpen, requestHostsView, settingsOpen } from './lib/app_views';
+import { sidebarView } from './lib/work_view';
 import { destination } from './lib/destination';
 import { uiLayout } from './lib/prefs';
 import { sessionActionRequest } from './lib/session_actions';
@@ -22,6 +23,8 @@ beforeEach(() => {
 afterEach(() => {
   destination.set('session');
   uiLayout.set('classic');
+  sidebarView.set('sessions');
+  settingsOpen.set(false);
 });
 
 function terminalSlot(container: HTMLElement): Element {
@@ -106,33 +109,65 @@ describe('App: the destination store', () => {
   });
 });
 
-describe('App: the Accounts page (step 4.1)', () => {
-  it('Classic shows no Accounts tab', () => {
+describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
+  it('Classic shows no rail', () => {
     const { queryByTestId } = render(App);
-    expect(queryByTestId('tab-accounts')).toBeNull();
+    expect(queryByTestId('rail')).toBeNull();
   });
 
-  it('New opens it as one more overlay over a mounted terminal, and Esc leaves it', async () => {
+  it('New shows the landed items in the manual order, Settings last', () => {
+    uiLayout.set('new');
+    const { getByTestId } = render(App);
+    const ids = Array.from(getByTestId('rail').querySelectorAll('[data-testid^="rail-"]'), (e) =>
+      e.getAttribute('data-testid'),
+    );
+    expect(ids).toEqual(['rail-sessions', 'rail-work', 'rail-accounts', 'rail-settings']);
+    expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
+  });
+
+  it('Accounts opens as one more overlay over a mounted terminal, and Esc leaves it', async () => {
     uiLayout.set('new');
     const { container, getByTestId } = render(App);
     const term = terminalSlot(container);
     await fireEvent.click(getByTestId('tab-hosts'));
-    await fireEvent.click(getByTestId('tab-accounts'));
+    expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
+    await fireEvent.click(getByTestId('rail-accounts'));
     expect(openOverlays(container)).toEqual(['accounts-overlay']);
-    expect(getByTestId('tab-accounts').getAttribute('aria-selected')).toBe('true');
+    expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
     expect(getByTestId('tab-session').classList.contains('active')).toBe(false);
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(get(destination)).toBe('session');
     expect(terminalSlot(container)).toBe(term);
   });
 
-  it('switching back to Classic leaves it', async () => {
+  it('Work and Sessions pick the sidebar tree and leave a fleet page', async () => {
+    uiLayout.set('new');
+    const { getByTestId } = render(App);
+    await fireEvent.click(getByTestId('rail-accounts'));
+    await fireEvent.click(getByTestId('rail-work'));
+    expect(get(sidebarView)).toBe('work');
+    expect(get(destination)).toBe('session');
+    expect(getByTestId('rail-work').getAttribute('aria-current')).toBe('page');
+    await fireEvent.click(getByTestId('rail-sessions'));
+    expect(get(sidebarView)).toBe('sessions');
+    expect(getByTestId('rail-sessions').getAttribute('aria-current')).toBe('page');
+  });
+
+  it('Settings opens the Settings dialog', async () => {
+    uiLayout.set('new');
+    const { getByTestId } = render(App);
+    await fireEvent.click(getByTestId('rail-settings'));
+    expect(get(settingsOpen)).toBe(true);
+    settingsOpen.set(false);
+  });
+
+  it('switching back to Classic leaves Accounts and hides the rail', async () => {
     uiLayout.set('new');
     const { container, getByTestId, queryByTestId } = render(App);
-    await fireEvent.click(getByTestId('tab-accounts'));
+    await fireEvent.click(getByTestId('rail-accounts'));
     uiLayout.set('classic');
     await waitFor(() => expect(openOverlays(container)).toEqual([]));
-    expect(queryByTestId('tab-accounts')).toBeNull();
+    expect(queryByTestId('rail')).toBeNull();
     expect(get(destination)).toBe('session');
   });
 });

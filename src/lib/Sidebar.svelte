@@ -16,6 +16,7 @@
     type SessionRow,
   } from './sessions';
   import { describePurge, purgeHostsForProject } from './purge';
+  import { groupRows, isFlatGroupBy } from './row_groups';
   import { sessionMatchesSearch } from './search';
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
@@ -23,7 +24,6 @@
   import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
-  import NewSessionDialog from './NewSessionDialog.svelte';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
   import OnboardingCard from './OnboardingCard.svelte';
@@ -50,6 +50,7 @@
   } from './app_views';
   import { hintAnchor } from './hints';
   import { openNewSessionPicker } from './switcher_request';
+  import { requestNewSession } from './new_session_request';
   import { setProjectPick } from './project_picks';
   import { detectMac } from './terminal_keys';
   import {
@@ -860,6 +861,21 @@
   }
   const orphanSessions = $derived(orphansOf(treePredicate));
 
+  // ── Flat groups (redesign step 3.6): state, host or agent ──
+  // The same rows the project tree and "Other sessions" would show, in the
+  // same order, regrouped. Collapsed groups are remembered by key.
+  const flatBy = $derived(isFlatGroupBy($sidebarGroupBy) ? $sidebarGroupBy : null);
+  const flatGroups = $derived(
+    flatBy
+      ? groupRows(
+          [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions],
+          flatBy,
+          attentionOpts,
+        )
+      : [],
+  );
+  let collapsedFlat: Set<string> = $state(new Set());
+
   // Interactive Claude sessions running entirely outside fleet (Claude
   // Desktop, a bare terminal). Read-only; the host filter applies but the
   // bg-agent toggle does not.
@@ -871,12 +887,9 @@
         ),
   );
 
-  let dialogProject: ProjectTreeRow | null = $state(null);
   let showAddProject = $state(false);
   /** Clone URL the switcher's Add row hands over, prefilled in the dialog. */
   let initialCloneUrl: string | undefined = $state(undefined);
-  /** Host to preselect in NewSessionDialog: where Add project put the project. */
-  let dialogHost: string | undefined = $state(undefined);
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
 
   // Add project ROUTES to the hub now (the clone runs on the host through the
@@ -903,12 +916,13 @@
   const openAddHost = () => requestHostsView();
   const openNewSession = () => openNewSessionPicker();
 
-  // A project row's own `+`: straight to NewSessionDialog for that project.
+  // A project row's own `+`: straight to New session for that project.
   // (The switcher's New session mode is the one place a project is picked.)
+  // The dialog is App's one mount, reached through `newSessionRequest`
+  // (redesign 1.9): the Sidebar no longer mounts a second copy.
   function openNew(p: ProjectTreeRow, e?: Event) {
     e?.stopPropagation();
-    dialogHost = undefined;
-    dialogProject = p;
+    requestNewSession({ project: p });
   }
 
   // The switcher's Add row asks for the Add project dialog (App-level stores
@@ -928,18 +942,8 @@
     // (quietly: they asked to add a project, not to save a picker choice).
     void setProjectPick(row.project.owner, row.project.repo, { vis: 'keep' }, { quiet: true });
     showAddProject = false;
-    dialogHost = host;
-    dialogProject = row;
-  }
-
-  function onCreated(s: SessionRow) {
-    dialogProject = null;
-    // Auto-focus the just-created session in the center/terminal panes.
-    selectSessionExplicitly(s);
-  }
-
-  function onCancel() {
-    dialogProject = null;
+    // Preselect the host Add project put it on.
+    requestNewSession({ project: row, initialHost: host });
   }
 
   function toggleCollapse(projectId: number) {
@@ -1424,7 +1428,40 @@
         {/each}
       </ul>
     {/if}
-    {#if filtered.length > 0}
+    {#if flatBy && flatGroups.length > 0}
+      <ul class="tree flat-groups" data-testid="flat-groups" data-group-by={flatBy}>
+        {#each flatGroups as g (g.key)}
+          {@const isCollapsed = collapsedFlat.has(g.key)}
+          <li class="proj">
+            <div
+              class="proj-row"
+              data-testid="flat-group"
+              data-group={g.key}
+              role="button"
+              tabindex="0"
+              aria-expanded={!isCollapsed}
+              onclick={() => (collapsedFlat = toggleIn(collapsedFlat, g.key))}
+              onkeydown={(e) => {
+                if (!fromRowItself(e)) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  collapsedFlat = toggleIn(collapsedFlat, g.key);
+                }
+              }}
+            >
+              <span class="caret" class:collapsed={isCollapsed}>▾</span>
+              <span class="label">{g.label}</span>
+              <span class="count">{g.rows.length}</span>
+            </div>
+            {#if !isCollapsed}
+              {#each g.rows as sess (sess.id)}
+                {@render sessionRow(sess)}
+              {/each}
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {:else if !flatBy && filtered.length > 0}
       <ul class="tree">
         {#each filtered as row (row.project.id)}
           {@const projectSessions = filteredSessionsByProject.get(row.project.id) ?? []}
@@ -1518,7 +1555,7 @@
       {/if}
     {/if}
 
-    {#if orphanSessions.length > 0}
+    {#if !flatBy && orphanSessions.length > 0}
       <div class="orphan-section" data-testid="orphan-sessions">
         <div class="section-header">Other sessions ({orphanSessions.length})</div>
         {#each orphanSessions as sess (sess.id)}
@@ -1619,9 +1656,6 @@
   />
 {/if}
 
-{#if dialogProject}
-  <NewSessionDialog project={dialogProject} initialHost={dialogHost} onCreate={onCreated} {onCancel} />
-{/if}
 
 {#if pendingKill}
   <KillDialog

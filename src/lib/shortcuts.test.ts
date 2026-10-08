@@ -88,6 +88,24 @@ function* allEvents(): Generator<Ev> {
   }
 }
 
+// Chords added on purpose since 0.5.4, each by its plan step. The freeze
+// allows exactly these, on exactly this platform, and nothing else; every
+// chord 0.5.4 answered still answers the same.
+const ADDED_SINCE_054: readonly { key: string; mods: Partial<Ev>; mac: boolean; action: string; step: string }[] = [
+  { key: ',', mods: { ctrlKey: true }, mac: false, action: 'settings', step: '1.9' },
+];
+
+const isAddition = (e: Ev, isMac: boolean): string | null => {
+  for (const a of ADDED_SINCE_054) {
+    if (a.mac !== isMac || a.key !== e.key) continue;
+    const want = { metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...a.mods };
+    if (e.metaKey === want.metaKey && e.ctrlKey === want.ctrlKey && e.altKey === want.altKey && e.shiftKey === want.shiftKey) {
+      return a.action;
+    }
+  }
+  return null;
+};
+
 const show = (e: Ev) =>
   `${e.metaKey ? 'Meta+' : ''}${e.ctrlKey ? 'Ctrl+' : ''}${e.altKey ? 'Alt+' : ''}${e.shiftKey ? 'Shift+' : ''}${e.key}`;
 
@@ -100,6 +118,9 @@ describe('shortcut freeze: every 0.5.4 global chord resolves to the same action'
       for (const e of allEvents()) {
         const was = appChord054(e, isMac);
         const now = appChord(e, isMac);
+        const added = isAddition(e, isMac);
+        // An addition only ever fills a chord 0.5.4 left free.
+        if (added !== null && was === null && now === added) continue;
         if (was !== now) drift.push(`${show(e)}: ${was} → ${now}`);
       }
       expect(drift).toEqual([]);
@@ -133,6 +154,11 @@ describe('shortcut freeze: every 0.5.4 global chord resolves to the same action'
       key, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...mods,
     });
     expect(appChord(ev(',', { metaKey: true }), true)).toBe('settings');
+    // Step 1.9: Ctrl+, opens Settings on Linux and Windows; the Super form
+    // still does, and on the Mac Ctrl+, stays free.
+    expect(appChord(ev(',', { ctrlKey: true }), false)).toBe('settings');
+    expect(appChord(ev(',', { metaKey: true }), false)).toBe('settings');
+    expect(appChord(ev(',', { ctrlKey: true }), true)).toBeNull();
     expect(appChord(ev('W', { metaKey: true, shiftKey: true }), true)).toBe('work-view');
     expect(appChord(ev('E', { ctrlKey: true, shiftKey: true }), false)).toBe('agent');
     expect(isSwitcherChord(ev('P', { ctrlKey: true, shiftKey: true }), false)).toBe(true);

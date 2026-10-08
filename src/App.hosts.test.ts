@@ -12,7 +12,7 @@ import { clearToasts } from './lib/toasts';
 import { clearSelection, selectSession, selectedSession } from './lib/selection';
 import { hostFilter } from './lib/hosts';
 import { addProjectRequest, hostsViewOpen, settingsOpen } from './lib/app_views';
-import { clearNewSessionRequest } from './lib/new_session_request';
+import { clearNewSessionRequest, requestNewSession } from './lib/new_session_request';
 import { agentPanelOpen, operatorState } from './lib/operator';
 import type { SessionRow } from './lib/sessions';
 import type { AccountUsageSnapshot } from './lib/account_usage_store';
@@ -353,6 +353,23 @@ describe('App: the Hosts view', () => {
     await waitFor(() =>
       expect(dialog.querySelector(".host-pick[aria-pressed='true']")?.getAttribute('data-alias')).toBe('mefistos'),
     );
+  });
+
+  it('every entry point lands on the one New session dialog App mounts (redesign 1.9)', async () => {
+    // The switcher, a project row's + and the end of Add project all publish
+    // `newSessionRequest` (Sidebar.test.ts pins the last two); the Sidebar
+    // mounts no copy of its own, so one request is one dialog.
+    await mountApp();
+    requestNewSession({ project, initialHost: 'local' });
+    await screen.findByRole('dialog', { name: 'New session' });
+    expect(screen.getAllByRole('dialog', { name: 'New session' })).toHaveLength(1);
+  });
+
+  it('Ctrl+, opens Settings off the Mac (redesign 1.9)', async () => {
+    await mountApp();
+    await fireEvent.keyDown(window, { key: ',', ctrlKey: true });
+    await tick();
+    expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeTruthy();
   });
 
   it('⌘, opens Settings, which no longer holds the hosts table', async () => {
