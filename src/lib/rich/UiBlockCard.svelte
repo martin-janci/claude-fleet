@@ -20,6 +20,7 @@
   import ProgressCard from './ProgressCard.svelte';
   import ReportCard from './ReportCard.svelte';
   import ResultsCard from './ResultsCard.svelte';
+  import SettingCard from './SettingCard.svelte';
 
   let { block, raw, sessionId = null }: { block: UiBlock; raw: string; sessionId?: number | null } = $props();
 
@@ -146,6 +147,8 @@
   <ResultsCard {block} />
 {:else if block.kind === 'error'}
   <ErrorCard {block} onfill={fill} canFill={sessionId !== null} />
+{:else if block.kind === 'setting'}
+  <SettingCard {block} />
 {/if}
 
 <style>
