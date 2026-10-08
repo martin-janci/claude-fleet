@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import { getAsset, deleteAsset, lintAsset, type AssetDetail, type LintReport, type WriteResult } from './assets';
   import type { HostRow } from './hosts';
@@ -206,7 +207,7 @@
           data-testid="asset-sync"
         >Sync this asset</button>
         <button class="sync-btn" onclick={() => (showAuthorDialog = true)} disabled={authorBlocked !== null} title={authorBlocked ?? ''} data-testid="asset-open-session">Open in session</button>
-        <button class="sync-btn" onclick={toggleLint} data-testid="asset-lint">{lintBusy ? 'Linting…' : 'Lint'}</button>
+        <button class="sync-btn" onclick={toggleLint} data-testid="asset-lint">{#if lintBusy}<Loader name="comet" size={12} class="btn-loader" />{/if}{lintBusy ? 'Linting…' : 'Lint'}</button>
         {#if !editing}
           <button class="sync-btn" onclick={() => { editing = true; onsection?.('source'); }} data-testid="asset-edit">Edit</button>
         {/if}

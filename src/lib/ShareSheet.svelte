@@ -25,6 +25,7 @@
   // org: it reaches the org's members and admins who are in it when the share
   // is made — never someone who joins later (changing a membership never
   // widens a grant), never a viewer. The sheet says so beside the control.
+  import Loader from './Loader.svelte';
   import Modal from './Modal.svelte';
   import { accessOf } from './access';
   import type { Result } from './result';
@@ -250,7 +251,7 @@
             data-testid="share-confirm"
             disabled={busy || person.trim() === '' || shareBlocked !== null}
             title={shareBlocked ?? 'Share this session'}
-            onclick={doShare}>{busy ? 'Sharing…' : 'Share'}</button
+            onclick={doShare}>{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Sharing…' : 'Share'}</button
           >
         </div>
         <!-- Phase D: an org share is a grant to the org's members of today

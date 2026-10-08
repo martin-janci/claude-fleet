@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import Modal from './Modal.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -194,7 +195,7 @@
       <div class="actions">
         <button type="button" onclick={onclose}>Cancel</button>
         <button type="submit" class="primary" disabled={!canSubmit} title={blocked ?? ''} data-testid="edit-task-submit"
-          >{busy ? 'Saving…' : 'Save'}</button
+          >{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Saving…' : 'Save'}</button
         >
       </div>
     </form>

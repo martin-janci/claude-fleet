@@ -3,6 +3,7 @@
   // session, on demand only. One print-mode fork runs on the session's own
   // host with no tools; the reply is kept in the work journal, where the next
   // resume brief shows it. Here it is shown once, below the row, as text.
+  import Loader from './Loader.svelte';
   import { linkSessionId, summarizePastWork, type WorkLink } from './work';
   import { plainUntrusted } from './tracker_health';
   import { hubActionBlocked, hubStatus } from './hub';
@@ -83,7 +84,7 @@
   title={disabledReason ??
     `Ask Claude to summarise this session's last conversation (one model call on ${link.snap_host ?? 'its host'}); the next resume brief includes it`}
   data-testid="summarize-button"
-  onclick={run}>{busy ? 'Summarising…' : 'Summarise'}</button
+  onclick={run}>{#if busy}<Loader name="comet" size={12} class="btn-loader" />{/if}{busy ? 'Summarising…' : 'Summarise'}</button
 >
 
 {#if text !== null}
