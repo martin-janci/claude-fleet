@@ -8,9 +8,10 @@
   // instead of answering it.
   //
   // Rendered in two places (the Conversation panel and the sidebar row, the
-  // latter `compact`), which is why the send lives HERE rather than in each
-  // caller: the freshness check below is the whole safety of the feature and
-  // must not be something a second caller can forget.
+  // latter `compact`), which is why the send lives in this card (and, for
+  // the ⌘K Approve command, in `answer_send.ts`, which this card uses too)
+  // rather than in each caller: the freshness check is the whole safety of
+  // the feature and must not be something a second caller can forget.
   //
   // A multi-select question is answered in two steps, because a digit only
   // TOGGLES a box there: each choice button toggles (and the card stays up),
@@ -18,24 +19,23 @@
   // on — to the next question or to "Review your answers", whose
   // `1. Submit answers` arrives as an ordinary dialog on this same card.
   //
-  // Answering re-reads the pane first and refuses unless the dialog it is
-  // about to answer is still the dialog on screen. The row is written by the
+  // Answering re-reads the pane first (`sendAnswer`) and refuses unless the
+  // dialog it is about to answer is still the dialog on screen. The row is written by the
   // 20 s reconcile tick, so without that check a click on a stale card could
   // approve a permission dialog the user never saw — or press a digit into
   // the REPL of a session that has already moved on.
-  import { sessionActivity } from './conversation';
+  import { sendAnswer } from './answer_send';
   import { destination } from './destination';
   import { matchShortcut } from './shortcuts';
   import { detectMac, isEditable } from './terminal_keys';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
-  import { sendPrompt, type SessionRow } from './sessions';
+  import type { SessionRow } from './sessions';
   import {
     answerFingerprint,
     isFreeTextOption,
     MULTI_CONTINUE_KEY,
-    pendingInputFor,
     type AnswerOption,
     type AnswerView,
   } from './pending_input';
@@ -121,58 +121,21 @@
           ? (toggleBlocked ?? `Press ${o.key} — ${isChecked(o) ? 'untick' : 'tick'} it`)
           : `Press ${o.key}${isSticky(o) ? ' — this also stops Claude asking again' : ''}`;
 
-  /** The pane as it is right now, or `null` when it cannot be read.
-   *
-   *  The reading has to come from the PROBE — `pendingInputFor` falls back to
-   *  the row when handed no probe, and the row is precisely the stale value
-   *  this check exists to distrust. So an absent probe is refused here rather
-   *  than quietly answered from the row. */
-  async function reread(): Promise<{ view: AnswerView | null } | { error: string }> {
-    const r = await sessionActivity(session.id);
-    if (!r.ok) return { error: r.error.message };
-    if (!r.value) return { view: null };
-    const fresh = pendingInputFor({
-      rowStatus: session.claude_status,
-      rowStuck: session.stuck_kind,
-      rowPending: session.pending_input,
-      probe: r.value,
-    });
-    return { view: fresh?.live ? fresh : null };
-  }
-
   /** Re-read the pane, then press `key` only if it still shows this card's
-   *  dialog. `label` is what the card reports as sent; a `null` label (a
-   *  multi-select toggle) leaves the choices up and runs `onSent` instead. */
+   *  dialog (`answer_send.ts`). `label` is what the card reports as sent; a
+   *  `null` label (a multi-select toggle) leaves the choices up and runs
+   *  `onSent` instead. */
   async function press(key: string, label: string | null, onSent?: () => void) {
     if (busy || writeBlocked !== null) return;
     busy = true;
     errorMsg = null;
     staleMsg = null;
-    const fresh = await reread();
-    if ('error' in fresh) {
-      // Not knowing what is on the pane is not the same as knowing it is
-      // unchanged: without proof, a keystroke is a guess.
-      errorMsg = fresh.error;
-      busy = false;
-      return;
-    }
-    if (fresh.view === null || answerFingerprint(fresh.view) !== answerFingerprint(view)) {
-      staleMsg = fresh.view === null
-        ? 'That dialog is gone — nothing was sent.'
-        : 'The dialog changed — nothing was sent.';
-      busy = false;
-      return;
-    }
-    // Asked again after the await: the re-read is a round trip to the host, and
-    // a revoke can land inside it.
-    if (writeBlocked !== null) {
-      busy = false;
-      return;
-    }
-    const r = await sendPrompt(session.host_alias, session.tmux_name, '', { keys: key });
-    if (!r.ok) errorMsg = r.error.message;
-    else if (label !== null) sent = label;
-    else onSent?.();
+    const out = await sendAnswer(session, view, key);
+    if (out.ok) {
+      if (label !== null) sent = label;
+      else onSent?.();
+    } else if ('stale' in out) staleMsg = out.stale;
+    else if ('error' in out) errorMsg = out.error;
     busy = false;
   }
 

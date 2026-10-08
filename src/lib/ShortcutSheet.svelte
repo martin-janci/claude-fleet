@@ -5,6 +5,7 @@
   // `?` opens it from anywhere outside a text field, the terminal and a
   // dialog; a view with its own `?` (the Hosts legend) keeps it.
   import Modal from './Modal.svelte';
+  import { shortcutSheetOpen } from './app_views';
   import {
     SCOPE_TITLES,
     SHORTCUTS,
@@ -20,7 +21,7 @@
   let { isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator) }: { isMac?: boolean } =
     $props();
 
-  let open = $state(false);
+  const open = shortcutSheetOpen;
 
   /** One row's chords as a label. Global rows show their advertised chord
    *  only (the rest are kept, not advertised); a run of nine reads as a
@@ -43,19 +44,19 @@
   });
 
   function onWindowKeydown(e: KeyboardEvent) {
-    if (open || e.defaultPrevented) return;
+    if ($open || e.defaultPrevented) return;
     if (matchShortcut('global', e, isMac) !== 'shortcut-sheet') return;
     const target = e.target as HTMLElement | null;
     if (isEditable(target) || target?.dataset?.imeProxy !== undefined || target?.closest?.('dialog')) return;
     e.preventDefault();
-    open = true;
+    open.set(true);
   }
 </script>
 
 <svelte:window onkeydown={onWindowKeydown} />
 
-{#if open}
-  <Modal title="Keyboard shortcuts" onclose={() => (open = false)} width="560px" testid="shortcut-sheet">
+{#if $open}
+  <Modal title="Keyboard shortcuts" onclose={() => open.set(false)} width="560px" testid="shortcut-sheet">
     <div class="sheet">
       {#each sections as sec (sec.scope)}
         <section data-testid="shortcut-section" data-scope={sec.scope}>
