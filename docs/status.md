@@ -184,9 +184,14 @@ history kept on removal and close, adoption from a tracker's sprint or
 version and its withdrawal), `Caps.versions` with Jira `fixVersions`,
 GitHub milestones and Linear project milestones (E8's default), and the MCP
 actions (`work { buckets | bucket }`, `work_link { bucket_add |
-bucket_remove }`, six `work_admin` bucket actions). No UI yet: the Work
-view's Sprint / Release axis, bulk assignment and the sprint board are not
-built, nor are epics for local items (phase 4). E9–E11 run on their
+bucket_remove }`, six `work_admin` bucket actions). The board (§6c) is
+built as a first cut: the Work view's *Board* button opens `WorkBoard` over
+the terminal, To do / Doing / Done from one `work_tree` read with the Work
+view's filters, a native card dragged (pointer events, or ← →) to set its
+status through `set_work_status` → `work_link { set_status }`, a tracker's
+card refused on the card (E11), each card with its live session and host.
+It is not yet scoped to a sprint: the Work view's Sprint / Release axis and
+bulk assignment are not built, nor are epics for local items (phase 4). E9–E11 run on their
 defaults.
 
 The Jev evaluation (TypeSafe's decision model as an optional reader for

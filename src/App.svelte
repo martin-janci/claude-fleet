@@ -30,6 +30,7 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
+  import WorkBoard from './lib/WorkBoard.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, applySessionEvents, sessions, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
   import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
@@ -67,6 +68,7 @@
     onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
+    workBoardOpen,
     sessionViewChordLabel,
     settingsOpen,
     openSettingsAt,
@@ -478,7 +480,10 @@
   // Opening a session from anywhere (sidebar, quick switcher, a Hosts-view
   // session row, a fresh create) means "go to it": leave the Hosts view so
   // the terminal shows that session.
-  const unsubOpened = onSessionOpened(() => closeHosts());
+  const unsubOpened = onSessionOpened(() => {
+    closeHosts();
+    workBoardOpen.set(false);
+  });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
   // through this signal instead, same shape as `onSessionOpened` above.
@@ -602,6 +607,7 @@
     hostsPreselect = preselect;
     filesMode = false;
     assetsMode = false;
+    workBoardOpen.set(false);
     hostsMode = true;
   }
 
@@ -652,19 +658,34 @@
   function showSession() {
     filesMode = false;
     assetsMode = false;
+    workBoardOpen.set(false);
     closeHosts();
   }
   function showFiles() {
     if (!$selectedSession) return;
     closeHosts(false);
     assetsMode = false;
+    workBoardOpen.set(false);
     filesMode = true;
   }
   function showAssets() {
     closeHosts(false);
     filesMode = false;
+    workBoardOpen.set(false);
     assetsMode = true;
   }
+  // The task board (sprints design 2026-09-28 §6c) is an overlay over the
+  // terminal like Assets, opened from the Work view's Board button; it
+  // keeps the center pane, where a card opens its task. Opening it leaves
+  // the other overlays, and each of them closes it.
+  $effect(() => {
+    if (!$workBoardOpen) return;
+    untrack(() => {
+      filesMode = false;
+      assetsMode = false;
+      closeHosts(false);
+    });
+  });
   /**
    * Pick a sub-view. A row that cannot show it is left alone. The pref is
    * written only when the row can genuinely offer both views: on a row that
@@ -692,7 +713,7 @@
    * tab is already showing.
    */
   function flipSessionView() {
-    if (!sessionTabActive) {
+    if (!sessionTabActive || $workBoardOpen) {
       showSession();
       return;
     }
@@ -804,6 +825,13 @@
     if (filesMode) {
       if (isEditable(target)) return;
       filesMode = false;
+      return;
+    }
+    // The board, like Assets: Esc closes it, not while typing or in a
+    // dialog (a drag in progress takes its own Esc first).
+    if ($workBoardOpen && !e.defaultPrevented) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      workBoardOpen.set(false);
       return;
     }
     // Assets is an overlay with no Esc handling of its own; the same rule as
@@ -953,9 +981,9 @@
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
-        class:active={sessionTabActive}
+        class:active={sessionTabActive && !$workBoardOpen}
         role="tab"
-        aria-selected={sessionTabActive}
+        aria-selected={sessionTabActive && !$workBoardOpen}
         title={!$selectedSession ? 'No session selected' : 'The running session — its conversation and its terminal'}
         onclick={showSession}
         data-testid="tab-session">Session</button
@@ -1113,6 +1141,11 @@
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
           <AssetsPanel visible={assetsMode} />
+        </div>
+      {/if}
+      {#if $workBoardOpen}
+        <div class="view-slot overlay" data-testid="board-overlay">
+          <WorkBoard onclose={() => workBoardOpen.set(false)} />
         </div>
       {/if}
     </div>

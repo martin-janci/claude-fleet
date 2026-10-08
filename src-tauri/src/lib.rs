@@ -429,6 +429,7 @@ pub fn run() {
             commands::work::name_session_work,
             commands::work::rename_work_item,
             commands::work::create_work_task,
+            commands::work::set_work_status,
             commands::work::accept_work_proposal,
             commands::work::reject_work_proposal,
             commands::work_view::work_tree,
