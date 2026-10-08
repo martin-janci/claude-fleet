@@ -178,6 +178,13 @@ export interface WorkTask {
   title_derived?: boolean;
   /** Agent proposals under this task waiting for a person's decision. */
   open_proposals?: number;
+  /** It waits for work that is not done (a dependency edge), and is not done
+   *  itself. Absent when false. */
+  blocked?: boolean;
+  /** What it waits for (`item:<id>`), only the items this reader may see. */
+  blocked_by?: string[];
+  /** Spend of its sessions in micro-USD, each session once. Absent when 0. */
+  cost_micros?: number;
   last_activity_at?: number | null;
   repos?: string[];
   /** 0 = no placement. */
@@ -193,6 +200,8 @@ export interface WorkTreeGroup {
   org_name?: string | null;
   group: GroupRef;
   count: number;
+  /** Spend of the tasks it counts, in micro-USD. Absent when 0. */
+  cost_micros?: number;
 }
 
 export interface WorkTreeOrg {
