@@ -35,6 +35,8 @@
   import AssetsPanel from './lib/AssetsPanel.svelte';
   import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
+  import ControlView from './lib/ControlView.svelte';
+  import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
   import WorkBoard from './lib/WorkBoard.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
@@ -491,6 +493,7 @@
     closeHosts();
     leave('board');
     leave('accounts');
+    leave('control');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
@@ -559,11 +562,14 @@
   // The Details tab (step 3.5): the New layout's session details in the
   // right column, in place of the inspector beside it.
   const detailsMode = $derived($destination === 'details');
+  // Control (step 9.1) is the New layout's: Classic keeps the agent's sheet.
+  const controlMode = $derived($destination === 'control');
   $effect(() => {
     if ($uiLayout !== 'new')
       untrack(() => {
         leave('accounts');
         leave('details');
+        leave('control');
       });
   });
   // Classic has no Inbox (step 3.3): it shows the Sessions list instead.
@@ -623,7 +629,9 @@
   // underneath. Unlike Files/Hosts the Session tab keeps the center
   // (Details) pane — both its views are views *of* the session. The board
   // covers the Session tab without leaving it, so its segment stays shown.
-  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode && !accountsMode && !detailsMode);
+  const sessionTabActive = $derived(
+    !filesMode && !assetsMode && !hostsMode && !accountsMode && !detailsMode && !controlMode,
+  );
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
   );
@@ -724,7 +732,10 @@
     if (id === 'inbox' || id === 'sessions' || id === 'work') {
       sidebarCollapsed = false;
       sidebarView.set(id);
-      if (hostsMode || accountsMode || assetsMode) showSession();
+      if (hostsMode || accountsMode || assetsMode || controlMode) showSession();
+    } else if (id === 'control') {
+      closeHosts();
+      goTo('control');
     } else if (id === 'accounts') showAccounts();
     else if (id === 'settings') settingsOpen.set(true);
   }
@@ -778,7 +789,7 @@
     writePref('layout.inspector', inspectorOpen);
   });
   const taskShowing = $derived($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen && !$todayOpen);
-  const wideMode = $derived(filesMode || hostsMode || assetsMode || accountsMode);
+  const wideMode = $derived(filesMode || hostsMode || assetsMode || accountsMode || controlMode);
   const detailsMain = $derived(
     newLayout && !wideMode && !boardMode && (detailsMode || $todayOpen || taskShowing || !$selectedSession),
   );
@@ -888,10 +899,14 @@
     if (chord === 'hosts') toggleHosts();
     else if (chord === 'session-view') flipSessionView();
     else if (chord === 'settings') settingsOpen.set(true);
-    else if (chord === 'agent') void toggleAgent();
+    // The New layout's ⌘E opens Control (step 9.1); Classic keeps the sheet.
+    else if (chord === 'agent') {
+      if (newLayout) toggleControl('chat');
+      else void toggleAgent();
+    }
     // The Work view has its own org filter: the chord cycles that one there.
     else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
-    else if (chord === 'today') todayOpen.update((v) => !v);
+    else if (chord === 'today') toggleToday();
     else if (chord === 'inspector') toggleInspector();
     else if (chord === 'work-view') {
       sidebarCollapsed = false;
@@ -909,7 +924,7 @@
     // Esc with focus left on the page behind it. A modal <dialog> above the
     // sheet still owns its own Esc, and an editable outside the panel keeps
     // Esc for itself, exactly as Files and Assets do.
-    if ($agentPanelOpen && !e.defaultPrevented) {
+    if (!newLayout && $agentPanelOpen && !e.defaultPrevented) {
       if (target?.closest?.('dialog')) return;
       if (!isEditable(target)) {
         closeAgent();
@@ -945,6 +960,12 @@
       leave('accounts');
       return;
     }
+    // Control, the same rule (its composer keeps Esc while you type).
+    if (controlMode) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('control');
+      return;
+    }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
     // filter, close from the list). This catches only an Esc with focus lost
     // to the page or left on the right column's chrome; a dialog, an input
@@ -967,7 +988,7 @@
     const sbResizer = sidebarCollapsed ? '0px' : '4px';
     // In files mode the center pane collapses to zero — the file viewer
     // takes the whole region right of the sidebar.
-    const wide = filesMode || hostsMode || assetsMode || accountsMode;
+    const wide = filesMode || hostsMode || assetsMode || accountsMode || controlMode;
     const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
     const centerResizer = wide || centerCollapsed ? '0px' : '4px';
     // The New layout (steps 3.2, 3.5): the rail in front, no center pane,
@@ -989,8 +1010,11 @@
      share a session should not each own a dialog. -->
 <ShareSheet />
 <McpConfirmDialog />
-<AgentFab />
-<AgentPanel contextInput={agentContextInput} />
+<!-- In the New layout the agent lives in Control (step 9.1), on the rail. -->
+{#if !newLayout}
+  <AgentFab />
+  <AgentPanel contextInput={agentContextInput} />
+{/if}
 <!-- Cmd/Ctrl+K / Cmd/Ctrl+P, and the one place a project is picked for a new
      session (the sidebar's "+ New session" and the Hosts view's `n` open it
      in New session mode). Its rows publish a request that mounts the dialog
@@ -1209,7 +1233,7 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode} />
+          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode && !controlMode} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -1244,7 +1268,7 @@
             <WatchView
               session={$selectedSession}
               access={selAccess}
-              visible={!hostsMode && !assetsMode && !accountsMode && !filesMode && !conversationMode}
+              visible={!hostsMode && !assetsMode && !accountsMode && !controlMode && !filesMode && !conversationMode}
             />
           {:else}
             <TerminalView />
@@ -1257,7 +1281,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode} onOpenTerminal={() => setSessionView('terminal')} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode && !controlMode} onOpenTerminal={() => setSessionView('terminal')} />
           </div>
         {/if}
       {/if}
@@ -1282,6 +1306,11 @@
       {#if accountsMode}
         <div class="view-slot overlay" data-testid="accounts-overlay">
           <AccountsPage />
+        </div>
+      {/if}
+      {#if controlMode}
+        <div class="view-slot overlay" data-testid="control-overlay">
+          <ControlView {isMac} contextInput={agentContextInput} />
         </div>
       {/if}
       {#if boardMode}
