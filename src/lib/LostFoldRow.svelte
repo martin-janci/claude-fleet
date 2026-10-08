@@ -107,7 +107,7 @@
       data-testid="lost-fold-restore"
       disabled={blocked !== null || busy}
       title={blocked ?? `Restore the stopped sessions on ${fold.host}; each resumes its Claude conversation`}
-      onclick={onRestore}>Restore</button
+      onclick={onRestore}>Restore…</button
     >
   </div>
   {#if open}

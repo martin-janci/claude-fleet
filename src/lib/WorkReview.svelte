@@ -25,7 +25,7 @@
     type WorkRef,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import {
     ackWorkLink,
     conflictNotice,
@@ -563,7 +563,7 @@
             >
             {#if it.confidence != null}<span class="conf" class:conf--high={isHighConfidence(it)} title="Confidence from detection" data-testid="work-review-confidence">{it.confidence}%</span>{/if}
             {#if it.strength}<span class="muted">· {it.strength}{#if it.rule}&nbsp;{it.rule}{/if}</span>{/if}
-            {#if it.created_at}<span class="muted">· {timeAgo(it.created_at)}</span>{/if}
+            {#if it.created_at}<span class="muted">· {shortAge(it.created_at)}</span>{/if}
           </div>
           {#each it.why ?? [] as w, wi (wi)}
             <p class="why" data-testid="work-review-why">{w}</p>

@@ -12,7 +12,7 @@
   import { hubConnection } from './hub_connection';
   import { projects } from './projects';
   import { hosts } from './hosts';
-  import { timeAgo } from './session_status';
+  import { shortAge, timeAgo } from './session_status';
   import { createWorkTask, onWorkChangedDebounced } from './work';
   import { NEWER_HUB, isOlderHub, readErrorText as rawErrorText } from './work_view';
   import type { IpcError } from './result';
@@ -854,7 +854,7 @@
       <h4>Log</h4>
       <ul class="events" data-testid="mission-events">
         {#each detail.events ?? [] as e (e.id)}
-          <li><span class="muted small">{timeAgo(e.at)}</span> {eventSentence(e)}</li>
+          <li><span class="muted small">{shortAge(e.at)}</span> {eventSentence(e)}</li>
         {/each}
       </ul>
 

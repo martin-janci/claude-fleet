@@ -24,7 +24,7 @@
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
   import { needsMore, wrapsPastOneLine } from './composer_overflow';
   import { contextLevel } from './attention';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
   import type { SessionEvent } from './timeline';
   import ConversationHeader from './ConversationHeader.svelte';
@@ -1971,7 +1971,7 @@
                 data-match={matchKeys.has(key) || undefined}
                 data-current-match={currentMatch === key || undefined}
               >
-                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{timeAgo(row.event.at, nowMs)}</time>
+                <span class="label">{row.event.label}</span>{#if row.event.detail}<span class="detail">{row.event.detail}</span>{/if}<time datetime={new Date(row.event.at * 1000).toISOString()}>{shortAge(row.event.at, Math.floor(nowMs / 1000))}</time>
               </div>
             {:else}
             {@const turn = row.turn}

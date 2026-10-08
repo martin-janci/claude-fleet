@@ -7,6 +7,7 @@
     contextMeter,
     conversationTitle,
     relativeTime,
+    backgroundStatusWord,
     statusChip,
     switcherEntries,
     switcherLabel,
@@ -14,7 +15,7 @@
     type ConversationSummary,
   } from './conversation';
   import type { TurnIndexEntry } from './conversation_nav';
-  import { contextColor } from './attention';
+  import { claudeStatusLabel, contextColor } from './attention';
 
   // The find and turn-index state lives in ConversationPanel (it owns the
   // thread and the scroller); the header only renders the controls and
@@ -321,7 +322,7 @@
         >{#if meter.tokensLabel}<span class="ctx-tokens">{meter.tokensLabel}</span>{/if}</span
       >
     {/if}
-    {#if status}<span class="tag status" data-testid="conv-status" data-status={status} title="Status: {status}"><span class="status-dot" aria-hidden="true"></span><span class="status-word">{status}</span></span>{/if}
+    {#if status}<span class="tag status" data-testid="conv-status" data-status={status} title="Status: {status}"><span class="status-dot" aria-hidden="true"></span><span class="status-word">{status === 'compacting' ? 'Working · compacting' : claudeStatusLabel(status)}</span></span>{/if}
     {#if model}<span class="tag tag--mono" data-testid="conv-model">{model}</span>{/if}
     {#if lastEvent}<span class="tag last-event" data-testid="conv-last-event">{lastEvent}</span>{/if}
     </div>
@@ -378,7 +379,7 @@
                   <li>
                     <button type="button" data-testid="conv-background-item" onclick={() => onPickBackground(e)}>
                       <span class="ti-label">{e.kind} · {e.label}</span>
-                      <span class="bg-item-status" data-status={e.status}>{e.status}</span>
+                      <span class="bg-item-status" data-status={e.status}>{backgroundStatusWord(e.status)}</span>
                     </button>
                   </li>
                 {/each}

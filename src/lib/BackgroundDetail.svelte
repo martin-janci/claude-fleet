@@ -3,7 +3,7 @@
   // an agent or command this conversation launched, or a fleet task it
   // dispatched. Read-only — it renders what the transcript and the stores
   // already carry, and fetches nothing.
-  import { formatDuration, lastNonNull, type BackgroundEntry, type BackgroundReport } from './conversation';
+  import { backgroundStatusWord, formatDuration, lastNonNull, type BackgroundEntry, type BackgroundReport } from './conversation';
   import Markdown from './MarkdownView.svelte';
   import CopyButton from './CopyButton.svelte';
 
@@ -53,7 +53,7 @@
   <h3 class="bg-title">
     <span class="bg-kind" data-testid="bg-detail-kind">{entry.kind}</span>
     <span class="bg-label" data-testid="bg-detail-label">{entry.label}</span>
-    <span class="bg-status" data-status={entry.status} data-testid="bg-detail-status">{entry.status}</span>
+    <span class="bg-status" data-status={entry.status} data-testid="bg-detail-status">{backgroundStatusWord(entry.status)}</span>
     {#if duration}<span class="bg-dur" data-testid="bg-detail-duration">{duration}</span>{/if}
   </h3>
 

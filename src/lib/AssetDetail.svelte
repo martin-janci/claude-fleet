@@ -206,12 +206,12 @@
           onclick={() => onsync?.({ kind: detail?.asset.kind, name: detail?.asset.name })}
           data-testid="asset-sync"
         >Sync this asset</button>
-        <button class="sync-btn" onclick={() => (showAuthorDialog = true)} disabled={authorBlocked !== null} title={authorBlocked ?? ''} data-testid="asset-open-session">Open in session</button>
+        <button class="sync-btn" onclick={() => (showAuthorDialog = true)} disabled={authorBlocked !== null} title={authorBlocked ?? ''} data-testid="asset-open-session">Open in session…</button>
         <button class="sync-btn" onclick={toggleLint} data-testid="asset-lint">{#if lintBusy}<Loader name="comet" size={12} class="btn-loader" />{/if}{lintBusy ? 'Linting…' : 'Lint'}</button>
         {#if !editing}
           <button class="sync-btn" onclick={() => { editing = true; onsection?.('source'); }} data-testid="asset-edit">Edit</button>
         {/if}
-        <button class="sync-btn danger" onclick={() => (showDeleteConfirm = true)} data-testid="asset-delete">Delete</button>
+        <button class="sync-btn danger" onclick={() => (showDeleteConfirm = true)} data-testid="asset-delete">Delete…</button>
       </div>
     </div>
     {#if showLint}

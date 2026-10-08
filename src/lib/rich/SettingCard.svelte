@@ -133,7 +133,7 @@
           class="btn btn--primary"
           disabled={busy}
           data-testid="rich-setting-apply"
-          onclick={() => (confirming = true)}>Apply</button>
+          onclick={() => (confirming = true)}>Apply…</button>
         <button type="button" class="btn" disabled={busy} data-testid="rich-setting-later-btn" onclick={() => settle('later')}
           >Not now</button>
         <span class="meta">undo in Settings</span>

@@ -4,7 +4,7 @@
   // claude_status. `brief` is the read-only "Outside fleet" row's variant:
   // no activity in the tooltip, no inactive chip and no spinner.
   import { isInactiveAgent, type SessionRow } from './sessions';
-  import { claudeStatusColor, claudeStatusLabel, stuckKindLabel, STUCK_COLOR } from './attention';
+  import { claudeStatusColor, claudeStatusLabel, stuckStatus, STUCK_COLOR } from './attention';
   import Loader from './Loader.svelte';
 
   let { sess, brief = false }: { sess: SessionRow; brief?: boolean } = $props();
@@ -19,13 +19,13 @@
     class="claude-chip stuck-chip"
     data-testid="stuck-chip"
     style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
-    title="Stuck: {stuckKindLabel(sess.stuck_kind)}{activity}"
-  >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
+    title="{stuckStatus(sess.stuck_kind)}{activity}"
+  >{stuckStatus(sess.stuck_kind)}</span>
 {:else if !brief && isInactiveAgent(sess)}
   <!-- A bg agent whose CLI process is gone: shown as stopped
        (grey), offering Remove from list instead of the usual
        claude_status chip. -->
-  <span class="claude-chip inactive-chip" data-testid="inactive-chip">inactive</span>
+  <span class="claude-chip inactive-chip" data-testid="inactive-chip">Idle · process ended</span>
 {:else if sess.claude_status}
   <span
     class="claude-chip"
