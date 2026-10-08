@@ -281,7 +281,7 @@
     margin-top: 0.6rem;
     padding: 0.6rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
   }
   .pair form {
     display: flex;

@@ -138,6 +138,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "this app's own log folder, which it has either way",
         },
     ),
+    (
+        "set_tray_state",
+        Verdict::SameInBoth {
+            why: "this window's own tray icon, which it has either way",
+        },
+    ),
     // ── projects ────────────────────────────────────────────────────────────
     (
         "list_projects",
@@ -583,6 +589,24 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "spawn_review",
         Verdict::Routed {
             tool: "spawn_review",
+        },
+    ),
+    (
+        "queue_prompt",
+        Verdict::Routed {
+            tool: "queue_prompt",
+        },
+    ),
+    (
+        "queued_prompts",
+        Verdict::Routed {
+            tool: "queued_prompts",
+        },
+    ),
+    (
+        "cancel_queued_prompt",
+        Verdict::Routed {
+            tool: "queued_prompts",
         },
     ),
     (

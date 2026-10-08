@@ -699,6 +699,8 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "resolve_move" => fx.t.resolve_move(ext, p!()).await,
         // ---- messaging.rs -------------------------------------------------
         "send_prompt" => fx.t.send_prompt(ext, p!()).await,
+        "queue_prompt" => fx.t.queue_prompt(ext, p!()).await,
+        "queued_prompts" => fx.t.queued_prompts(ext, p!()).await,
         "broadcast_prompt" => fx.t.broadcast_prompt(ext, p!()).await,
         "session_history" => fx.t.session_history(ext, p!()).await,
         "session_conversations" => fx.t.session_conversations(ext, p!()).await,
@@ -1143,6 +1145,20 @@ async fn run_matrix() {
         "send_prompt",
         Reach::Drive,
         |fx, _| json!({ "session_id": fx.row, "prompt": "go" }),
+    )
+    .await;
+    m.gated(
+        "queue_prompt",
+        Reach::Drive,
+        |fx, _| json!({ "session_id": fx.row, "prompt": "go" }),
+    )
+    .await;
+    // The list is the session's pending input, and `cancel` takes it back:
+    // `drive` for both, so a watcher reads none of it.
+    m.gated(
+        "queued_prompts",
+        Reach::Drive,
+        |fx, _| json!({ "session_id": fx.row }),
     )
     .await;
     m.gated(

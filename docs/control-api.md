@@ -325,6 +325,8 @@ Index by area (names only; see the reference for details):
   the list last read, turns a lost race into `E_CONFLICT`; `set` is refused
   to a per-host token and the operator).
 - **Steering & observing** — `send_prompt`, `broadcast_prompt`,
+  `queue_prompt` and `queued_prompts` (a prompt typed as a new turn once the
+  session is idle; list or take back what still waits),
   `capture_session`, `session_transcript` (the conversation of any session,
   including pane-less `bg:<uuid>` rows — track background runs with it),
   `peer_status`, `session_history`, `session_conversations` (the Claude
@@ -1249,6 +1251,16 @@ hook confirmed the prompt, `false` when it did not within 1.5 s, and `null`
 when it cannot be known — nothing was submitted, no hook has ever reached the
 row, or the prompt was QUEUED (the hook fires when the queued prompt starts,
 which is whenever the running turn ends, so there is nothing to wait for).
+
+`queue_prompt` (`{ session_id, prompt }`) is the patient form, what the
+desktop's Send prompt dialog uses: an idle session gets the prompt at once
+(`delivered: true`); a working, blocked or stuck one keeps it in the hub
+(`queued_id`) and gets it as a new turn when its Stop hook reports the turn
+over, with the reconcile tick as the backstop. It is never typed into a
+dialog, prompts for one session go out in order, one per idle moment, and a
+typing that fails three times is kept with its `error` rather than retried
+forever. `queued_prompts { session_id }` lists what still waits (and what
+failed); `cancel: <id>` takes one back. Both are `drive`, like `send_prompt`.
 
 `acked: false` is **not** "the send failed": the text is in the pane either
 way, and a slow hook, a busy host and a REPL that took the paste without
