@@ -1551,6 +1551,12 @@ const MIGRATIONS: &[Migration] = &[
         133,
         include_str!("../../migrations/133_deferred_prompts.sql"),
     ),
+    // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
+    // new table, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        137,
+        include_str!("../../migrations/137_usage_daily_person.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -54,6 +54,10 @@
         {
           "type": "field",
           "key": "spend_series"
+        },
+        {
+          "type": "field",
+          "key": "spend_by_person"
         }
       ]
     },

@@ -225,6 +225,16 @@
         },
         {
           "add": [],
+          "help": "Whose sessions spent it: today, the last 7 days and this month (UTC). Shown only to an admin who sees every session; otherwise it is hidden whole, never in part.",
+          "id": "spend_by_person",
+          "item_label": {
+            "type": "person_spend"
+          },
+          "label": "By person",
+          "type": "items"
+        },
+        {
+          "add": [],
           "help": "What its admins should look at: a budget at 80% or past it (Fleet only warns; it never stops a session), a device that may prompt but is not trusted yet (trust it in Settings → Devices), sessions on its hosts nobody has claimed.",
           "id": "needs_admin",
           "item_label": {
