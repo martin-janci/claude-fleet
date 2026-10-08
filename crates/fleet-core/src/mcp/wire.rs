@@ -60,6 +60,14 @@ pub struct SseDecoder {
     name: Option<String>,
     /// Its `id:`, if one was given.
     id: Option<String>,
+    /// Bytes in `data`, newlines included.
+    data_bytes: usize,
+    /// The most `partial` and `data` may hold together; `None` is unbounded (a body already whole
+    /// in memory, [`last_event_payload`]).
+    limit: Option<usize>,
+    /// An event outgrew `limit` and was dropped. Sticky: the stream it came
+    /// from is no longer framed the way its sender meant.
+    overflowed: bool,
 }
 
 impl SseDecoder {
@@ -67,26 +75,66 @@ impl SseDecoder {
         Self::default()
     }
 
+    /// A decoder for a live stream: an event (its unterminated line and its
+    /// `data:` lines together) that grows past `limit` bytes is dropped and
+    /// [`overflowed`](Self::overflowed) turns true. Without a bound, a peer
+    /// that sends a `data:` line with no newline, or `data:` lines with no
+    /// blank line, grows the reader's memory for as long as it keeps sending
+    /// — and every byte resets the reader's idle timer.
+    pub fn bounded(limit: usize) -> Self {
+        Self {
+            limit: Some(limit),
+            ..Self::default()
+        }
+    }
+
+    /// Whether an event outgrew the limit. The caller should end the stream.
+    pub fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
     /// Feed one chunk of the stream; returns every frame it completed, in
     /// order. A chunk that completes no frame returns an empty vector, which
     /// is the normal answer for a keep-alive comment or a split line.
+    ///
+    /// Only the new chunk is searched for line ends: the held tail has none,
+    /// so re-scanning it on every feed made a long unterminated line
+    /// quadratic.
     pub fn feed(&mut self, chunk: &str) -> Vec<SseFrame> {
-        self.partial.push_str(chunk);
-        // Taken out of `self` so the loop can borrow it while calling
-        // `&mut self` methods; whatever follows the last '\n' goes back.
-        let buf = std::mem::take(&mut self.partial);
         let mut out = Vec::new();
-        let mut start = 0;
-        while let Some(off) = buf[start..].find('\n') {
-            let end = start + off;
-            let line = &buf[start..end];
+        let mut rest = chunk;
+        while let Some(off) = rest.find('\n') {
+            let joined: String;
+            let line = if self.partial.is_empty() {
+                &rest[..off]
+            } else {
+                self.partial.push_str(&rest[..off]);
+                joined = std::mem::take(&mut self.partial);
+                &joined[..]
+            };
             if let Some(frame) = self.line(line.strip_suffix('\r').unwrap_or(line)) {
                 out.push(frame);
             }
-            start = end + 1;
+            rest = &rest[off + 1..];
         }
-        self.partial = buf[start..].to_string();
+        self.partial.push_str(rest);
+        self.check_limit();
         out
+    }
+
+    /// Drop the event being assembled once it holds more than the limit.
+    fn check_limit(&mut self) {
+        if self
+            .limit
+            .is_some_and(|max| self.partial.len() + self.data_bytes > max)
+        {
+            self.overflowed = true;
+            self.partial.clear();
+            self.data.clear();
+            self.name = None;
+            self.id = None;
+            self.data_bytes = 0;
+        }
     }
 
     /// The stream ended. An event that was never terminated by a blank line
@@ -119,7 +167,11 @@ impl SseDecoder {
             None => (line, ""),
         };
         match field {
-            "data" => self.data.push(value.to_string()),
+            "data" => {
+                self.data_bytes += value.len() + 1;
+                self.data.push(value.to_string());
+                self.check_limit();
+            }
             "event" => self.name = Some(value.to_string()),
             // The spec ignores an id holding U+0000; `retry` stays unused,
             // and an unknown field is ignored by the spec.
@@ -134,6 +186,7 @@ impl SseDecoder {
     /// or a stray comment produce nothing.
     fn dispatch(&mut self) -> Option<SseFrame> {
         let name = self.name.take();
+        self.data_bytes = 0;
         if self.data.is_empty() {
             return None;
         }
@@ -165,6 +218,43 @@ pub fn last_event_payload(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bounded_decoder_drops_an_event_that_outgrows_it() {
+        // One endless line…
+        let mut d = SseDecoder::bounded(1024);
+        for _ in 0..100 {
+            assert!(d.feed(&"x".repeat(100)).is_empty());
+        }
+        assert!(d.overflowed());
+        assert!(d.partial.len() <= 1024);
+        // …and endless `data:` lines with no blank line.
+        let mut d = SseDecoder::bounded(1024);
+        for _ in 0..100 {
+            assert!(d.feed(&format!("data: {}\n", "y".repeat(50))).is_empty());
+        }
+        assert!(d.overflowed());
+        assert!(d.data.iter().map(String::len).sum::<usize>() <= 1024);
+        // Many small events never add up: each dispatch frees its bytes.
+        let mut d = SseDecoder::bounded(1024);
+        let mut n = 0;
+        for _ in 0..1000 {
+            n += d.feed("event: e\ndata: 0123456789\n\n").len();
+        }
+        assert_eq!(n, 1000);
+        assert!(!d.overflowed());
+    }
+
+    #[test]
+    fn a_line_fed_a_byte_at_a_time_frames_the_same() {
+        let mut d = SseDecoder::bounded(1 << 20);
+        let mut frames = Vec::new();
+        for c in "event: e\r\ndata: a\ndata: b\n\n".chars() {
+            frames.extend(d.feed(&c.to_string()));
+        }
+        assert_eq!(frames, vec![frame("e", "a\nb")]);
+        assert!(!d.overflowed());
+    }
 
     #[test]
     fn one_frame_is_unwrapped() {

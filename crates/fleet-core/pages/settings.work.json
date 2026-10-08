@@ -144,6 +144,28 @@
           ]
         }
       ]
+    },
+    {
+      "title": "Missions",
+      "sections": [
+        {
+          "title": "Mission loop",
+          "items": [
+            {
+              "type": "field",
+              "key": "orchestrator.enabled"
+            },
+            {
+              "type": "field",
+              "key": "orchestrator.max_level",
+              "when": {
+                "key": "orchestrator.enabled",
+                "truthy": true
+              }
+            }
+          ]
+        }
+      ]
     }
   ]
 }

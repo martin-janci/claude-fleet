@@ -308,6 +308,11 @@ pub const RESTORE_BATCH_SIZE: &str = "restore.batch_size";
 /// Read by Task 3's restore path via `get_setting` + `settings::resolve`.
 pub const RESTORE_STAGGER_MS: &str = "restore.stagger_ms";
 pub const PLAYBOOK_PRESS_ENTER: &str = "playbooks.press_enter";
+/// Orchestration O4–O6: the missions' loop runs at all (the kill switch).
+pub const ORCHESTRATOR_ENABLED: &str = "orchestrator.enabled";
+/// Orchestration O6: the highest autonomy any mission's loop may take,
+/// whatever a mission asks and a grant signs (design §7.1).
+pub const ORCHESTRATOR_MAX_LEVEL: &str = "orchestrator.max_level";
 pub const PLAYBOOK_OOM_RECREATE: &str = "playbooks.oom_recreate";
 /// Recreates the `oom` playbook may run on one session per 24 h
 /// (`service::playbooks::OOM_ATTEMPT_WINDOW_SECS`). `0` refuses every
@@ -629,6 +634,21 @@ pub const SPECS: &[Spec] = &[
     )
     .unit(Unit::Ms)
     .tags(&[Tag::Advanced]),
+    Spec::new(
+        ORCHESTRATOR_ENABLED,
+        "true",
+        Kind::Bool,
+        "Mission loop",
+        "Let active missions take their next steps: keep their cards and brakes current and, under a person's grant, run what is ready. Off stops every mission's loop at once.",
+    ),
+    Spec::new(
+        ORCHESTRATOR_MAX_LEVEL,
+        "1",
+        Kind::Int { min: 0, max: 3 },
+        "Highest mission autonomy",
+        "The most any mission's loop may do on its own, whatever the mission asks and its grant signs. 0: the loop only keeps the cards; 1: it also asks the planner, and a person presses every step; 2: runs, retries, reviews and closes within a grant; 3: also creates the planner's tasks.",
+    )
+    .unit(Unit::Count),
     Spec::new(
         PLAYBOOK_PRESS_ENTER,
         "false",

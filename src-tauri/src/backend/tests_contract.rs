@@ -232,6 +232,8 @@ pub(crate) fn sample_task() -> TaskRow {
         work_item_id: None,
         attempt: None,
         role: None,
+        report: None,
+        evidence: None,
     }
 }
 

@@ -417,7 +417,10 @@
       .then((fn) => {
         if (disposed) fn();
         else unlisten = fn;
-      });
+      })
+      // Subscribing can reject (the webview torn down mid-subscribe, no Tauri
+      // at all); that must not surface as an unhandled rejection.
+      .catch(() => {});
     return () => {
       disposed = true;
       unlisten?.();

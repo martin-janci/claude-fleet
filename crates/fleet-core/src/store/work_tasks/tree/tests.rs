@@ -94,6 +94,36 @@ fn a_bad_tree_writes_nothing() {
     assert_eq!(s.mission_items(m).unwrap().len(), 1);
 }
 
+/// An entry's edges are bounded and distinct: each one is lookups and a
+/// dependency walk under the store lock, so an unbounded list was a way to
+/// hold that lock for as long as the body was long.
+#[test]
+fn an_entry_waits_for_a_bounded_set_of_distinct_things() {
+    let s = store();
+    let (root, m) = root_in_mission(&s);
+    let other = s.create_local_work_item(None, "elsewhere").unwrap().id;
+    let flood = vec![TreeRef::Item(other); TREE_DEPS_CAP + 1];
+    assert_eq!(
+        s.propose_tree(root, &[entry("a", &flood)], "agent")
+            .unwrap_err()
+            .code,
+        codes::E_LIMIT
+    );
+    let twice = s
+        .propose_tree(
+            root,
+            &[
+                entry("a", &[]),
+                entry("b", &[TreeRef::Entry(0), TreeRef::Entry(0)]),
+            ],
+            "agent",
+        )
+        .unwrap_err();
+    assert_eq!(twice.code, codes::E_INVALID);
+    assert_eq!(s.native_children(root).unwrap().len(), 0);
+    assert_eq!(s.mission_items(m).unwrap().len(), 1);
+}
+
 #[test]
 fn many_are_accepted_together_or_not_at_all_and_undone() {
     let s = store();

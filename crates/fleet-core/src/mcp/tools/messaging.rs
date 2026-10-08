@@ -232,12 +232,11 @@ impl FleetTools {
             Reach::Read,
             "the session whose history to read",
         )?;
-        let limit = p.limit.unwrap_or(50);
+        let limit = bounded_limit(p.limit, 50);
 
-        // fresh_for absent: today's default, byte-identical, no cursor
-        // touched — `limit` reaches the store exactly as it always has
-        // (0 => [], negative => SQLite's own "no limit"), so the clamp
-        // below must never run on this path.
+        // fresh_for absent: no cursor touched, and 0 => [] as always. A
+        // negative or huge `limit` no longer reaches SQLite as "no limit":
+        // see `bounded_limit`.
         let Some(reader) = p.fresh_for else {
             let events = {
                 let s = lock(&self.store).map_err(to_mcp_err)?;
@@ -613,12 +612,11 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             super::support::reaches_row(&s, &caller, &row, Reach::Drive)?
         };
-        let limit = p.limit.unwrap_or(50);
+        let limit = bounded_limit(p.limit, 50);
 
-        // fresh_for absent: today's default, byte-identical, no cursor
-        // touched — `limit` reaches `list_inbox` exactly as it always has
-        // (0 => [], negative => SQLite's own "no limit"), so the clamp
-        // below must never run on this path.
+        // fresh_for absent: no cursor touched, and 0 => [] as always. A
+        // negative or huge `limit` no longer reaches SQLite as "no limit":
+        // see `bounded_limit`.
         let Some(reader) = p.fresh_for else {
             let msgs = crate::service::messages::list_inbox(
                 p.session_id,
@@ -785,4 +783,35 @@ fn page_inbox(
     let more = rows.len() as i64 > limit;
     rows.truncate(limit as usize);
     Ok((rows, more))
+}
+
+/// The most rows `session_history` / `inbox` answer in one call.
+pub(super) const READ_LIMIT_MAX: i64 = 500;
+
+/// A caller's `limit`, bounded. A negative one used to reach SQLite as `LIMIT
+/// -1`, i.e. no limit at all: any reader (a readonly phone included) could
+/// dump a long-lived session's whole timeline, or its whole inbox with full
+/// bodies, built and serialised under the one store lock every other caller
+/// waits on — and with `mark_read`, stamp all of it read at once. Negative
+/// and over-large both mean "as many as allowed"; 0 still answers nothing.
+pub(super) fn bounded_limit(limit: Option<i64>, default: i64) -> i64 {
+    match limit.unwrap_or(default) {
+        n if n < 0 => READ_LIMIT_MAX,
+        n => n.min(READ_LIMIT_MAX),
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+
+    #[test]
+    fn a_limit_is_bounded_both_ways() {
+        assert_eq!(bounded_limit(None, 50), 50);
+        assert_eq!(bounded_limit(Some(0), 50), 0);
+        assert_eq!(bounded_limit(Some(7), 50), 7);
+        assert_eq!(bounded_limit(Some(-1), 50), READ_LIMIT_MAX);
+        assert_eq!(bounded_limit(Some(i64::MIN), 50), READ_LIMIT_MAX);
+        assert_eq!(bounded_limit(Some(i64::MAX), 50), READ_LIMIT_MAX);
+    }
 }

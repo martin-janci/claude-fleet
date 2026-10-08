@@ -66,6 +66,115 @@ pub const MISSION_TRANSITIONS: &[(&str, &str)] = &[
     ("paused", "cancelled"),
 ];
 
+/// What a mission asks of its loop (`orchestration_projects.policy_json`,
+/// design §7.1): the limits it runs within. It is what the mission ASKS for;
+/// what applies is capped by a person's grant (O6) and the fleet-wide
+/// ceiling (`orchestrator.max_level`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MissionPolicy {
+    /// Runs open at once.
+    pub max_parallel: u32,
+    /// Retries of one item after its first attempt.
+    pub max_retries: u32,
+    /// Every implemented item gets a review run before it closes.
+    pub require_review: bool,
+    /// `propose`: the planner's new items are proposals a person accepts;
+    /// `auto`: at L3 under a grant they are created as tasks.
+    pub task_creation: String,
+    /// Attempts (runs of any role) the whole mission may take.
+    pub max_tasks: u32,
+    /// Planner calls per hour, a brake on replan → fail → replan.
+    pub max_planner_runs_per_hour: u32,
+    /// With runs open and nothing finishing for this long, the mission
+    /// pauses and asks a person.
+    pub no_progress_secs: u64,
+    /// The planner's model (`claude -p --model`); empty for the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planner_model: Option<String>,
+    /// The host the planner runs on; empty: the root's or a member's host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planner_host: Option<String>,
+    /// A continuous mission's timer (O8): wake at least this often.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_every_secs: Option<u64>,
+}
+
+impl Default for MissionPolicy {
+    fn default() -> Self {
+        MissionPolicy {
+            max_parallel: 2,
+            max_retries: 1,
+            require_review: false,
+            task_creation: "propose".into(),
+            max_tasks: 60,
+            max_planner_runs_per_hour: 6,
+            no_progress_secs: 3600,
+            planner_model: None,
+            planner_host: None,
+            wake_every_secs: None,
+        }
+    }
+}
+
+/// The policy's bounds.
+pub const POLICY_MAX_PARALLEL: u32 = 8;
+pub const POLICY_MAX_RETRIES: u32 = 5;
+pub const POLICY_MAX_TASKS: u32 = 300;
+pub const POLICY_MAX_PLANNER_RUNS: u32 = 30;
+/// A continuous mission's timer is at least this.
+pub const POLICY_MIN_WAKE_SECS: u64 = 300;
+
+/// PURE: a policy within its bounds, or `E_INVALID` naming the field.
+pub fn check_policy(p: &MissionPolicy) -> Result<MissionPolicy, IpcError> {
+    let bad = |f: &str, why: String| invalid(format!("policy.{f}: {why}"));
+    if !(1..=POLICY_MAX_PARALLEL).contains(&p.max_parallel) {
+        return Err(bad("max_parallel", format!("1 to {POLICY_MAX_PARALLEL}")));
+    }
+    if p.max_retries > POLICY_MAX_RETRIES {
+        return Err(bad("max_retries", format!("0 to {POLICY_MAX_RETRIES}")));
+    }
+    if !(1..=POLICY_MAX_TASKS).contains(&p.max_tasks) {
+        return Err(bad("max_tasks", format!("1 to {POLICY_MAX_TASKS}")));
+    }
+    if p.max_planner_runs_per_hour > POLICY_MAX_PLANNER_RUNS {
+        return Err(bad(
+            "max_planner_runs_per_hour",
+            format!("0 to {POLICY_MAX_PLANNER_RUNS}"),
+        ));
+    }
+    if p.no_progress_secs < 300 {
+        return Err(bad("no_progress_secs", "at least 300".into()));
+    }
+    if !matches!(p.task_creation.as_str(), "propose" | "auto") {
+        return Err(bad("task_creation", "propose or auto".into()));
+    }
+    if p.wake_every_secs.is_some_and(|w| w < POLICY_MIN_WAKE_SECS) {
+        return Err(bad(
+            "wake_every_secs",
+            format!("at least {POLICY_MIN_WAKE_SECS}"),
+        ));
+    }
+    let short = |v: &Option<String>, f: &str| -> Result<Option<String>, IpcError> {
+        match v.as_deref().map(str::trim).filter(|x| !x.is_empty()) {
+            None => Ok(None),
+            Some(x)
+                if x.len() <= 80
+                    && x.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "-._@:".contains(c)) =>
+            {
+                Ok(Some(x.to_string()))
+            }
+            Some(_) => Err(bad(f, "a short name of letters, digits and -._@:".into())),
+        }
+    };
+    Ok(MissionPolicy {
+        planner_model: short(&p.planner_model, "planner_model")?,
+        planner_host: short(&p.planner_host, "planner_host")?,
+        ..p.clone()
+    })
+}
+
 /// One mission, with its members' roll-up and its repos.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissionRow {
@@ -108,6 +217,12 @@ pub struct MissionRow {
     pub done: i64,
     #[serde(default)]
     pub repos: Vec<MissionRepoRow>,
+    /// What it asks of its loop (O4).
+    #[serde(default)]
+    pub policy: MissionPolicy,
+    /// When the loop looks at it next (O4); `None`: when something wakes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_wake_at: Option<i64>,
 }
 
 /// A repo a mission may run in.
@@ -165,6 +280,7 @@ pub struct MissionPatch {
     pub done_when: Option<Vec<String>>,
     pub mode: Option<String>,
     pub level: Option<i64>,
+    pub policy: Option<MissionPolicy>,
 }
 
 /// A [`NewMission`]'s fields, checked.
@@ -193,7 +309,8 @@ const MISSION_COLUMNS: &str = "m.id, m.org_id, m.owner_person_id, m.root_item_id
      m.created_at, m.updated_at, m.started_at, m.finished_at, m.version, \
      (SELECT COUNT(*) FROM work_items i WHERE i.orchestration_project_id = m.id), \
      (SELECT COUNT(*) FROM work_items i \
-       WHERE i.orchestration_project_id = m.id AND i.status_category = 'done')";
+       WHERE i.orchestration_project_id = m.id AND i.status_category = 'done'), \
+     m.policy_json, m.next_wake_at";
 
 fn map_mission(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRow> {
     let done_when: Option<String> = r.get(7)?;
@@ -220,6 +337,11 @@ fn map_mission(r: &rusqlite::Row<'_>) -> rusqlite::Result<MissionRow> {
         total: r.get(17)?,
         done: r.get(18)?,
         repos: Vec::new(),
+        policy: r
+            .get::<_, Option<String>>(19)?
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
+        next_wake_at: r.get(20)?,
     })
 }
 
@@ -550,11 +672,18 @@ impl Store {
             Some(l) => check_level(l)?,
             None => before.level,
         };
+        let policy = match &p.policy {
+            Some(pol) => check_policy(pol)?,
+            None => before.policy.clone(),
+        };
+        let policy_json = serde_json::to_string(&policy)
+            .map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))?;
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "UPDATE orchestration_projects SET name = ?1, goal = ?2, non_goals = ?3, \
-               done_when = ?4, mode = ?5, level = ?6, updated_at = ?7, version = version + 1 \
-             WHERE id = ?8",
+               done_when = ?4, mode = ?5, level = ?6, policy_json = ?7, updated_at = ?8, \
+               version = version + 1 \
+             WHERE id = ?9",
             rusqlite::params![
                 name,
                 goal,
@@ -562,6 +691,7 @@ impl Store {
                 done_when,
                 mode,
                 level,
+                policy_json,
                 now_unix(),
                 id
             ],
@@ -584,6 +714,9 @@ impl Store {
         }
         if level != before.level {
             changed.push("level");
+        }
+        if policy != before.policy {
+            changed.push("policy");
         }
         self.insert_mission_event(
             id,

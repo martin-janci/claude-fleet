@@ -62,6 +62,10 @@ pub fn head_is_chunked(head: &str) -> bool {
 /// stream cannot, because a chunk boundary falls wherever the hub flushed and
 /// the next size line may not have arrived yet — this is what `events.rs`'s
 /// `SseBody` feeds one socket read at a time.
+/// The longest chunk-size line accepted, extensions included. A size is at
+/// most 16 hex digits; nothing here sends extensions.
+pub const MAX_SIZE_LINE: usize = 1024;
+
 pub struct Dechunker {
     chunked: bool,
     /// Bytes left in the chunk being read.
@@ -107,7 +111,13 @@ impl Dechunker {
             // previous chunk's data.
             let skip = if raw.starts_with(b"\r\n") { 2 } else { 0 };
             let Some(eol) = find(&raw[skip..], b"\r\n") else {
-                // Not a whole size line yet.
+                // Not a whole size line yet — unless it is already longer
+                // than any size line is. Without this a peer that never sent
+                // the CRLF grew `raw` (and every scan of it) for as long as
+                // it kept sending, which also kept the idle timer quiet.
+                if raw.len() - skip > MAX_SIZE_LINE {
+                    return Err(format!("a chunk size line ran past {MAX_SIZE_LINE} bytes"));
+                }
                 break;
             };
             let line = String::from_utf8_lossy(&raw[skip..skip + eol]).into_owned();

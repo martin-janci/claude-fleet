@@ -187,9 +187,9 @@ describe('AssetEditor', () => {
     await waitFor(() => expect(screen.queryByTestId('editor-resource-resources/run.sh')).toBeNull());
   });
 
-  it('adding a resource opens the file picker and calls addResource with the picked path', async () => {
-    open.mockResolvedValueOnce('/tmp/script.sh');
+  it('adding a resource opens the Rust-side picker and calls addResource with the picked path', async () => {
     byCmd({
+      pick_attachments: [{ path: '/tmp/script.sh', name: 'script.sh', size: 2, kind: 'binary' }],
       catalog_lint_asset: { errors: [], warnings: [] },
       catalog_add_resource: { commit: 'sha3', lint: { errors: [], warnings: [] } },
       catalog_get_asset: {
@@ -202,7 +202,10 @@ describe('AssetEditor', () => {
 
     await fireEvent.click(screen.getByTestId('editor-resource-add'));
 
-    expect(open).toHaveBeenCalledWith({ multiple: false });
+    // SEC-9: the webview never names a path itself — the picker runs in Rust,
+    // which authorises the choice that catalog_add_resource then requires.
+    expect(open).not.toHaveBeenCalled();
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pick_attachments', {}));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('catalog_add_resource', { args: { kind: 'skill', name: 'worktree', local_path: '/tmp/script.sh', rel_path: null } }));
     await waitFor(() => expect(screen.getByTestId('editor-resource-resources/script.sh')).toBeTruthy());
   });

@@ -19,6 +19,13 @@ use serde::{Deserialize, Serialize};
 /// How long after an accept a person may still undo it, seconds.
 pub const ACCEPT_UNDO_SECS: i64 = 600;
 
+/// The most edges one entry of a tree may carry. Entries are capped
+/// ([`PROPOSALS_OPEN_CAP`]), but an entry's `depends_on` was not: each `Item`
+/// costs three lookups and each edge a dependency walk of up to 1000 nodes,
+/// all under the one store lock, so ~500k copies of one item in an 8 MiB body
+/// froze every MCP call, hook and window behind it.
+pub const TREE_DEPS_CAP: usize = 32;
+
 /// What a proposed subtask waits for: an earlier entry of the same tree (by
 /// its index), or an existing item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +83,24 @@ impl Store {
         }
         for (i, e) in entries.iter().enumerate() {
             super::super::work_local::validate_local_work_title(&e.title)?;
+            if e.depends_on.len() > TREE_DEPS_CAP {
+                return Err(IpcError::new(
+                    codes::E_LIMIT,
+                    format!(
+                        "entry {i} waits for {} things; an entry may wait for at most \
+                         {TREE_DEPS_CAP}",
+                        e.depends_on.len()
+                    ),
+                ));
+            }
+            for (k, d) in e.depends_on.iter().enumerate() {
+                if e.depends_on[..k].contains(d) {
+                    return Err(IpcError::new(
+                        codes::E_INVALID,
+                        format!("entry {i} names {d:?} twice"),
+                    ));
+                }
+            }
             for d in &e.depends_on {
                 match *d {
                     TreeRef::Entry(j) if j >= i => {

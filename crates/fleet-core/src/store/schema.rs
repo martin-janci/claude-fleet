@@ -590,6 +590,16 @@ fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<b
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 117.
+fn work_items_has_done_when(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'done_when'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 116.
 fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1371,6 +1381,20 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/116_work_item_deps.sql"),
         already_applied: Some(work_items_has_held_at),
     },
+    // Orchestration O3: a task's report and git evidence, an item's
+    // done_when (three ADD COLUMNs, guarded on the last) and the journal of
+    // a person's checks (a new table).
+    Migration {
+        version: 117,
+        sql: include_str!("../../migrations/117_task_evidence.sql"),
+        already_applied: Some(work_items_has_done_when),
+    },
+    // Orchestration O4–O6: the loop's cards and a person's grants (new
+    // tables only, so idempotent).
+    Migration::plain(
+        118,
+        include_str!("../../migrations/118_orchestration_loop.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

@@ -1061,6 +1061,13 @@ impl FleetTools {
         mission_repo {project_id, role?, on?}; mission_item {item_id, on?}; \
         mission_delete. dep {item_id, depends_on, on?}; hold {item_id, on?}; \
         propose_tree {parent, tree}; accept_many | undo_accept {item_ids}. \
+        done_when {item_id, done_when: [ci[:check] | review | test[:cmd] | \
+        person | text]}; verify {item_id, line, ok, note?}: a person's check. \
+        mission_start {mission_id, step?}: take the next steps; retry \
+        {item_id, note?}; mission_plan: ask the planner; card_decide \
+        {card_id, ok, note?}; mission_grant {mission_id, level, hours?, \
+        budget_cents?, hosts?, max_parallel?}; mission_revoke; \
+        missions_pause_all. \
         Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
@@ -1379,6 +1386,22 @@ impl FleetTools {
                     .map_err(to_mcp_err)?,
             );
         }
+        if args.action == "done_when" {
+            mission_caller(&caller)?;
+            self.require_drive_on_item_sessions(&caller, graph_item(&args)?)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::verify::set_done_when(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "verify" {
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::verify::verify(&args, &self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
+        }
         // A proposal decision is `accept` or `reject` with nothing else named;
         // `reject` WITH a session, a link or a key is the link decision, which
         // falls through to the shared tail below and takes its `Reach::Drive`.
@@ -1534,6 +1557,7 @@ impl FleetTools {
             mission_caller(&caller)?;
             let view_scope = self.view_scope(&caller)?;
             use crate::service::work::missions as ms;
+            use crate::service::work::orchestrate as orch;
             return match args.action.as_str() {
                 "mission_save" => {
                     ok_json(&ms::save(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
@@ -1554,12 +1578,63 @@ impl FleetTools {
                 "mission_delete" => {
                     ok_json(&ms::delete(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
                 }
+                // The loop (orchestration O4–O6): a person takes the next
+                // steps, asks the planner, signs or ends a grant.
+                "mission_start" => ok_json(
+                    &orch::start(&args, &self.mission_deps(), &view_scope)
+                        .await
+                        .map_err(to_mcp_err)?,
+                ),
+                "mission_plan" => ok_json(
+                    &orch::plan_now(&args, &self.mission_deps(), &view_scope)
+                        .await
+                        .map_err(to_mcp_err)?,
+                ),
+                "mission_grant" => {
+                    ok_json(&orch::grant(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
+                }
+                "mission_revoke" => {
+                    ok_json(&orch::revoke(&args, &self.store, &view_scope).map_err(to_mcp_err)?)
+                }
                 other => Err(mcp_err(
                     "E_INVALID",
                     format!("unknown work_link action {other:?}"),
                     None,
                 )),
             };
+        }
+        // Another attempt at a mission's item, a card of its confirm queue,
+        // and Pause all (orchestration O4–O6): a person's, never a
+        // session's; the mission fences are inside.
+        if args.action == "retry" {
+            mission_caller(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::orchestrate::retry(&args, &self.mission_deps(), &view_scope)
+                    .await
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "card_decide" {
+            mission_caller(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::orchestrate::decide_card(
+                    &args,
+                    &self.mission_deps(),
+                    &view_scope,
+                )
+                .await
+                .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "missions_pause_all" {
+            mission_caller(&caller)?;
+            let view_scope = self.view_scope(&caller)?;
+            return ok_json(
+                &crate::service::work::orchestrate::pause_all(&self.store, &view_scope)
+                    .map_err(to_mcp_err)?,
+            );
         }
         if args.action == "tidy_apply" {
             let mut items = args.items.clone().unwrap_or_default();
@@ -2158,6 +2233,18 @@ fn ipc_of_mcp(e: McpError) -> IpcError {
 fn graph_item(args: &crate::service::work::WorkLinkArgs) -> Result<i64, McpError> {
     args.item_id
         .ok_or_else(|| mcp_err("E_INVALID", format!("{} needs item_id", args.action), None))
+}
+
+impl super::FleetTools {
+    /// What the mission loop needs to take a step from this server.
+    fn mission_deps(&self) -> crate::service::work::orchestrate::Deps {
+        crate::service::work::orchestrate::Deps {
+            store: self.store.clone(),
+            ssh: self.ssh.clone(),
+            reg: self.reg.clone(),
+            net: crate::service::trackers::default_net(),
+        }
+    }
 }
 
 /// Refuse a `work_link { mission_* }` from a per-host or peer token: a
