@@ -72,6 +72,12 @@ pub struct FormView {
     pub created_at: i64,
     #[serde(default)]
     pub decided_at: Option<i64>,
+    /// What Jev proposes for the form's first choice while it waits (J5,
+    /// `decide::quick_answer`, assist mode): the card moves that option
+    /// first and says so; a person still answers. Left off the wire when
+    /// there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<crate::service::decide::quick_answer::FormProposal>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -103,7 +109,26 @@ pub fn view(row: &FormRow) -> FormView {
         answered_by: row.answered_by.clone(),
         created_at: row.created_at,
         decided_at: row.decided_at,
+        proposal: None,
     }
+}
+
+/// [`view`], with the live proposal for a pending form's first choice
+/// (`get`: what a person reads before answering).
+pub fn view_with_proposal(s: &Store, row: &FormRow) -> FormView {
+    let mut v = view(row);
+    if v.state == "pending" {
+        let org = s.session_org(row.session_id).ok().flatten();
+        v.proposal = crate::service::decide::quick_answer::form_choice(
+            &v.form_id,
+            org,
+            &v.title,
+            v.why.as_deref(),
+            &v.spec,
+        )
+        .and_then(|fc| crate::service::decide::quick_answer::form_proposal(s, &fc));
+    }
+    v
 }
 
 pub fn result_of(row: &FormRow) -> FormResult {
@@ -173,7 +198,9 @@ pub fn row(store: &Mutex<Store>, form_id: &str) -> Result<FormRow, IpcError> {
 }
 
 pub fn get(store: &Mutex<Store>, form_id: &str) -> Result<FormView, IpcError> {
-    row(store, form_id).map(|r| view(&r))
+    let s = lock(store)?;
+    let r = s.form(form_id)?.ok_or_else(|| not_found(form_id))?;
+    Ok(view_with_proposal(&s, &r))
 }
 
 /// Validate `spec` and open it for `session_id` (a session the caller

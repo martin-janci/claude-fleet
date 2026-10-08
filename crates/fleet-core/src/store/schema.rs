@@ -651,6 +651,16 @@ fn peer_links_has_msgs_total(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 117.
+/// `already_applied` guard of migration 134.
+fn hosts_has_agents_on_path(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'agents_on_path'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'worktree_at'",
@@ -1551,11 +1561,18 @@ const MIGRATIONS: &[Migration] = &[
         133,
         include_str!("../../migrations/133_deferred_prompts.sql"),
     ),
+    // Orbit Fleet 12.4: which agent CLIs a host has on its PATH (one ADD
+    // COLUMN, guarded).
+    Migration {
+        version: 134,
+        sql: include_str!("../../migrations/134_host_agents_on_path.sql"),
+        already_applied: Some(hosts_has_agents_on_path),
+    },
     // Orbit Fleet 11.8: `usage_daily_person`, an org's spend by person. A
     // new table, `IF NOT EXISTS`, safe to re-run.
     Migration::plain(
-        137,
-        include_str!("../../migrations/137_usage_daily_person.sql"),
+        135,
+        include_str!("../../migrations/135_usage_daily_person.sql"),
     ),
 ];
 

@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import type { ChangedFile, RepoTree } from './files';
+  import type { BranchDiff, ChangedFile, DiffRange, RepoTree } from './files';
   import { fileIcon, folderIcon } from './fileicons';
   import Skeleton from './states/Skeleton.svelte';
 
@@ -67,6 +67,9 @@
     onCommit,
     enableStaging = false,
     writeBlocked = null,
+    branch = null,
+    selectedRange = null,
+    onSelectRange,
   }: {
     mode: 'changes' | 'tree' | 'history' | 'branches';
     changes: ChangedFile[];
@@ -81,6 +84,12 @@
     /** Set when staging/committing has no hub tool (`hubBlock('repo_write', …)`
      *  from `FilesPanel`) — the reason, shown as the checkbox's/button's title. */
     writeBlocked?: string | null;
+    /** The new layout's committed groups under Changed (redesign step 5.6):
+     *  null keeps the classic flat list of the worktree's own changes. */
+    branch?: BranchDiff | null;
+    /** The range the selected row came from; null for a worktree row. */
+    selectedRange?: DiffRange | null;
+    onSelectRange?: (path: string, range: DiffRange, status: string) => void;
   } = $props();
 
   let filter = $state('');
@@ -99,6 +108,28 @@
       ? changes
       : changes.filter((c) => c.path.toLowerCase().includes(filterLc)),
   );
+
+  const match = (c: ChangedFile) => filterLc === '' || c.path.toLowerCase().includes(filterLc);
+  // The committed groups: what is not pushed yet, then the whole branch
+  // against its base (folded until opened; it repeats the first group
+  // whenever nothing is pushed). An empty group is not shown.
+  const groups = $derived(
+    branch
+      ? [
+          {
+            range: 'unpushed' as const,
+            title: 'In this branch, not pushed',
+            files: branch.unpushedFiles,
+          },
+          {
+            range: 'base' as const,
+            title: `Against ${branch.base ?? 'base'} · ${branch.aheadOfBase} ahead`,
+            files: branch.base ? branch.baseFiles : [],
+          },
+        ].filter((g) => g.files.length > 0)
+      : [],
+  );
+  let folded = $state<Record<DiffRange, boolean>>({ unpushed: false, base: true });
 
   const treeNodes = $derived(tree ? buildTree(tree.entries) : []);
 
@@ -130,8 +161,13 @@
     {:else if error}
       <p class="hint err">{error}</p>
     {:else if mode === 'changes'}
+      {#if groups.length > 0}
+        <h3 class="group" data-testid="group-uncommitted">
+          <span>Uncommitted</span><span class="gcount tnum">{changes.length}</span>
+        </h3>
+      {/if}
       {#if filteredChanges.length === 0}
-        <p class="hint">{changes.length === 0 ? 'No changes.' : 'No matches.'}</p>
+        <p class="hint">{changes.length === 0 ? (groups.length > 0 ? 'Nothing uncommitted.' : 'No changes.') : 'No matches.'}</p>
       {:else}
         {#each filteredChanges as c (c.path)}
           <div class="row-wrap">
@@ -141,13 +177,14 @@
                 class="stage"
                 checked={c.staged}
                 disabled={writeBlocked !== null}
+                aria-label="{c.staged ? 'Unstage' : 'Stage'} {c.path}"
                 title={writeBlocked ?? (c.staged ? 'Unstage' : 'Stage')}
                 onclick={(e) => { e.stopPropagation(); onStageToggle?.(c.path, !c.staged); }}
               />
             {/if}
             <button
               class="row file"
-              class:sel={selectedPath === c.path}
+              class:sel={selectedPath === c.path && selectedRange === null}
               onclick={() => onSelect(c.path, c.status)}
               title={c.orig_path ? `${c.orig_path} → ${c.path}` : c.path}
             >
@@ -160,6 +197,41 @@
           </div>
         {/each}
       {/if}
+      {#each groups as g (g.range)}
+        {@const shown = g.files.filter(match)}
+        <h3 class="group" data-testid="group-{g.range}">
+          <button
+            type="button"
+            class="gtoggle"
+            aria-expanded={!folded[g.range]}
+            onclick={() => (folded[g.range] = !folded[g.range])}
+          >
+            <span class="caret" aria-hidden="true">{folded[g.range] ? '▸' : '▾'}</span>
+            <span>{g.title}</span>
+            <span class="gcount tnum">{g.files.length}</span>
+          </button>
+        </h3>
+        {#if !folded[g.range]}
+          {#if shown.length === 0}
+            <p class="hint">No matches.</p>
+          {/if}
+          {#each shown as c (c.path)}
+            <button
+              class="row file ranged"
+              class:sel={selectedPath === c.path && selectedRange === g.range}
+              data-testid="range-row"
+              onclick={() => onSelectRange?.(c.path, g.range, c.status)}
+              title={c.orig_path ? `${c.orig_path} → ${c.path}` : c.path}
+            >
+              <span class="badge {BADGE[c.status]?.cls ?? 'b-mod'}"
+                >{BADGE[c.status]?.letter ?? '•'}</span
+              >
+              <span class="ficon">{fileIcon(c.path)}</span>
+              <span class="name">{c.path}</span>
+            </button>
+          {/each}
+        {/if}
+      {/each}
     {:else if filterLc !== ''}
       <!-- tree mode, filtering → flat matches -->
       {#if filteredTreeFlat.length === 0}
@@ -269,6 +341,40 @@
   }
   .hint.err {
     color: var(--danger);
+  }
+  .group {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0.4rem 0.5rem 0.2rem;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--fg-muted);
+  }
+  .gtoggle {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: 1 1 auto;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .gtoggle:hover {
+    color: var(--fg);
+  }
+  .gcount {
+    margin-left: auto;
+    font-weight: 400;
+  }
+  .row.ranged {
+    padding-left: 1.35rem;
   }
   .row {
     display: flex;
