@@ -282,9 +282,9 @@ impl Store {
             "SELECT {}, w.id FROM work_items w JOIN tasks t ON t.id = w.task_id",
             super::rows::task_columns_t()
         ))?;
-        const ITEM_ID: usize = 16;
+        let item_id = super::rows::TASK_COLUMNS.split(',').count();
         let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, i64>(ITEM_ID)?, super::rows::map_task_row(r)?))
+            Ok((r.get::<_, i64>(item_id)?, super::rows::map_task_row(r)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<HashMap<_, _>>>()?)
     }

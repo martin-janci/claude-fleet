@@ -3857,7 +3857,10 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 80,099 on 2026-10-07 after the mission graph (`work_link
     /// { dep | hold | propose_tree | accept_many | undo_accept }` and their
     /// arguments, +515 bytes).
-    const BUDGET_BYTES: usize = 80_199;
+    /// Measured at 80,557 on 2026-10-08 after a run's evidence and typed
+    /// done_when (`work_link { done_when | verify }` and their arguments,
+    /// +458 bytes).
+    const BUDGET_BYTES: usize = 80_657;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
