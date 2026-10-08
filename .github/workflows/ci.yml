@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` so adding `ci:all-os` to a PR starts the macOS/Windows legs
+    # (see "MACOS AND WINDOWS ON MAIN" below).
+    types: [opened, synchronize, reopened, labeled]
   # Manual re-run. The real coverage is the two triggers above — every PR and
   # every push to main — but without this the workflow cannot be started from
   # the UI or `gh workflow run ci.yml` at all, which is how a job added here
@@ -62,6 +65,24 @@ concurrency:
 #
 # Raise one when the work in it legitimately grows; do not remove it.
 
+# MACOS AND WINDOWS ON MAIN, NOT ON EVERY PULL REQUEST. A full run is fifteen
+# jobs, eight of them on macOS or Windows runners, and the account's hosted
+# pool runs at most five macOS jobs at a time, account-wide (fleet-mobile's
+# CI draws from the same pool). On 2026-10-08 fifteen redesign PRs were open
+# at once and each merge to main made every lane merge main back in, so each
+# PR restarted its fifteen jobs every few minutes: `changes`, a 5-second job,
+# waited 17 minutes for a runner, the macOS legs never got one before the
+# next push cancelled them, and every PR sat on "Queued".
+#
+# So a pull request runs the Linux legs only (rust, frontend, ag, hub-headless,
+# hub-image, version-consistency: seven jobs), and every push to main and
+# every manual run still runs all three OSes, so a macOS or Windows break is
+# caught on the merge commit that brought it. A PR that touches
+# platform-specific code (cfg(target_os), the PTY, Windows paths, the bundle)
+# gets the full matrix by adding the `ci:all-os` label. Skipped jobs count as
+# passed for a required check; the matrix legs below simply do not exist on
+# a Linux-only run.
+#
 # work::scale_tests' wall-clock budgets are enforced only with this set; a
 # developer's loaded box prints an over-budget call instead of failing it.
 env:
@@ -228,7 +249,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-24.04]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:all-os')) && '["macos-latest","ubuntu-24.04"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -254,7 +275,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-24.04]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:all-os')) && '["macos-latest","ubuntu-24.04"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -299,7 +320,7 @@ jobs:
   # platform-specific and stay on the Linux leg of `rust` above.
   rust-windows:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:all-os')) }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -327,7 +348,7 @@ jobs:
   # Its cache is saved from main only, as windows-bundle's is.
   clippy:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:all-os')) }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -364,7 +385,7 @@ jobs:
   # from main only, so PR runs restore it without adding an entry per PR.
   windows-bundle:
     needs: changes
-    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:all-os')) }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -543,7 +564,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-24.04, windows-latest]
+        os: ${{ fromJSON((github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:all-os')) && '["macos-latest","ubuntu-24.04","windows-latest"]' || '["ubuntu-24.04"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - run: git config --global core.autocrlf false
