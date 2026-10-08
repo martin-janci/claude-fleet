@@ -49,6 +49,13 @@
 .ofl--comet {
   --b-light: var(--comet-head);
 }
+/* On a filled primary button the Comet takes the button's text colour
+ * (the manual's `.of-btn.primary .cm`). */
+.btn--primary .ofl--comet,
+.of-btn.primary .ofl--comet {
+  --accent: var(--accent-fg);
+  --b-light: var(--accent-fg);
+}
 
 /* Reduced and Off: every loop becomes one slow opacity fade. */
 .ofl--still * {

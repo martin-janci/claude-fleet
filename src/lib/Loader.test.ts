@@ -123,6 +123,11 @@ describe('Loader kit', () => {
     expect(comet.style.getPropertyValue('--s')).toBe('12px');
   });
 
+  it('a Comet on a filled primary button takes the button text colour', () => {
+    const css = readFileSync('src/lib/loader-kit.css', 'utf8');
+    expect(css).toMatch(/\.btn--primary \.ofl--comet,\s*\.of-btn\.primary \.ofl--comet\s*\{\s*--accent: var\(--accent-fg\);\s*--b-light: var\(--accent-fg\);/);
+  });
+
   it('draws a known progress', () => {
     render(Loader, { props: { delay: 0, name: 'progress-ring', value: 0.64 } });
     const ring = screen.getByTestId('loader');
