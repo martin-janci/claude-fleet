@@ -317,6 +317,43 @@ Choice over those same candidates (or `unsure`).
 Code: `service/decide/start_project.rs`, `preview_start_decided` in
 `service/trackers/tickets.rs`; card K1 in the test map.
 
+## `work_link` — the work item of a session no rule could link (J1)
+
+When three turns of a conversation have gone by and nothing linked the
+session to a ticket (no branch, PR, prompt key or person did), and
+`decide.jev.work_link` is on, Jev is asked one Choice: which of the
+person's own candidates (the classification nudge's set: *My work* tickets
+inside the host's scope and keyed local items changed in the last 14 days,
+less any the session rejected; at most 20) the session works on, or `none`.
+
+- **What is sent.** The conversation's first prompt with every key, ticket
+  URL, URL and the branch name removed, redacted; each candidate's title.
+  The same question the offline benchmark asks
+  (`fleet-hub decide bench work-link`), so its acceptance lines measure what
+  goes live.
+- **Shadow.** Asked off the prompt's path and only recorded, with `none` as
+  the baseline (no rule had an answer).
+- **Assist.** A usable answer (at least 50%, not `none`) becomes a
+  pre-selected suggestion (rule R12, source `jev`): the row's chip shows ✦
+  instead of `?`, Review shows *Proposed by Jev · from the first prompt ·
+  N%* with Confirm, Reject and Change, and the link's evidence keeps the
+  confidence. Nothing is linked until a person confirms; a rejected pair is
+  never proposed again (R9); Jev's suggestions never count as high
+  confidence for *Confirm all high-confidence*.
+- **Asked once per input.** Later prompts of the conversation reuse the
+  decided run.
+- **Follow-up.** Your Confirm marks the run `confirmed`, your Reject
+  `rejected`, and confirming another link of the session `corrected` (to
+  that item). A shadow answer nobody saw is never marked.
+- **What is recorded.** Subject `session` `<row id>`; options are item ids
+  (`i<id>`) and `none`.
+- **Live only after acceptance (D32).** Leave it `off` or `shadow` until the
+  benchmark's J1 acceptance lines pass.
+
+Code: `service/decide/work_link.rs`, `work_link_subject` in
+`service/hooks.rs`, `on_jev_proposal` in `service/work/detect.rs`; card J1
+in the test map.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->

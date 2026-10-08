@@ -39,6 +39,7 @@
     setWorkProjectTrust,
     unlinkSessionWork,
     workWhy,
+    JEV_RULE,
     crossOrgOf,
     crossOrgSentence,
     type WorkLink,
@@ -728,6 +729,7 @@
             <WorkChip
               workKey={suggestionKey}
               suggested
+              proposed={$uiLayout === 'new' && suggestion.rule === JEV_RULE}
               testid="work-suggestion"
               onclick={(e) => (workBlocked === null ? openWorkMenu(e) : e.stopPropagation())}
             />
