@@ -18,6 +18,8 @@
   // as "update the hub", with Same worktree still one click away.
   import { untrack } from 'svelte';
   import DialogSheet from './DialogSheet.svelte';
+  import Loader from './Loader.svelte';
+  import { uiLayout } from './prefs';
   import { rewindConversation, sessions } from './sessions';
   import { moveSession } from './moveSession';
   import { hosts } from './hosts';
@@ -233,12 +235,27 @@
     {/if}
   </label>
 
+  {#if busy && $uiLayout === 'new'}
+    <!-- Redesign step 5.13: forking is merging work, so the manual's Liquid
+         orbit, inline where the new session will appear. -->
+    <div class="merging" data-testid="fork-merging">
+      <Loader name="liquid-orbit" size={56} label={moving ? 'Forking and moving' : 'Forking'} />
+      <span>{moving ? `Copying the conversation, then moving it to ${targetHost}` : 'Copying the conversation into a new session'}</span>
+    </div>
+  {/if}
   {#if notice && notice !== 'forked'}
     <p class="notice" data-testid="fork-notice">{notice}</p>
   {/if}
 </DialogSheet>
 
 <style>
+  .merging {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 11px;
+    color: var(--fg-muted);
+  }
   .choices {
     border: none;
     padding: 0;
