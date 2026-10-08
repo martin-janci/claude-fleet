@@ -2406,8 +2406,9 @@ fn router_sum_serves_every_tool() {
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
     // claim tools (T12) + the New session picker's `project_picks` /
     // `set_project_pick` + org administration's `org_admin` (phase B) +
-    // chat forms' `ask` + debug devices' `debug_devices`.
-    assert_eq!(served, 119);
+    // chat forms' `ask` + debug devices' `debug_devices` + the Files tab's
+    // `repo_blame`.
+    assert_eq!(served, 120);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3934,7 +3935,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// sides' sum.
     /// Measured at 85,601 on 2026-10-08 after debug devices (the
     /// `debug_devices` tool, one entry by `action`, +1,967 bytes).
-    const BUDGET_BYTES: usize = 85_701;
+    /// Measured at 85,990 on 2026-10-08 after the Files tab's `repo_blame`
+    /// and `repo_branches`' `merged` note (+389 bytes).
+    const BUDGET_BYTES: usize = 86_090;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10110,6 +10113,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // grantee is offered the control and refused it. `share.ts` has to move to
     // `'own'` — frontend territory, named in this round's hand-off.
     ("delete_worktree", &["Own"]),
+    ("repo_blame", &["Read"]),
     ("repo_branches", &["Read"]),
     ("repo_changes", &["Read"]),
     ("repo_commit", &["Read"]),

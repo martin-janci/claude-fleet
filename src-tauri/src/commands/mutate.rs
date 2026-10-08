@@ -13,7 +13,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::repo::SessionIdArgs;
 use fleet_core::service::repo_mutate::{
     self, CheckoutArgs, CheckoutCommitArgs, CommitCreateArgs, CreateBranchArgs, DeleteBranchArgs,
-    PushArgs, StageArgs,
+    DeleteMergedArgs, DeleteMergedResult, PushArgs, StageArgs,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
@@ -68,6 +68,19 @@ pub async fn repo_delete_branch(
 ) -> Result<(), IpcError> {
     backend.refuse_local_only("repo_delete_branch")?;
     repo_mutate::repo_delete_branch(args, &store, &ssh).await
+}
+
+/// Delete the named local branches the base branch still contains; each is
+/// re-checked on the host, and the rest come back in `kept`.
+#[tauri::command]
+pub async fn repo_delete_merged_branches(
+    args: DeleteMergedArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<DeleteMergedResult, IpcError> {
+    backend.refuse_local_only("repo_delete_merged_branches")?;
+    repo_mutate::repo_delete_merged_branches(args, &store, &ssh).await
 }
 
 /// Stage the given worktree paths (`git add --`).

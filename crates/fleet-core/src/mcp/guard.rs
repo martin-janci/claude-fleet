@@ -966,6 +966,13 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         deadline: Deadline::Quick,
     },
     ToolPolicy {
+        name: "repo_blame",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
         name: "repo_log",
         access: Access::Client,
         readonly: true,

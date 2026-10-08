@@ -729,6 +729,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "repo_tree" => fx.t.repo_tree(ext, p!()).await,
         "repo_file" => fx.t.repo_file(ext, p!()).await,
         "repo_diff" => fx.t.repo_diff(ext, p!()).await,
+        "repo_blame" => fx.t.repo_blame(ext, p!()).await,
         "repo_log" => fx.t.repo_log(ext, p!()).await,
         "repo_branches" => fx.t.repo_branches(ext, p!()).await,
         "repo_commit" => fx.t.repo_commit(ext, p!()).await,
@@ -1318,6 +1319,12 @@ async fn run_matrix() {
     .await;
     m.gated(
         "repo_diff",
+        Reach::Read,
+        |fx, _| json!({ "session_id": fx.row, "path": "README.md" }),
+    )
+    .await;
+    m.gated(
+        "repo_blame",
         Reach::Read,
         |fx, _| json!({ "session_id": fx.row, "path": "README.md" }),
     )

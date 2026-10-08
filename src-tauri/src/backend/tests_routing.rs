@@ -1243,6 +1243,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "repo_blame",
+            "repo_blame",
+            json!({ "session_id": 7, "path": "src/lib.rs" }),
+            r#"{"path":"src/lib.rs","hunks":[],"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_blame(
+                    b,
+                    RepoFileArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
         // The simple `(b, s, _)` shape: `operator_status` needs neither ssh
         // nor a cancellation registry, unlike `ensure_operator` below.
         (
