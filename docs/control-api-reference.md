@@ -752,6 +752,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::health::health_check`
 - `commands::diagnostics::collect_diagnostics`
 - `commands::diagnostics::open_log_folder`
+- `commands::tray::set_tray_state`
 - `commands::projects::list_projects`
 - `commands::projects::refresh_projects`
 - `commands::projects::add_project`

@@ -6,7 +6,8 @@
 // - A label that opens a dialog ends with "…", and no label ends in "...".
 //
 // What "opens a dialog" means here: a dialog is a component whose markup
-// renders a `<Modal`. It is shown by an `{#if flag}` around it, either where it
+// renders a `<Modal` (or `<DialogSheet`, the one dialog pattern that wraps
+// it). It is shown by an `{#if flag}` around it, either where it
 // is used (`{#if reviewOpen}<ReviewDialog …>`) or inside itself
 // (`{#if $open}<Modal …>`). A button opens it when its `onclick` makes that
 // flag truthy: inline, through a function in the same file, or through an
@@ -288,6 +289,10 @@ export interface DialogIndex {
 }
 
 const nameOf = (path: string) => path.replace(/^.*\//, '').replace(/\.svelte$/, '');
+
+/** The components a dialog draws its frame with: `Modal`, and `DialogSheet`
+ *  (step 5.10), which wraps it. */
+const FRAMES = ['Modal', 'DialogSheet'];
 
 /** Index the dialogs, their store flags and the module functions that open
  *  them. `selfGated` names the store a self-gated dialog's local flag follows
