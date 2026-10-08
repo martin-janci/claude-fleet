@@ -101,6 +101,7 @@
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { attentionFacts } from './attention_facts';
+  import { snapshotRows } from './motion_catalog';
   import { push, pushError } from './toasts';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
@@ -930,6 +931,13 @@
     $sidebarView === 'inbox' ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions] : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
+  // Redesign step 7.4: a row whose state moves it to another group is a new
+  // element there; snapshot every row's place before the groups re-render so
+  // the new one slides from where the old one was (motion_catalog.slideIn).
+  $effect.pre(() => {
+    void [flatGroups, workGroups, inboxList, orphanSessions];
+    untrack(() => snapshotRows(sidebarEl));
+  });
   const inboxRestText = $derived(notWaitingText(notWaiting(inboxPool, attentionOpts)));
 
   // Interactive Claude sessions running entirely outside fleet (Claude
