@@ -191,7 +191,7 @@
     border-color: currentColor;
   }
   .checks--failing {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .link {
     background: none;
@@ -210,6 +210,6 @@
     color: var(--fg-muted);
   }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
 </style>

@@ -28,8 +28,8 @@
 
 <style>
   .mic { background: none; border: 1px solid transparent; border-radius: 4px; cursor: pointer; opacity: 0.5; position: relative; }
-  .mic.on { opacity: 1; border-color: var(--accent, #6aa0ff); }
+  .mic.on { opacity: 1; border-color: var(--accent); }
   .mic:disabled { cursor: not-allowed; opacity: 0.25; }
-  .live { position: absolute; top: 1px; right: 1px; width: 6px; height: 6px; border-radius: 50%; background: #e5484d; }
+  .live { position: absolute; top: 1px; right: 1px; width: 6px; height: 6px; border-radius: 50%; background: var(--status-failed); }
   .tip { font-size: 11px; opacity: 0.8; margin-left: 4px; }
 </style>

@@ -147,7 +147,7 @@
   }
   .sess-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .muted { color: var(--fg-muted); font-size: 11px; }
-  .ok { color: rgb(80, 200, 110); }
+  .ok { color: var(--status-done); }
   .err { color: var(--danger); font-size: 11px; }
   textarea {
     width: 100%;

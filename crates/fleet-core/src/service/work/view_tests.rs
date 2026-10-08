@@ -2267,3 +2267,41 @@ fn a_tasks_cost_sums_its_sessions_and_the_group_header_sums_its_tasks() {
     let p = page(&w, &strict(w.org_b), WorkTreeFilters::default());
     assert!(p.tasks.iter().all(|t| t.cost_micros == 0));
 }
+
+/// Step 2.8: what a rule, Jev or an LLM proposes about a task rides on it
+/// in the shape a session row carries; a task nothing decided carries none.
+#[test]
+fn a_task_carries_what_is_proposed_about_it() {
+    let w = world();
+    let run = |answer: &str| crate::store::NewDecisionRun {
+        at: 1_000,
+        feature: "duplicate".into(),
+        org_id: Some(w.org_a),
+        subject_kind: crate::store::PROPOSAL_SUBJECT_WORK_ITEM.into(),
+        subject_id: w.t1.to_string(),
+        mode: "assist".into(),
+        provider: "jev".into(),
+        question_version: "duplicate.v1".into(),
+        answer: Some(answer.into()),
+        confidence: Some(0.9),
+        ..Default::default()
+    };
+    let id = lock(&w.st)
+        .unwrap()
+        .insert_decision_run(&run("keep_both"))
+        .unwrap();
+    let p = page(&w, &OrgScope::All, WorkTreeFilters::default());
+    assert_eq!(
+        task_of(&p, "TK-1").proposals,
+        vec![crate::store::DecisionProposal {
+            feature: "duplicate".into(),
+            value: "keep_both".into(),
+            source: "jev".into(),
+            reason: None,
+            confidence_pct: Some(90),
+            run_id: Some(id),
+            at: Some(1_000),
+        }]
+    );
+    assert!(task_of(&p, "TK-3").proposals.is_empty());
+}

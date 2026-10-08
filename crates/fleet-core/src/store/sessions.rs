@@ -729,6 +729,36 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Set (or, with `None`, clear) what a finished turn came to (migration
+    /// 129; J2, step 5.11, writes it). Refuses a value outside
+    /// [`TURN_OUTCOMES`](super::TURN_OUTCOMES). Answers whether the row
+    /// changed; a change emits `session_updated`.
+    pub fn set_turn_outcome(
+        &self,
+        id: i64,
+        outcome: Option<&str>,
+    ) -> Result<bool, crate::ipc_error::IpcError> {
+        if let Some(o) = outcome {
+            if !super::TURN_OUTCOMES.contains(&o) {
+                return Err(crate::ipc_error::IpcError::new(
+                    crate::ipc_error::codes::E_INVALID,
+                    format!(
+                        "turn_outcome is one of {}, not {o:?}",
+                        super::TURN_OUTCOMES.join(", ")
+                    ),
+                ));
+            }
+        }
+        let n = self.conn.execute(
+            "UPDATE sessions SET turn_outcome = ?1 WHERE id = ?2 AND turn_outcome IS NOT ?1",
+            rusqlite::params![outcome, id],
+        )?;
+        if n > 0 {
+            self.emit_session(id)?;
+        }
+        Ok(n > 0)
+    }
+
     /// Record who or what started a session (migration 124). Every start
     /// path writes it once the row exists; a restart, recreate or repair
     /// keeps the row and so keeps its origin. On the row, so this emits
