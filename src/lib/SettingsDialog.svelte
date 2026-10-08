@@ -37,7 +37,7 @@
   import McpSettings from './McpSettings.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import { loadHostTokens } from './host_actions';
-  import { hostsChordLabel, requestHostsView, settingsSection } from './app_views';
+  import { hostsChordLabel, requestHostsView, settingsKey, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
@@ -258,9 +258,11 @@
   onMount(() => {
     const section = $settingsSection;
     if (!section) return;
+    const key = $settingsKey;
     settingsSection.set(null);
+    settingsKey.set(null);
     if (section.includes('.') || section === 'settings' || section === 'usage' || section === 'guides') {
-      select(section);
+      select(section, key ?? undefined);
       return;
     }
     void tick().then(() => {

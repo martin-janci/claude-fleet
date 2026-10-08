@@ -109,10 +109,14 @@ export type UiBlock =
       note?: string;
     }
   | { kind: 'results'; title?: string; summary?: string; items: ResultItem[] }
-  | { kind: 'error'; code: string; title: string; body?: string; detail?: string; next: UiChoice[] };
+  | { kind: 'error'; code: string; title: string; body?: string; detail?: string; next: UiChoice[] }
+  /** A settings change waiting for a person: the id `set_setting` with
+   *  `propose: true` answered. The card reads the key and values from the
+   *  proposal, never from the block (`rich/SettingCard.svelte`). */
+  | { kind: 'setting'; proposal: number; note?: string };
 
 export type UiKind = UiBlock['kind'];
-export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error'];
+export const UI_KINDS: UiKind[] = ['report', 'steps', 'guide', 'callout', 'facts', 'choices', 'form', 'progress', 'results', 'error', 'setting'];
 /** A progress `id` and an error `code`: a key, never prose. */
 const KEY_RE = /^[A-Za-z0-9_.:-]+$/;
 const KEY_MAX = 64;
@@ -647,6 +651,13 @@ export function checkUiBlock(raw: string): Check {
       const title = str(v, 'title', p, '', { required: true, max: 120 }) ?? '';
       const next = each(optArr(v, 'next', p, '', 1, 4) ?? [], p, 'next', (o, at) => choice(o, p, at));
       block = { kind: 'error', code, title, body: str(v, 'body', p, '', { max: 4000 }), detail: str(v, 'detail', p, '', { max: 8000 }), next };
+      break;
+    }
+    case 'setting': {
+      let proposal: number | undefined;
+      if (v.proposal === undefined || v.proposal === null) p.add('', '`proposal` is required');
+      else proposal = num(v, 'proposal', p, '', { min: 1 });
+      block = { kind: 'setting', proposal: proposal ?? 0, note: str(v, 'note', p, '', { max: 500 }) };
       break;
     }
   }

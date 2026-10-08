@@ -12,10 +12,11 @@ it are drawn as cards instead:
 - **A `fleet.ui/1` block.** A fenced ```` ```fleet-ui ```` block (or a
   ```` ```json ```` block whose object has `"spec": "fleet.ui/1"`) holding one
   block: a tutorial, a guide, a callout, facts, choices, a form, a report,
-  a job's progress, results or an error.
+  a job's progress, results, an error or a settings change.
 
 A card is a view of the reply. Nothing is stored and nothing is sent from
-one. A card that acts (choices, a form, a follow-up) only fills the
+one, with one exception: a `setting` card applies a settings change an
+agent proposed, after the person confirms it. A card that acts (choices, a form, a follow-up) only fills the
 session's composer, and the person presses Enter. It acts only when the
 composer is on screen for the conversation shown. An earlier conversation
 or a row with no REPL draws the card with its actions turned off.
@@ -40,6 +41,7 @@ it closes.
 | follow a long job as it moves on | `progress` |
 | read numbers, a chart or a table you measured | `results` |
 | see what failed and pick what to do about it | `error` |
+| apply a settings change you proposed | `setting` |
 
 A block's form is not `ask`: you do not wait for it, and its answers arrive
 as the person's next prompt. Use it when the answers can wait for the next
@@ -199,6 +201,27 @@ A stat or a numeric cell without one is an `int`.
 | `next` | no | 1–4 of `{ label, prompt, hint? }`, as `choices` |
 
 A next step fills the composer, as a choice does; the person presses Enter.
+
+### `setting`: a settings change to apply
+
+| Key | Required | Meaning |
+|---|---|---|
+| `proposal` | yes | The id `set_setting` with `propose: true` answered (a whole number ≥ 1) |
+| `note` | no | ≤ 500 chars, what the change does in plain words |
+
+Propose first, over the control API: `set_setting { key, value, why,
+propose: true }`. It validates the value and answers the proposal with its
+`id`. Then write the block with that id. The card does not take the key or
+the value from the block: it reads both, and the value now, from the
+proposal, so the person always sees what Apply would write.
+
+Apply asks first, with the setting's own warning when it has one, then
+applies that one proposal as Settings › Review does
+(`decide_setting_proposals`, which only the desktop or a trusted device may
+call). *Not now* writes nothing: the proposal still waits in Settings ›
+Review. After Apply, *Undo in Settings* opens the setting where it lives.
+A proposal that was already decided shows as such; a device that may not
+change settings shows the change with no Apply.
 
 ## Checking a block
 
