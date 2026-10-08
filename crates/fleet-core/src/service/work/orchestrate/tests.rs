@@ -427,3 +427,82 @@ fn a_runs_start_is_recorded_as_the_missions() {
         );
     }
 }
+
+/// Redesign 8.7: a grant names its login, and the loop holds a run whose
+/// account is past `accounts.pause_at` (the plan's check: the loop skips an
+/// account over its threshold), saying so once.
+#[test]
+fn the_loop_holds_runs_on_an_account_over_the_line() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let g = grant(
+        &WorkLinkArgs {
+            level: Some(2),
+            hosts: Some(vec!["mac".into()]),
+            profile: Some(" work ".into()),
+            ..by_id("mission_grant", fx.m.id)
+        },
+        &fx.deps.store,
+        &fx.me,
+    )
+    .unwrap();
+    assert_eq!(g.profile.as_deref(), Some("work"));
+    assert_eq!(
+        grant(
+            &WorkLinkArgs {
+                level: Some(2),
+                profile: Some("../x".into()),
+                ..by_id("mission_grant", fx.m.id)
+            },
+            &fx.deps.store,
+            &fx.me,
+        )
+        .unwrap_err()
+        .code,
+        codes::E_INVALID
+    );
+    let s = lock(&fx.deps.store).unwrap();
+    let g = s.live_mission_grant(fx.m.id, now_unix()).unwrap().unwrap();
+    assert_eq!(g.profile.as_deref(), Some("work"), "read back");
+    let start = start_for(&s, &fx.m, item, &Actor::Loop, Some(&g)).unwrap();
+    assert_eq!(start.profile.as_deref(), Some("work"), "the run bills it");
+    let now = 5_000;
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 91.0, now);
+    let run = Step {
+        kind: "run".into(),
+        item_id: Some(item),
+        role: Some("implement".into()),
+        reason: String::new(),
+        context: None,
+        auto: true,
+    };
+    let ask = Step {
+        kind: "ask".into(),
+        auto: false,
+        ..run.clone()
+    };
+    let limit_events = |s: &Store| {
+        s.mission_events(fx.m.id, None, 50)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "account_limit")
+            .count()
+    };
+    for _ in 0..2 {
+        let mut steps = vec![run.clone(), ask.clone()];
+        hold_runs_over_limit(&s, &fx.m, Some(&g), &mut steps, now).unwrap();
+        assert_eq!(steps, vec![ask.clone()], "the run waits, the ask stays");
+    }
+    assert_eq!(limit_events(&s), 1, "said once");
+    let e = &s.mission_events(fx.m.id, None, 1).unwrap()[0];
+    let why = e.payload.as_ref().unwrap()["why"].as_str().unwrap();
+    assert!(
+        why.contains("profile work on mac") && why.contains("91%"),
+        "{why}"
+    );
+    // Under the line again: the run goes.
+    crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 30.0, now);
+    let mut steps = vec![run.clone()];
+    hold_runs_over_limit(&s, &fx.m, Some(&g), &mut steps, now).unwrap();
+    assert_eq!(steps, vec![run]);
+}

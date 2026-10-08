@@ -428,6 +428,23 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Redesign step 9.2: the owner's paired device lists and answers the
+    // confirmations waiting on this server — on a hub, the only place they
+    // can be answered. Not served to the master; answering is a write.
+    ToolPolicy {
+        name: "mcp_confirms",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "answer_mcp_confirm",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The page specs, for a phone that renders them (P6). Compiled into the
     // hub like the desktop: the same answer for everyone who may see pages.
     ToolPolicy {
@@ -1649,14 +1666,22 @@ impl RateLimiter {
 
 /// What the desktop is asked to approve. Emitted to the frontend as the
 /// `mcp:confirm-required` event and echoed back in `E_CONFIRM_REQUIRED`.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ConfirmRequest {
     pub nonce: String,
     pub tool: String,
     /// Redacted argument summary (never a prompt body).
     pub summary: String,
-    /// Caller label (`master` or `host:<alias>`).
+    /// Caller label (`master`, `host:<alias>` or `client:<name>`).
     pub caller: String,
+    /// The UX agent's operator session asked (`Caller::is_operator`): the
+    /// New layout answers it as a card in Control's transcript (redesign
+    /// step 9.2) rather than in the dialog.
+    #[serde(default)]
+    pub operator: bool,
+    /// When it was asked, unix seconds ("asked 2m ago" on the card).
+    #[serde(default)]
+    pub asked_at: i64,
 }
 
 /// Callback that surfaces a [`ConfirmRequest`] to the desktop. Wired in
@@ -1678,6 +1703,9 @@ pub enum ConfirmState {
 
 struct Pending {
     tool: String,
+    caller: String,
+    operator: bool,
+    asked_at: i64,
     /// The argument summary the user saw and approved. A retry must present
     /// the same summary — otherwise an approval for `kill_session name=x`
     /// could be replayed as `kill_session name=controller force=true`.
@@ -1699,7 +1727,22 @@ impl PendingConfirms {
 
     /// Mint a nonce for `tool` and return the request to show the user.
     pub fn request(&self, tool: &str, summary: &str, caller: &str) -> ConfirmRequest {
+        self.request_from(tool, summary, caller, false)
+    }
+
+    /// [`Self::request`], saying whether the operator asked.
+    pub fn request_from(
+        &self,
+        tool: &str,
+        summary: &str,
+        caller: &str,
+        operator: bool,
+    ) -> ConfirmRequest {
         let nonce = super::generate_token();
+        let asked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         let mut entries = self
             .entries
             .lock()
@@ -1709,6 +1752,9 @@ impl PendingConfirms {
             nonce.clone(),
             Pending {
                 tool: tool.to_string(),
+                caller: caller.to_string(),
+                operator,
+                asked_at,
                 summary: summary.to_string(),
                 created: Instant::now(),
                 approved: None,
@@ -1719,6 +1765,8 @@ impl PendingConfirms {
             tool: tool.to_string(),
             summary: summary.to_string(),
             caller: caller.to_string(),
+            operator,
+            asked_at,
         }
     }
 
@@ -1767,6 +1815,32 @@ impl PendingConfirms {
                 ConfirmState::Denied
             }
         }
+    }
+
+    /// Outstanding (unanswered) requests in full, oldest first: what the
+    /// confirm cards and the dialog show after a reload, and what a hub
+    /// lists to its owner's desktop (`confirms { action: list }`).
+    pub fn pending(&self) -> Vec<ConfirmRequest> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune(&mut entries, Instant::now());
+        let mut v: Vec<(&String, &Pending)> = entries
+            .iter()
+            .filter(|(_, p)| p.approved.is_none())
+            .collect();
+        v.sort_by_key(|(_, p)| p.created);
+        v.into_iter()
+            .map(|(n, p)| ConfirmRequest {
+                nonce: n.clone(),
+                tool: p.tool.clone(),
+                summary: p.summary.clone(),
+                caller: p.caller.clone(),
+                operator: p.operator,
+                asked_at: p.asked_at,
+            })
+            .collect()
     }
 
     /// Outstanding (unanswered) requests, oldest first — lets the desktop
@@ -2500,6 +2574,9 @@ mod tests {
             "old".to_string(),
             Pending {
                 tool: "kill_session".into(),
+                caller: "master".into(),
+                operator: false,
+                asked_at: 0,
                 summary: String::new(),
                 created: now,
                 approved: None,

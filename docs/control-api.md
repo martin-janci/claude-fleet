@@ -816,6 +816,12 @@ Index by area (names only; see the reference for details):
   `failed` on an error, a lost or removed session, six quiet hours, or a
   session past the run budget (which also turns the routine off with
   `paused_reason`), and `skipped` when the last run is still going under
+<<<<<<< origin/main
+  `overlap: skip`, today's budget is spent, the account its login bills
+  is at or past `accounts.pause_at` (Orbit Fleet 8.7, read from the stored
+  usage readings), or a person skipped it.
+  `automation.paused` (Pause all) stops the schedule and event fires,
+=======
   `overlap: skip`, today's budget is spent, or a person skipped it.
   A finished run also carries an `outcome` (8.10): `did_work`, `nothing`,
   `failed` or `needs_person`, with `outcome_source` `exit` (a failed run,
@@ -823,6 +829,7 @@ Index by area (names only; see the reference for details):
   `needs_person`, a pull request `did_work`) or `jev`; a run no rule can
   read has none until Jev answers. A `nothing` run marks its session seen,
   so it stays out of the Inbox. `automation.paused` (Pause all) stops the schedule and event fires,
+>>>>>>> HEAD
   never `run_now`. Read and changed by the owner and the org's admins, read
   by the org's members, never served to a per-host token; the routine's
   org is its host's.
@@ -1579,8 +1586,13 @@ automatically on app start.
   with `new_worker`, `restore_host_sessions` (not its `dry_run`),
   `recreate_session`, `restart_session`, `work_link` `start` / `resume` —
   its `safe_kill_session`, and every tool above return
-  `E_CONFIRM_REQUIRED` until a person approves them on the desktop; on a
-  hub, which has no approver, they are refused with `E_FORBIDDEN`. Every
+  `E_CONFIRM_REQUIRED` until a person approves them: on the desktop in its
+  dialog or Control's cards, and on a hub from the owner's paired device,
+  which lists the waiting calls with `mcp_confirms` (each with `nonce`,
+  `tool`, `summary`, `caller`, `operator`, `asked_at`) and answers one with
+  `answer_mcp_confirm` (`nonce`, `approved`; `false` when it was already
+  answered or expired). Both are the owner's own device only, never the
+  operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central

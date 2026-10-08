@@ -570,6 +570,15 @@ fn hosts_has_claude_profiles(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 /// `already_applied` guard of migration 129.
+fn grants_have_profile(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('orchestration_grants') WHERE name = 'profile'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn sessions_has_turn_outcome(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'turn_outcome'",
@@ -640,7 +649,7 @@ fn host_tokens_has_rotated_at(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
-/// `already_applied` guard of migration 136.
+/// `already_applied` guard of migration 138.
 fn routine_runs_has_outcome_source(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('routine_runs') WHERE name = 'outcome_source'",
@@ -1582,11 +1591,21 @@ const MIGRATIONS: &[Migration] = &[
     // and the fleet-agent install jobs (`agent_installs`). New tables only,
     // `IF NOT EXISTS`, safe to re-run.
     Migration::plain(135, include_str!("../../migrations/135_host_setup.sql")),
+    // PR shepherd: a person's standing rule per project and one row per
+    // problem the shepherd saw on a session's PR (two CREATE TABLE IF NOT
+    // EXISTS, idempotent as written).
+    Migration::plain(136, include_str!("../../migrations/136_pr_shepherd.sql")),
+    // Orbit Fleet 8.7: a mission grant names its login (one ADD COLUMN,
+    // guarded).
+    Migration {
+        version: 137,
+        sql: include_str!("../../migrations/137_grant_profile.sql"),
+        already_applied: Some(grants_have_profile),
     // Orbit Fleet 8.10: what a routine run came to (two ADD COLUMNs,
     // guarded on the last).
     Migration {
-        version: 136,
-        sql: include_str!("../../migrations/136_routine_run_outcome.sql"),
+        version: 138,
+        sql: include_str!("../../migrations/138_routine_run_outcome.sql"),
         already_applied: Some(routine_runs_has_outcome_source),
     },
 ];

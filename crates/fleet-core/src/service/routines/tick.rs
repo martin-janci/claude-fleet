@@ -157,6 +157,14 @@ fn refusal(s: &Store, r: &RoutineRow, now: i64) -> Result<Option<String>, IpcErr
             )));
         }
     }
+    // Account-aware automation (redesign 8.7): a run on an account past
+    // `accounts.pause_at` would stall at the limit, so the routine skips it
+    // and fires again at its next time.
+    if let Some(over) =
+        crate::service::account_limits::over_limit(s, &r.host_alias, r.profile.as_deref(), now)?
+    {
+        return Ok(Some(over.reason()));
+    }
     Ok(None)
 }
 

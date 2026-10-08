@@ -18,6 +18,12 @@
   import DiffView from './DiffView.svelte';
   import { highlight, langForPath } from './highlight';
   import { sendFile } from './downloads';
+  import { uiLayout, sessionView } from './prefs';
+  import { copyText } from './clipboard';
+  import { insertIntoComposer } from './conversation';
+  import { goTo } from './destination';
+  import { accessOf } from './access';
+  import { editorBlockedReason, openSessionInEditor } from './editor';
 
   let {
     session,
@@ -225,6 +231,25 @@
       : [],
   );
   const gutter = $derived(showBlame && blame ? blameGutter(blame.hunks, hlLines.length) : []);
+
+  // The new layout's viewer actions (redesign step 5.6, Files board): the
+  // path to the clipboard, the path into this session's composer, and the
+  // worktree in VS Code (the 5.5 command, with its reasons).
+  let copied = $state(false);
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(copiedTimer));
+  async function copyPath(p: string): Promise<void> {
+    if (!(await copyText(p))) return;
+    copied = true;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copied = false), 1_500);
+  }
+  function mention(p: string): void {
+    insertIntoComposer(session.id, `@${p}`);
+    sessionView.set('conversation');
+    goTo('session');
+  }
+  const editorBlocked = $derived(editorBlockedReason(session, $accessOf(session)));
 </script>
 
 <div class="viewer" data-testid="file-viewer">
@@ -263,6 +288,29 @@
           title="Copy this file to Downloads, for your phone and this window"
           onclick={() => path && void sendFile(session.id, path)}>⤓ Send to downloads</button
         >
+      {/if}
+      {#if $uiLayout === 'new'}
+        {@const p = path}
+        <div class="actions" role="group" aria-label="File actions">
+          <button type="button" class="act" data-testid="viewer-copy-path" onclick={() => void copyPath(p)}
+            >{copied ? 'Copied' : 'Copy path'}</button
+          >
+          <button
+            type="button"
+            class="act"
+            data-testid="viewer-mention"
+            title="Add @{p} to this session's message"
+            onclick={() => mention(p)}>Mention in chat</button
+          >
+          <button
+            type="button"
+            class="act"
+            data-testid="viewer-open-editor"
+            disabled={editorBlocked !== null}
+            title={editorBlocked ?? 'Open this worktree in VS Code'}
+            onclick={() => void openSessionInEditor(session)}>Open in VS Code</button
+          >
+        </div>
       {/if}
     </header>
 
@@ -358,6 +406,28 @@
     white-space: nowrap;
     direction: rtl;
     text-align: left;
+  }
+  .actions {
+    display: flex;
+    gap: 0.3rem;
+    margin-left: auto;
+  }
+  .act {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0.15rem 0.55rem;
+    white-space: nowrap;
+  }
+  .act:hover:not(:disabled) {
+    color: var(--fg);
+  }
+  .act:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
   .send {
     margin-left: 0.5rem;
