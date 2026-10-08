@@ -96,7 +96,6 @@ describe('no transition uses a raw duration', () => {
   // raw transitions left, so the list can only shrink.
   const PENDING: Record<string, number> = {
     'src/lib/Sidebar.svelte': 3,
-    'src/lib/ConversationPanel.svelte': 3,
   };
 
   const files = (dir: string): string[] =>

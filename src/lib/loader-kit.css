@@ -1,0 +1,80 @@
+/* The loader kit's frame (Loader.svelte). The 24 drawings and their
+ * animations are generated from the manual into loader-kit.generated.css;
+ * this file holds what the board leaves to its stage: the colour map, the
+ * dark stage, the reduced-motion fade, pausing and the determinate ring.
+ * Manual: docs/ux/2026-10-08-orbit-fleet-redesign/design-system/components/Loader. */
+
+.ofl {
+  /* The board's `.mo` map. */
+  --b-ink: var(--brand-ink);
+  --b-light: var(--brand-light);
+  --b-amber: var(--brand-amber);
+  --glow: color-mix(in srgb, var(--loader-accent) 35%, transparent);
+  --line: var(--border);
+  --pane: var(--bg-pane);
+  --muted: var(--fg-muted);
+  --failed: var(--status-failed);
+  --done: var(--status-done);
+  --waiting: var(--status-waiting);
+  display: inline-block;
+  position: relative;
+  flex-shrink: 0;
+  vertical-align: middle;
+  overflow: hidden;
+  line-height: 0;
+}
+
+/* The drawing at its natural size, scaled to the Loader's box. */
+.ofl__box {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+}
+
+/* Particle loaders sit on a dark stage in both themes. */
+.ofl--stage {
+  --accent: var(--loader-accent);
+  --fg: var(--brand-light);
+  /* The board's stage values: no theme token is this dark. */
+  --line: #2a2a2a;
+  --pane: #161616;
+  --muted: #8f8f8f;
+  background: radial-gradient(ellipse at center, #141a22 0%, #0f0f0f 70%);
+  border-radius: var(--radius-lg);
+}
+
+/* The Comet off the stage turns accent to --comet-head (the brand light only
+ * in dark, where it reads). */
+.ofl--comet {
+  --b-light: var(--comet-head);
+}
+
+/* Reduced and Off: every loop becomes one slow opacity fade. */
+.ofl--still * {
+  animation-name: ofl-fade !important;
+  animation-duration: var(--loader-reduced) !important;
+  animation-timing-function: ease-in-out !important;
+  animation-iteration-count: infinite !important;
+}
+@keyframes ofl-fade {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* Paused by the caller, or hidden (off screen, window in the background). */
+.ofl--paused,
+.ofl--paused * {
+  animation-play-state: paused !important;
+}
+
+/* Progress ring with a known value: the ring and its head follow `--ofl-p`. */
+.ofl--determinate .ofl-pr {
+  animation: none !important;
+  stroke-dashoffset: calc(100 - var(--ofl-p) * 100);
+}
+.ofl--determinate .ofl-head {
+  animation: none !important;
+  transform: rotate(calc(var(--ofl-p) * 360deg));
+}
