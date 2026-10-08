@@ -43,6 +43,9 @@ export function matchesRecency(p: ProjectTreeRow, r: Recency): boolean {
  *  `nowMs` is injectable so callers with a shared clock (and tests) stay
  *  deterministic. */
 export function timeAgo(unixSecs: number, nowMs: number = Date.now()): string {
+  // An unreadable timestamp (a transcript's free-form `timestamp`) is NaN
+  // here; every comparison below is false for NaN, so it read "NaNd ago".
+  if (!Number.isFinite(unixSecs)) return '';
   const ageSec = Math.floor((nowMs - unixSecs * 1000) / 1000);
   if (ageSec < 60) return 'just now';
   if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;

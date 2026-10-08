@@ -587,10 +587,9 @@ async fn healthcheck_probe(
 ) -> Result<String, String> {
     let port = match (port, env.get("FLEET_HUB_PORT")) {
         (Some(p), _) => p,
-        (None, Some(v)) => v
-            .trim()
-            .parse::<u16>()
-            .map_err(|e| format!("FLEET_HUB_PORT '{v}': {e}"))?,
+        (None, Some(v)) => {
+            crate::config::parse_port(v).map_err(|e| format!("FLEET_HUB_PORT {e}"))?
+        }
         (None, None) => mcp::DEFAULT_PORT,
     };
     let mode = match (tls, env.get("FLEET_HUB_TLS")) {

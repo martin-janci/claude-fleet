@@ -540,15 +540,26 @@ printf 'ok\036%s\036%s\036%s\036%s\036%s\036%s\036%s\036%s\036%s' "$present" "$c
 }
 
 /// PURE: parse [`probe_script`] output. `Err` carries the note to show.
+///
+/// The script runs under `bash -lc`, so a login banner may print ahead of
+/// the answer: the answer is read from the line it starts on.
 pub fn parse_probe(stdout: &str) -> Result<GitFacts, String> {
-    let t = stdout.trim_start();
-    if t.starts_with("norepo") {
-        return Err("no checkout of the project on the host".into());
-    }
-    if t.starts_with("nobranch") {
-        return Err("the branch is not on the host any more".into());
-    }
-    let f: Vec<&str> = stdout.trim_end_matches('\n').split('\u{1e}').collect();
+    let at_line_start = |i: usize| i == 0 || stdout.as_bytes()[i - 1] == b'\n';
+    let Some(start) = stdout
+        .match_indices("ok\u{1e}")
+        .map(|(i, _)| i)
+        .find(|&i| at_line_start(i))
+    else {
+        return Err(match stdout.trim_end().lines().last().map(str::trim) {
+            Some("norepo") => "no checkout of the project on the host".into(),
+            Some("nobranch") => "the branch is not on the host any more".into(),
+            _ => "unreadable git probe output".into(),
+        });
+    };
+    let f: Vec<&str> = stdout[start..]
+        .trim_end_matches('\n')
+        .split('\u{1e}')
+        .collect();
     if f.len() != 10 || f[0].trim() != "ok" {
         return Err("unreadable git probe output".into());
     }
@@ -1379,6 +1390,17 @@ Verify the git state before acting; this summary may be stale. Full context: the
         assert_eq!(g.commits, vec!["fix: a", "feat: b"]);
         assert!(parse_probe("norepo").is_err());
         assert!(parse_probe("nobranch").is_err());
+        // A login banner ahead of the answer.
+        assert!(parse_probe("Welcome\nnorepo")
+            .unwrap_err()
+            .contains("no checkout"));
+        let f = parse_probe(
+            "Welcome\nok\u{1e}1\u{1e}main\u{1e}abc\u{1e}\u{1e}\u{1e}0\u{1e}0\u{1e}\u{1e}",
+        )
+        .unwrap();
+        assert!(f.worktree_present);
+        assert_eq!(f.branch.as_deref(), Some("main"));
+        assert_eq!(f.dirty, Some(false));
         assert!(parse_probe("garbage").is_err());
     }
 

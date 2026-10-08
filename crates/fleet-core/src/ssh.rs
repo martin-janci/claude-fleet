@@ -1682,11 +1682,28 @@ pub(crate) fn home_from_output(host: &str, out: &Output) -> Result<String, IpcEr
             ),
         ));
     }
-    let home = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // The LAST line: the command runs through the remote user's shell, and
+    // a `~/.bashrc` that echoes before its interactivity guard prints ahead
+    // of it. The answer is cached for the app's lifetime and every remote
+    // project path is built on it, so anything but an absolute path is
+    // refused rather than cached.
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let home = stdout
+        .lines()
+        .map(str::trim)
+        .rfind(|l| !l.is_empty())
+        .unwrap_or_default()
+        .to_string();
     if home.is_empty() {
         return Err(IpcError::new(
             codes::E_SSH,
             format!("remote $HOME on {host} is empty"),
+        ));
+    }
+    if !home.starts_with('/') {
+        return Err(IpcError::new(
+            codes::E_SSH,
+            format!("remote $HOME on {host} is not an absolute path: {home:?}"),
         ));
     }
     Ok(home)
@@ -1958,6 +1975,27 @@ fn cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_is_the_last_line_and_must_be_absolute() {
+        let out = |stdout: &str| Output {
+            status: crate::agent::transport::exit_status(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        };
+        // A `~/.bashrc` that echoes ahead of the answer.
+        assert_eq!(
+            home_from_output("h", &out("Loading env\n/home/u\n")).unwrap(),
+            "/home/u"
+        );
+        assert_eq!(
+            home_from_output("h", &out("/home/u\n\n")).unwrap(),
+            "/home/u"
+        );
+        let e = home_from_output("h", &out("garbage\n")).unwrap_err();
+        assert_eq!(e.code, codes::E_SSH);
+        assert!(home_from_output("h", &out("  \n")).is_err());
+    }
 
     #[test]
     fn control_path_lives_under_cache_dir() {

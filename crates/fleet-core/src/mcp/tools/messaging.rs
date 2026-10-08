@@ -71,7 +71,14 @@ impl FleetTools {
         // that gives up and retries does so DURING that window — which a
         // write-on-success cache does not cover at all: both calls miss, both
         // deliver, and the session gets the prompt twice.
-        let dedupe_id = p.client_msg_id.clone();
+        // The key names the TARGET as well as the id: the label is shared by
+        // every agent behind one host token, so a bare id reused for another
+        // session answered the first call's cached result and never sent.
+        // The `send_prompt:` prefix keeps it apart from `send_message`'s.
+        let dedupe_id = p
+            .client_msg_id
+            .as_deref()
+            .map(|id| format!("send_prompt:{}:{id}", row.id));
         if let Some(id) = dedupe_id.as_deref() {
             match lock_sends(&self.recent_sends).reserve(&label, id) {
                 Reservation::Fresh => {}
@@ -416,7 +423,17 @@ impl FleetTools {
         // of the shared map instead; `send_prompt`'s own key stays bare so
         // its behaviour and tests are untouched.
         let dedupe_id = p.client_msg_id.clone();
-        let dedupe_key = dedupe_id.as_deref().map(|id| format!("send_message:{id}"));
+        // Sender and recipient are in the key too (see `send_prompt`): the
+        // same id from another agent on this host, or to another recipient,
+        // is another message.
+        let dedupe_key = dedupe_id.as_deref().map(|id| {
+            format!(
+                "send_message:{}:{}:{}:{id}",
+                p.from_session_id,
+                p.to_session_id,
+                p.to_addr.as_deref().unwrap_or("")
+            )
+        });
         if let Some(key) = dedupe_key.as_deref() {
             match lock_sends(&self.recent_sends).reserve(&label, key) {
                 Reservation::Fresh => {}
@@ -590,7 +607,9 @@ impl FleetTools {
             Reach::Read,
             "the inbox's session",
         )?;
-        let mark_read = p.mark_read && {
+        // A readonly token reads the inbox (`inbox` is a readonly tool) but
+        // stamping `read_at` is a write, so it is served as a watcher is.
+        let mark_read = p.mark_read && caller.mode != TokenMode::Readonly && {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             super::support::reaches_row(&s, &caller, &row, Reach::Drive)?
         };

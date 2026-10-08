@@ -291,10 +291,12 @@ export function sessionUsageTokens(s: UsageFields): number {
 export function formatTokens(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n <= 0) return '0';
   if (n < 1_000) return String(Math.round(n));
-  if (n < 10_000) return `${(n / 1_000).toFixed(1)}k`;
-  if (n < 1_000_000) return `${Math.round(n / 1_000)}k`;
-  if (n < 10_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  // Each step's bound is where its ROUNDED value would reach the next
+  // format, so 999_600 reads "1.00M", never "1000k" (or 9_999 "10.0k").
+  if (n < 9_950) return `${(n / 1_000).toFixed(1)}k`;
+  if (n < 999_500) return `${Math.round(n / 1_000)}k`;
+  if (n < 9_995_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n < 999_950_000) return `${(n / 1_000_000).toFixed(1)}M`;
   return `${(n / 1_000_000_000).toFixed(2)}B`;
 }
 

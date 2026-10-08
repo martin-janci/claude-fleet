@@ -656,7 +656,8 @@ pub fn pty_open(
 ) -> Result<(), IpcError> {
     // Validate untrusted IPC input before it reaches `ssh` / `tmux`.
     fleet_core::validate::host_alias(&args.host_alias)?;
-    fleet_core::validate::tmux_name(&args.session_name)?;
+    // Attaches to an existing session (`-t`), so a `#` in its name is fine.
+    fleet_core::validate::tmux_name_addressable(&args.session_name)?;
 
     // A `wsl-` host may still be being detected at startup; until it is, it
     // would read as an SSH alias. Waited for BEFORE `openpty`, so no pseudo

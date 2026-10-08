@@ -566,16 +566,49 @@ async fn probe_with_token(
         });
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let mut parts = stdout.split("---");
-    let tmux_line = parts.next().unwrap_or("").trim().to_string();
-    let claude_line = parts.next().unwrap_or("").trim().to_string();
-    let oauth_line = parts.next().unwrap_or("").trim().to_string();
+    let (tmux_line, claude_line, oauth_line) = probe_sections(&stdout);
     Ok((
         true,
         parse_claude_version(&claude_line),
         parse_tmux_version(&tmux_line),
         parse_oauth_account(&oauth_line),
     ))
+}
+
+/// [`PROBE_SCRIPT`]'s stdout as its three sections: the tmux line, the
+/// claude line and the account JSON. Sections end at a line that is exactly
+/// `---` — never at a `---` inside a value (an org named `Acme --- Labs`
+/// would cut the JSON) — and the version sections take their LAST matching
+/// line, since the script runs under `bash -lc` and a login banner prints
+/// ahead of `tmux -V`.
+fn probe_sections(stdout: &str) -> (String, String, String) {
+    let mut sections: Vec<Vec<&str>> = vec![Vec::new()];
+    for line in stdout.lines() {
+        if line.trim_end_matches('\r') == "---" && sections.len() < 3 {
+            sections.push(Vec::new());
+        } else if let Some(cur) = sections.last_mut() {
+            cur.push(line);
+        }
+    }
+    sections.resize(3, Vec::new());
+    let tmux = sections[0]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .find(|l| l.starts_with("tmux "))
+        .unwrap_or_default();
+    let claude = sections[1]
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
+    let oauth = sections[2].join("\n");
+    (
+        tmux.to_string(),
+        claude.to_string(),
+        oauth.trim().to_string(),
+    )
 }
 
 /// Lenient probe with an explicit cancellation token. Used by `probe_host`.
@@ -1011,6 +1044,29 @@ mod tests {
         assert!(!desktop.enabled);
         assert!(desktop.hosts.iter().all(|h| !h.connected));
         assert_eq!(desktop.hosts.len(), 2);
+    }
+
+    #[test]
+    fn probe_sections_split_on_whole_lines_and_skip_banners() {
+        let (t, c, o) = probe_sections(
+            "Welcome!\ntmux 3.4\n---\n2.1.144 (Claude Code)\n---\n\
+             {\"accountUuid\":\"acc-1\",\"displayName\":\"A --- B\"}\n",
+        );
+        assert_eq!(parse_tmux_version(&t).as_deref(), Some("3.4"));
+        assert_eq!(parse_claude_version(&c).as_deref(), Some("2.1.144"));
+        assert_eq!(
+            parse_oauth_account(&o).and_then(|a| a.uuid).as_deref(),
+            Some("acc-1")
+        );
+        // A host without tmux, claude or an account degrades to empty.
+        assert_eq!(
+            probe_sections("---\n---\n"),
+            (String::new(), String::new(), String::new())
+        );
+        assert_eq!(
+            probe_sections(""),
+            (String::new(), String::new(), String::new())
+        );
     }
 
     #[test]
