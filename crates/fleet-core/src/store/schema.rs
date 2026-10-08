@@ -1418,6 +1418,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/121_session_agent.sql"),
         already_applied: Some(sessions_has_agent),
     },
+    // Account usage history: `account_usage_snapshots` and its index. New
+    // objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        122,
+        include_str!("../../migrations/122_account_usage_snapshots.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
