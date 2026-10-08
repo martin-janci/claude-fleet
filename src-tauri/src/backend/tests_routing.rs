@@ -467,6 +467,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b,
                     commands::projects::ListGithubReposArgs {
                         host_alias: "trn".into(),
+                        owner: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_github_repos",
+            "list_github_repos",
+            json!({ "host_alias": "trn", "owner": "papaya-pos" }),
+            r#"[{"name_with_owner":"papaya-pos/receipts","is_private":true}]"#,
+            Box::new(|b, s, h| {
+                block_on(commands::projects::routed::list_github_repos(
+                    b,
+                    commands::projects::ListGithubReposArgs {
+                        host_alias: "trn".into(),
+                        owner: Some("papaya-pos".into()),
                     },
                     s,
                     h,

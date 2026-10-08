@@ -338,6 +338,8 @@ fn sample_github_repo() -> GithubRepo {
         description: Some("w".into()),
         is_private: true,
         updated_at: Some("2026-09-01T10:00:00Z".into()),
+        // Some, so the golden pins the name the From GitHub rows read.
+        language: Some("Rust".into()),
     }
 }
 
