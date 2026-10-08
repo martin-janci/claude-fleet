@@ -619,6 +619,18 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Every work item that belongs to a mission, as `(item id, mission
+    /// id)`: the Work view's group by mission (redesign step 6.2). The
+    /// caller fences which missions it may name.
+    pub fn mission_membership(&self) -> Result<Vec<(i64, i64)>, IpcError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, orchestration_project_id FROM work_items \
+             WHERE orchestration_project_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /// Every mission: live ones (draft, active, paused) first, then by last
     /// change. The caller fences by org and owner.
     pub fn list_missions(&self) -> Result<Vec<MissionRow>, IpcError> {
