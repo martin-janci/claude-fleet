@@ -163,6 +163,13 @@ pub mod codes {
     /// host can already enumerate its tmux sessions, and this says nothing
     /// about WHOSE the row is or what is in it.
     pub const E_PANE_UNPROVEN: &str = "E_PANE_UNPROVEN";
+    /// `ask { form }` from a caller that is not a proven session: a form
+    /// opens in the asking session's own chat, so the call must come from a
+    /// per-host token whose `X-Fleet-Pane` matches a session row.
+    pub const E_NOT_A_SESSION: &str = "E_NOT_A_SESSION";
+    /// A chat form's secret could not be written to its session's host;
+    /// `details.field` names it. The form stays pending.
+    pub const E_HOST_WRITE: &str = "E_HOST_WRITE";
     /// The caller exceeded a per-caller rate limit (`broadcast_prompt`);
     /// `details.retry_after_secs` says when to retry.
     pub const E_RATE_LIMITED: &str = "E_RATE_LIMITED";

@@ -124,7 +124,7 @@ pub fn needs_attention_with(row: &SessionRow, context_red_pct: f64) -> Option<At
         .claude_status
         .as_deref()
         .is_some_and(|s| crate::store::IDLE_STATUSES.contains(&s));
-    let reason = if row.claude_status.as_deref() == Some("blocked") {
+    let reason = if row.claude_status.as_deref() == Some("blocked") || row.pending_form.is_some() {
         Reason::Waiting
     } else if row.stuck_kind.is_some() {
         Reason::Stuck
@@ -244,6 +244,17 @@ mod tests {
         assert_eq!(needs_attention(&r), None, "a working session needs nobody");
 
         r.claude_status = Some("blocked".into());
+        assert_eq!(needs_attention(&r).unwrap().reason, Reason::Waiting);
+    }
+
+    #[test]
+    fn a_session_waiting_on_a_form_needs_attention_while_working() {
+        let mut r = row();
+        assert_eq!(needs_attention(&r), None, "a working session needs nobody");
+        r.pending_form = Some(crate::store::PendingForm {
+            form_id: "f_x".into(),
+            title: "T".into(),
+        });
         assert_eq!(needs_attention(&r).unwrap().reason, Reason::Waiting);
     }
 

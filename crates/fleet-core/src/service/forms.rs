@@ -1,0 +1,729 @@
+//! Chat forms (`docs/superpowers/specs/2026-10-07-chat-forms-design.md`):
+//! an agent opens a `fleet.form/1` form in its session's chat and waits; a
+//! person answers or declines. Access is the caller's business (the `ask`
+//! tool, the desktop commands); this module takes ids already gated.
+
+use crate::ipc_error::{codes, lock, IpcError};
+use crate::pages::forms::{self, FieldProblem};
+use crate::service::tasks::AccessRecheck;
+use crate::ssh::SshExec;
+use crate::store::{FormFinish, FormRow, NewForm, Store};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::time::Duration;
+
+pub const DEFAULT_WAIT_SECS: u64 = 600;
+pub const MAX_WAIT_SECS: u64 = 600;
+/// A pending form nobody answered within this long expires.
+pub const EXPIRE_SECS: i64 = 24 * 3600;
+/// A decided form's row is kept this long.
+pub const KEEP_SECS: i64 = 7 * 24 * 3600;
+/// Where a form's secrets go on its session's host: `<dir>/<form_id>/<field>`.
+pub const SECRET_DIR: &str = "~/.cache/claude-fleet/forms";
+pub const SECRET_NOTE: &str = "Delete each secret file once you have used it.";
+/// A waiter re-reads at least this often, so a missed wake costs latency only.
+const POLL_FLOOR: Duration = Duration::from_millis(500);
+const SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub fn wait_timeout(timeout_s: Option<u64>) -> Duration {
+    Duration::from_secs(timeout_s.unwrap_or(DEFAULT_WAIT_SECS).min(MAX_WAIT_SECS))
+}
+
+/// What `ask` answers the agent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormResult {
+    pub status: String,
+    pub form_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<BTreeMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// One form as a person's screen reads it (`list` / `get` / `answer` /
+/// `decline`, and the desktop's commands).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormView {
+    pub form_id: String,
+    pub session_id: i64,
+    pub host_alias: String,
+    pub title: String,
+    pub spec: Value,
+    #[serde(default)]
+    pub why: Option<String>,
+    pub state: String,
+    #[serde(default)]
+    pub answers: Option<Value>,
+    #[serde(default)]
+    pub secrets: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub answered_by: Option<String>,
+    pub created_at: i64,
+    #[serde(default)]
+    pub decided_at: Option<i64>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct Stored {
+    answers: Map<String, Value>,
+    secrets: BTreeMap<String, String>,
+}
+
+fn stored(row: &FormRow) -> Option<Stored> {
+    row.answers
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok())
+}
+
+pub fn view(row: &FormRow) -> FormView {
+    let spec: Value = serde_json::from_str(&row.spec).unwrap_or(Value::Null);
+    let st = stored(row);
+    FormView {
+        form_id: row.form_id.clone(),
+        session_id: row.session_id,
+        host_alias: row.host_alias.clone(),
+        title: spec["title"].as_str().unwrap_or_default().to_string(),
+        spec,
+        why: row.why.clone(),
+        state: row.state.clone(),
+        answers: st.as_ref().map(|s| Value::Object(s.answers.clone())),
+        secrets: st.map(|s| s.secrets),
+        note: row.note.clone(),
+        answered_by: row.answered_by.clone(),
+        created_at: row.created_at,
+        decided_at: row.decided_at,
+    }
+}
+
+pub fn result_of(row: &FormRow) -> FormResult {
+    let mut r = FormResult {
+        status: row.state.clone(),
+        form_id: row.form_id.clone(),
+        answers: None,
+        secrets: None,
+        answered_by: None,
+        note: None,
+    };
+    match row.state.as_str() {
+        "answered" => {
+            let st = stored(row).unwrap_or_default();
+            if !st.secrets.is_empty() {
+                r.note = Some(SECRET_NOTE.into());
+                r.secrets = Some(st.secrets);
+            }
+            r.answers = Some(Value::Object(st.answers));
+            r.answered_by = row.answered_by.clone();
+        }
+        "declined" => {
+            r.note = row.note.clone();
+            r.answered_by = row.answered_by.clone();
+        }
+        _ => {}
+    }
+    r
+}
+
+fn new_form_id() -> String {
+    use rand::RngExt;
+    const ABC: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut rng = rand::rng();
+    let tail: String = (0..16)
+        .map(|_| ABC[rng.random_range(0..ABC.len())] as char)
+        .collect();
+    format!("f_{tail}")
+}
+
+fn not_found(form_id: &str) -> IpcError {
+    IpcError::new(codes::E_NOTFOUND, format!("form {form_id} not found"))
+}
+
+fn not_pending(row: &FormRow) -> IpcError {
+    IpcError::new(
+        codes::E_CONFLICT,
+        format!("form {} is {}, not pending", row.form_id, row.state),
+    )
+    .with_details(serde_json::json!({ "form_id": row.form_id, "state": row.state }))
+}
+
+fn bounded_text(what: &str, t: Option<&str>) -> Result<(), IpcError> {
+    match t {
+        Some(t) if t.chars().count() > forms::MAX_TEXT => Err(IpcError::new(
+            codes::E_INVALID,
+            format!("{what} is longer than {} characters", forms::MAX_TEXT),
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub fn row(store: &Mutex<Store>, form_id: &str) -> Result<FormRow, IpcError> {
+    lock(store)?
+        .form(form_id)?
+        .ok_or_else(|| not_found(form_id))
+}
+
+pub fn get(store: &Mutex<Store>, form_id: &str) -> Result<FormView, IpcError> {
+    row(store, form_id).map(|r| view(&r))
+}
+
+/// Validate `spec` and open it for `session_id` (a session the caller
+/// proved it is).
+pub fn open(
+    store: &Mutex<Store>,
+    session_id: i64,
+    spec: &Value,
+    why: Option<&str>,
+) -> Result<FormView, IpcError> {
+    bounded_text("why", why)?;
+    let form = forms::parse(spec).map_err(|problems| {
+        IpcError::new(codes::E_INVALID, problems.join("; "))
+            .with_details(serde_json::json!({ "problems": problems }))
+    })?;
+    let s = lock(store)?;
+    let session = s.get_session_by_id(session_id)?.ok_or_else(|| {
+        IpcError::new(codes::E_NOTFOUND, format!("session {session_id} not found"))
+    })?;
+    if let Some(open) = s.pending_form_of_session(session_id)? {
+        return Err(IpcError::new(
+            codes::E_CONFLICT,
+            format!(
+                "this session already waits on form {}; wait on it or cancel it",
+                open.form_id
+            ),
+        )
+        .with_details(serde_json::json!({ "form_id": open.form_id })));
+    }
+    let text = serde_json::to_string(&form).expect("a form serialises");
+    let id = new_form_id();
+    let row = s.insert_form(&NewForm {
+        form_id: &id,
+        session_id,
+        host_alias: &session.host_alias,
+        spec: &text,
+        why,
+    })?;
+    Ok(view(&row))
+}
+
+/// Wait up to `timeout` for `form_id` to finish. A pending form at the
+/// deadline answers `pending`, not an error.
+pub async fn wait(
+    store: &Mutex<Store>,
+    form_id: &str,
+    timeout: Duration,
+    recheck: &dyn AccessRecheck,
+) -> Result<FormResult, IpcError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let notify = {
+        let s = lock(store)?;
+        s.form(form_id)?.ok_or_else(|| not_found(form_id))?;
+        s.form_notify()
+    };
+    loop {
+        // Registered before the read, so a change between the read and the
+        // sleep is not lost.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        {
+            let s = lock(store)?;
+            recheck.check(&s)?;
+            let row = s.form(form_id)?.ok_or_else(|| not_found(form_id))?;
+            if row.state != "pending" {
+                return Ok(result_of(&row));
+            }
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Ok(FormResult {
+                status: "pending".into(),
+                form_id: form_id.into(),
+                answers: None,
+                secrets: None,
+                answered_by: None,
+                note: None,
+            });
+        }
+        let _ = tokio::time::timeout(POLL_FLOOR.min(deadline - now), notified).await;
+    }
+}
+
+pub fn cancel(store: &Mutex<Store>, form_id: &str) -> Result<FormResult, IpcError> {
+    let s = lock(store)?;
+    let row = s.form(form_id)?.ok_or_else(|| not_found(form_id))?;
+    let done = FormFinish {
+        state: "cancelled",
+        answers: None,
+        note: None,
+        answered_by: None,
+        secrets_on_host: false,
+    };
+    if !s.finish_form(form_id, &done)? {
+        return Err(not_pending(&row));
+    }
+    Ok(result_of(
+        &s.form(form_id)?.ok_or_else(|| not_found(form_id))?,
+    ))
+}
+
+pub fn decline(
+    store: &Mutex<Store>,
+    form_id: &str,
+    note: Option<&str>,
+    by: &str,
+) -> Result<FormView, IpcError> {
+    bounded_text("note", note)?;
+    let s = lock(store)?;
+    let row = s.form(form_id)?.ok_or_else(|| not_found(form_id))?;
+    let done = FormFinish {
+        state: "declined",
+        answers: None,
+        note,
+        answered_by: Some(by),
+        secrets_on_host: false,
+    };
+    if !s.finish_form(form_id, &done)? {
+        return Err(not_pending(&row));
+    }
+    Ok(view(&s.form(form_id)?.ok_or_else(|| not_found(form_id))?))
+}
+
+/// The form's secret directory on its host, `~/` form (for
+/// `write_host_file_secret`) and absolute (for the agent).
+async fn secret_dir(
+    ssh: &dyn SshExec,
+    host: &str,
+    form_id: &str,
+) -> Result<(String, String), IpcError> {
+    let tilde = format!("{SECRET_DIR}/{form_id}");
+    let home = if host == crate::service::projects::LOCAL_HOST {
+        std::env::var("HOME").unwrap_or_default()
+    } else {
+        ssh.remote_home(host).await?
+    };
+    let abs = format!("{home}/{}", tilde.trim_start_matches("~/"));
+    Ok((tilde, abs))
+}
+
+async fn remove_secret_dir(ssh: &dyn SshExec, host: &str, form_id: &str) -> Result<(), IpcError> {
+    let script = format!(
+        "rm -rf -- \"$HOME\"/.cache/claude-fleet/forms/{}",
+        crate::shell::quote(form_id)
+    );
+    let out = crate::ssh::run_shell(ssh, host, &script, SWEEP_TIMEOUT).await?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            codes::E_HOST_WRITE,
+            format!("{host}: {}", String::from_utf8_lossy(&out.stderr).trim()),
+        ))
+    }
+}
+
+fn host_write_error(field: &str, why: &str) -> IpcError {
+    IpcError::new(codes::E_HOST_WRITE, format!("{field}: {why}"))
+        .with_details(serde_json::json!({ "field": field }))
+}
+
+/// Answer `form_id` as `by`. Secrets are written to the host first; any
+/// failure there (the home lookup included) is `E_HOST_WRITE` and leaves the
+/// form pending.
+pub async fn answer(
+    store: &Mutex<Store>,
+    ssh: &dyn SshExec,
+    form_id: &str,
+    values: &Map<String, Value>,
+    by: &str,
+) -> Result<FormView, IpcError> {
+    let row = row(store, form_id)?;
+    if row.state != "pending" {
+        return Err(not_pending(&row));
+    }
+    let form: forms::FormSpec = serde_json::from_str(&row.spec)
+        .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("stored form {form_id}: {e}")))?;
+    let answers = forms::check_answers(&form, values).map_err(|problems: Vec<FieldProblem>| {
+        IpcError::new(
+            codes::E_INVALID,
+            problems
+                .iter()
+                .map(|p| format!("{}: {}", p.field, p.problem))
+                .collect::<Vec<_>>()
+                .join("; "),
+        )
+        .with_details(serde_json::json!({ "problems": problems }))
+    })?;
+    let mut paths = BTreeMap::new();
+    if let Some(first) = answers.secrets.keys().next() {
+        let (dir, abs) = secret_dir(ssh, &row.host_alias, form_id)
+            .await
+            .map_err(|e| host_write_error(first, &e.message))?;
+        for (field, secret) in &answers.secrets {
+            let path = format!("{dir}/{field}");
+            if let Err(e) = crate::service::provision::write_host_file_secret(
+                ssh,
+                &row.host_alias,
+                &dir,
+                &path,
+                secret,
+            )
+            .await
+            {
+                let _ = remove_secret_dir(ssh, &row.host_alias, form_id).await;
+                return Err(host_write_error(field, &e.message));
+            }
+            paths.insert(field.clone(), format!("{abs}/{field}"));
+        }
+    }
+    let text = serde_json::to_string(&Stored {
+        answers: answers.values,
+        secrets: paths.clone(),
+    })
+    .expect("answers serialise");
+    let done = FormFinish {
+        state: "answered",
+        answers: Some(&text),
+        note: None,
+        answered_by: Some(by),
+        secrets_on_host: !paths.is_empty(),
+    };
+    let finished = {
+        let s = lock(store)?;
+        s.finish_form(form_id, &done)?
+    };
+    if !finished {
+        if !paths.is_empty() {
+            let _ = remove_secret_dir(ssh, &row.host_alias, form_id).await;
+        }
+        return Err(not_pending(&self::row(store, form_id)?));
+    }
+    get(store, form_id)
+}
+
+/// The tick: expire pending forms older than [`EXPIRE_SECS`], delete
+/// decided ones older than [`KEEP_SECS`]. Returns the rows touched.
+pub fn expire_and_purge(store: &Mutex<Store>, now: i64) -> usize {
+    let Ok(s) = lock(store) else { return 0 };
+    let expired = s.expire_forms(now - EXPIRE_SECS).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "[forms] expiry failed");
+        0
+    });
+    let purged = s.purge_forms(now - KEEP_SECS).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "[forms] purge failed");
+        0
+    });
+    expired + purged
+}
+
+/// The tick: remove secret directories no form needs any more. A host
+/// that does not answer is tried again on a later tick.
+pub async fn sweep_secret_dirs(store: &Mutex<Store>, ssh: &dyn SshExec, now: i64) -> usize {
+    let due = match lock(store).and_then(|s| Ok(s.forms_to_sweep(now - KEEP_SECS)?)) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e.message, "[forms] sweep query failed");
+            return 0;
+        }
+    };
+    let mut swept = 0;
+    for (form_id, host) in due {
+        match remove_secret_dir(ssh, &host, &form_id).await {
+            Ok(()) => {
+                if let Ok(s) = lock(store) {
+                    if s.mark_form_swept(&form_id).is_ok() {
+                        swept += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(%form_id, %host, error = %e.message, "[forms] sweep deferred")
+            }
+        }
+    }
+    swept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::service::tasks::NoRecheck;
+    use crate::ssh_fake::{FakeSsh, Match, Reply};
+    use crate::store::now_unix;
+    use serde_json::json;
+    use std::time::Duration;
+
+    const PASSWORD: &str = "hunter2-the-secret";
+
+    fn spec() -> Value {
+        json!({ "spec": "fleet.form/1", "title": "Deploy", "steps": [
+            { "title": "Target", "fields": [
+                { "name": "env", "type": "select", "label": "Env", "required": true,
+                  "options": [["stg", "Staging"], ["prod", "Production"]] },
+                { "name": "pw", "type": "secret", "label": "Password" } ] } ] })
+    }
+
+    fn fixture() -> (Mutex<Store>, i64) {
+        let s = Store::open_in_memory().unwrap();
+        s.upsert_host("h").unwrap();
+        let sid = s
+            .upsert_session("dev", "h", None, None, 1, 1, "running", None)
+            .unwrap();
+        (Mutex::new(s), sid)
+    }
+
+    fn values(v: Value) -> Map<String, Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn an_invalid_spec_is_refused_with_every_problem() {
+        let (st, sid) = fixture();
+        let err = open(
+            &st,
+            sid,
+            &json!({ "spec": "fleet.form/1", "title": "", "steps": [] }),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert!(
+            err.message.contains("title must not be empty"),
+            "{}",
+            err.message
+        );
+        assert!(
+            st.lock().unwrap().forms(None, None).unwrap().is_empty(),
+            "nothing stored"
+        );
+    }
+
+    #[test]
+    fn a_second_form_while_one_is_pending_is_a_conflict_naming_it() {
+        let (st, sid) = fixture();
+        let first = open(&st, sid, &spec(), None).unwrap();
+        let err = open(&st, sid, &spec(), None).unwrap_err();
+        assert_eq!(err.code, codes::E_CONFLICT);
+        assert_eq!(err.details.unwrap()["form_id"], json!(first.form_id));
+    }
+
+    #[test]
+    fn form_ids_are_unguessable_and_well_formed() {
+        let (st, sid) = fixture();
+        let a = open(&st, sid, &spec(), None).unwrap().form_id;
+        assert!(a.starts_with("f_") && a.len() == 18, "{a}");
+        assert!(a[2..].chars().all(|c| c.is_ascii_alphanumeric()), "{a}");
+    }
+
+    #[tokio::test]
+    async fn a_wait_that_runs_out_answers_pending_and_a_later_wait_gets_the_answer() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let r = wait(&st, &id, Duration::from_millis(30), &NoRecheck)
+            .await
+            .unwrap();
+        assert_eq!((r.status.as_str(), r.answers.is_none()), ("pending", true));
+
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u");
+        let waiting = wait(&st, &id, Duration::from_secs(5), &NoRecheck);
+        let answering = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            answer(
+                &st,
+                &fake,
+                &id,
+                &values(json!({ "env": "stg" })),
+                "ada (desktop)",
+            )
+            .await
+        };
+        let (r, v) = tokio::join!(waiting, answering);
+        let r = r.unwrap();
+        v.unwrap();
+        assert_eq!(r.status, "answered");
+        assert_eq!(r.answers, Some(json!({ "env": "stg" })));
+        assert_eq!(r.answered_by.as_deref(), Some("ada (desktop)"));
+        assert!(fake.calls().is_empty(), "no secret, no host write");
+        let again = wait(&st, &id, Duration::from_millis(1), &NoRecheck)
+            .await
+            .unwrap();
+        assert_eq!(
+            again, r,
+            "a finished form answers the same, at once, every time"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_secret_goes_to_the_host_over_stdin_and_only_its_path_is_kept() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u");
+        answer(
+            &st,
+            &fake,
+            &id,
+            &values(json!({ "env": "prod", "pw": PASSWORD })),
+            "ada",
+        )
+        .await
+        .unwrap();
+        let calls = fake.calls();
+        assert!(
+            calls.iter().all(|c| !c.command().contains(PASSWORD)),
+            "never in argv or a script: {:?}",
+            calls.iter().map(|c| c.command()).collect::<Vec<_>>()
+        );
+        let uploads: Vec<_> = calls.iter().filter(|c| c.stdin.is_some()).collect();
+        assert_eq!(uploads.len(), 1);
+        assert_eq!(uploads[0].stdin_str().as_deref(), Some(PASSWORD));
+        let path = format!("/home/u/.cache/claude-fleet/forms/{id}/pw");
+        let row = st.lock().unwrap().form(&id).unwrap().unwrap();
+        assert!(row.secrets_on_host);
+        let stored = row.answers.unwrap();
+        assert!(!stored.contains(PASSWORD), "{stored}");
+        assert!(stored.contains(&path), "{stored}");
+        let r = result_of(&st.lock().unwrap().form(&id).unwrap().unwrap());
+        assert_eq!(r.secrets.unwrap().get("pw"), Some(&path));
+        assert_eq!(r.note.as_deref(), Some(SECRET_NOTE));
+    }
+
+    #[tokio::test]
+    async fn a_failed_secret_write_leaves_the_form_pending() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u");
+        fake.on(Match::Any, Reply::fail(1, "disk full"));
+        let err = answer(
+            &st,
+            &fake,
+            &id,
+            &values(json!({ "env": "prod", "pw": PASSWORD })),
+            "ada",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_HOST_WRITE);
+        assert_eq!(err.details.unwrap()["field"], json!("pw"));
+        let row = st.lock().unwrap().form(&id).unwrap().unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.secrets_on_host),
+            ("pending", false)
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_values_come_back_per_field_and_the_form_stays_pending() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let err = answer(
+            &st,
+            &FakeSsh::new(),
+            &id,
+            &values(json!({ "env": "dev" })),
+            "ada",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_INVALID);
+        assert_eq!(
+            err.details.unwrap()["problems"],
+            json!([{ "field": "env", "problem": "must be one of the options" }])
+        );
+        assert_eq!(get(&st, &id).unwrap().state, "pending");
+    }
+
+    #[tokio::test]
+    async fn decline_cancel_and_a_late_answer() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let v = decline(&st, &id, Some("not now"), "ada").unwrap();
+        assert_eq!(
+            (v.state.as_str(), v.note.as_deref()),
+            ("declined", Some("not now"))
+        );
+        let late = answer(
+            &st,
+            &FakeSsh::new(),
+            &id,
+            &values(json!({ "env": "stg" })),
+            "bob",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(late.code, codes::E_CONFLICT);
+        assert_eq!(late.details.unwrap()["state"], json!("declined"));
+
+        let id2 = open(&st, sid, &spec(), None).unwrap().form_id;
+        assert_eq!(cancel(&st, &id2).unwrap().status, "cancelled");
+        assert_eq!(cancel(&st, &id2).unwrap_err().code, codes::E_CONFLICT);
+        assert_eq!(get(&st, "f_nope").unwrap_err().code, codes::E_NOTFOUND);
+    }
+
+    #[tokio::test]
+    async fn the_tick_expires_and_the_sweep_removes_a_ghosts_secrets() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        assert_eq!(expire_and_purge(&st, now_unix() + EXPIRE_SECS + 1), 1);
+        assert_eq!(get(&st, &id).unwrap().state, "expired");
+        {
+            let s = st.lock().unwrap();
+            s.conn_ref()
+                .execute("UPDATE form_requests SET secrets_on_host = 1", [])
+                .unwrap();
+            s.mark_session_killed(sid, 5).unwrap();
+        }
+        let fake = FakeSsh::new();
+        assert_eq!(sweep_secret_dirs(&st, &fake, now_unix()).await, 1);
+        let script = fake.calls()[0].script().unwrap();
+        assert!(
+            script.contains("rm -rf") && script.contains(&id),
+            "{script}"
+        );
+        assert!(
+            !st.lock()
+                .unwrap()
+                .form(&id)
+                .unwrap()
+                .unwrap()
+                .secrets_on_host
+        );
+        assert_eq!(
+            sweep_secret_dirs(&st, &fake, now_unix()).await,
+            0,
+            "done once"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_host_is_swept_on_a_later_tick() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        {
+            let s = st.lock().unwrap();
+            s.conn_ref()
+                .execute("UPDATE form_requests SET secrets_on_host = 1", [])
+                .unwrap();
+            s.mark_session_killed(sid, 5).unwrap();
+        }
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::Unreachable);
+        assert_eq!(sweep_secret_dirs(&st, &fake, now_unix()).await, 0);
+        assert!(
+            st.lock()
+                .unwrap()
+                .form(&id)
+                .unwrap()
+                .unwrap()
+                .secrets_on_host
+        );
+    }
+}

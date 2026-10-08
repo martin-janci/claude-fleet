@@ -1375,6 +1375,9 @@ pub(crate) fn record_kill(s: &Store, id: i64, claude_session_id: Option<&str>) {
     if let Some(cid) = claude_session_id {
         let _ = s.close_conversation(id, cid, "killed");
     }
+    if let Err(e) = s.cancel_forms_of_session(id) {
+        tracing::warn!(session_id = id, error = %e, "[forms] cancel on kill failed");
+    }
 }
 
 pub async fn kill_session(

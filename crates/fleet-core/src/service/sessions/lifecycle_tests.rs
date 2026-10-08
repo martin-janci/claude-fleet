@@ -311,6 +311,26 @@ fn a_kill_closes_the_current_conversation_as_killed() {
     record_kill(&s, id, None);
 }
 
+#[test]
+fn a_kill_cancels_the_sessions_pending_form() {
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("local").unwrap();
+    let id = s
+        .upsert_session("k", "local", None, None, 0, 0, "running", None)
+        .unwrap();
+    let spec = serde_json::json!({ "spec": "fleet.form/1", "title": "T", "steps": [
+        { "title": "S", "fields": [{ "name": "a", "type": "text", "label": "A" }] }] });
+    let st = std::sync::Mutex::new(s);
+    let form = crate::service::forms::open(&st, id, &spec, None).unwrap();
+    record_kill(&st.lock().unwrap(), id, None);
+    assert_eq!(
+        crate::service::forms::get(&st, &form.form_id)
+            .unwrap()
+            .state,
+        "cancelled"
+    );
+}
+
 // ── Every path that brings a tmux name back to life must say so ────────────
 //
 // `record_tmux_created` is what lets a session created under a just-killed
