@@ -10,12 +10,20 @@
 // survives any round trip.
 //
 // Classic reads this store with no visible change; the New layout's rail
-// (step 3.2) will write the same store.
+// (step 3.2, `AppRail.svelte`) writes the same store. `accounts` (step 4.1)
+// is reachable only from the rail, so only in the New layout.
 import { derived, writable, type Readable } from 'svelte/store';
 
-export type Destination = 'session' | 'files' | 'hosts' | 'assets' | 'board';
+export type Destination = 'session' | 'files' | 'hosts' | 'assets' | 'board' | 'accounts';
 
-export const DESTINATIONS: readonly Destination[] = ['session', 'files', 'hosts', 'assets', 'board'];
+export const DESTINATIONS: readonly Destination[] = [
+  'session',
+  'files',
+  'hosts',
+  'assets',
+  'board',
+  'accounts',
+];
 
 export const destination = writable<Destination>('session');
 

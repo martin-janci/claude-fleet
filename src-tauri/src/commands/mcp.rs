@@ -194,6 +194,8 @@ pub async fn mcp_configure(
 #[tauri::command]
 pub async fn provision_hosts(
     rotate: Option<bool>,
+    // Orbit Fleet 4.7: re-provision one host from its detail.
+    host: Option<String>,
     backend: State<'_, Arc<FleetBackend>>,
     store: State<'_, Arc<Mutex<Store>>>,
     ssh: State<'_, Arc<SshClient>>,
@@ -210,6 +212,7 @@ pub async fn provision_hosts(
         &base,
         fleet_core::service::provision::ProvisionScope {
             rotate: rotate.unwrap_or(false),
+            only_host: host,
             ..Default::default()
         },
     )

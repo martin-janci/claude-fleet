@@ -443,7 +443,7 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
       set_fleet_setting: { 'playbooks.press_enter': 'false' },
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
     const box = (await screen.findByTestId('setting-playbooks-press-enter')) as HTMLInputElement;
     expect(box.checked).toBe(true);
     expect(screen.getByTestId('hub-scope-note').textContent).toContain('paired as laptop');
@@ -456,6 +456,18 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
     expect(inv.mock.calls.some((c) => c[0] === 'fetch_page_source')).toBe(false);
   });
 
+  it('Projects is the hub’s page, not this machine’s roots editor (7.1)', async () => {
+    route({
+      describe_fleet_settings: described,
+      get_fleet_settings: {},
+      setting_proposals: { can_write: true, proposals: [] },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-projects'));
+    expect(await screen.findByTestId('page-settings.projects')).toBeInTheDocument();
+    expect(screen.queryByTestId('projects-section')).toBeNull();
+  });
+
   it('an untrusted device reads them, and is told how to be trusted', async () => {
     route({
       describe_fleet_settings: described,
@@ -463,7 +475,7 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
       setting_proposals: { can_write: false, proposals: [] },
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
     await screen.findByTestId('hub-scope-note');
     expect(screen.getByTestId('hub-scope-readonly').textContent).toContain('fleet-hub client trust laptop');
     // Shown, not editable: the value in words, no switch.
@@ -471,12 +483,28 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
     expect(screen.getByTestId('setting-playbooks-press-enter').textContent).toBe('On');
   });
 
+  it('Decisions on an untrusted paired desktop: every use case shown, none editable (7.7)', async () => {
+    route({
+      describe_fleet_settings: described.map((d) => (d.key === 'decide.jev.enabled' ? { ...d, value: 'true' } : d)),
+      get_fleet_settings: { 'decide.jev.enabled': 'true' },
+      setting_proposals: { can_write: false, proposals: [] },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-decisions'));
+    await screen.findByTestId('hub-scope-readonly');
+    for (const k of ['enabled', 'status-map', 'start-project', 'work-link']) {
+      expect((await screen.findByTestId(`setting-decide-jev-${k}`)).tagName, k).toBe('SPAN');
+    }
+    // The Today record reads this app's store: a paired desktop shows none.
+    expect(screen.queryByTestId('data-record-decide.today')).toBeNull();
+  });
+
   it('a hub that serves no settings leaves its reason and its answer', async () => {
     route({
       describe_fleet_settings: ipcError('E_FORBIDDEN', 'describe_fleet_settings: get_settings is not a client-callable tool'),
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.automation'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-automation'));
     const note = await screen.findByTestId('pages-remote');
     await waitFor(() => expect(note.textContent).toContain('did not serve its settings'));
     expect(screen.getByTestId('pages-remote-error').textContent).toContain('not a client-callable tool');
@@ -496,7 +524,7 @@ describe('Settings → Catalogs on a paired desktop', () => {
       ],
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.catalogs'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-catalogs'));
     const reason = await screen.findByTestId('resource-readonly');
     expect(reason.textContent).toContain('fleet-hub catalog add');
     expect(reason.textContent).toContain('https://fleet.example.com');

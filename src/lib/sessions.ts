@@ -394,8 +394,11 @@ showRowDetails.subscribe((v) => writePref('rows.details', v));
 // Sidebar grouping — `project` (the tree by repository) or `work` (sessions
 // that carry a work key grouped by it first, the rest still under their
 // project; see work_keys.ts). Persisted across restarts.
-export type SidebarGroupBy = 'project' | 'work';
-const isGroupBy = (v: unknown): v is SidebarGroupBy => v === 'project' || v === 'work';
+/** Project and work are trees with their own headers; state, host and agent
+ *  (redesign step 3.6) are flat groups, `row_groups.ts`. */
+export type SidebarGroupBy = 'project' | 'work' | 'state' | 'host' | 'agent';
+const isGroupBy = (v: unknown): v is SidebarGroupBy =>
+  v === 'project' || v === 'work' || v === 'state' || v === 'host' || v === 'agent';
 export const sidebarGroupBy = writable<SidebarGroupBy>(readPref('sidebar.group', 'project', isGroupBy));
 sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 
@@ -1042,6 +1045,17 @@ export async function dismissGhostSession(sessionId: number): Promise<Result<voi
     args: { session_id: sessionId },
   });
   if (r.ok) removeSession(sessionId);
+  return r;
+}
+
+/** Adopt a live tmux session fleet did not start (`started_at` null): fleet
+ *  runs it from now on and the caller owns it when nobody did (Lost and
+ *  found, redesign step 4.8). */
+export async function adoptSession(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('adopt_session', {
+    args: { session_id: sessionId },
+  });
+  if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 

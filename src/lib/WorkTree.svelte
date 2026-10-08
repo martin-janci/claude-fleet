@@ -27,6 +27,7 @@
   import { providerInfo, unavailableLabel } from './trackers';
   import { timeAgo } from './session_status';
   import { workBoardOpen, workViewChordLabel } from './app_views';
+  import { uiLayout } from './prefs';
   import { detectMac } from './terminal_keys';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
   import { facetSentence, workFacets } from './filter_facets';
@@ -399,6 +400,23 @@
     () => maxWaitMs,
   );
 
+  // The New layout's tabs (step 3.10). The board is a destination of the
+  // right column (`workBoardOpen`), so its tab reads that store; any other tab
+  // leaves it.
+  const newLayout = $derived($uiLayout === 'new');
+  const shownTab = $derived<'tasks' | 'missions' | 'board'>(
+    $workBoardOpen ? 'board' : tab === 'missions' ? 'missions' : 'tasks',
+  );
+  function pickTab(t: 'tasks' | 'review' | 'missions' | 'board') {
+    if (t === 'board') {
+      workBoardOpen.set(true);
+      return;
+    }
+    workBoardOpen.set(false);
+    if (t === 'tasks') showTasks();
+    else tab = t;
+  }
+
   function showTasks() {
     tab = 'tasks';
     if (!staleWhileHidden) return;
@@ -445,7 +463,7 @@
   }
 
   function selectTask(t: WorkTask) {
-    openTask(t.task_id);
+    openTask(t.task_id, t.sessions);
   }
 
   // Opening an occurrence opens its session — the same `session_id` from
@@ -454,12 +472,8 @@
   function openOccurrence(t: WorkTask, l: WorkTaskLink) {
     const row =
       l.session_id != null && l.state !== 'ended' ? $sessions.find((r) => r.id === l.session_id) : undefined;
-    if (row) {
-      selectedTaskId.set(t.task_id);
-      selectSessionExplicitly(row);
-    } else {
-      openTask(t.task_id);
-    }
+    if (row) selectSessionExplicitly(row, { task: t.task_id });
+    else openTask(t.task_id, t.sessions);
   }
 
   function occurrenceTitle(l: WorkTaskLink): string {
@@ -537,32 +551,77 @@
 <div class="work-tree" data-testid="work-tree" aria-busy={loading} bind:this={root}>
   <header class="work-header">
     <div class="row">
-      <div class="tabs" role="tablist" aria-label="Work view">
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={tab === 'tasks'}
-          class:is-active={tab === 'tasks'}
-          data-testid="work-tab-tasks"
-          onclick={showTasks}>Tasks</button
-        >
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={tab === 'review'}
-          class:is-active={tab === 'review'}
-          data-testid="work-tab-review"
-          onclick={() => (tab = 'review')}>Review{#if reviewTotal}&nbsp;· {reviewTotal}{/if}</button
-        >
-        <button
-          class="btn btn--chip btn--toggle"
-          role="tab"
-          aria-selected={tab === 'missions'}
-          class:is-active={tab === 'missions'}
-          data-testid="work-tab-missions"
-          onclick={() => (tab = 'missions')}>Missions</button
-        >
-      </div>
+      {#if newLayout}
+        <!-- The New layout's fixed Work tabs (redesign step 3.10): Tasks, with
+             the links waiting for review as a count beside it, Missions and
+             Board. Review is part of Tasks; the board is a Work view of its
+             own, not an overlay toggled from the layout chips. -->
+        <div class="tabs" role="tablist" aria-label="Work view">
+          <button
+            class="btn btn--chip btn--toggle"
+            role="tab"
+            aria-selected={shownTab === 'tasks'}
+            class:is-active={shownTab === 'tasks'}
+            data-testid="work-tab-tasks"
+            onclick={() => pickTab('tasks')}>Tasks</button
+          >
+          {#if reviewTotal}
+            <button
+              class="review-count"
+              type="button"
+              class:is-active={shownTab === 'tasks' && tab === 'review'}
+              title="{reviewTotal} {reviewTotal === 1 ? 'link waits' : 'links wait'} for review"
+              aria-label="Review: {reviewTotal} waiting"
+              data-testid="work-review-count"
+              onclick={() => pickTab('review')}>{reviewTotal}</button
+            >
+          {/if}
+          <button
+            class="btn btn--chip btn--toggle"
+            role="tab"
+            aria-selected={shownTab === 'missions'}
+            class:is-active={shownTab === 'missions'}
+            data-testid="work-tab-missions"
+            onclick={() => pickTab('missions')}>Missions</button
+          >
+          <button
+            class="btn btn--chip btn--toggle"
+            role="tab"
+            aria-selected={shownTab === 'board'}
+            class:is-active={shownTab === 'board'}
+            data-testid="work-tab-board"
+            title="These tasks on a board by status"
+            onclick={() => pickTab('board')}>Board</button
+          >
+        </div>
+      {:else}
+        <div class="tabs" role="tablist" aria-label="Work view">
+          <button
+            class="btn btn--chip btn--toggle"
+            role="tab"
+            aria-selected={tab === 'tasks'}
+            class:is-active={tab === 'tasks'}
+            data-testid="work-tab-tasks"
+            onclick={showTasks}>Tasks</button
+          >
+          <button
+            class="btn btn--chip btn--toggle"
+            role="tab"
+            aria-selected={tab === 'review'}
+            class:is-active={tab === 'review'}
+            data-testid="work-tab-review"
+            onclick={() => (tab = 'review')}>Review{#if reviewTotal}&nbsp;· {reviewTotal}{/if}</button
+          >
+          <button
+            class="btn btn--chip btn--toggle"
+            role="tab"
+            aria-selected={tab === 'missions'}
+            class:is-active={tab === 'missions'}
+            data-testid="work-tab-missions"
+            onclick={() => (tab = 'missions')}>Missions</button
+          >
+        </div>
+      {/if}
       {#if tab === 'tasks'}
         <div class="layout" role="group" aria-label="Layout">
           <button
@@ -583,15 +642,17 @@
             title="Organisation → group"
             onclick={() => workLayout.set('grouped')}>Grouped</button
           >
-          <button
-            class="btn btn--chip btn--toggle"
-            type="button"
-            aria-pressed={$workBoardOpen}
-            class:is-active={$workBoardOpen}
-            data-testid="work-layout-board"
-            title="A board of these tasks by status, beside the terminal"
-            onclick={() => workBoardOpen.update((v) => !v)}>Board</button
-          >
+          {#if !newLayout}
+            <button
+              class="btn btn--chip btn--toggle"
+              type="button"
+              aria-pressed={$workBoardOpen}
+              class:is-active={$workBoardOpen}
+              data-testid="work-layout-board"
+              title="A board of these tasks by status, beside the terminal"
+              onclick={() => workBoardOpen.update((v) => !v)}>Board</button
+            >
+          {/if}
         </div>
       {/if}
       <button
@@ -617,6 +678,19 @@
         Couldn't refresh ({readErrorText(refreshError)}) — showing what was loaded.
         <button class="btn btn--quiet" type="button" data-testid="work-tree-refresh-retry" onclick={() => void load()}>Retry</button>
       </p>
+    {/if}
+    {#if newLayout && tab === 'review' && !$workBoardOpen}
+      <div class="review-strip" data-testid="work-review-strip">
+        <span>Review: {reviewTotal ?? 0} waiting</span>
+        <button
+          class="btn btn--quiet btn--icon"
+          type="button"
+          title="Back to the tasks"
+          aria-label="Close review"
+          data-testid="work-review-strip-close"
+          onclick={() => pickTab('tasks')}>×</button
+        >
+      </div>
     {/if}
     {#if tab === 'review'}
       <WorkReview onchanged={() => void loadReviewCount()} />
@@ -801,6 +875,34 @@
 {/if}
 
 <style>
+  .review-count {
+    min-width: 1.25rem;
+    height: 1.1rem;
+    padding: 0 0.35rem;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+    align-self: center;
+  }
+  .review-count.is-active {
+    outline: 1px solid var(--accent);
+  }
+  .review-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.25rem 0.5rem;
+    margin: 0.25rem 0.5rem;
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    font-size: 0.8rem;
+  }
   .work-tree {
     display: flex;
     flex-direction: column;

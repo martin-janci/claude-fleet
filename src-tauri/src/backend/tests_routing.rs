@@ -1990,9 +1990,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     use fleet_core::service::rewind::{RewindArgs, RewindMode};
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
-        DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs,
-        RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
-        SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+        AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
+        NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
+        RestoreHostSessionsArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
     };
 
     vec![
@@ -2817,6 +2817,23 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 block_on(commands::sessions::routed::dismiss_ghost_session(
                     b,
                     DismissGhostSessionArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "adopt_session",
+            "adopt_session",
+            json!({ "session_id": 7 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::adopt_session(
+                    b,
+                    AdoptSessionArgs {
+                        session_id: 7,
+                        owner_person_id: Some(1),
+                    },
                     s,
                 ))
                 .map(|_| ())

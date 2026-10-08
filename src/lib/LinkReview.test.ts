@@ -72,7 +72,7 @@ describe('LinkReview', () => {
     sessions.set(rows());
     render(LinkReview);
     const pill = screen.getByTestId('link-review-pill');
-    expect(pill.textContent).toContain('2 link suggestions · Review');
+    expect(pill.textContent).toContain('2 links to review');
     await fireEvent.click(pill);
     await tick();
     const sheet = screen.getByTestId('link-review-sheet');
@@ -176,7 +176,7 @@ describe('LinkReview', () => {
     // The cursor was on index 1, which no longer exists: it is clamped onto
     // the remaining row, so the next chord decides that one and not nothing.
     expect(left.classList.contains('cursor')).toBe(true);
-    expect(screen.getByTestId('link-review-pill')).toHaveTextContent('1 link suggestion · Review');
+    expect(screen.getByTestId('link-review-pill')).toHaveTextContent('1 link to review');
     await fireEvent.keyDown(sheet, { key: 'y' });
     expect(invoke).toHaveBeenLastCalledWith('confirm_session_work', {
       args: { session_id: 1, link_id: 11 },
@@ -336,7 +336,7 @@ describe('LinkReview', () => {
     hubConnection.set({ state: 'reconnecting', attempt: 2, retry_in_secs: 5, reason: 'socket closed' });
     render(LinkReview);
     // The pill still counts: the suggestions are there to look at.
-    expect(screen.getByTestId('link-review-pill')).toHaveTextContent('2 link suggestions · Review');
+    expect(screen.getByTestId('link-review-pill')).toHaveTextContent('2 links to review');
     await fireEvent.click(screen.getByTestId('link-review-pill'));
     await tick();
     const sheet = screen.getByTestId('link-review-sheet');

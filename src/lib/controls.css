@@ -234,3 +234,115 @@
 .switch-row[aria-checked='true'] .switch::after {
   transform: translateX(12px);
 }
+
+/* ── Segmented control ──
+   A row of mutually exclusive `.btn--chip.btn--toggle` segments sharing one
+   rounded outline. Render it with `SegmentedControl.svelte`, the only
+   component that should carry this class. */
+.seg-group {
+  display: flex;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+/* `.btn--chip` gives every segment its own resting border; collapse the
+   shared edge instead of doubling it. */
+.seg-group > .btn {
+  flex: 1 1 0;
+  border-radius: 0;
+}
+.seg-group > .btn + .btn {
+  margin-left: -1px;
+}
+
+/* ── Tabs ──
+   `role="tablist"` of `role="tab"` buttons; the selected one is carried by
+   `aria-selected` as an accent underline and weight, never colour alone. */
+.tab-strip {
+  display: flex;
+  gap: var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+.tab-strip__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: -1px;
+  padding: var(--space-2) 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: color var(--dur-fast);
+}
+.tab-strip__tab:hover {
+  color: var(--fg);
+}
+.tab-strip__tab[aria-selected='true'] {
+  color: var(--fg);
+  font-weight: 500;
+  border-bottom-color: var(--accent);
+}
+
+/* ── Count badge ──
+   A number beside a label: "Sessions 12". `--hot` is the attention count
+   (Needs you) and is the only filled one. */
+.count-badge {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--count-bg);
+  color: var(--fg-2);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.count-badge--hot {
+  background: var(--status-waiting);
+  color: var(--on-waiting);
+  font-weight: 700;
+}
+
+/* ── State chip ──
+   Non-interactive status: one plain word, the full status colour as text
+   over its soft tint. A chip that does something is `.btn--chip`. */
+.state-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: var(--chip-bg);
+  color: var(--fg-2);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.state-chip--waiting {
+  background: var(--waiting-soft);
+  color: var(--status-waiting);
+}
+.state-chip--failed {
+  background: var(--failed-soft);
+  color: var(--status-failed);
+}
+.state-chip--done {
+  background: var(--done-soft);
+  color: var(--status-done);
+}
+.state-chip--working {
+  color: var(--status-working);
+}
+.state-chip--idle {
+  color: var(--status-idle);
+}
+.state-chip--accent {
+  background: var(--accent-soft);
+  color: var(--fg);
+}

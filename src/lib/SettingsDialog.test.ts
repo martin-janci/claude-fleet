@@ -15,6 +15,13 @@ import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { registryRouter } from './pages/testing';
 import { settingsSection } from './app_views';
 
+/** On screen: present, and not in a hidden Settings panel (step 7.1 keeps
+ *  every hand-written panel mounted and hides the ones another leaf is on). */
+function shown(testid: string): boolean {
+  const el = screen.queryByTestId(testid);
+  return el !== null && el.closest('[hidden]') === null;
+}
+
 const sample: HostRow[] = [
   { alias: 'local', ssh_alias: null, reachable: true, claude_version: '2.1.145', tmux_version: '3.5a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
   { alias: 'mefistos', ssh_alias: 'mefistos', reachable: true, claude_version: '2.1.144', tmux_version: '3.6a', hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' },
@@ -402,22 +409,26 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
   }
   afterEach(() => fleetSettings.set({ ...SETTING_DEFAULTS }));
 
-  it('opens on General, lists every page, and renders a page from the registry', async () => {
+  it('opens on Appearance, lists the tree, and renders a page from the registry', async () => {
     const inv = routeRegistry();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    expect(await screen.findByTestId('settings-nav-settings.automation')).toBeInTheDocument();
-    expect(screen.getByTestId('settings-nav-general').getAttribute('aria-current')).toBe('page');
-    expect(screen.getByTestId('hub-section')).toBeInTheDocument();
+    expect(await screen.findByTestId('settings-nav-automation')).toBeInTheDocument();
+    expect(screen.getByTestId('settings-nav-appearance').getAttribute('aria-current')).toBe('page');
+    expect(shown('settings-panel-appearance')).toBe(true);
+    expect(shown('hub-section')).toBe(false);
+    await fireEvent.click(screen.getByTestId('settings-nav-hub'));
+    expect(screen.getByTestId('settings-nav-hub').getAttribute('aria-current')).toBe('page');
+    expect(shown('hub-section')).toBe(true);
     // The app-vs-hub versions line is about a pairing; standalone there is
     // one program and the footer already names its version.
     expect(screen.queryByTestId('hub-versions')).toBeNull();
-    for (const id of ['settings', 'settings.limits', 'settings.work', 'settings.decisions', 'usage']) {
+    for (const id of ['advanced', 'limits', 'work', 'decisions', 'usage', 'voice', 'downloads', 'playbooks']) {
       expect(screen.getByTestId(`settings-nav-${id}`)).toBeInTheDocument();
     }
     await waitFor(() => expect(inv).toHaveBeenCalledWith('describe_fleet_settings', undefined));
-    await fireEvent.click(screen.getByTestId('settings-nav-settings.automation'));
+    await fireEvent.click(screen.getByTestId('settings-nav-automation'));
     expect(await screen.findByTestId('page-settings.automation')).toBeInTheDocument();
-    expect(screen.queryByTestId('hub-section')).toBeNull();
+    expect(shown('hub-section')).toBe(false);
     const press = screen.getByTestId('setting-playbooks-press-enter') as HTMLInputElement;
     expect(press.checked).toBe(false);
     await fireEvent.click(press);
@@ -431,7 +442,7 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
   it('Decisions: off by default, says what is sent where, offers no auto mode, and asks before turning on', async () => {
     const inv = routeRegistry();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.click(await screen.findByTestId('settings-nav-settings.decisions'));
+    await fireEvent.click(await screen.findByTestId('settings-nav-decisions'));
     const page = await screen.findByTestId('page-settings.decisions');
     await waitFor(() => expect(screen.getByTestId('setting-decide-jev-enabled')).toBeInTheDocument());
     expect((screen.getByTestId('setting-decide-jev-enabled') as HTMLInputElement).checked).toBe(false);
@@ -451,18 +462,75 @@ describe('SettingsDialog — generated pages (declarative pages P3)', () => {
     expect(screen.getByTestId('setting-row-decide.jev.work_link').textContent).toContain('offline benchmark only until J1');
     const sm = screen.getByTestId('setting-decide-jev-status-map') as HTMLSelectElement;
     expect(Array.from(sm.querySelectorAll('option'), (o) => o.value)).toEqual(['off', 'shadow', 'assist']);
+    // Step 7.7: each use case its own row, today's budget, the breaker, the
+    // key and which orgs consent, with the way to change that consent.
+    for (const k of ['status_map', 'start_project', 'work_link']) {
+      const sel = screen.queryByTestId(`setting-decide-jev-${k.replace('_', '-')}`) as HTMLSelectElement | null;
+      expect(sel, k).not.toBeNull();
+      if (sel?.tagName === 'SELECT') expect(Array.from(sel.options, (o) => o.value)).not.toContain('auto');
+    }
+    expect(screen.getByTestId('section-Use cases').textContent).toContain('There is no auto mode');
+    const today = await screen.findByTestId('section-Today');
+    await waitFor(() => expect(today.textContent).toContain('closed'));
+    expect(today.textContent).toContain('Acme');
+    expect(today.textContent).toContain('Daily budget');
+    expect(screen.getByTestId('page-link-settings.orgs').textContent).toContain('which organisations allow Jev');
   });
 
   it('search finds a setting and opens it on its page and tab', async () => {
     routeRegistry();
     render(SettingsDialog, { props: { onClose: () => {} } });
     const search = (await screen.findByTestId('settings-search')) as HTMLInputElement;
-    await waitFor(() => expect(screen.getByTestId('settings-nav-settings.work')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId('settings-nav-work')).toBeInTheDocument());
     await fireEvent.input(search, { target: { value: 'unlinked' } });
     await fireEvent.click(await screen.findByTestId('settings-hit-work.tidy_idle_unlinked_days'));
     const row = await screen.findByTestId('setting-row-work.tidy_idle_unlinked_days');
     await waitFor(() => expect(row.classList.contains('highlighted')).toBe(true));
     expect(screen.getByTestId('page-settings.work-tab-1').getAttribute('aria-selected')).toBe('true');
+    // The hits stay up until the search is cleared; then the tree marks the leaf.
+    await fireEvent.input(search, { target: { value: '' } });
+    expect(screen.getByTestId('settings-nav-work').getAttribute('aria-current')).toBe('page');
+  });
+
+  it('a hit in a section with its own leaf opens that leaf, and only that section', async () => {
+    routeRegistry();
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    const search = (await screen.findByTestId('settings-search')) as HTMLInputElement;
+    await fireEvent.input(search, { target: { value: 'voice.max_capture_secs' } });
+    await fireEvent.click(await screen.findByTestId('settings-hit-voice.max_capture_secs'));
+    await fireEvent.input(search, { target: { value: '' } });
+    expect(screen.getByTestId('settings-nav-voice').getAttribute('aria-current')).toBe('page');
+    const page = await screen.findByTestId('page-settings.limits');
+    expect(screen.getByTestId('section-Voice')).toBeInTheDocument();
+    expect(screen.queryByTestId('section-Downloads')).toBeNull();
+    expect(page.querySelector('h4')?.textContent).toBe('Voice');
+    // The whole page is one click away, on the Limits leaf.
+    await fireEvent.click(screen.getByTestId('page-whole-link'));
+    expect(screen.getByTestId('settings-nav-limits').getAttribute('aria-current')).toBe('page');
+    expect(await screen.findByTestId('section-Downloads')).toBeInTheDocument();
+  });
+
+  it('each tree leaf shows its own screen, and the old section names still open', async () => {
+    routeRegistry();
+    settingsSection.set('diagnostics');
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await waitFor(() => expect(screen.getByTestId('settings-nav-error-reports').getAttribute('aria-current')).toBe('page'));
+    expect(shown('diagnostics-section')).toBe(true);
+    expect(await screen.findByTestId('section-Error reports')).toBeInTheDocument();
+    for (const [leaf, testid] of [
+      ['notifications', 'notifications-section'],
+      ['shortcuts', 'shortcuts-section'],
+      ['sessions', 'composer-section'],
+      ['projects', 'projects-section'],
+      ['work', 'work-section'],
+      ['control-api', 'mcp-section'],
+      ['accounts-hosts', 'settings-hosts-line'],
+      ['appearance', 'onboarding-section'],
+    ] as const) {
+      await fireEvent.click(screen.getByTestId(`settings-nav-${leaf}`));
+      expect(shown(testid), leaf).toBe(true);
+      expect(shown('diagnostics-section'), leaf).toBe(false);
+    }
   });
 
   it('a deep link to a page opens it', async () => {

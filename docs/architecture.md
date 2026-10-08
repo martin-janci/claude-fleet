@@ -16,8 +16,8 @@ bullet for the area you are about to change.
   `tokio::process`); tmux command construction in `tmux.rs`; SQLite in `store/`
   (migrations are registered in the `MIGRATIONS` table there — add a new
   `NNN_<topic>.sql` plus an entry); the event bus in `events.rs`; cancellation
-  registry in `cancel.rs`. The single global PTY (`pty.rs`) stays in
-  `src-tauri`, since it is desktop-only.
+  registry in `cancel.rs`. The PTY map (`pty.rs`) stays in `src-tauri`,
+  since it is desktop-only.
 - **Session listing** is cache-first: `service::sessions::list_sessions` serves
   stored rows and only runs a reconcile pass when the last one is stale;
   `refresh_sessions` is the forced path for an explicit user refresh.
@@ -409,9 +409,15 @@ bullet for the area you are about to change.
   read `list_downloads` (not served to host tokens), re-read on
   `download:changed` (ids only, hidden from scoped streams) and fetch the
   bytes from `GET /downloads/<id>` (`mcp/downloads_route.rs`), never through
-  a tool result. The GC sweep drops rows past `downloads.keep_secs`. Desktop:
-  the footer's ⤓ Downloads sheet and the file viewer's *Send to downloads*;
-  `save_download` picks the destination in its own save dialog.
+  a tool result. The GC sweep drops rows past `downloads.keep_secs`. A row
+  being copied carries `fetched_bytes` (in memory, `download:changed` after
+  each 8 MiB slice; never stored). Desktop: the footer's ⤓ Downloads sheet
+  (progress with the time left, *Retry* = `send_file` again for the same
+  session and path, *Show in Finder* for a file saved in this window, *Clear
+  finished*) and the file viewer's *Send to downloads*; `save_download` picks
+  the destination in its own save dialog. The same sheet's Notifications tab
+  is the notification centre: every toast this window showed
+  (`src/lib/notifications.ts`), its button offered only while the toast is up.
 - **Voice relay F1** (spec `docs/superpowers/specs/2026-10-05-voice-relay-design.md`, plan
   `docs/superpowers/plans/2026-10-05-voice-relay-f1.md`, guide `docs/voice.md`):
   `service/voice` `VoiceRegistry` (one claim per session, process-global),
@@ -423,7 +429,10 @@ bullet for the area you are about to change.
   never stored.
 - **Terminal** is a hand-rolled ANSI screen buffer (`src/lib/ansi.ts` +
   `TerminalView.svelte`), *not* xterm.js — xterm's renderer failed to repaint in
-  the WKWebView setup. Only one PTY is attached at a time.
+  the WKWebView setup. PTYs live in an id-keyed map (`PtyState` in `pty.rs`,
+  at most `MAX_PTYS` open): each id has its own child, reader and writer
+  threads and 1 MiB output cap, and every `pty_*` command names its id. The
+  agent pane uses `agent`; opening an id replaces only that id's PTY.
 - **Local workspace sync** (`service/local_sync/`, `store/local_workspaces.rs`,
   migration 109; spec
   `docs/superpowers/specs/2026-10-07-local-workspace-sync-design.md`): one

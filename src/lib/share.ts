@@ -145,6 +145,7 @@ const SESSION_TIER = {
   set_friendly_name: 'drive',
   repair_session: 'drive',
   dismiss_ghost_session: 'drive',
+  adopt_session: 'own',
   dismiss_agent_session: 'drive',
   delete_worktree: 'drive',
   // It types a prompt into the pane and waits for the reply, exactly like

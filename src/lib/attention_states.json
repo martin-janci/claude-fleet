@@ -1,0 +1,46 @@
+{
+  "_comment": "Redesign step 0.4: the one attention model. Read by src/lib/attention.ts at runtime and checked against crates/fleet-core/src/service/attention.rs by both test suites. `states` is the seven states in urgency order; `counted` marks the three the Needs you badge counts. `buckets` maps every triage bucket, in TRIAGE_BUCKETS order, to its state. `cases` are rows (overrides on a plain running work session) with the bucket, state and count both sides must agree on.",
+  "states": [
+    { "id": "action_required", "counted": true },
+    { "id": "failed", "counted": true },
+    { "id": "blocked", "counted": true },
+    { "id": "working", "counted": false },
+    { "id": "paused", "counted": false },
+    { "id": "done", "counted": false },
+    { "id": "idle", "counted": false }
+  ],
+  "buckets": [
+    ["waiting", "action_required"],
+    ["stuck", "action_required"],
+    ["stop_failed", "failed"],
+    ["failed", "failed"],
+    ["context_full", "action_required"],
+    ["stale_working", "action_required"],
+    ["ci_failing", "failed"],
+    ["done_unread", "done"],
+    ["lifecycle", "paused"],
+    ["idle_long", "idle"],
+    ["working", "working"],
+    ["idle", "idle"]
+  ],
+  "cases": [
+    { "name": "a plain working session", "row": {}, "bucket": "working", "state": "working", "counted": false },
+    { "name": "an idle session", "row": { "claude_status": "idle" }, "bucket": "idle", "state": "idle", "counted": false },
+    { "name": "a finished session", "row": { "claude_status": "completed" }, "bucket": "idle", "state": "idle", "counted": false },
+    { "name": "blocked on a prompt", "row": { "claude_status": "blocked" }, "bucket": "waiting", "state": "action_required", "counted": true },
+    { "name": "stuck on an auth menu", "row": { "stuck_kind": "auth_menu", "stuck_since": 50 }, "bucket": "stuck", "state": "action_required", "counted": true },
+    { "name": "crashed out of memory still counts", "row": { "claude_status": "idle", "stuck_kind": "oom" }, "bucket": "stuck", "state": "action_required", "counted": true },
+    { "name": "a turn that ended in an API error", "row": { "claude_status": "failed" }, "bucket": "stop_failed", "state": "failed", "counted": true },
+    { "name": "a failed background agent", "row": { "kind": "bg", "claude_status": "failed" }, "bucket": "failed", "state": "failed", "counted": true },
+    { "name": "a full context", "row": { "context_pct": 92.0 }, "bucket": "context_full", "state": "action_required", "counted": true },
+    { "name": "a stale working row", "row": { "stale_working_at": 90 }, "bucket": "stale_working", "state": "action_required", "counted": true },
+    { "name": "idle with failing CI", "row": { "claude_status": "idle", "ci_status": "failing" }, "bucket": "ci_failing", "state": "failed", "counted": true },
+    { "name": "a ghost row leaves the count", "row": { "status": "ghost", "claude_status": "idle" }, "bucket": "lifecycle", "state": "paused", "counted": false },
+    { "name": "a lost row leaves the count", "row": { "lost_at": 80, "claude_status": "working" }, "bucket": "lifecycle", "state": "paused", "counted": false },
+    { "name": "a ghost keeps its last context but leaves the count", "row": { "status": "ghost", "context_pct": 99.0 }, "bucket": "lifecycle", "state": "paused", "counted": false },
+    { "name": "a pending safe kill", "row": { "safe_kill_state": "requested", "safe_kill_requested_at": 70 }, "bucket": "lifecycle", "state": "paused", "counted": false },
+    { "name": "a lost row that is blocked still counts", "row": { "lost_at": 80, "claude_status": "blocked" }, "bucket": "waiting", "state": "action_required", "counted": true },
+    { "name": "an external session never counts", "row": { "kind": "external", "claude_status": "blocked" }, "bucket": "idle", "state": "idle", "counted": false },
+    { "name": "a shell never counts", "row": { "kind": "shell", "claude_status": "failed" }, "bucket": "idle", "state": "idle", "counted": false }
+  ]
+}

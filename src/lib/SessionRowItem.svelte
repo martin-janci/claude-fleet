@@ -7,9 +7,6 @@
     isInactiveAgent,
     showFriendlyNames,
     showRowDetails,
-    formatCostMicros,
-    formatTokens,
-    sessionUsageTokens,
     lostReasonLabel,
     type SessionRow,
   } from './sessions';
@@ -17,21 +14,10 @@
   import { forgetSessionUi } from './session_ui';
   import { hostByAlias } from './hosts';
   import { hintAnchor } from './hints';
-  import {
-    claudeStatusColor,
-    claudeStatusLabel,
-    contextColor,
-    contextLevel,
-    ciStatusColor,
-    ciStatusLabel,
-    rank,
-    stuckKindLabel,
-    STUCK_COLOR,
-  } from './attention';
+  import { bucketState, rank } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { pushError } from './toasts';
-  import { rowElapsed, rowPrompt, timeAgo } from './session_status';
-  import { isStale } from './evidence';
+  import { rowPrompt, shortAge, timeAgo } from './session_status';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
@@ -57,9 +43,14 @@
   import { fleetSettings, SETTING_KEYS } from './fleet_settings';
   import type { Result } from './result';
   import { orgs } from './orgs';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import SessionStatusChip from './SessionStatusChip.svelte';
+  import SessionRowDetails from './SessionRowDetails.svelte';
+  import SessionRowMeta from './SessionRowMeta.svelte';
+  import { COMPACT_ROW_PX, uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
+  import { uiLayout } from './prefs';
+  import SessionRowMenu from './SessionRowMenu.svelte';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -140,14 +131,12 @@
       .filter(Boolean)
       .join(', ') || undefined,
   );
-  const ctxLevel = $derived(contextLevel(sess.context_pct));
-  const elapsed = $derived(rowElapsed(sess, nowSec));
-  // An old reading describes the past (result evidence): dim the badge
-  // rather than let yesterday's `passing` look current.
-  const ciStale = $derived(isStale(sess.pr_checked_at, nowSec));
   // The row's triage bucket (P13). Published as data-bucket because component
   // CSS never reaches jsdom, so this is how tests assert a row's triage state.
   const triage = $derived(rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
+  // Redesign step 3.6: Compact is the two-line row (sans title, one meta
+  // line, chips on hover); Comfortable is 0.5.4's row unchanged.
+  const compact = $derived($uiDensity === 'compact');
   const promptText = $derived(rowPrompt(sess));
   // The dialog this row is blocked on, straight from the row: the sidebar
   // does not probe (that would be one `capture-pane` per visible row, every
@@ -535,6 +524,12 @@
 
   /** `y` / `n` decide the row's top suggestion, `l` links or picks. */
   function onRowKey(e: KeyboardEvent) {
+    if (rowMenuOn && (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))) {
+      e.preventDefault();
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      rowMenu = { x: r.left + 24, y: r.bottom };
+      return;
+    }
     if (e.target === e.currentTarget && !e.metaKey && !e.ctrlKey && !e.altKey && workBlocked === null) {
       if (e.key === 'y' && suggestion) {
         e.preventDefault();
@@ -556,6 +551,26 @@
     onKeySession(e, sess);
   }
 
+  // The row's ⋯ menu and right-click (redesign step 3.10, New layout): every
+  // Details action, run by Details (`session_actions.ts`). Ghost and outside-
+  // fleet rows keep their own inline actions.
+  const rowMenuOn = $derived($uiLayout === 'new' && !readOnly && sess.status !== 'ghost');
+  let rowMenu = $state<{ x: number; y: number } | null>(null);
+  function openRowMenu(e: MouseEvent) {
+    e.stopPropagation();
+    if (rowMenu) {
+      rowMenu = null;
+      return;
+    }
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    rowMenu = { x: r.left, y: r.bottom + 2 };
+  }
+  function onRowContextMenu(e: MouseEvent) {
+    if (!rowMenuOn || isRenaming) return;
+    e.preventDefault();
+    rowMenu = { x: e.clientX, y: e.clientY };
+  }
+
   function onWorkKey(e: KeyboardEvent) {
     e.stopPropagation();
     if (e.key === 'Enter') setWork(e);
@@ -569,10 +584,13 @@
   class:renaming={isRenaming}
   class:checked={isChecked}
   class:stuck={sess.stuck_kind !== null}
+  class:compact
   data-testid="sess-row"
+  data-density={$uiDensity}
   data-session-id={sess.id}
   data-org-color={orgColor ?? undefined}
   style:box-shadow={rowShadow}
+  style:min-height={compact ? `${COMPACT_ROW_PX}px` : undefined}
   aria-current={sessSelected ? 'true' : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
@@ -581,6 +599,7 @@
   ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
   onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onRowKey(e)}
+  oncontextmenu={onRowContextMenu}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
 >
   {#if selectMode && !readOnly}
@@ -619,21 +638,7 @@
            Recreate / Dismiss either. -->
       <span class="status-dot status-{sess.status}" title={sess.status} aria-hidden="true"></span>
       <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
-      {#if sess.stuck_kind}
-        <span
-          class="claude-chip stuck-chip"
-          data-testid="stuck-chip"
-          style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
-          title="Stuck: {stuckKindLabel(sess.stuck_kind)}"
-        >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
-      {:else if sess.claude_status}
-        <span
-          class="claude-chip"
-          data-testid="claude-chip"
-          style="background: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 13%, transparent); color: {claudeStatusColor(sess.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 27%, transparent);"
-          title="Claude: {sess.claude_status}"
-        >{claudeStatusLabel(sess.claude_status)}</span>
-      {/if}
+      <SessionStatusChip {sess} brief />
     {:else if sess.status === 'ghost'}
       <span class="status-dot status-ghost" title="ghost — session lost" aria-hidden="true"></span>
       <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
@@ -686,28 +691,34 @@
             <span class="bg-badge" role="img" title="background agent" aria-label="background agent">🤖</span>
           {/if}
           <span class="sess-name" title={sess.tmux_name}>{primaryName}</span>
-          {#if privacyBadge}
-            <!-- Beside WorkChip in the line-1 chip strip: the same place every
-                 other fact about the row is drawn. -->
-            <span class="privacy-chip" data-testid="privacy-chip" title={privacyBadge.title}
-              >{privacyBadge.text}</span
-            >
-          {/if}
-          {#if localLink}
-            <!-- Local workspace sync: shown only on a linked worktree. -->
-            <span
-              class="lw-dot tone-{localBadge.tone}"
-              data-testid="local-sync-dot"
-              title="Local workspace: {localBadge.label} — {localLink.local_path}"
-              aria-label="Local workspace: {localBadge.label}"
-            ></span>
-            {#if (localLink.local_activity ?? 0) > 0}
-              <span class="lw-changes" data-testid="local-sync-changes">changes</span>
+          <!-- The chip strip. A Compact row hides it until hover or focus
+               (its state is on the meta line); Comfortable lays the chips
+               out as if the wrapper were not there. The work suggestion
+               stays outside it: a proposal is never hidden. -->
+          <span class="chips" data-testid="row-chips">
+            {#if privacyBadge}
+              <!-- Beside WorkChip in the line-1 chip strip: the same place every
+                   other fact about the row is drawn. -->
+              <span class="privacy-chip" data-testid="privacy-chip" title={privacyBadge.title}
+                >{privacyBadge.text}</span
+              >
             {/if}
-          {/if}
-          {#if workKey}
-            <WorkChip {workKey} />
-          {/if}
+            {#if localLink}
+              <!-- Local workspace sync: shown only on a linked worktree. -->
+              <span
+                class="lw-dot tone-{localBadge.tone}"
+                data-testid="local-sync-dot"
+                title="Local workspace: {localBadge.label} — {localLink.local_path}"
+                aria-label="Local workspace: {localBadge.label}"
+              ></span>
+              {#if (localLink.local_activity ?? 0) > 0}
+                <span class="lw-changes" data-testid="local-sync-changes">changes</span>
+              {/if}
+            {/if}
+            {#if workKey}
+              <WorkChip {workKey} />
+            {/if}
+          </span>
           {#if suggestionKey && suggestion}
             <WorkChip
               workKey={suggestionKey}
@@ -716,27 +727,13 @@
               onclick={(e) => (workBlocked === null ? openWorkMenu(e) : e.stopPropagation())}
             />
           {/if}
-          {#if sess.stuck_kind}
-            <!-- Stuck outranks claude_status: one red chip, no green "working"
-                 next to it to soften the signal. -->
-            <span
-              class="claude-chip stuck-chip"
-              data-testid="stuck-chip"
-              style="background: color-mix(in srgb, {STUCK_COLOR} 13%, transparent); color: {STUCK_COLOR}; border-color: color-mix(in srgb, {STUCK_COLOR} 40%, transparent);"
-              title="Stuck: {stuckKindLabel(sess.stuck_kind)}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-            >⚠ stuck: {stuckKindLabel(sess.stuck_kind)}</span>
-          {:else if isInactiveAgent(sess)}
-            <!-- A bg agent whose CLI process is gone: shown as stopped
-                 (grey), offering Remove from list instead of the usual
-                 claude_status chip. -->
-            <span class="claude-chip inactive-chip" data-testid="inactive-chip">inactive</span>
-          {:else if sess.claude_status}
-            <span
-              class="claude-chip"
-              data-testid="claude-chip"
-              style="background: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 13%, transparent); color: {claudeStatusColor(sess.claude_status)}; border-color: color-mix(in srgb, {claudeStatusColor(sess.claude_status)} 27%, transparent);"
-              title="Claude: {sess.claude_status}{sess.current_activity ? ' — ' + sess.current_activity : ''}"
-            >{#if sess.claude_status === 'working'}<SpiralLoader size={10} class="chip-spiral" />{/if}{claudeStatusLabel(sess.claude_status)}</span>
+          <span class="chips" data-testid="row-chips">
+            <SessionStatusChip {sess} />
+          </span>
+          {#if compact}
+            <span class="sess-age" data-testid="sess-age" title={new Date(sess.last_activity_at * 1000).toLocaleString()}
+              >{shortAge(sess.last_activity_at, nowSec)}</span
+            >
           {/if}
           <div class="row-actions">
             {#if isInactiveAgent(sess)}
@@ -802,6 +799,17 @@
                 title={killBlocked ?? 'Kill session'}
                 aria-label="Kill"
               >×</button>
+            {/if}
+            {#if rowMenuOn}
+              <button
+                class="icon-btn small"
+                data-testid="row-menu-open"
+                onclick={openRowMenu}
+                title="Every action on this session (right-click the row)"
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded={rowMenu !== null}
+              >⋯</button>
             {/if}
           </div>
         </div>
@@ -942,76 +950,10 @@
                `blocked` status chip above still says the session is waiting. -->
           <AnswerPrompt session={sess} view={answerView} compact />
         {/if}
-        {#if $showRowDetails}
-          <div class="sess-details" data-testid="sess-details">
-            <span class="host-badge" data-testid="host-badge" aria-label="host {sess.host_alias}">{sess.host_alias}</span>
-            {#if secondaryName}
-              <span class="sep" aria-hidden="true">·</span>
-              <span class="sess-secondary" data-testid="sess-tmux-name">{secondaryName}</span>
-            {/if}
-            {#if elapsed}
-              <span class="sep" aria-hidden="true">·</span>
-              <span class="sess-elapsed">{elapsed}</span>
-            {/if}
-            {#if ctxLevel !== null && sess.context_pct !== null}
-              <span class="sep" aria-hidden="true">·</span>
-              <span
-                class="ctx-badge ctx-{ctxLevel}"
-                data-testid="context-badge"
-                data-level={ctxLevel}
-                style="color: {contextColor(ctxLevel)}; border-color: {contextColor(ctxLevel)};"
-                title="Context window {Math.round(sess.context_pct)}% used"
-                role="meter"
-                aria-valuemin="0"
-                aria-valuemax="100"
-                aria-valuenow={Math.round(sess.context_pct)}
-                aria-label="context usage"
-              ><span class="ctx-bar" style="width: {Math.min(100, Math.max(0, sess.context_pct))}%; background: {contextColor(ctxLevel)};"></span><span class="ctx-pct">{Math.round(sess.context_pct)}%</span></span>
-            {/if}
-            {#if sessionUsageTokens(sess) > 0}
-              {@const priced = (sess.usage_cost_micros ?? 0) > 0}
-              <span class="sep" aria-hidden="true">·</span>
-              <span
-                class="cost-badge"
-                data-testid="cost-badge"
-                data-priced={priced}
-                title={priced
-                  ? `Estimated cost ${formatCostMicros(sess.usage_cost_micros)} · ${formatTokens(sessionUsageTokens(sess))} tokens${sess.usage_model ? ' · ' + sess.usage_model : ''}`
-                  : `Unpriced: no price for ${sess.usage_model ?? 'an unknown model'} · ${formatTokens(sessionUsageTokens(sess))} tokens`}
-              >{priced ? formatCostMicros(sess.usage_cost_micros) : 'unpriced'}</span>
-            {/if}
-            {#if sess.effort_level}
-              <span class="sep" aria-hidden="true">·</span>
-              <span class="effort-badge" title="Effort: {sess.effort_level}">{sess.effort_level}</span>
-            {/if}
-            {#if sess.pr_url}
-              <span class="sep" aria-hidden="true">·</span>
-              <a
-                class="pr-link"
-                href={sess.pr_url}
-                onclick={(e) => e.stopPropagation()}
-                title="Open pull request"
-                target="_blank"
-                rel="noreferrer"
-              >PR↗</a>
-              {#if sess.ci_status}
-                <span class="sep" aria-hidden="true">·</span>
-                <span
-                  class="ci-badge"
-                  class:ci-badge--stale={ciStale}
-                  data-testid="ci-badge"
-                  style="color: {ciStatusColor(sess.ci_status)};"
-                  title={ciStale && sess.pr_checked_at != null
-                    ? `CI checks: ${sess.ci_status}, last checked ${timeAgo(sess.pr_checked_at, nowSec * 1000)}`
-                    : `CI checks: ${sess.ci_status}`}
-                >{ciStatusLabel(sess.ci_status)}</span>
-              {/if}
-            {/if}
-            {#if promptText}
-              <span class="sep" aria-hidden="true">·</span>
-              <span class="sess-meta" data-testid="sess-meta" title={sess.last_prompt ?? undefined}>{promptText}</span>
-            {/if}
-          </div>
+        {#if compact}
+          <SessionRowMeta {sess} state={bucketState(triage.bucket)} {promptText} />
+        {:else if $showRowDetails}
+          <SessionRowDetails {sess} {nowSec} {secondaryName} />
         {/if}
       </div>
     {/if}
@@ -1030,6 +972,9 @@
 {/if}
 {#if isRenaming && renameError}
   <p class="err inline-err">{renameError}</p>
+{/if}
+{#if rowMenu}
+  <SessionRowMenu session={sess} x={rowMenu.x} y={rowMenu.y} onclose={() => (rowMenu = null)} />
 {/if}
 
 <style>
@@ -1181,19 +1126,6 @@
     white-space: nowrap;
   }
 
-  .claude-chip {
-    font-size: 0.65rem;
-    padding: 0.05rem 0.3rem;
-    border-radius: 3px;
-    border: 1px solid;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .claude-chip :global(.chip-spiral) {
-    margin-right: 0.2rem;
-    vertical-align: -1px;
-  }
-  .stuck-chip { font-weight: 600; }
   /* The privacy badge (multi-user M1). Quiet on purpose: on a one-person
      fleet every row carries it, so it has to read as a label and not as an
      alert. */
@@ -1232,58 +1164,6 @@
     flex-shrink: 0;
     white-space: nowrap;
     align-self: flex-start;
-  }
-  .inactive-chip {
-    background: color-mix(in srgb, var(--fg-muted) 18%, transparent);
-    color: var(--fg-muted);
-    border-color: color-mix(in srgb, var(--fg-muted) 40%, transparent);
-  }
-  .ctx-badge {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 2.6rem;
-    height: 0.95rem;
-    font-size: 0.6rem;
-    border: 1px solid;
-    border-radius: 3px;
-    overflow: hidden;
-    flex-shrink: 0;
-    font-variant-numeric: tabular-nums;
-  }
-  .ctx-bar {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    opacity: 0.25;
-  }
-  .ctx-pct { position: relative; }
-  .cost-badge {
-    font-size: 0.6rem;
-    flex-shrink: 0;
-    white-space: nowrap;
-    opacity: 0.75;
-    font-variant-numeric: tabular-nums;
-  }
-  .ci-badge--stale {
-    opacity: 0.45;
-  }
-  .ci-badge {
-    font-size: 0.6rem;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .effort-badge {
-    font-size: 0.6rem;
-    padding: 0.05rem 0.25rem;
-    border-radius: 3px;
-    background: color-mix(in srgb, var(--fg) 10%, transparent);
-    color: var(--fg-muted);
-    flex-shrink: 0;
-    white-space: nowrap;
-    text-transform: uppercase;
   }
   .work-why {
     display: flex;
@@ -1346,37 +1226,27 @@
     padding: 0.05rem 0.35rem;
     white-space: nowrap;
   }
-  .pr-link {
-    font-size: 0.65rem;
-    color: var(--accent);
-    text-decoration: none;
-    flex-shrink: 0;
-    white-space: nowrap;
-  }
-  .pr-link:hover { text-decoration: underline; }
-
   .sess-lines { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.1rem; }
   .sess-line1 { position: relative; display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
   .sess-line1 .sess-name { flex: 1; }
-  .sess-details {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.35rem;
-    row-gap: 0.15rem;
-    min-width: 0;
-    padding-left: 0.85rem;
+
+  /* Redesign step 3.6: the chip strip and the Compact row. */
+  .chips { display: contents; }
+  .sess-row.compact { box-sizing: border-box; }
+  .sess-row.compact .chips { display: none; }
+  .sess-row.compact:hover .chips,
+  .sess-row.compact:focus-within .chips,
+  .sess-row.compact.selected .chips { display: contents; }
+  .sess-row.compact .sess-name {
+    font-family: var(--font-sans);
+    font-size: 0.82rem;
+  }
+  .sess-age {
+    flex-shrink: 0;
     font-size: 0.65rem;
     color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
   }
-  /* The line wraps instead of clipping — hiding the prompt preview (or any
-     badge) with no visible trace that it exists would defeat the point of
-     the line. Extra height is the user's choice: they opted into this line
-     via the details toggle and can collapse it. */
-  .sess-details > * { flex-shrink: 0; }
-  .sess-details > .sess-secondary { flex-shrink: 1; min-width: 0; }
-  .sess-details > .sess-meta { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .sess-details .sep { color: var(--fg-muted); opacity: 0.6; }
   .sess-name {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.8rem;
@@ -1385,15 +1255,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .sess-secondary,
-  .sess-meta {
-    font-size: 0.65rem;
-    color: var(--fg-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .sess-secondary { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
   .rename-input {
     flex: 1;

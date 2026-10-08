@@ -141,7 +141,7 @@
 
   function open(t: WorkTask) {
     sidebarView.set('work');
-    openTask(t.task_id);
+    openTask(t.task_id, t.sessions);
   }
 
   // ── Pointer drag ──
@@ -238,9 +238,11 @@
          every visit; a reason the board cannot move tasks still shows here. -->
     <h2 use:hintAnchor={{ id: 'board-move', when: !moveBlocked }}>Board</h2>
     {#if moveBlocked}<span class="muted" data-testid="work-board-hint">{moveBlocked}</span>{/if}
-    <button class="btn btn--quiet btn--icon" type="button" title="Close the board" aria-label="Close the board"
-      data-testid="work-board-close" onclick={() => onclose?.()}>✕</button
-    >
+    {#if onclose}
+      <button class="btn btn--quiet btn--icon" type="button" title="Close the board" aria-label="Close the board"
+        data-testid="work-board-close" onclick={() => onclose?.()}>✕</button
+      >
+    {/if}
   </header>
 
   {#if error}

@@ -231,12 +231,15 @@ limits: `docs/forms.md`.
 
 When the person reads you in fleet's Conversation view, a fenced
 ```` ```fleet-ui ```` block in your reply is drawn as a card: `steps` (a
-tutorial with checkboxes), `guide` (folding sections), `callout`, `facts`,
+tutorial with checkboxes), `guide` (folding sections; or `{"kind": "guide", "page": <id>}` for a guide fleet has, from `guide { list }`, drawn as Settings draws it), `callout`, `facts`,
 `choices` (buttons that put a prompt in the composer), `form` (a
 `fleet.form/1` form, no secrets, whose answers arrive as the person's next
 prompt), `progress` (a long job; write it again with the same `id` and the
-first card updates in place), `results` (stats, a chart, a table) or `error`
-(a code, what failed, next steps). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
+first card updates in place), `results` (stats, a chart, a table), `error`
+(a code, what failed, next steps) or `setting` (a settings change to apply:
+propose it first with `set_setting { key, value, why, propose: true }`, then
+write `{"kind": "setting", "proposal": <its id>, "note"?}`; the person
+confirms Apply, you never apply it yourself). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
 broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
 Use `ask` instead when you need the answers before you continue.
 

@@ -1,7 +1,7 @@
 <script lang="ts">
-  // The Settings page tree and search (design §6): "General" (the
-  // hand-written panels) and every generated page, plus a search over every
-  // setting's label, key, help and tags. `@modified` lists what is off its
+  // The Settings tree and search (design §6; redesign step 7.1): the groups
+  // of `settings_tree.ts` in one 240 px column, the active leaf marked, plus
+  // a search over every setting's label, key, help and tags. `@modified` lists what is off its
   // default; `@tag:experimental` and the like filter by tag. A hit opens the
   // setting's page and tab and highlights it.
   //
@@ -11,7 +11,8 @@
   import ConfirmDialog from '../ConfirmDialog.svelte';
   import { setFleetSetting, type SettingKey } from '../fleet_settings';
   import { push } from '../toasts';
-  import { childrenOf, homeOf, searchSettings, type Descriptor, type Page } from './pages';
+  import { homeOf, searchSettings, type Descriptor, type Page } from './pages';
+  import { navGroups } from '../settings_tree';
   import { valueInWords } from './review';
   import { interpret } from './settings_nl';
 
@@ -27,12 +28,13 @@
     pages: Page[];
     descs: Map<string, Descriptor>;
     values: Record<string, string>;
-    /** `general`, or a page id. */
+    /** The selected leaf's id. */
     selected: string;
-    /** A badge by a page's name: proposals waiting for review. */
+    /** A badge by a page's leaf: proposals waiting for review, by page id. */
     counts?: Record<string, number>;
     /** This app owns the fleet: a plain-words command may change a setting. */
     canWrite?: boolean;
+    /** A leaf id, or a page id (and setting) from a search hit. */
     onselect: (view: string, focusKey?: string) => void;
   } = $props();
 
@@ -67,18 +69,10 @@
     if (home) onselect(home.page, d.key);
   }
 
-  // General first, then the Settings overview and its pages in list order,
-  // then any other top-level page (Usage).
-  const entries = $derived.by(() => {
-    const out: { id: string; title: string; depth: number }[] = [
-      { id: 'general', title: 'General', depth: 0 },
-    ];
-    for (const top of childrenOf(pages, null)) {
-      out.push({ id: top.id, title: top.id === 'settings' ? 'Overview' : top.title, depth: 0 });
-      for (const child of childrenOf(pages, top.id)) out.push({ id: child.id, title: child.title, depth: 1 });
-    }
-    return out;
-  });
+  const groups = $derived(navGroups(pages));
+  /** A count shows on the leaf that shows its whole page. */
+  const countOf = (leaf: { page?: string; section?: string }) =>
+    leaf.page && !leaf.section ? (counts[leaf.page] ?? 0) : 0;
 
   function onKey(e: KeyboardEvent) {
     if (e.key === 'Escape' && query) {
@@ -151,22 +145,31 @@
       {/each}
     </ul>
   {:else if !nl}
-    <ul class="tree">
-      {#each entries as e (e.id)}
-        <li>
-          <button
-            type="button"
-            class:depth1={e.depth === 1}
-            aria-current={selected === e.id ? 'page' : undefined}
-            data-testid={`settings-nav-${e.id}`}
-            onclick={() => onselect(e.id)}
-            >{e.title}{#if counts[e.id]}<span class="count" data-testid={`settings-nav-count-${e.id}`}
-                aria-label={`${counts[e.id]} waiting`}>{counts[e.id]}</span
-              >{/if}</button
-          >
-        </li>
+    <div class="tree">
+      {#each groups as g (g.title)}
+        <div class="group" role="group" aria-labelledby={`settings-group-${g.title}`}>
+          <h5 class="group-title" id={`settings-group-${g.title}`}>{g.title}</h5>
+          <ul>
+            {#each g.rows as r (r.id)}
+              {@const n = countOf(r.leaf)}
+              <li>
+                <button
+                  type="button"
+                  class:depth1={r.depth === 1}
+                  aria-current={selected === r.id ? 'page' : undefined}
+                  data-testid={`settings-nav-${r.id}`}
+                  onclick={() => onselect(r.id)}
+                  ><span class="label">{r.label}{#if r.leaf.elsewhere}<span class="out" aria-hidden="true"> ↗</span>{/if}</span
+                  >{#if n}<span class="count" data-testid={`settings-nav-count-${r.id}`} aria-label={`${n} waiting`}
+                      >{n}</span
+                    >{/if}</button
+                >
+              </li>
+            {/each}
+          </ul>
+        </div>
       {/each}
-    </ul>
+    </div>
   {/if}
 </nav>
 
@@ -188,8 +191,25 @@
   .settings-nav {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-2);
+    width: var(--settings-nav-w);
+    max-width: 100%;
     min-width: 0;
+  }
+  .tree {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .group-title {
+    margin: 0;
+    padding: var(--space-1) 0.45rem 2px;
+    font-size: var(--control-font-sm);
+    font-weight: 500;
+    color: var(--fg-muted);
+  }
+  .out {
+    color: var(--fg-muted);
   }
   .search {
     width: 100%;
@@ -225,7 +245,8 @@
   }
   li button[aria-current='page'] {
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--fg);
+    box-shadow: inset 2px 0 0 var(--accent);
   }
   li button:focus-visible {
     outline: var(--ring-w) solid var(--ring);

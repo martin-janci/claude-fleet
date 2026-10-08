@@ -266,6 +266,28 @@ pub struct WorkTask {
     /// Agent proposals under this task waiting for a person's decision.
     #[serde(default)]
     pub open_proposals: u32,
+    /// The task waits for another work item that is not done (a
+    /// `work_item_deps` edge, inside a mission or not), and is not done
+    /// itself. Derived on every read, never stored (redesign step 6.3).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blocked: bool,
+    /// What it waits for, as task ids (`item:<id>`): only the items this
+    /// caller may see, so `blocked` can be true with this empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// What its sessions have spent, in micro-USD: the usage of every
+    /// distinct session this caller sees on an active or ended link. A
+    /// session that worked on two tasks counts in both.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cost_micros: i64,
+}
+
+/// A section header while a tree read counts it: the group, how many tasks,
+/// the smallest sort key among them and their summed cost.
+type GroupAcc = (GroupRef, u32, SortKey, i64);
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
 }
 
 /// A native subtask on a task page.
@@ -350,6 +372,10 @@ pub struct TreeGroup {
     pub org_name: Option<String>,
     pub group: GroupRef,
     pub count: u32,
+    /// The spend of its tasks: the sum of their [`WorkTask::cost_micros`]
+    /// over every task the header counts (redesign step 6.3).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cost_micros: i64,
 }
 
 /// An org the caller sees.
@@ -642,6 +668,12 @@ pub(crate) struct Graph {
     /// [`Self::hidden_sessions`], for `work_items.proposed_by` (multi-user
     /// M1). See [`Self::proposer_visible`].
     pub(crate) visible_proposers: Option<BTreeSet<String>>,
+    /// Every `work_item_deps` edge out of an item in [`Self::items`]: item
+    /// id → the items it waits for (redesign step 6.3).
+    pub(crate) deps: HashMap<i64, Vec<i64>>,
+    /// The scope the graph was loaded for, so a task's `blocked_by` names
+    /// only items this caller may see.
+    pub(crate) scope: OrgScope,
 }
 
 /// How a session is named when an agent proposes a subtask in its name:
@@ -799,6 +831,11 @@ impl Graph {
         let visible_proposers: Option<BTreeSet<String>> =
             view.map(|_| sessions.values().map(proposer_label).collect());
         let job_states = job_states_from(s, &sessions, view)?;
+        let item_ids: Vec<i64> = items.keys().copied().collect();
+        let mut deps: HashMap<i64, Vec<i64>> = HashMap::new();
+        for e in s.item_deps(&item_ids)? {
+            deps.entry(e.item_id).or_default().push(e.depends_on);
+        }
         Ok(Graph {
             now: crate::service::catalog::now_secs(),
             items,
@@ -840,6 +877,8 @@ impl Graph {
             // here, since a mirror is never `proposal_state = 'proposed'`.
             open_proposals,
             visible_proposers,
+            deps,
+            scope: scope.clone(),
         })
     }
 
@@ -1699,9 +1738,14 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     let mut last: Option<i64> = None;
     let mut repos: Vec<String> = Vec::new();
     let mut link_orgs: BTreeSet<Option<i64>> = BTreeSet::new();
+    // Session id -> its spend, once per session however many links it has.
+    let mut spent: BTreeMap<i64, i64> = BTreeMap::new();
     let mut listed = Vec::with_capacity(links.len());
     for (l, st) in links {
         let row = g.session_of(l);
+        if let (Some(r), "active" | "ended") = (row, st) {
+            spent.insert(r.id, r.usage.usage_cost_micros);
+        }
         let link_needs_you = needs_you_of(g, row);
         listed.push((l, st, link_needs_you));
         match st {
@@ -1756,6 +1800,11 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
     // host or in an org it cannot see still keeps the task in work.
     let archived = !b.all.iter().any(|(_, st)| *st == "active")
         && (status_category.as_deref() == Some("done") || all_links_archived(&b.all));
+    let (blocked, blocked_by) = match item {
+        Some(i) if status_category.as_deref() != Some("done") => blocked_on(g, i.item.id),
+        _ => (false, Vec::new()),
+    };
+    let cost_micros = spent.values().sum();
     if let Some(i) = item {
         let ext = i.item.updated_ext.unwrap_or(i.item.updated_at);
         last = Some(last.map_or(ext, |x| x.max(ext)));
@@ -1843,11 +1892,43 @@ fn summarize<'g>(g: &Graph, b: &Built<'g>, with_rejected: bool) -> TaskSummary<'
         job_state,
         title_derived,
         open_proposals,
+        blocked,
+        blocked_by,
+        cost_micros,
     };
     TaskSummary {
         task,
         links: listed,
     }
+}
+
+/// Whether item `id` waits for work that is not done, and which of those
+/// items the caller may see (as `item:<id>`). An item missing from the graph
+/// still blocks; so does one the caller may not see, which is then left out
+/// of the list (it would otherwise name work outside the caller's orgs).
+fn blocked_on(g: &Graph, id: i64) -> (bool, Vec<String>) {
+    let Some(deps) = g.deps.get(&id) else {
+        return (false, Vec::new());
+    };
+    let mut blocked = false;
+    let mut named = Vec::new();
+    for dep in deps {
+        let item = g.items.get(dep);
+        if item.and_then(|i| item_status(g, i)).as_deref() == Some("done") {
+            continue;
+        }
+        blocked = true;
+        let visible = item.is_some_and(|i| {
+            // This is the org boundary, not a privacy fence: whether a scoped
+            // caller is told the id of a work item in another org. Items are
+            // the org's work data; nothing about a person is named here.
+            g.scope.is_all() || g.item_org(i).is_some_and(|o| g.scope.sees_org(Some(o)))
+        });
+        if visible {
+            named.push(format!("item:{dep}"));
+        }
+    }
+    (blocked, named)
 }
 
 /// An item's origin; a row an older hub wrote (and a bare key) reads as
@@ -2174,7 +2255,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     let mut archived_hidden = 0u32;
     // Section headers count every task under the filters but the group
     // one, so every section of the view has its header and count.
-    let mut groups: BTreeMap<(Option<i64>, String), (GroupRef, u32, SortKey)> = BTreeMap::new();
+    let mut groups: BTreeMap<(Option<i64>, String), GroupAcc> = BTreeMap::new();
     let summaries: Vec<TaskSummary<'_>> = built.iter().map(|b| summarize(g, b, false)).collect();
     let mut matching: Vec<(SortKey, usize)> = Vec::new();
     for (i, summary) in summaries.iter().enumerate() {
@@ -2196,8 +2277,9 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
         let key = sort_key(t, &org_names);
         let e = groups
             .entry((t.org_id, t.group.id.clone()))
-            .or_insert_with(|| (t.group.clone(), 0, key.clone()));
+            .or_insert_with(|| (t.group.clone(), 0, key.clone(), 0));
         e.1 += 1;
+        e.3 += t.cost_micros;
         if key < e.2 {
             e.2 = key.clone();
         }
@@ -2244,7 +2326,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
     };
     let mut group_list: Vec<(SortKey, TreeGroup)> = groups
         .into_iter()
-        .map(|((org, _), (group, count, key))| {
+        .map(|((org, _), (group, count, key, cost_micros))| {
             (
                 SortKey(key.0, key.1, key.2, key.3, 0, 0, String::new()),
                 TreeGroup {
@@ -2252,6 +2334,7 @@ pub(crate) fn tree_of(g: &Graph, scope: &OrgScope, args: &TreeArgs) -> Result<Tr
                     org_name: org.and_then(|o| org_names.get(&o).cloned()),
                     group,
                     count,
+                    cost_micros,
                 },
             )
         })

@@ -15,7 +15,7 @@
   import { onDestroy } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
-  import { selectSessionExplicitly } from './selection';
+  import { selectSessionExplicitly, taskLinksLoaded } from './selection';
   import { orgs as orgStore } from './orgs';
   import { openExternal } from './open_external';
   import { timeAgo } from './session_status';
@@ -120,6 +120,8 @@
     // so the selection survives.
     const now = detail?.task.task_id;
     if (now && now !== id && (detail?.aliases ?? []).includes(id)) selectedTaskId.set(now);
+    // Picked without its links (a subtask, a review row): its live session opens now.
+    if (now) taskLinksLoaded(now, detail?.task.sessions ?? []);
   }
 
   // A placement saved: show the task and its placement line as the hub

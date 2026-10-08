@@ -30,6 +30,9 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
+  import AccountsPage from './lib/AccountsPage.svelte';
+  import AppRail from './lib/AppRail.svelte';
+  import type { RailId } from './lib/rail';
   import WorkBoard from './lib/WorkBoard.svelte';
   import { loadProjects, applyProjectEvents } from './lib/projects';
   import { loadSessions, applySessionEvents, sessions, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
@@ -73,7 +76,8 @@
   } from './lib/app_views';
   import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
-  import { readPref, writePref, sessionView } from './lib/prefs';
+  import { readPref, writePref, sessionView, uiLayout } from './lib/prefs';
+  import { sessionActionRequest } from './lib/session_actions';
   import { resolveSessionView, otherSessionView, type SessionView } from './lib/session_view';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
   import HintLayer from './lib/HintLayer.svelte';
@@ -482,6 +486,7 @@
   const unsubOpened = onSessionOpened(() => {
     closeHosts();
     leave('board');
+    leave('accounts');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
@@ -530,6 +535,19 @@
   const hostsMode = $derived($destination === 'hosts');
   const assetsMode = $derived($destination === 'assets');
   const boardMode = $derived($destination === 'board');
+  const newLayout = $derived($uiLayout === 'new');
+  // A row's ⋯ menu asks Details to run an action (step 3.10): Details must be
+  // showing to take it.
+  const unsubRowAction = sessionActionRequest.subscribe((r) => {
+    if (r) centerCollapsed = false;
+  });
+  onDestroy(unsubRowAction);
+  // The Accounts page (step 4.1) is New-layout only until the rail (3.2);
+  // switching back to Classic leaves it.
+  const accountsMode = $derived($destination === 'accounts');
+  $effect(() => {
+    if ($uiLayout !== 'new') untrack(() => leave('accounts'));
+  });
 
   // Files mode swaps the center + terminal region for the worktree file
   // viewer. The Files tab needs a selected session (the worktree to browse);
@@ -583,7 +601,7 @@
   // underneath. Unlike Files/Hosts the Session tab keeps the center
   // (Details) pane — both its views are views *of* the session. The board
   // covers the Session tab without leaving it, so its segment stays shown.
-  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode);
+  const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode && !accountsMode);
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
   );
@@ -670,6 +688,23 @@
   }
   function showAssets() {
     goTo('assets');
+  }
+  function showAccounts() {
+    // Hosts first, as for the Session tab: closing it restores its focus.
+    closeHosts();
+    goTo('accounts');
+  }
+  // The New layout's rail (step 3.2). Sessions and Work pick the sidebar's
+  // tree, as ⌘⇧W does, and bring back the Session tab from a fleet page
+  // (Accounts, Hosts, Assets); over a session (Files, the board) they leave
+  // the right column alone.
+  function onRailSelect(id: RailId) {
+    if (id === 'sessions' || id === 'work') {
+      sidebarCollapsed = false;
+      sidebarView.set(id);
+      if (hostsMode || accountsMode || assetsMode) showSession();
+    } else if (id === 'accounts') showAccounts();
+    else if (id === 'settings') settingsOpen.set(true);
   }
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
   // terminal like Assets, opened from the Work view's Board button
@@ -819,7 +854,7 @@
     }
     // The board, like Assets: Esc closes it, not while typing or in a
     // dialog (a drag in progress takes its own Esc first).
-    if (boardMode && !e.defaultPrevented) {
+    if (boardMode && !newLayout && !e.defaultPrevented) {
       if (isEditable(target) || target?.closest?.('dialog')) return;
       leave('board');
       return;
@@ -829,6 +864,12 @@
     if (assetsMode) {
       if (isEditable(target) || target?.closest?.('dialog')) return;
       leave('assets');
+      return;
+    }
+    // Accounts, the same rule as Assets.
+    if (accountsMode) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('accounts');
       return;
     }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
@@ -844,18 +885,21 @@
   }
 
   // Build the grid template based on which panes are collapsed. We keep a
-  // constant 5-column layout (panel, resizer, panel, resizer, panel) so the
-  // grid placement of each named child stays stable across toggles. Setting
-  // a slot to `0px` effectively hides it while preserving column count.
+  // constant 5-column layout (panel, resizer, panel, resizer, panel; the New
+  // layout puts its rail in front as a sixth) so the grid placement of each
+  // named child stays stable across toggles. Setting a slot to `0px`
+  // effectively hides it while preserving column count.
   const gridTemplate = $derived.by(() => {
     const sb = sidebarCollapsed ? '20px' : `${sidebarPx}px`;
     const sbResizer = sidebarCollapsed ? '0px' : '4px';
     // In files mode the center pane collapses to zero — the file viewer
     // takes the whole region right of the sidebar.
-    const wide = filesMode || hostsMode || assetsMode;
+    const wide = filesMode || hostsMode || assetsMode || accountsMode;
     const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
     const centerResizer = wide || centerCollapsed ? '0px' : '4px';
-    return `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
+    const cols = `${sb} ${sbResizer} ${center} ${centerResizer} 1fr`;
+    // The New layout's rail is one more column in front (step 3.2).
+    return $uiLayout === 'new' ? `var(--rail-w) ${cols}` : cols;
   });
 </script>
 
@@ -917,6 +961,9 @@
     onsettings={() => settingsOpen.set(true)} />
 {/if}
 <main class="layout" style="grid-template-columns: {gridTemplate};">
+  {#if $uiLayout === 'new'}
+    <AppRail {isMac} onselect={onRailSelect} />
+  {/if}
   {#if sidebarCollapsed}
     <button
       class="strip-expand"
@@ -936,8 +983,8 @@
     <Resizer id="sidebar" onresize={onResizeSidebar} />
   {/if}
 
-  {#if filesMode || hostsMode}
-    <!-- Center collapsed to 0 in files/hosts mode — two empty grid cells. -->
+  {#if filesMode || hostsMode || accountsMode}
+    <!-- Center collapsed to 0 in files/hosts/accounts mode — two empty grid cells. -->
     <div></div>
     <div></div>
   {:else if centerCollapsed}
@@ -1063,7 +1110,7 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} />
+          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -1098,7 +1145,7 @@
             <WatchView
               session={$selectedSession}
               access={selAccess}
-              visible={!hostsMode && !assetsMode && !filesMode && !conversationMode}
+              visible={!hostsMode && !assetsMode && !accountsMode && !filesMode && !conversationMode}
             />
           {:else}
             <TerminalView />
@@ -1111,7 +1158,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode} onOpenTerminal={() => setSessionView('terminal')} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode} onOpenTerminal={() => setSessionView('terminal')} />
           </div>
         {/if}
       {/if}
@@ -1133,9 +1180,17 @@
           <AssetsPanel visible={assetsMode} />
         </div>
       {/if}
+      {#if accountsMode}
+        <div class="view-slot overlay" data-testid="accounts-overlay">
+          <AccountsPage />
+        </div>
+      {/if}
       {#if boardMode}
-        <div class="view-slot overlay" data-testid="board-overlay">
-          <WorkBoard onclose={() => leave('board')} />
+        <!-- In the New layout the board is a Work view (step 3.10): its Work
+             tab opens it, the other tabs leave it, and it has no close of
+             its own. It still sits over the mounted terminal. -->
+        <div class="view-slot overlay" data-testid={newLayout ? 'board-view' : 'board-overlay'}>
+          <WorkBoard onclose={newLayout ? undefined : () => leave('board')} />
         </div>
       {/if}
     </div>

@@ -601,6 +601,15 @@ fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<b
 }
 
 /// `already_applied` guard of migration 117.
+fn hosts_has_worktree_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'worktree_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 fn work_items_has_done_when(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'done_when'",
@@ -1417,6 +1426,20 @@ const MIGRATIONS: &[Migration] = &[
         version: 121,
         sql: include_str!("../../migrations/121_session_agent.sql"),
         already_applied: Some(sessions_has_agent),
+    },
+    // Account usage history: `account_usage_snapshots` and its index. New
+    // objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        122,
+        include_str!("../../migrations/122_account_usage_snapshots.sql"),
+    ),
+    // Orbit Fleet 4.6, the Hosts page: CPU, total memory, boot time,
+    // latency and worktree size on `hosts` (six ADD COLUMNs, guarded on the
+    // last).
+    Migration {
+        version: 123,
+        sql: include_str!("../../migrations/123_host_probe_facts.sql"),
+        already_applied: Some(hosts_has_worktree_at),
     },
 ];
 

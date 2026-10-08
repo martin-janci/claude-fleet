@@ -609,7 +609,7 @@ const ORG: ResourceType = ResourceType {
         .badge(Badge::Set { text: "auto-tidy" }),
         FieldSpec::new(
             "jev_allowed",
-            "Send to Jev",
+            "Allow Jev (decision model) for this organisation's work",
             "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
             FieldKind::Bool { on_off: true, default: false },
         )

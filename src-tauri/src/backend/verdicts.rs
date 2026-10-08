@@ -608,6 +608,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "adopt_session",
+        Verdict::Routed {
+            tool: "adopt_session",
+        },
+    ),
+    (
         "dismiss_ghost_session",
         Verdict::Routed {
             tool: "dismiss_ghost_session",
@@ -973,6 +979,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "check_host",
+        Verdict::LocalOnly {
+            instead: "the health checklist reads a host's settings over this app's own SSH; \
+                      repair a host's hooks from the hub with `fleet-hub provision --host <alias>`",
+        },
+    ),
+    (
         "hide_host",
         Verdict::LocalOnly {
             instead: "hiding a host is fleet administration, which the hub reserves for its \
@@ -992,6 +1005,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
                       the cache is empty; read usage on the hub",
+        },
+    ),
+    (
+        "account_usage_history",
+        Verdict::LocalOnly {
+            instead: "this app does not poll account usage while a hub owns the fleet, so \
+                      it keeps no history; read usage on the hub",
         },
     ),
     (
@@ -1509,10 +1529,10 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     (
         "pty_write",
         Verdict::SameInBoth {
-            why: "acts on the one pty THIS process opened, and pty_open is the same in \
-                  both modes, so there is one answer either way; E_PTY_CLOSED when \
-                  nothing is attached, which includes every session the pane declined \
-                  to attach",
+            why: "acts on a pty THIS process opened, named by the id it was opened \
+                  under, and pty_open is the same in both modes, so there is one answer \
+                  either way; E_PTY_CLOSED when nothing is attached under that id, which \
+                  includes every session the pane declined to attach",
         },
     ),
     (
