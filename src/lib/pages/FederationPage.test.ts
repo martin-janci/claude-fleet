@@ -34,6 +34,7 @@ const acme = {
   latency: '42 ms',
   messages_today: 7,
   messages_total: 310,
+  sync: undefined as unknown,
 };
 const beta = {
   ...acme,
@@ -108,5 +109,50 @@ describe('Settings → Federation', () => {
     expect(invoke.mock.calls.some((c) => c[0] === 'unlink_peer_hub')).toBe(false);
     await fireEvent.click(screen.getByTestId('record-confirm'));
     await waitFor(() => expect(argsOf('unlink_peer_hub')).toEqual({ id: 1 }));
+  });
+});
+
+describe('Settings → Federation: loaders (11.12)', () => {
+  const show = () => render(ResourcePage, { props: { page, resource } });
+
+  it('shows a Constellation with the count from the link’s message counters while its queue drains', async () => {
+    const t = Math.floor(Date.now() / 1000);
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === 'list_peer_links' ? [{ ...acme, sync: { done: 412, total: 1280, both_ways: false, since: t - 18 } }] : null,
+    );
+    show();
+    await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
+    expect(screen.getByTestId('sync-count-sync').textContent).toBe('412 of 1 280 messages · 18 s');
+    expect((await screen.findByTestId('sync-loader-sync')).getAttribute('data-loader')).toBe('constellation');
+  });
+
+  it('shows a Counter-orbit while the hubs trade with nothing queued, and nothing when idle', async () => {
+    invoke.mockImplementation(async (cmd: string) =>
+      cmd === 'list_peer_links' ? [{ ...acme, sync: { done: 7, total: 7, both_ways: true } }, beta] : null,
+    );
+    show();
+    const rows = await screen.findAllByTestId('resource-row');
+    await fireEvent.click(rows[0]);
+    expect(screen.getByTestId('sync-count-sync').textContent).toBe('Trading both ways');
+    expect((await screen.findByTestId('sync-loader-sync')).getAttribute('data-loader')).toBe('counter-orbit');
+    await fireEvent.click(rows[1]);
+    expect(screen.queryByTestId('sync-sync')).toBeNull();
+  });
+
+  it('runs a Counter-orbit while Link a hub talks to the other hub', async () => {
+    let finish: (v: unknown) => void = () => {};
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_peer_links') return [];
+      if (cmd === 'link_peer_hub') return new Promise((r) => (finish = r));
+      return null;
+    });
+    show();
+    await fireEvent.click(await screen.findByTestId('resource-add'));
+    await fireEvent.input(screen.getByTestId('param-peer_link.add-url'), { target: { value: 'https://hub.b.example' } });
+    await fireEvent.input(screen.getByTestId('param-peer_link.add-code'), { target: { value: 'AB12CD34' } });
+    await fireEvent.click(screen.getByTestId('run-peer_link.add'));
+    await waitFor(() => expect(screen.getByTestId('busy-peer_link.add')).toBeTruthy());
+    finish(null);
+    await waitFor(() => expect(screen.queryByTestId('busy-peer_link.add')).toBeNull());
   });
 });

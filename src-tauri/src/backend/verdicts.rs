@@ -138,6 +138,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "this app's own log folder, which it has either way",
         },
     ),
+    (
+        "set_tray_state",
+        Verdict::SameInBoth {
+            why: "this window's own tray icon, which it has either way",
+        },
+    ),
     // ── projects ────────────────────────────────────────────────────────────
     (
         "list_projects",
@@ -586,6 +592,24 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "queue_prompt",
+        Verdict::Routed {
+            tool: "queue_prompt",
+        },
+    ),
+    (
+        "queued_prompts",
+        Verdict::Routed {
+            tool: "queued_prompts",
+        },
+    ),
+    (
+        "cancel_queued_prompt",
+        Verdict::Routed {
+            tool: "queued_prompts",
+        },
+    ),
+    (
         "recreate_session",
         Verdict::Routed {
             tool: "recreate_session",
@@ -878,6 +902,18 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
     ("repo_blame", Verdict::Routed { tool: "repo_blame" }),
     (
+        "repo_branch_diff",
+        Verdict::Routed {
+            tool: "repo_branch_diff",
+        },
+    ),
+    (
+        "repo_range_diff",
+        Verdict::Routed {
+            tool: "repo_range_diff",
+        },
+    ),
+    (
         "upload_to_session",
         Verdict::SameInBoth {
             why: "the same story as `pty_open`: the bytes are on this machine and so is the \
@@ -1039,6 +1075,38 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         Verdict::LocalOnly {
             instead: "the health checklist reads a host's settings over this app's own SSH; \
                       repair a host's hooks from the hub with `fleet-hub provision --host <alias>`",
+        },
+    ),
+    (
+        "list_host_setups",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "save_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "discard_host_setup",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
+        },
+    ),
+    (
+        "run_host_setup_check",
+        Verdict::LocalOnly {
+            instead: "the add-host wizard adds a host of this machine's ~/.ssh/config and checks \
+                      it over this app's own SSH; the hub adds hosts with `add_host` and installs \
+                      fleet-agent with `install_agent`",
         },
     ),
     (

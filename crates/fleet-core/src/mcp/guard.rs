@@ -291,6 +291,23 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Orbit Fleet 4.9: installs fleet-agent on a host over SSH and moves the
+    // host onto it — fleet administration, like `add_host`. Returns at once;
+    // the job runs on.
+    ToolPolicy {
+        name: "install_agent",
+        access: Access::Master,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "agent_installs",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Re-reads external (SSH) state without touching sessions — readonly
     // like `refresh_projects`.
     ToolPolicy {
@@ -717,6 +734,22 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Typed later, when the session is idle: a pane write like send_prompt.
+    ToolPolicy {
+        name: "queue_prompt",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Lists a session's waiting prompts, or takes one back (`cancel`).
+    ToolPolicy {
+        name: "queued_prompts",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "broadcast_prompt",
         access: Access::Client,
@@ -1029,6 +1062,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     ToolPolicy {
         name: "repo_commit_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_branch_diff",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "repo_range_diff",
         access: Access::Client,
         readonly: true,
         confirm: false,

@@ -1,5 +1,4 @@
 import { sidebarView } from './work_view';
-import { todayOpen } from './today';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
@@ -3290,16 +3289,13 @@ describe('Inbox (redesign step 3.3)', () => {
     expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
   });
 
-  it('Today is the second tab and ⌘⇧T still opens it', async () => {
+  it('has no Today tab: Today lives in Control since step 9.1', async () => {
     mockBackend(fakeProjects, fleet());
     sidebarView.set('inbox');
     render(Sidebar);
     await tick();
-    await fireEvent.click(screen.getByTestId('inbox-tab-today'));
-    expect(get(todayOpen)).toBe(true);
-    expect(screen.getByTestId('inbox-tab-today').getAttribute('aria-selected')).toBe('true');
-    await fireEvent.click(screen.getByTestId('inbox-tab-inbox'));
-    expect(get(todayOpen)).toBe(false);
+    expect(screen.getByTestId('inbox-title').textContent).toContain('Inbox');
+    expect(screen.queryByTestId('inbox-tab-today')).toBeNull();
   });
 });
 
