@@ -4,6 +4,7 @@
 // opens the start popover with the conflicts and the choices.
 import { invokeCmd, type IpcError, type Result } from './result';
 import { startWork, type StartWorkArgs } from './trackers';
+import type { DecisionProposal } from './proposals';
 import type { SessionRow } from './sessions';
 import type { WorkTask } from './work_view';
 import { preselect, type ProposalLike } from './ai_proposal';
@@ -44,6 +45,9 @@ export interface StartPreview {
   /** With `missing: 'project'`: the repository Jev proposes (K1, assist).
    *  A pre-selection only; the person still presses Start. */
   suggested_project?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
+  /** The same pre-selection as a proposal (redesign 2.8): feature
+   *  `start_project`, value `p<id>`. */
+  proposal?: DecisionProposal | null;
   /** With a planned project: the sibling repository (one the key ran in
    *  before) Jev proposes the task also needs (N3, assist). A pre-tick
    *  only; the person still presses Start. */

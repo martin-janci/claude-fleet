@@ -30,10 +30,10 @@
     gap: 0.8rem;
     align-items: center;
     padding: 0.5rem 0.8rem;
-    background: #5a1f1a;
-    color: #ffd9d2;
+    background: var(--failed-soft);
+    color: var(--fg);
     font-size: 0.85rem;
-    border-bottom: 1px solid #8a2f24;
+    border-bottom: 1px solid var(--failed-line);
   }
   .hub-unavailable p {
     margin: 0;

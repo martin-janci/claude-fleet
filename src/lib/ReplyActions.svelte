@@ -280,7 +280,7 @@
     opacity: 0.4;
   }
   .reply-actions .rewind:hover:not(:disabled) {
-    color: var(--usage-warn, #d29922);
+    color: var(--usage-warn);
   }
   .sep {
     width: 1px;

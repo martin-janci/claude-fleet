@@ -121,6 +121,25 @@ environment variable or a file), read only when a call is made, never
 returned by any read path, never printed, and masked in the diagnostics
 bundle.
 
+## Proposals on the wire
+
+Every row a person decides on carries what is proposed about it in one
+shape, `proposals` (redesign step 2.8): `SessionRow.proposals` (runs with
+`subject_kind = 'session'`, `subject_id` = the session id),
+`WorkTask.proposals` (`work_item`, the item id) and a start preview's
+`proposal` (K1's `suggested_project`, also kept under its old name). Each
+entry is `{feature, value, source, reason?, confidence_pct?, run_id?, at?}`,
+`source` being `rule`, `jev` or `llm`.
+
+They are read, never stored on the row: per feature, the **latest** run
+about the subject, kept only when it is a live `assist` answer with no
+fallback and no follow-up, not `unsure`, and at or above the 0.5 floor. So a
+shadow run is never shown, a later fallback withdraws the proposal, and a
+person's confirm, correction or rejection takes it off the row. Recording a
+run about a session, or its follow-up, re-emits the session row. `reason` is
+fleet's own words when a use case composes them; a run read back carries
+none, because `decision_runs` holds no text.
+
 ## Retention
 
 `decide.retention_days` (90 by default; `0` keeps them forever). The GC

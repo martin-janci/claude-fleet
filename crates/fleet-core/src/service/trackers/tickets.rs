@@ -1772,6 +1772,11 @@ pub struct StartPreview {
     /// only; the person still starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_project: Option<crate::service::decide::start_project::SuggestedProject>,
+    /// The same pre-selection in the shape every row proposes in (step 2.8):
+    /// feature `start_project`, value `p<id>`. `suggested_project`
+    /// stays for clients that read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<crate::store::DecisionProposal>,
     /// With a planned project: the sibling repository (one of the projects
     /// the key ran in before) the decision model proposes the same task
     /// also needs (Jev N3, `decide.jev.sibling_repos` at `assist`). A
@@ -1886,7 +1891,13 @@ pub async fn preview_start_decided(
         }
     };
     match start_project::mode_for(ctx, &input) {
-        Some(Mode::Assist) => preview.suggested_project = start_project::ask(ctx, &input).await,
+        Some(Mode::Assist) => {
+            preview.suggested_project = start_project::ask(ctx, &input).await;
+            preview.proposal = preview
+                .suggested_project
+                .as_ref()
+                .map(start_project::SuggestedProject::proposal);
+        }
         Some(Mode::Shadow) => {
             let ctx = ctx.clone();
             tokio::spawn(async move {
@@ -2092,6 +2103,7 @@ pub async fn preview_start(
         brief: None,
         checkout: None,
         suggested_project: None,
+        proposal: None,
         suggested_sibling: None,
     };
     let plan = match plan_resolved(store, &planned, view, &ticket) {

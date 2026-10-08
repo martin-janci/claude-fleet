@@ -291,11 +291,11 @@
   }
   .warn {
     margin: 0;
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .err {
     margin: 0;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .acts {
     display: flex;
