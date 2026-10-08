@@ -117,9 +117,12 @@ describe('TaskList', () => {
     render(TaskList);
     await flush();
     expect(screen.getByTestId('task-section-todo').textContent).toContain('Write notes');
-    const doing = screen.getByTestId('task-section-doing');
-    expect(doing.textContent).toContain('Qomora');
-    expect(doing.textContent).toContain('Backlog');
+    // OM-110 is in its tracker's Backlog with a live session: it stays in
+    // To do, the column the Board puts it in (one status rule, step 1.6).
+    const todo = screen.getByTestId('task-section-todo');
+    expect(todo.textContent).toContain('Qomora');
+    expect(todo.textContent).toContain('Backlog');
+    expect(screen.getByTestId('task-section-doing').textContent).not.toContain('Qomora');
     expect(screen.getByTestId('task-proposals-badge').textContent).toContain('2');
     expect(screen.getByTestId('task-child').textContent).toContain('Neutral review');
     expect(screen.getByTestId('task-child').textContent).toContain('agent');
@@ -154,9 +157,9 @@ describe('TaskList', () => {
   it('a task with a live session opens it; s and ⇧S act on the selected row', async () => {
     render(TaskList);
     await flush();
-    const doing = screen.getByTestId('task-section-doing');
+    const om110 = screen.getAllByTestId('task-row').find((r) => r.textContent?.includes('Qomora'));
     // OM-110 has an active count but no live link in the fixture: Start.
-    expect(doing.querySelector('[data-testid="work-button-primary"]')?.textContent).toBe('Start');
+    expect(om110?.querySelector('[data-testid="work-button-primary"]')?.textContent).toBe('Start');
     const list = screen.getByTestId('task-list');
     await fireEvent.keyDown(list, { key: 'j' });
     await flush();
