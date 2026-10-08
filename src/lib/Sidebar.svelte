@@ -52,7 +52,8 @@
   import { openNewSessionPicker } from './switcher_request';
   import { requestNewSession } from './new_session_request';
   import { setProjectPick } from './project_picks';
-  import { detectMac } from './terminal_keys';
+  import { detectMac, isEditable } from './terminal_keys';
+  import { matchShortcut } from './shortcuts';
   import {
     buildSessionsByProject,
     buildOutsideFleet,
@@ -84,12 +85,15 @@
     workFilters,
   } from './work_filters';
   import {
+    bucketState,
     ciStatusColor,
     ciStatusLabel,
     countNeedsYou,
+    countsTowardBadge,
     needsYou,
     severity,
     worstSeverityByProject,
+    type TriageBucket,
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { push, pushError } from './toasts';
@@ -992,10 +996,63 @@
 
   function onKeySession(e: KeyboardEvent, sess: SessionRow) {
     if (!fromRowItself(e)) return;
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault();
-      onSelectSession(sess);
+    // The list keys (redesign step 3.8), from the shortcut registry.
+    const key = matchShortcut('session-list', e, isMac);
+    if (!key) return;
+    e.preventDefault();
+    if (key === 'session-list.open') onSelectSession(sess);
+    else if (key === 'session-list.down') focusRowAt(rowIndexOf(sess) + 1);
+    else if (key === 'session-list.up') focusRowAt(rowIndexOf(sess) - 1);
+    else if (key === 'session-list.pick') {
+      if (!selectMode) selectMode = true;
+      toggleSelected(sess);
     }
+  }
+
+  // ── List keys from anywhere (redesign step 3.8) ──
+  // The rows as drawn, top to bottom, whatever the grouping: what j/k walk,
+  // what ⌘1–9 count and what "next needs you" searches.
+  function shownRows(): HTMLElement[] {
+    return Array.from(sidebarEl?.querySelectorAll<HTMLElement>('[data-testid="sess-row"]') ?? []);
+  }
+  function rowIndexOf(sess: SessionRow): number {
+    return shownRows().findIndex((el) => el.dataset.sessionId === String(sess.id));
+  }
+  function focusRowAt(i: number) {
+    const rows = shownRows();
+    if (i < 0 || i >= rows.length) return;
+    rows[i].focus();
+    rows[i].scrollIntoView?.({ block: 'nearest' });
+  }
+  function openRow(el: HTMLElement | undefined) {
+    const sess = el && $sessions.find((s) => String(s.id) === el.dataset.sessionId);
+    if (!el || !sess) return;
+    if ($selectedSession?.id !== sess.id) selectSessionExplicitly(sess);
+    el.focus();
+    el.scrollIntoView?.({ block: 'nearest' });
+  }
+  /** The next row after the open one (wrapping) whose state raises the
+   *  Needs you badge: Needs you, Failed or Blocked (step 0.4). */
+  function nextNeedingYou(): HTMLElement | undefined {
+    const rows = shownRows();
+    const cur = rows.findIndex((el) => el.dataset.sessionId === String($selectedSession?.id));
+    for (let step = 1; step <= rows.length; step++) {
+      const el = rows[(cur + step + rows.length) % rows.length];
+      const bucket = el.dataset.bucket as TriageBucket | undefined;
+      if (bucket && countsTowardBadge(bucketState(bucket))) return el;
+    }
+    return undefined;
+  }
+  function onWindowKeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented) return;
+    const id = matchShortcut('global', e, isMac);
+    if (id !== 'next-needs-you' && id !== 'jump-n') return;
+    const target = e.target as HTMLElement | null;
+    // A modal owns the keyboard, and a field keeps its keys.
+    if (target?.closest?.('dialog') || isEditable(target)) return;
+    e.preventDefault();
+    if (id === 'next-needs-you') openRow(nextNeedingYou());
+    else openRow(shownRows()[Number(e.key) - 1]);
   }
 
   /** Same guard for the project row, which holds + New session and Purge. */
@@ -1212,6 +1269,8 @@
     pendingPurge = null;
   }
 </script>
+
+<svelte:window onkeydown={onWindowKeydown} />
 
 <div class="sidebar" data-testid="sidebar-tree" bind:this={sidebarEl}>
   {#snippet sessionRow(sess: SessionRow, readOnly = false, inWorkGroup = false)}

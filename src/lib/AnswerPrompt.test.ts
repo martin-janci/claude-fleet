@@ -365,3 +365,33 @@ describe('AnswerPrompt, multi-select', () => {
     expect(screen.queryByTestId('answer-continue')).toBeNull();
   });
 });
+
+describe('AnswerPrompt 1–9 (redesign step 3.8)', () => {
+  it('a digit answers the Conversation card when no field has focus', async () => {
+    render(AnswerPrompt, { session: session(), view: view() });
+    await fireEvent.keyDown(document.body, { key: '2' });
+    await settle();
+    expect(mockedSend).toHaveBeenCalledTimes(1);
+    expect(mockedSend.mock.calls[0][3]).toEqual({ keys: '2' });
+    expect(screen.getByTestId('answer-sent').textContent).toContain("Yes, and don't ask again");
+  });
+
+  it('a digit typed in a field, with a modifier, or past the options does nothing', async () => {
+    render(AnswerPrompt, { session: session(), view: view() });
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    await fireEvent.keyDown(input, { key: '1' });
+    await fireEvent.keyDown(document.body, { key: '1', metaKey: true });
+    await fireEvent.keyDown(document.body, { key: '7' });
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+    input.remove();
+  });
+
+  it('the compact sidebar card takes no digits', async () => {
+    render(AnswerPrompt, { session: session(), view: view(), compact: true });
+    await fireEvent.keyDown(document.body, { key: '1' });
+    await settle();
+    expect(mockedSend).not.toHaveBeenCalled();
+  });
+});

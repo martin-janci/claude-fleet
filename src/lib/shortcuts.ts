@@ -10,8 +10,8 @@
  *   the review sheets, the board, a session row) and the contextual chords of
  *   the terminal, the conversation, the switcher and the New session dialog.
  *   Their handlers still read `e.key` themselves; the rows here are the
- *   inventory the freeze test checks against the handler sources, and what a
- *   `?` sheet (3.8) and ⌘K commands (3.9) will read.
+ *   inventory the freeze test checks against the handler sources, what the
+ *   `?` sheet (`ShortcutSheet`, 3.8) lists and what ⌘K commands (3.9) read.
  * - `planned` rows are the design manual's new chords (`keyboard.md`): they
  *   match nothing yet, but they take part in the conflict check, so a chord
  *   is known to be free on both platforms before its step wires it.
@@ -44,7 +44,29 @@ export type Scope =
   | 'tidy-review'
   | 'work-board'
   | 'session-row'
+  | 'session-list'
   | 'question-card';
+
+/** Each scope's heading, in the order the lists show them: Settings →
+ *  Shortcuts and the `?` sheet both read it, so they name a scope alike. */
+export const SCOPE_TITLES: Record<Scope, string> = {
+  global: 'Everywhere',
+  'session-list': 'Session list',
+  'session-row': 'Session row',
+  'question-card': 'Question card',
+  conversation: 'Conversation',
+  terminal: 'Terminal',
+  switcher: 'Quick switcher',
+  'switcher-new': 'Quick switcher, New session',
+  'new-session-dialog': 'New session',
+  hosts: 'Accounts & hosts',
+  assets: 'Assets',
+  'task-list': 'Task list',
+  'work-review': 'Work review',
+  'link-review': 'Link review',
+  'tidy-review': 'Tidy up',
+  'work-board': 'Work board',
+};
 
 export interface Shortcut {
   readonly id: string;
@@ -119,6 +141,12 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { status: 'planned', step: '5.5' }),
   row('global', 'go-to-file', 'Go to file (Files tab only)',
     split(['Alt+Meta+P'], ['Ctrl+Alt+P']), { status: 'planned', step: '5.3' }),
+  // Step 3.8: the list keys that work from anywhere outside a text field
+  // (Sidebar, ShortcutSheet). ⌘1–9 is Mac-only: off the Mac Ctrl+digit and
+  // Alt+digit belong to the terminal and the window manager.
+  row('global', 'next-needs-you', 'Next session that needs you', split(['Alt+Meta+N'], ['Ctrl+Alt+N'])),
+  row('global', 'jump-n', 'Open the 1st–9th session in the list', split(digits('Meta+'), [])),
+  row('global', 'shortcut-sheet', 'Keyboard shortcuts', keys('?~')),
 
   // ── Terminal (TerminalView) ──────────────────────────────────────────
   // Cmd is never sent to the pty; Ctrl+Shift is the copy/paste chord off
@@ -148,7 +176,8 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('switcher-new', 'switcher-new.undo', 'Undo the last pin or hide', keys('Meta+Z~', 'Ctrl+Z~')),
   row('switcher-new', 'switcher-new.menu', 'Project menu', keys('Shift+F10', 'ContextMenu~')),
   row('switcher-new', 'switcher-new.pick-n', 'Pick the numbered project',
-    keys(...digits('Meta+').map((s) => `${s}~`), ...digits('Ctrl+').map((s) => `${s}~`))),
+    keys(...digits('Meta+').map((s) => `${s}~`), ...digits('Ctrl+').map((s) => `${s}~`)),
+    { shadows: ['jump-n'] }),
   row('switcher-new', 'switcher-new.unfold', 'Unfold a group', keys('ArrowRight')),
   row('switcher-new', 'switcher-new.fold', 'Fold the group', keys('ArrowLeft')),
 
@@ -171,7 +200,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('hosts', 'hosts.new-session', 'New session on the host', keys('n')),
   row('hosts', 'hosts.edit', 'Edit the account', keys('e')),
   row('hosts', 'hosts.search', 'Search hosts', keys('/')),
-  row('hosts', 'hosts.legend', 'Legend', keys('?~')),
+  row('hosts', 'hosts.legend', 'Legend', keys('?~'), { shadows: ['shortcut-sheet'] }),
   // AssetsWorkspace
   row('assets', 'assets.primary', 'Run the primary (apply the card or Sync fleet)',
     keys('Meta+Enter', 'Ctrl+Enter')),
@@ -215,9 +244,14 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('session-row', 'session-row.no', 'Reject the suggested link', keys('n')),
   row('session-row', 'session-row.link', 'Link or pick work', keys('l')),
 
-  // ── Question card (10.1): 1–9 answer when the composer is not focused ─
-  row('question-card', 'question-card.answer', 'Answer with option 1–9', keys(...digits('')),
-    { status: 'planned', step: '10.1' }),
+  // Sidebar session list (3.8): the row has focus.
+  row('session-list', 'session-list.down', 'Next session', keys('j', 'ArrowDown')),
+  row('session-list', 'session-list.up', 'Previous session', keys('k', 'ArrowUp')),
+  row('session-list', 'session-list.open', 'Open the session', keys('Enter', 'Space')),
+  row('session-list', 'session-list.pick', 'Select for a bulk action', keys('x')),
+
+  // ── Question card (3.8): 1–9 answer when no text field has focus ─────
+  row('question-card', 'question-card.answer', 'Answer with option 1–9', keys(...digits(''))),
 ];
 
 /** The view handlers each per-view scope lives in, for the freeze test. */
@@ -235,6 +269,13 @@ export const SCOPE_SOURCES: Partial<Record<Scope, string>> = {
   'tidy-review': 'src/lib/TidyReview.svelte',
   'work-board': 'src/lib/WorkBoard.svelte',
   'session-row': 'src/lib/SessionRowItem.svelte',
+};
+
+/** Scopes whose handler asks `matchShortcut` (3.8), as the global chords do:
+ *  the table is the handler, so there are no keys in the source to check. */
+export const MATCHED_SCOPES: Partial<Record<Scope, string>> = {
+  'session-list': 'src/lib/Sidebar.svelte',
+  'question-card': 'src/lib/AnswerPrompt.svelte',
 };
 
 export interface KeyEventLike {
