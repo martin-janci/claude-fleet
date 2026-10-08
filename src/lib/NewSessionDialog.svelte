@@ -5,7 +5,7 @@
   import { endedWorkLinks, pastWorkSummary, type WorkLink } from './work';
   import ResumeDialog from './ResumeDialog.svelte';
   import { selectSessionExplicitly } from './selection';
-  import { newSessionAbortable, sessions, type SessionRow } from './sessions';
+  import { newBgSession, newSessionAbortable, sessions, type SessionRow } from './sessions';
   import { defaultHost, hosts, isPickableHost } from './hosts';
   import { readPref, writePref, uiLayout } from './prefs';
   import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS } from './conversation';
@@ -16,7 +16,14 @@
   import HostChips from './HostChips.svelte';
   import { refreshAccountUsage } from './account_usage_store';
   import { accountByUuid, accountLabel } from './accounts';
-  import { checkAccountHeadroom, loginLabel, usedText, type Headroom, type HostLogin } from './account_limits';
+  import {
+    checkAccountHeadroom,
+    freestLogin,
+    loginLabel,
+    usedText,
+    type Headroom,
+    type HostLogin,
+  } from './account_limits';
   import { push, pushError } from './toasts';
   import type { PickerItem } from './PickerList.svelte';
   import {
@@ -185,6 +192,65 @@
     limitConfirmed = true;
     limitAsk = null;
     void submit();
+  }
+  // Redesign step 4.5 (New layout): the login is picked from the host's
+  // logins with their live usage, defaulting to the one with the most
+  // headroom until the person picks; "Other profile…" brings back the free
+  // name field (a new profile still asks for its /login in the pane).
+  const newLayout = $derived($uiLayout === 'new');
+  const OTHER_PROFILE = '\u0000other';
+  let hostLogins = $state<HostLogin[] | null>(null);
+  let pickedLogin = false;
+  let otherProfile = $state(false);
+  $effect(() => {
+    const host = chosenHost;
+    if (!newLayout) return;
+    untrack(() => {
+      hostLogins = null;
+      pickedLogin = false;
+      otherProfile = false;
+    });
+    void checkAccountHeadroom(host, null).then((h) => {
+      if (chosenHost !== host) return;
+      const logins = h.ok && Array.isArray(h.value?.logins) ? h.value.logins : [];
+      hostLogins = logins;
+      const best = pickedLogin ? null : freestLogin(logins);
+      if (best) chosenProfile = best.profile ?? '';
+    });
+  });
+  function onPickLogin(v: string) {
+    pickedLogin = true;
+    if (v === OTHER_PROFILE) {
+      otherProfile = true;
+      chosenProfile = '';
+    } else {
+      chosenProfile = v;
+    }
+  }
+  // "Run: in background" (step 4.5): a supervised background session, what
+  // the sidebar's ⚡ dialog launches, which stays as it was.
+  let runBackground = $state(false);
+  let bgPrompt = $state('');
+  const bgSessionBlocked = $derived(hubActionBlocked('new_bg_session', $hubStatus, $hubConnection));
+  const asBackground = $derived(newLayout && runBackground && chosenKind === 'work' && !ticket);
+  async function submitBackground() {
+    if (bgSessionBlocked !== null) return;
+    if (!bgPrompt.trim()) {
+      error = 'A background session needs its first prompt';
+      return;
+    }
+    busy = true;
+    error = null;
+    const bgName = friendlyName.trim() || name.trim() || nameWords(generateName(takenSlugs));
+    const r = await newBgSession(chosenHost, bgName, bgPrompt.trim());
+    busy = false;
+    if (!r.ok) {
+      if (destroyed) pushError(r.error, 'Background session failed');
+      else error = r.error.message;
+      return;
+    }
+    push({ kind: 'info', message: `Started ${bgName} in the background on ${chosenHost}` });
+    onCancel();
   }
   const profileInvalid = $derived(
     chosenProfile.trim() !== '' && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/.test(chosenProfile.trim()),
@@ -865,6 +931,10 @@
     // any field (`onKeydown` below) calls `submit()` directly — the handler
     // must refuse too, or a blocked hub client could still route
     // `new_session` from the keyboard.
+    if (asBackground) {
+      await submitBackground();
+      return;
+    }
     if (newSessionBlocked) return;
     if (inNewMode) {
       // Strip any trailing dash the live slugifier left in place so the
@@ -1099,30 +1169,61 @@
       <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
     {/if}
 
-    <!-- A group, not a labelable control: it is named by aria-labelledby. -->
-    <span class="field-label" id="kind-picker-label">Type</span>
-    <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label">
-      <button
-        class="kind-pick"
-        class:active={chosenKind === 'work'}
-        aria-pressed={chosenKind === 'work'}
-        data-testid="kind-work"
-        onclick={() => onPickKind('work')}
-      >
-        Claude
-      </button>
-      <button
-        class="kind-pick"
-        class:active={chosenKind === 'shell'}
-        aria-pressed={chosenKind === 'shell'}
-        data-testid="kind-shell"
-        onclick={() => onPickKind('shell')}
-      >
-        Shell
-      </button>
-    </div>
+    {#if newLayout}
+      <!-- A group, not a labelable control: it is named by aria-labelledby. -->
+      <span class="field-label" id="kind-picker-label">Agent</span>
+      <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label" data-testid="agent-picker">
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'work'}
+          aria-pressed={chosenKind === 'work'}
+          data-testid="kind-work"
+          onclick={() => onPickKind('work')}
+        >
+          Claude Code
+        </button>
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'shell'}
+          aria-pressed={chosenKind === 'shell'}
+          data-testid="kind-shell"
+          onclick={() => onPickKind('shell')}
+        >
+          Shell
+        </button>
+        <button class="kind-pick" aria-pressed="false" data-testid="agent-codex" disabled title="Codex sessions are coming">
+          Codex <span class="soon">coming</span>
+        </button>
+        <button class="kind-pick" aria-pressed="false" data-testid="agent-agy" disabled title="Agy sessions are coming">
+          Agy <span class="soon">coming</span>
+        </button>
+      </div>
+    {:else}
+      <!-- A group, not a labelable control: it is named by aria-labelledby. -->
+      <span class="field-label" id="kind-picker-label">Type</span>
+      <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label">
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'work'}
+          aria-pressed={chosenKind === 'work'}
+          data-testid="kind-work"
+          onclick={() => onPickKind('work')}
+        >
+          Claude
+        </button>
+        <button
+          class="kind-pick"
+          class:active={chosenKind === 'shell'}
+          aria-pressed={chosenKind === 'shell'}
+          data-testid="kind-shell"
+          onclick={() => onPickKind('shell')}
+        >
+          Shell
+        </button>
+      </div>
+    {/if}
 
-    {#if chosenKind === 'work' && !ticket}
+    {#if chosenKind === 'work' && !ticket && !asBackground}
       <div class="launch-row">
         <div class="launch-field">
           <label for="launch-model">Model</label>
@@ -1142,25 +1243,74 @@
             {/each}
           </select>
         </div>
-        <div class="launch-field">
-          <label for="launch-profile">Login profile</label>
-          <input
-            id="launch-profile"
-            data-testid="launch-profile"
-            bind:value={chosenProfile}
-            placeholder="Host login"
-            list="launch-profile-options"
-            maxlength="32"
-            aria-invalid={profileInvalid}
-            title="A name such as work: the session runs under ~/.claude-profiles/<name> on the host, with its own /login. A new profile asks you to log in, in the session."
-          />
-          <datalist id="launch-profile-options">
-            {#each hostProfiles as p (p.name)}
-              <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
-            {/each}
-          </datalist>
-        </div>
+        {#if newLayout && hostLogins && hostLogins.length > 0 && !otherProfile}
+          <div class="launch-field">
+            <label for="launch-account">Account</label>
+            <select
+              id="launch-account"
+              data-testid="launch-account"
+              value={chosenProfile}
+              onchange={(e) => onPickLogin(e.currentTarget.value)}
+            >
+              {#each hostLogins as l (l.profile ?? '')}
+                <option value={l.profile ?? ''}>{loginLabel(l, accountName)} · {usedText(l)}</option>
+              {/each}
+              <option value={OTHER_PROFILE}>Other profile…</option>
+            </select>
+          </div>
+        {:else}
+          <div class="launch-field">
+            <label for="launch-profile">Login profile</label>
+            <input
+              id="launch-profile"
+              data-testid="launch-profile"
+              bind:value={chosenProfile}
+              placeholder="Host login"
+              list="launch-profile-options"
+              maxlength="32"
+              aria-invalid={profileInvalid}
+              title="A name such as work: the session runs under ~/.claude-profiles/<name> on the host, with its own /login. A new profile asks you to log in, in the session."
+            />
+            <datalist id="launch-profile-options">
+              {#each hostProfiles as p (p.name)}
+                <option value={p.name}>{p.email ?? (p.account_uuid ? p.name : 'not logged in')}</option>
+              {/each}
+            </datalist>
+          </div>
+        {/if}
       </div>
+    {/if}
+
+    {#if newLayout && chosenKind === 'work' && !ticket}
+      <span class="field-label" id="run-picker-label">Run</span>
+      <div class="kind-row" id="run-picker" role="group" aria-labelledby="run-picker-label">
+        <button
+          class="kind-pick"
+          class:active={!runBackground}
+          aria-pressed={!runBackground}
+          data-testid="run-pane"
+          onclick={() => (runBackground = false)}
+        >
+          In a pane
+        </button>
+        <button
+          class="kind-pick"
+          class:active={runBackground}
+          aria-pressed={runBackground}
+          data-testid="run-background"
+          onclick={() => (runBackground = true)}
+          title="A supervised background session on the host, outside this project's worktree"
+        >
+          In background
+        </button>
+      </div>
+      {#if runBackground}
+        <label for="bg-prompt">First prompt</label>
+        <textarea id="bg-prompt" data-testid="bg-prompt" rows="3" bind:value={bgPrompt} placeholder="What should Claude work on?"></textarea>
+        <p class="work-note" data-testid="bg-note">
+          Runs supervised on {chosenHost} in its home folder, with no pane; it shows in the list when it starts.
+        </p>
+      {/if}
     {/if}
 
     {#if chosenKind === 'shell'}
@@ -1269,15 +1419,23 @@
         data-testid="create-btn"
         disabled={(inNewMode && !newWorktreeName.trim()) ||
           (chosenKind === 'work' && profileInvalid) ||
-          (ticket && chosenKind === 'work' ? startBlocked !== null : newSessionBlocked !== null)}
-        title={(ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
-      >{ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
+          (asBackground
+            ? bgSessionBlocked !== null || !bgPrompt.trim()
+            : ticket && chosenKind === 'work'
+              ? startBlocked !== null
+              : newSessionBlocked !== null)}
+        title={(asBackground ? bgSessionBlocked : ticket && chosenKind === 'work' ? startBlocked : newSessionBlocked) ?? ''}
+      >{asBackground ? 'Start in background' : ticket && chosenKind === 'work' ? 'Start work' : 'Create'}</button>
     {/if}
   </div>
 </div>
 </Modal>
 
 <style>
+  .soon {
+    font-size: 11px;
+    color: var(--fg-muted);
+  }
   .limit-ask {
     flex: 1 1 100%;
     display: flex;
