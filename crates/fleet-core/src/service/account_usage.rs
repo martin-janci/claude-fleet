@@ -930,16 +930,7 @@ impl UsageCache {
     /// What the UI needs for `account`.
     pub fn snapshot(&self, account: &str) -> AccountUsageSnapshot {
         match self.entries.get(account) {
-            None => AccountUsageSnapshot {
-                account_uuid: account.to_string(),
-                usage: None,
-                subscription: None,
-                fetched_at: None,
-                source_host: None,
-                status: UsageOutcomeKind::NeverFetched,
-                detail: None,
-                next_try_at: 0,
-            },
+            None => AccountUsageSnapshot::never_fetched(account),
             Some(e) => AccountUsageSnapshot {
                 account_uuid: account.to_string(),
                 usage: e.last_ok.as_ref().map(|(u, _, _)| u.clone()),
@@ -972,6 +963,20 @@ pub struct AccountUsageSnapshot {
 }
 
 impl AccountUsageSnapshot {
+    /// An account nothing has been asked about yet.
+    pub fn never_fetched(account: &str) -> Self {
+        Self {
+            account_uuid: account.to_string(),
+            usage: None,
+            subscription: None,
+            fetched_at: None,
+            source_host: None,
+            status: UsageOutcomeKind::NeverFetched,
+            detail: None,
+            next_try_at: 0,
+        }
+    }
+
     /// Whether this snapshot says anything new compared with `before`.
     ///
     /// Everything except [`Self::next_try_at`], which moves on every attempt

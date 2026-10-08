@@ -281,7 +281,10 @@ Index by area (names only; see the reference for details):
   usage and cost per session, host and day), `list_hosts`, `discover_hosts`,
   `add_host`, `remove_host`, `merge_host` (fold a renamed alias into another),
   `probe_host`, `hide_host`, `provision_hosts`,
-  `list_accounts`, `agent_status` (which agent hosts have a `fleet-agent`
+  `list_accounts`, `account_usage` (each account's latest plan usage: the
+  5-hour and weekly windows with their reset times, status and when it was
+  fetched, as the hub's usage poll last answered; never fetches; hub
+  contract 11), `agent_status` (which agent hosts have a `fleet-agent`
   connected; see *`/agent`* above).
 - **Projects & worktrees** — `list_projects`, `refresh_projects`,
   `forget_project` (drop a row a local-less hub cannot rescan away),

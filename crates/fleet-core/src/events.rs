@@ -596,6 +596,15 @@ pub trait EventBus: Send + Sync {
     /// the usage history `restore_usage` seeds. Not an event. Every bus but
     /// the hub's ignores it.
     fn attention_seeded(&self, _hosts: &[HostRow], _usage: &[AccountUsageSnapshot]) {}
+
+    /// Each account's latest usage answer this bus has carried (or was
+    /// seeded with), by account: what the hub's `account_usage` tool serves,
+    /// since the usage tick's cache is not reachable from the control API.
+    /// Only the hub's [`BroadcastEventBus`] follows it; every other bus knows
+    /// none.
+    fn account_usage(&self) -> Vec<AccountUsageSnapshot> {
+        Vec::new()
+    }
 }
 
 /// Silently drops every event. For tests and any context that doesn't need
@@ -968,6 +977,13 @@ impl EventBus for BroadcastEventBus {
     fn attention_seeded(&self, hosts: &[HostRow], usage: &[AccountUsageSnapshot]) {
         if let Ok(mut a) = self.attention.lock() {
             a.seed(hosts, usage);
+        }
+    }
+
+    fn account_usage(&self) -> Vec<AccountUsageSnapshot> {
+        match self.attention.lock() {
+            Ok(a) => a.usage.values().cloned().collect(),
+            Err(_) => Vec::new(),
         }
     }
 

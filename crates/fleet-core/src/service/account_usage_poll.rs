@@ -254,6 +254,30 @@ pub fn list_account_usage(
     Ok(accounts.iter().map(|a| c.snapshot(&a.uuid)).collect())
 }
 
+/// The hub's `account_usage` tool: every known account's latest usage
+/// answer as the store's bus followed it from `account_usage:updated` (and
+/// the history `restore_usage` seeded at startup). The usage tick's own
+/// cache stays private to the tick; the bus holds every answer that changed
+/// something, so only `next_try_at` can lag. Never fetches. An account the
+/// bus has no answer for is `never_fetched`.
+pub fn served_account_usage(store: &Mutex<Store>) -> Result<Vec<AccountUsageSnapshot>, IpcError> {
+    let s = lock(store)?;
+    let known: std::collections::HashMap<String, AccountUsageSnapshot> = s
+        .bus_account_usage()
+        .into_iter()
+        .map(|u| (u.account_uuid.clone(), u))
+        .collect();
+    Ok(s.list_accounts()?
+        .iter()
+        .map(|a| {
+            known
+                .get(&a.uuid)
+                .cloned()
+                .unwrap_or_else(|| AccountUsageSnapshot::never_fetched(&a.uuid))
+        })
+        .collect())
+}
+
 /// `refresh_account_usage`: fetch now if the per-account floor allows, else
 /// the current (unchanged) snapshot — its `next_try_at` tells the caller
 /// when a refresh becomes possible. `E_NOTFOUND` when `account_uuid` is not
@@ -716,6 +740,50 @@ mod tests {
         let snaps = list_account_usage(&store, &cache).unwrap();
         assert_eq!(snaps[0].status, UsageOutcomeKind::Ok);
         assert_eq!(snaps[0].subscription.as_deref(), Some("max"));
+    }
+
+    /// The hub's `account_usage` tool serves what the bus followed: the
+    /// answer an `account_usage:updated` carried, and `never_fetched` for an
+    /// account nothing has answered for. Off the hub the bus knows none.
+    #[test]
+    fn served_usage_is_what_the_bus_followed() {
+        let bus = Arc::new(crate::events::BroadcastEventBus::new(4));
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        for uuid in ["acct-1", "acct-2"] {
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: uuid.to_string(),
+                email: None,
+                display_name: None,
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: Some(1),
+                nickname: None,
+                has_extra_usage: false,
+            })
+            .unwrap();
+        }
+        let store = Mutex::new(s);
+        let mut answered = AccountUsageSnapshot::never_fetched("acct-1");
+        answered.status = UsageOutcomeKind::Ok;
+        answered.subscription = Some("max".to_string());
+        answered.fetched_at = Some(100);
+        bus.emit(&crate::events::RowChange::AccountUsageUpdated(
+            answered.clone(),
+        ));
+
+        let served = served_account_usage(&store).unwrap();
+        assert_eq!(served.len(), 2);
+        let one = served.iter().find(|u| u.account_uuid == "acct-1").unwrap();
+        assert_eq!(one, &answered);
+        let two = served.iter().find(|u| u.account_uuid == "acct-2").unwrap();
+        assert_eq!(two.status, UsageOutcomeKind::NeverFetched);
+
+        let desktop = store_with_account("acct-1");
+        assert_eq!(
+            served_account_usage(&desktop).unwrap()[0].status,
+            UsageOutcomeKind::NeverFetched
+        );
     }
 
     #[tokio::test]

@@ -568,6 +568,12 @@ impl Store {
         self.bus.inner.attention_facts()
     }
 
+    /// Each account's latest usage answer as this store's bus follows it
+    /// ([`EventBus::account_usage`]). Empty off the hub.
+    pub fn bus_account_usage(&self) -> Vec<crate::service::account_usage::AccountUsageSnapshot> {
+        self.bus.inner.account_usage()
+    }
+
     /// An in-memory store for a test. Its database is a copy of one that went
     /// through every migration once per test process
     /// ([`migrated_template_copy`]); `migrate()` then runs on the copy as

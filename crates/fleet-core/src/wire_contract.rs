@@ -160,7 +160,8 @@
 //!   `state` beside the reason; a phone that decodes the reason as a closed
 //!   enum fails the row on the first new one. The desktop routes
 //!   `touch_session_viewed` (step 2.3) and `repo_blame` to tools a
-//!   revision-10 hub does not serve, and `update_device` to an
-//!   `org_admin` action it does not know. Session rows also carry `agent`,
+//!   revision-10 hub does not serve, `list_account_usage` to the new
+//!   `account_usage` tool, and `update_device` to an `org_admin` action it
+//!   does not know. Session rows also carry `agent`,
 //!   `origin`, `last_viewed_at`, `turn_outcome` and `proposals` (additive).
 pub const CONTRACT_REVISION: u32 = 11;

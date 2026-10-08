@@ -7,6 +7,10 @@ Auto-generated from the embedded MCP tool router. See [`control-api.md`](control
 
 ## MCP tools
 
+### `account_usage`
+
+Each Claude account's latest plan usage: 5-hour and weekly utilization with reset times, status, fetched_at. Never fetches.
+
 ### `add_host`
 
 Register a host. transport "ssh" (default) is probed first and persisted only if reachable; "agent" (a host the hub cannot reach; it runs fleet-agent and dials in) is persisted unprobed, unreachable until its agent connects (token: `fleet-hub agent-token <alias>` on the hub). Returns the host row.

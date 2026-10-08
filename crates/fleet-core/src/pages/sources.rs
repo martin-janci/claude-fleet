@@ -101,9 +101,9 @@ pub struct ParamSpec {
 
 /// A source the app keeps current itself instead of reading through
 /// `fetch_page_source`: `command` loads it, so that command's hub verdict
-/// is the source's (`list_account_usage` is `LocalOnly`: a paired desktop
-/// has no usage cache and shows no data items), and the `event` row kind
-/// keeps it live. `fetch` refuses it.
+/// is the source's (`list_account_usage` routes to the hub's
+/// `account_usage`), and the `event` row kind keeps it live. `fetch`
+/// refuses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Live {
     pub command: &'static str,

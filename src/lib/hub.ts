@@ -205,8 +205,6 @@ const REASONS = {
   // P6); this is what a paired desktop says when the hub serves them none.
   fleet_settings:
     'the hub did not serve its settings to this device — a hub older than this app, or a device bound to one organisation, reads none; the hub’s operator changes them with fleet-hub settings or set_setting',
-  list_account_usage:
-    'this app does not poll account usage while a hub owns the fleet, so its cache stays empty',
   refresh_account_usage:
     'it reads the account’s usage over this machine’s SSH connection to the host',
   account_usage_history:
