@@ -362,7 +362,14 @@ Index by area (names only; see the reference for details):
   when `mcp.confirm_destructive` is on), `kill_session`, `safe_kill_session`,
   `dismiss_ghost_session`, `adopt_session` (a live tmux session fleet did
   not start, `started_at` null, becomes fleet's: `started_at` is set and the
-  caller owns it when nobody did; the pane is untouched), `move_session` (continue a work session on another
+  caller owns it when nobody did; the pane is untouched; `project_id` puts it
+  in a project), `lost_target` (read-only: the project a Lost and found
+  entry would go into, to prefill Adopt or Restore: a directory inside a
+  project answers `rule`; otherwise Jev may propose one, `decide.jev.adopt_target`
+  and `decide.jev.restore_target`, both off by default), `place_transcript`
+  (Restore into a project: copies a found conversation under the directory
+  Claude Code keys the project's root by, so `new_session { resume_claude_session_id }`
+  resumes it there; never moves or overwrites a transcript), `move_session` (continue a work session on another
   host: the transcript is copied and the work travels as it is — unpushed
   commits, uncommitted files and small git-ignored ones, nothing pushed or
   committed for you (`strict: true` restores the old clean + pushed

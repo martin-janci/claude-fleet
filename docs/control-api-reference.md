@@ -25,9 +25,9 @@ Parameters: `confirm_nonce`, `host_alias`, `source`
 
 ### `adopt_session`
 
-Adopt a live tmux session fleet did not start (started_at null: someone ran tmux by hand on the host). Fleet runs it from now on: started_at is set and the caller becomes its owner when it has none. The pane is untouched. Errors with E_INVALID_STATE for a row fleet already runs, a lost one (use restore_host_sessions) or one with no pane (bg, external).
+Adopt a live tmux session fleet did not start (started_at null: someone ran tmux by hand on the host). Fleet runs it from now on: started_at is set and the caller becomes its owner when it has none. project_id puts it in that project (lost_target proposes one). The pane is untouched. Errors with E_INVALID_STATE for a row fleet already runs, a lost one (use restore_host_sessions) or one with no pane (bg, external).
 
-Parameters: `session_id`
+Parameters: `project_id`, `session_id`
 
 ### `agent_installs`
 
@@ -269,6 +269,12 @@ Git worktrees fleet knows about, with their alive-session occupants (0 = free to
 
 Parameters: `host_alias`, `limit`, `project_id`, `summary`
 
+### `lost_target`
+
+Read-only: the project a Lost and found entry would go into, to prefill Adopt or Restore. Pass session_id (a pane fleet did not start) or host_alias, claude_session_id, cwd and git_branch (a conversation discover_lost_sessions found). A directory inside a fleet project answers source rule; otherwise, with decide.jev.adopt_target / restore_target at assist, Jev may answer source jev with a confidence, or unsure (leave the form blank). Never adopts or restores anything.
+
+Parameters: `claude_session_id`, `cwd`, `git_branch`, `host_alias`, `session_id`
+
 ### `mcp_confirms`
 
 Calls waiting for your OK (the agent's starts and kills), oldest first.
@@ -334,6 +340,12 @@ Parameters: `after`, `fleet_id`, `proto`, `results`, `send`, `wait_ms`
 What is a peer session doing: claude_status, current_activity, stuck_kind, context_pct (plus host/name/status). Cheap check before send_message or broadcast_prompt.
 
 Parameters: `session_id`
+
+### `place_transcript`
+
+Restore into a project: copy a conversation discover_lost_sessions found (not resumable where it ran) under the directory Claude Code keys that project's root by, on the same host, so claude --resume finds it there. Never moves or overwrites a transcript. Then resume with new_session { host_alias, project_id, name: tmux_name, resume_claude_session_id }.
+
+Parameters: `claude_session_id`, `host_alias`, `project_id`
 
 ### `plan_sync`
 
@@ -963,6 +975,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::resolve_move::resolve_move`
 - `commands::sessions::dismiss_ghost_session`
 - `commands::sessions::adopt_session`
+- `commands::sessions::lost_target`
+- `commands::sessions::place_transcript`
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::purge_project`

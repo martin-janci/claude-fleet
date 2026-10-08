@@ -544,6 +544,8 @@ pub fn run() {
             commands::resolve_move::resolve_move,
             commands::sessions::dismiss_ghost_session,
             commands::sessions::adopt_session,
+            commands::sessions::lost_target,
+            commands::sessions::place_transcript,
             commands::sessions::dismiss_agent_session,
             commands::sessions::new_bg_session,
             commands::sessions::purge_project,

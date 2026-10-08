@@ -366,6 +366,7 @@ export const ROUTED_ACTIONS = [
   'restore_host_sessions',
   'dismiss_ghost_session',
   'adopt_session',
+  'place_transcript',
   'new_bg_session',
   'cancel_task',
   'probe_host',
