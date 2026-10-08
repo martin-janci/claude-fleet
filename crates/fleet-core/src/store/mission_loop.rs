@@ -278,14 +278,17 @@ impl Store {
         )?)
     }
 
-    /// What the mission's workers have spent, in micro-USD: the usage of
-    /// every session that ran an attempt at one of its members.
+    /// What the mission has spent, in micro-USD: the usage of every session
+    /// that ran an attempt at one of its members, plus its planner's
+    /// `claude -p` runs (`aux_usage`, redesign 8.2).
     pub fn mission_cost_micros(&self, mission_id: i64) -> Result<i64, IpcError> {
         Ok(self.conn.query_row(
-            "SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
-             WHERE s.id IN (SELECT t.worker_session_id FROM tasks t \
-                            JOIN work_items i ON i.id = t.work_item_id \
-                            WHERE i.orchestration_project_id = ?1)",
+            "SELECT (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
+                     WHERE s.id IN (SELECT t.worker_session_id FROM tasks t \
+                                    JOIN work_items i ON i.id = t.work_item_id \
+                                    WHERE i.orchestration_project_id = ?1)) \
+                  + (SELECT COALESCE(SUM(cost_micros), 0) FROM aux_usage \
+                     WHERE mission_id = ?1)",
             [mission_id],
             |r| r.get(0),
         )?)
