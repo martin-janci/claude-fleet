@@ -28,22 +28,11 @@
     },
     {
       "title": "Overview",
+      "tiles": true,
       "items": [
         {
           "type": "field",
-          "key": "session_count"
-        },
-        {
-          "type": "field",
-          "key": "needs_you"
-        },
-        {
-          "type": "field",
           "key": "spent_today_micros"
-        },
-        {
-          "type": "field",
-          "key": "spent_week_micros"
         },
         {
           "type": "field",
@@ -51,7 +40,33 @@
         },
         {
           "type": "field",
-          "key": "over_budget"
+          "key": "spent_week_micros"
+        },
+        {
+          "type": "field",
+          "key": "session_count"
+        }
+      ]
+    },
+    {
+      "title": "Spend",
+      "items": [
+        {
+          "type": "field",
+          "key": "spend_series"
+        }
+      ]
+    },
+    {
+      "title": "Needs an admin",
+      "items": [
+        {
+          "type": "field",
+          "key": "needs_admin"
+        },
+        {
+          "type": "field",
+          "key": "needs_you"
         }
       ]
     },
