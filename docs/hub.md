@@ -2201,12 +2201,21 @@ options, and without it the view is a list a phone can read but not act on —
 answering that dialog is the one thing a pager exists for. `needs_attention`
 is there for the mirror of that reason: projected away, the view would hand a
 phone the columns to re-derive the answer instead of the answer. Its reasons,
-most urgent first (`service/attention.rs`): `waiting`, `stuck`, `stop_failed`,
+most urgent first (`service/attention.rs`): `waiting`, `stuck`, `host_down`
+(the session's host was pinged and did not answer), `account_limit` (its
+account's 5-hour or weekly window is used up and the session is not
+working), `no_credentials` (its account's login is missing, expired or
+rejected, and the session is not working), `stop_failed`,
 `failed`, `context_full` (at or past `health.context_red_pct`),
 `stale_working` (a `working` row demoted after `reconcile.stale_working_secs`
 with no activity; it lifts on the next hook, when its terminal is opened,
 when the row works again, or after `reconcile.stale_working_ttl_secs`),
-`ci_failing` and `lifecycle`. `tags`
+`ci_failing` and `lifecycle`. The three after `stuck` are decided from what
+the hub's event bus follows of hosts and account usage, not from the row, so
+every site that stamps `needs_attention` (`list_sessions`, `/events`, Today,
+the org counts, the work view) agrees. Beside the reason, `state` (contract
+11) is the attention state it puts the session in: `action_required`,
+`failed`, `blocked` (the three above) or `paused` (`lifecycle`). `tags`
 is there because the phone's tag editor starts from them and
 `set_session_tags` replaces the whole list: without them a phone that added
 one tag deleted the rest. `work` (the primary work link: key, title) is the

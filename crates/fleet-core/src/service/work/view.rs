@@ -631,6 +631,9 @@ pub(crate) struct Graph {
     pub(crate) rules: Vec<WorkRule>,
     /// `health.context_red_pct`: `needs_you` agrees with `list_sessions`.
     pub(crate) context_red_pct: f64,
+    /// What the fleet knows beyond the rows (step 2.6): `needs_you` counts a
+    /// Blocked session as `list_sessions` does.
+    pub(crate) facts: attention::Facts,
     /// Item ids with a live confirmed link whose session is presently
     /// working (native item status §2 rule 3) — one join for the whole
     /// page, looked up per task instead of queried per row. Fenced by the
@@ -870,6 +873,7 @@ impl Graph {
                 .collect(),
             rules: s.work_rules()?,
             context_red_pct: crate::service::health::context_red_pct(s),
+            facts: s.attention_facts(),
             working_session_items,
             hidden_sessions,
             hidden_links,
@@ -1505,7 +1509,7 @@ pub(crate) fn task_kind(item: Option<&ViewItem>) -> &'static str {
 
 /// Does this live session need a person (`list_sessions`' judgement)?
 fn needs_you_of(g: &Graph, row: Option<&SessionRow>) -> bool {
-    row.is_some_and(|r| attention::needs_attention_with(r, g.context_red_pct).is_some())
+    row.is_some_and(|r| attention::needs_attention_in(r, g.context_red_pct, &g.facts).is_some())
 }
 
 /// One session a task counts: the live session, else the participant it

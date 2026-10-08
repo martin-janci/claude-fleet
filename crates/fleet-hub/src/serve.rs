@@ -852,6 +852,12 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     // running hub) reach it through `service::settings::set`.
     if let Ok(s) = store.lock() {
         bus.set_context_red_pct(fleet_core::service::health::context_red_pct(&s));
+        // …and the host rows the three `Blocked` reasons start from; the bus
+        // follows every later probe itself (step 2.6).
+        match s.list_hosts() {
+            Ok(hosts) => bus.attention_seeded(&hosts, &[]),
+            Err(e) => tracing::warn!("attention facts: list_hosts failed: {e}"),
+        }
     }
     if !r.local_host {
         // Before the control API and the ticks start: from here on every
@@ -941,7 +947,11 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         &r.data_dir.join("state.db"),
         fleet_core::store::READ_POOL_SIZE,
     ) {
-        Ok(Some(pool)) => Some(Arc::new(pool)),
+        // The facts `needs_attention` is decided from live on the bus, not
+        // in the file: a pooled read must see the writer's.
+        Ok(Some(pool)) => Some(Arc::new(
+            pool.following(Arc::clone(&bus) as Arc<dyn EventBus>),
+        )),
         Ok(None) => {
             tracing::warn!("state.db is not in WAL; every read stays on the writer");
             None

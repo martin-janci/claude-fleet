@@ -143,8 +143,12 @@ fn persist_if_new(
 
 /// Seed `cache` with each account's newest stored answer, so a restart keeps
 /// the last-known usage (redesign step 2.5). Accounts already in the cache
-/// are left alone; nothing is fetched or emitted.
-pub(crate) fn restore_usage(store: &Mutex<Store>, cache: &Mutex<UsageCache>) {
+/// are left alone; nothing is fetched or emitted. Answers the restored
+/// accounts' snapshots, for the bus's attention facts (step 2.6).
+pub(crate) fn restore_usage(
+    store: &Mutex<Store>,
+    cache: &Mutex<UsageCache>,
+) -> Vec<AccountUsageSnapshot> {
     let rows = match store.lock() {
         Ok(s) => s.latest_usage_snapshots().map_err(|e| e.to_string()),
         Err(e) => Err(e.to_string()),
@@ -153,10 +157,11 @@ pub(crate) fn restore_usage(store: &Mutex<Store>, cache: &Mutex<UsageCache>) {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!("account usage history: read failed: {e}");
-            return;
+            return Vec::new();
         }
     };
     let mut c = lock_cache(cache);
+    let mut restored = Vec::with_capacity(rows.len());
     for r in rows {
         c.restore(
             &r.account_uuid,
@@ -165,7 +170,9 @@ pub(crate) fn restore_usage(store: &Mutex<Store>, cache: &Mutex<UsageCache>) {
             r.fetched_at,
             r.source_host,
         );
+        restored.push(c.snapshot(&r.account_uuid));
     }
+    restored
 }
 
 /// Spawn a background fetch for every account in `hosts` that is due and not

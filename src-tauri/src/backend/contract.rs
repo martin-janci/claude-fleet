@@ -137,7 +137,11 @@ pub fn wire_keys<T: Serialize>(value: &T) -> Vec<String> {
 ///
 /// Raised to 10 for revision 10: the Debug devices page routes its seven
 /// commands to the new `debug_devices` tool, which a revision-9 hub lacks.
-pub const MIN_HUB_CONTRACT: u32 = 10;
+///
+/// Raised to 11 for revision 11: the desktop routes `touch_session_viewed`
+/// and `repo_blame` to tools a revision-10 hub lacks, so the unread state
+/// would never clear and Blame would fail with an unknown tool.
+pub const MIN_HUB_CONTRACT: u32 = 11;
 
 /// The highest hub wire-contract revision this build understands. A hub
 /// ahead of this is running row shapes compiled after this build was —
@@ -154,7 +158,9 @@ pub const MIN_HUB_CONTRACT: u32 = 10;
 /// Raised to 9 with revision 9 (chat forms' `ask` tool), in that lockstep.
 ///
 /// Raised to 10 with revision 10 (debug devices' `debug_devices` tool).
-pub const MAX_HUB_CONTRACT: u32 = 10;
+///
+/// Raised to 11 with revision 11 (the Orbit Fleet redesign's M2).
+pub const MAX_HUB_CONTRACT: u32 = 11;
 
 /// Where a hub's wire-contract revision stands against what this build
 /// accepts. A pure function of the three numbers on purpose: the real bounds
