@@ -13,10 +13,19 @@
 // (step 3.2, `AppRail.svelte`) writes the same store. `accounts` (step 4.1)
 // is reachable only from the rail, so only in the New layout. `details`
 // (step 3.5) is the New layout's Details tab: the session's details in the
-// right column, in place of the inspector beside it.
+// right column, in place of the inspector beside it. `control` (step 9.1)
+// is the New layout's Control: the fleet agent and Today (`control.ts`).
 import { derived, writable, type Readable } from 'svelte/store';
 
-export type Destination = 'session' | 'files' | 'hosts' | 'assets' | 'board' | 'accounts' | 'details';
+export type Destination =
+  | 'session'
+  | 'files'
+  | 'hosts'
+  | 'assets'
+  | 'board'
+  | 'accounts'
+  | 'details'
+  | 'control';
 
 export const DESTINATIONS: readonly Destination[] = [
   'session',
@@ -26,6 +35,7 @@ export const DESTINATIONS: readonly Destination[] = [
   'board',
   'accounts',
   'details',
+  'control',
 ];
 
 export const destination = writable<Destination>('session');
