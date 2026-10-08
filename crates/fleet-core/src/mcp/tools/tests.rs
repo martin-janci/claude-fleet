@@ -990,6 +990,60 @@ fn set_secret_value_never_reaches_the_persisted_audit_trail() {
     assert_eq!(detail, "set_secret by master: host_alias=mefistos name=FOO");
 }
 
+/// SEC: `ask { answer, values }` carries a form's secret fields in `values`.
+/// The audit row goes onto the controller's timeline and out to every client
+/// as `session:event`; neither may ever hold a value. The audit keeps the
+/// fact (how many fields), not the content.
+#[test]
+fn ask_values_never_reach_the_audit_row_or_the_announced_event() {
+    struct Capture(Mutex<Vec<String>>);
+    impl crate::events::EventBus for Capture {
+        fn emit(&self, e: &crate::events::RowChange) {
+            if let crate::events::RowChange::SessionEventAdded(ev) = e {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(ev.detail.clone().unwrap_or_default());
+            }
+        }
+    }
+    let bus = Arc::new(Capture(Mutex::new(Vec::new())));
+    let store = Arc::new(Mutex::new(
+        Store::open_with_bus_in_memory(bus.clone()).unwrap(),
+    ));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    let args = serde_json::json!({
+        "answer": "f_x",
+        "values": { "pw": "hunter2-unique-zz", "user": "ada-unique-yy" }
+    });
+    persist_audit(&store, "ask", args.as_object(), &Caller::master());
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    let detail = events
+        .iter()
+        .find(|e| e.kind == "mcp_call")
+        .expect("mcp_call event")
+        .detail
+        .clone()
+        .unwrap();
+    assert!(!detail.contains("hunter2-unique-zz"), "{detail}");
+    assert!(!detail.contains("ada-unique-yy"), "{detail}");
+    assert_eq!(detail, "ask by master: answer=f_x values=<2 fields>");
+    let announced = bus.0.lock().unwrap().clone();
+    assert!(
+        !announced.is_empty() && announced.iter().all(|d| !d.contains("unique-")),
+        "{announced:?}"
+    );
+}
+
 /// SEC: a linked hub's message bodies ride `peer_exchange`'s `send` array,
 /// and `redact_args` only redacts top-level string keys — an array is
 /// rendered as raw JSON, so up to the summary cap of a peer's body would
@@ -17921,6 +17975,97 @@ async fn someone_elses_session_form_is_not_answerable() {
     assert!(
         ["E_FORBIDDEN", "E_NOTFOUND"].contains(&err_code(&err).as_str()),
         "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn cancel_is_the_asking_sessions_or_the_masters_alone() {
+    let g = gate_fixture();
+    let (a_row, b_row, ada) = (g.a_row, g.b_row, g.ada);
+    let t = test_tools(g.store);
+    let a_form = crate::service::forms::open(&t.store, a_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let b_form = crate::service::forms::open(&t.store, b_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let cancel = |id: &str| AskParams {
+        cancel: Some(id.to_string()),
+        ..ask_p()
+    };
+    // A host token whose pane proves ada's row (`%7`) cannot withdraw the
+    // form of another session on the same host.
+    let err = t
+        .ask(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(cancel(&b_form)),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+    // A host token that proves no session cannot cancel anything either.
+    let err = t
+        .ask(Extension(pane_caller(None)), Parameters(cancel(&a_form)))
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+    // A paired device is not the master, even for its own person's session.
+    let err = t
+        .ask(Extension(device_of(ada, ada)), Parameters(cancel(&a_form)))
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+    for id in [&a_form, &b_form] {
+        assert_eq!(
+            crate::service::forms::get(&t.store, id).unwrap().state,
+            "pending",
+            "a refused cancel changes nothing"
+        );
+    }
+    // The asking session itself, and the master, can.
+    t.ask(
+        Extension(pane_caller(Some("%7"))),
+        Parameters(cancel(&a_form)),
+    )
+    .await
+    .expect("the asking session withdraws its own form");
+    t.ask(Extension(Caller::master()), Parameters(cancel(&b_form)))
+        .await
+        .expect("the master withdraws any form");
+}
+
+#[tokio::test]
+async fn list_returns_only_the_forms_of_sessions_the_caller_can_read() {
+    let g = gate_fixture();
+    let (a_row, b_row, ada) = (g.a_row, g.b_row, g.ada);
+    let t = test_tools(g.store);
+    let a_form = crate::service::forms::open(&t.store, a_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let b_form = crate::service::forms::open(&t.store, b_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let listed = |out: CallToolResult| -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(text_of(&out.content[0])).unwrap();
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["form_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let list = || AskParams {
+        list: Some(AskListFilter::default()),
+        ..ask_p()
+    };
+    let ids = listed(
+        t.ask(Extension(device_of(ada, ada)), Parameters(list()))
+            .await
+            .unwrap(),
+    );
+    assert!(ids.contains(&a_form), "{ids:?}");
+    assert!(
+        !ids.contains(&b_form),
+        "bob's form is not ada's to see: {ids:?}"
     );
 }
 
