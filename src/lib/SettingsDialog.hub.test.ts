@@ -483,6 +483,22 @@ describe('the hub’s settings on a paired desktop (P6)', () => {
     expect(screen.getByTestId('setting-playbooks-press-enter').textContent).toBe('On');
   });
 
+  it('Decisions on an untrusted paired desktop: every use case shown, none editable (7.7)', async () => {
+    route({
+      describe_fleet_settings: described.map((d) => (d.key === 'decide.jev.enabled' ? { ...d, value: 'true' } : d)),
+      get_fleet_settings: { 'decide.jev.enabled': 'true' },
+      setting_proposals: { can_write: false, proposals: [] },
+    });
+    render(SettingsDialog, { props: { onClose: () => {} } });
+    await fireEvent.click(await screen.findByTestId('settings-nav-decisions'));
+    await screen.findByTestId('hub-scope-readonly');
+    for (const k of ['enabled', 'status-map', 'start-project', 'work-link']) {
+      expect((await screen.findByTestId(`setting-decide-jev-${k}`)).tagName, k).toBe('SPAN');
+    }
+    // The Today record reads this app's store: a paired desktop shows none.
+    expect(screen.queryByTestId('data-record-decide.today')).toBeNull();
+  });
+
   it('a hub that serves no settings leaves its reason and its answer', async () => {
     route({
       describe_fleet_settings: ipcError('E_FORBIDDEN', 'describe_fleet_settings: get_settings is not a client-callable tool'),

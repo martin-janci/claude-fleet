@@ -766,7 +766,7 @@
           "edit": "jev",
           "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
           "id": "jev_allowed",
-          "label": "Send to Jev",
+          "label": "Allow Jev (decision model) for this organisation's work",
           "on_off": true,
           "type": "bool"
         },
@@ -3738,6 +3738,45 @@
       "help": "When the last sweep ran and what it deleted.",
       "id": "work.retention_last",
       "label": "Last retention sweep",
+      "params": [],
+      "shape": "record"
+    },
+    {
+      "fields": [
+        {
+          "id": "input_tokens",
+          "label": "Used today",
+          "ty": "tokens"
+        },
+        {
+          "id": "budget",
+          "label": "Daily budget",
+          "ty": "tokens"
+        },
+        {
+          "id": "cost_micros",
+          "label": "Cost today",
+          "ty": "usd_micros"
+        },
+        {
+          "id": "breaker",
+          "label": "Breaker",
+          "ty": "text"
+        },
+        {
+          "id": "key",
+          "label": "Key",
+          "ty": "text"
+        },
+        {
+          "id": "orgs_allowed",
+          "label": "Orgs that allow Jev",
+          "ty": "text"
+        }
+      ],
+      "help": "Today's use of the decision model (Jev): input tokens against the daily budget, the breaker, the key and the organisations that allow it (`fleet-hub decide status`).",
+      "id": "decide.today",
+      "label": "Decision model today",
       "params": [],
       "shape": "record"
     }

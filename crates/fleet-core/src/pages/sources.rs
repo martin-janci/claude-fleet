@@ -267,6 +267,23 @@ pub const SOURCES: &[SourceSpec] = &[
         },
         params: &[],
     },
+    SourceSpec {
+        id: "decide.today",
+        live: None,
+        label: "Decision model today",
+        help: "Today's use of the decision model (Jev): input tokens against the daily budget, the breaker, the key and the organisations that allow it (`fleet-hub decide status`).",
+        shape: Shape::Record {
+            fields: &[
+                col("input_tokens", "Used today", ColType::Tokens),
+                col("budget", "Daily budget", ColType::Tokens),
+                col("cost_micros", "Cost today", ColType::UsdMicros),
+                col("breaker", "Breaker", ColType::Text),
+                col("key", "Key", ColType::Text),
+                col("orgs_allowed", "Orgs that allow Jev", ColType::Text),
+            ],
+        },
+        params: &[],
+    },
 ];
 
 pub fn source(id: &str) -> Option<&'static SourceSpec> {
@@ -482,11 +499,46 @@ pub fn fetch(
                 "describe_cache": l.describe_cache,
             }))
         }
+        "decide.today" => {
+            let st = crate::service::decide::status(s, now, 0)?;
+            Ok(decide_today_json(&st))
+        }
         other => Err(IpcError::new(
             codes::E_INTERNAL,
             format!("data source {other} is declared but has no reader"),
         )),
     }
+}
+
+/// PURE: the `decide.today` record from `fleet-hub decide status`. Never
+/// the key itself: only whether one is set.
+fn decide_today_json(st: &crate::service::decide::DecideStatus) -> Value {
+    let b = &st.breaker;
+    let breaker = if b.open {
+        format!("open, {} failed calls in a row", b.consecutive_failures)
+    } else if b.consecutive_failures > 0 {
+        format!("closed, {} failed in a row", b.consecutive_failures)
+    } else {
+        "closed".to_string()
+    };
+    let key = if st.key.configured { "set" } else { "not set" };
+    let orgs = if st.orgs_allowed.is_empty() {
+        "none".to_string()
+    } else {
+        st.orgs_allowed
+            .iter()
+            .map(|o| o.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    json!({
+        "input_tokens": st.today.input_tokens + st.today.bench_input_tokens,
+        "budget": st.today.budget,
+        "cost_micros": st.today.cost_microusd + st.today.bench_cost_microusd,
+        "breaker": breaker,
+        "key": key,
+        "orgs_allowed": orgs,
+    })
 }
 
 #[cfg(test)]
@@ -638,6 +690,43 @@ mod tests {
         let v = fetch(&s, "usage.by_model", &alpha, now).unwrap();
         assert_eq!(v.as_array().unwrap().len(), 1);
         assert!(fetch(&s, "no.such_source", &Map::new(), now).is_err());
+    }
+
+    /// Step 7.7: the Decisions page's Today record says what the gate sees,
+    /// in words, and never the key itself.
+    #[test]
+    fn decide_today_reads_the_budget_breaker_key_and_consent() {
+        use crate::service::decide::{self, OrgConsent};
+        let (s, now) = seeded();
+        let v = fetch(&s, "decide.today", &Map::new(), now).unwrap();
+        assert_eq!(v["input_tokens"], 0);
+        assert_eq!(v["breaker"], "closed");
+        assert_eq!(v["key"], "not set");
+        assert_eq!(v["orgs_allowed"], "none");
+        assert!(
+            v["budget"].as_i64().unwrap() > 0,
+            "the default budget shows"
+        );
+
+        let mut st = decide::status(&s, now, 0).unwrap();
+        st.breaker.open = true;
+        st.breaker.consecutive_failures = 5;
+        st.today.input_tokens = 40;
+        st.today.bench_input_tokens = 2;
+        st.orgs_allowed = vec![
+            OrgConsent {
+                id: 1,
+                name: "Acme".into(),
+            },
+            OrgConsent {
+                id: 2,
+                name: "Globex".into(),
+            },
+        ];
+        let v = decide_today_json(&st);
+        assert_eq!(v["breaker"], "open, 5 failed calls in a row");
+        assert_eq!(v["input_tokens"], 42, "the budget counts the benchmark too");
+        assert_eq!(v["orgs_allowed"], "Acme, Globex");
     }
 
     #[test]

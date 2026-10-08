@@ -45,6 +45,14 @@ export const SOURCE_DATA: Record<string, unknown> = {
     { group: 'links', counted: '3 made (manual 3)' },
     { group: 'trackers', counted: 'none' },
   ],
+  'decide.today': {
+    input_tokens: 41_000,
+    budget: 2_000_000,
+    cost_micros: 860,
+    breaker: 'closed',
+    key: 'set',
+    orgs_allowed: 'Acme',
+  },
   'usage.by_model': [
     { model: 'claude-opus-5', sessions: 2, input_tokens: 20, output_tokens: 0, cost_micros: 3_000_000 },
   ],
