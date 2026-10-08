@@ -230,6 +230,17 @@ describe('pathological input', () => {
     expect(blocks).toHaveLength(1);
   });
 
+  it('stays fast on a long fence-like or table-separator-like line', () => {
+    for (const nasty of ['```' + ' '.repeat(40000) + '`', 'para\n```' + ' '.repeat(40000) + '`', 'a|b\n|-' + ' '.repeat(40000) + 'x']) {
+      const t0 = performance.now();
+      parseMarkdown(nasty);
+      expect(performance.now() - t0).toBeLessThan(100);
+    }
+    expect(parseMarkdown('```js extra\nx\n```')[0]).toEqual({ t: 'code', lang: 'js', v: 'x' });
+    expect(parseMarkdown('``` a`b\nx')[0].t).toBe('para');
+    expect(parseMarkdown('a | b\n  | --- | ---: |  \n1 | 2')[0].t).toBe('table');
+  });
+
   it('does not overflow the stack on deeply nested quotes and lists', () => {
     expect(() => parseMarkdown('>'.repeat(5000) + ' x')).not.toThrow();
     expect(() => parseMarkdown(Array.from({ length: 400 }, (_, k) => ' '.repeat(k * 2) + '- x').join('\n'))).not.toThrow();

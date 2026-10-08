@@ -3001,6 +3001,84 @@ async fn run_matrix(isolate: bool) {
         )
         .await;
     }
+    // ── The mission graph (orchestration O2) ───────────────────────────
+    // A tree is `propose`'s parent question; an edge and a hold are a
+    // person's plan; many decisions at once are still a person's.
+    m.row(
+        "work_link",
+        "propose_tree",
+        move |_, _| {
+            json!({ "action": "propose_tree", "parent": format!("item:{local_a}"),
+                    "tree": [{ "title": "matrix plan" }] })
+        },
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    is_code(who, a, "E_NOTFOUND", "another org's parent")
+                }
+                _ => assert!(
+                    text(a).contains("\"proposal_state\":\"proposed\""),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "dep",
+        move |fx, _| json!({ "action": "dep", "item_id": fx.item_b, "depends_on": fx.item_a }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                Who::BoundA | Who::BoundB => is_code(who, a, "E_NOTFOUND", "another org's item"),
+                // Both visible: the store refuses an edge across orgs.
+                _ => is_code(who, a, "E_FORBIDDEN", "cross-org edge"),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "hold",
+        move |fx, _| json!({ "action": "hold", "item_id": fx.item_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not plan"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's item"),
+                _ => is_ok(who, a, "hold"),
+            }
+        },
+    )
+    .await;
+    for action in ["accept_many", "undo_accept"] {
+        m.row(
+            "work_link",
+            action,
+            move |fx, _| json!({ "action": action, "item_ids": [fx.item_b] }),
+            |_, who, a| {
+                if readonly_refused(who, a) {
+                    return;
+                }
+                match who {
+                    // A ticket is no proposal: the store's answer, once the
+                    // caller is a person who may see it.
+                    Who::Master | Who::ClientFull => is_code(who, a, "E_INVALID", "not a proposal"),
+                    _ => is_code(who, a, "E_FORBIDDEN", "a person decides"),
+                }
+            },
+        )
+        .await;
+    }
     // ── idle_unlinked and keep (work graph M11.3) ──────────────────────
     // Two work sessions with their own worktrees and no work linked, idle
     // and unprompted forever: A's on h-a, B's on h-b.

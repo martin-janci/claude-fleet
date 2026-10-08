@@ -349,6 +349,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_mission_repo", Verdict::Routed { tool: "work_link" }),
     ("set_mission_item", Verdict::Routed { tool: "work_link" }),
     ("delete_mission", Verdict::Routed { tool: "work_link" }),
+    // Orchestration O2: the mission graph's writes.
+    ("set_work_dep", Verdict::Routed { tool: "work_link" }),
+    ("set_work_hold", Verdict::Routed { tool: "work_link" }),
+    (
+        "accept_work_proposals",
+        Verdict::Routed { tool: "work_link" },
+    ),
+    ("undo_work_accept", Verdict::Routed { tool: "work_link" }),
     // Work graph M3.1: trackers and their credentials are fleet
     // administration. The hub's `work_admin` is master-only, and a paired
     // desktop is a client, never the master (review C17).

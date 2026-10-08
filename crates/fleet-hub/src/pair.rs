@@ -104,7 +104,7 @@ pub(crate) fn hub_conn(
         "FLEET_HUB_PORT",
         None,
     )? {
-        Some(p) => p.parse::<u16>().map_err(|e| format!("port '{p}': {e}"))?,
+        Some(p) => crate::config::parse_port(&p)?,
         None => cfg.port,
     };
     // TLS: the same precedence `serve`/`init` resolve `hub.tls` with — flag >

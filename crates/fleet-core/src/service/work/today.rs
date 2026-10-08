@@ -587,6 +587,7 @@ mod tests {
                 proposal_state: None,
                 proposed_by: None,
                 proposal_why: None,
+                held_at: None,
             },
             org_id: None,
         }

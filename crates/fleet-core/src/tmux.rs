@@ -957,10 +957,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
                 "new session name must not be empty",
             ));
         }
-        if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
+        if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':' || c == '#') {
             return Err(IpcError::new(
                 codes::E_TMUX,
-                "tmux session name must not contain whitespace, `.`, or `:`",
+                "tmux session name must not contain whitespace, `.`, `:` or `#`",
             ));
         }
         if trimmed == old {
@@ -1158,6 +1158,10 @@ impl<C: SshExec> TmuxExec for RemoteTmux<C> {
 pub enum NamedKey {
     Enter,
     Escape,
+    /// Moves a multi-select question's cursor to its next option, and from
+    /// the last one onto the dialog's `Submit` row (where a further `Tab` does
+    /// nothing), so a client can reach Submit without knowing the cursor.
+    Tab,
     CtrlC,
     /// One of `1`..`9` — the keystroke that answers a numbered permission /
     /// question dialog. Typing the ordinal as *text* would not do: the text
@@ -1196,12 +1200,13 @@ impl NamedKey {
     /// Every accepted value, in the words a refusal shows the caller. Both
     /// `send_prompt` paths (the service function and the MCP tool) print
     /// this, so the message can never fall behind [`parse`](Self::parse).
-    pub const VOCABULARY: &'static str = "Enter, Escape, C-c or a digit 1-9";
+    pub const VOCABULARY: &'static str = "Enter, Escape, Tab, C-c or a digit 1-9";
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "Enter" => Some(Self::Enter),
             "Escape" => Some(Self::Escape),
+            "Tab" => Some(Self::Tab),
             "C-c" => Some(Self::CtrlC),
             // Exactly one ASCII digit. `str::parse::<u8>` would accept
             // "+1", " 1" and "007"; a dialog answer must be the literal
@@ -1216,6 +1221,7 @@ impl NamedKey {
         match self {
             Self::Enter => "Enter",
             Self::Escape => "Escape",
+            Self::Tab => "Tab",
             Self::CtrlC => "C-c",
             // Sound by construction: `DigitKey`'s field is private and
             // `DigitKey::new` admits only 1..=9.
@@ -1557,10 +1563,10 @@ pub async fn rename_session(old: &str, new: &str) -> Result<(), IpcError> {
             "new session name must not be empty",
         ));
     }
-    if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':') {
+    if trimmed.contains(|c: char| c.is_whitespace() || c == '.' || c == ':' || c == '#') {
         return Err(IpcError::new(
             codes::E_TMUX,
-            "tmux session name must not contain whitespace, `.`, or `:`",
+            "tmux session name must not contain whitespace, `.`, `:` or `#`",
         ));
     }
     if trimmed == old {
@@ -3179,7 +3185,7 @@ mod tests {
         // The refusal message both `send_prompt` paths print comes from this
         // one constant, so a key the parser accepts can never go unnamed.
         let v = NamedKey::VOCABULARY;
-        for accepted in ["Enter", "Escape", "C-c", "1-9"] {
+        for accepted in ["Enter", "Escape", "Tab", "C-c", "1-9"] {
             assert!(v.contains(accepted), "{v:?} must mention {accepted}");
         }
     }

@@ -75,6 +75,7 @@ describe('validateBranchName', () => {
     expect(validateBranchName('x/')).toMatch(/start or end with/);
     expect(validateBranchName('x.')).toMatch(/end with/);
     expect(validateBranchName('x.lock')).toMatch(/end with/);
+    expect(validateBranchName('feat.lock/x')).toMatch(/end with .lock/);
     expect(validateBranchName('a..b')).toMatch(/cannot contain \.\./);
     expect(validateBranchName('a//b')).toMatch(/cannot contain/);
     expect(validateBranchName('a@{b')).toMatch(/cannot contain/);

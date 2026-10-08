@@ -4362,6 +4362,24 @@ async fn create_worktree_local_creates_and_is_idempotent() {
 }
 
 #[test]
+fn a_login_banner_never_becomes_the_worktree_path() {
+    assert_eq!(
+        worktree_path_from_stdout(b"Welcome to build-box\n/home/u/r/.worktrees/feat-x\n").unwrap(),
+        "/home/u/r/.worktrees/feat-x"
+    );
+    assert_eq!(
+        worktree_path_from_stdout(b"/home/u/r/.worktrees/x\n\n").unwrap(),
+        "/home/u/r/.worktrees/x"
+    );
+    for bad in [&b"Welcome to build-box\n"[..], b"", b"  \n"] {
+        assert_eq!(
+            worktree_path_from_stdout(bad).unwrap_err().code,
+            codes::E_GIT_SETUP
+        );
+    }
+}
+
+#[test]
 fn remote_script_must_be_quoted_to_survive_login_shell_retokenization() {
     // Regression for "zsh: parse error near `then`" on remote session
     // creation. ssh concatenates the trailing argv with spaces and the

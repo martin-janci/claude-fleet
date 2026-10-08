@@ -1111,7 +1111,9 @@ impl Store {
     }
 
     /// Where work on `prefix`-keys last ran: `(project_id, host)` of the
-    /// newest confirmed link, live or ended.
+    /// newest confirmed link, live or ended. An exact prefix compare, not
+    /// `LIKE`: a Jira key may hold `_`, which `LIKE` reads as a wildcard
+    /// (`MY_PROJ` would match `MYXPROJ-3`'s links).
     pub fn last_place_for_prefix(&self, prefix: &str) -> Result<Option<(i64, String)>, IpcError> {
         if prefix.is_empty() {
             return Ok(None);
@@ -1125,7 +1127,7 @@ impl Store {
                  LEFT JOIN participants p ON p.id = l.participant_id AND p.retired_at IS NULL \
                  LEFT JOIN sessions s ON s.id = p.session_id AND l.ended_at IS NULL \
                  WHERE l.state = 'confirmed' \
-                   AND UPPER(COALESCE(i.key, l.ref_key)) LIKE ?1 || '-%' \
+                   AND substr(UPPER(COALESCE(i.key, l.ref_key)), 1, length(?1) + 1) = ?1 || '-' \
                    AND COALESCE(s.project_id, l.snap_project_id) IS NOT NULL \
                    AND COALESCE(s.host_alias, l.snap_host) IS NOT NULL \
                  ORDER BY COALESCE(l.ended_at, l.decided_at, l.created_at) DESC, l.id DESC \
@@ -1261,6 +1263,27 @@ mod tests {
         .unwrap();
         bus.take();
         (s, t.id, bus)
+    }
+
+    #[test]
+    fn the_last_place_for_a_prefix_matches_it_exactly() {
+        let s = Store::open_in_memory().unwrap();
+        let pid = s.upsert_project("acme", "api", "/src/acme/api").unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO work_links (ref_key, state, source, created_at, ended_at, \
+                                         snap_project_id, snap_host) \
+                 VALUES ('AXB-7', 'confirmed', 'manual', 1, 2, ?1, 'h')",
+                rusqlite::params![pid],
+            )
+            .unwrap();
+        assert_eq!(s.last_place_for_prefix("A_B").unwrap(), None);
+        assert_eq!(s.last_place_for_prefix("A%").unwrap(), None);
+        assert_eq!(s.last_place_for_prefix("AX").unwrap(), None);
+        assert_eq!(
+            s.last_place_for_prefix("axb").unwrap(),
+            Some((pid, "h".to_string()))
+        );
     }
 
     #[test]

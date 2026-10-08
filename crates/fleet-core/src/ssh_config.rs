@@ -156,7 +156,10 @@ fn include_files(
     };
     let mut files: Vec<std::path::PathBuf> = entries
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        // `metadata` follows a symlink (`file_type` does not): dotfile
+        // managers (stow, home-manager) link `config.d/*.conf` in, and
+        // `ssh` reads those.
+        .filter(|e| std::fs::metadata(e.path()).is_ok_and(|m| m.is_file()))
         .filter(|e| glob_match(&name, &e.file_name().to_string_lossy()))
         .map(|e| e.path())
         .collect();
@@ -266,17 +269,15 @@ fn strip_comment(line: &str) -> &str {
 }
 
 fn split_kv(line: &str) -> Option<(&str, &str)> {
-    // `key value` separated by whitespace OR `key=value`. Either form is
-    // legal per ssh_config(5).
-    if let Some(eq) = line.find('=') {
-        // Make sure '=' actually appears before any whitespace.
-        if line[..eq].chars().all(|c| !c.is_whitespace()) {
-            return Some((line[..eq].trim(), line[eq + 1..].trim()));
-        }
-    }
-    let mut it = line.splitn(2, char::is_whitespace);
-    let key = it.next()?.trim();
-    let val = it.next()?.trim();
+    // `key value`, `key=value` or `key = value`: OpenSSH splits the keyword
+    // at the first whitespace or `=`, then allows whitespace around ONE `=`
+    // (ssh_config(5)). `Hostname = a.lan` is a host name of `a.lan`, not
+    // `= a.lan`.
+    let line = line.trim();
+    let key_end = line.find(|c: char| c.is_whitespace() || c == '=')?;
+    let key = &line[..key_end];
+    let rest = line[key_end..].trim_start();
+    let val = rest.strip_prefix('=').unwrap_or(rest).trim();
     if key.is_empty() || val.is_empty() {
         return None;
     }
@@ -489,6 +490,46 @@ Host eq
         let hosts = parse(cfg);
         assert_eq!(hosts[0].hostname.as_deref(), Some("eq.lan"));
         assert_eq!(hosts[0].port, Some(2244));
+    }
+
+    #[test]
+    fn supports_equals_with_surrounding_spaces() {
+        let cfg = "
+Host a
+    Hostname = a.lan
+    User = me
+    Port = 2222
+Host b
+    Port =2244
+    User= x
+";
+        let hosts = parse(cfg);
+        assert_eq!(hosts[0].hostname.as_deref(), Some("a.lan"));
+        assert_eq!(hosts[0].user.as_deref(), Some("me"));
+        assert_eq!(hosts[0].port, Some(2222));
+        assert_eq!(hosts[1].port, Some(2244));
+        assert_eq!(hosts[1].user.as_deref(), Some("x"));
+        // A value that itself holds `=` keeps it.
+        assert_eq!(
+            split_kv("ProxyCommand ssh -o A=b jump"),
+            Some(("ProxyCommand", "ssh -o A=b jump"))
+        );
+        assert_eq!(split_kv("Port ="), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_include_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = dir.path().join(".ssh");
+        std::fs::create_dir_all(ssh.join("config.d")).unwrap();
+        std::fs::create_dir_all(dir.path().join("real")).unwrap();
+        let real = dir.path().join("real").join("w.conf");
+        std::fs::write(&real, "Host work\n").unwrap();
+        std::os::unix::fs::symlink(&real, ssh.join("config.d").join("w.conf")).unwrap();
+        let text = inline_includes("Include config.d/*.conf\n", &ssh, Some(dir.path()), 0);
+        let aliases: Vec<String> = parse(&text).into_iter().map(|h| h.alias).collect();
+        assert_eq!(aliases, ["work"]);
     }
 
     #[test]

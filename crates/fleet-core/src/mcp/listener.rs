@@ -58,6 +58,14 @@ const HANDSHAKE_BACKLOG: usize = 64;
 /// is generous by orders of magnitude for anything legitimate.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How many handshakes may be in flight at once. The connection cap in
+/// `conn::serve` only applies once a handshake has finished, so without this
+/// a peer opening silent connections faster than [`HANDSHAKE_TIMEOUT`]
+/// expires them holds an unbounded number of tasks and file descriptors —
+/// no token needed — until `accept` (and SQLite, SSH, the agent sockets)
+/// fail with EMFILE. A connection over the cap is closed at once.
+const MAX_PENDING_HANDSHAKES: usize = 128;
+
 /// An `axum::serve::Listener` yielding connections `A` has already wrapped.
 pub struct TlsListener<A: TlsAcceptor> {
     local_addr: SocketAddr,
@@ -67,20 +75,42 @@ pub struct TlsListener<A: TlsAcceptor> {
 impl<A: TlsAcceptor> TlsListener<A> {
     /// Take over `listener`, wrapping every connection with `acceptor`.
     pub fn spawn(listener: TcpListener, acceptor: A) -> std::io::Result<Self> {
-        Self::spawn_with_handshake_timeout(listener, acceptor, HANDSHAKE_TIMEOUT)
+        Self::spawn_with_limits(
+            listener,
+            acceptor,
+            HANDSHAKE_TIMEOUT,
+            MAX_PENDING_HANDSHAKES,
+        )
     }
 
     /// [`Self::spawn`] with the handshake deadline as a parameter, so a test
     /// can exercise it on the real clock without waiting the full
     /// [`HANDSHAKE_TIMEOUT`].
+    #[cfg(test)]
     fn spawn_with_handshake_timeout(
         listener: TcpListener,
         acceptor: A,
         handshake_timeout: std::time::Duration,
     ) -> std::io::Result<Self> {
+        Self::spawn_with_limits(
+            listener,
+            acceptor,
+            handshake_timeout,
+            MAX_PENDING_HANDSHAKES,
+        )
+    }
+
+    /// [`Self::spawn`] with both limits as parameters.
+    fn spawn_with_limits(
+        listener: TcpListener,
+        acceptor: A,
+        handshake_timeout: std::time::Duration,
+        max_pending: usize,
+    ) -> std::io::Result<Self> {
         let local_addr = listener.local_addr()?;
         let (tx, rx) = mpsc::channel(HANDSHAKE_BACKLOG);
         let acceptor = Arc::new(acceptor);
+        let pending = Arc::new(tokio::sync::Semaphore::new(max_pending));
         crate::rt::spawn(async move {
             loop {
                 let (stream, peer) = tokio::select! {
@@ -100,9 +130,17 @@ impl<A: TlsAcceptor> TlsListener<A> {
                         }
                     },
                 };
+                let Ok(permit) = Arc::clone(&pending).try_acquire_owned() else {
+                    // Dropping the stream closes it: a flood costs the
+                    // flooder its connection, not the hub its descriptors.
+                    tracing::debug!(%peer, "[mcp] too many TLS handshakes in flight; closed");
+                    continue;
+                };
                 let tx = tx.clone();
                 let acceptor = Arc::clone(&acceptor);
                 crate::rt::spawn(async move {
+                    // Held until the handshake ends, either way.
+                    let _permit = permit;
                     match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
                         Ok(Ok(conn)) => {
                             // An `Err` here means the server is gone; the
@@ -289,6 +327,32 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(TcpStream::connect(addr).await.is_ok(), "still listening");
+    }
+
+    /// A flood of silent connections is capped: one over the limit is
+    /// closed at once, long before the handshake deadline.
+    #[tokio::test]
+    async fn a_flood_of_silent_handshakes_is_capped() {
+        let (l, addr) = bound().await;
+        let _listener = TlsListener::spawn_with_limits(
+            l,
+            NeverCompletes,
+            std::time::Duration::from_secs(30),
+            2,
+        )
+        .unwrap();
+        let _a = TcpStream::connect(addr).await.unwrap();
+        let _b = TcpStream::connect(addr).await.unwrap();
+        // Let the accept loop take both before the third arrives.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut third = TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 1];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), third.read(&mut buf))
+            .await
+            .expect("the connection over the cap must be closed at once")
+            .unwrap_or(0);
+        assert_eq!(n, 0);
         assert!(TcpStream::connect(addr).await.is_ok(), "still listening");
     }
 

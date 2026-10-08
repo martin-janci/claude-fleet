@@ -575,11 +575,15 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("preview_start_work", &wire).await,
             None => {
-                tickets::preview_start(
+                // A standalone desktop owns its fleet: Jev K1 may ask (off by
+                // default). A paired one routed to its hub above.
+                let decide = fleet_core::service::decide::DecideCtx::jev(Arc::clone(store));
+                tickets::preview_start_decided(
                     store,
                     &fleet_core::service::work::start_args(&wire),
                     &fleet_core::service::view_scope::ViewScope::internal(),
                     &default_net(),
+                    Some(&decide),
                 )
                 .await
             }

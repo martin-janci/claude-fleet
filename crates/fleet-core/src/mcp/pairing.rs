@@ -597,39 +597,45 @@ pub async fn handle_pair(
             tracing::error!("[mcp] store lock poisoned while pairing");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
-        // The trust grant rides on the same code the operator minted: a
-        // `--trusted` pairing lands trusted, nothing else does.
-        s.insert_client_token(&req.name, &hash, &req.mode)
-            .and_then(|row| {
-                if req.trusted {
-                    s.set_client_trust(&row.name, true)
-                } else {
-                    Ok(row)
-                }
-            })
-            .and_then(|row| match req.org_id {
-                // The org binding rides on the code too (work graph M14).
-                Some(org) => s.set_client_org(&row.name, Some(org)),
-                None => Ok(row),
-            })
-            .and_then(|row| match req.person.as_deref() {
-                // And WHOSE device it is (multi-user M1). The `people` row
-                // is created HERE, at redemption, not at mint: a code minted
-                // and never walked to the phone must not leave an orphan
-                // person behind. An existing live person of that name is
-                // reused, which is what makes "pair my second phone" and
-                // "pair a colleague's laptop" the same command.
-                Some(person) => {
-                    let row_id = match s.get_person_by_name(person)? {
-                        Some(p) => p.id,
-                        None => s.create_person(person, None)?.id,
-                    };
-                    s.set_client_person(&row.name, Some(row_id))
-                }
-                // A `peer` link and an `updater` token are nobody's device;
-                // `pair_client` refuses `person` for both.
-                None => Ok(row),
-            })
+        // One transaction: a bind that fails after the insert (the org was
+        // removed while the code waited) must not leave a live, unbound
+        // row behind that nobody holds the token for and that keeps the
+        // name taken. The code is spent either way.
+        s.atomically(|s| {
+            // The trust grant rides on the same code the operator minted: a
+            // `--trusted` pairing lands trusted, nothing else does.
+            s.insert_client_token(&req.name, &hash, &req.mode)
+                .and_then(|row| {
+                    if req.trusted {
+                        s.set_client_trust(&row.name, true)
+                    } else {
+                        Ok(row)
+                    }
+                })
+                .and_then(|row| match req.org_id {
+                    // The org binding rides on the code too (work graph M14).
+                    Some(org) => s.set_client_org(&row.name, Some(org)),
+                    None => Ok(row),
+                })
+                .and_then(|row| match req.person.as_deref() {
+                    // And WHOSE device it is (multi-user M1). The `people` row
+                    // is created HERE, at redemption, not at mint: a code minted
+                    // and never walked to the phone must not leave an orphan
+                    // person behind. An existing live person of that name is
+                    // reused, which is what makes "pair my second phone" and
+                    // "pair a colleague's laptop" the same command.
+                    Some(person) => {
+                        let row_id = match s.get_person_by_name(person)? {
+                            Some(p) => p.id,
+                            None => s.create_person(person, None)?.id,
+                        };
+                        s.set_client_person(&row.name, Some(row_id))
+                    }
+                    // A `peer` link and an `updater` token are nobody's device;
+                    // `pair_client` refuses `person` for both.
+                    None => Ok(row),
+                })
+        })
     };
     match inserted {
         Ok(row) => {

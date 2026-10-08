@@ -9,6 +9,7 @@ pub mod buckets;
 pub mod card;
 pub mod describe;
 pub mod detect;
+pub mod graph;
 pub mod handover;
 pub mod harvest;
 pub mod local;
@@ -269,6 +270,17 @@ pub struct WorkLinkArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "object_schema")]
     pub mission: Option<missions::MissionInput>,
+    /// dep: what `item_id` waits for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<i64>,
+    /// accept_many, undo_accept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_ids: Option<Vec<i64>>,
+    /// propose_tree: [{title, notes?, why?, depends_on?: [{entry: n} |
+    /// {item: id}]}].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "array_schema")]
+    pub tree: Option<Vec<crate::store::TreeEntry>>,
 }
 
 /// `work_link { action: dismiss, item_id }`.
@@ -465,6 +477,11 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "mission_repo",
     "mission_item",
     "mission_delete",
+    "dep",
+    "hold",
+    "propose_tree",
+    "accept_many",
+    "undo_accept",
 ];
 
 /// The desktop's Routed work commands and the hub action each one calls
@@ -531,6 +548,11 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("set_mission_repo", "work_link", "mission_repo"),
     ("set_mission_item", "work_link", "mission_item"),
     ("delete_mission", "work_link", "mission_delete"),
+    // Orchestration O2: the mission graph.
+    ("set_work_dep", "work_link", "dep"),
+    ("set_work_hold", "work_link", "hold"),
+    ("accept_work_proposals", "work_link", "accept_many"),
+    ("undo_work_accept", "work_link", "undo_accept"),
 ];
 
 /// The `action` schemas are generated from the tables above (work graph

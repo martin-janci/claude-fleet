@@ -52,8 +52,17 @@ pub fn parse_rfc3339(s: &str) -> Option<i64> {
             if rb.len() != 6 || !matches!(rb[0], b'+' | b'-') || rb[3] != b':' {
                 return None;
             }
-            let h: i64 = rest.get(1..3)?.parse().ok()?;
-            let m: i64 = rest.get(4..6)?.parse().ok()?;
+            let digits = |r: std::ops::Range<usize>| -> Option<i64> {
+                let part = rest.get(r)?;
+                if !part.bytes().all(|c| c.is_ascii_digit()) {
+                    return None;
+                }
+                part.parse().ok()
+            };
+            let (h, m) = (digits(1..3)?, digits(4..6)?);
+            if h > 23 || m > 59 {
+                return None;
+            }
             let sign = if rb[0] == b'-' { -1 } else { 1 };
             sign * (h * 3600 + m * 60)
         }
@@ -143,6 +152,12 @@ mod tests {
             "2026-09-30T10:12:00.Z",
             "2026-09-30T10:12:00+0200",
             "+026-09-30T10:12:00Z",
+            // Offsets are digits and in range: no sign inside the field, and
+            // nothing that would shift an `expires_at` by days.
+            "2026-09-30T10:12:00+-1:00",
+            "2026-09-30T10:12:00+24:00",
+            "2026-09-30T10:12:00+00:60",
+            "2026-09-30T10:12:00-99:99",
         ] {
             assert_eq!(parse_rfc3339(bad), None, "{bad}");
         }

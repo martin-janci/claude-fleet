@@ -246,6 +246,8 @@ Rejected alternatives:
    - The operator's CLAUDE.md gains a rule to call `suggest` when a request belongs to another topic. The panel then shows a banner.
 3. **Automatic (opt-in):** fleet, not the model, switches to an existing thread or opens a new one. It does so only while the pane is quiet and before the prompt is sent, and every such switch is followed by a 10 s Undo toast.
 
+**Jev (K2, test map §5).** For a prompt that names no key, a shadow slot asks Jev after the send which thread it belongs to (current, another open one, or a new topic). In assist the answer may raise the same banner; it never moves a prompt by itself.
+
 **Never mid-turn.** While the operator is in a turn, the panel offers "Switch when done" (queued and run on the Stop hook) or "Interrupt and switch".
 
 ### 3.3 Binding conversation ↔ task

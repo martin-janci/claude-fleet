@@ -590,6 +590,16 @@ fn work_items_has_orchestration_project(conn: &Connection) -> rusqlite::Result<b
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 116.
+fn work_items_has_held_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('work_items') WHERE name = 'held_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// `already_applied` guard of migration 111.
 fn hosts_has_auth_overrides(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1353,6 +1363,13 @@ const MIGRATIONS: &[Migration] = &[
         version: 115,
         sql: include_str!("../../migrations/115_orchestration_projects.sql"),
         already_applied: Some(work_items_has_orchestration_project),
+    },
+    // Orchestration O2: the dependency graph (a new table) and a person's
+    // hold on an item (ADD COLUMN, so guarded on it).
+    Migration {
+        version: 116,
+        sql: include_str!("../../migrations/116_work_item_deps.sql"),
+        already_applied: Some(work_items_has_held_at),
     },
 ];
 

@@ -287,7 +287,7 @@ const MAX_HEAD: usize = 64 * 1024;
 
 /// `GET url` and stream the body into `dest` — the bytes of a file download
 /// (`GET /downloads/<id>`), which may be far past [`MAX_RESPONSE`], so they
-/// are never buffered whole. Written to `<dest>.part` and renamed into place
+/// are never buffered whole. Written to `<dest>.<pid>-<random>.part` and renamed into place
 /// only once complete, so `dest` is either the whole file or untouched. The
 /// byte count on success; on a non-200, `Err("HTTP <status>: <body>")`.
 pub async fn download_to(
@@ -342,13 +342,24 @@ pub async fn download_to(
     if expected.is_some_and(|n| n > max) {
         return Err(too_large_download(max));
     }
-    let mut chunks = http1::Dechunker::new(http1::head_is_chunked(&head));
+    let chunked = http1::head_is_chunked(&head);
+    let mut chunks = http1::Dechunker::new(chunked);
+    // A name of this download's own, created new: a fixed `<dest>.part`
+    // truncated (and on failure deleted) a file the user already had under
+    // that name, and two saves to one destination wrote into one file.
     let part = {
         let mut p = dest.as_os_str().to_owned();
-        p.push(".part");
+        p.push(format!(
+            ".{}-{}.part",
+            std::process::id(),
+            &crate::mcp::generate_token()[..12]
+        ));
         std::path::PathBuf::from(p)
     };
-    let mut file = tokio::fs::File::create(&part)
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&part)
         .await
         .map_err(|e| format!("create {}: {e}", part.display()))?;
     let result: Result<u64, String> = async {
@@ -382,6 +393,14 @@ pub async fn download_to(
                     "{host}:{port} sent {got} of {n} bytes; the download is incomplete"
                 ));
             }
+        }
+        // A chunked body (a proxy in front of the hub re-chunks) carries no
+        // length: only its terminating chunk says it is whole. A connection
+        // cut before it is a partial file, not a download.
+        if chunked && !chunks.finished() {
+            return Err(format!(
+                "{host}:{port} closed mid-download before the last chunk; the download is incomplete"
+            ));
         }
         file.sync_all()
             .await

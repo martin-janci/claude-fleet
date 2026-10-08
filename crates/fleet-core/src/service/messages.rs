@@ -219,6 +219,10 @@ pub async fn send_message_scoped(
         ));
     }
     let kind = args.kind.as_deref().unwrap_or("message");
+    // Served back verbatim by every `inbox` read, so it gets the shape a
+    // kind crossing a link gets: not empty, not megabytes, no newlines.
+    crate::service::peer::validate::check_local_kind(kind)
+        .map_err(|r| IpcError::new(r.code, r.message))?;
     let detail = timeline_detail(&args.body);
 
     // Resolve both ends and write the row + events under one lock window and
@@ -1156,6 +1160,35 @@ mod tests {
             send_message(big, &store, &ssh).await.unwrap_err().code,
             codes::E_VALIDATE
         );
+    }
+
+    /// A local recipient's inbox serves `kind` back verbatim, so it is
+    /// shape-checked too, before anything is written.
+    #[tokio::test]
+    async fn a_local_kind_is_shape_checked_before_anything_is_written() {
+        let (store, ssh, a, b) = fixture();
+        for bad in ["Task", "a b", "kind\nx", &"k".repeat(33), ""] {
+            let mut m = args(a, b, "hi");
+            m.kind = Some(bad.to_string());
+            assert_eq!(
+                send_message(m, &store, &ssh).await.unwrap_err().code,
+                codes::E_VALIDATE,
+                "{bad:?}"
+            );
+        }
+        let count = |store: &Mutex<Store>| -> i64 {
+            store
+                .lock()
+                .unwrap()
+                .conn_ref()
+                .query_row("SELECT COUNT(*) FROM session_messages", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(count(&store), 0, "no refused kind was stored");
+        let mut ok = args(a, b, "hi");
+        ok.kind = Some("question".into());
+        send_message(ok, &store, &ssh).await.unwrap();
+        assert_eq!(count(&store), 1, "a well-formed local kind still lands");
     }
 
     /// A kind the peer's `check_inbound` would reject is refused at the

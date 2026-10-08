@@ -667,6 +667,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hub_mode_refuses_a_target_from_an_expired_channel() {
+        // A compromised hub freezing the channel: an old, correctly signed
+        // document whose `expires_at` has passed still names a target, so a
+        // later withdrawal or raised floor would never reach this client.
+        let key = TestKey::new(7);
+        let d = honest_decision(&key).await;
+        let expired = crate::time::parse_rfc3339("2026-10-14T00:00:01Z").unwrap();
+        assert_eq!(
+            hub(d.clone(), &key)
+                .with_clock(move || expired)
+                .check(&req("0.3.3"))
+                .await,
+            Err(UpdateError::Unverified(VerifyError::Stale))
+        );
+        assert!(hub(d, &key).check(&req("0.3.3")).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn hub_mode_refuses_an_answer_for_another_component() {
         let key = TestKey::new(7);
         let mut d = honest_decision(&key).await;

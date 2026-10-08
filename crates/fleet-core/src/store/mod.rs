@@ -18,6 +18,7 @@ mod decisions;
 mod downloads;
 mod guides;
 mod hosts_accounts;
+mod item_deps;
 mod layers;
 mod local_workspaces;
 mod nl_census;
@@ -81,6 +82,7 @@ pub use decisions::{
 };
 pub use downloads::{DownloadRow, NewDownload};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
+pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use layers::HostLayerRow;
 pub(crate) use local_workspaces::paths_overlap;
 pub use local_workspaces::{
@@ -166,7 +168,10 @@ pub use work_journal::{
 pub use work_local::{validate_local_work_title, LocalItemLink, LOCAL_WORK_TITLE_MAX_CHARS};
 pub use work_retention::{retention_cutoff, RetentionTable, WORK_EVENT_KINDS};
 pub use work_status::STATUS_CATEGORIES;
-pub use work_tasks::{job_status, NativeItem, Proposal, PROPOSALS_OPEN_CAP, TASK_KEY_PREFIX};
+pub use work_tasks::{
+    job_status, NativeItem, Proposal, TreeEntry, TreeRef, ACCEPT_UNDO_SECS, PROPOSALS_OPEN_CAP,
+    TASK_KEY_PREFIX,
+};
 pub use work_tidy::ReopenedWork;
 pub use work_usage::{DetectionCounts, JournalCounts};
 pub use work_view::{
