@@ -275,6 +275,25 @@ pub async fn refresh_account_usage(
     Ok(fetch_and_emit(account_uuid, &hosts, ssh, cache, bus, Some(store)).await)
 }
 
+/// `account_usage_history`: one account's stored snapshots fetched at or
+/// after `since` (unix seconds), oldest first — what the Accounts page draws
+/// its 5-hour and weekly history from (redesign step 4.1). Never fetches.
+/// `E_NOTFOUND` when `account_uuid` is not a known account.
+pub fn account_usage_history(
+    account_uuid: &str,
+    since: i64,
+    store: &Mutex<Store>,
+) -> Result<Vec<UsageSnapshotRow>, IpcError> {
+    let s = lock(store)?;
+    if !s.list_accounts()?.iter().any(|a| a.uuid == account_uuid) {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("account {account_uuid} not found"),
+        ));
+    }
+    Ok(s.usage_history(account_uuid, since)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +371,12 @@ mod tests {
             provision_warning: None,
             auth_overrides: None,
             claude_profiles: None,
+            cpu_count: None,
+            mem_total_kb: None,
+            boot_at: None,
+            latency_ms: None,
+            worktree_kb: None,
+            worktree_at: None,
             harnesses: None,
         }
     }
@@ -900,5 +925,31 @@ mod tests {
         restore_usage(&store, &cache);
         let snap = cache.lock().unwrap().snapshot("acct-1");
         assert_eq!(snap.subscription.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn history_is_read_from_since_and_an_unknown_account_is_not_found() {
+        let store = store_with_account("acct-1");
+        {
+            let s = store.lock().unwrap();
+            for at in [100, 200, 300] {
+                s.insert_usage_snapshot(&UsageSnapshotRow {
+                    account_uuid: "acct-1".into(),
+                    fetched_at: at,
+                    usage: Default::default(),
+                    subscription: None,
+                    source_host: None,
+                })
+                .unwrap();
+            }
+        }
+        let at: Vec<i64> = account_usage_history("acct-1", 200, &store)
+            .unwrap()
+            .iter()
+            .map(|r| r.fetched_at)
+            .collect();
+        assert_eq!(at, vec![200, 300]);
+        let err = account_usage_history("nope", 0, &store).unwrap_err();
+        assert_eq!(err.code, "E_NOTFOUND");
     }
 }

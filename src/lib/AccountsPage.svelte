@@ -1,0 +1,501 @@
+<script lang="ts">
+  // The Accounts page (Orbit Fleet redesign step 4.1, the Accounts board):
+  // a list of every Claude account on the left, the picked one's detail on
+  // the right — plan, the 5-hour and weekly windows with their reset times
+  // and history, the hosts and login profiles signed in to it, and the
+  // sessions running on it. Usage comes from the same snapshots the Hosts
+  // view shows (`account_usage_store`); history from `account_usage_history`.
+  import { accounts } from './accounts';
+  import { hosts } from './hosts';
+  import { sessions } from './sessions';
+  import { accountUsage, refreshAccountUsage } from './account_usage_store';
+  import {
+    checkedAgo,
+    formatReset,
+    formatResetShort,
+    leftPct,
+    severity,
+    severityBadge,
+    windowOf,
+    type UsageWindowKind,
+  } from './account_usage';
+  import {
+    accountSummaries,
+    historyPoints,
+    HISTORY_SPAN_SECS,
+    loadUsageHistory,
+    peakUsed,
+    sparkPath,
+    type AccountSummary,
+    type UsageSnapshotRow,
+  } from './accounts_page';
+  import { displayName } from './attention';
+  import { showFriendlyNames } from './sessions';
+  import { selectSessionExplicitly } from './selection';
+  import { pushError } from './toasts';
+  import { untrack } from 'svelte';
+
+  let {
+    clock = () => Math.floor(Date.now() / 1000),
+    locale,
+    timeZone,
+  }: {
+    clock?: () => number;
+    locale?: string;
+    timeZone?: string;
+  } = $props();
+
+  let now = $state(untrack(() => clock()));
+  $effect(() => {
+    const t = setInterval(() => (now = clock()), 30_000);
+    return () => clearInterval(t);
+  });
+
+  const list = $derived(accountSummaries($accounts, $hosts, $sessions, $accountUsage));
+  let picked = $state<string | null>(null);
+  const selected: AccountSummary | null = $derived(
+    list.find((a) => a.uuid === picked) ?? list[0] ?? null,
+  );
+
+  // History for the selected account, re-read when the selection changes or
+  // its usage moves (a new snapshot was just written).
+  let history = $state<UsageSnapshotRow[]>([]);
+  let historyFor = $state<string | null>(null);
+  const selUuid = $derived(selected?.uuid ?? null);
+  const selFetchedAt = $derived(selected?.usage?.fetched_at ?? null);
+  $effect(() => {
+    const uuid = selUuid;
+    void selFetchedAt;
+    if (!uuid) {
+      history = [];
+      historyFor = null;
+      return;
+    }
+    let live = true;
+    const since = clock() - HISTORY_SPAN_SECS.weekly;
+    void loadUsageHistory(uuid, since).then((r) => {
+      if (!live) return;
+      history = r.ok && Array.isArray(r.value) ? r.value : [];
+      historyFor = uuid;
+    });
+    return () => {
+      live = false;
+    };
+  });
+
+  let refreshing = $state(false);
+  async function refresh(uuid: string) {
+    refreshing = true;
+    const r = await refreshAccountUsage(uuid);
+    refreshing = false;
+    if (!r.ok) pushError(r.error);
+  }
+
+  interface WindowView {
+    kind: UsageWindowKind;
+    title: string;
+    left: number | null;
+    level: string;
+    badge: string | null;
+    reset: string;
+    resetShort: string;
+  }
+
+  function windowView(a: AccountSummary, kind: UsageWindowKind): WindowView {
+    const w = windowOf(a.usage?.usage ?? null, kind);
+    const title = kind === '5h' ? '5-hour window' : 'Week';
+    if (!w) {
+      return { kind, title, left: null, level: 'none', badge: null, reset: 'no reading yet', resetShort: '' };
+    }
+    const left = leftPct(w);
+    const level = severity(kind, left, w.resets_at, now, a.account.has_extra_usage);
+    const b = severityBadge(level, a.account.has_extra_usage);
+    return {
+      kind,
+      title,
+      left,
+      level,
+      badge: b ? `${b.glyph} ${b.word}` : null,
+      reset: formatReset(kind, w.resets_at, now, locale, timeZone),
+      resetShort: formatResetShort(kind, w.resets_at, now, locale, timeZone),
+    };
+  }
+
+  const SPARK_W = 240;
+  const SPARK_H = 36;
+
+  function onListKeydown(e: KeyboardEvent) {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const i = list.findIndex((a) => a.uuid === selected?.uuid);
+    const next = list[Math.min(list.length - 1, Math.max(0, i + (e.key === 'ArrowDown' ? 1 : -1)))];
+    if (next) {
+      picked = next.uuid;
+      (document.querySelector(`[data-account="${next.uuid}"]`) as HTMLElement | null)?.focus();
+    }
+  }
+</script>
+
+<section class="accounts" data-testid="accounts-page" aria-label="Accounts">
+  <header class="head">
+    <h2>Accounts</h2>
+    <span class="sub" data-testid="accounts-count">
+      {list.length} {list.length === 1 ? 'account' : 'accounts'}
+    </span>
+  </header>
+
+  {#if list.length === 0}
+    <p class="empty" data-testid="accounts-empty">
+      No Claude account yet. An account appears here once a host is logged in to it.
+    </p>
+  {:else}
+    <div class="split">
+      <ul class="list" role="listbox" aria-label="Claude accounts" tabindex="-1" onkeydown={onListKeydown}>
+        {#each list as a (a.uuid)}
+          {@const five = windowView(a, '5h')}
+          {@const week = windowView(a, 'weekly')}
+          <li
+            class="card"
+            class:active={a.uuid === selected?.uuid}
+            role="option"
+            aria-selected={a.uuid === selected?.uuid}
+            tabindex={a.uuid === selected?.uuid ? 0 : -1}
+            data-account={a.uuid}
+            data-testid="account-card"
+            onclick={() => (picked = a.uuid)}
+            onkeydown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                picked = a.uuid;
+              }
+            }}
+          >
+            <div class="card-head">
+              <span class="label">{a.label}</span>
+              {#if a.plan}<span class="plan">{a.plan}</span>{/if}
+            </div>
+            {#each [five, week] as w (w.kind)}
+              <div class="line" data-level={w.level}>
+                <span class="w-title">{w.title}</span>
+                <span class="w-val">
+                  {#if w.left === null}—{:else}{w.left}% left{#if w.resetShort} · {w.resetShort}{/if}{/if}
+                </span>
+              </div>
+            {/each}
+            <div class="meta">
+              {a.sessions.length} {a.sessions.length === 1 ? 'session' : 'sessions'}
+              · {a.logins.length} {a.logins.length === 1 ? 'login' : 'logins'}
+            </div>
+          </li>
+        {/each}
+      </ul>
+
+      {#if selected}
+        {@const a = selected}
+        <div class="detail" data-testid="account-detail">
+          <div class="d-head">
+            <div>
+              <h3>{a.label}</h3>
+              <div class="sub">
+                {#if a.account.email && a.account.email !== a.label}{a.account.email} · {/if}
+                {a.plan ?? 'plan unknown'}
+                {#if a.account.organization_name} · {a.account.organization_name}{/if}
+              </div>
+            </div>
+            <button
+              class="btn"
+              disabled={refreshing}
+              onclick={() => refresh(a.uuid)}
+              data-testid="account-refresh">Refresh</button
+            >
+          </div>
+          {#if a.usage?.fetched_at}
+            <div class="sub" data-testid="account-checked">
+              {checkedAgo(a.usage.fetched_at, now)}{#if a.usage.source_host} via {a.usage.source_host}{/if}
+            </div>
+          {/if}
+
+          {#each ['5h', 'weekly'] as const as kind (kind)}
+            {@const w = windowView(a, kind)}
+            {@const pts = historyFor === a.uuid ? historyPoints(history, kind, now) : []}
+            {@const path = sparkPath(pts, kind, now, SPARK_W, SPARK_H)}
+            {@const peak = peakUsed(pts)}
+            <div class="window" data-testid="account-window-{kind}" data-level={w.level}>
+              <div class="w-row">
+                <span class="w-title">{w.title}</span>
+                <span class="w-val">
+                  {#if w.left === null}no reading yet{:else}{w.left}% left{/if}
+                  {#if w.badge}<span class="badge">{w.badge}</span>{/if}
+                </span>
+              </div>
+              {#if w.left !== null}
+                <div
+                  class="meter"
+                  role="meter"
+                  aria-label="{w.title} left"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow={w.left}
+                >
+                  <div class="fill" style="width: {w.left}%"></div>
+                </div>
+                <div class="sub" data-testid="account-reset-{kind}">{w.reset}</div>
+              {/if}
+              <div class="hist">
+                {#if path}
+                  <svg
+                    width={SPARK_W}
+                    height={SPARK_H}
+                    viewBox="0 0 {SPARK_W} {SPARK_H}"
+                    role="img"
+                    aria-label="{w.title} use over the last {kind === '5h' ? 'day' : 'week'}"
+                    data-testid="account-history-{kind}"
+                  >
+                    <path d={path} />
+                  </svg>
+                  <span class="sub">
+                    last {kind === '5h' ? 'day' : 'week'}{#if peak !== null} · peaked at {peak}% used{/if}
+                  </span>
+                {:else}
+                  <span class="sub" data-testid="account-history-empty-{kind}">No history yet</span>
+                {/if}
+              </div>
+            </div>
+          {/each}
+
+          <h4>Hosts and profiles</h4>
+          {#if a.logins.length === 0}
+            <p class="sub">No host is logged in to this account right now.</p>
+          {:else}
+            <ul class="rows" data-testid="account-logins">
+              {#each a.logins as l (l.host + '/' + (l.profile ?? ''))}
+                <li>
+                  <span class="mono">{l.host}</span>
+                  <span class="sub">{l.profile ? `profile ${l.profile}` : 'host login'}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+
+          <h4>Sessions on it</h4>
+          {#if a.sessions.length === 0}
+            <p class="sub">No session runs on this account.</p>
+          {:else}
+            <ul class="rows" data-testid="account-sessions">
+              {#each a.sessions as s (s.id)}
+                <li>
+                  <button class="link" onclick={() => selectSessionExplicitly(s)}>
+                    {displayName(s, $showFriendlyNames)}
+                  </button>
+                  <span class="sub">{s.host_alias} · {s.claude_status ?? s.status}</span>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
+</section>
+
+<style>
+  .accounts {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+  }
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+  }
+  h2 {
+    margin: 0;
+    font-size: var(--text-lg);
+    font-weight: 600;
+  }
+  h3 {
+    margin: 0;
+    font-size: var(--text-md);
+    font-weight: 600;
+  }
+  h4 {
+    margin: var(--space-4) 0 var(--space-2);
+    font-size: var(--text-sm);
+    font-weight: 600;
+  }
+  .sub {
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
+  }
+  .empty {
+    padding: var(--space-4);
+    color: var(--fg-muted);
+  }
+  .split {
+    display: grid;
+    grid-template-columns: minmax(220px, 300px) 1fr;
+    min-height: 0;
+    flex: 1 1 auto;
+  }
+  .list {
+    list-style: none;
+    margin: 0;
+    padding: var(--space-2);
+    overflow: auto;
+    border-right: 1px solid var(--border);
+  }
+  .card {
+    padding: var(--space-2) var(--space-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-2);
+    background: var(--bg-pane);
+    cursor: pointer;
+  }
+  .card.active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .card:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: var(--ring-offset);
+  }
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-1);
+  }
+  .label {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .plan {
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+  }
+  .line,
+  .w-row {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
+  }
+  .w-title {
+    color: var(--fg-muted);
+  }
+  [data-level='low'] .w-val,
+  [data-level='limit'] .w-val {
+    color: var(--usage-crit);
+  }
+  [data-level='caution'] .w-val {
+    color: var(--usage-warn);
+  }
+  .meta {
+    margin-top: var(--space-1);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+  }
+  .detail {
+    padding: var(--space-3) var(--space-4);
+    overflow: auto;
+  }
+  .d-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+  .btn {
+    height: var(--control-h);
+    padding: 0 var(--control-px);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-sm);
+    background: var(--control-bg);
+    color: var(--control-fg);
+    font: inherit;
+    font-size: var(--control-font-sm);
+    cursor: pointer;
+  }
+  .btn:hover:not(:disabled) {
+    background: var(--control-bg-hover);
+  }
+  .window {
+    margin-top: var(--space-3);
+    max-width: 420px;
+  }
+  .w-row {
+    font-size: var(--text-sm);
+  }
+  .badge {
+    margin-left: var(--space-1);
+    font-size: var(--text-2xs);
+  }
+  .meter {
+    height: 6px;
+    margin: var(--space-1) 0;
+    border-radius: var(--radius-pill);
+    background: var(--control-bg);
+    overflow: hidden;
+  }
+  .fill {
+    height: 100%;
+    background: var(--usage-ok);
+  }
+  [data-level='caution'] .fill {
+    background: var(--usage-warn);
+  }
+  [data-level='low'] .fill,
+  [data-level='limit'] .fill {
+    background: var(--usage-crit);
+  }
+  .hist {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+  }
+  .hist svg {
+    flex: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .hist path {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1.5;
+  }
+  .rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .rows li {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    padding: 2px 0;
+  }
+  .mono {
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+  }
+  .link {
+    border: none;
+    background: none;
+    padding: 0;
+    color: var(--accent);
+    font: inherit;
+    cursor: pointer;
+  }
+  .link:hover {
+    text-decoration: underline;
+  }
+</style>

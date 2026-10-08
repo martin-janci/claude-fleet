@@ -25,3 +25,38 @@ describe('controls.css chip/toggle hover specificity', () => {
     expect(css).toMatch(/\.btn--toggle\.is-active:hover:not\(:disabled\)/);
   });
 });
+
+// Redesign step 0.5/0.7: the tabs, segmented control, count badge and state
+// chip are drawn from tokens only, so both themes and the manual's palette
+// reach them. A raw colour in one of them is the bug the tokens exist to stop.
+describe('controls.css redesign variants', () => {
+  const at = css.indexOf('/* ── Segmented control ──');
+  const variants = css.slice(at);
+
+  it('declares every variant', () => {
+    expect(at).toBeGreaterThan(0);
+    for (const cls of [
+      '.seg-group',
+      '.tab-strip',
+      '.tab-strip__tab',
+      ".tab-strip__tab[aria-selected='true']",
+      '.count-badge',
+      '.count-badge--hot',
+      '.state-chip',
+      ...['waiting', 'failed', 'done', 'working', 'idle', 'accent'].map((s) => `.state-chip--${s}`),
+    ]) {
+      expect(variants, cls).toContain(`${cls} {`);
+    }
+  });
+
+  it('uses no raw colour', () => {
+    const body = variants.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(body).not.toMatch(/#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i);
+  });
+
+  it('marks the selected tab by more than colour', () => {
+    const rule = variants.match(/\.tab-strip__tab\[aria-selected='true'\] \{([^}]*)\}/)?.[1] ?? '';
+    expect(rule).toContain('border-bottom-color: var(--accent)');
+    expect(rule).toContain('font-weight');
+  });
+});

@@ -1031,6 +1031,23 @@ pub struct HostRow {
     /// never read. Per-field default: an older hub omits it.
     #[serde(default)]
     pub claude_profiles: Option<Vec<HostProfileRow>>,
+    /// Probe facts for the Hosts page (Orbit Fleet 4.6, migration 123):
+    /// online CPUs, physical memory, the boot epoch the host states, the
+    /// round trip of an empty command (`None` for `local`), and the disk
+    /// fleet's worktrees hold with when that was last asked. All
+    /// per-field default: an older hub omits them.
+    #[serde(default)]
+    pub cpu_count: Option<i64>,
+    #[serde(default)]
+    pub mem_total_kb: Option<i64>,
+    #[serde(default)]
+    pub boot_at: Option<i64>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+    #[serde(default)]
+    pub worktree_kb: Option<i64>,
+    #[serde(default)]
+    pub worktree_at: Option<i64>,
 }
 
 /// One login profile on a host, as `hosts.claude_profiles` stores it.
@@ -1061,6 +1078,18 @@ pub struct HostHealth {
     /// hub's ping omits it.
     #[serde(default)]
     pub auth_overrides: Option<Vec<String>>,
+    /// Migration 123 (Orbit Fleet 4.6). Per-field default: an older hub's
+    /// ping omits them.
+    #[serde(default)]
+    pub cpu_count: Option<i64>,
+    #[serde(default)]
+    pub mem_total_kb: Option<i64>,
+    #[serde(default)]
+    pub boot_at: Option<i64>,
+    #[serde(default)]
+    pub latency_ms: Option<i64>,
+    #[serde(default)]
+    pub worktree_kb: Option<i64>,
 }
 
 impl HostHealth {
@@ -1074,6 +1103,11 @@ impl HostHealth {
             uptime_secs: row.uptime_secs,
             health_at: row.health_at,
             auth_overrides: row.auth_overrides.clone(),
+            cpu_count: row.cpu_count,
+            mem_total_kb: row.mem_total_kb,
+            boot_at: row.boot_at,
+            latency_ms: row.latency_ms,
+            worktree_kb: row.worktree_kb,
         }
     }
 }
@@ -1101,7 +1135,8 @@ pub(super) const HOST_COLUMNS: &str =
      last_pinged_at, account_uuid, provisioned, transport, org_id, claude_version_at, \
      disk_home_free_kb, disk_home_total_kb, disk_tmp_free_kb, load_1m, mem_avail_kb, \
      uptime_secs, health_at, last_hook_at, agent_version, provisioned_at, provision_fingerprint, \
-     harnesses, provision_warning, auth_overrides, claude_profiles";
+     harnesses, provision_warning, auth_overrides, claude_profiles, cpu_count, mem_total_kb, \
+     boot_at, latency_ms, worktree_kb, worktree_at";
 
 /// Map a row selected with [`HOST_COLUMNS`].
 pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow> {
@@ -1154,6 +1189,13 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         claude_profiles: row
             .get::<_, Option<String>>(26)?
             .and_then(|t| serde_json::from_str::<Vec<HostProfileRow>>(&t).ok()),
+        // Migration 123 (Orbit Fleet 4.6).
+        cpu_count: row.get(27)?,
+        mem_total_kb: row.get(28)?,
+        boot_at: row.get(29)?,
+        latency_ms: row.get(30)?,
+        worktree_kb: row.get(31)?,
+        worktree_at: row.get(32)?,
     })
 }
 
