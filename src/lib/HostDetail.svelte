@@ -6,6 +6,7 @@
   // reversible actions are plain buttons (hide shows an Undo toast);
   // `Rotate token…` and `Remove host…` sit at the bottom, have no keyboard
   // shortcut, and confirm with Cancel focused, stating the consequence.
+  import HostOffline from './states/HostOffline.svelte';
   import type { HostRow } from './hosts';
   import { deleteHost, setHostHarnesses, codexModeOf, harnessesFor, type HarnessMode } from './hosts';
   import type { AccountRow } from './accounts';
@@ -449,6 +450,17 @@
         >{#if probing}probing…{:else}<kbd>r</kbd> Re-probe{/if}</button
       >
     </div>
+    {#if !host.reachable && !isLocal}
+      <!-- The states kit: an offline host is said here, in its own pane. -->
+      <HostOffline
+        alias={host.alias}
+        lastSeen={host.last_pinged_at}
+        {now}
+        sessions={hostSessions.length}
+        ontry={onreprobe}
+        trying={probing}
+        tryBlocked={reprobeBlocked} />
+    {/if}
     <dl class="facts">
       {#if host.ssh_alias}
         <dt>ssh</dt><dd data-testid="detail-ssh">{host.ssh_alias}</dd>

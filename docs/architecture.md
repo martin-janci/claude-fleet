@@ -398,7 +398,18 @@ bullet for the area you are about to change.
   line and its JSON (normalised as `service/work/report.rs`
   `report_from_value` does), or a ```` ```fleet-ui ```` `fleet.ui/1` block.
   A card acts only by `insertIntoComposer`, never by sending. A reply form
-  refuses secret fields; `ask` is the path for those.
+  refuses secret fields; `ask` is the path for those. Two cards act through
+  the store, each only after a person's press: `setting` applies one
+  settings proposal (`decide_setting_proposals`, after a confirm), and
+  `guide` with `page` draws a guide fleet has with the Settings `PageView`.
+- **States kit** (`src/lib/states/`): the shared loading, empty,
+  no-results and offline-host states. `Skeleton` shows only after
+  `LOADING_DELAY_MS` (400 ms); `EmptyState` says what happened and offers
+  the next step (`kind: 'none'` always has a way out); `HostOffline` sits in
+  the host's own group or pane, never window-wide. The hub banner
+  (`HubConnectionBanner.svelte`) counts the backoff down live, and *Retry
+  now* calls `hub_retry_now`, which wakes the event bridge's wait
+  (`HubConnectionStatus::retry_now`).
 - **File downloads** (spec
   `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
   095, contract revision 7): `send_file { session_id, path }` (a host's

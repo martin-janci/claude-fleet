@@ -689,6 +689,8 @@ mod tests {
 
     fn host_row(alias: &str, token: &str, mode: &str) -> HostTokenRow {
         HostTokenRow {
+            last_used_at: None,
+            rotated_at: None,
             host_alias: alias.into(),
             token: token.into(),
             created_at: 0,

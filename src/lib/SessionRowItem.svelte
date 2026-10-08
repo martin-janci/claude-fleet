@@ -16,6 +16,8 @@
   import { hintAnchor } from './hints';
   import { bucketState, rank } from './attention';
   import { attentionIdleMinutes } from './notify';
+  import { attentionFacts, blockedLine } from './attention_facts';
+  import { accountByUuid, accountLabel } from './accounts';
   import { pushError } from './toasts';
   import { rowPrompt, shortAge, timeAgo } from './session_status';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
@@ -134,7 +136,9 @@
   );
   // The row's triage bucket (P13). Published as data-bucket because component
   // CSS never reaches jsdom, so this is how tests assert a row's triage state.
-  const triage = $derived(rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec }));
+  const triage = $derived(
+    rank(sess, { idleSecs: $attentionIdleMinutes * 60, now: nowSec, facts: $attentionFacts }),
+  );
   // Redesign step 3.6: Compact is the two-line row (sans title, one meta
   // line, chips on hover); Comfortable is 0.5.4's row unchanged.
   const compact = $derived($uiDensity === 'compact');
@@ -957,7 +961,12 @@
           <AnswerPrompt session={sess} view={answerView} compact />
         {/if}
         {#if compact}
-          <SessionRowMeta {sess} state={bucketState(triage.bucket)} {promptText} />
+          <SessionRowMeta
+            {sess}
+            state={bucketState(triage.bucket)}
+            {promptText}
+            reason={blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u)))}
+          />
         {:else if $showRowDetails}
           <SessionRowDetails {sess} {nowSec} {secondaryName} />
         {/if}

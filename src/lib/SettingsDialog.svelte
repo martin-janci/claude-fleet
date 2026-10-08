@@ -939,7 +939,7 @@
     <!-- Provisioning mints host tokens: refresh the shared token cache the
          Hosts view reads (host_actions.ts). Module-level, so it is safe even
          when a slow multi-host provision outlives this dialog. -->
-    <McpSettings bind:this={mcpSettings} onProvisioned={loadHostTokens} />
+    <McpSettings bind:this={mcpSettings} onProvisioned={loadHostTokens} active={panel === 'mcp'} />
     {/if}
     </div>
 

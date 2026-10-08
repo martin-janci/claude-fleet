@@ -5,6 +5,7 @@
   // scope. This is the view only: nothing here relaxes the hub's boundary.
   import { sessions } from './sessions';
   import { attentionIdleMinutes } from './notify';
+  import { attentionFacts } from './attention_facts';
   import { effectiveScope, scopes, scopeOf, scopeFilter, needsYouElsewhere } from './orgs';
 
   let nowSec = $state(Math.floor(Date.now() / 1000));
@@ -16,6 +17,7 @@
     needsYouElsewhere($sessions, $effectiveScope, $scopes, $scopeOf, {
       idleSecs: $attentionIdleMinutes * 60,
       now: nowSec,
+      facts: $attentionFacts,
     }),
   );
 </script>

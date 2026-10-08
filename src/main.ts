@@ -3,6 +3,7 @@ import './app.css';
 import './lib/controls.css';
 import './lib/loader-kit.css';
 import './lib/loader-kit.generated.css';
+import './lib/kit/of.generated.css';
 import { mount } from 'svelte';
 import { initTheme } from './lib/theme';
 import { initMotion } from './lib/motion';

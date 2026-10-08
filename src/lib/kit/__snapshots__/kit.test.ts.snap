@@ -1,0 +1,76 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`the kit’s colours, light and dark > match the snapshot of what each state resolves to 1`] = `
+{
+  "Banner failed": [
+    "base "Headline" fg on failed-soft/bg-pane 14.62/13.6",
+    "base "Meta" fg-muted on failed-soft/bg-pane 4.35/4.92",
+    "hover "Headline" fg on failed-soft/bg-pane 14.62/13.6",
+    "hover "Meta" fg-muted on failed-soft/bg-pane 4.35/4.92",
+  ],
+  "Banner waiting": [
+    "base "Headline" fg on waiting-faint/bg-pane 16.04/13.99",
+    "base "Meta" fg-muted on waiting-faint/bg-pane 4.78/5.06",
+    "hover "Headline" fg on waiting-faint/bg-pane 16.04/13.99",
+    "hover "Meta" fg-muted on waiting-faint/bg-pane 4.78/5.06",
+  ],
+  "Button danger": [
+    "base "Go" danger on bg-pane 5.62/5.19",
+    "hover "Go" danger on bg-pane 5.62/5.19",
+  ],
+  "Button danger-fill": [
+    "base "Go" on-danger on danger-fill 5.62/5.62",
+    "hover "Go" on-danger on danger-fill 5.62/5.62",
+  ],
+  "Button default": [
+    "base "1" fg-muted on bg-raise 4.72/5.27",
+    "base "Go" fg on bg-raise 15.85/14.56",
+    "hover "1" fg-muted on bg-hover 4.43/4.86",
+    "hover "Go" fg on bg-hover 14.89/13.42",
+  ],
+  "Button primary": [
+    "base "1" accent-fg on accent 5.17/7.36",
+    "base "Go" accent-fg on accent 5.17/7.36",
+    "hover "1" accent-fg on accent 5.17/7.36",
+    "hover "Go" accent-fg on accent 5.17/7.36",
+  ],
+  "Button quiet": [
+    "base "Go" fg-2 on bg-pane 10.44/8.73",
+    "hover "Go" fg on bg-hover 14.89/13.42",
+  ],
+  "SessionRow selected": [
+    "base "Title" fg on accent-soft 15.24/12.9",
+    "base "2m" fg-muted on accent-soft 4.54/4.67",
+    "base "line" fg-muted on accent-soft 4.54/4.67",
+    "base "Waiting:" status-waiting on accent-soft 5.34/6.13",
+    "hover "Title" fg on accent-soft 15.24/12.9",
+    "hover "2m" fg-muted on accent-soft 4.54/4.67",
+    "hover "line" fg-muted on accent-soft 4.54/4.67",
+    "hover "Waiting:" status-waiting on accent-soft 5.34/6.13",
+  ],
+  "StatusChip accent": [
+    "base "accent" fg on accent-soft 15.24/12.9",
+    "hover "accent" fg on accent-soft 15.24/12.9",
+  ],
+  "StatusChip done": [
+    "base "done" status-done on done-soft/bg-pane 5.03/7.54",
+    "hover "done" status-done on done-soft/bg-pane 5.03/7.54",
+  ],
+  "StatusChip failed": [
+    "base "failed" status-failed on failed-soft/bg-pane 4.64/4.57",
+    "hover "failed" status-failed on failed-soft/bg-pane 4.64/4.57",
+  ],
+  "StatusChip idle": [
+    "base "idle" status-idle on chip-bg 4.6/6",
+    "hover "idle" status-idle on chip-bg 4.6/6",
+  ],
+  "StatusChip waiting": [
+    "base "waiting" status-waiting on waiting-soft/bg-pane 5.16/5.99",
+    "hover "waiting" status-waiting on waiting-soft/bg-pane 5.16/5.99",
+  ],
+  "StatusChip working": [
+    "base "working" status-working on chip-bg 5.48/6.43",
+    "hover "working" status-working on chip-bg 5.48/6.43",
+  ],
+}
+`;

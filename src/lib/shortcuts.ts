@@ -136,7 +136,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // The design manual's new chords (keyboard.md); ⌥⌘ is Ctrl+Alt elsewhere.
   row('global', 'open-in-editor', 'Open in VS Code',
     split(['Meta+Shift+E'], ['Ctrl+Alt+E']), { status: 'planned', step: '5.6' }),
-  row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B']), { status: 'planned', step: '3.5' }),
+  row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B'])),
   row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { status: 'planned', step: '5.5' }),
   row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { status: 'planned', step: '5.5' }),
   row('global', 'go-to-file', 'Go to file (Files tab only)',
@@ -284,10 +284,15 @@ export interface KeyEventLike {
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey: boolean;
+  /** The physical key. On macOS Option rewrites `key` (⌥B types `∫`), so an
+   *  Alt chord on a letter also matches by `code`. */
+  code?: string;
 }
 
 export function bindingMatches(b: Binding, e: KeyEventLike): boolean {
-  if (b.key.toLowerCase() !== e.key.toLowerCase()) return false;
+  const letterByCode =
+    e.altKey && /^[a-z]$/i.test(b.key) && e.code === `Key${b.key.toUpperCase()}`;
+  if (b.key.toLowerCase() !== e.key.toLowerCase() && !letterByCode) return false;
   const has = (m: Mod) => b.mods.includes(m);
   if (has('meta') !== e.metaKey || has('ctrl') !== e.ctrlKey || has('alt') !== e.altKey) return false;
   return b.anyShift === true || has('shift') === e.shiftKey;

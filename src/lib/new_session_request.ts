@@ -8,6 +8,7 @@
 import { writable } from 'svelte/store';
 import type { ProjectTreeRow } from './projects';
 import type { TicketRow } from './trackers';
+import type { ProposalLike } from './ai_proposal';
 
 export interface NewSessionRequest {
   project: ProjectTreeRow;
@@ -21,6 +22,9 @@ export interface NewSessionRequest {
   /** Start at once with the remembered choices (the picker's ⌘↵); the
    *  dialog stays open only if something needs a person. */
   autostart?: boolean;
+  /** What chose `project` (redesign 3.12, K1): a rule (earlier work on the
+   *  key) or Jev. The dialog shows the shared chip with a Change link. */
+  proposal?: ProposalLike | null;
 }
 
 export const newSessionRequest = writable<NewSessionRequest | null>(null);
