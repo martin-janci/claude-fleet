@@ -2399,6 +2399,7 @@ fn router_sum_serves_every_tool() {
         include_str!("devices.rs"),
         include_str!("prs.rs"),
         include_str!("routines.rs"),
+        include_str!("presence.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -10261,6 +10262,11 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("session_narrow", &["Own"]),
     ("session_share", &["Own"]),
     ("session_unshare", &["Own"]),
+    // presence.rs — redesign 11.7b. `Read`: being on a session you may read
+    // is what a watch share is for. Who ELSE is looking is narrowed inside
+    // `service::presence` (the owner sees everyone, a grantee the owner and
+    // themselves), the same line `session_access` draws at `Own`.
+    ("session_presence", &["Read"]),
     // `Read`, and the reason is the whole of `Access::HostToken`: `may_own`
     // is false for a per-host token whatever pane it proves — the proof says
     // "I am standing in this session", never "this session is mine" — so an
@@ -10557,6 +10563,8 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
         // Chat forms: `ask`'s list/get/wait read the form's session, its
         // answer/decline drive it.
         "forms.rs",
+        // Presence (11.7b): `session_presence` threads `Reach::Read`.
+        "presence.rs",
     ] {
         let src = std::fs::read_to_string(dir.join(file)).expect("read a tool file");
         let code = src
@@ -17248,6 +17256,7 @@ fn the_sharing_tools_are_never_a_per_host_tokens() {
         "session_narrow",
         "session_access",
         "my_grants",
+        "session_presence",
     ] {
         assert!(
             guard::NOT_FOR_HOST_TOKENS.contains(&tool),
@@ -17268,6 +17277,7 @@ fn the_sharing_tools_are_never_a_per_host_tokens() {
     // The two reads are reads; the three writes are not.
     assert!(guard::is_readonly_tool("session_access"));
     assert!(guard::is_readonly_tool("my_grants"));
+    assert!(guard::is_readonly_tool("session_presence"));
     for w in ["session_share", "session_unshare", "session_narrow"] {
         assert!(!guard::is_readonly_tool(w), "{w}");
     }

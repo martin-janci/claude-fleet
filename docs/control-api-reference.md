@@ -617,6 +617,12 @@ Lower a person's or org's grant on your session from drive to watch (owner only)
 
 Parameters: `org`, `person`, `session_id`
 
+### `session_presence`
+
+Presence: report that you have a session open (again every heartbeat_secs; leaving: true when you close it) and read who else has. The owner sees everyone; others see the owner and themselves. Returns { session_id, viewers: [{ person_id, name, device?, since, you? }], heartbeat_secs }.
+
+Parameters: `leaving`, `session_id`
+
 ### `session_share`
 
 Share a session you OWN with a person, or an org you are in (its members from now), at watch (read) or drive (also prompt). Owner only; never 'own' or a terminal. Returns the row. Errors: E_NOTFOUND, E_FORBIDDEN, E_VALIDATE, E_EXISTS.
@@ -998,6 +1004,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::debug_device_logs`
 - `commands::debug_devices::debug_device_screenshot`
 - `commands::prs::list_pull_requests`
+- `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`

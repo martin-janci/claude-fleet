@@ -361,7 +361,8 @@ fn tier(reach: Reach, who: Who) -> Out {
 ///
 /// * the five person-facing SHARING surfaces, because a per-host token
 ///   proves no person and so can be neither an owner nor a grantee
-///   (`sharing.rs`'s header, spec §4.3);
+///   (`sharing.rs`'s header, spec §4.3), and presence (11.7b), which
+///   reports a PERSON looking at a session;
 /// * `list_downloads`, because listing and removing sent files is a
 ///   person's half of the downloads feature — a host's Claude only SENDS one
 ///   (`send_file`, which is deliberately NOT here: the session's own agent
@@ -372,6 +373,7 @@ const NEVER_A_HOST_TOKENS: &[&str] = &[
     "session_narrow",
     "session_access",
     "my_grants",
+    "session_presence",
     "list_downloads",
 ];
 
@@ -761,6 +763,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "session_access" => fx.t.session_access(ext, p!()).await,
         "session_claim" => fx.t.session_claim(ext, p!()).await,
         "my_grants" => fx.t.my_grants(ext).await,
+        "session_presence" => fx.t.session_presence(ext, p!()).await,
         // ---- downloads.rs -------------------------------------------------
         "send_file" => fx.t.send_file(ext, p!()).await,
         "list_downloads" => fx.t.list_downloads(ext, p!()).await,
@@ -1048,6 +1051,10 @@ async fn run_matrix() {
         .await;
     }
     m.gated("session_access", Reach::Own, row).await;
+    // Presence (11.7b): a watch grantee may say it is looking; a stranger
+    // gets the not-found every session tool answers, and learns nobody's
+    // there.
+    m.gated("session_presence", Reach::Read, row).await;
     // `send_file` is the `own` tier, and the reason is the FILE's path
     // rather than anything about the session: `send_file { session_id, path }`
     // copies a file off the session's host at an UNCONSTRAINED absolute path
