@@ -864,9 +864,9 @@ export interface NewSessionArgs {
    *  on the host, with its own `/login`); null = the host's login. Rejected
    *  for a shell session. */
   profile?: string | null;
-  /** Which agent runs in the pane: `claude` (default) or `shell` (the same
-   *  as `kind: 'shell'`). `codex` and `agy` are refused until fleet can
-   *  launch them. */
+  /** Which agent runs in the pane: `claude` (default), `codex`, or `shell`
+   *  (the same as `kind: 'shell'`). `agy` is refused until fleet can launch
+   *  it. A Codex session takes no `profile`. */
   agent?: SessionAgent | null;
 }
 

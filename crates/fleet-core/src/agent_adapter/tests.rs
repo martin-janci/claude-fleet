@@ -8,7 +8,7 @@ fn claude_is_the_adapter_for_every_kind_but_shell() {
     }
     assert!(for_kind("shell").is_none());
     assert_eq!(by_id("claude").map(|a| a.label()), Some("Claude Code"));
-    for no_adapter_yet in ["shell", "codex", "nope"] {
+    for no_adapter_yet in ["shell", "nope"] {
         assert!(by_id(no_adapter_yet).is_none(), "{no_adapter_yet}");
     }
 }
@@ -34,9 +34,9 @@ fn claude_launches_exactly_as_before() {
             );
         }
     }
-    let minted = a.mint_conversation_id();
+    let minted = a.mint_conversation_id().expect("Claude Code mints its ids");
     assert!(a.valid_conversation_id(&minted), "{minted}");
-    assert_ne!(minted, a.mint_conversation_id());
+    assert_ne!(Some(minted), a.mint_conversation_id());
     assert!(!a.valid_conversation_id("x'; rm -rf ~"));
 }
 
@@ -185,7 +185,7 @@ fn agy_drops_what_it_does_not_take() {
         .all(|m| crate::validate::claude_model(m.value).is_ok()));
     assert!(a.launch_switch("/model gemini-3.8-flash").is_none());
     assert!(a.slash_commands().iter().any(|c| c.name == "resume"));
-    let minted = a.mint_conversation_id();
+    let minted = a.mint_conversation_id().expect("a placeholder id");
     assert!(a.valid_conversation_id(&minted));
     assert!(!a.valid_conversation_id("x'; rm -rf ~"));
 }
