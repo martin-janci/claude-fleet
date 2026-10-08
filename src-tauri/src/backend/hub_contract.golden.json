@@ -12,11 +12,21 @@
       "seat_tier",
       "uuid"
     ],
+    "BlameHunk": [
+      "author",
+      "hash",
+      "lines",
+      "start",
+      "summary",
+      "time",
+      "uncommitted"
+    ],
     "Branch": [
       "ahead",
       "behind",
       "isCurrent",
       "isRemote",
+      "merged",
       "name",
       "tipHash",
       "upstream"
@@ -174,6 +184,7 @@
       "last_prompt",
       "last_stop_at",
       "last_turn_at",
+      "last_viewed_at",
       "link_version",
       "lost_at",
       "lost_reason",
@@ -218,6 +229,11 @@
       "work_suggested",
       "worktree_id",
       "worktree_key"
+    ],
+    "FileBlame": [
+      "hunks",
+      "path",
+      "truncated"
     ],
     "FileContent": [
       "binary",
@@ -479,6 +495,7 @@
       "last_prompt",
       "last_stop_at",
       "last_turn_at",
+      "last_viewed_at",
       "lost_at",
       "lost_reason",
       "model",

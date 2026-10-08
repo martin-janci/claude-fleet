@@ -1,5 +1,7 @@
+import { sidebarView } from './work_view';
+import { todayOpen } from './today';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { readPref } from './prefs';
 
@@ -3021,6 +3023,94 @@ describe('the per-host unclaimed count', () => {
   });
 });
 
+describe('Sidebar: a mass loss folds into one row (redesign 1.1)', () => {
+  function lostOn(host: string, n: number, blocked = true): SessionRow[] {
+    return Array.from({ length: n }, (_, i) => ({
+      ...sessionFor(1, `${host}-lost-${i}`),
+      host_alias: host,
+      lost_at: 50,
+      claude_session_id: `c-${host}-${i}`,
+      claude_status: blocked ? ('blocked' as const) : null,
+    }));
+  }
+
+  it('shows "12 stopped on trn" instead of twelve rows, and keeps them out of the badge', async () => {
+    const waiting = { ...sessionFor(2, 'dev-waiting'), claude_status: 'blocked' as const };
+    mockBackend(fakeProjects, [...lostOn('trn', 12), waiting]);
+    render(Sidebar);
+    await tick(); await tick();
+    const fold = screen.getByTestId('lost-fold');
+    expect(within(fold).getByTestId('lost-fold-toggle')).toHaveTextContent('12 stopped on trn');
+    expect(within(fold).getByTestId('lost-fold-restore')).toHaveTextContent('Restore');
+    // Only the live waiting session is in the tree and in the count.
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(1);
+    expect(screen.getByTestId('needs-you-filter')).toHaveTextContent('Needs you 1');
+  });
+
+  it('the fold expands to its rows, so every stopped session is still one click away', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 3));
+    render(Sidebar);
+    await tick(); await tick();
+    const toggle = screen.getByTestId('lost-fold-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryAllByTestId('sess-row')).toHaveLength(0);
+    await fireEvent.click(toggle);
+    await tick();
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    const rows = within(screen.getByTestId('lost-fold')).getAllByTestId('sess-row');
+    expect(rows.map((r) => r.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining('trn-lost-0'), expect.stringContaining('trn-lost-2')]),
+    );
+  });
+
+  it('two lost rows are not a mass loss and stay where they are', async () => {
+    mockBackend(fakeProjects, lostOn('trn', 2));
+    render(Sidebar);
+    await tick(); await tick();
+    expect(screen.queryByTestId('lost-fold')).toBeNull();
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(2);
+  });
+
+  it('Restore plans with restore_host_sessions, confirms, then restores the fold', async () => {
+    const lost = lostOn('trn', 3);
+    mockBackend(fakeProjects, lost);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (c: string, x?: unknown) => Promise<unknown>;
+    const calls: { dry_run: boolean; session_ids: number[] | null }[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (c: string, x?: unknown) => {
+      if (c === 'restore_host_sessions') {
+        const a = (x as { args: { host_alias: string; dry_run: boolean; session_ids: number[] | null } }).args;
+        calls.push({ dry_run: a.dry_run, session_ids: a.session_ids });
+        const plan = lost.map((s) => ({
+          session_id: s.id,
+          tmux_name: s.tmux_name,
+          cwd: null,
+          claude_session_id: s.claude_session_id,
+          friendly_name: null,
+          action: 'restore',
+          reason: null,
+        }));
+        return {
+          host_alias: a.host_alias,
+          dry_run: a.dry_run,
+          plan,
+          results: a.dry_run ? [] : lost.map((s) => ({ session_id: s.id, tmux_name: s.tmux_name, ok: true, error: null })),
+        };
+      }
+      return base(c, x);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    await fireEvent.click(screen.getByTestId('lost-fold-restore'));
+    const confirm = await screen.findByTestId('lost-fold-confirm');
+    expect(screen.getByTestId('confirm-dialog')).toHaveTextContent('trn-lost-1');
+    expect(calls).toEqual([{ dry_run: true, session_ids: lost.map((s) => s.id) }]);
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({ dry_run: false, session_ids: lost.map((s) => s.id) });
+    await waitFor(() => expect(get(toasts).some((t) => t.message === 'Restored 3 of 3 sessions on trn.')).toBe(true));
+  });
+});
+
 describe('Group by state, host or agent (redesign step 3.6)', () => {
   beforeEach(() => sidebarGroupBy.set('project'));
 
@@ -3089,5 +3179,125 @@ describe('Group by state, host or agent (redesign step 3.6)', () => {
     expect(headers.map((h) => h.dataset.group)).toEqual(['agent:claude', 'agent:codex']);
     expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
     sidebarGroupBy.set('project');
+  });
+});
+
+describe('List keys (redesign step 3.8)', () => {
+  beforeEach(() => sidebarGroupBy.set('project'));
+
+  function three() {
+    return [
+      { ...sessionFor(1, 'dev-one'), claude_status: 'working' as const },
+      { ...sessionFor(1, 'dev-two'), claude_status: 'working' as const },
+      { ...sessionFor(1, 'dev-three'), claude_status: 'blocked' as const },
+    ];
+  }
+
+  it('j and k move between rows, x picks one for a bulk action, Enter opens', async () => {
+    const rows = three();
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    render(Sidebar);
+    await tick(); await tick();
+    const els = screen.getAllByTestId('sess-row');
+    els[0].focus();
+    await fireEvent.keyDown(els[0], { key: 'j' });
+    expect(document.activeElement).toBe(els[1]);
+    await fireEvent.keyDown(els[1], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(els[2]);
+    await fireEvent.keyDown(els[2], { key: 'k' });
+    expect(document.activeElement).toBe(els[1]);
+
+    await fireEvent.keyDown(els[1], { key: 'x' });
+    await tick();
+    expect(screen.getAllByTestId('select-box').filter((b) => (b as HTMLInputElement).checked)).toHaveLength(1);
+
+    await fireEvent.keyDown(document.activeElement!, { key: 'x' });
+    await tick();
+    await fireEvent.click(screen.getByText('Select'));
+    await tick();
+    const row = screen.getAllByTestId('sess-row')[0];
+    await fireEvent.keyDown(row, { key: 'Enter' });
+    expect(get(selectedSession)?.id).toBe(rows[0].id);
+  });
+
+  it('the next-needs-you chord opens the next row that needs you, and wraps', async () => {
+    const rows = three();
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    render(Sidebar);
+    await tick(); await tick();
+    const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+    const chord = isMac ? { key: 'n', metaKey: true, altKey: true } : { key: 'n', ctrlKey: true, altKey: true };
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)?.id).toBe(rows[2].id);
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)?.id).toBe(rows[2].id);
+  });
+
+  it('⌘2 opens the second row on a Mac', async () => {
+    const plat = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+    try {
+      const rows = three();
+      mockBackend(fakeProjects, rows);
+      selectSession(null);
+      render(Sidebar);
+      await tick(); await tick();
+      await fireEvent.keyDown(document.body, { key: '2', metaKey: true });
+      expect(get(selectedSession)?.id).toBe(rows[1].id);
+      // A digit typed into a field is the field's.
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      await fireEvent.keyDown(input, { key: '3', metaKey: true });
+      expect(get(selectedSession)?.id).toBe(rows[1].id);
+      input.remove();
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>).platform;
+      if (plat) Object.defineProperty(Navigator.prototype, 'platform', plat);
+    }
+  });
+});
+
+describe('Inbox (redesign step 3.3)', () => {
+  afterEach(() => sidebarView.set('sessions'));
+
+  function fleet() {
+    const now = Math.floor(Date.now() / 1000);
+    return [
+      { ...sessionFor(1, 'dev-busy'), claude_status: 'working' as const, last_activity_at: now },
+      { ...sessionFor(2, 'dev-asking'), claude_status: 'blocked' as const, last_activity_at: now },
+      { ...sessionFor(null, 'dev-crashed'), claude_status: 'failed' as const, last_activity_at: now },
+    ];
+  }
+
+  it('lists only what needs you, counts the rest and links to All sessions', async () => {
+    mockBackend(fakeProjects, fleet());
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick(); await tick();
+    const shown = screen.getAllByTestId('sess-row').map((r) => r.textContent ?? '');
+    expect(shown).toHaveLength(2);
+    expect(shown.some((t) => t.includes('dev-busy'))).toBe(false);
+    expect(screen.getByTestId('inbox-head').textContent).toContain('2 need you');
+    expect(screen.getByTestId('inbox-rest').textContent).toContain('1 running');
+    // Links to review and sessions to tidy stay on the Inbox's attention line.
+    expect(screen.getByTestId('attention-line')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('inbox-all-sessions'));
+    await tick();
+    expect(get(sidebarView)).toBe('sessions');
+    expect(screen.getAllByTestId('sess-row')).toHaveLength(3);
+  });
+
+  it('Today is the second tab and ⌘⇧T still opens it', async () => {
+    mockBackend(fakeProjects, fleet());
+    sidebarView.set('inbox');
+    render(Sidebar);
+    await tick();
+    await fireEvent.click(screen.getByTestId('inbox-tab-today'));
+    expect(get(todayOpen)).toBe(true);
+    expect(screen.getByTestId('inbox-tab-today').getAttribute('aria-selected')).toBe('true');
+    await fireEvent.click(screen.getByTestId('inbox-tab-inbox'));
+    expect(get(todayOpen)).toBe(false);
   });
 });

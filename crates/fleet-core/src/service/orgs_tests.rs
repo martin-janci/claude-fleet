@@ -776,3 +776,97 @@ fn an_orgs_spend_settings_and_budget_are_the_administrators_only() {
         assert!(json.get(k).is_none(), "{k}: {json}");
     }
 }
+
+/// Redesign 11.1: the overview's 14-day spend series and its "Needs an
+/// admin" list — an untrusted device that may prompt is in it, a read-only
+/// or trusted one is not — and neither reaches anyone who is not an admin.
+#[test]
+fn an_orgs_overview_carries_its_spend_series_and_what_needs_an_admin() {
+    use crate::service::org_needs::AdminNeed;
+    use crate::store::{UsageDelta, UsageTotals};
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let now = crate::service::catalog::now_secs();
+    let today = now.div_euclid(86_400);
+    let org = {
+        let s = st.lock().unwrap();
+        s.insert_host("a", Some("a")).unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_host_org("a", Some(org)).unwrap();
+        let id = s
+            .upsert_session("x", "a", None, None, 1, 1, "running", None)
+            .unwrap();
+        for (day, micros) in [
+            (today - 20, 9_000_000),
+            (today - 13, 2_000_000),
+            (today, 3_000_000),
+        ] {
+            s.apply_usage(
+                id,
+                "a",
+                &UsageDelta {
+                    reset: false,
+                    totals: UsageTotals {
+                        cost_micros: micros,
+                        input_tokens: 1,
+                        ..Default::default()
+                    },
+                    model: None,
+                    offset: day + micros,
+                    source: "s.jsonl".into(),
+                    last_msg_id: None,
+                    last_msg_usage: None,
+                    now: day * 86_400 + 10,
+                    by_day: Vec::new(),
+                    backfill_until: None,
+                },
+            )
+            .unwrap();
+        }
+        for (name, mode, trusted) in [
+            ("peters-iphone", "full", false),
+            ("ada-mac", "full", true),
+            ("wall-tv", "readonly", false),
+        ] {
+            s.insert_client_token(name, &format!("digest-{name}"), mode)
+                .unwrap();
+            s.set_client_org(name, Some(org)).unwrap();
+            s.set_client_trust(name, trusted).unwrap();
+        }
+        org
+    };
+    let d = &org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap()[0];
+    assert_eq!(d.org.id, org);
+    let series = d
+        .spend_series
+        .as_ref()
+        .expect("the administrator sees spend");
+    assert_eq!(series.len(), 14);
+    assert_eq!(
+        series.first().map(|p| (p.day.clone(), p.cost_micros)),
+        Some((crate::service::usage::day_string(today - 13), 2_000_000)),
+        "the oldest day is 13 days back; older spend is out"
+    );
+    assert_eq!(series.last().map(|p| p.cost_micros), Some(3_000_000));
+    assert_eq!(series.iter().map(|p| p.cost_micros).sum::<i64>(), 5_000_000);
+    let needs = d
+        .needs_admin
+        .as_ref()
+        .expect("the administrator gets the list");
+    let untrusted: Vec<&str> = needs
+        .iter()
+        .filter_map(|n| match n {
+            AdminNeed::UntrustedDevice { device, .. } => Some(device.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(untrusted, vec!["peters-iphone"]);
+    assert!(
+        !needs.iter().any(|n| matches!(n, AdminNeed::Budget { .. })),
+        "no budget, no budget line"
+    );
+
+    let other = &org_details(&st, &vs(&OrgScope::All), AdminView::Other).unwrap()[0];
+    assert!(other.spend_series.is_none() && other.needs_admin.is_none());
+    let json = serde_json::to_value(other).unwrap();
+    assert!(json.get("spend_series").is_none() && json.get("needs_admin").is_none());
+}

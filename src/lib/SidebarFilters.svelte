@@ -32,6 +32,9 @@
   import ScopeAttention from './ScopeAttention.svelte';
   import { scopes, scopeSelectorShown, scopeFilter, effectiveScope, UNASSIGNED } from './orgs';
   import { scopeChordLabel, workViewChordLabel } from './app_views';
+  import { uiLayout } from './prefs';
+  import { shortcutLabel } from './shortcuts';
+  import { todayOpen } from './today';
   import { detectMac } from './terminal_keys';
   import LinkReview from './LinkReview.svelte';
   import TidyReview from './TidyReview.svelte';
@@ -65,6 +68,7 @@
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   const scopeTitle = `Organisation scope (${scopeChordLabel(isMac)})`;
   const workViewChord = workViewChordLabel(isMac);
+  const todayChord = shortcutLabel('today', isMac);
 
   let {
     listView = 'sessions',
@@ -260,31 +264,58 @@
        sessions). ⌘⇧W / Ctrl+Shift+W flips them. Global actions on the
        right: they are not filters. -->
   <div class="row r0">
-    <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch">
-      <button
-        class="btn btn--chip btn--toggle"
-        role="tab"
-        aria-selected={$sidebarView === 'sessions'}
-        class:is-active={$sidebarView === 'sessions'}
-        data-testid="sidebar-view-sessions"
-        title={`Sessions (${workViewChord})`}
-        onclick={() => sidebarView.set('sessions')}
-        >Sessions{#if !sessionsList && needsYouCount > 0}<span
-            class="tab-badge hot"
-            data-testid="sessions-tab-needs-you"
-            title="{needsYouCount} waiting on you">{needsYouCount}</span
-          >{/if}</button
-      >
-      <button
-        class="btn btn--chip btn--toggle"
-        role="tab"
-        aria-selected={$sidebarView === 'work'}
-        class:is-active={$sidebarView === 'work'}
-        data-testid="sidebar-view-work"
-        title={`Work: organisation → group → task → its sessions (${workViewChord})`}
-        onclick={() => sidebarView.set('work')}>Work</button
-      >
-    </div>
+    {#if listView === 'inbox'}
+      <!-- The Inbox (redesign step 3.3), with Today as its second tab until
+           Control (9.1) takes it; ⌘⇧T opens Today as before. -->
+      <div class="btn-group view-switch" role="tablist" aria-label="Inbox" data-testid="inbox-tabs">
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={!$todayOpen}
+          class:is-active={!$todayOpen}
+          data-testid="inbox-tab-inbox"
+          onclick={() => todayOpen.set(false)}
+          >Inbox{#if needsYouCount > 0}<span class="tab-badge hot" title="{needsYouCount} waiting on you"
+              >{needsYouCount}</span
+            >{/if}</button
+        >
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={$todayOpen}
+          class:is-active={$todayOpen}
+          data-testid="inbox-tab-today"
+          title={`Today (${todayChord})`}
+          onclick={() => todayOpen.set(true)}>Today</button
+        >
+      </div>
+    {:else}
+      <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch">
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={$sidebarView === 'sessions'}
+          class:is-active={$sidebarView === 'sessions'}
+          data-testid="sidebar-view-sessions"
+          title={`Sessions (${workViewChord})`}
+          onclick={() => sidebarView.set('sessions')}
+          >{$uiLayout === 'new' ? 'All sessions' : 'Sessions'}{#if !sessionsList && needsYouCount > 0}<span
+              class="tab-badge hot"
+              data-testid="sessions-tab-needs-you"
+              title="{needsYouCount} waiting on you">{needsYouCount}</span
+            >{/if}</button
+        >
+        <button
+          class="btn btn--chip btn--toggle"
+          role="tab"
+          aria-selected={$sidebarView === 'work'}
+          class:is-active={$sidebarView === 'work'}
+          data-testid="sidebar-view-work"
+          title={`Work: organisation → group → task → its sessions (${workViewChord})`}
+          onclick={() => sidebarView.set('work')}>Work</button
+        >
+      </div>
+    {/if}
     <span class="spacer"></span>
     <button
       class="btn btn--quiet btn--icon"

@@ -25,7 +25,12 @@ const SOURCES = import.meta.glob('../**/*.svelte', {
 /** Components allowed to use `{@html}` because they demonstrably render no
  *  hub-provided text. Empty, and adding an entry needs that argument made in
  *  a comment beside it. */
-const ALLOWED: string[] = [];
+const ALLOWED: string[] = [
+  // The loader kit renders only LOADER_SPECS markup, generated at build time
+  // from the design manual's Loader board (loader-kit-extract.ts); its props
+  // pick a spec by name and never carry text into the markup.
+  './Loader.svelte',
+];
 
 describe('Hub text never reaches {@html}', () => {
   const files = Object.keys(SOURCES).sort();

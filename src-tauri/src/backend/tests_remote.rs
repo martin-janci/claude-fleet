@@ -412,6 +412,7 @@ fn sample_session_row() -> SessionRow {
         agent: fleet_core::store::AGENT_CLAUDE.into(),
         origin: None,
         origin_ref: None,
+        last_viewed_at: None,
         pending_form: None,
         parent_session_id: None,
         tags: vec!["review".into()],

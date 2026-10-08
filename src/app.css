@@ -27,6 +27,8 @@
   --accent-fg: #ffffff;
   --accent-soft: #e7eefe;
   --ring: var(--accent);
+  /* The ring on a field AI filled, until a person touches it (manual ai.md). */
+  --ai-pre: var(--accent);
   /* Status: the full colour is text; soft, faint and line tint chips and banners. */
   --status-working: #3157c9;
   --status-waiting: #8f520b;
@@ -194,6 +196,8 @@
     --accent-fg: #0b1220;
     --accent-soft: #1c2735;
     --ring: var(--accent);
+    /* The ring on a field AI filled, until a person touches it (manual ai.md). */
+    --ai-pre: var(--accent);
     /* Status: the full colour is text; soft, faint and line tint chips and banners. */
     --status-working: #7fa3ff;
     --status-waiting: #d29b4a;
@@ -271,6 +275,8 @@
   --accent-fg: #ffffff;
   --accent-soft: #e7eefe;
   --ring: var(--accent);
+  /* The ring on a field AI filled, until a person touches it (manual ai.md). */
+  --ai-pre: var(--accent);
   /* Status: the full colour is text; soft, faint and line tint chips and banners. */
   --status-working: #3157c9;
   --status-waiting: #8f520b;
@@ -347,6 +353,8 @@
   --accent-fg: #0b1220;
   --accent-soft: #1c2735;
   --ring: var(--accent);
+  /* The ring on a field AI filled, until a person touches it (manual ai.md). */
+  --ai-pre: var(--accent);
   /* Status: the full colour is text; soft, faint and line tint chips and banners. */
   --status-working: #7fa3ff;
   --status-waiting: #d29b4a;
@@ -403,6 +411,19 @@
   --control-border-strong: #6e6e6e;
   --control-fg: #ededed;
   --control-fg-quiet: #a8a8a8;
+}
+
+/* Motion (src/lib/motion.ts sets data-motion from the Motion pref and the
+   OS). Reduced keeps only short fades; Off stops UI motion. Every
+   transition reads these tokens, so this is the one switch. */
+:root[data-motion='reduced'] {
+  --dur-base: var(--dur-fast);
+  --dur-slow: var(--dur-fast);
+}
+:root[data-motion='off'] {
+  --dur-fast: 0ms;
+  --dur-base: 0ms;
+  --dur-slow: 0ms;
 }
 
 /* One focus style for everything focusable, at zero specificity so any

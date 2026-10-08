@@ -8,7 +8,7 @@
   import { onMount, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import Modal from './Modal.svelte';
-  import SpiralLoader from './SpiralLoader.svelte';
+  import Loader from './Loader.svelte';
   import { resumeWork, workResumePlan, type ResumeMode, type ResumePlan } from './work';
   import { sessions } from './sessions';
   import { sessionIdBlocked } from './share';
@@ -237,13 +237,13 @@
       data-testid="resume-start"
       disabled={!plan || live.length > 0 || !current?.ok || busy || shareBlocked !== null || (mode === 'brief' && briefLoading)}
       title={shareBlocked}
-      onclick={start}>{#if busy}<SpiralLoader size={12} class="btn-spiral" />Starting…{:else}{LABELS[mode]}{/if}</button
+      onclick={start}>{#if busy}<Loader name="comet" size={12} class="btn-loader" />Starting…{:else}{LABELS[mode]}{/if}</button
     >
   </div>
 </Modal>
 
 <style>
-  button :global(.btn-spiral) {
+  button :global(.btn-loader) {
     margin-right: 0.35em;
     vertical-align: -1px;
   }

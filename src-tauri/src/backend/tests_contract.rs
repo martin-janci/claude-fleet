@@ -5,7 +5,8 @@ use fleet_core::service::add_project::GithubRepo;
 use fleet_core::service::health::{Health, HubHealth, TrackerHealth, TrackersHealth};
 use fleet_core::service::projects::ProjectTreeRow;
 use fleet_core::service::repo_read::{
-    Branch, ChangedFile, Commit, CommitDetail, FileContent, FileDiff, GitRef, RepoTree,
+    BlameHunk, Branch, ChangedFile, Commit, CommitDetail, FileBlame, FileContent, FileDiff, GitRef,
+    RepoTree,
 };
 use fleet_core::service::tick::ReconcileStats;
 use fleet_core::service::transcript::{ContextView, ConvItem, ConvTurn, Conversation};
@@ -99,6 +100,8 @@ pub(crate) fn sample_session() -> SessionRow {
         // Some, so the golden pins both names the origin chip reads.
         origin: Some("mission".into()),
         origin_ref: Some("7".into()),
+        // Some, so the golden pins the name the unread state reads.
+        last_viewed_at: Some(1_700_000_100),
         pending_form: Some(fleet_core::store::PendingForm {
             form_id: "f_x".into(),
             title: "T".into(),
@@ -856,6 +859,25 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             ahead: 1,
             behind: 2,
             tip_hash: "abc123".into(),
+            merged: true,
+        }),
+    );
+    let hunk = BlameHunk {
+        start: 1,
+        lines: 2,
+        hash: "abc123".into(),
+        author: "a".into(),
+        time: 1,
+        summary: "s".into(),
+        uncommitted: false,
+    };
+    put("BlameHunk", wire_keys(&hunk));
+    put(
+        "FileBlame",
+        wire_keys(&FileBlame {
+            path: "a.rs".into(),
+            hunks: vec![hunk],
+            truncated: false,
         }),
     );
     put("GitRef", wire_keys(&sample_git_ref()));
@@ -1017,11 +1039,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// sixty-eight keys nothing else would notice losing. Its list is a literal
+/// sixty-nine keys nothing else would notice losing. Its list is a literal
 /// here, not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_sixty_eight() {
+fn a_session_rows_wire_names_are_these_exact_sixty_nine() {
     let expected = [
         "account_uuid",
         "agent",
@@ -1048,6 +1070,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_eight() {
         "last_prompt",
         "last_stop_at",
         "last_turn_at",
+        "last_viewed_at",
         "lost_at",
         "lost_reason",
         "model",
@@ -1093,7 +1116,7 @@ fn a_session_rows_wire_names_are_these_exact_sixty_eight() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 68, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 69, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

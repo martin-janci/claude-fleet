@@ -381,9 +381,15 @@ Repair a session workspace (the Repair workspace button): make its directory a h
 
 Parameters: `confirm_nonce`, `host_alias`, `name`, `session_id`
 
+### `repo_blame`
+
+Blame of one worktree file as runs of lines: {path, hunks: [{start, lines, hash, author, time, summary, uncommitted}], truncated}.
+
+Parameters: `path`, `session_id`
+
 ### `repo_branches`
 
-Local + remote branches of a session's worktree, with ahead/behind.
+Local + remote branches of a session's worktree, with ahead/behind and `merged` (the base branch contains the tip).
 
 Parameters: `session_id`
 
@@ -637,6 +643,12 @@ Spawn a review session: a new Claude session in the source session's worktree, s
 
 Parameters: `confirm_nonce`, `prompt`, `source_session_id`
 
+### `touch_session_viewed`
+
+Mark a session viewed now: the turns it has finished read as seen. Returns the row.
+
+Parameters: `session_id`
+
 ### `update_admin`
 
 Update admin, master only: pin a version for a component or target (below installed = rollback), unpin, or refresh the signed channel. E_INVALID, E_UPDATE_UNVERIFIED.
@@ -738,6 +750,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::repair_session`
 - `commands::sessions::rename_session`
 - `commands::sessions::set_session_friendly_name`
+- `commands::sessions::touch_session_viewed`
 - `commands::work::session_work_links`
 - `commands::work::link_session_work`
 - `commands::work::reject_session_work`
@@ -909,6 +922,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::files::repo_tree`
 - `commands::files::repo_file`
 - `commands::files::repo_diff`
+- `commands::files::repo_blame`
 - `commands::upload::upload_to_session`
 - `commands::upload::pick_attachments`
 - `commands::upload::attachment_preview`
@@ -922,6 +936,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mutate::repo_checkout_commit`
 - `commands::mutate::repo_create_branch`
 - `commands::mutate::repo_delete_branch`
+- `commands::mutate::repo_delete_merged_branches`
 - `commands::mutate::repo_stage`
 - `commands::mutate::repo_unstage`
 - `commands::mutate::repo_commit_create`

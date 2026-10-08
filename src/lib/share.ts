@@ -143,6 +143,9 @@ const SESSION_TIER = {
   // not a field the owner-only tier is protecting, and a driver correcting the
   // caption of the session it drives changes nothing the owner cannot re-set.
   set_friendly_name: 'drive',
+  // The row's one `last_viewed_at` (redesign 2.3): a watcher looking must not
+  // clear what the owner has not seen yet.
+  touch_session_viewed: 'drive',
   repair_session: 'drive',
   dismiss_ghost_session: 'drive',
   adopt_session: 'own',

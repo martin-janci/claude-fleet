@@ -28,6 +28,17 @@ export interface Branch {
   ahead: number;
   behind: number;
   tipHash: string;
+  /** The base branch (origin/HEAD, else main or master) already contains
+   *  this tip, so deleting it loses nothing. Never set on the base, its
+   *  local twin or the checked-out branch. */
+  merged: boolean;
+}
+
+/** What "Delete merged" did: each name re-checked on the host first. */
+export interface DeleteMergedResult {
+  deleted: string[];
+  /** Asked for but kept (no longer merged, checked out somewhere, gone). */
+  kept: string[];
 }
 
 export interface CommitDetail {
@@ -103,6 +114,15 @@ export function repoDeleteBranch(
 ): Promise<Result<null>> {
   return invokeCmd<null>('repo_delete_branch', {
     args: { session_id: sessionId, name, force },
+  });
+}
+
+export function repoDeleteMergedBranches(
+  sessionId: number,
+  names: string[],
+): Promise<Result<DeleteMergedResult>> {
+  return invokeCmd<DeleteMergedResult>('repo_delete_merged_branches', {
+    args: { session_id: sessionId, names },
   });
 }
 

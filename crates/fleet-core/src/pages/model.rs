@@ -202,6 +202,11 @@ pub struct Section {
     pub collapsible: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub advanced: bool,
+    /// A `master_detail` page's overview: its `count` and `money` fields
+    /// shown as tiles (label, value, and the field's `sub` line) rather
+    /// than rows.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tiles: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Condition>,
     pub items: Vec<Item>,

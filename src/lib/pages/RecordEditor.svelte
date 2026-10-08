@@ -9,6 +9,7 @@
   import ActionForm from './ActionForm.svelte';
   import TrackerExtras from '../TrackerExtras.svelte';
   import OrgSettingsList from './OrgSettingsList.svelte';
+  import Chart from './Chart.svelte';
   import type { OrgSettingRow } from '../orgs';
   import type { TrackerRow } from '../trackers';
   import { evalCondition, type Section } from './pages';
@@ -25,7 +26,10 @@
     itemKey,
     itemLabel,
     itemsOf,
+    needLine,
     recordValues,
+    subLine,
+    type AdminNeed,
     titleOf,
     type ActionSpec,
     type FieldSpec,
@@ -80,7 +84,9 @@
   const fieldOf = (id: string) => resource.fields.find((f) => f.id === id);
   const saved = $derived(
     Object.fromEntries(
-      resource.fields.filter((f) => f.type !== 'items' && f.type !== 'settings').map((f) => [f.id, fieldValue(f, record)]),
+      resource.fields
+        .filter((f) => f.type !== 'items' && f.type !== 'settings' && f.type !== 'money_series')
+        .map((f) => [f.id, fieldValue(f, record)]),
     ),
   ) as Record<string, FieldValue>;
 
@@ -196,6 +202,23 @@
   {#each sections.filter((s) => evalCondition(s.when, values)) as section (section.title)}
     <section class="section">
       <h6>{section.title}</h6>
+      {#if section.tiles}
+        <!-- A record's numbers at a glance: a money field the caller may not
+             see is left out, as on a row. -->
+        <div class="tiles">
+          {#each section.items as item, i (i)}
+            {@const f = item.type === 'field' ? fieldOf(item.key) : undefined}
+            {#if f && !(f.type === 'money' && record[f.id] === undefined)}
+              {@const sub = subLine(f.sub, record[f.id], record)}
+              <div class="tile" data-testid={`tile-${f.id}`} title={f.help}>
+                <span class="tile-label">{f.label}</span>
+                <span class="tile-value" data-testid={`value-${f.id}`}>{shown(f)}</span>
+                {#if sub}<span class="tile-sub" data-testid={`tile-sub-${f.id}`}>{sub}</span>{/if}
+              </div>
+            {/if}
+          {/each}
+        </div>
+      {:else}
       {#each section.items as item, i (i)}
         {#if item.type === 'notice'}
           <p class={`notice ${item.tone}`}>{item.text}</p>
@@ -206,11 +229,34 @@
           <!-- A list the record does not carry at all is not known here (a
                hub too old for it, or a list only the operator is shown):
                left out, rather than shown as empty. -->
-          {#if f && !(['items', 'money', 'settings'].includes(f.type) && record[f.id] === undefined)}
+          {#if f && !(['items', 'money', 'money_series', 'settings'].includes(f.type) && record[f.id] === undefined)}
             <div class="field" class:changed={changed.includes(f)} data-testid={`record-field-${f.id}`}>
               <span class="label" id={`rf-${f.id}`}>{f.label}</span>
               <div class="control">
-                {#if f.type === 'items'}
+                {#if f.type === 'items' && f.item_label.type === 'admin_need'}
+                  <ul class="needs" aria-labelledby={`rf-${f.id}`}>
+                    {#each itemsOf(f, record) as it, n (n)}
+                      {@const line = needLine(it as AdminNeed, now())}
+                      <li class={`need ${line.tone}`} data-testid={`item-${f.id}`}>
+                        <span class="need-mark" aria-hidden="true">{line.tone === 'warn' ? '!' : 'i'}</span>
+                        <span class="need-text">{line.text}</span>
+                        <span class="need-detail">{line.detail}</span>
+                      </li>
+                    {:else}
+                      <li class="none">Nothing needs an admin.</li>
+                    {/each}
+                  </ul>
+                {:else if f.type === 'money_series'}
+                  <div class="series">
+                    <Chart
+                      points={(record[f.id] as Record<string, unknown>[]) ?? []}
+                      x={{ id: 'day', label: 'Day', ty: 'day' }}
+                      y={{ id: 'cost_micros', label: f.label, ty: 'usd_micros' }}
+                      kind="bar"
+                      title={f.label}
+                      testid={`chart-${f.id}`} />
+                  </div>
+                {:else if f.type === 'items'}
                   <div class="chips" aria-labelledby={`rf-${f.id}`}>
                     {#each itemsOf(f, record) as it (itemKey(it))}
                       <span class="chip" data-testid={`item-${f.id}`}
@@ -305,6 +351,7 @@
           {/if}
         {/if}
       {/each}
+      {/if}
     </section>
   {/each}
 
@@ -427,6 +474,69 @@
     font-size: 0.75rem;
     color: var(--fg-muted);
     line-height: 1.4;
+  }
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+    gap: 0.5rem;
+  }
+  .tile {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    padding: 0.5rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-pane);
+  }
+  .tile-label,
+  .tile-sub {
+    font-size: 0.72rem;
+    color: var(--fg-muted);
+  }
+  .tile-value {
+    font-size: 1.15rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .series {
+    width: 100%;
+  }
+  .needs {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    width: 100%;
+  }
+  .need {
+    display: grid;
+    grid-template-columns: 1.1rem 1fr;
+    column-gap: 0.4rem;
+    font-size: 0.8rem;
+  }
+  .need-mark {
+    grid-row: span 2;
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    border: 1px solid var(--border);
+    color: var(--fg-muted);
+  }
+  .need.warn .need-mark {
+    border-color: var(--usage-warn);
+    color: var(--usage-warn);
+  }
+  .need-detail {
+    font-size: 0.74rem;
+    color: var(--fg-muted);
   }
   .notice {
     font-size: 0.78rem;

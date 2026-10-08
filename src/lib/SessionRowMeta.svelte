@@ -11,14 +11,21 @@
     sess,
     state,
     promptText,
-  }: { sess: SessionRow; state: AttentionState; promptText: string } = $props();
+    reason = null,
+  }: {
+    sess: SessionRow;
+    state: AttentionState;
+    promptText: string;
+    /** A Blocked row's reason line (step 2.4), shown in place of the state word. */
+    reason?: string | null;
+  } = $props();
 
   const agent = $derived(sessionAgent(sess));
   const detail = $derived(sess.current_activity || promptText);
 </script>
 
 <div class="sess-meta-line" data-testid="sess-meta-line" data-state={state}>
-  <span class="state state-{state}">{STATE_LABELS[state]}</span>
+  <span class="state state-{state}" data-testid="meta-state">{reason ?? STATE_LABELS[state]}</span>
   <span class="sep" aria-hidden="true">·</span>
   <span>{AGENT_LABELS[agent] ?? agent}</span>
   <span class="sep" aria-hidden="true">·</span>

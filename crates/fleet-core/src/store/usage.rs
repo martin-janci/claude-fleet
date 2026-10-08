@@ -398,6 +398,23 @@ impl Store {
         rows.collect()
     }
 
+    /// One org's LIVE spend per UTC day over `since_day..`, in micro-USD:
+    /// `day → cost_micros`, days with no row left out.
+    pub fn org_live_cost_by_day(
+        &self,
+        org: i64,
+        since_day: i64,
+    ) -> Result<std::collections::BTreeMap<i64, i64>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT day, SUM(cost_micros) FROM usage_daily_org \
+             WHERE org_id = ?1 AND day >= ?2 AND backfill = 0 GROUP BY day",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![org, since_day], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        rows.collect()
+    }
+
     /// Add `t` to one `usage_daily` row, keyed `(day, host_alias, backfill)`.
     fn add_usage_daily(
         &self,

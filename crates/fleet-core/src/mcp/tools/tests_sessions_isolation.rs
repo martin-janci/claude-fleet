@@ -690,6 +690,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "safe_kill_session" => fx.t.safe_kill_session(ext, p!()).await,
         "rename_session" => fx.t.rename_session(ext, p!()).await,
         "set_friendly_name" => fx.t.set_friendly_name(ext, p!()).await,
+        "touch_session_viewed" => fx.t.touch_session_viewed(ext, p!()).await,
         "restart_session" => fx.t.restart_session(ext, p!()).await,
         "rewind_conversation" => fx.t.rewind_conversation(ext, p!()).await,
         "spawn_review" => fx.t.spawn_review(ext, p!()).await,
@@ -729,6 +730,7 @@ async fn call(fx: &Fx, who: Who, tool: &str, args: Value) -> Answer {
         "repo_tree" => fx.t.repo_tree(ext, p!()).await,
         "repo_file" => fx.t.repo_file(ext, p!()).await,
         "repo_diff" => fx.t.repo_diff(ext, p!()).await,
+        "repo_blame" => fx.t.repo_blame(ext, p!()).await,
         "repo_log" => fx.t.repo_log(ext, p!()).await,
         "repo_branches" => fx.t.repo_branches(ext, p!()).await,
         "repo_commit" => fx.t.repo_commit(ext, p!()).await,
@@ -1194,6 +1196,7 @@ async fn run_matrix() {
     )
     .await;
     m.gated("repair_session", Reach::Drive, row).await;
+    m.gated("touch_session_viewed", Reach::Drive, row).await;
     m.gated("dismiss_ghost_session", Reach::Drive, row).await;
     m.gated("adopt_session", Reach::Own, row).await;
     m.gated("register_self", Reach::Drive, row).await;
@@ -1320,6 +1323,12 @@ async fn run_matrix() {
     .await;
     m.gated(
         "repo_diff",
+        Reach::Read,
+        |fx, _| json!({ "session_id": fx.row, "path": "README.md" }),
+    )
+    .await;
+    m.gated(
+        "repo_blame",
         Reach::Read,
         |fx, _| json!({ "session_id": fx.row, "path": "README.md" }),
     )
