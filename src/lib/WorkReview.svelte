@@ -30,6 +30,7 @@
     ackWorkLink,
     conflictNotice,
     decideWorkBatch,
+    isHighConfidence,
     openTask,
     readErrorText,
     reconsiderWorkLink,
@@ -316,6 +317,10 @@
   // item this client may not decide is not ticked in the first place (the
   // checkbox is disabled), and the narrowing holds even so.
   const pickedSuggestions = $derived(decidable(pickedItems.filter((x) => x.kind === 'suggestion')));
+  // "Confirm all high-confidence" (redesign 6.5): every suggestion this
+  // client may decide whose detection confidence clears the bar. It is still
+  // a person's click, with the batch's Undo.
+  const highConfidence = $derived(decidable(items.filter(isHighConfidence)));
   const pickedConflicts = $derived(
     decidable(pickedItems.filter((x) => x.kind === 'cross_org' || x.kind === 'unavailable')),
   );
@@ -496,6 +501,14 @@
     </div>
   {/if}
 
+  {#if highConfidence.length > 0 && pickedItems.length === 0}
+    <div class="bulk" role="toolbar" aria-label="Confirm the high-confidence suggestions" data-testid="work-review-high">
+      <button class="btn" type="button" data-testid="work-review-confirm-high" disabled={busy || blocked !== null} onclick={() => void batch('confirm', highConfidence)}
+        >Confirm all high-confidence ({highConfidence.length})</button
+      >
+    </div>
+  {/if}
+
   {#if pickedItems.length > 0}
     <div class="bulk" role="toolbar" aria-label="Decide the ticked items" data-testid="work-review-bulk">
       <span>{pickedItems.length} ticked</span>
@@ -548,6 +561,7 @@
             <button class="link muted" type="button" title="Open the session" onclick={() => openSession(it)}
               >{sessionName(it)}{#if it.host}&nbsp;· {it.host}{/if}</button
             >
+            {#if it.confidence != null}<span class="conf" class:conf--high={isHighConfidence(it)} title="Confidence from detection" data-testid="work-review-confidence">{it.confidence}%</span>{/if}
             {#if it.strength}<span class="muted">· {it.strength}{#if it.rule}&nbsp;{it.rule}{/if}</span>{/if}
             {#if it.created_at}<span class="muted">· {timeAgo(it.created_at)}</span>{/if}
           </div>
@@ -713,6 +727,13 @@
   }
   .muted {
     color: var(--fg-muted);
+  }
+  .conf {
+    font-variant-numeric: tabular-nums;
+    color: var(--fg-muted);
+  }
+  .conf--high {
+    color: var(--fg);
   }
   .error {
     color: var(--usage-crit, #c62828);

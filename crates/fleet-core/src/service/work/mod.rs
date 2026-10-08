@@ -7,6 +7,7 @@ pub mod abandon;
 pub mod agent_handover;
 pub mod buckets;
 pub mod card;
+pub mod confidence;
 pub mod describe;
 pub mod detect;
 pub mod graph;
