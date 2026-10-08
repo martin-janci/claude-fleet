@@ -409,9 +409,15 @@ bullet for the area you are about to change.
   read `list_downloads` (not served to host tokens), re-read on
   `download:changed` (ids only, hidden from scoped streams) and fetch the
   bytes from `GET /downloads/<id>` (`mcp/downloads_route.rs`), never through
-  a tool result. The GC sweep drops rows past `downloads.keep_secs`. Desktop:
-  the footer's ⤓ Downloads sheet and the file viewer's *Send to downloads*;
-  `save_download` picks the destination in its own save dialog.
+  a tool result. The GC sweep drops rows past `downloads.keep_secs`. A row
+  being copied carries `fetched_bytes` (in memory, `download:changed` after
+  each 8 MiB slice; never stored). Desktop: the footer's ⤓ Downloads sheet
+  (progress with the time left, *Retry* = `send_file` again for the same
+  session and path, *Show in Finder* for a file saved in this window, *Clear
+  finished*) and the file viewer's *Send to downloads*; `save_download` picks
+  the destination in its own save dialog. The same sheet's Notifications tab
+  is the notification centre: every toast this window showed
+  (`src/lib/notifications.ts`), its button offered only while the toast is up.
 - **Voice relay F1** (spec `docs/superpowers/specs/2026-10-05-voice-relay-design.md`, plan
   `docs/superpowers/plans/2026-10-05-voice-relay-f1.md`, guide `docs/voice.md`):
   `service/voice` `VoiceRegistry` (one claim per session, process-global),

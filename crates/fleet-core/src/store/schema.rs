@@ -1427,12 +1427,18 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/121_session_agent.sql"),
         already_applied: Some(sessions_has_agent),
     },
+    // Account usage history: `account_usage_snapshots` and its index. New
+    // objects only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        122,
+        include_str!("../../migrations/122_account_usage_snapshots.sql"),
+    ),
     // Orbit Fleet 4.6, the Hosts page: CPU, total memory, boot time,
     // latency and worktree size on `hosts` (six ADD COLUMNs, guarded on the
     // last).
     Migration {
-        version: 122,
-        sql: include_str!("../../migrations/122_host_probe_facts.sql"),
+        version: 123,
+        sql: include_str!("../../migrations/123_host_probe_facts.sql"),
         already_applied: Some(hosts_has_worktree_at),
     },
 ];

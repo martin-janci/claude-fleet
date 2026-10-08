@@ -344,6 +344,7 @@ export const ROUTED_ACTIONS = [
   // (multi-user M1, F2b).
   'restore_host_sessions',
   'dismiss_ghost_session',
+  'adopt_session',
   'new_bg_session',
   'cancel_task',
   'probe_host',

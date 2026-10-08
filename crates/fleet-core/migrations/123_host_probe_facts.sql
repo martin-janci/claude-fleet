@@ -14,4 +14,4 @@ ALTER TABLE hosts ADD COLUMN boot_at INTEGER;
 ALTER TABLE hosts ADD COLUMN latency_ms INTEGER;
 ALTER TABLE hosts ADD COLUMN worktree_kb INTEGER;
 ALTER TABLE hosts ADD COLUMN worktree_at INTEGER;
-INSERT OR IGNORE INTO schema_version (version) VALUES (122);
+INSERT OR IGNORE INTO schema_version (version) VALUES (123);

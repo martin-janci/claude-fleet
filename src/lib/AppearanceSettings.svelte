@@ -2,8 +2,8 @@
   // Settings → Appearance (redesign step 0.3): the layout switch and the
   // theme picker. Hand-written, not a generated page, because both are
   // per-device prefs in localStorage rather than fleet settings. Copy
-  // follows the Settings board of the Orbit Fleet canvas. The sidebar's
-  // "theme: …" line keeps working until step 1.4 removes it.
+  // follows the Settings board of the Orbit Fleet canvas. This is the one
+  // theme picker: step 1.4 removed the sidebar's "theme: …" line.
   import SegmentedControl from './SegmentedControl.svelte';
   import { uiLayout, type UiLayout } from './prefs';
   import { applyTheme, theme, type Theme } from './theme';

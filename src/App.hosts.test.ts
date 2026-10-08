@@ -501,7 +501,7 @@ describe('App: the footer usage segment', () => {
     expect(seg.dataset.state).toBe('ok');
     expect(seg.getAttribute('aria-label')).toContain('all 3 accounts have headroom');
     // It sits in the footer beside the version line.
-    expect(seg.closest('footer')?.textContent).toContain('db: ok');
+    expect(seg.closest('footer')?.textContent).toContain('All systems OK');
   });
 
   it('names the worst account, and clicking it opens Hosts on that account’s host', async () => {

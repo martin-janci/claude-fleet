@@ -1031,7 +1031,7 @@ pub struct HostRow {
     /// never read. Per-field default: an older hub omits it.
     #[serde(default)]
     pub claude_profiles: Option<Vec<HostProfileRow>>,
-    /// Probe facts for the Hosts page (Orbit Fleet 4.6, migration 122):
+    /// Probe facts for the Hosts page (Orbit Fleet 4.6, migration 123):
     /// online CPUs, physical memory, the boot epoch the host states, the
     /// round trip of an empty command (`None` for `local`), and the disk
     /// fleet's worktrees hold with when that was last asked. All
@@ -1078,7 +1078,7 @@ pub struct HostHealth {
     /// hub's ping omits it.
     #[serde(default)]
     pub auth_overrides: Option<Vec<String>>,
-    /// Migration 121 (Orbit Fleet 4.6). Per-field default: an older hub's
+    /// Migration 123 (Orbit Fleet 4.6). Per-field default: an older hub's
     /// ping omits them.
     #[serde(default)]
     pub cpu_count: Option<i64>,
@@ -1189,7 +1189,7 @@ pub(super) fn map_host_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostRow>
         claude_profiles: row
             .get::<_, Option<String>>(26)?
             .and_then(|t| serde_json::from_str::<Vec<HostProfileRow>>(&t).ok()),
-        // Migration 121 (Orbit Fleet 4.6).
+        // Migration 123 (Orbit Fleet 4.6).
         cpu_count: row.get(27)?,
         mem_total_kb: row.get(28)?,
         boot_at: row.get(29)?,

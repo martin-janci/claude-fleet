@@ -255,7 +255,7 @@ impl Store {
         Ok(())
     }
 
-    /// Record a worktree-size read (Orbit Fleet 4.6, migration 122). The
+    /// Record a worktree-size read (Orbit Fleet 4.6, migration 123). The
     /// stamp moves on every ask so a `du` that timed out waits the full
     /// interval before the next try; the size moves only on an answer.
     /// No event: the reconcile pass's ping carries it.

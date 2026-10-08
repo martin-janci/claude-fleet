@@ -22,12 +22,17 @@ import {
   setContextRedPct,
   severity,
   TRIAGE_BUCKETS,
+  ATTENTION_STATES,
+  attentionState,
+  bucketState,
+  countsTowardBadge,
   stuckKindLabel,
   stuckMessage,
   stuckSnapshot,
   worstSeverityByProject,
 } from './attention';
 import { CLAUDE_STATUSES, STUCK_KINDS, type SessionRow } from './sessions';
+import attentionTable from './attention_states.json';
 
 let nextId = 1;
 function row(over: Partial<SessionRow> = {}): SessionRow {
@@ -289,14 +294,16 @@ describe('triage rank', () => {
     expect(needsYou(row(), opts)).toBe(false);
     expect(
       countNeedsYou([row({ stuck_kind: 'oom' }), row({ claude_status: 'working' }), row({ status: 'ghost' })], opts),
-    ).toBe(2);
+    ).toBe(1);
   });
 
   // The pill and the filter answer different questions, so they cover
   // different buckets. If this test ever "fails" because the two were made to
   // agree, read NEEDS_YOU_COUNTED_BUCKETS before changing it.
-  it('counts one bucket narrower than it filters: idle_long is shown, not counted', () => {
-    expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual([...TRIAGE_BUCKETS].slice(0, 9));
+  it('counts narrower than it filters: idle_long and lifecycle are shown, not counted', () => {
+    expect([...NEEDS_YOU_COUNTED_BUCKETS]).toEqual(
+      [...TRIAGE_BUCKETS].slice(0, 9).filter((b) => b !== 'done_unread' && b !== 'lifecycle'),
+    );
     const idleRows = Array.from({ length: 6 }, () => row({ idle_since: 0 }));
     const blocked = row({ claude_status: 'blocked' });
     const rows = [...idleRows, blocked];
@@ -346,4 +353,29 @@ describe('triage rank', () => {
     expect(classify(row({ kind: 'external', claude_status: 'working' }), opts)).toBe('working');
     expect(countNeedsYou([row({ kind: 'external', stuck_kind: 'oom' }), row({ stuck_kind: 'oom' })], opts)).toBe(1);
   });
+});
+
+// Redesign step 0.4: the shared attention table. attention.rs checks the same
+// file against its own `State` / `BUCKET_STATES` and runs the same cases.
+describe('the seven attention states (shared fixture with attention.rs)', () => {
+  const opts = { idleSecs: 0, now: 1000 };
+
+  it('maps every triage bucket, in order, to one of seven states', () => {
+    expect(attentionTable.buckets.map(([b]) => b)).toEqual([...TRIAGE_BUCKETS]);
+    expect(ATTENTION_STATES).toEqual(['action_required', 'failed', 'blocked', 'working', 'paused', 'done', 'idle']);
+    for (const b of TRIAGE_BUCKETS) expect(ATTENTION_STATES).toContain(bucketState(b));
+  });
+
+  it('the badge counts only Action required, Failed and Blocked', () => {
+    expect(ATTENTION_STATES.filter(countsTowardBadge)).toEqual(['action_required', 'failed', 'blocked']);
+  });
+
+  for (const c of attentionTable.cases) {
+    it(c.name, () => {
+      const r = row({ claude_status: 'working', last_activity_at: 100, ...(c.row as Partial<SessionRow>) });
+      expect(classify(r, opts)).toBe(c.bucket);
+      expect(attentionState(r, opts)).toBe(c.state);
+      expect(countNeedsYou([r], opts)).toBe(c.counted ? 1 : 0);
+    });
+  }
 });

@@ -20,7 +20,7 @@ describe('AppearanceSettings', () => {
     expect(screen.getByTestId('appearance-layout-new').getAttribute('aria-pressed')).toBe('true');
   });
 
-  it('picks the theme the sidebar line cycles through', async () => {
+  it('picks the theme (the one picker since the sidebar line went in 1.4)', async () => {
     render(AppearanceSettings);
     expect(screen.getByTestId('appearance-theme-auto').textContent).toBe('System');
     await fireEvent.click(screen.getByTestId('appearance-theme-dark'));

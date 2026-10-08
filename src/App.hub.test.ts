@@ -60,7 +60,7 @@ describe('the hub badge', () => {
     const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? STANDALONE : undefined));
     try {
       render(App);
-      await waitFor(() => expect(screen.getByText(/schema/)).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText('All systems OK')).toBeInTheDocument());
       expect(screen.queryByTestId('hub-badge')).toBeNull();
     } finally {
       restore();
@@ -142,11 +142,9 @@ describe('health in remote mode', () => {
     try {
       render(App);
       // `0.0.0-test` is the `getVersion()` stand-in from `vitest.setup.ts`.
-      await waitFor(() =>
-        expect(screen.getByTestId('footer-version').textContent).toBe(
-          'app 0.0.0-test · hub 9.9.9 · db: ok · schema 41',
-        ),
-      );
+      // Redesign 1.4: the strip says how things are, the versions are on hover.
+      await waitFor(() => expect(screen.getByTestId('footer-version').textContent).toBe('All systems OK'));
+      expect(screen.getByTestId('footer-version').title).toContain('app 0.0.0-test · hub 9.9.9 · db: ok · schema 41');
       expect(screen.getByTestId('footer-version').title).toContain('hub 9.9.9 is https://fleet.example.com');
     } finally {
       restore();
@@ -168,10 +166,9 @@ describe('the footer’s version line', () => {
       // `0.0.0-test` is `getVersion()`'s stand-in (`vitest.setup.ts`); the
       // `0.4.5` the health mock answers is the SAME version standalone, and
       // the fallback that uses it is covered in `app_version.test.ts`.
-      await waitFor(() =>
-        expect(screen.getByTestId('footer-version').textContent).toBe('app 0.0.0-test · db: ok · schema 90'),
-      );
-      expect(screen.getByTestId('footer-version').textContent).not.toContain('hub');
+      await waitFor(() => expect(screen.getByTestId('footer-version').textContent).toBe('All systems OK'));
+      expect(screen.getByTestId('footer-version').title).toContain('app 0.0.0-test · db: ok · schema 90');
+      expect(screen.getByTestId('footer-version').title).not.toContain('hub 0.4.5');
       expect(screen.getByTestId('footer-version').title).toContain('This app owns the fleet');
     } finally {
       restore();
@@ -237,7 +234,7 @@ describe('the disconnected banner', () => {
     );
     try {
       render(App);
-      await waitFor(() => expect(screen.getByText(/schema/)).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText('All systems OK')).toBeInTheDocument());
       expect(inv.mock.calls.some((c) => c[0] === 'hub_connection')).toBe(false);
       expect(screen.queryByTestId('hub-connection-banner')).toBeNull();
     } finally {
@@ -512,7 +509,7 @@ describe('a configured hub this launch cannot use', () => {
       const { restore } = await routeInvoke((cmd) => (cmd === 'hub_status' ? status : undefined));
       try {
         const { unmount } = render(App);
-        await waitFor(() => expect(screen.getByText(/schema|connecting/)).toBeInTheDocument());
+        await waitFor(() => expect(screen.getByText(/All systems OK|connecting/)).toBeInTheDocument());
         expect(screen.queryByTestId('hub-unavailable')).toBeNull();
         unmount();
       } finally {
