@@ -111,7 +111,7 @@ const RETENTION_IS_ADMIN: &str = "work retention is the hub's own sweep of its s
      the fleet's administrator; set the windows with set_setting and read the status on the \
      hub";
 
-/// The ten git-write commands of the Files tab, likewise.
+/// The eleven git-write commands of the Files tab, likewise.
 const NO_GIT_WRITE_TOOL: &str =
     "the hub exposes no git-write tool — a remote client must not stage or commit under a \
      running agent; do it in the session, or from a standalone app";
@@ -804,6 +804,30 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "claim_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "install_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "debug_device_logs",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "debug_device_screenshot",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::Routed {
             tool: "set_setting",
@@ -827,6 +851,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("repo_tree", Verdict::Routed { tool: "repo_tree" }),
     ("repo_file", Verdict::Routed { tool: "repo_file" }),
     ("repo_diff", Verdict::Routed { tool: "repo_diff" }),
+    ("repo_blame", Verdict::Routed { tool: "repo_blame" }),
     (
         "upload_to_session",
         Verdict::SameInBoth {
@@ -889,6 +914,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     (
         "repo_delete_branch",
+        Verdict::LocalOnly {
+            instead: NO_GIT_WRITE_TOOL,
+        },
+    ),
+    (
+        "repo_delete_merged_branches",
         Verdict::LocalOnly {
             instead: NO_GIT_WRITE_TOOL,
         },

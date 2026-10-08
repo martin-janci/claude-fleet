@@ -95,7 +95,7 @@ describe('ROUTED_ACTIONS against the generated routed/routed_unless commands', (
 // REASONS (a typo, or a command that got renamed on one side and not the
 // other) — see the "every other REASONS key is a command name" test below.
 //
-//   repo_write  -> the ten git-write commands FilesPanel.svelte fans
+//   repo_write  -> the eleven git-write commands FilesPanel.svelte fans
 //                  `hubBlock('repo_write', …)` out to (FileList,
 //                  RemoteToolbar, BranchList, CommitGraph)
 //   catalog_registry -> catalog_add_catalog / catalog_remove_catalog, which
@@ -188,6 +188,7 @@ const LOCAL_ONLY_WITH_NO_DIRECT_REASONS_ENTRY = {
     'repo_checkout_commit',
     'repo_create_branch',
     'repo_delete_branch',
+    'repo_delete_merged_branches',
     'repo_stage',
     'repo_unstage',
     'repo_commit_create',

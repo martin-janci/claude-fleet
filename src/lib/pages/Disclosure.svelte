@@ -46,7 +46,7 @@
   summary::before {
     content: '▸';
     display: inline-block;
-    transition: transform 0.12s ease;
+    transition: transform var(--dur-fast) ease;
   }
   details[open] > summary::before {
     transform: rotate(90deg);

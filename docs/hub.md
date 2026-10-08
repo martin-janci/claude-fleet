@@ -3230,7 +3230,7 @@ REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
 <!-- BEGIN GENERATED: hub-client verdicts -->
 <!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
 
-Of the 316 commands, 223 route to a hub tool, 1 routes except for one argument shape, 50 refuse, and 42 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
+Of the 322 commands, 228 route to a hub tool, 1 routes except for one argument shape, 51 refuse, and 42 are the same in both modes; the full table is `src-tauri/src/backend/verdicts.rs`.
 
 | Command | What to do instead |
 | --- | --- |
@@ -3269,6 +3269,7 @@ Of the 316 commands, 223 route to a hub tool, 1 routes except for one argument s
 | `repo_commit_create` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_create_branch` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_delete_branch` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
+| `repo_delete_merged_branches` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_fetch` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_pull` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |
 | `repo_push` | the hub exposes no git-write tool — a remote client must not stage or commit under a running agent; do it in the session, or from a standalone app |

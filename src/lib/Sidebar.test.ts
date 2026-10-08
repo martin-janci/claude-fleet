@@ -3179,3 +3179,80 @@ describe('Group by state, host or agent (redesign step 3.6)', () => {
     sidebarGroupBy.set('project');
   });
 });
+
+describe('List keys (redesign step 3.8)', () => {
+  beforeEach(() => sidebarGroupBy.set('project'));
+
+  function three() {
+    return [
+      { ...sessionFor(1, 'dev-one'), claude_status: 'working' as const },
+      { ...sessionFor(1, 'dev-two'), claude_status: 'working' as const },
+      { ...sessionFor(1, 'dev-three'), claude_status: 'blocked' as const },
+    ];
+  }
+
+  it('j and k move between rows, x picks one for a bulk action, Enter opens', async () => {
+    const rows = three();
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    render(Sidebar);
+    await tick(); await tick();
+    const els = screen.getAllByTestId('sess-row');
+    els[0].focus();
+    await fireEvent.keyDown(els[0], { key: 'j' });
+    expect(document.activeElement).toBe(els[1]);
+    await fireEvent.keyDown(els[1], { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(els[2]);
+    await fireEvent.keyDown(els[2], { key: 'k' });
+    expect(document.activeElement).toBe(els[1]);
+
+    await fireEvent.keyDown(els[1], { key: 'x' });
+    await tick();
+    expect(screen.getAllByTestId('select-box').filter((b) => (b as HTMLInputElement).checked)).toHaveLength(1);
+
+    await fireEvent.keyDown(document.activeElement!, { key: 'x' });
+    await tick();
+    await fireEvent.click(screen.getByText('Select'));
+    await tick();
+    const row = screen.getAllByTestId('sess-row')[0];
+    await fireEvent.keyDown(row, { key: 'Enter' });
+    expect(get(selectedSession)?.id).toBe(rows[0].id);
+  });
+
+  it('the next-needs-you chord opens the next row that needs you, and wraps', async () => {
+    const rows = three();
+    mockBackend(fakeProjects, rows);
+    selectSession(null);
+    render(Sidebar);
+    await tick(); await tick();
+    const isMac = /Mac/.test(navigator.platform) || /Macintosh/.test(navigator.userAgent);
+    const chord = isMac ? { key: 'n', metaKey: true, altKey: true } : { key: 'n', ctrlKey: true, altKey: true };
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)?.id).toBe(rows[2].id);
+    await fireEvent.keyDown(document.body, chord);
+    expect(get(selectedSession)?.id).toBe(rows[2].id);
+  });
+
+  it('⌘2 opens the second row on a Mac', async () => {
+    const plat = Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform');
+    Object.defineProperty(navigator, 'platform', { value: 'MacIntel', configurable: true });
+    try {
+      const rows = three();
+      mockBackend(fakeProjects, rows);
+      selectSession(null);
+      render(Sidebar);
+      await tick(); await tick();
+      await fireEvent.keyDown(document.body, { key: '2', metaKey: true });
+      expect(get(selectedSession)?.id).toBe(rows[1].id);
+      // A digit typed into a field is the field's.
+      const input = document.createElement('input');
+      document.body.appendChild(input);
+      await fireEvent.keyDown(input, { key: '3', metaKey: true });
+      expect(get(selectedSession)?.id).toBe(rows[1].id);
+      input.remove();
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>).platform;
+      if (plat) Object.defineProperty(Navigator.prototype, 'platform', plat);
+    }
+  });
+});

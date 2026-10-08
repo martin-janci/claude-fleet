@@ -1,14 +1,14 @@
 //! Tauri commands for the Files & Diff viewer (iter 5). Thin wrappers over
 //! `service::repo_read`.
 //!
-//! All four have hub tools of the same name and route there in remote mode;
+//! All five have hub tools of the same name and route there in remote mode;
 //! see `commands/history.rs` for the note on their wire types.
 
 use crate::backend::FleetBackend;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::repo::SessionIdArgs;
 use fleet_core::service::repo_read::{
-    self, ChangedFile, FileContent, FileDiff, RepoFileArgs, RepoTree,
+    self, ChangedFile, FileBlame, FileContent, FileDiff, RepoFileArgs, RepoTree,
 };
 use fleet_core::ssh::SshClient;
 use fleet_core::store::Store;
@@ -61,8 +61,31 @@ pub async fn repo_diff(
     routed::repo_diff(&backend, args, &store, &ssh).await
 }
 
+/// Who last changed each line of one worktree file (`git blame`).
+#[tauri::command]
+pub async fn repo_blame(
+    args: RepoFileArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<FileBlame, IpcError> {
+    routed::repo_blame(&backend, args, &store, &ssh).await
+}
+
 pub(crate) mod routed {
     use super::*;
+
+    pub async fn repo_blame(
+        backend: &FleetBackend,
+        args: RepoFileArgs,
+        store: &Mutex<Store>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<FileBlame, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("repo_blame", &args).await,
+            None => repo_read::repo_blame(args, store, ssh).await,
+        }
+    }
 
     pub async fn repo_changes(
         backend: &FleetBackend,
