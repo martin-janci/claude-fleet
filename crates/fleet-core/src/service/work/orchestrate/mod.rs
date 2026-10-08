@@ -258,6 +258,9 @@ fn start_for(
             Actor::Loop => Decider::Agent,
         },
         owner: m.owner_person_id,
+        // The run's session is the mission's, whoever pressed Go
+        // (migration 124): the origin chip names the mission.
+        origin: Some(crate::store::SessionOrigin::mission(m.id)),
         ..Default::default()
     })
 }
