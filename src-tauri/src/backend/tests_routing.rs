@@ -731,6 +731,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // `leaving` is skipped when false, so a heartbeat is the session id
+        // alone; the hub learns the device from the connection, never here.
+        (
+            "session_presence",
+            "session_presence",
+            json!({ "session_id": 42 }),
+            r#"{"session_id":42,"viewers":[{"person_id":3,"name":"jane","since":1700000000}],"heartbeat_secs":20}"#,
+            Box::new(|b, _, _| {
+                block_on(commands::presence::routed::session_presence(
+                    b,
+                    fleet_core::service::presence::SessionPresenceArgs {
+                        session_id: 42,
+                        leaving: false,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "list_pull_requests",
             "prs",
@@ -6122,6 +6140,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/federation.rs"),
     ),
     ("commands/prs.rs", include_str!("../commands/prs.rs")),
+    (
+        "commands/presence.rs",
+        include_str!("../commands/presence.rs"),
+    ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",

@@ -382,6 +382,41 @@ pub struct PersonSummary {
     pub devices: Vec<String>,
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Fill each member's live and private counts (redesign 11.7c) as `viewer`
+/// may learn them: every live session of `org` the member owns, and of those
+/// the ones `viewer` neither owns nor holds a grant on. `None` is the
+/// desktop's own store, which reads every row, so nothing is private to it.
+pub fn count_member_sessions(
+    s: &Store,
+    org: i64,
+    viewer: Option<i64>,
+    members: &mut [MemberSummary],
+) -> Result<(), IpcError> {
+    let grants = match viewer {
+        Some(p) => s.grants_for_person(p)?,
+        None => Default::default(),
+    };
+    let mut by_owner: std::collections::HashMap<i64, (u32, u32)> = Default::default();
+    for (owner, session) in s.live_owned_sessions_in_org(org)? {
+        let open = viewer.is_none() || viewer == Some(owner) || grants.contains_key(&session);
+        let e = by_owner.entry(owner).or_default();
+        e.0 += 1;
+        if !open {
+            e.1 += 1;
+        }
+    }
+    for m in members.iter_mut() {
+        let (live, private) = by_owner.get(&m.person_id).copied().unwrap_or_default();
+        m.live_sessions = live;
+        m.private_sessions = private;
+    }
+    Ok(())
+}
+
 /// Whose hosts' unclaimed counts `person` is served (phase D): every host
 /// for a host administrator — the hub's owner, or an admin of the company
 /// that owns the hub (owner's answer 1) — else the hosts of each org they
@@ -442,6 +477,14 @@ pub struct MemberSummary {
     /// Their live devices, by name.
     #[serde(default)]
     pub devices: Vec<String>,
+    /// Redesign 11.7c: their live sessions in this org, counted for whoever
+    /// administers it. Absent (zero) from `set_member`'s answer.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub live_sessions: u32,
+    /// Of [`Self::live_sessions`], how many the asking admin may not open:
+    /// shown as existing, never named — a session's metadata is content.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub private_sessions: u32,
 }
 
 /// The live members of `org`, admins first.
@@ -469,6 +512,8 @@ pub fn list_members(s: &Store, org: i64) -> Result<Vec<MemberSummary>, IpcError>
             added_at: m.added_at,
             shares_since: m.shares_since,
             owner: owner == Some(m.person_id),
+            live_sessions: 0,
+            private_sessions: 0,
         });
     }
     Ok(out)
@@ -876,7 +921,9 @@ pub fn run(
             let org = org_of(&s, args)?.ok_or_else(|| {
                 IpcError::new(codes::E_INVALID, "list_members needs org_id or org")
             })?;
-            to_json(&list_members(&s, org)?)
+            let mut members = list_members(&s, org)?;
+            count_member_sessions(&s, org, me.person, &mut members)?;
+            to_json(&members)
         }
         Action::SetMember => {
             let org = org_of(&s, args)?
