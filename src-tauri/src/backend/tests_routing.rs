@@ -6112,6 +6112,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("commands/tray.rs", include_str!("../commands/tray.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/voice.rs", include_str!("../commands/voice.rs")),
+    (
+        "commands/windows.rs",
+        include_str!("../commands/windows.rs"),
+    ),
     ("commands/work.rs", include_str!("../commands/work.rs")),
     (
         "commands/work_view.rs",

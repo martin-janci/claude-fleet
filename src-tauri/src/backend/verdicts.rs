@@ -1712,6 +1712,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
                   passed in; it reads no state.db and the hub is not in the path",
         },
     ),
+    (
+        "open_terminal_window",
+        Verdict::SameInBoth {
+            why: "a window of this app, whose pane attaches through pty_open like the \
+                  main window's; it reads no state.db and the hub is not in the path",
+        },
+    ),
     // ── the voice relay's microphone claim ──────────────────────────────────
     (
         "voice_claim",

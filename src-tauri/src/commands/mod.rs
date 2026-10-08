@@ -32,6 +32,7 @@ pub mod trackers;
 pub mod tray;
 pub mod upload;
 pub mod voice;
+pub mod windows;
 pub mod work;
 pub mod work_view;
 pub mod worktrees;
