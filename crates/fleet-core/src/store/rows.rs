@@ -536,6 +536,11 @@ impl SessionOrigin {
         Self::with("token", proven_session)
     }
 
+    /// A routine's run started it (redesign 8.5).
+    pub fn routine(routine_id: i64) -> Self {
+        Self::with("routine", Some(routine_id))
+    }
+
     /// The origin a row records, to carry it onto another row (a move).
     /// `None` for a row with no origin, or one this build does not know.
     pub fn of_row(row: &SessionRow) -> Option<Self> {
