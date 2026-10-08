@@ -2338,6 +2338,7 @@ fn router_sum_serves_every_tool() {
         include_str!("updates.rs"),
         include_str!("downloads.rs"),
         include_str!("sharing.rs"),
+        include_str!("forms.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -2349,8 +2350,9 @@ fn router_sum_serves_every_tool() {
     );
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
     // claim tools (T12) + the New session picker's `project_picks` /
-    // `set_project_pick` + org administration's `org_admin` (phase B).
-    assert_eq!(served, 117);
+    // `set_project_pick` + org administration's `org_admin` (phase B) +
+    // chat forms' `ask`.
+    assert_eq!(served, 118);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3851,7 +3853,8 @@ fn the_served_definition_budget_stays_bounded() {
     /// Measured at 78,993 on 2026-10-07 after login profiles
     /// (`new_session { profile }` and `restart_session { profile }`, +91
     /// bytes).
-    const BUDGET_BYTES: usize = 79_093;
+    /// +1,517 B: the ask tool (chat forms), 78,993 → 80,510.
+    const BUDGET_BYTES: usize = 80_610;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -9976,6 +9979,10 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("safe_kill_session", &["Own"]),
     ("set_friendly_name", &["Drive"]),
     ("spawn_review", &["Own"]),
+    // forms.rs
+    // `list` and `get` and `wait` read the form's session; `answer` and
+    // `decline` drive it.
+    ("ask", &["Drive", "Read"]),
     // messaging.rs
     // `Read` to read, `Drive` when `mark_read` advances the row's cursor.
     ("inbox", &["Drive", "Read"]),
@@ -10384,6 +10391,9 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
         // reason: without this line `send_file`'s handler is invisible and
         // its `SESSION_REACH` row reads as stale.
         "downloads.rs",
+        // Chat forms: `ask`'s list/get/wait read the form's session, its
+        // answer/decline drive it.
+        "forms.rs",
     ] {
         let src = std::fs::read_to_string(dir.join(file)).expect("read a tool file");
         let code = src
@@ -17705,4 +17715,169 @@ async fn org_admin_lists_for_a_device_and_changes_only_for_a_trusted_one() {
         store.lock().unwrap().active_client_tokens().unwrap().len(),
         1
     );
+}
+
+// ---- chat forms: the `ask` tool ---------------------------------------------
+
+fn small_form() -> serde_json::Value {
+    serde_json::json!({ "spec": "fleet.form/1", "title": "Pick", "steps": [
+        { "title": "One", "fields": [ { "name": "x", "type": "text", "label": "X", "required": true } ] } ] })
+}
+
+fn ask_p() -> AskParams {
+    AskParams {
+        form: None,
+        why: None,
+        wait: None,
+        cancel: None,
+        list: None,
+        get: None,
+        answer: None,
+        values: None,
+        decline: None,
+        note: None,
+        timeout_s: None,
+    }
+}
+
+#[tokio::test]
+async fn an_agent_asks_a_person_answers_and_the_agent_gets_the_answers() {
+    let g = gate_fixture();
+    let (a_row, ada) = (g.a_row, g.ada);
+    let t = test_tools(g.store);
+    let asking = t.ask(
+        Extension(pane_caller(Some("%7"))),
+        Parameters(AskParams {
+            form: Some(small_form()),
+            timeout_s: Some(30),
+            ..ask_p()
+        }),
+    );
+    let answering = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let id = t
+            .store
+            .lock()
+            .unwrap()
+            .pending_form_of_session(a_row)
+            .unwrap()
+            .unwrap()
+            .form_id;
+        let values = serde_json::from_value(serde_json::json!({ "x": "hello" })).unwrap();
+        let answered = t
+            .ask(
+                Extension(device_of(ada, ada)),
+                Parameters(AskParams {
+                    answer: Some(id),
+                    values: Some(values),
+                    ..ask_p()
+                }),
+            )
+            .await;
+        assert!(answered.is_ok(), "{answered:?}");
+    };
+    let (out, ()) = tokio::join!(asking, answering);
+    let out = out.expect("the agent's call returns");
+    let body = text_of(&out.content[0]);
+    assert!(
+        body.contains("\"answered\"") && body.contains("hello"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_caller_that_is_no_session_cannot_ask() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    for caller in [Caller::master(), pane_caller(None)] {
+        let err = t
+            .ask(
+                Extension(caller),
+                Parameters(AskParams {
+                    form: Some(small_form()),
+                    ..ask_p()
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err_code(&err), "E_NOT_A_SESSION");
+    }
+}
+
+#[tokio::test]
+async fn a_host_token_never_answers_not_even_its_own_form() {
+    let g = gate_fixture();
+    let a_row = g.a_row;
+    let t = test_tools(g.store);
+    let id = crate::service::forms::open(&t.store, a_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let values = serde_json::from_value(serde_json::json!({ "x": "y" })).unwrap();
+    let err = t
+        .ask(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(AskParams {
+                answer: Some(id.clone()),
+                values: Some(values),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+    let err = t
+        .ask(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(AskParams {
+                decline: Some(id),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_FORBIDDEN");
+}
+
+#[tokio::test]
+async fn someone_elses_session_form_is_not_answerable() {
+    let g = gate_fixture();
+    let (b_row, ada) = (g.b_row, g.ada);
+    let t = test_tools(g.store);
+    let id = crate::service::forms::open(&t.store, b_row, &small_form(), None)
+        .unwrap()
+        .form_id;
+    let values = serde_json::from_value(serde_json::json!({ "x": "y" })).unwrap();
+    let err = t
+        .ask(
+            Extension(device_of(ada, ada)),
+            Parameters(AskParams {
+                answer: Some(id),
+                values: Some(values),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        ["E_FORBIDDEN", "E_NOTFOUND"].contains(&err_code(&err).as_str()),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn exactly_one_action_per_call() {
+    let g = gate_fixture();
+    let t = test_tools(g.store);
+    let err = t
+        .ask(
+            Extension(Caller::master()),
+            Parameters(AskParams {
+                get: Some("f_a".into()),
+                decline: Some("f_a".into()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err_code(&err), "E_INVALID");
 }

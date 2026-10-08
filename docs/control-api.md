@@ -771,6 +771,7 @@ Index by area (names only; see the reference for details):
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
   stream. See `docs/hub.md` → *File downloads*.
+- **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
   read, but master token only, since the values name hosts and their
@@ -926,13 +927,20 @@ Three codes are specific to agent hosts:
   of band (`fleet-hub agent-token <host>`, then
   `fleet-agent install --token-file -`), then provision again.
 
+Two codes belong to chat forms (`ask`):
+- `E_NOT_A_SESSION`: `ask { form }` from a caller that is not a proven
+  session. A form opens in the asking session's own chat, so the call must
+  come from a per-host token whose `X-Fleet-Pane` matches a session row.
+- `E_HOST_WRITE`: a chat form's secret could not be written to its session's
+  host; `details.field` names it. The form stays pending.
+
 A timed-out agent call reports `E_SSH_TIMEOUT`, the same code as SSH, so
 nothing downstream mistakes a timeout for "nothing ran".
 
 Every call runs under a wall clock: 60 s for reads and single round trips,
 300 s for session lifecycle, provisioning and host probes, 660 s for the
 self-bounded long polls (`wait_for_session`, `wait_for_task`, `run_prompt`,
-whose own `timeout_s` maxes at 600). On elapse the result is
+`ask`, whose own `timeout_s` maxes at 600). On elapse the result is
 `E_TIMEOUT: <tool> exceeded its <n> s limit; the call may have partially
 completed` with `structuredContent { code: "E_TIMEOUT", tool, limit_secs }`.
 

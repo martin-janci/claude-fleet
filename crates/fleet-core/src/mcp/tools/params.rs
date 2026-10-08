@@ -1024,6 +1024,52 @@ pub struct GuideParams {
     pub page_id: Option<String>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema, Default)]
+pub struct AskListFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<i64>,
+    /// pending, answered, declined, cancelled or expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AskParams {
+    /// A fleet.form/1 form for your own session's chat (docs/forms.md).
+    #[serde(default)]
+    pub form: Option<serde_json::Value>,
+    /// form: why you ask (≤500 chars).
+    #[serde(default)]
+    pub why: Option<String>,
+    /// Wait again on this pending form_id.
+    #[serde(default)]
+    pub wait: Option<String>,
+    /// Withdraw this form_id.
+    #[serde(default)]
+    pub cancel: Option<String>,
+    /// List forms: {session_id?, state?}.
+    #[serde(default)]
+    pub list: Option<AskListFilter>,
+    /// Read this form_id.
+    #[serde(default)]
+    pub get: Option<String>,
+    /// Answer this form_id with `values`.
+    #[serde(default)]
+    pub answer: Option<String>,
+    /// answer: field name → value.
+    #[serde(default)]
+    pub values: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Decline this form_id, with an optional `note`.
+    #[serde(default)]
+    pub decline: Option<String>,
+    /// decline: a short reason.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// form / wait: default and max 600.
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct ListClientsParams {
     /// Include revoked clients (kept for the audit trail).

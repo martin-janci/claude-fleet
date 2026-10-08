@@ -731,6 +731,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::LongPoll,
     },
+    // forms.rs — chat forms: an agent's `ask { form | wait }` is a bounded
+    // wait (≤ 600 s), the rest are quick. Answering is a person's (refused to
+    // host tokens in the tool).
+    ToolPolicy {
+        name: "ask",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::LongPoll,
+    },
     ToolPolicy {
         name: "session_transcript",
         access: Access::Client,
@@ -2017,6 +2027,8 @@ mod tests {
             "apply_sync",
             // Writes a secret value; master-only.
             "set_secret",
+            // Opens, withdraws, answers and declines chat forms.
+            "ask",
             "no_such_tool",
         ] {
             assert!(!is_readonly_tool(t), "{t} must be mutating");

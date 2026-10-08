@@ -29,6 +29,12 @@ Apply a plan_sync plan: writes files with compare-and-swap, backs up overwritten
 
 Parameters: `confirm_nonce`, `force_partial`, `plan_id`
 
+### `ask`
+
+Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
+
+Parameters: `answer`, `cancel`, `decline`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
+
 ### `broadcast_prompt`
 
 Send one prompt to every matching work session (not the controller), skipping blocked or stuck ones unless status="blocked". Returns per-session results. Rate-limited per caller (default one call per 30 s; E_RATE_LIMITED with retry_after_secs). Marked untrusted unless raw=true (master token only). May return E_CONFIRM_REQUIRED when desktop confirmation is on.
