@@ -976,15 +976,18 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryByTestId('sidebar-collapse')).toBeNull();
   });
 
-  it('header (search + filter) and footer (theme + new) stay rendered even with no projects', async () => {
+  it('header (search + filter) and footer (new session) stay rendered even with no projects', async () => {
     mockBackend([], []);
     render(Sidebar);
     await tick(); await tick();
     expect(screen.getByTestId('sidebar-chrome-top')).toBeInTheDocument();
     expect(screen.getByTestId('sidebar-chrome-bottom')).toBeInTheDocument();
     expect(screen.getByTestId('sidebar-search')).toBeInTheDocument();
-    expect(screen.getByTestId('theme-toggle')).toBeInTheDocument();
     expect(screen.getByTestId('new-session-footer')).toBeInTheDocument();
+    // Redesign 1.4: the "theme: auto" line is gone from the footer; the
+    // picker lives in Settings › Appearance (AppearanceSettings.test.ts).
+    expect(screen.queryByTestId('theme-toggle')).toBeNull();
+    expect(screen.getByTestId('sidebar-chrome-bottom').textContent).not.toMatch(/theme:/);
   });
 
   it('renders a host pill for each non-hidden host plus "all"', async () => {

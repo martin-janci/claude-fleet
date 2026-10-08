@@ -48,6 +48,11 @@ export interface VersionLine {
   title: string;
 }
 
+/** The footer's own words for the fleet in front of the reader. */
+function summaryWord(dbReady: boolean): string {
+  return dbReady ? 'All systems OK' : 'Database not ready';
+}
+
 /** What `db:` says about whichever database the line is describing. */
 function dbWord(ready: boolean): string {
   return ready ? 'db: ok' : 'db: fail';
@@ -55,6 +60,12 @@ function dbWord(ready: boolean): string {
 
 /**
  * PURE: the footer's version line.
+ *
+ * The status bar says how the fleet is in words ("All systems OK", or
+ * "Database not ready"); the versions moved to its hover title (redesign step
+ * 1.4: "hub 0.5.4 · db ok" was plumbing in the one strip always on screen).
+ * The title opens with the line the footer used to show, so the numbers are
+ * one hover away and a bug report can still copy them.
  *
  * `health` is the fleet in front of the reader — this app's own numbers
  * standalone, the hub's over the wire — so the labelling turns on `remote`
@@ -91,9 +102,10 @@ export function versionLine(v: {
     // Standalone the app IS the fleet, so one version covers both and
     // `health.version` is as good a source for it as Tauri's.
     const mine = app ?? health.version;
+    const line = `app ${mine} · ${dbWord(health.db_ready)} · schema ${health.schema_version}`;
     return {
-      text: `app ${mine} · ${dbWord(health.db_ready)} · schema ${health.schema_version}`,
-      title: `This app owns the fleet: version ${mine}, its own database (schema ${health.schema_version}). No hub.`,
+      text: summaryWord(health.db_ready),
+      title: `${line}. This app owns the fleet: version ${mine}, its own database (schema ${health.schema_version}). No hub.`,
     };
   }
 
@@ -114,5 +126,5 @@ export function versionLine(v: {
     app && app !== health.version
       ? ' The two differ, which is allowed: the hub and its clients are released separately, and compatibility is decided by the wire contract rather than by matching versions.'
       : '';
-  return { text: parts.join(' · '), title: whose + drift };
+  return { text: summaryWord(health.db_ready), title: `${parts.join(' · ')}. ${whose}${drift}` };
 }

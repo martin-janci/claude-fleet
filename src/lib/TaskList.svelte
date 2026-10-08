@@ -53,6 +53,13 @@
   const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
 
   const sections: StatusSections = $derived(groupTasksByStatus(tasks, Math.floor(Date.now() / 1000)));
+  const emptySections = $derived(
+    [
+      sections.todo.length === 0 ? 'To do' : null,
+      sections.doing.length === 0 ? 'Doing' : null,
+      sections.done.length === 0 ? 'Done in the last 7 days' : null,
+    ].filter((x): x is string => x !== null),
+  );
   const pickable = $derived(($projects ?? []).filter((p) => !p.project?.system));
 
   let seq = 0;
@@ -206,9 +213,14 @@
   {:else if tasks.length === 0}
     <p class="muted" data-testid="task-list-empty">No tasks match. Type one above and press Enter.</p>
   {:else}
-    {@render section('todo', 'To do', sections.todo, true)}
-    {@render section('doing', 'Doing', sections.doing, true)}
-    {@render section('done', 'Done · last 7 days', sections.done, doneOpen)}
+    <!-- An empty section is a word in one line, not a heading with nothing
+         under it (redesign 1.4). -->
+    {#if sections.todo.length > 0}{@render section('todo', 'To do', sections.todo, true)}{/if}
+    {#if sections.doing.length > 0}{@render section('doing', 'Doing', sections.doing, true)}{/if}
+    {#if sections.done.length > 0}{@render section('done', 'Done · last 7 days', sections.done, doneOpen)}{/if}
+    {#if emptySections.length > 0}
+      <p class="muted" data-testid="task-sections-empty">Nothing in {emptySections.join(' or ')}.</p>
+    {/if}
   {/if}
 </div>
 

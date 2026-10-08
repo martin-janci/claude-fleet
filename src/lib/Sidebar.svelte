@@ -23,7 +23,6 @@
   import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
   import { readPref, writePref } from './prefs';
-  import { theme, cycleTheme } from './theme';
   import NewSessionDialog from './NewSessionDialog.svelte';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
@@ -1608,14 +1607,6 @@
         use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
       >⚡</button>
     </div>
-    <button
-      class="theme-toggle"
-      onclick={cycleTheme}
-      title="Theme: {$theme} (click to cycle auto/light/dark)"
-      data-testid="theme-toggle"
-    >
-      theme: {$theme}
-    </button>
   </footer>
 </div>
 
@@ -2067,16 +2058,4 @@
     cursor: not-allowed;
   }
   .purge-btn:hover:not(:disabled) { opacity: 1 !important; }
-  .theme-toggle {
-    width: 100%;
-    text-align: left;
-    font-size: 0.75rem;
-    padding: 0.25rem 0.5rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg-muted);
-    border-radius: 4px;
-    cursor: pointer;
-  }
-  .theme-toggle:hover { color: var(--fg); border-color: var(--accent); }
 </style>
