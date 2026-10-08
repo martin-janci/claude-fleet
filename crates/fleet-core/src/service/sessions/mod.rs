@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 mod activity;
+mod adopt;
 mod claim;
 mod discover;
 mod lifecycle;
@@ -40,6 +41,7 @@ mod lifecycle_tests;
 mod tests;
 
 pub use self::activity::*;
+pub use self::adopt::*;
 pub use self::claim::*;
 pub use self::discover::*;
 pub use self::lifecycle::*;

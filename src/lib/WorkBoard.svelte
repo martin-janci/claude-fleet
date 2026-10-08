@@ -26,6 +26,7 @@
     type WorkTask,
   } from './work_view';
   import { providerInfo } from './trackers';
+  import { hintAnchor } from './hints';
   import EditTaskDialog from './EditTaskDialog.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -140,7 +141,7 @@
 
   function open(t: WorkTask) {
     sidebarView.set('work');
-    openTask(t.task_id);
+    openTask(t.task_id, t.sessions);
   }
 
   // ── Pointer drag ──
@@ -233,11 +234,10 @@
 
 <section class="board" data-testid="work-board" aria-label="Task board">
   <header>
-    <h2>Board</h2>
-    <span class="muted" data-testid="work-board-hint">
-      {#if moveBlocked}{moveBlocked}{:else}Drag a task to set its status, or focus it and press ← →. The Work view's
-        filters apply.{/if}
-    </span>
+    <!-- How to move a task is a one-time hint now (redesign 1.4), not a line on
+         every visit; a reason the board cannot move tasks still shows here. -->
+    <h2 use:hintAnchor={{ id: 'board-move', when: !moveBlocked }}>Board</h2>
+    {#if moveBlocked}<span class="muted" data-testid="work-board-hint">{moveBlocked}</span>{/if}
     <button class="btn btn--quiet btn--icon" type="button" title="Close the board" aria-label="Close the board"
       data-testid="work-board-close" onclick={() => onclose?.()}>✕</button
     >
@@ -366,6 +366,10 @@
   h2 {
     margin: 0;
     font-size: 0.95rem;
+  }
+  /* The close button sits at the right edge whether or not a reason shows. */
+  header [data-testid='work-board-close'] {
+    margin-left: auto;
   }
   header .muted {
     flex: 1;

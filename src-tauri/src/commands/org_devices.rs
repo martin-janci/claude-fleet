@@ -44,6 +44,20 @@ pub struct DeviceArgs {
     pub device: String,
 }
 
+/// Apply's changed fields on Settings → Devices: only those present are
+/// written. `name` is the device's new name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateDeviceArgs {
+    pub device: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// `full` or `readonly`.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub trusted: Option<bool>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceTrustArgs {
     pub device: String,
@@ -172,6 +186,19 @@ pub async fn set_device_trust(
         )
         .await?,
     )
+}
+
+/// Trust, then mode, then the name, each through its own `org_admin`
+/// action, so a hub that predates `rename_device` / `set_device_mode` still
+/// takes a trust change. The rename goes last: the others address the
+/// device by the name it has now.
+#[tauri::command]
+pub async fn update_device(
+    backend: State<'_, Arc<FleetBackend>>,
+    args: UpdateDeviceArgs,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<DeviceSummary, IpcError> {
+    decode(routed::update_device(&backend, &store, args).await?)
 }
 
 #[tauri::command]
@@ -325,6 +352,49 @@ pub(crate) mod routed {
             Some(hub) => hub.route("set_device_trust", &args).await,
             None => local(&args, store),
         }
+    }
+
+    pub async fn update_device(
+        backend: &FleetBackend,
+        store: &Mutex<Store>,
+        args: UpdateDeviceArgs,
+    ) -> Result<serde_json::Value, IpcError> {
+        let mut steps: Vec<OrgAdminArgs> = Vec::new();
+        if let Some(trusted) = args.trusted {
+            steps.push(OrgAdminArgs {
+                device: Some(args.device.clone()),
+                trusted: Some(trusted),
+                ..OrgAdminArgs::new("set_device_trust")
+            });
+        }
+        if let Some(mode) = args.mode {
+            steps.push(OrgAdminArgs {
+                device: Some(args.device.clone()),
+                mode: Some(mode),
+                ..OrgAdminArgs::new("set_device_mode")
+            });
+        }
+        if let Some(name) = args.name.filter(|n| n.trim() != args.device.trim()) {
+            steps.push(OrgAdminArgs {
+                device: Some(args.device.clone()),
+                name: Some(name),
+                ..OrgAdminArgs::new("rename_device")
+            });
+        }
+        if steps.is_empty() {
+            return Err(IpcError::new(
+                fleet_core::ipc_error::codes::E_INVALID,
+                "update_device needs name, mode or trusted",
+            ));
+        }
+        let mut last = serde_json::Value::Null;
+        for step in steps {
+            last = match backend.hub() {
+                Some(hub) => hub.route("update_device", &step).await?,
+                None => local(&step, store)?,
+            };
+        }
+        Ok(last)
     }
 
     pub async fn bind_device_org(

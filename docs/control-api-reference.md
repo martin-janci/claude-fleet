@@ -19,6 +19,12 @@ Add a project on a host: clone a GitHub URL, adopt a folder (the hub's local hos
 
 Parameters: `confirm_nonce`, `host_alias`, `source`
 
+### `adopt_session`
+
+Adopt a live tmux session fleet did not start (started_at null: someone ran tmux by hand on the host). Fleet runs it from now on: started_at is set and the caller becomes its owner when it has none. The pane is untouched. Errors with E_INVALID_STATE for a row fleet already runs, a lost one (use restore_host_sessions) or one with no pane (bg, external).
+
+Parameters: `session_id`
+
 ### `agent_status`
 
 Which agent hosts (transport "agent") have a fleet-agent connected: since (unix s), version, host name, OS. Offline ones show connected=false; a call for one fails fast with E_AGENT_OFFLINE. enabled=false where no agents are accepted (the desktop).
@@ -261,7 +267,7 @@ Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
+Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -835,6 +841,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::org_devices::pair_device`
 - `commands::org_devices::revoke_device`
 - `commands::org_devices::set_device_trust`
+- `commands::org_devices::update_device`
 - `commands::org_devices::bind_device_org`
 - `commands::org_devices::set_device_person`
 - `commands::org_devices::grant_device_catalog`
@@ -862,6 +869,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::move_session::move_session`
 - `commands::resolve_move::resolve_move`
 - `commands::sessions::dismiss_ghost_session`
+- `commands::sessions::adopt_session`
 - `commands::sessions::dismiss_agent_session`
 - `commands::sessions::new_bg_session`
 - `commands::sessions::purge_project`

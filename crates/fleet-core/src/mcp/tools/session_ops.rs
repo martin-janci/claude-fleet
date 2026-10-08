@@ -420,6 +420,7 @@ impl FleetTools {
             model: p.model,
             effort: p.effort,
             profile: p.profile,
+            agent: p.agent,
             // Whose the new session is (multi-user M1, T5): the person behind
             // THIS connection, resolved by `owner_for` — a paired device's own
             // person, the hub's personal owner for the master token, and
@@ -484,6 +485,7 @@ impl FleetTools {
             model: None,
             effort: None,
             profile: None,
+            agent: None,
             // The caller's own person, as in `new_session` above — a shell
             // session is as private as any other (its pane sees the same
             // checkout and the same credentials).
@@ -814,6 +816,39 @@ impl FleetTools {
         )?;
         sessions::dismiss_ghost_session(args, &self.store).map_err(to_mcp_err)?;
         ok_json(&serde_json::json!({ "dismissed": session_id }))
+    }
+
+    #[tool(description = "Adopt a live tmux session fleet did not start \
+        (started_at null: someone ran tmux by hand on the host). Fleet runs \
+        it from now on: started_at is set and the caller becomes its owner \
+        when it has none. The pane is untouched. Errors with \
+        E_INVALID_STATE for a row fleet already runs, a lost one (use \
+        restore_host_sessions) or one with no pane (bg, external).")]
+    pub(super) async fn adopt_session(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(mut args): Parameters<sessions::AdoptSessionArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("adopt_session", &format!("session_id={}", args.session_id));
+        self.resolve_target(
+            &caller,
+            Some(args.session_id),
+            None,
+            None,
+            // `own`: it takes ownership of the row, which is the claim's
+            // reach, and `resolve_target` keeps an unclaimed row this caller
+            // may not see answering exactly like a missing one.
+            Reach::Own,
+            "the session to adopt",
+        )?;
+        // Whose it becomes follows from the connection, never the request
+        // (the field is `skip_deserializing`), as in `new_session`.
+        args.owner_person_id = {
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            super::fleet::owner_for(&caller, &s)
+        };
+        let row = sessions::adopt_session(args, &self.store).map_err(to_mcp_err)?;
+        ok_json(&row)
     }
 
     #[tool(description = "Launch a supervised headless (background) Claude \

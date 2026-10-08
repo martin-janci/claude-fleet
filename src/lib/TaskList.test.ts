@@ -117,18 +117,39 @@ describe('TaskList', () => {
     render(TaskList);
     await flush();
     expect(screen.getByTestId('task-section-todo').textContent).toContain('Write notes');
-    const doing = screen.getByTestId('task-section-doing');
-    expect(doing.textContent).toContain('Qomora');
-    expect(doing.textContent).toContain('Backlog');
+    // OM-110 is in its tracker's Backlog with a live session: it stays in
+    // To do, the column the Board puts it in (one status rule, step 1.6).
+    const todo = screen.getByTestId('task-section-todo');
+    expect(todo.textContent).toContain('Qomora');
+    expect(todo.textContent).toContain('Backlog');
+    // Nothing is in Doing, so it is a word in one line, not an empty heading.
+    expect(screen.queryByTestId('task-section-doing')).toBeNull();
     expect(screen.getByTestId('task-proposals-badge').textContent).toContain('2');
     expect(screen.getByTestId('task-child').textContent).toContain('Neutral review');
     expect(screen.getByTestId('task-child').textContent).toContain('agent');
   });
 
   it('Done is collapsed by default', async () => {
+    const shipped = task({ task_id: 'item:7', item_id: 7, key: 'TASK-7', title: 'Shipped', kind: 'local', status_category: 'done', last_activity_at: NOW });
+    (invoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'work_tree' ? { ...page, tasks: [...page.tasks, shipped], total: 4 } : null,
+    );
     render(TaskList);
     await flush();
     expect(screen.getByTestId('task-section-done').querySelector('ul')).toBeNull();
+    await fireEvent.click(screen.getByTestId('task-section-done').querySelector('button')!);
+    expect(screen.getByTestId('task-section-done').textContent).toContain('Shipped');
+  });
+
+  it('empty sections fold into one line instead of a heading each (redesign 1.4)', async () => {
+    render(TaskList);
+    await flush();
+    // The fixture has To do rows only: Doing and Done are one line between them.
+    expect(screen.getByTestId('task-section-todo')).toBeTruthy();
+    expect(screen.queryByTestId('task-section-doing')).toBeNull();
+    expect(screen.queryByTestId('task-section-done')).toBeNull();
+    expect(screen.getByTestId('task-sections-empty').textContent).toBe('Nothing in Doing or Done in the last 7 days.');
+    expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(1);
   });
 
   it('quick add creates a task; the Work button previews, then starts where the preview said', async () => {
@@ -154,9 +175,9 @@ describe('TaskList', () => {
   it('a task with a live session opens it; s and ⇧S act on the selected row', async () => {
     render(TaskList);
     await flush();
-    const doing = screen.getByTestId('task-section-doing');
+    const om110 = screen.getAllByTestId('task-row').find((r) => r.textContent?.includes('Qomora'));
     // OM-110 has an active count but no live link in the fixture: Start.
-    expect(doing.querySelector('[data-testid="work-button-primary"]')?.textContent).toBe('Start');
+    expect(om110?.querySelector('[data-testid="work-button-primary"]')?.textContent).toBe('Start');
     const list = screen.getByTestId('task-list');
     await fireEvent.keyDown(list, { key: 'j' });
     await flush();

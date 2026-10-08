@@ -852,6 +852,7 @@ async fn rewind_conversation_with(
                     model: launch.model.clone(),
                     effort: launch.effort.clone(),
                     profile: launch.profile.clone(),
+                    agent: None,
                     // Multi-user M1 (T5, spec §4.3 invariant 6): a fork
                     // inherits the SOURCE's owner, never the forker's. The
                     // fork is a permanent verbatim copy of the source's

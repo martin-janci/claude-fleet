@@ -57,6 +57,13 @@ pub struct NewSessionArgs {
     /// login. Rejected for a `"shell"` session.
     #[serde(default)]
     pub profile: Option<String>,
+    /// Which agent runs in the pane (`sessions.agent`, migration 121):
+    /// `"claude"` (the default) or `"shell"`, which is the same as
+    /// `kind: "shell"`. `"codex"` and `"agy"` are known and refused with
+    /// `E_UNSUPPORTED` until fleet can launch them (redesign step 12.1).
+    /// `None` / empty = Claude Code, or a shell for `kind: "shell"`.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Whose session this is to be (multi-user M1, T5): the `people` row the
     /// new row is owned by, and therefore `private` to. `None` leaves it
     /// `unclaimed` — the safe holding state (spec §4.3), never "everybody's".
@@ -659,7 +666,9 @@ pub fn conversation_owner_allows(
 }
 
 /// Blank `model` / `effort` mean the host's default (`None`); anything else
-/// must be a valid value, and neither applies to a shell session.
+/// must be a valid value, and neither applies to a shell session. `agent`
+/// folds into `kind` here ([`normalize_agent`]), so everything after this
+/// reads a shell session from `kind` alone.
 pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError> {
     let trim = |v: &mut Option<String>| {
         *v = v
@@ -667,6 +676,8 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
             .map(|x| x.trim().to_string())
             .filter(|x| !x.is_empty());
     };
+    trim(&mut args.agent);
+    normalize_agent(args)?;
     trim(&mut args.model);
     trim(&mut args.effort);
     trim(&mut args.profile);
@@ -686,6 +697,49 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
     }
     if let Some(e) = args.effort.as_deref() {
         crate::validate::effort_level(e)?;
+    }
+    Ok(())
+}
+
+/// Settle `agent` against `kind`: `agent: "shell"` makes a shell session
+/// (and conflicts with any other kind), `kind: "shell"` with no agent is a
+/// shell, and `agent: "claude"` cannot run in a shell session. The row's
+/// `agent` then follows from `kind` (`Store::set_session_kind`), so an
+/// absent agent stays absent here. `codex` / `agy` are refused until the
+/// agent adapters exist; an unknown name is invalid.
+fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
+    use crate::store::{AGENTS, AGENT_CLAUDE, AGENT_SHELL};
+    let shell_kind = args.kind.as_deref() == Some("shell");
+    match args.agent.as_deref() {
+        None => {}
+        Some(AGENT_SHELL) => match args.kind.as_deref() {
+            None | Some("shell") => args.kind = Some("shell".into()),
+            Some(other) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    format!("agent shell runs a plain shell; it cannot start a {other} session"),
+                ))
+            }
+        },
+        Some(AGENT_CLAUDE) if shell_kind => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a shell session runs no agent; drop agent or kind",
+            ))
+        }
+        Some(AGENT_CLAUDE) => {}
+        Some(a) if AGENTS.contains(&a) => {
+            return Err(IpcError::new(
+                codes::E_UNSUPPORTED,
+                format!("fleet cannot start {a} sessions yet; only claude and shell"),
+            ))
+        }
+        Some(_) => {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                format!("agent must be one of {}", AGENTS.join(", ")),
+            ))
+        }
     }
     Ok(())
 }

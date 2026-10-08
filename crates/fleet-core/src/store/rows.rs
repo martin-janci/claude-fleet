@@ -353,10 +353,40 @@ pub struct SessionRow {
     /// `~/.claude-profiles/<name>` on its host. `None` = the host's own login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_profile: Option<String>,
+    /// Which coding agent runs in the session's pane (migration 121): one of
+    /// [`AGENTS`]. A different axis from `kind` (what the session is for);
+    /// a `shell` session is the one place they meet, and
+    /// `Store::set_session_kind` keeps the two in step there.
+    ///
+    /// `#[serde(default = "agent_claude")]`: a hub older than the column
+    /// sends no `agent`, and every session such a hub runs is Claude Code
+    /// (a shell row there still says `kind: "shell"`). Never skipped when
+    /// serialised, so a client can tell a Claude row from an old hub's.
+    #[serde(default = "agent_claude")]
+    pub agent: String,
     /// The form this session's agent asked and is waiting on. `serde(default)`
     /// so an older hub's row (without it) still parses.
     #[serde(default)]
     pub pending_form: Option<PendingForm>,
+}
+
+/// `sessions.agent` (migration 121): Claude Code, the default and, until the
+/// agent adapters land (redesign step 12.1), the only agent fleet launches.
+pub const AGENT_CLAUDE: &str = "claude";
+
+/// `sessions.agent` (migration 121): no agent, a plain login shell
+/// (`kind = 'shell'`).
+pub const AGENT_SHELL: &str = "shell";
+
+/// Every value migration 121's `CHECK` admits. `codex` and `agy` are
+/// reserved for the adapters: a row may carry them, `new_session` refuses
+/// them until fleet can launch them.
+pub const AGENTS: [&str; 4] = [AGENT_CLAUDE, "codex", "agy", AGENT_SHELL];
+
+/// [`SessionRow::agent`] when a frame carries no `agent` key: a hub built
+/// before migration 121, whose sessions all run Claude Code.
+fn agent_claude() -> String {
+    AGENT_CLAUDE.to_string()
 }
 
 /// `sessions.visibility` (migration 100): private to its owner, and to the
@@ -513,7 +543,7 @@ pub(super) const SESSION_COLUMNS: &str = concat!(
      pr_evidence, pr_checked_at, owner_person_id, visibility, claude_profile, \
      (SELECT json_object('form_id', f.form_id, 'title', json_extract(f.spec, '$.title')) \
         FROM form_requests f WHERE f.session_id = sessions.id AND f.state = 'pending') \
-       AS pending_form"
+       AS pending_form, agent"
 );
 
 /// Decode `sessions.pr_evidence`. Malformed text (never written by us)
@@ -626,6 +656,7 @@ pub(super) fn map_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Sessi
         pending_form: row
             .get::<_, Option<String>>(67)?
             .and_then(|j| serde_json::from_str(&j).ok()),
+        agent: row.get(68)?,
     })
     .map(|mut r| {
         // A link's org is its tracker item's, else the session's (M5).

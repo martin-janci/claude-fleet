@@ -11,6 +11,8 @@ import { invoke } from '@tauri-apps/api/core';
 import WorkBoard from './WorkBoard.svelte';
 import { link, task } from './work_view_fixture';
 import { selectedTaskId, sidebarView, workViewFilters, type WorkTreePage } from './work_view';
+import { activeHintId, hintDef, markSeen, resetHints } from './hints';
+import { onboardingWelcomed } from './onboarding';
 
 const NOW = Math.floor(Date.now() / 1000);
 const page = (): WorkTreePage => ({
@@ -69,6 +71,22 @@ beforeEach(() => {
 });
 
 describe('WorkBoard', () => {
+  it('says how to move a task once, as a hint, not as a line on every visit (redesign 1.4)', async () => {
+    resetHints();
+    onboardingWelcomed.set(true);
+    render(WorkBoard);
+    await flush();
+    expect(screen.queryByTestId('work-board-hint')).toBeNull();
+    expect(screen.getByTestId('work-board').querySelector('header')!.textContent).not.toContain('Drag a task');
+    // The same words, offered once by the hint layer while the board is open…
+    expect(get(activeHintId)).toBe('board-move');
+    expect(hintDef('board-move')!.text).toContain('Drag a task to set its status');
+    // …and gone for good once dismissed.
+    markSeen('board-move');
+    expect(get(activeHintId)).not.toBe('board-move');
+    resetHints();
+  });
+
   it('reads with the filters, archived on and the status filter off', async () => {
     render(WorkBoard);
     await flush();

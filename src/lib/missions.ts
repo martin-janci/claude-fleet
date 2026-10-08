@@ -33,6 +33,46 @@ export interface Mission {
   total?: number;
   done?: number;
   repos?: MissionRepo[];
+  /** What it asks of its loop (O4); absent from a hub older than O4. */
+  policy?: MissionPolicy;
+}
+
+/** `store::MissionPolicy`. The backend reads a missing field as its
+ *  default, so a save sends the whole policy back with its edits on top. */
+export interface MissionPolicy {
+  max_parallel?: number;
+  max_retries?: number;
+  require_review?: boolean;
+  task_creation?: string;
+  max_tasks?: number;
+  max_planner_runs_per_hour?: number;
+  no_progress_secs?: number;
+  planner_model?: string | null;
+  planner_host?: string | null;
+  /** A continuous mission's timer: wake at least this often (≥ 300 s). */
+  wake_every_secs?: number | null;
+}
+
+/** `store::POLICY_MAX_PARALLEL` and `POLICY_MIN_WAKE_SECS`. */
+export const POLICY_MAX_PARALLEL = 8;
+export const POLICY_MIN_WAKE_SECS = 300;
+/** The default runs at once (`MissionPolicy::default`). */
+export const POLICY_DEFAULT_PARALLEL = 2;
+
+/** The policy to save: the mission's own with `edits` on top, so a field
+ *  the form does not show keeps its value. `wake_every_secs: null` clears
+ *  the timer. */
+export function policyWith(current: MissionPolicy | undefined, edits: MissionPolicy): MissionPolicy {
+  const out: MissionPolicy = { ...(current ?? {}), ...edits };
+  if (out.wake_every_secs == null) delete out.wake_every_secs;
+  return out;
+}
+
+/** "every 10 min", "every 2 h", or `null` without a timer. */
+export function wakeLabel(secs: number | null | undefined): string | null {
+  if (!secs) return null;
+  if (secs % 3600 === 0) return `every ${secs / 3600} h`;
+  return `every ${Math.round(secs / 60)} min`;
 }
 
 export interface MissionRepo {
@@ -269,6 +309,7 @@ export interface MissionInput {
   mode?: string;
   level?: number;
   org_id?: number;
+  policy?: MissionPolicy;
 }
 
 /** The lifecycle moves a person may make from each state, in button order. */
@@ -634,4 +675,103 @@ export function revokeMissionGrant(missionId: number): Promise<Result<number>> {
 /** Pause every active mission this person may change, and end their grants. */
 export function pauseAllMissions(): Promise<Result<number[]>> {
   return changed(invokeCmd<number[]>('pause_all_missions', { args: {} }));
+}
+
+// ── Errors in words (redesign step 1.3) ──
+//
+// A planner that could not run, or whose answer was refused, says what
+// happened and what to do in plain words, with Retry; the raw code and
+// message stay one click away under Details. No settings key reaches the
+// user's text: the backend's "(orchestrator.max_level)"-style hints are for
+// the log, and Details still carries them.
+
+/** A failure as the Missions view shows it. */
+export interface HumanError {
+  /** One bold line: what happened. */
+  title: string;
+  /** What it means and what to do next. */
+  text: string;
+  /** The raw code and message, for Details. */
+  details: string;
+}
+
+/** Text with any parenthesised settings key, like "(orchestrator.enabled)"
+ *  or "(policy.max_planner_runs_per_hour)", taken out. */
+export function withoutConfigKeys(text: string): string {
+  return text
+    .replace(/\s*\((?:[a-z][a-z0-9_]*\.)+[a-z][a-z0-9_]*\)/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+const capital = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const sentence = (s: string) => {
+  const t = capital(withoutConfigKeys(s));
+  return t && !/[.!?]$/.test(t) ? `${t}.` : t;
+};
+
+/** `plan_mission` failed: why the planner could not run, in words. */
+export function plannerError(e: { code: string; message: string }): HumanError {
+  const details = `${e.code} · ${e.message}`;
+  const title = "The planner couldn't run";
+  const m = e.message;
+  let hit: RegExpMatchArray | null;
+  if (e.code === 'E_LIMIT' && (hit = m.match(/ran (\d+) times? in the last hour/))) {
+    return {
+      title,
+      text: `It already ran ${hit[1]} times in the last hour, the most this mission allows. Try again later.`,
+      details,
+    };
+  }
+  if ((hit = m.match(/^claude is not on (.+?)'s PATH/))) {
+    return { title, text: `Claude Code isn't installed on ${hit[1]}, so the planner has nowhere to run.`, details };
+  }
+  if ((hit = m.match(/^the planner on (.+?) gave no answer/))) {
+    return { title, text: `The planner on ${hit[1]} finished without an answer. Retry, or look at Details.`, details };
+  }
+  if (e.code === 'E_SSH' || e.code === 'E_SSH_TIMEOUT' || e.code === 'E_HOST_OFFLINE') {
+    return { title, text: "Fleet couldn't reach the planner's host. Check that it is online, then retry.", details };
+  }
+  if (e.code === 'E_HUB_UNREACHABLE' || e.code === 'E_HUB_TIMEOUT') {
+    return { title, text: "The hub didn't answer. Your missions are unchanged; retry when it is back.", details };
+  }
+  if (e.code === 'E_INVALID_STATE' && /\bis (completed|failed|cancelled)$/.test(m)) {
+    return { title, text: 'This mission has ended, so there is nothing left to plan.', details };
+  }
+  return { title, text: sentence(m) || 'Something went wrong. Retry, or look at Details.', details };
+}
+
+/** The planner ran but its answer could not be used (`PlanOutcome.refused`). */
+export function plannerRefusal(why: string): HumanError {
+  return {
+    title: "The planner's answer couldn't be used",
+    text: 'Nothing was changed. Retry to ask again; Details shows what was wrong with the answer.',
+    details: why,
+  };
+}
+
+// ── Autonomy in words (redesign step 1.8) ──
+
+/** The header's autonomy: what applies, what bounds it, and the one hint
+ *  that says how to change it, all without a settings key. */
+export interface AutonomyWords {
+  /** "Runs at L1". */
+  runs: string;
+  /** "L3 asked · L1 ceiling · no grant". */
+  limits: string;
+  /** What holds it back and where to change that, or `null`. */
+  hint: string | null;
+}
+
+export function autonomyWords(a: MissionAutonomy, now = Date.now() / 1000): AutonomyWords {
+  const g = a.grant && (a.grant.revoked_at == null && a.grant.expires_at > now) ? a.grant : null;
+  const until = g ? new Date(g.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+  const parts = [`L${a.asked} asked`, `L${a.ceiling} ceiling`, g ? `L${g.level} grant until ${until}` : 'no grant'];
+  let hint: string | null = null;
+  if (!a.enabled) hint = 'The mission loop is off for the whole fleet. Turn it on in Settings.';
+  else if (a.effective >= a.asked) hint = null;
+  else if (a.ceiling < a.asked && a.effective === a.ceiling) hint = `The fleet's ceiling holds it at L${a.ceiling}. Raise it in Settings.`;
+  else if (!g) hint = 'Without a grant a person presses every step. Grant… lets it run by itself.';
+  else hint = `The grant signs L${g.level}. End it and grant again to change that.`;
+  return { runs: a.enabled ? `Runs at L${a.effective}` : 'Loop off', limits: parts.join(' · '), hint };
 }

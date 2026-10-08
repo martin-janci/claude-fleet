@@ -6,8 +6,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
-import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
-import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel } from './sessions';
+import { sessions, loadSessions, killSession, renameSession, restartSession, rewindConversation, repairSession, restoreHostSessions, discoverLostSessions, adoptSession, newSessionAbortable, newBgSession, dismissAgentSession, hasNoPane, isInactiveAgent, purgeProject, showBgAgents, resetTombstonesForTests, applySessionEvents } from './sessions';
+import { formatCostMicros, formatTokens, sessionUsageTokens, lostReasonLabel, sessionAgent } from './sessions';
 import type { SessionRow } from './sessions';
 
 beforeEach(() => {
@@ -231,6 +231,18 @@ describe('sessions store', () => {
     ]);
   });
 
+  it('adoptSession sends the id and puts the adopted row in the list', async () => {
+    const adopted = { ...base, id: 9, tmux_name: 'scratch', started_at: 100 };
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(adopted); // adopt_session
+    const r = await adoptSession(9);
+    expect(r.ok).toBe(true);
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual([
+      'adopt_session',
+      { args: { session_id: 9 } },
+    ]);
+    expect(get(sessions).find((s) => s.id === 9)?.started_at).toBe(100);
+  });
+
   it('discoverLostSessions defaults omitted limit to null', async () => {
     (mockedInvoke as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     await discoverLostSessions('mefistos');
@@ -424,5 +436,15 @@ describe('optimistic merge guard', () => {
     );
     await loadSessions();
     expect(get(sessions).map((s) => s.id)).toEqual([2, 1]);
+  });
+});
+
+describe('sessionAgent', () => {
+  it('reads the row, and an older hub\'s missing field from the kind', () => {
+    expect(sessionAgent({ agent: 'codex', kind: 'work' })).toBe('codex');
+    expect(sessionAgent({ agent: 'shell', kind: 'shell' })).toBe('shell');
+    expect(sessionAgent({ kind: 'work' })).toBe('claude');
+    expect(sessionAgent({ kind: 'bg' })).toBe('claude');
+    expect(sessionAgent({ kind: 'shell' })).toBe('shell');
   });
 });

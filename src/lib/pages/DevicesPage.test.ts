@@ -127,10 +127,33 @@ describe('Settings → Devices', () => {
     await fireEvent.click(screen.getByTestId('edit-trusted'));
     await fireEvent.click(screen.getByTestId('record-apply'));
     await fireEvent.click(screen.getByTestId('record-confirm'));
-    await waitFor(() => expect(argsOf('set_device_trust')).toEqual({ device: 'ada-phone', trusted: true }));
+    await waitFor(() => expect(argsOf('update_device')).toEqual({ device: 'ada-phone', trusted: true }));
     await fireEvent.click(screen.getByTestId('record-delete'));
     await fireEvent.click(screen.getByTestId('record-confirm'));
     await waitFor(() => expect(argsOf('revoke_device')).toEqual({ device: 'ada-phone' }));
+  });
+});
+
+describe('Settings → Devices: rename and mode (11.3)', () => {
+  const show = () => render(ResourcePage, { props: { page: pageOf('settings.devices'), resource: resourceOf('device') } });
+
+  it('renames a device and changes its mode in one Apply, sending only what changed', async () => {
+    show();
+    await fireEvent.click((await screen.findAllByTestId('resource-row'))[1]);
+    await fireEvent.input(screen.getByTestId('edit-name'), { target: { value: "Ada's Pixel" } });
+    await fireEvent.click(screen.getByTestId('edit-mode-full'));
+    await fireEvent.click(screen.getByTestId('record-apply'));
+    // Addressed by the name it has now; the new one rides `name`.
+    await waitFor(() =>
+      expect(argsOf('update_device')).toEqual({ device: 'ada-phone', name: "Ada's Pixel", mode: 'full' }),
+    );
+  });
+
+  it('offers both modes, with the current one checked', async () => {
+    show();
+    await fireEvent.click((await screen.findAllByTestId('resource-row'))[1]);
+    expect((screen.getByTestId('edit-mode-readonly') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByTestId('edit-mode-full') as HTMLInputElement).checked).toBe(false);
   });
 });
 

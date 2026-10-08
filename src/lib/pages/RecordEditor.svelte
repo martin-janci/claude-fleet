@@ -238,7 +238,7 @@
                     {readonly}
                     {busy}
                     onset={(key, value) => setting(f, key, value)} />
-                {:else if readonly || !f.edit || f.type === 'choice' || f.type === 'time'}
+                {:else if readonly || !f.edit || f.type === 'time'}
                   <span class="value" data-testid={`value-${f.id}`}>{shown(f)}</span>
                 {:else if f.type === 'text'}
                   <input
@@ -266,6 +266,22 @@
                     disabled={busy}
                     checked={draft[f.id] === true}
                     onchange={(e) => set(f.id, (e.currentTarget as HTMLInputElement).checked)} />
+                {:else if f.type === 'choice'}
+                  <div role="radiogroup" aria-labelledby={`rf-${f.id}`} class="choices">
+                    {#each f.options as [o, label] (o)}
+                      <label class="choice">
+                        <input
+                          type="radio"
+                          name={`rf-${f.id}`}
+                          value={o}
+                          checked={draft[f.id] === o}
+                          disabled={busy}
+                          data-testid={`edit-${f.id}-${o}`}
+                          onchange={() => set(f.id, o)} />
+                        {label}
+                      </label>
+                    {/each}
+                  </div>
                 {:else if f.type === 'inherit'}
                   <div role="radiogroup" aria-labelledby={`rf-${f.id}`} class="choices">
                     {#each ['inherit', 'on', 'off'] as o (o)}

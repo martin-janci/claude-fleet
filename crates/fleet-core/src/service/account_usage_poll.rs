@@ -15,14 +15,16 @@
 //!   with the poller so both paths emit the same event under the same rule.
 //! - [`fetch_and_emit`]: fetch, then emit `EventBus::account_usage_updated`
 //!   only when the snapshot actually changed — a call the floor turns away
-//!   returns the same snapshot, so it never emits.
+//!   returns the same snapshot, so it never emits. A NEW successful answer is
+//!   also written to `account_usage_snapshots` (redesign step 2.5), which
+//!   [`restore_usage`] seeds the cache from after a restart.
 
 use crate::events::EventBus;
 use crate::ipc_error::lock;
 use crate::ipc_error::{codes, IpcError};
 use crate::service::account_usage::{self, AccountUsageSnapshot, UsageCache};
 use crate::ssh::SshExec;
-use crate::store::{HostRow, Store};
+use crate::store::{HostRow, Store, UsageSnapshotRow};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Semaphore;
@@ -95,14 +97,75 @@ async fn fetch_and_emit(
     ssh: &dyn SshExec,
     cache: &Mutex<UsageCache>,
     bus: &dyn EventBus,
+    store: Option<&Mutex<Store>>,
 ) -> AccountUsageSnapshot {
     let before = lock_cache(cache).snapshot(account_uuid);
     let after =
         account_usage::fetch_account_usage_with(account_uuid, hosts, ssh, cache, false).await;
+    if let Some(store) = store {
+        persist_if_new(store, &before, &after);
+    }
     if after.is_newsworthy_change(&before) {
         bus.account_usage_updated(&after);
     }
     after
+}
+
+/// Write `after`'s usage to the history when it is a new successful answer
+/// (its `fetched_at` moved). A failure is logged, never surfaced: the cache
+/// already holds the answer, and history is a convenience on top of it.
+fn persist_if_new(
+    store: &Mutex<Store>,
+    before: &AccountUsageSnapshot,
+    after: &AccountUsageSnapshot,
+) {
+    let (Some(usage), Some(fetched_at)) = (&after.usage, after.fetched_at) else {
+        return;
+    };
+    if before.fetched_at == Some(fetched_at) {
+        return;
+    }
+    let row = UsageSnapshotRow {
+        account_uuid: after.account_uuid.clone(),
+        fetched_at,
+        usage: usage.clone(),
+        subscription: after.subscription.clone(),
+        source_host: after.source_host.clone(),
+    };
+    let written = match store.lock() {
+        Ok(s) => s.insert_usage_snapshot(&row).map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = written {
+        tracing::warn!(account = %row.account_uuid, "account usage history: write failed: {e}");
+    }
+}
+
+/// Seed `cache` with each account's newest stored answer, so a restart keeps
+/// the last-known usage (redesign step 2.5). Accounts already in the cache
+/// are left alone; nothing is fetched or emitted.
+pub(crate) fn restore_usage(store: &Mutex<Store>, cache: &Mutex<UsageCache>) {
+    let rows = match store.lock() {
+        Ok(s) => s.latest_usage_snapshots().map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("account usage history: read failed: {e}");
+            return;
+        }
+    };
+    let mut c = lock_cache(cache);
+    for r in rows {
+        c.restore(
+            &r.account_uuid,
+            r.usage,
+            r.subscription,
+            r.fetched_at,
+            r.source_host,
+        );
+    }
 }
 
 /// Spawn a background fetch for every account in `hosts` that is due and not
@@ -118,6 +181,7 @@ pub(crate) fn poll_due_accounts(
     ssh: Arc<dyn SshExec>,
     cache: Arc<Mutex<UsageCache>>,
     bus: Arc<dyn EventBus>,
+    store: Option<Arc<Mutex<Store>>>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
     for account in distinct_account_uuids(&hosts) {
@@ -140,6 +204,7 @@ pub(crate) fn poll_due_accounts(
         let ssh = Arc::clone(&ssh);
         let cache = Arc::clone(&cache);
         let bus = Arc::clone(&bus);
+        let store = store.clone();
         handles.push(tokio::spawn(async move {
             let _permit = poller
                 .limit
@@ -147,7 +212,15 @@ pub(crate) fn poll_due_accounts(
                 .acquire_owned()
                 .await
                 .expect("usage semaphore is never closed");
-            fetch_and_emit(&account, &hosts, ssh.as_ref(), &cache, bus.as_ref()).await;
+            fetch_and_emit(
+                &account,
+                &hosts,
+                ssh.as_ref(),
+                &cache,
+                bus.as_ref(),
+                store.as_deref(),
+            )
+            .await;
             poller
                 .in_flight
                 .lock()
@@ -199,7 +272,7 @@ pub async fn refresh_account_usage(
         }
         s.list_hosts()?
     };
-    Ok(fetch_and_emit(account_uuid, &hosts, ssh, cache, bus).await)
+    Ok(fetch_and_emit(account_uuid, &hosts, ssh, cache, bus, Some(store)).await)
 }
 
 #[cfg(test)]
@@ -315,7 +388,7 @@ mod tests {
         let ssh: Arc<dyn SshExec> = Arc::new(fake.clone());
         let poller = Arc::new(AccountUsagePoller::new());
         let bus: Arc<dyn EventBus> = Arc::new(RecordingEventBus::new());
-        let handles = poll_due_accounts(&poller, hosts, ssh, Arc::clone(&cache), bus);
+        let handles = poll_due_accounts(&poller, hosts, ssh, Arc::clone(&cache), bus, None);
         assert_eq!(handles.len(), 1, "only the due account should be polled");
         for h in handles {
             h.await.unwrap();
@@ -412,7 +485,7 @@ mod tests {
         let ssh_dyn: Arc<dyn SshExec> = ssh.clone();
         let poller = Arc::new(AccountUsagePoller::new());
         let bus: Arc<dyn EventBus> = Arc::new(RecordingEventBus::new());
-        let handles = poll_due_accounts(&poller, hosts, ssh_dyn, cache, bus);
+        let handles = poll_due_accounts(&poller, hosts, ssh_dyn, cache, bus, None);
         assert_eq!(handles.len(), 4);
         for h in handles {
             h.await.unwrap();
@@ -452,11 +525,12 @@ mod tests {
             Arc::clone(&ssh),
             Arc::clone(&cache),
             Arc::clone(&bus),
+            None,
         );
         assert_eq!(first.len(), 1, "first call spawns the fetch");
         // Called again while the first fetch is still in flight (it hangs
         // for 150ms and we have not awaited it yet).
-        let second = poll_due_accounts(&poller, hosts, ssh, cache, bus);
+        let second = poll_due_accounts(&poller, hosts, ssh, cache, bus, None);
         assert!(
             second.is_empty(),
             "in-flight account must not be spawned again"
@@ -485,7 +559,7 @@ mod tests {
         let bus: Arc<dyn EventBus> = Arc::new(RecordingEventBus::new());
 
         let start = Instant::now();
-        let handles = poll_due_accounts(&poller, hosts, ssh, cache, bus);
+        let handles = poll_due_accounts(&poller, hosts, ssh, cache, bus, None);
         let elapsed = start.elapsed();
         assert_eq!(handles.len(), 1);
         assert!(
@@ -522,7 +596,7 @@ mod tests {
         let poller = Arc::new(AccountUsagePoller::new());
         let recording = Arc::new(RecordingEventBus::new());
         let bus: Arc<dyn EventBus> = recording.clone();
-        let handles = poll_due_accounts(&poller, hosts, ssh, cache, bus);
+        let handles = poll_due_accounts(&poller, hosts, ssh, cache, bus, None);
         for h in handles {
             h.await.unwrap();
         }
@@ -551,9 +625,9 @@ mod tests {
         let ssh: Arc<dyn SshExec> = Arc::new(fake);
         let recording = RecordingEventBus::new();
 
-        let first = fetch_and_emit("acct-1", &hosts, ssh.as_ref(), &cache, &recording).await;
+        let first = fetch_and_emit("acct-1", &hosts, ssh.as_ref(), &cache, &recording, None).await;
         clock.advance(USAGE_POLL_FLOOR_SECS as u64 + 10);
-        let second = fetch_and_emit("acct-1", &hosts, ssh.as_ref(), &cache, &recording).await;
+        let second = fetch_and_emit("acct-1", &hosts, ssh.as_ref(), &cache, &recording, None).await;
 
         assert_eq!(
             recording.take(),
@@ -687,5 +761,144 @@ mod tests {
         assert_eq!(after.status, UsageOutcomeKind::NoCredentials);
         assert_eq!(fake.calls_for("h1").len(), 1);
         assert_eq!(bus.take(), vec!["account_usage:updated:acct-1".to_string()]);
+    }
+
+    // ── usage history (redesign step 2.5) ────────────────────────────────
+
+    const OK_OUTPUT: &str =
+        "__usage_start__\n__subscription__=max\n__http_status__=200\n__body__\n\
+        {\"five_hour\":{\"utilization\":35.0,\"resets_at\":\"2026-02-06T22:00:00+00:00\"},\
+        \"seven_day\":{\"utilization\":14.0,\"resets_at\":\"2026-02-12T20:00:00+00:00\"}}";
+
+    fn store_with_logged_in_host() -> Arc<Mutex<Store>> {
+        let store = store_with_account("acct-1");
+        {
+            let s = store.lock().unwrap();
+            s.insert_host("h1", None).unwrap();
+            s.set_host_account("h1", Some("acct-1")).unwrap();
+            s.update_host_probe("h1", true, None, None, 1).unwrap();
+        }
+        Arc::new(store)
+    }
+
+    #[tokio::test]
+    async fn a_poll_writes_a_row_and_a_restart_keeps_the_last_value() {
+        let store = store_with_logged_in_host();
+        let hosts = Arc::new(store.lock().unwrap().list_hosts().unwrap());
+        let clock = TestClock::new();
+        let cache = Arc::new(Mutex::new(UsageCache::with_clock(clock.clone())));
+        let fake = FakeSsh::new();
+        fake.on(
+            crate::ssh_fake::Match::Any,
+            crate::ssh_fake::Reply::ok(OK_OUTPUT),
+        );
+        let ssh: Arc<dyn SshExec> = Arc::new(fake.clone());
+        let bus: Arc<dyn EventBus> = Arc::new(RecordingEventBus::new());
+        let poller = Arc::new(AccountUsagePoller::new());
+        let poll = || {
+            poll_due_accounts(
+                &poller,
+                Arc::clone(&hosts),
+                Arc::clone(&ssh),
+                Arc::clone(&cache),
+                Arc::clone(&bus),
+                Some(Arc::clone(&store)),
+            )
+        };
+        for h in poll() {
+            h.await.unwrap();
+        }
+        let rows = store.lock().unwrap().usage_history("acct-1", 0).unwrap();
+        assert_eq!(rows.len(), 1, "one successful poll, one row");
+        assert_eq!(rows[0].usage.five_hour.as_ref().unwrap().utilization, 35.0);
+        assert!(rows[0]
+            .usage
+            .seven_day
+            .as_ref()
+            .unwrap()
+            .resets_at
+            .is_some());
+        assert_eq!(rows[0].subscription.as_deref(), Some("max"));
+        assert_eq!(rows[0].source_host.as_deref(), Some("h1"));
+
+        // Inside the floor nothing is fetched, so nothing is written.
+        assert!(poll().is_empty());
+        clock.advance(USAGE_POLL_FLOOR_SECS as u64);
+        for h in poll() {
+            h.await.unwrap();
+        }
+        assert_eq!(
+            store
+                .lock()
+                .unwrap()
+                .usage_history("acct-1", 0)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // A restart: a fresh cache seeded from the store shows the last value
+        // before any poll, and is still due straight away.
+        let before = cache.lock().unwrap().snapshot("acct-1");
+        let fresh = Mutex::new(UsageCache::new());
+        restore_usage(&store, &fresh);
+        let after = list_account_usage(&store, &fresh).unwrap();
+        assert_eq!(after[0].status, UsageOutcomeKind::Ok);
+        assert_eq!(after[0].usage, before.usage);
+        assert_eq!(after[0].fetched_at, before.fetched_at);
+        assert_eq!(after[0].source_host.as_deref(), Some("h1"));
+        assert!(fresh.lock().unwrap().due("acct-1"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_answer_writes_no_row() {
+        let store = store_with_logged_in_host();
+        let cache = Mutex::new(UsageCache::new());
+        let fake = FakeSsh::new();
+        fake.on(
+            crate::ssh_fake::Match::Any,
+            crate::ssh_fake::Reply::ok(NO_CREDENTIALS_OUTPUT),
+        );
+        let bus = RecordingEventBus::new();
+        refresh_account_usage("acct-1", &store, &fake, &cache, &bus)
+            .await
+            .unwrap();
+        assert!(store
+            .lock()
+            .unwrap()
+            .usage_history("acct-1", 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn restore_never_overwrites_a_live_entry() {
+        let store = store_with_account("acct-1");
+        store
+            .lock()
+            .unwrap()
+            .insert_usage_snapshot(&UsageSnapshotRow {
+                account_uuid: "acct-1".into(),
+                fetched_at: 5,
+                usage: Default::default(),
+                subscription: Some("old".into()),
+                source_host: None,
+            })
+            .unwrap();
+        let cache = Mutex::new(UsageCache::new());
+        cache.lock().unwrap().record(
+            "acct-1",
+            FetchResult::Answered {
+                host: "h1".to_string(),
+                outcome: UsageOutcome::Ok {
+                    usage: Default::default(),
+                    subscription: Some("new".to_string()),
+                },
+                notes: vec![],
+            },
+        );
+        restore_usage(&store, &cache);
+        let snap = cache.lock().unwrap().snapshot("acct-1");
+        assert_eq!(snap.subscription.as_deref(), Some("new"));
     }
 }

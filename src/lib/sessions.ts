@@ -59,6 +59,15 @@ export interface PrEvidence {
   checks: CheckSummary;
 }
 
+/** `sessions.agent` (migration 121). */
+export type SessionAgent = 'claude' | 'codex' | 'agy' | 'shell';
+
+/** The agent a row runs, reading an older hub's missing field as Claude
+ *  Code (a shell row there still says `kind: 'shell'`). */
+export function sessionAgent(row: Pick<SessionRow, 'agent' | 'kind'>): SessionAgent {
+  return row.agent ?? (row.kind === 'shell' ? 'shell' : 'claude');
+}
+
 export interface SessionRow {
   id: number;
   tmux_name: string;
@@ -214,6 +223,10 @@ export interface SessionRow {
    *  `~/.claude-profiles/<name>` on its host, docs/accounts.md); absent =
    *  the host's own login. */
   claude_profile?: string | null;
+  /** Which agent runs in the pane (migration 121): Claude Code, Codex, Agy,
+   *  or none for a plain shell (`kind: 'shell'`). Absent from a hub older
+   *  than the column, whose sessions all run Claude Code. */
+  agent?: SessionAgent;
   /** A digest of the versions and ids of the session's live (non-ended)
    *  work links (work graph M14): it moves whenever any of them changes —
    *  added, removed, primary, state — a secondary link too. Absent = 0 (no
@@ -803,6 +816,10 @@ export interface NewSessionArgs {
    *  on the host, with its own `/login`); null = the host's login. Rejected
    *  for a shell session. */
   profile?: string | null;
+  /** Which agent runs in the pane: `claude` (default) or `shell` (the same
+   *  as `kind: 'shell'`). `codex` and `agy` are refused until fleet can
+   *  launch them. */
+  agent?: SessionAgent | null;
 }
 
 export async function newSessionAbortable(
@@ -1025,6 +1042,17 @@ export async function dismissGhostSession(sessionId: number): Promise<Result<voi
     args: { session_id: sessionId },
   });
   if (r.ok) removeSession(sessionId);
+  return r;
+}
+
+/** Adopt a live tmux session fleet did not start (`started_at` null): fleet
+ *  runs it from now on and the caller owns it when nobody did (Lost and
+ *  found, redesign step 4.8). */
+export async function adoptSession(sessionId: number): Promise<Result<SessionRow>> {
+  const r = await invokeCmd<SessionRow>('adopt_session', {
+    args: { session_id: sessionId },
+  });
+  if (r.ok) acceptCommandRow(r.value);
   return r;
 }
 

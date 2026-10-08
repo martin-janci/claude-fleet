@@ -21,7 +21,7 @@ import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
 import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
 import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
-import { onSessionOpened } from './selection';
+import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
 import { todayOpen } from './today';
 import { trackerStateBadge } from './trackers';
 import { knownProviderShort } from './tracker_health';
@@ -373,6 +373,18 @@ export interface SessionTasks {
 /** `suggestion` | `cross_org` | `unavailable` | `no_primary`. */
 export type ReviewKind = 'suggestion' | 'cross_org' | 'unavailable' | 'no_primary';
 
+/**
+ * A suggestion at or above this confidence is "high confidence": Review's
+ * "Confirm all high-confidence" ticks exactly these. Mirrors
+ * `work::confidence::HIGH_CONFIDENCE` in fleet-core.
+ */
+export const HIGH_CONFIDENCE_PCT = 85;
+
+/** A review item's suggestion clears the high-confidence bar. */
+export function isHighConfidence(it: Pick<ReviewItem, 'kind' | 'confidence'>): boolean {
+  return it.kind === 'suggestion' && (it.confidence ?? 0) >= HIGH_CONFIDENCE_PCT;
+}
+
 export interface ReviewItem {
   review_id: string;
   kind: ReviewKind | string;
@@ -385,6 +397,8 @@ export interface ReviewItem {
   why?: string[];
   strength?: string | null;
   rule?: string | null;
+  /** 0–100, from detection (`work::confidence`); absent from an older hub. */
+  confidence?: number | null;
   preselected?: boolean;
   alternatives?: { link_id?: number | null; task_id: string; key?: string | null; title?: string | null }[];
   created_at?: number;
@@ -1211,8 +1225,13 @@ const isSelMap = (v: unknown): v is Record<string, string> =>
 const selectedByView = writable<Record<string, string>>(readPref('work.selected', {}, isSelMap));
 selectedByView.subscribe((v) => writePref('work.selected', v));
 
-/** The task selected in the Work view (its id), kept per view. */
-export const selectedTaskId = writable<string | null>(get(selectedByView)[get(workViewKey)] ?? null);
+/** The task selected in the Work view (its id), kept per view. The selection
+ *  itself lives in `selection.ts` (one store for sessions and tasks). */
+export { selectedTaskId };
+/** Whether Details shows the selected task (until a session is opened). */
+export const taskDetailOpen = taskFocused;
+// Start from the stored pick, before the write-back below can see an empty one.
+selectedTaskId.set(get(selectedByView)[get(workViewKey)] ?? null);
 let restoring = false;
 selectedTaskId.subscribe((id) => {
   if (restoring) return;
@@ -1226,18 +1245,18 @@ selectedTaskId.subscribe((id) => {
 });
 workViewKey.subscribe((k) => {
   restoring = true;
-  selectedTaskId.set(get(selectedByView)[k] ?? null);
+  const id = get(selectedByView)[k] ?? null;
+  // A view switch while a task has the focus picks the view's task, so its
+  // detail never sits beside the other view's session.
+  if (id && get(taskDetailOpen)) pickTask(id);
+  else selectedTaskId.set(id);
   restoring = false;
 });
 
-/** Whether Details shows the selected task (until a session is opened). */
-export const taskDetailOpen = writable(false);
-onSessionOpened(() => taskDetailOpen.set(false));
-
-/** Select a task and show it in Details. */
-export function openTask(taskId: string): void {
-  selectedTaskId.set(taskId);
-  taskDetailOpen.set(true);
+/** Select a task and show it in Details; the center pane follows it
+ *  (`pickTask`). Pass the task's session links when the caller has them. */
+export function openTask(taskId: string, links?: readonly TaskSessionLink[]): void {
+  pickTask(taskId, links);
   todayOpen.set(false);
 }
 
@@ -1246,9 +1265,9 @@ export const revealTaskRequest = writable<{ taskId: string; seq: number } | null
 let revealSeqN = 0;
 
 /** "Show in Work view": switch the sidebar, select the task, reveal it. */
-export function showTaskInWorkView(taskId: string): void {
+export function showTaskInWorkView(taskId: string, links?: readonly TaskSessionLink[]): void {
   sidebarView.set('work');
-  openTask(taskId);
+  openTask(taskId, links);
   revealTaskRequest.set({ taskId, seq: ++revealSeqN });
 }
 

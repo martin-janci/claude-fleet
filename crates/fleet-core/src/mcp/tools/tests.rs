@@ -1620,6 +1620,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 model: None,
                 effort: None,
                 profile: None,
+                agent: None,
                 confirm_nonce: None,
             }),
         )
@@ -1852,6 +1853,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 model: None,
                 effort: None,
                 profile: None,
+                agent: None,
                 confirm_nonce: None,
             }),
         )
@@ -2406,9 +2408,9 @@ fn router_sum_serves_every_tool() {
     // 108 (main, incl. file downloads) + multi-user M1's six sharing /
     // claim tools (T12) + the New session picker's `project_picks` /
     // `set_project_pick` + org administration's `org_admin` (phase B) +
-    // chat forms' `ask` + debug devices' `debug_devices` + the Files tab's
-    // `repo_blame`.
-    assert_eq!(served, 120);
+    // chat forms' `ask` + debug devices' `debug_devices` + Lost and found's
+    // `adopt_session` + the Files tab's `repo_blame`.
+    assert_eq!(served, 121);
     assert_eq!(FleetTools::tool_router_for_doc().list_all().len(), served);
 }
 
@@ -3935,9 +3937,11 @@ fn the_served_definition_budget_stays_bounded() {
     /// sides' sum.
     /// Measured at 85,601 on 2026-10-08 after debug devices (the
     /// `debug_devices` tool, one entry by `action`, +1,967 bytes).
-    /// Measured at 85,990 on 2026-10-08 after the Files tab's `repo_blame`
-    /// and `repo_branches`' `merged` note (+389 bytes).
-    const BUDGET_BYTES: usize = 86_090;
+    /// Measured at 86,158 on 2026-10-08 after Lost and found's adopt (the
+    /// `adopt_session` tool, +557 bytes).
+    /// Measured at 86,625 on 2026-10-08 after merging `main` (86,158) into
+    /// the Files tab's `repo_blame` and `repo_branches`' `merged` note.
+    const BUDGET_BYTES: usize = 86_725;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10125,6 +10129,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // session_ops.rs
     ("capture_session", &["Read"]),
     ("dismiss_ghost_session", &["Drive"]),
+    ("adopt_session", &["Own"]),
     // Its `requester_session_id` is `dispatch_task`'s by another name: the
     // new row is stamped `parent_session_id`, so it shows in that session's
     // Conversations panel, and `inherit_worker_work` copies its work links.

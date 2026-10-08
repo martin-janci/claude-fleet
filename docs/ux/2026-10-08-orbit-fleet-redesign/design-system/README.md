@@ -55,3 +55,13 @@ UI motion runs 80 to 280 ms (`dur-fast`, `dur-base`, `dur-slow`) and stays out o
 - Compact markers are text glyphs: ✓ ✗ … for CI and checks, ▾ for menus, × to remove a chip, ✦ for a Jev proposal, ✎ for an LLM draft.
 - The agent tab uses the agent's own mark in its own colour (`agent-claude` for Claude Code).
 - The logo is the Orbit mark in `assets/Logos`; the name is set in the UI font at weight 600 beside it.
+
+## On the phone (fleet-mobile)
+
+The same tokens, themes, status words and loaders, at touch size. Boards: the "Mobile app" row of the redesign canvas.
+
+- **Navigation:** `BottomBar` with Inbox, Sessions, Control, Work, More. Inbox opens first and carries the only badge, the Needs you count.
+- **Size:** every target is at least `touch-min` (48 px); screens and sheets use `phone-gutter`; rows use `PhoneRow`; dialogs are a `BottomSheet`; a `ChatForm` from Control opens as a sheet.
+- **Notifications** say what the session waits on and open the question card. They never carry Approve.
+- **Loaders:** Orbit for pull-to-refresh, Signal lost for an offline hub or host (static, with Retry), Gravity well while reconnecting, Progress ring with the real size for downloads, Sonar while checking a host, a skeleton with Dot wave for a loading conversation. All after `loader-delay`.
+- **Pairing** is QR-first with the Draw-on mark, Halo on success, then the notification permission with a reason.

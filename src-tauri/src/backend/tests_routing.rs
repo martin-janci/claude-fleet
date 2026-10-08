@@ -1584,6 +1584,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             model: None,
             effort: None,
             profile: None,
+            agent: None,
             owner_person_id: Some(42),
         },
         &st,
@@ -1886,6 +1887,24 @@ fn org_admin_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "update_device",
+            "org_admin",
+            json!({ "action": "rename_device", "device": "phone", "name": "Ada's phone" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::update_device(
+                    b,
+                    s,
+                    commands::org_devices::UpdateDeviceArgs {
+                        device: "phone".into(),
+                        name: Some("Ada's phone".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "bind_device_org",
             "org_admin",
             json!({ "action": "bind_device", "device": "phone", "org": "Acme" }),
@@ -1989,9 +2008,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     use fleet_core::service::rewind::{RewindArgs, RewindMode};
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
-        DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs, NewSessionArgs,
-        RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs,
-        SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
+        AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
+        NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
+        RestoreHostSessionsArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
     };
 
     vec![
@@ -2822,6 +2841,23 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "adopt_session",
+            "adopt_session",
+            json!({ "session_id": 7 }),
+            SESSION_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::adopt_session(
+                    b,
+                    AdoptSessionArgs {
+                        session_id: 7,
+                        owner_person_id: Some(1),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "new_bg_session",
             "new_bg_session",
             json!({ "host_alias": "trn", "name": "worker", "prompt": "go", "requester_session_id": 41 }),
@@ -3075,6 +3111,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 "model": "opus",
                 "effort": "high",
                 "profile": "work",
+                "agent": "claude",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -3097,6 +3134,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         model: Some("opus".into()),
                         effort: Some("high".into()),
                         profile: Some("work".into()),
+                        agent: Some("claude".into()),
                         // Set, and absent from the asserted JSON above: whose
                         // a session is follows from the CONNECTION, never from
                         // an argument a client could choose (multi-user M1,

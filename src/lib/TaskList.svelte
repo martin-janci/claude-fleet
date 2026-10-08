@@ -53,6 +53,13 @@
   const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
 
   const sections: StatusSections = $derived(groupTasksByStatus(tasks, Math.floor(Date.now() / 1000)));
+  const emptySections = $derived(
+    [
+      sections.todo.length === 0 ? 'To do' : null,
+      sections.doing.length === 0 ? 'Doing' : null,
+      sections.done.length === 0 ? 'Done in the last 7 days' : null,
+    ].filter((x): x is string => x !== null),
+  );
   const pickable = $derived(($projects ?? []).filter((p) => !p.project?.system));
 
   let seq = 0;
@@ -122,6 +129,8 @@
     [...sections.todo, ...sections.doing, ...(doneOpen ? sections.done : [])].map((n) => n.task.task_id),
   );
 
+  const nodeOf = (id: string) => [...sections.todo, ...sections.doing, ...sections.done].find((n) => n.task.task_id === id);
+
   /** The list's keyboard (task → session spec §2.2): `j` / `k` move the
    *  selection, `s` runs the selected task's Work button, ⇧S opens its
    *  start popover. Never inside a field, a menu or a dialog. */
@@ -135,7 +144,7 @@
       e.preventDefault();
       const next = e.key === 'j' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
       const id = visibleRows[at < 0 ? 0 : next];
-      openTask(id);
+      openTask(id, nodeOf(id)?.task.sessions);
       document.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"] .main`)?.focus();
     } else if ((e.key === 's' || e.key === 'S') && at >= 0) {
       const b = workButtonFor(visibleRows[at]);
@@ -206,9 +215,14 @@
   {:else if tasks.length === 0}
     <p class="muted" data-testid="task-list-empty">No tasks match. Type one above and press Enter.</p>
   {:else}
-    {@render section('todo', 'To do', sections.todo, true)}
-    {@render section('doing', 'Doing', sections.doing, true)}
-    {@render section('done', 'Done · last 7 days', sections.done, doneOpen)}
+    <!-- An empty section is a word in one line, not a heading with nothing
+         under it (redesign 1.4). -->
+    {#if sections.todo.length > 0}{@render section('todo', 'To do', sections.todo, true)}{/if}
+    {#if sections.doing.length > 0}{@render section('doing', 'Doing', sections.doing, true)}{/if}
+    {#if sections.done.length > 0}{@render section('done', 'Done · last 7 days', sections.done, doneOpen)}{/if}
+    {#if emptySections.length > 0}
+      <p class="muted" data-testid="task-sections-empty">Nothing in {emptySections.join(' or ')}.</p>
+    {/if}
   {/if}
 </div>
 
@@ -237,7 +251,7 @@
                 class="main"
                 type="button"
                 aria-current={$selectedTaskId === t.task_id ? 'true' : undefined}
-                onclick={() => openTask(t.task_id)}
+                onclick={() => openTask(t.task_id, t.sessions)}
               >
                 <span class="title">
                   {#if t.needs_you}<span class="needs" title="A session needs you" aria-label="needs you">●</span>{/if}
@@ -276,7 +290,7 @@
                 {#each n.children as c (c.task_id)}
                   <li class="child" data-testid="task-child">
                     <span class="dot dot--{c.status_category ?? 'todo'}" aria-hidden="true"></span>
-                    <button class="txt" type="button" onclick={() => openTask(c.task_id)}>{displayTitle(c)}</button>
+                    <button class="txt" type="button" onclick={() => openTask(c.task_id, c.sessions)}>{displayTitle(c)}</button>
                     {#if c.origin === 'agent'}<span class="chip agent" title="A delegated job">agent</span>{:else if c.key}<span class="key">{c.key}</span>{/if}
                   </li>
                 {/each}

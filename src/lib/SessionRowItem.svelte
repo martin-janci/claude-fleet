@@ -133,6 +133,13 @@
   } = $props();
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
+  // Selection is a bar as well as a tint, so it does not rest on colour
+  // alone; with an org colour the bar sits just inside the org stripe.
+  const rowShadow = $derived(
+    [orgColor && `inset 3px 0 0 ${orgColor}`, sessSelected && `inset ${orgColor ? 5 : 2}px 0 0 var(--accent)`]
+      .filter(Boolean)
+      .join(', ') || undefined,
+  );
   const ctxLevel = $derived(contextLevel(sess.context_pct));
   const elapsed = $derived(rowElapsed(sess, nowSec));
   // An old reading describes the past (result evidence): dim the badge
@@ -565,7 +572,8 @@
   data-testid="sess-row"
   data-session-id={sess.id}
   data-org-color={orgColor ?? undefined}
-  style:box-shadow={orgColor ? `inset 3px 0 0 ${orgColor}` : undefined}
+  style:box-shadow={rowShadow}
+  aria-current={sessSelected ? 'true' : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
   role="button"

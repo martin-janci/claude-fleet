@@ -160,6 +160,7 @@
     ],
     "DecidedRow": [
       "account_uuid",
+      "agent",
       "ci_status",
       "claude_profile",
       "claude_session_id",
@@ -461,6 +462,7 @@
     ],
     "SessionRow": [
       "account_uuid",
+      "agent",
       "ci_status",
       "claude_profile",
       "claude_session_id",

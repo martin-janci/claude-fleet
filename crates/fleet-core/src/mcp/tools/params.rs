@@ -106,6 +106,9 @@ pub struct NewSessionParams {
     /// Login profile (~/.claude-profiles/<name>).
     #[serde(default)]
     pub profile: Option<String>,
+    /// claude (default) or shell.
+    #[serde(default)]
+    pub agent: Option<String>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,

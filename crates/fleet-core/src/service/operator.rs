@@ -558,6 +558,7 @@ impl OperatorHost for LiveHost {
                 model: None,
                 effort: None,
                 profile: None,
+                agent: None,
                 // Whose the operator's session is (multi-user M1, T5): the
                 // hub's own person. The UX agent is fleet acting for whoever
                 // runs this hub, and its session has to be readable by them —
