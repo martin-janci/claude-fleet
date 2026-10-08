@@ -16,6 +16,7 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 import { session as fixtureSession } from './hosts_fixture';
+import { expectAccessible } from './a11y_check';
 
 /** A desktop paired with a hub whose live link is down: every routed
  *  mutation (tidy_apply, dismiss_reopened) is blocked with a reason. */
@@ -746,5 +747,18 @@ describe('TidyReview access gate (multi-user M1)', () => {
     await tick();
     expect(dis(screen.getByTestId('tidy-safe-kill'))).toBe(false);
     expect(screen.queryByTestId('tidy-not-mine')).toBeNull();
+  });
+});
+
+describe('TidyReview accessibility (7.2)', () => {
+  it('passes the axe and audit checks with the review open', async () => {
+    candidates = [cand(1), cand(2)];
+    sessions.set(
+      candidates.map((c) => ({ id: c.session_id, tmux_name: c.tmux_name, host_alias: c.host_alias }) as SessionRow),
+    );
+    await mount();
+    await fireEvent.click(await screen.findByTestId('tidy-pill'));
+    await tick();
+    await expectAccessible(document.body);
   });
 });

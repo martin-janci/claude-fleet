@@ -23,6 +23,7 @@ import KeyValue from './KeyValue.svelte';
 import Meter from './Meter.svelte';
 import OrbitMark from './OrbitMark.svelte';
 import Icon from './Icon.svelte';
+import { expectAccessible } from '../a11y_check';
 
 const MANUAL = 'docs/ux/2026-10-08-orbit-fleet-redesign/design-system/components/bundle.css';
 const CSS_FILE = 'src/lib/kit/of.generated.css';
@@ -509,5 +510,44 @@ describe('the kit’s colours, light and dark', () => {
     render(SessionRow, { state: 'waiting', title: 'Title', age: '2m', lead: 'Waiting:', line: 'line', selected: true, testid: 'r' });
     add('SessionRow selected', screen.getByTestId('r'));
     expect(rows).toMatchSnapshot();
+  });
+});
+
+describe('kit accessibility (7.2)', () => {
+  it('every component passes the axe and audit checks', async () => {
+    render(Button, { variant: 'primary', kbd: '⌘↵', mac: true, children: text('Approve') });
+    render(Button, { icon: true, label: 'Send', children: text('↑') });
+    render(Button, { busy: true, busyLabel: 'Starting…', children: text('Start') });
+    render(StatusChip, { state: 'waiting' });
+    render(StatusDot, { state: 'failed' });
+    render(QuestionCard, {
+      question: 'Push to origin needs your OK',
+      answers: [{ label: 'Approve', primary: true, onselect: () => {} }, { label: 'Deny', onselect: () => {} }],
+      onownwords: () => {},
+      mac: true,
+    });
+    // A SessionRow is an option: it lives in the list's listbox.
+    const list = document.body.appendChild(document.createElement('div'));
+    list.setAttribute('role', 'listbox');
+    list.setAttribute('aria-label', 'Sessions');
+    render(SessionRow, {
+      props: { state: 'waiting', title: 'Fix hub-e2e flake', age: '2m', line: 'approve push', selected: true, onselect: () => {} },
+      target: list,
+    });
+    render(ListFilters, {
+      title: 'Inbox',
+      placeholder: 'Search sessions',
+      searchLabel: 'Search sessions',
+      filters: [{ id: 'host:mac', label: 'mac' }],
+      onremove: () => {},
+      grouping: 'state',
+    });
+    render(Rail, { items: [{ id: 'inbox', label: 'Inbox', icon: 'inbox', badge: 4 }], current: 'inbox', onselect: () => {} });
+    render(AppHeader, { oncommand: () => {}, mac: true, children: text('me') });
+    render(Tabs, { tabs: [{ id: 'a', label: 'Conversation' }, { id: 'b', label: 'Terminals', count: 2 }], selected: 'a', onselect: () => {}, label: 'Session views', mac: true });
+    render(KeyValue, { items: [{ label: 'Account', value: 'm' }] });
+    render(Meter, { value: 0.5, level: 'ok', label: 'Week 50% used' });
+    await expectAccessible(document.body);
+    list.remove();
   });
 });

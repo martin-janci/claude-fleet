@@ -659,6 +659,7 @@
       <dt>Login</dt>
       <dd class="login" data-testid="session-login">
         <select
+          aria-label="Claude login"
           data-testid="session-login-pick"
           value={loginTarget}
           onchange={(e) => (loginPick = (e.currentTarget as HTMLSelectElement).value)}
@@ -768,7 +769,7 @@
             >
               <span class="host-badge">[{r.host_alias}]</span>
               <span class="account">{accountEmailTier(accountForRow(r))}</span>
-              <span class="status-dot status-{r.status}" title={r.status}></span>
+              <span class="status-word" data-status={r.status}>{r.status}</span>
               <span class="sess-name">{r.tmux_name}</span>
               <span class="age">{formatRelative(r.last_activity_at)}</span>
             </button>
@@ -791,7 +792,7 @@
             >
               <span class="host-badge">[{r.host_alias}]</span>
               <span class="account">{accountEmailTier(accountForRow(r))}</span>
-              <span class="status-dot status-{r.status}" title={r.status}></span>
+              <span class="status-word" data-status={r.status}>{r.status}</span>
               <span class="sess-name">{r.tmux_name}</span>
               <span class="age">{formatRelative(r.last_activity_at)}</span>
             </button>
@@ -1553,5 +1554,11 @@
   .related .age {
     color: var(--fg-muted);
     font-size: 0.7rem;
+  }
+  /* The status as a word (7.2): the bare dot it replaces had no style, so
+     it showed nothing and said nothing. */
+  .related .status-word {
+    color: var(--fg-muted);
+    font-size: 0.8rem;
   }
 </style>

@@ -1431,6 +1431,7 @@
               title="Sessions whose tag, branch or worktree names {g.key}"
               role="button"
               tabindex="0"
+              aria-expanded={!isCollapsed}
               onclick={() => toggleWorkCollapse(g.key)}
               onkeydown={(e) => {
                 if (!fromRowItself(e)) return;
@@ -1481,6 +1482,7 @@
                   data-testid="work-done"
                   role="button"
                   tabindex="0"
+                  aria-expanded={openDone.has(g.key)}
                   onclick={() => (openDone = toggleIn(openDone, g.key))}
                   onkeydown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') openDone = toggleIn(openDone, g.key);
@@ -1518,6 +1520,7 @@
               title="Past work on {pg.key}: no session is running it"
               role="button"
               tabindex="0"
+              aria-expanded={isOpen}
               onclick={() => (openPast = toggleIn(openPast, pg.key))}
               onkeydown={(e) => {
                 if (!fromRowItself(e)) return;
@@ -1587,6 +1590,7 @@
               title={row.project.base_path}
               role="button"
               tabindex="0"
+              aria-expanded={!isCollapsed}
               onclick={() => toggleCollapse(row.project.id)}
               onkeydown={(e) => onKeyProject(e, row.project.id)}
             >
