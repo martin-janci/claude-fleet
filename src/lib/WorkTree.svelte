@@ -622,7 +622,9 @@
           >
         </div>
       {/if}
-      {#if tab === 'tasks'}
+      {#if tab === 'tasks' && !newLayout}
+        <!-- The New layout's Group control (step 3.7, in WorkFiltersBar)
+             picks List or Grouped there. -->
         <div class="layout" role="group" aria-label="Layout">
           <button
             class="btn btn--chip btn--toggle"
