@@ -1254,6 +1254,32 @@ pub fn write_private_file(path: &std::path::Path, content: &str) -> std::io::Res
     Ok(())
 }
 
+/// Replace `path` with `content`, 0600, so a reader (or a crash) sees the old
+/// file or the new one and never a truncated one: written to a tmp file
+/// beside it, then renamed over it ([`place_private_file`], with its copy
+/// fallback for a bind-mounted target). [`write_private_file`] truncates in
+/// place, which is fine for a file nobody else reads; `~/.claude/settings.json`
+/// is read by every Claude Code start, and a crash mid-write left it cut off.
+///
+/// A symlinked `path` (settings kept in a dotfiles repo) is replaced at its
+/// target, so the link survives.
+pub fn replace_private_file(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => {
+            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    };
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(format!(".fleet-tmp-{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    if let Err(e) = write_private_file(&tmp, content) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    place_private_file(&tmp, &target, |f, t| std::fs::rename(f, t))
+}
+
 /// Open `path` for writing, truncated, at mode 0600 BEFORE a byte is
 /// written. `mode()` only applies when the file is created, so a
 /// pre-existing 0644 file (an older build's, a restored backup) is tightened

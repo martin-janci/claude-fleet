@@ -466,11 +466,11 @@ pub fn install_hook_at_with(
                 IpcError::new(codes::E_IO, format!("write settings.json.fleet-bak: {e}"))
             })?;
         }
-        super::provision::write_private_file(settings_path, &merged)
+        super::provision::replace_private_file(settings_path, &merged)
             .map_err(|e| IpcError::new(codes::E_IO, format!("write settings.json: {e}")))?;
     }
     if headers_changed {
-        super::provision::write_private_file(&headers_path, &headers_content)
+        super::provision::replace_private_file(&headers_path, &headers_content)
             .map_err(|e| IpcError::new(codes::E_IO, format!("write {HOOK_HEADERS_FILE}: {e}")))?;
     }
     Ok(HookInstall::Written)
@@ -571,6 +571,39 @@ mod tests {
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&both).unwrap();
         assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    }
+
+    /// settings.json is replaced whole (tmp file, then rename), never cut
+    /// off in place; a symlinked one is replaced at its target, so a dotfiles
+    /// link survives; no tmp file is left beside it.
+    #[cfg(unix)]
+    #[test]
+    fn install_hook_at_replaces_settings_whole_and_keeps_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let dotfiles = dir.path().join("dotfiles");
+        std::fs::create_dir_all(&dotfiles).unwrap();
+        std::fs::write(dotfiles.join("settings.json"), "{\"model\":\"opus\"}").unwrap();
+        let claude = dir.path().join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+        let path = claude.join("settings.json");
+        std::os::unix::fs::symlink(dotfiles.join("settings.json"), &path).unwrap();
+
+        install_hook_at(&path, "http://127.0.0.1:4180/hook", "tok").unwrap();
+
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let written = std::fs::read_to_string(dotfiles.join("settings.json")).unwrap();
+        assert!(written.contains("\"model\"") && written.contains("4180/hook"));
+        for d in [&dotfiles, &claude] {
+            let stray: Vec<_> = std::fs::read_dir(d)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().contains("fleet-tmp"))
+                .collect();
+            assert!(stray.is_empty(), "{stray:?}");
+        }
     }
 
     #[test]

@@ -380,7 +380,11 @@ impl SshClient {
         dir.join(format!("cm-{host}.sock"))
     }
 
-    /// The `-o` flags shared by every multiplexed ssh invocation. With
+    /// The `-o` flags shared by every multiplexed ssh invocation.
+    ///
+    /// Multiplexing is left out — every call connects on its own, as on
+    /// Windows — when the socket directory is not private to this user (see
+    /// [`control_dir_is_private`]). With
     /// `ControlMaster=auto` + `ControlPersist`, ssh creates the master on the
     /// first call and reuses/recreates it as needed — no app-side bookkeeping.
     ///
@@ -389,8 +393,8 @@ impl SshClient {
     /// `ConnectTimeout` bounds each one.
     pub fn mux_opts(&self, host: &str, timeout: Duration) -> Vec<String> {
         let mut opts: Vec<String> = Vec::new();
-        if self.inner.mux {
-            let path = self.control_path(host);
+        let path = self.control_path(host);
+        if self.inner.mux && path.parent().is_some_and(control_dir_is_private) {
             opts.extend([
                 "-o".into(),
                 "ControlMaster=auto".into(),
@@ -1972,9 +1976,58 @@ fn cache_dir() -> PathBuf {
     crate::home::cache_dir()
 }
 
+/// Whether `dir` may hold ControlMaster sockets: a real directory (not a
+/// symlink), owned by this user, with no group or other permission bits.
+///
+/// `control_path` creates and `chmod`s it best-effort and ignores failure,
+/// so it says nothing about a directory someone else made first — and with
+/// `HOME` unset the cache falls back to the shared temp dir
+/// (`/tmp/claude-fleet`). Another user who pre-created that, with a
+/// `cm-<host>.sock` of their own in it, would have every command (and every
+/// secret streamed over stdin) handed to their socket by `ControlMaster=auto`.
+pub fn control_dir_is_private(dir: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match std::fs::symlink_metadata(dir) {
+            Ok(m) => {
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                let me = unsafe { libc::geteuid() };
+                m.is_dir() && m.uid() == me && m.mode() & 0o077 == 0
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a directory of this user's own, closed to everyone else, holds
+    /// ControlMaster sockets.
+    #[cfg(unix)]
+    #[test]
+    fn a_control_dir_must_be_private_to_this_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("claude-fleet");
+        assert!(!control_dir_is_private(&dir), "missing");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(control_dir_is_private(&dir));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!control_dir_is_private(&dir), "world-writable");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(!control_dir_is_private(&link), "a symlink");
+    }
 
     #[test]
     fn home_is_the_last_line_and_must_be_absolute() {
