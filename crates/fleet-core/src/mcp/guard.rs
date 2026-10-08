@@ -481,6 +481,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Presence (redesign 11.7b): reports into the hub's in-memory board and
+    // reads it back; touches no row. A person's tool, not a host token's.
+    ToolPolicy {
+        name: "session_presence",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Debug devices: a host's Claude uses the devices it may see (its own
     // host's, and those a person shared within its org); a person also
     // labels, shares and forgets them (refused to host tokens in the
@@ -1417,6 +1426,7 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "session_narrow",
     "session_access",
     "my_grants",
+    "session_presence",
 ];
 
 // --- legacy name lists -------------------------------------------------------

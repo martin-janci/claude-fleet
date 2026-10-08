@@ -48,6 +48,7 @@ mod messaging;
 mod orchestration;
 mod params;
 mod peer;
+mod presence;
 mod present;
 mod prs;
 mod repo;
@@ -114,6 +115,9 @@ pub struct FleetTools {
     /// retried call delivers once. Created once in `new`; every per-MCP-
     /// session clone shares it.
     recent_sends: Arc<std::sync::Mutex<RecentSends>>,
+    /// Who has which session open (redesign 11.7b), in memory only. Created
+    /// once in `new`; every per-MCP-session clone shares it.
+    presence: Arc<crate::service::presence::PresenceBoard>,
     /// The tool list each caller is known to hold, for
     /// `notifications/tools/list_changed`. Created once in `new`; both mounts
     /// and every per-request clone share it.
@@ -293,6 +297,7 @@ impl FleetTools {
             guards,
             long_polls: guard::LongPollLimiter::new(guard::MAX_LONG_POLLS_PER_CALLER),
             recent_sends: Arc::new(std::sync::Mutex::new(RecentSends::default())),
+            presence: Arc::default(),
             list_changed: Arc::default(),
             push_list_changed: false,
             tool_router: Self::tool_router(),
@@ -368,6 +373,7 @@ impl FleetTools {
             + Self::devices_router()
             + Self::prs_router()
             + Self::routines_router()
+            + Self::presence_router()
     }
 }
 

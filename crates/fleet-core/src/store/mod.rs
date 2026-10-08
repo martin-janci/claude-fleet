@@ -30,6 +30,7 @@ mod local_workspaces;
 mod mission_loop;
 mod nl_census;
 mod orchestration;
+mod org_activity;
 mod org_members;
 mod orgs;
 mod participants;

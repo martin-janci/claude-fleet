@@ -317,6 +317,14 @@ Index by area (names only; see the reference for details):
   claim is `fleet-hub session claim <id> --person <name>`, beside
   `fleet-hub session unclaimed`. Sharing never confers a terminal: a
   terminal is this machine's own SSH, which no revoke could reach.
+- **Presence** (redesign 11.7b) — `session_presence` (`session_id`,
+  `leaving?`): say you have a session open, again every `heartbeat_secs`
+  (20), and once with `leaving: true` when you close it; the answer is who
+  has it open now, `{ person_id, name, device?, since, you? }` per device.
+  Watch reach. The owner sees everyone; anyone else sees the owner and
+  themselves, never another grantee. The hub keeps it in memory only, so a
+  report lapses 45 s after its last heartbeat and a restart forgets it. A
+  per-host token is refused it.
 - **Composer** — `quick_replies` (the fleet's shared chip row: the prompt
   presets the desktop and the phone both draw above their text box, in list
   order, each with `auto_send`: a tap sends at once rather than filling the

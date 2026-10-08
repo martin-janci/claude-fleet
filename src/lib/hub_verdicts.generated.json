@@ -235,6 +235,7 @@
     "session_conversations",
     "session_history",
     "session_narrow",
+    "session_presence",
     "session_share",
     "session_tool_detail",
     "session_unshare",

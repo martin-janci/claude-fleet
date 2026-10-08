@@ -21,6 +21,7 @@
   import { shortcutLabel } from './shortcuts';
   import { accessOf } from './access';
   import { editorBlockedReason, openSessionInEditor } from './editor';
+  import PresenceStrip from './PresenceStrip.svelte';
 
   interface Props {
     session: SessionRow | null;
@@ -81,6 +82,7 @@
       <span class="name" data-testid="session-head-name">{name}</span>
       <span class="state state-{state}" data-testid="session-head-state">{STATE_LABELS[state]}</span>
       <span class="grow"></span>
+      <PresenceStrip sessionId={session.id} />
       <button
         type="button"
         class="btn btn--quiet btn--icon editor-open"

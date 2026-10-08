@@ -729,3 +729,60 @@ fn list_members_carries_shares_since_and_member_grants_count_what_remove_asks_ab
     .unwrap();
     assert_eq!(grants, serde_json::json!({ "watch": 0, "drive": 0 }));
 }
+
+/// Redesign 11.7c: an admin sees that a member's private sessions exist —
+/// a count beside their name — and never which ones. A session shared with
+/// the admin is live but not private; another org's sessions and a lost or
+/// dead row are not counted at all.
+#[test]
+fn list_members_counts_live_and_private_sessions_and_names_none() {
+    let c = company();
+    {
+        let s = c.st.lock().unwrap();
+        let conn = s.conn_for_test();
+        conn.execute_batch("INSERT INTO hosts (alias) VALUES ('ha'), ('hb')")
+            .unwrap();
+        s.set_host_org("ha", Some(c.acme)).unwrap();
+        s.set_host_org("hb", Some(c.beta)).unwrap();
+        let add = |name: &str, host: &str, owner: i64, status: &str, lost: Option<i64>| {
+            conn.execute(
+                "INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, \
+                                       status, started_at, owner_person_id, visibility, lost_at) \
+                 VALUES (?1, ?2, 1, 1, ?3, 1, ?4, 'private', ?5)",
+                rusqlite::params![name, host, status, owner, lost],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let shared = add("bob-shared", "ha", c.bob, "running", None);
+        add("bob-private", "ha", c.bob, "running", None);
+        add("bob-private-2", "ha", c.bob, "running", None);
+        add("bob-dead", "ha", c.bob, "dead", None);
+        add("bob-lost", "ha", c.bob, "running", Some(5));
+        add("bob-at-beta", "hb", c.bob, "running", None);
+        add("jane-own", "ha", c.jane, "running", None);
+        s.grant_session(
+            shared,
+            crate::store::GrantRecipient::Person(c.jane),
+            crate::store::GRANT_WATCH,
+            c.bob,
+        )
+        .unwrap();
+    }
+    let listed = run(&c.with_org("list_members", c.acme), &c.st, c.jane()).unwrap();
+    let text = listed.to_string();
+    assert!(
+        !text.contains("bob-private"),
+        "a count, never a name: {text}"
+    );
+    let rows: Vec<MemberSummary> = serde_json::from_value(listed).unwrap();
+    let bob = rows.iter().find(|m| m.person_id == c.bob).unwrap();
+    assert_eq!((bob.live_sessions, bob.private_sessions), (3, 2));
+    let jane = rows.iter().find(|m| m.person_id == c.jane).unwrap();
+    assert_eq!((jane.live_sessions, jane.private_sessions), (1, 0));
+    // The desktop's own store reads every row: nothing is private to it.
+    let local = run(&c.with_org("list_members", c.acme), &c.st, Me::LOCAL).unwrap();
+    let rows: Vec<MemberSummary> = serde_json::from_value(local).unwrap();
+    let bob = rows.iter().find(|m| m.person_id == c.bob).unwrap();
+    assert_eq!((bob.live_sessions, bob.private_sessions), (3, 0));
+}

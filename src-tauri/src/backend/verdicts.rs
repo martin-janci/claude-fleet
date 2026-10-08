@@ -811,6 +811,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
+        "session_presence",
+        Verdict::Routed {
+            tool: "session_presence",
+        },
+    ),
+    (
         "list_debug_devices",
         Verdict::Routed {
             tool: "debug_devices",
