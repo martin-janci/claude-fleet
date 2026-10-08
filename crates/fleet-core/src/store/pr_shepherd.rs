@@ -30,6 +30,17 @@ impl ShepherdRuleRow {
     }
 }
 
+/// One merge the queue tried (migration 138).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShepherdMergeRow {
+    pub session_id: i64,
+    pub head_oid: String,
+    pub project_id: i64,
+    pub pr_url: String,
+    pub at: i64,
+    pub outcome: String,
+}
+
 /// One recorded episode: a problem on one pushed commit of a session's PR.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ShepherdEpisodeRow {
@@ -194,6 +205,93 @@ impl Store {
                 session_id: r.get(0)?,
                 head_oid: r.get(1)?,
                 condition: r.get(2)?,
+                pr_url: r.get(3)?,
+                at: r.get(4)?,
+                outcome: r.get(5)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Whether the merge queue already tried this head of this session's PR.
+    /// A merge or a failure is final for the head; a refusal (`skipped:…`,
+    /// GitHub's live answer said not yet) holds only until `retry_after`,
+    /// so a stale reading is looked at again once the probe refreshed it.
+    pub fn shepherd_merge_tried(
+        &self,
+        session_id: i64,
+        head_oid: &str,
+        retry_after: i64,
+    ) -> Result<bool, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT 1 FROM pr_shepherd_merges WHERE session_id = ?1 AND head_oid = ?2 \
+                 AND (outcome NOT LIKE 'skipped:%' OR at > ?3)",
+                params![session_id, head_oid, retry_after],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|r| r.is_some())
+    }
+
+    /// When the queue last merged (or tried to merge) a PR of `project_id`.
+    /// A skip is not an attempt: it touched nothing on GitHub.
+    pub fn last_shepherd_merge_at(&self, project_id: i64) -> Result<Option<i64>, rusqlite::Error> {
+        self.conn.query_row(
+            "SELECT MAX(at) FROM pr_shepherd_merges \
+             WHERE project_id = ?1 AND outcome NOT LIKE 'skipped:%'",
+            params![project_id],
+            |r| r.get(0),
+        )
+    }
+
+    /// Record one merge attempt, with its `pr_shepherd` timeline event
+    /// (`merge:<outcome>`). A head's merge or failure is written once; a
+    /// refusal may be overwritten by the next attempt. `true` when written.
+    pub fn record_shepherd_merge(&self, m: &ShepherdMergeRow) -> Result<bool, rusqlite::Error> {
+        let n = self.conn.execute(
+            "INSERT INTO pr_shepherd_merges \
+               (session_id, head_oid, project_id, pr_url, at, outcome) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(session_id, head_oid) DO UPDATE SET \
+               at = excluded.at, outcome = excluded.outcome \
+             WHERE pr_shepherd_merges.outcome LIKE 'skipped:%'",
+            params![
+                m.session_id,
+                m.head_oid,
+                m.project_id,
+                m.pr_url,
+                m.at,
+                m.outcome
+            ],
+        )?;
+        if n > 0 {
+            let detail = format!("merge:{}", m.outcome);
+            if let Err(e) = self.insert_session_event(m.session_id, "pr_shepherd", Some(&detail)) {
+                tracing::warn!(
+                    session_id = m.session_id,
+                    error = %e,
+                    "[pr_shepherd] session_event insert failed"
+                );
+            }
+        }
+        Ok(n > 0)
+    }
+
+    /// The newest merge attempts, newest first.
+    pub fn list_shepherd_merges(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<ShepherdMergeRow>, rusqlite::Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, head_oid, project_id, pr_url, at, outcome \
+             FROM pr_shepherd_merges ORDER BY at DESC, session_id LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |r| {
+            Ok(ShepherdMergeRow {
+                session_id: r.get(0)?,
+                head_oid: r.get(1)?,
+                project_id: r.get(2)?,
                 pr_url: r.get(3)?,
                 at: r.get(4)?,
                 outcome: r.get(5)?,

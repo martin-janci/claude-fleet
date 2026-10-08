@@ -143,7 +143,8 @@ pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
 };
 pub use pr_shepherd::{
-    ShepherdEpisodeRow, ShepherdRuleRow, SHEPHERD_LEVELS, SHEPHERD_RECIPES_MAX_CHARS,
+    ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
+    SHEPHERD_RECIPES_MAX_CHARS,
 };
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};

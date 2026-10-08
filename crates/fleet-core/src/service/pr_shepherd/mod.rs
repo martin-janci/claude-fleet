@@ -12,7 +12,7 @@
 //! |---------|--------------------------------------------------------------|
 //! | `watch` | records the episode on the session's timeline, sends nothing |
 //! | `nudge` | also sends the session's own Claude one fix prompt           |
-//! | `merge` | as `nudge` for now; the merge queue is a later step          |
+//! | `merge` | also merges a green PR, one per project at a time (`merge.rs`) |
 //!
 //! It reads what the reconcile pass already probed (`sessions.pr_evidence`,
 //! the PR probe in `outcome.rs`): no extra GitHub call. An **episode** is one
@@ -29,6 +29,7 @@
 //!
 //! The planner is pure; the executor is injected, as in `playbooks.rs`.
 
+pub mod merge;
 pub mod prompts;
 #[cfg(test)]
 mod tests;
@@ -36,7 +37,7 @@ mod tests;
 use crate::ipc_error::IpcError;
 use crate::service::outcome::PrEvidence;
 use crate::ssh::SshClient;
-use crate::store::{SessionRow, ShepherdEpisodeRow, ShepherdRuleRow, Store};
+use crate::store::{SessionRow, ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, Store};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
@@ -151,6 +152,10 @@ pub struct Seen {
     pub episodes: HashSet<(i64, String, &'static str)>,
     /// Nudges per session within [`NUDGE_WINDOW_SECS`].
     pub nudges: HashMap<i64, u32>,
+    /// Heads the merge queue already tried: `(session, head)`.
+    pub merges_tried: HashSet<(i64, String)>,
+    /// When the merge queue last acted on each project.
+    pub last_merge: HashMap<i64, i64>,
 }
 
 /// Pure: decide what to do this tick. `rules` are the rules in force,
@@ -238,7 +243,16 @@ pub enum NudgeOutcome {
     Attached,
 }
 
-/// The shepherd's one side effect, injected so the runner is testable.
+/// What a merge attempt did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    Merged,
+    /// GitHub's live answer disagreed with the stored reading; nothing was
+    /// merged. The reason is a vocabulary word ([`merge::live_refusal`]).
+    Refused(String),
+}
+
+/// The shepherd's side effects, injected so the runner is testable.
 #[async_trait::async_trait]
 pub trait ShepherdExec: Send + Sync {
     async fn nudge(
@@ -247,6 +261,14 @@ pub trait ShepherdExec: Send + Sync {
         tmux_name: &str,
         prompt: &str,
     ) -> Result<NudgeOutcome, IpcError>;
+
+    /// Ask GitHub again and merge only if it agrees (see `merge.rs`).
+    async fn merge_if_green(
+        &self,
+        host_alias: &str,
+        pr_url: &str,
+        head_oid: &str,
+    ) -> Result<MergeOutcome, IpcError>;
 }
 
 /// Production executor: skip an attached pane (as `press_enter` does), else
@@ -290,6 +312,45 @@ impl ShepherdExec for RealShepherdExec {
         .await?;
         Ok(NudgeOutcome::Sent)
     }
+
+    async fn merge_if_green(
+        &self,
+        host_alias: &str,
+        pr_url: &str,
+        head_oid: &str,
+    ) -> Result<MergeOutcome, IpcError> {
+        let timeout = std::time::Duration::from_secs(60);
+        let view = crate::service::sessions::run_host_script(
+            &self.ssh,
+            host_alias,
+            &merge::view_script(pr_url)?,
+            timeout,
+        )
+        .await?;
+        if !view.status.success() {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_SHELL,
+                String::from_utf8_lossy(&view.stderr).trim().to_string(),
+            ));
+        }
+        if let Some(why) = merge::live_refusal(&String::from_utf8_lossy(&view.stdout), head_oid) {
+            return Ok(MergeOutcome::Refused(why));
+        }
+        let out = crate::service::sessions::run_host_script(
+            &self.ssh,
+            host_alias,
+            &merge::merge_script(pr_url, head_oid)?,
+            timeout,
+        )
+        .await?;
+        if !out.status.success() {
+            return Err(IpcError::new(
+                crate::ipc_error::codes::E_SHELL,
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ));
+        }
+        Ok(MergeOutcome::Merged)
+    }
 }
 
 /// Read the rules in force, the candidates and what was seen, under one lock.
@@ -314,6 +375,18 @@ fn snapshot(s: &Store, now: i64) -> (Vec<Candidate>, HashMap<i64, ShepherdRuleRo
         .collect();
     let mut seen = Seen::default();
     for c in &candidates {
+        if let Some(head) = c.evidence.head_oid.as_deref() {
+            if let Ok(true) =
+                s.shepherd_merge_tried(c.session_id, head, now - merge::REFUSAL_RETRY_SECS)
+            {
+                seen.merges_tried.insert((c.session_id, head.to_string()));
+            }
+        }
+        if let std::collections::hash_map::Entry::Vacant(e) = seen.last_merge.entry(c.project_id) {
+            if let Ok(Some(t)) = s.last_shepherd_merge_at(c.project_id) {
+                e.insert(t);
+            }
+        }
         let (Some(cond), Some(head)) = (condition_of(&c.evidence), c.evidence.head_oid.as_deref())
         else {
             continue;
@@ -329,14 +402,24 @@ fn snapshot(s: &Store, now: i64) -> (Vec<Candidate>, HashMap<i64, ShepherdRuleRo
     (candidates, rules, seen)
 }
 
-/// Plan and apply one tick. Returns the number of episodes recorded.
+/// Plan and apply one tick: nudges first, then at most one merge per
+/// project. Returns the number of episodes and merges recorded.
 pub async fn run_with(store: &Mutex<Store>, exec: &dyn ShepherdExec, now: i64) -> usize {
-    let planned = {
+    let (planned, merges) = {
         let Ok(s) = store.lock() else {
             return 0;
         };
         let (candidates, rules, seen) = snapshot(&s, now);
-        plan(&candidates, &rules, &seen, now)
+        (
+            plan(&candidates, &rules, &seen, now),
+            merge::plan_merges(
+                &candidates,
+                &rules,
+                &seen.merges_tried,
+                &seen.last_merge,
+                now,
+            ),
+        )
     };
     let mut recorded = 0;
     for p in planned {
@@ -380,6 +463,44 @@ pub async fn run_with(store: &Mutex<Store>, exec: &dyn ShepherdExec, now: i64) -
                 session_id = p.session_id,
                 error = %e,
                 "[pr_shepherd] recording the episode failed"
+            ),
+        }
+    }
+    for m in merges {
+        let outcome = match exec
+            .merge_if_green(&m.host_alias, &m.pr_url, &m.head_oid)
+            .await
+        {
+            Ok(MergeOutcome::Merged) => "merged".to_string(),
+            Ok(MergeOutcome::Refused(why)) => format!("skipped:{why}"),
+            Err(e) => {
+                tracing::warn!(
+                    host = %m.host_alias,
+                    pr = %m.pr_url,
+                    error = %e,
+                    "[pr_shepherd] merge failed"
+                );
+                format!("failed:{}", e.message)
+            }
+        };
+        tracing::info!(pr = %m.pr_url, outcome = %outcome, "[pr_shepherd] merge");
+        let Ok(s) = store.lock() else {
+            continue;
+        };
+        match s.record_shepherd_merge(&ShepherdMergeRow {
+            session_id: m.session_id,
+            head_oid: m.head_oid,
+            project_id: m.project_id,
+            pr_url: m.pr_url,
+            at: now,
+            outcome,
+        }) {
+            Ok(true) => recorded += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                session_id = m.session_id,
+                error = %e,
+                "[pr_shepherd] recording the merge failed"
             ),
         }
     }

@@ -1592,6 +1592,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/137_grant_profile.sql"),
         already_applied: Some(grants_have_profile),
     },
+    // PR shepherd, step 3: the merge queue's record (a new table and an
+    // index, `IF NOT EXISTS`, safe to re-run).
+    Migration::plain(
+        138,
+        include_str!("../../migrations/138_pr_shepherd_merges.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the
