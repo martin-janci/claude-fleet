@@ -2035,6 +2035,7 @@ mod tests {
                 checked: false,
             }],
             multi: false,
+            detail: None,
         };
         let pass = |store: &mut Store, pending: Option<PendingInput>, observed: bool| {
             let sessions = vec![ReconcileSession {

@@ -76,4 +76,4 @@ CREATE TABLE IF NOT EXISTS routine_runs (
 CREATE INDEX IF NOT EXISTS routine_runs_by_routine ON routine_runs (routine_id, started_at);
 CREATE INDEX IF NOT EXISTS routine_runs_running ON routine_runs (state) WHERE state = 'running';
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (130);
+INSERT OR IGNORE INTO schema_version (version) VALUES (131);

@@ -9,6 +9,7 @@
 //! dependency on the Tauri runtime and are directly unit-testable.
 
 pub mod account_limits;
+pub mod account_spend;
 pub mod account_usage;
 pub mod account_usage_poll;
 pub mod add_project;

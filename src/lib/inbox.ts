@@ -19,6 +19,7 @@ import { attentionIdleMinutes } from './notify';
 import { effectiveScope, scopeOf } from './orgs';
 import { sessions, showBgAgents, type SessionRow } from './sessions';
 import { sessionVisible } from './sidebar_index';
+import { attentionFacts } from './attention_facts';
 
 /** The rows that need you, worst first (`byTriage`). */
 export function inboxRows(rows: readonly SessionRow[], opts: AttentionOptions): SessionRow[] {
@@ -68,3 +69,29 @@ export const inboxCount = derived(
     return countNeedsYou(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000) });
   },
 );
+
+/** The Inbox's rows as a store, under the rail count's filters and with the
+ *  attention facts (step 2.4), for code that walks the queue rather than
+ *  drawing it: the Conversation's "moved to next" after an answer (5.9). */
+export const inboxQueue = derived(
+  [sessions, effectiveHostFilter, showBgAgents, effectiveScope, scopeOf, attentionIdleMinutes, attentionFacts],
+  ([$sessions, $host, $bg, $scope, $of, $idle, $facts]) => {
+    const scope = $scope === 'all' ? null : { id: $scope, of: $of };
+    const visible = $sessions.filter((s) => sessionVisible(s, $host, $bg, null, scope));
+    return inboxRows(visible, { idleSecs: $idle * 60, now: Math.floor(Date.now() / 1000), facts: $facts });
+  },
+);
+
+/**
+ * The session to move to after answering `currentId` (redesign 5.9): the
+ * next one in the Inbox's order, wrapping round, never `currentId` itself
+ * (its row says it is waiting until the next tick reads the pane). `null`
+ * when nothing else needs you.
+ */
+export function nextInInbox(queue: readonly SessionRow[], currentId: number): SessionRow | null {
+  const others = queue.filter((s) => s.id !== currentId);
+  if (others.length === 0) return null;
+  const at = queue.findIndex((s) => s.id === currentId);
+  if (at === -1) return others[0];
+  return queue.slice(at + 1).find((s) => s.id !== currentId) ?? others[0];
+}
