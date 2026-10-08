@@ -27,6 +27,7 @@ pub mod decide;
 pub mod delivery;
 pub mod diagnostics;
 pub mod downloads;
+pub mod drafts;
 pub mod editor;
 pub mod evidence;
 pub mod forms;

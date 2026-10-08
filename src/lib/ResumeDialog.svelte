@@ -8,7 +8,12 @@
   import { onMount, untrack } from 'svelte';
   import { get } from 'svelte/store';
   import DialogSheet from './DialogSheet.svelte';
-  import { resumeWork, workResumePlan, type ResumeMode, type ResumePlan } from './work';
+  import DraftField from './DraftField.svelte';
+  import { resumeWork, summarizePastWork, workResumePlan, type ResumeMode, type ResumePlan, type SummaryOutcome } from './work';
+  import { plainUntrusted } from './tracker_health';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { uiLayout } from './prefs';
   import { sessions } from './sessions';
   import { sessionIdBlocked } from './share';
   import { selectSessionExplicitly } from './selection';
@@ -54,6 +59,35 @@
   let briefLoading = $state(false);
   let busy = $state(false);
 
+  // "What changed" (redesign step 5.12, new layout): the past session's
+  // summary, written on its own host by `summarize_past_work`, shown as a
+  // draft. The next brief includes it, so a brief already built is rebuilt.
+  let changed = $state('');
+  let changedBy = $state<SummaryOutcome | null>(null);
+  let changedBusy = $state(false);
+  const changedBlocked = $derived(
+    hubActionBlocked('summarize_past_work', $hubStatus, $hubConnection) ??
+      $sessionIdBlocked(sessionId ?? null, 'summarize_past_work'),
+  );
+
+  async function whatChanged(): Promise<void> {
+    const id = plan?.link_id ?? linkId;
+    if (id == null || changedBusy || changedBlocked !== null) return;
+    changedBusy = true;
+    const r = await summarizePastWork(workKey, id);
+    changedBusy = false;
+    if (!r.ok) {
+      error = r.error.message;
+      return;
+    }
+    changedBy = r.value;
+    changed = plainUntrusted(r.value.summary);
+    if (mode === 'brief') {
+      briefFor = null;
+      void loadBrief();
+    }
+  }
+
   /**
    * Multi-user M1 (F2c). `resume_work` is `share.ts`'s `own` tier whatever the
    * mode: `last` re-opens the source conversation, `brief` carries a handover
@@ -85,6 +119,8 @@
   async function pickCandidate(id: number) {
     linkId = id;
     briefFor = null;
+    changed = '';
+    changedBy = null;
     await loadPlan();
   }
 
@@ -251,6 +287,34 @@
       {/if}
     {/if}
 
+    {#if $uiLayout === 'new' && live.length === 0 && (plan.link_id ?? linkId) != null}
+      <div class="changed" data-testid="resume-changed">
+        {#if changed.trim() !== '' || changedBusy}
+          <DraftField
+            bind:value={changed}
+            label="What changed"
+            model={changedBy?.model}
+            host={changedBy?.host_alias}
+            from={changedBy ? 'from its last conversation' : null}
+            busy={changedBusy}
+            rows={6}
+            onregenerate={() => void whatChanged()}
+            onclear={() => (changedBy = null)}
+            testid="resume-changed-draft"
+          />
+        {:else}
+          <button
+            type="button"
+            class="btn btn--quiet"
+            data-testid="resume-changed-run"
+            disabled={changedBlocked !== null}
+            title={changedBlocked ?? 'Ask Claude what the last session did (one model call on its host); the next brief includes it'}
+            onclick={() => void whatChanged()}>✎ What changed</button
+          >
+        {/if}
+      </div>
+    {/if}
+
     {#each plan.warnings ?? [] as w (w)}
       <p class="warn" data-testid="resume-warning">{w}</p>
     {/each}
@@ -294,6 +358,9 @@
   .where,
   .live {
     margin: 0 0 0.5rem;
+  }
+  .changed {
+    margin-bottom: 0.6rem;
   }
   .host {
     display: flex;

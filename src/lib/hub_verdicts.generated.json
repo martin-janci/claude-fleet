@@ -13,6 +13,7 @@
     "discard_kill_session",
     "discover_hosts",
     "dismiss_agent_session",
+    "draft_commit_message",
     "fetch_page_source",
     "flow_back",
     "flow_cancel",
