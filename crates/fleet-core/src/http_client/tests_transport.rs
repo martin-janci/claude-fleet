@@ -592,3 +592,28 @@ async fn a_download_never_touches_a_pre_existing_part_file() {
         .collect();
     assert_eq!(left.len(), 2, "{left:?}");
 }
+
+#[test]
+fn a_bearer_that_would_break_the_request_head_is_refused() {
+    assert!(check_bearer("abc-DEF_123.~").is_ok());
+    for bad in ["", "a\r\nX-Evil: 1", "a b", "a\u{e9}", "a\0"] {
+        assert!(check_bearer(bad).is_err(), "{bad:?}");
+    }
+    assert!(check_bearer(&"a".repeat(5000)).is_err());
+}
+
+/// A download whose peer stops sending is abandoned after `DOWNLOAD_IDLE`
+/// rather than held open for ever. (`read_or_stall` on an in-memory pipe:
+/// paused time and a real socket would race the connect timeout.)
+#[tokio::test(start_paused = true)]
+async fn a_read_that_stalls_is_abandoned() {
+    let (mut near, far) = tokio::io::duplex(64);
+    let mut buf = [0u8; 16];
+    let started = tokio::time::Instant::now();
+    let err = read_or_stall(&mut near, &mut buf, "hub", 443)
+        .await
+        .unwrap_err();
+    assert!(err.contains("stalled"), "{err}");
+    assert!(started.elapsed() >= DOWNLOAD_IDLE);
+    drop(far);
+}

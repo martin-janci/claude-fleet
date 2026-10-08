@@ -6771,7 +6771,7 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     assert_eq!(
         result_json(&out).as_array().unwrap().len(),
         3,
-        "session_history negative limit without fresh_for must stay SQLite's own unlimited"
+        "session_history negative limit without fresh_for means as many as allowed (bounded_limit)"
     );
 
     let out = t
@@ -6811,7 +6811,7 @@ async fn session_history_and_inbox_default_paths_keep_edge_limits_byte_identical
     assert_eq!(
         result_json(&out).as_array().unwrap().len(),
         3,
-        "inbox negative limit without fresh_for must stay SQLite's own unlimited"
+        "inbox negative limit without fresh_for means as many as allowed (bounded_limit)"
     );
 }
 

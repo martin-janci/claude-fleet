@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { open } from '@tauri-apps/plugin-dialog';
+  import { invokeCmd } from './result';
+  import type { PickedFile } from './attachments';
   import {
     updateAsset, addResource, removeResource, lintAsset, getAsset, resourceSize,
     TOOLS, TIERS, EVENTS, KIND_FIELDS,
@@ -214,20 +215,22 @@
 
   async function addResourceFile() {
     resourceError = null;
-    let picked: unknown;
-    try {
-      picked = await open({ multiple: false });
-    } catch (e) {
-      resourceError = e instanceof Error ? e.message : String(e);
+    // The picker runs in Rust, which authorises what the user chose; the
+    // webview never names a path the backend will read (SEC-9).
+    const pickedR = await invokeCmd<PickedFile[]>('pick_attachments', {});
+    if (!pickedR.ok) {
+      resourceError = pickedR.error.message;
       return;
     }
-    if (typeof picked !== 'string') return;
-    resourceBusy = picked;
-    const r = await addResource(draft.kind, draft.name, picked);
-    resourceBusy = null;
-    if (!r.ok) {
-      resourceError = r.error.message;
-      return;
+    if (pickedR.value.length === 0) return;
+    for (const file of pickedR.value) {
+      resourceBusy = file.path;
+      const r = await addResource(draft.kind, draft.name, file.path);
+      resourceBusy = null;
+      if (!r.ok) {
+        resourceError = r.error.message;
+        break;
+      }
     }
     await refreshResources();
   }

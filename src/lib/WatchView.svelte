@@ -82,13 +82,29 @@
    *  that lands after the selection moved on belongs to the pane that asked
    *  for it, and painting it under another session's header is the bug the
    *  terminal's own `openGeneration` guard exists for. */
+  /** The newest capture asked for. A reply that is not the newest is
+   *  dropped: on a host where one capture outlasts the poll interval, replies
+   *  can land out of order, and an older pane must not replace a newer one. */
+  let generation = 0;
+  /** A capture is out. The interval skips its tick rather than stacking
+   *  another SSH capture behind a slow one. */
+  let inFlight = false;
+
   async function refresh(id: number, first: boolean) {
+    if (!first && inFlight) return;
+    const mine = ++generation;
+    inFlight = true;
     if (first) loading = true;
-    const r = await captureSession(id, {
-      scrollback_lines: SCROLLBACK_LINES,
-      max_lines: MAX_LINES,
-    });
-    if (id !== session.id) return;
+    let r: Awaited<ReturnType<typeof captureSession>>;
+    try {
+      r = await captureSession(id, {
+        scrollback_lines: SCROLLBACK_LINES,
+        max_lines: MAX_LINES,
+      });
+    } finally {
+      if (mine === generation) inFlight = false;
+    }
+    if (mine !== generation || id !== session.id) return;
     loading = false;
     if (r.ok) {
       text = r.value;
