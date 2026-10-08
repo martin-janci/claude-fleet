@@ -22,6 +22,9 @@
   import { projects, loadProjects } from './projects';
   import { workButtonFor } from './start_preview';
   import WorkButton from './WorkButton.svelte';
+  import EditTaskDialog from './EditTaskDialog.svelte';
+  import { hubActionBlocked, hubStatus } from './hub';
+  import { hubConnection } from './hub_connection';
   import { displayTitle, groupTasksByStatus, type StatusSections, type TaskNode } from './task_list';
   import type { IpcError } from './result';
 
@@ -45,6 +48,9 @@
   let addNotes = $state('');
   let busy = $state(false);
   let actionError = $state<string | null>(null);
+  /** The task whose edit dialog is open. */
+  let editing = $state<string | null>(null);
+  const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
 
   const sections: StatusSections = $derived(groupTasksByStatus(tasks, Math.floor(Date.now() / 1000)));
   const pickable = $derived(($projects ?? []).filter((p) => !p.project?.system));
@@ -206,6 +212,10 @@
   {/if}
 </div>
 
+{#if editing}
+  <EditTaskDialog taskId={editing} onclose={() => (editing = null)} ondone={() => void load()} />
+{/if}
+
 {#snippet section(id: 'todo' | 'doing' | 'done', label: string, nodes: TaskNode[], open: boolean)}
   <section data-testid="task-section-{id}">
     <h3>
@@ -245,6 +255,17 @@
                 {#if (t.open_proposals ?? 0) > 0}
                   <span class="chip prop" data-testid="task-proposals-badge" title="Agent proposals — decide them on the task page"
                     >{t.open_proposals} to review</span
+                  >
+                {/if}
+                {#if t.kind === 'local' && t.item_id != null}
+                  <button
+                    class="edit"
+                    type="button"
+                    title={editBlocked ?? 'Edit task'}
+                    aria-label="Edit {displayTitle(t)}"
+                    disabled={editBlocked !== null}
+                    data-testid="task-edit"
+                    onclick={() => (editing = t.task_id)}>✎</button
                   >
                 {/if}
                 <WorkButton task={t} />
@@ -405,6 +426,26 @@
     display: flex;
     gap: 4px;
     align-items: center;
+  }
+  .edit {
+    background: none;
+    border: 0;
+    padding: 0 3px;
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+    opacity: 0;
+  }
+  .row:hover .edit,
+  .edit:focus-visible {
+    opacity: 1;
+  }
+  .edit:hover {
+    color: var(--fg);
+  }
+  .edit:disabled {
+    cursor: not-allowed;
   }
   .chip {
     font-size: 0.7rem;

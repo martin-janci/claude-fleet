@@ -1053,7 +1053,8 @@ impl FleetTools {
         a Claude-written summary of past work. archive|unarchive (UI only), snooze {days}|never \
         (tidy-up); dismiss {item_id} (reopened); tidy_apply {items}: kills (safe \
         kill when dirty). set_status {item_id, status}: a person's status for \
-        work with no ticket. create {title, parent?, notes?}: a task or \
+        work with no ticket. edit {item_id, title?, notes?, assignees?}: a \
+        person edits work with no ticket. create {title, parent?, notes?}: a task or \
         subtask. propose {parent, title, why?}: a subtask a person accepts \
         or rejects {item_id, no session_id}. bucket_add|bucket_remove \
         {bucket_id, item_id}: sprint/release. mission_save {mission, \
@@ -1524,6 +1525,22 @@ impl FleetTools {
             self.require_drive_on_item_sessions(&caller, item_id)?;
             return ok_json(
                 &crate::service::work::status::set_status(&self.store, &scope, item_id, status)
+                    .map_err(to_mcp_err)?,
+            );
+        }
+        if args.action == "edit" {
+            // Task editing: a local item's title, notes and assignees. The
+            // ORG fence is inside `edit_local_item` (an item outside the
+            // scope answers as an unknown id, a tracker's ticket is
+            // `E_INVALID`); the PERSON fence is the rename half's and
+            // `set_status`'s — the text it rewrites is what the owner's own
+            // sidebar shows for their row.
+            let item_id = args
+                .item_id
+                .ok_or_else(|| mcp_err("E_INVALID", "edit needs item_id", None))?;
+            self.require_drive_on_item_sessions(&caller, item_id)?;
+            return ok_json(
+                &crate::service::work::local::edit_local_item(&args, &self.store, &scope)
                     .map_err(to_mcp_err)?,
             );
         }

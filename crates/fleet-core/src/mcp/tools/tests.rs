@@ -3864,7 +3864,9 @@ fn the_served_definition_budget_stays_bounded() {
     /// { mission_start | mission_plan | mission_grant | mission_revoke |
     /// retry | card_decide | missions_pause_all }` and their arguments,
     /// +1,137 bytes).
-    const BUDGET_BYTES: usize = 81_794;
+    /// Measured at 81,951 on 2026-10-08 after task editing (`work_link
+    /// { edit }` and its `assignees` argument, +257 bytes).
+    const BUDGET_BYTES: usize = 82_051;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -10742,6 +10744,9 @@ const WORK_ACTION_REACH: &[(&str, &str, &[&str])] = &[
     // `require_drive_on_item_sessions`, the same gate and level as `name`'s
     // rename half.
     ("work_link", "set_status", &["Drive"]),
+    // Task editing: the text the owner's sidebar shows for their own row,
+    // behind `set_status`'s gate.
+    ("work_link", "edit", &["Drive"]),
     // Sprint and release membership: `set_status`'s person gate, on the
     // item planned.
     ("work_link", "bucket_add", &["Drive"]),

@@ -311,6 +311,8 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     // The board (sprints design 2026-09-28 §6c): a person's status for a
     // native item, set by dragging its card to a column.
     ("set_work_status", Verdict::Routed { tool: "work_link" }),
+    // Task editing: a person's title, notes and assignees for a native item.
+    ("edit_work_item", Verdict::Routed { tool: "work_link" }),
     (
         "accept_work_proposal",
         Verdict::Routed { tool: "work_link" },

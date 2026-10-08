@@ -150,3 +150,28 @@ describe('WorkBoard', () => {
     expect(onclose).toHaveBeenCalledOnce();
   });
 });
+
+describe('WorkBoard editing', () => {
+  it("opens the edit dialog from a native card's ✎ or E, and offers none on a ticket", async () => {
+    render(WorkBoard, { props: { debounceMs: 0 } });
+    await flush();
+    const edits = screen.getAllByTestId('work-board-card-edit');
+    expect(edits).toHaveLength(1);
+    expect(edits[0].getAttribute('aria-label')).toBe('Edit Write notes');
+    await fireEvent.click(edits[0]);
+    await flush();
+    expect(screen.getByTestId('edit-task-dialog')).toBeTruthy();
+    expect(calls('work_task')).toEqual([['work_task', { args: { task_id: 'item:1' } }]]);
+  });
+
+  it('E on a focused tracker card opens nothing', async () => {
+    render(WorkBoard, { props: { debounceMs: 0 } });
+    await flush();
+    await fireEvent.keyDown(card('Login fails'), { key: 'e' });
+    await flush();
+    expect(screen.queryByTestId('edit-task-dialog')).toBeNull();
+    await fireEvent.keyDown(card('Write notes'), { key: 'e' });
+    await flush();
+    expect(screen.getByTestId('edit-task-dialog')).toBeTruthy();
+  });
+});

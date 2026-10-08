@@ -2593,6 +2593,53 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Task editing: `set_status`'s fences — host A's own local item edited
+    // by whoever may see it, another host's answering as unknown, a
+    // ticket refused for who sees it.
+    let unknown_item_edit = call(
+        &fx,
+        Who::HostB,
+        "work_link",
+        json!({ "action": "edit", "item_id": 999_999, "notes": "n" }),
+    )
+    .await;
+    m.row(
+        "work_link",
+        "edit",
+        move |_, _| json!({ "action": "edit", "item_id": local_a, "notes": "edited notes" }),
+        move |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostB | Who::HostNone | Who::BoundB => {
+                    same_as_unknown(a, &unknown_item_edit, &local_a.to_string(), "999999")
+                }
+                _ => assert!(
+                    text(a).contains("\"notes\":\"edited notes\""),
+                    "{who:?}: {a:?}"
+                ),
+            }
+        },
+    )
+    .await;
+    m.row(
+        "work_link",
+        "edit",
+        |fx, _| json!({ "action": "edit", "item_id": fx.item_b, "title": "Hijack" }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                Who::HostA | Who::HostNone | Who::BoundA => {
+                    is_code(who, a, "E_NOTFOUND", "another org's ticket")
+                }
+                _ => is_code(who, a, "E_INVALID", "a ticket"),
+            }
+        },
+    )
+    .await;
     // Sprints and releases (design 2026-09-28 §7, §8): fenced by the
     // bucket's own org; a member by its item's; membership is a person's
     // plan, never a session's.

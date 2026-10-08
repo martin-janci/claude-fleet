@@ -878,6 +878,28 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        // Task editing.
+        (
+            "edit_work_item",
+            "work_link",
+            json!({ "session_id": null, "action": "edit", "key": null, "item_id": 9,
+                    "link_id": null, "source": null, "title": "Fix login",
+                    "notes": "", "assignees": ["Ana"] }),
+            NATIVE_ITEM_PAYLOAD,
+            Box::new(|b, s, _| {
+                block_on(commands::work::routed::edit_work_item(
+                    b,
+                    commands::work::EditWorkItemArgs {
+                        item_id: 9,
+                        title: Some("Fix login".into()),
+                        notes: Some(String::new()),
+                        assignees: Some(vec!["Ana".into()]),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
         (
             "accept_work_proposal",
             "work_link",

@@ -460,7 +460,9 @@ const SCOPE_GUARDS: &[Guard] = &[
               with sprints and releases: `buckets::item_visible`, which asks \
               whether a bucket's member ITEM is the caller's to see or plan \
               (the planning write carries `require_drive_on_item_sessions` at \
-              the tool layer, as `set_status` does)",
+              the tool layer, as `set_status` does). A SIXTH arrived with task \
+              editing: `edit_local_item`, a write like the rename, behind the \
+              same `require_drive_on_item_sessions` at the tool layer",
     },
     Guard {
         file: "crates/fleet-core/src/service/work/local.rs",
