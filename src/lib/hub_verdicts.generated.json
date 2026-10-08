@@ -170,6 +170,7 @@
     "new_bg_session",
     "new_session",
     "operator_status",
+    "org_member_grants",
     "org_suggestions",
     "pair_device",
     "pause_all_missions",

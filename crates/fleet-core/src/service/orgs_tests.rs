@@ -870,3 +870,48 @@ fn an_orgs_overview_carries_its_spend_series_and_what_needs_an_admin() {
     let json = serde_json::to_value(other).unwrap();
     assert!(json.get("spend_series").is_none() && json.get("needs_admin").is_none());
 }
+
+/// Redesign 11.2: a member's row says since when an org share reaches them
+/// (none for a viewer), and their devices — to whoever administers the org.
+#[test]
+fn members_carry_shares_since_and_their_devices_for_an_administrator() {
+    let st = Mutex::new(Store::open_in_memory().unwrap());
+    let (acme, jane, ann) = {
+        let s = st.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        let ann = s.create_person("ann", None).unwrap().id;
+        s.set_org_member(acme, jane, "member", None).unwrap();
+        s.set_org_member(acme, ann, "viewer", None).unwrap();
+        s.insert_client_token("jane-phone", "digest-1", "full")
+            .unwrap();
+        s.set_client_person("jane-phone", Some(jane)).unwrap();
+        (acme, jane, ann)
+    };
+    let d = org_details(&st, &vs(&OrgScope::All), AdminView::Admin).unwrap();
+    let members = d[0]
+        .members
+        .as_ref()
+        .expect("the administrator sees members");
+    let jane_row = members.iter().find(|m| m.person_id == jane).unwrap();
+    assert!(jane_row.added_at.is_some());
+    assert_eq!(jane_row.shares_since, jane_row.added_at);
+    assert_eq!(
+        jane_row.devices.as_deref(),
+        Some(&["jane-phone".to_string()][..])
+    );
+    let ann_row = members.iter().find(|m| m.person_id == ann).unwrap();
+    assert_eq!(ann_row.shares_since, None, "a viewer receives no shares");
+    assert_eq!(ann_row.devices.as_deref(), Some(&[][..]));
+
+    // A plain member sees who is in the org, never anyone's devices.
+    let member = AdminView::Person {
+        roles: [(acme, "member".to_string())].into_iter().collect(),
+    };
+    let d = org_details(&st, &vs(&OrgScope::All), member).unwrap();
+    let members = d[0].members.as_ref().expect("a member sees the members");
+    assert!(members.iter().all(|m| m.devices.is_none()));
+    let json = serde_json::to_value(&members[0]).unwrap();
+    assert!(json.get("devices").is_none(), "{json}");
+    assert!(json.get("shares_since").is_some(), "{json}");
+}

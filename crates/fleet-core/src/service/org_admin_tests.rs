@@ -706,3 +706,26 @@ fn the_hub_owner_binds_a_members_device_only_to_one_of_their_orgs() {
     run(&own, &c.st, Me::LOCAL).unwrap();
     assert_eq!(c.st.lock().unwrap().hub_owner_org().unwrap(), Some(c.acme));
 }
+
+/// Redesign 11.2: `list_members` says since when an org share reaches each
+/// member, and `member_grants` answers the counts the remove dialog asks
+/// about.
+#[test]
+fn list_members_carries_shares_since_and_member_grants_count_what_remove_asks_about() {
+    let c = company();
+    let listed = run(&c.with_org("list_members", c.acme), &c.st, c.jane()).unwrap();
+    let rows: Vec<MemberSummary> = serde_json::from_value(listed).unwrap();
+    let bob = rows.iter().find(|m| m.person_id == c.bob).unwrap();
+    assert_eq!(bob.shares_since, Some(bob.added_at));
+
+    let grants = run(
+        &OrgAdminArgs {
+            person_id: Some(c.bob),
+            ..c.with_org("member_grants", c.acme)
+        },
+        &c.st,
+        c.jane(),
+    )
+    .unwrap();
+    assert_eq!(grants, serde_json::json!({ "watch": 0, "drive": 0 }));
+}

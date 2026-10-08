@@ -500,6 +500,7 @@ pub fn run() {
             commands::orgs::set_org_setting,
             commands::orgs::set_org_member,
             commands::orgs::remove_org_member,
+            commands::orgs::org_member_grants,
             commands::orgs::list_orgs,
             commands::orgs::org_suggestions,
             commands::org_devices::list_devices,
