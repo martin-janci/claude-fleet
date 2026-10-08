@@ -153,3 +153,65 @@ fn counts_and_cost_cover_the_members_attempts() {
     assert_eq!((c.total, c.open), (1, 1));
     assert_eq!(s.mission_cost_micros(m).unwrap(), 1_500_000);
 }
+
+/// An active mission, its next wake an hour away.
+fn sleeping(s: &Store) -> i64 {
+    let m = mission(s);
+    s.set_mission_state(m, None, "active", "fleet").unwrap();
+    let now = now_unix();
+    assert!(s.take_mission_lease(m, now).unwrap());
+    s.release_mission_lease(m, Some(now + 3600), Some(now))
+        .unwrap();
+    assert!(s.missions_due(now).unwrap().is_empty());
+    m
+}
+
+#[test]
+fn a_members_session_wakes_its_mission_and_another_does_not() {
+    let s = Store::open_in_memory().unwrap();
+    let m = sleeping(&s);
+    s.upsert_host("h").unwrap();
+    let w = s
+        .upsert_session("w", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let other = s
+        .upsert_session("o", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    let item = s.create_local_work_item(None, "a").unwrap().id;
+    s.set_mission_item(m, item, true, "fleet").unwrap();
+    let t = s.insert_task(None, Some(w), "go", "n").unwrap();
+    s.set_task_run(t.id, item, 1, "implement").unwrap();
+
+    assert_eq!(s.wake_session_missions(other).unwrap(), 0);
+    assert!(s.missions_due(now_unix()).unwrap().is_empty());
+    assert_eq!(s.wake_session_missions(w).unwrap(), 1);
+    assert_eq!(s.missions_due(now_unix()).unwrap(), vec![m]);
+}
+
+#[test]
+fn a_members_status_moving_on_the_tracker_wakes_its_mission() {
+    let s = Store::open_in_memory().unwrap();
+    let m = sleeping(&s);
+    let t = s
+        .add_tracker("jira", "Acme", "https://acme.atlassian.net")
+        .unwrap()
+        .id;
+    let write = |status: (&str, &str)| crate::store::TrackerItemWrite {
+        external_id: "1".into(),
+        key: Some("ABC-1".into()),
+        title: "a".into(),
+        status_name: status.0.into(),
+        status_category: status.1.into(),
+        ..Default::default()
+    };
+    let item = s
+        .upsert_tracker_item(t, &write(("To Do", "todo")))
+        .unwrap()
+        .id;
+    s.set_mission_item(m, item, true, "fleet").unwrap();
+    // A re-read that changes nothing leaves it asleep.
+    s.upsert_tracker_item(t, &write(("To Do", "todo"))).unwrap();
+    assert!(s.missions_due(now_unix()).unwrap().is_empty());
+    s.upsert_tracker_item(t, &write(("Done", "done"))).unwrap();
+    assert_eq!(s.missions_due(now_unix()).unwrap(), vec![m]);
+}

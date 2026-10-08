@@ -659,7 +659,14 @@ impl Store {
                 // `eq_ignoring_row_version`; since migration 063 a no-op pass
                 // leaves it alone too) ⇒ a no-op pass; emit nothing.
                 Some(ref before) if before.eq_ignoring_row_version(&row) => {}
-                Some(_) => out.push(RowChange::SessionUpdated(row)),
+                Some(before) => {
+                    // Its PR's checks moved: the missions it works for
+                    // look now (orchestration O8), not at their timer.
+                    if before.ci_status != row.ci_status {
+                        super::mission_loop::wake_session_missions_in_tx(tx, row.id)?;
+                    }
+                    out.push(RowChange::SessionUpdated(row))
+                }
             }
         }
         Ok(())

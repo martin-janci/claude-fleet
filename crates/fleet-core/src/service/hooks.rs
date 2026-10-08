@@ -584,6 +584,33 @@ pub fn take_pending_stop_delivery(
     ))
 }
 
+/// The worker guard's answer to a `PreToolUse(Bash)` hook (orchestration
+/// §7.2): why the command is a person's step, for a mission's worker only;
+/// `None` lets it run. Never an error: a guard that cannot read the store
+/// lets the command through, as a hub that does not answer would.
+pub fn pre_tool_use_denial(
+    store: &Arc<Mutex<Store>>,
+    payload: &HookPayload,
+    ctx: &HookContext,
+) -> Option<&'static str> {
+    if payload.tool_name.as_deref() != Some("Bash") {
+        return None;
+    }
+    let command = payload.tool_input.as_ref()?.get("command")?.as_str()?;
+    // The pure reading first, as if on the default branch: most commands
+    // that reach here are not a person's step on any branch.
+    crate::service::work::orchestrate::guard::deny_reason(command, Some("main"))?;
+    let s = lock(store).ok()?;
+    let (row, _) = resolve_hook_row(&s, payload, ctx, false).ok()??;
+    if !s.is_mission_worker(row.id).ok()? {
+        return None;
+    }
+    let branch = s.session_branch(row.id).ok().flatten();
+    let why = crate::service::work::orchestrate::guard::deny_reason(command, branch.as_deref())?;
+    tracing::info!(session = %row.tmux_name, why, "[hook] worker guard refused a command");
+    Some(why)
+}
+
 /// Most characters of a SessionStart `additionalContext` (work graph M4.5).
 pub const SESSION_START_CONTEXT_MAX: usize = 4000;
 
@@ -4680,5 +4707,53 @@ mod tests {
             0,
             "a legitimate Stop with nothing pending must reset the streak"
         );
+    }
+
+    /// The worker guard (orchestration §7.2): a mission's worker is refused
+    /// a person's step; the same command from any other session runs.
+    #[test]
+    fn the_guard_refuses_a_missions_worker_and_nobody_else() {
+        let store = make_store();
+        let id = hooked(&store);
+        let master = Caller::master();
+        let c = ctx(&master, None);
+        let bash = |cmd: &str| HookPayload {
+            tool_name: Some("Bash".into()),
+            tool_input: Some(serde_json::json!({ "command": cmd })),
+            ..make_payload("PreToolUse", "uuid-1")
+        };
+        assert_eq!(
+            pre_tool_use_denial(&store, &bash("gh pr merge 3"), &c),
+            None,
+            "not a worker"
+        );
+        {
+            let s = store.lock().unwrap();
+            let m = s
+                .create_mission(
+                    &crate::store::NewMission {
+                        name: "m",
+                        goal: "g",
+                        ..Default::default()
+                    },
+                    "fleet",
+                )
+                .unwrap()
+                .id;
+            s.set_mission_state(m, None, "active", "fleet").unwrap();
+            let item = s.create_local_work_item(None, "a").unwrap().id;
+            s.set_mission_item(m, item, true, "fleet").unwrap();
+            let t = s.insert_task(None, Some(id), "go", "n").unwrap();
+            s.set_task_run(t.id, item, 1, "implement").unwrap();
+        }
+        assert!(pre_tool_use_denial(&store, &bash("gh pr merge 3"), &c).is_some());
+        assert!(pre_tool_use_denial(&store, &bash("git push origin main"), &c).is_some());
+        assert_eq!(
+            pre_tool_use_denial(&store, &bash("git push -u origin feat"), &c),
+            None
+        );
+        let mut other_tool = bash("gh pr merge 3");
+        other_tool.tool_name = Some("Read".into());
+        assert_eq!(pre_tool_use_denial(&store, &other_tool, &c), None);
     }
 }

@@ -8,6 +8,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.5.3] - 2026-10-08
+
+### Added
+- **work:** edit a task's title, description, status and assignees
+- **forms:** the form card in the chat, the row chip, waiting triage
+- **forms:** the form wizard and the chat card
+- **forms:** the frontend form model and API, on the shared cases
+- **work:** the mission loop — steps, planner, grants, integration (O4–O8)
+- **forms:** desktop commands routed to the hub's ask; contract 9
+- **forms:** the ask tool — an agent asks, a person answers
+- **work:** a run's report, its git evidence and typed done_when (O3)
+- **forms:** the forms service: wait, answer with host secrets, decline, tick
+- **forms:** form_requests table and pending_form on the session row
+- **jev:** K1 start_project, Jev pre-selects a task's first repository
+- **work:** start progress strip and Cancel start (A3, P-5/P-6)
+- **work:** a task board, To do / Doing / Done, cards drag to set status
+- **work:** the mission graph — dependencies, READY / BLOCKED, waves (O2)
+- **forms:** the fleet.form/1 spec, its validator and answer checker
+- **operator:** the fleet-brainstorm skill, born with the operator (C0)
+- **local-sync:** sync symlinks as links
+- **accounts:** read each host's login profiles, attribute and poll their accounts, switch login in the desktop
+- **work:** missions, the orchestration container (O1)
+- **local-sync:** phases 2 and 3 — review, Ask AI, handoff, conflict tools
+- **sessions:** run a session under a Claude login profile
+
+### Changed
+- **work:** run the real-git script tests on Unix only
+- **forms:** cover conditions, hidden fields and spec limits in the shared corpus; redact secrets from Answers Debug
+- drop graft's local .claude/ edits from this branch
+- **token_store:** run the macOS keychain arm against the real keychain; record the hub live acceptance
+- **hub-e2e:** redeem the federation probe peer from its own address
+- **release:** ignore-list the nine tags behind the release-drift issue
+- **hub-e2e:** walk the guide tool's person-side half against a real hub
+- **add_project:** turn off auto maintenance in the bare-repo worktree fixture
+
+### Fixed
+- **core:** cap clipboard reads, private ssh socket dir, replace settings.json whole
+- **net:** bound hub-link buffers and /events query lists; stalled downloads end; peer tokens checked
+- **forms:** unknown-key problems in sorted order; closed card uses the friendly name; migration number
+- **forms:** per-host sweep backoff, gone hosts swept, no secret written for a withdrawn form
+- **forms:** ask values never reach the MCP audit row; cancel and list tests
+- **core:** catalog symlinks and clone options, failed provisioning reads, bounded MCP inputs
+- **mcp:** trim abandon_start's description to stay in the tool-surface budget
+- **desktop:** keep blocking commands off the main thread; catalog resources need a user pick
+- **forms:** a deleted session keeps a form with secrets for the sweep; docs and e2e fixes
+- **forms:** a session switch is not a closed form; strict null guards in the card
+- **forms:** a server problem moves the wizard to its step; per-card input ids; reset card state per form
+- **work:** read a job's item id after the task columns, and the tool budget
+- **forms:** a finish never lowers secrets_on_host
+- **forms:** serialise answers per form, bound the secret sweep, mark secrets before writing them
+- **answer-card:** a multi-select question can be answered from the card
+- **mcp:** a client_msg_id dedupes per target, not per token
+- **core:** bound four client-supplied MCP inputs
+- **core:** private files are 0600 before the secret lands; downloads use a part file of their own
+- **core:** read git renames and remote output past login banners
+- **frontend:** linear-time markdown fences, table rules and md links; safe truncation and unit display
+- **core:** parse probe, worktree-add and curl output robustly; never call a failed git status clean
+- **core:** harden pairing, downloads, ssh_config, metadata guard, $HOME, TLS accept
+- **tmux:** refuse '#' in new session names; branch .lock components
+- **hub:** safe --since parsing, escape-free console output, refuse port 0
+- **agent:** bound and neutralise peer text, refuse a relative --ca-file
+- **update:** refuse expired channels, malformed offsets and re-run hold-back resets
+- **local-sync:** sync on a desktop paired with a hub
+- **store:** take the write lock up front in read-then-write transactions
+- **provision:** refuse a git work tree only when it tracks fleet's skill dirs
+- **hardening:** review follow-ups on #473
+- **work-run:** run beside live work, refuse a job's mirror, show role in the approval
+- **hardening:** second-review follow-ups
+- **move:** carry git's reason when the target refuses the carried commits
+- **local-sync:** never delete on an unreadable or emptied side, never cross a link
+- **task-switch:** visible-primary compare-and-set, sticky acks, task listing gate
+- **work-buckets:** keep a person's removal, fence adoption by org, survive org delete
+
+### Documentation
+- **hub:** regenerate the verdict summary on main
+- **hub:** regenerate the verdict summary after merging main
+- **forms:** spec status, trigger, answered_by and sweep backoff; secrets cap; REGEN_FORM_DOCS
+- **forms:** the chat forms guide, the control skill, status; hub e2e scenario
+- **jev:** record K1-K5, the use cases accepted on 2026-10-07
+- **plan:** chat forms part 1 — implementation plan; spec aligned with the code
+- **spec:** chat forms — an agent asks, a person fills a form, the answers come back
 ## [0.5.2] - 2026-10-07
 
 **Upgrade note:** this release carries migrations 109–111 (local workspace
@@ -2877,6 +2958,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.5.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.3
 [0.5.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.2
 [0.5.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.1
 [0.5.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.0

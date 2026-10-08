@@ -344,11 +344,16 @@ itself is the least of the mission's level, `orchestrator.max_level`
 (`work_link { mission_grant }`: level, hours, budget, hosts); brakes pause the
 mission on a spent budget or no progress, and `missions_pause_all` pauses
 every mission and ends its grants. `orchestrator.enabled` is the kill switch.
-A continuous mission wakes on `policy.wake_every_secs`, and every finished
-run wakes its mission. The Missions tab has Start wave, the next steps, the
-cards, the grant and Pause all. Not built yet: a PreToolUse guard that stops
-a worker's command outside its grant, wakes from tracker and CI events, and
-the phone's missions view.
+A continuous mission wakes on `policy.wake_every_secs`; a finished run, a
+member's status moving on the tracker and a worker's PR checks moving each
+wake its mission. The Missions tab has Start wave, the next steps, the
+cards, the grant and Pause all; the phone (fleet-mobile) has the list, the
+steps, the cards and Pause all. A mission's worker is refused a person's
+step (`gh pr merge` / `ready`, a push to `main` / `master`, a tracker CLI)
+by fleet's `PreToolUse(Bash)` guard (`orchestrate/guard.rs`): a shell
+prefilter that asks the hub only about those commands and lets the command
+run when the hub does not answer. Hosts get it on re-provisioning
+(`provision_stale`); branch protection on the remote stays the backstop.
 
 Reply actions are landed (#338): Copy, Quote, Retry, Fork here and Rewind
 here under each reply; Fork, Rewind and Retry are one operation,
