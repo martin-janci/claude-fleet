@@ -293,17 +293,21 @@ const nameOf = (path: string) => path.replace(/^.*\//, '').replace(/\.svelte$/, 
  *  them. `selfGated` names the store a self-gated dialog's local flag follows
  *  (`ShareSheet`'s `id` is `$shareSheetFor`), for the ones whose `{#if}` reads
  *  a local. */
+/** The frames a dialog renders: `Modal`, or `DialogSheet` (step 5.10's one
+ *  dialog pattern, itself a `Modal`). */
+const FRAMES = ['Modal', 'DialogSheet'];
+
 export function indexDialogs(
   svelte: Record<string, string>,
   ts: Record<string, string>,
   selfGated: Record<string, string | null> = {},
 ): DialogIndex {
-  const dialogs = new Set<string>(['Modal']);
+  const dialogs = new Set<string>(FRAMES);
   const storeFlags = new Set<string>();
   const unnamed: string[] = [];
   for (const [path, src] of Object.entries(svelte)) {
     const markup = markupOf(src);
-    const at = markup.search(/<Modal[\s>]/);
+    const at = markup.search(/<(?:Modal|DialogSheet)[\s>]/);
     if (at < 0) continue;
     const ifs = openIfs(markup, at);
     // A dialog: its Modal is top-level, or under one `{#if}` its markup
@@ -323,7 +327,7 @@ export function indexDialogs(
   for (const [path, src] of Object.entries(svelte)) {
     const markup = markupOf(src);
     for (const m of markup.matchAll(/<([A-Z]\w*)[\s/>]/g)) {
-      if (!dialogs.has(m[1]) || (m[1] === 'Modal' && dialogs.has(nameOf(path)))) continue;
+      if (!dialogs.has(m[1]) || (FRAMES.includes(m[1]) && dialogs.has(nameOf(path)))) continue;
       const flag = gateAt(markup, m.index);
       if (flag?.store) storeFlags.add(flag.name);
     }
@@ -363,7 +367,7 @@ export function buttonsOf(src: string, index: DialogIndex, name = ''): DialogBut
   const local: Flag[] = [];
   for (const m of markup.matchAll(/<([A-Z]\w*)[\s/>]/g)) {
     // A dialog's own Modal is gated by the dialog's own flag, not a button's.
-    if (!index.dialogs.has(m[1]) || (m[1] === 'Modal' && index.dialogs.has(name))) continue;
+    if (!index.dialogs.has(m[1]) || (FRAMES.includes(m[1]) && index.dialogs.has(name))) continue;
     const flag = gateAt(markup, m.index);
     if (flag && !flag.store && !local.some((f) => f.name === flag.name)) local.push(flag);
   }
