@@ -1046,7 +1046,7 @@ impl FleetTools {
         new session on past work. start {key|url|item_id}: new session on a \
         ticket (project_ids: one per repo; parallel: beside a live one); \
         preview_start: where it would land, nothing made. abandon_start \
-        {session_id}: undo an untouched start. run {item_id, role?}: an \
+        {session_id}: undo an unused start. run {item_id, role?}: an \
         attempt at the item in its own session and worktree, tracked as a task. \
         handover {session_id}: ask it to \
         write its hand-off. summarize {key, link_id}: \
