@@ -329,6 +329,8 @@ resolve on a conflict, and an overview of every link with Clean up stale.
 Symlinks sync as links (their target, never followed; not on a Windows
 desktop). Not yet: a filesystem watcher, a three-way merge editor.
 
+Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.form/1, the form card in the Conversation panel, secrets to host files (migration 117; guide `docs/forms.md`). Contract revision 9: the desktop and its hub ship together. Part 2 (forms in guide steps) is not started; the fleet-mobile card is its own plan.
+
 Session state machine hardening (plan A, #343) is landed: a `working` row
 with no activity for `reconcile.stale_working_secs` turns `idle` with
 `stale_working_at` (migration 065); a StopFailure reads as failed; one
