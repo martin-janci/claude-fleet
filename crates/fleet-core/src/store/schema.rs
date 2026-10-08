@@ -1601,6 +1601,7 @@ const MIGRATIONS: &[Migration] = &[
         version: 137,
         sql: include_str!("../../migrations/137_grant_profile.sql"),
         already_applied: Some(grants_have_profile),
+    },
     // Orbit Fleet 8.10: what a routine run came to (two ADD COLUMNs,
     // guarded on the last).
     Migration {
