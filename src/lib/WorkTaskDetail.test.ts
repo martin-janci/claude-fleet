@@ -114,6 +114,19 @@ describe('WorkTaskDetail', () => {
     });
   });
 
+  it('a local task offers Edit, which opens the edit dialog; a ticket does not', async () => {
+    const { unmount } = render(WorkTaskDetail, { props: { taskId: 'ABC-12' } });
+    await flush();
+    expect(screen.queryByTestId('work-task-edit')).toBeNull();
+    unmount();
+    render(WorkTaskDetail, { props: { taskId: 'item:77' } });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-edit'));
+    await flush();
+    expect(screen.getByTestId('edit-task-dialog')).toBeTruthy();
+    expect((screen.getByTestId('edit-task-title') as HTMLInputElement).value).toBe('Clean up the CI cache');
+  });
+
   it('shows the tracker’s data as text and where the org and group come from', async () => {
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();

@@ -688,6 +688,12 @@ Index by area (names only; see the reference for details):
   `E_INVALID` too, naming it — its status belongs to its tracker, and the
   next sync would otherwise overwrite it here. The setting is final: fleet
   never derives a status back over what a person set.
+  `work_link { action: "edit", item_id, title?, notes?, assignees? }` edits a
+  local item's title, notes (`""` clears) and assignees (display names, `[]`
+  clears; trimmed, each once, at most 10 of 80 characters) and returns the
+  item; a field left out stays as it is. A ticket is `E_INVALID`, naming it,
+  and a delegated job's notes (its dispatch prompt) are `E_INVALID` too. The
+  person gate is `set_status`'s.
   **Sprints and releases** (design `2026-09-28-sprints-releases-epics-design.md`):
   `work { action: "buckets", kind? }` lists the sprints and releases in the
   caller's scope with their roll-up (`total`, `done`) and the tracker sprints

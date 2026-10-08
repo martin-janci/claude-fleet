@@ -234,3 +234,121 @@ fn local_items_named_after_the_migration_are_manual_too() {
     let (named, _) = s.name_session_work(sid, None, "named work").unwrap();
     assert_eq!(named.origin.as_deref(), Some("manual"));
 }
+
+#[test]
+fn a_person_edits_a_local_items_title_notes_and_assignees() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s
+        .create_native_item(&NativeItem {
+            notes: Some("old"),
+            ..native("Fix login")
+        })
+        .unwrap();
+    let people = vec![" Ana ".to_string(), "ana".into(), "".into(), "Bo".into()];
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                title: Some(" Fix the login "),
+                notes: Some(" new notes "),
+                assignees: Some(&people),
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (e.title.as_str(), e.notes.as_deref(), e.assignees.clone()),
+        (
+            "Fix the login",
+            Some("new notes"),
+            vec!["Ana".to_string(), "Bo".into()]
+        )
+    );
+    // A field left out stays; an empty one clears.
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                notes: Some("  "),
+                assignees: Some(&[]),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (e.title.as_str(), e.notes, e.assignees),
+        ("Fix the login", None, Vec::<String>::new())
+    );
+}
+
+#[test]
+fn an_edit_refuses_a_bad_title_or_assignee_and_a_job_mirrors_notes() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s.create_native_item(&native("Fix login")).unwrap();
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                title: Some(" "),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    let many: Vec<String> = (0..=ASSIGNEES_MAX).map(|i| format!("p{i}")).collect();
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                assignees: Some(&many),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    assert_eq!(s.get_work_item(t.id).unwrap().unwrap().title, "Fix login");
+
+    s.conn
+        .execute(
+            "UPDATE work_items SET origin = 'agent' WHERE id = ?1",
+            [t.id],
+        )
+        .unwrap();
+    let e = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                notes: Some("rewrite the prompt"),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+}
+
+#[test]
+fn an_edit_leaves_a_trackers_ticket_alone() {
+    let s = Store::open_in_memory().unwrap();
+    let t = s.create_native_item(&native("Fix login")).unwrap();
+    s.conn
+        .execute(
+            "UPDATE work_items SET source = 'jira' WHERE id = ?1",
+            [t.id],
+        )
+        .unwrap();
+    let r = s
+        .edit_local_item(
+            t.id,
+            &ItemEdit {
+                title: Some("Hijack"),
+                ..ItemEdit::default()
+            },
+        )
+        .unwrap();
+    assert!(r.is_none());
+    assert_eq!(
+        s.edit_local_item(999_999, &ItemEdit::default()).unwrap(),
+        None
+    );
+}
