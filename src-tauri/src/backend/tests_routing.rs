@@ -400,6 +400,20 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "queued_prompts",
+            "queued_prompts",
+            json!({ "session_id": 7 }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::queued_prompts(
+                    b,
+                    fleet_core::service::sessions::QueuedPromptsArgs { session_id: 7 },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_hosts",
             "list_hosts",
             json!({}),
@@ -723,6 +737,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     b, s, ssh,
                 ))
                 .map(|_| ())
+            }),
+        ),
+        (
+            "list_peer_links",
+            "list_peer_links",
+            json!({}),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::federation::routed::list_peer_links(b, s)).map(|_| ())
             }),
         ),
         (
@@ -1729,6 +1752,24 @@ fn org_admin_mutation_cases() -> Vec<Case> {
             }),
         ),
         (
+            "org_member_grants",
+            "org_admin",
+            json!({ "action": "member_grants", "org_id": 1, "person_id": 3 }),
+            r#"{"watch":4,"drive":2}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::orgs::routed::org_member_grants(
+                    b,
+                    s,
+                    OrgAdminArgs {
+                        org_id: Some(1),
+                        person_id: Some(3),
+                        ..OrgAdminArgs::new("member_grants")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "set_org_setting",
             "org_admin",
             json!({ "action": "set_org_setting", "org_id": 1, "key": "budget.org_daily_usd", "value": "5" }),
@@ -2052,6 +2093,35 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     };
 
     vec![
+        (
+            "link_peer_hub",
+            "link_peer",
+            json!({ "url": "https://hub.other.example", "code": "AB12-CD34" }),
+            "null",
+            Box::new(|b, _, _| {
+                block_on(commands::federation::routed::link_peer_hub(
+                    b,
+                    commands::federation::LinkPeerHubArgs {
+                        url: "https://hub.other.example".into(),
+                        code: "AB12-CD34".into(),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "unlink_peer_hub",
+            "unlink_peer",
+            json!({ "id": 1 }),
+            r#"{"id":1,"failed_messages":0}"#,
+            Box::new(|b, _, _| {
+                block_on(commands::federation::routed::unlink_peer_hub(
+                    b,
+                    commands::federation::UnlinkPeerHubArgs { id: 1 },
+                ))
+                .map(|_| ())
+            }),
+        ),
         // Declarative pages P6: a write the hub records as this device.
         (
             "set_fleet_setting",
@@ -2893,6 +2963,42 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "queue_prompt",
+            "queue_prompt",
+            json!({ "session_id": 7, "prompt": "rebase on main" }),
+            r#"{"session_id":7,"delivered":false,"queued_id":3}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::queue_prompt(
+                    b,
+                    fleet_core::service::sessions::QueuePromptArgs {
+                        session_id: 7,
+                        prompt: "rebase on main".into(),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Taking a prompt back is the same tool with `cancel` set.
+        (
+            "cancel_queued_prompt",
+            "queued_prompts",
+            json!({ "session_id": 7, "cancel": 3 }),
+            "[]",
+            Box::new(|b, s, _h| {
+                block_on(commands::sessions::routed::cancel_queued_prompt(
+                    b,
+                    fleet_core::service::sessions::CancelQueuedPromptArgs {
+                        session_id: 7,
+                        id: 3,
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -4458,6 +4564,47 @@ fn the_sharing_commands_address_a_session_by_id_and_nothing_reusable() {
     assert_eq!(keys(&a), want(&["session_id", "person"]));
 }
 
+/// Redesign 11.2: removing a member standalone says what happened to their
+/// shares in the local store, for each of the dialog's three choices.
+#[test]
+fn standalone_remove_member_takes_each_grants_choice() {
+    let (_dir, st) = store();
+    let local = FleetBackend::local();
+    let (org, people) = {
+        let s = st.lock().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        let people: Vec<i64> = ["ann", "ben", "cy"]
+            .iter()
+            .map(|n| {
+                let p = s.create_person(n, None).unwrap().id;
+                s.set_org_member(org, p, "member", None).unwrap();
+                p
+            })
+            .collect();
+        (org, people)
+    };
+    let remove = |person_id: i64, grants: &str| {
+        block_on(commands::orgs::routed::remove_org_member_choosing(
+            &local,
+            &st,
+            commands::orgs::RemoveOrgMemberArgs {
+                org_id: org,
+                person_id,
+                grants: Some(grants.into()),
+                ..Default::default()
+            },
+        ))
+    };
+    assert_eq!(
+        remove(people[0], "narrow").unwrap(),
+        json!({ "removed": true, "revoked_grants": 0, "narrowed": 0 })
+    );
+    assert_eq!(remove(people[1], "keep").unwrap()["removed"], true);
+    assert_eq!(remove(people[2], "revoke").unwrap()["removed"], true);
+    assert_eq!(remove(people[2], "all").unwrap_err().code, codes::E_INVALID);
+    assert!(st.lock().unwrap().org_members(org).unwrap().is_empty());
+}
+
 /// The work-link commands answer from the local store when standalone.
 /// Proof without seeding a session (no public way from this crate): the read
 /// comes back empty and every decision answers the local store's
@@ -5904,6 +6051,10 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/debug_devices.rs",
         include_str!("../commands/debug_devices.rs"),
     ),
+    (
+        "commands/federation.rs",
+        include_str!("../commands/federation.rs"),
+    ),
     ("commands/prs.rs", include_str!("../commands/prs.rs")),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
@@ -5931,6 +6082,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/sessions.rs"),
     ),
     ("commands/tasks.rs", include_str!("../commands/tasks.rs")),
+    ("commands/tray.rs", include_str!("../commands/tray.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/voice.rs", include_str!("../commands/voice.rs")),
     ("commands/work.rs", include_str!("../commands/work.rs")),

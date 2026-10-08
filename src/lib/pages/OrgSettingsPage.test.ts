@@ -11,7 +11,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import ResourcePage from './ResourcePage.svelte';
 import { hubStatus, STANDALONE } from '../hub';
-import { orgs, type OrgDetail } from '../orgs';
+import { memberPairing, orgs, type OrgDetail } from '../orgs';
 import { toasts } from '../toasts';
 import { bundle } from './testing';
 import type { Descriptor, Page } from './pages';
@@ -78,13 +78,19 @@ function route(list: OrgDetail[]) {
     if (cmd === 'set_org_setting') return [];
     if (cmd === 'set_org_member') return [];
     if (cmd === 'remove_org_member') return { removed: true, revoked_grants: 0 };
+    if (cmd === 'org_member_grants') return grants;
+    if (cmd === 'pair_device') return pairing;
     return null;
   });
 }
+let grants: { watch: number; drive: number } | null = null;
+const pairing = { url: 'https://hub/pair#M4D', code: 'M4D-82P-QX7', expires_in_s: 600, name: 'cleo-device', mode: 'full', trusted: false, person: 'cleo', qr: [] };
 const argsOf = (cmd: string) =>
   (invoke.mock.calls.filter((c) => c[0] === cmd).at(-1)![1] as { args: Record<string, unknown> }).args;
 
 beforeEach(() => {
+  grants = null;
+  memberPairing.set(null);
   hubStatus.set({ ...STANDALONE });
   toasts.set([]);
   orgs.set([]);
@@ -163,8 +169,9 @@ describe('an org’s members (phase D)', () => {
       },
     ]);
     render(ResourcePage, { props: { page, resource } });
-    await waitFor(() => expect(screen.getByTestId('record-field-members').textContent).toContain('jane · admin'));
-    expect(screen.getByTestId('record-field-members').textContent).toContain('Bob B · member');
+    await waitFor(() => expect(screen.getAllByTestId('item-members')[0].textContent).toContain('jane'));
+    expect(screen.getAllByTestId('item-members')[0].textContent).toContain('admin');
+    expect(screen.getAllByTestId('item-members')[1].textContent).toContain('Bob B');
     await fireEvent.input(screen.getByTestId('param-org.set_member-person'), { target: { value: 'cleo' } });
     await fireEvent.change(screen.getByTestId('param-org.set_member-role'), { target: { value: 'viewer' } });
     await fireEvent.click(screen.getByTestId('run-org.set_member'));
@@ -173,6 +180,77 @@ describe('an org’s members (phase D)', () => {
     expect((await screen.findByTestId('confirm-dialog')).textContent).toContain('taken back');
     await fireEvent.click(screen.getByTestId('record-confirm'));
     await waitFor(() => expect(argsOf('remove_org_member')).toEqual({ org_id: 1, person_id: 3 }));
+  });
+
+  // Redesign 11.2, board OrgMembers.
+  const joined = Math.floor(Date.parse('2026-09-12T10:00:00Z') / 1000);
+  const team = {
+    ...acme,
+    members: [
+      { person_id: 2, name: 'jane', role: 'admin', added_at: joined, shares_since: joined, devices: ['jane-mac', 'jane-phone'] },
+      { person_id: 3, name: 'bob', role: 'member', added_at: joined, shares_since: joined, devices: [] },
+      { person_id: 4, name: 'audit', role: 'viewer', added_at: joined, devices: ['browser'] },
+    ],
+  };
+
+  it('shows since when a share reaches each member, and their devices', async () => {
+    route([team]);
+    render(ResourcePage, { props: { page, resource } });
+    const since = await screen.findAllByTestId('member-shares-since');
+    expect(since.map((s) => s.textContent)).toEqual(['2026-09-12', '2026-09-12', 'never (viewer)']);
+    expect(screen.getAllByTestId('member-devices').map((d) => d.textContent)).toEqual(['jane-mac, jane-phone', 'none', 'browser']);
+  });
+
+  it('removing a member with 6 shares offers all three choices', async () => {
+    grants = { watch: 4, drive: 2 };
+    route([team]);
+    render(ResourcePage, { props: { page, resource } });
+    await fireEvent.click((await screen.findAllByTestId('item-remove-members'))[1]);
+    expect((await screen.findByTestId('member-grants')).textContent).toContain('6 sessions of Acme are shared with them');
+    expect(argsOf('org_member_grants')).toEqual({ org_id: 1, person_id: 3 });
+    expect(screen.getByTestId('member-grants-revoke')).toBeTruthy();
+    expect(screen.getByTestId('member-grants-narrow')).toBeTruthy();
+    expect(screen.getByTestId('member-grants-keep')).toBeTruthy();
+    await fireEvent.click(screen.getByTestId('member-grants-narrow'));
+    await fireEvent.click(screen.getByTestId('record-confirm'));
+    await waitFor(() => expect(argsOf('remove_org_member')).toEqual({ org_id: 1, person_id: 3, grants: 'narrow' }));
+  });
+
+  it('takes the shares back by default', async () => {
+    grants = { watch: 1, drive: 0 };
+    route([team]);
+    render(ResourcePage, { props: { page, resource } });
+    await fireEvent.click((await screen.findAllByTestId('item-remove-members'))[1]);
+    expect((await screen.findByTestId('member-grants')).textContent).toContain('1 session of Acme is shared with them');
+    await fireEvent.click(screen.getByTestId('record-confirm'));
+    await waitFor(() => expect(argsOf('remove_org_member')).toEqual({ org_id: 1, person_id: 3, grants: 'revoke' }));
+  });
+
+  it('adding a member offers a pairing code for their device', async () => {
+    route([team]);
+    render(ResourcePage, { props: { page, resource } });
+    await fireEvent.input(await screen.findByTestId('param-org.set_member-person'), { target: { value: 'cleo' } });
+    await fireEvent.change(screen.getByTestId('param-org.set_member-role'), { target: { value: 'member' } });
+    await fireEvent.click(screen.getByTestId('run-org.set_member'));
+    expect(((await screen.findByTestId('member-pair-device')) as HTMLInputElement).value).toBe('cleo-device');
+    await fireEvent.click(screen.getByTestId('member-pair-mint'));
+    await waitFor(() => expect(screen.getByTestId('pairing-code').textContent).toBe('M4D-82P-QX7'));
+    expect(argsOf('pair_device')).toEqual({ device: 'cleo-device', mode: 'full', org_id: 1, person: 'cleo' });
+    await fireEvent.click(screen.getByTestId('pairing-close'));
+    expect(screen.queryByTestId('member-pairing')).toBeNull();
+  });
+
+  it('says why when no code can be minted (a standalone desktop)', async () => {
+    route([team]);
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'list_orgs') return [team];
+      if (cmd === 'pair_device') throw { code: 'E_INVALID_STATE', message: 'pairing codes are minted by a hub' };
+      return null;
+    });
+    render(ResourcePage, { props: { page, resource } });
+    await fireEvent.click(await screen.findByTestId('member-pair-3'));
+    await fireEvent.click(screen.getByTestId('member-pair-mint'));
+    expect((await screen.findByTestId('member-pair-error')).textContent).toContain('minted by a hub');
   });
 
   it('leaves the members out for someone the hub does not show them to', async () => {

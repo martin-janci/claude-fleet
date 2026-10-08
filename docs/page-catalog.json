@@ -1683,7 +1683,7 @@
           "type": "time"
         }
       ],
-      "help": "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Peer hub links and updater tokens are managed on the hub.",
+      "help": "The phones, browsers and desktops paired to the hub. A device bound to an org sees only that org's work; a trusted one's prompts reach agents unmarked, and it may change these settings. Links to other fleets' hubs are under Federation; updater tokens are managed on the hub.",
       "id": "device",
       "id_field": "name",
       "label": "Device",
@@ -2210,6 +2210,170 @@
         "report": false
       },
       "variant_by": "kind"
+    },
+    {
+      "create": {
+        "bind": [
+          [
+            "url",
+            {
+              "from": "param",
+              "name": "url"
+            }
+          ],
+          [
+            "code",
+            {
+              "from": "param",
+              "name": "code"
+            }
+          ]
+        ],
+        "command": "link_peer_hub",
+        "envelope": "args",
+        "id": "peer_link.add",
+        "label": "Link a hub",
+        "params": [
+          {
+            "label": "Hub address",
+            "max": 512,
+            "name": "url",
+            "placeholder": "https://hub.example.com",
+            "required": true,
+            "type": "text"
+          },
+          {
+            "label": "Link code",
+            "name": "code",
+            "required": true,
+            "type": "secret"
+          }
+        ],
+        "report": false
+      },
+      "delete": {
+        "bind": [
+          [
+            "id",
+            {
+              "from": "record",
+              "name": "id"
+            }
+          ]
+        ],
+        "command": "unlink_peer_hub",
+        "confirm": "Sessions here can no longer message that fleet, and messages waiting for it fail back to their senders. Linking again needs a new code.",
+        "envelope": "args",
+        "id": "peer_link.remove",
+        "label": "Unlink",
+        "params": [],
+        "report": false
+      },
+      "empty": "No linked hubs. Ask the other fleet's owner for a link code (fleet-hub peer pair on their hub), then Link a hub.",
+      "fields": [
+        {
+          "help": "The other fleet's id once it has answered, else its hub's address.",
+          "id": "title",
+          "label": "Fleet",
+          "max": 256,
+          "type": "text"
+        },
+        {
+          "badge": {
+            "when": "label"
+          },
+          "help": "How the last exchange went.",
+          "id": "state",
+          "label": "State",
+          "options": [
+            [
+              "connected",
+              "Connected"
+            ],
+            [
+              "retrying",
+              "Retrying"
+            ],
+            [
+              "refused",
+              "Refused"
+            ],
+            [
+              "incompatible",
+              "Incompatible"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "Which hub opens the connection: this one dials out, or the other dials in.",
+          "id": "role",
+          "label": "Direction",
+          "options": [
+            [
+              "dialer",
+              "We dial"
+            ],
+            [
+              "listener",
+              "They dial"
+            ]
+          ],
+          "type": "choice"
+        },
+        {
+          "help": "The hub this one dials; a link the other side dials has none.",
+          "id": "url",
+          "label": "Address",
+          "max": 512,
+          "type": "text"
+        },
+        {
+          "help": "The round trip of the last exchange this hub dialed.",
+          "id": "latency",
+          "label": "Latency",
+          "max": 32,
+          "type": "text"
+        },
+        {
+          "help": "Carried either way since midnight (UTC).",
+          "id": "messages_today",
+          "label": "Messages today",
+          "type": "count"
+        },
+        {
+          "help": "Carried either way since the link was made.",
+          "id": "messages_total",
+          "label": "Messages in all",
+          "type": "count"
+        },
+        {
+          "help": "Messages queued for the other fleet.",
+          "id": "pending",
+          "label": "Waiting",
+          "type": "count"
+        },
+        {
+          "help": "When the hubs last traded messages.",
+          "id": "last_exchange_at",
+          "label": "Last exchange",
+          "type": "time"
+        },
+        {
+          "help": "Why the last exchange failed, while it is failing.",
+          "id": "last_error",
+          "label": "Last error",
+          "max": 512,
+          "type": "text"
+        }
+      ],
+      "help": "Other fleets' hubs this hub exchanges messages with: sessions here can message sessions there, and back. Each link shows how it is doing and what it carried.",
+      "id": "peer_link",
+      "id_field": "id",
+      "label": "Linked hub",
+      "list": "list_peer_links",
+      "plural": "Linked hubs",
+      "title_field": "title"
     }
   ],
   "settings": [
@@ -3324,6 +3488,42 @@
         "type": "choice"
       },
       "label": "Jev: start repository",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.sibling_repos",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: sibling repository",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.quick_answer",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: quick answer",
       "widgets": [
         "select",
         "radio",

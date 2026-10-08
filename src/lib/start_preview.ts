@@ -48,6 +48,10 @@ export interface StartPreview {
   /** The same pre-selection as a proposal (redesign 2.8): feature
    *  `start_project`, value `p<id>`. */
   proposal?: DecisionProposal | null;
+  /** With a planned project: the sibling repository (one the key ran in
+   *  before) Jev proposes the task also needs (N3, assist). A pre-tick
+   *  only; the person still presses Start. */
+  suggested_sibling?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
 }
 
 /** Jev's K1 answer as the shared chip reads it (redesign 3.12), when the
@@ -55,6 +59,14 @@ export interface StartPreview {
 export function projectProposal(p: StartPreview): ProposalLike | null {
   const s = p.suggested_project;
   if (s == null || p.missing !== 'project' || !p.projects.some((x) => x.id === s.project_id)) return null;
+  return { value: String(s.project_id), source: 'jev', confidence_pct: s.confidence_pct ?? null };
+}
+
+/** Jev's N3 answer (redesign 3.12): the sibling repository the same task
+ *  also needs, as the shared chip reads it. Only with a planned project. */
+export function siblingProposal(p: StartPreview): ProposalLike | null {
+  const s = p.suggested_sibling;
+  if (s == null || p.missing != null) return null;
   return { value: String(s.project_id), source: 'jev', confidence_pct: s.confidence_pct ?? null };
 }
 

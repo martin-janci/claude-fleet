@@ -37,6 +37,12 @@
 pub mod bench;
 pub mod haiku;
 pub mod jev;
+pub mod quick_answer;
+#[cfg(test)]
+mod quick_answer_tests;
+pub mod sibling_repos;
+#[cfg(test)]
+mod sibling_repos_tests;
 pub mod start_project;
 #[cfg(test)]
 mod start_project_tests;
@@ -83,16 +89,28 @@ pub enum Feature {
     WorkLink,
     /// Pre-selecting the repository of a task's first start (K1).
     StartProject,
+    /// Pre-ticking the sibling repository a ticket start also needs (N3).
+    SiblingRepos,
+    /// The likely option first in an agent's question or a form (J5).
+    QuickAnswer,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 3] = [Feature::StatusMap, Feature::WorkLink, Feature::StartProject];
+    pub const ALL: [Feature; 5] = [
+        Feature::StatusMap,
+        Feature::WorkLink,
+        Feature::StartProject,
+        Feature::SiblingRepos,
+        Feature::QuickAnswer,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
             Feature::StatusMap => "status_map",
             Feature::WorkLink => "work_link",
             Feature::StartProject => "start_project",
+            Feature::SiblingRepos => "sibling_repos",
+            Feature::QuickAnswer => "quick_answer",
         }
     }
 
@@ -106,6 +124,8 @@ impl Feature {
             Feature::StatusMap => settings::DECIDE_JEV_STATUS_MAP,
             Feature::WorkLink => settings::DECIDE_JEV_WORK_LINK,
             Feature::StartProject => settings::DECIDE_JEV_START_PROJECT,
+            Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
+            Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
         }
     }
 }

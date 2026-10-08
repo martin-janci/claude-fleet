@@ -967,6 +967,43 @@ export async function sendPrompt(
   });
 }
 
+/** What `queue_prompt` did with one prompt (step 5.10). */
+export interface QueuePromptResult {
+  session_id: number;
+  /** Typed now: the session was idle. */
+  delivered: boolean;
+  /** Kept until the session is idle; `null` when delivered. */
+  queued_id?: number | null;
+}
+
+/** A prompt waiting for its session to be idle, or one whose typing failed. */
+export interface QueuedPrompt {
+  id: number;
+  session_id: number;
+  body: string;
+  created_at: number;
+  delivered_at?: number | null;
+  attempts?: number;
+  failed_at?: number | null;
+  error?: string | null;
+  cancelled_at?: number | null;
+}
+
+/** Send a prompt as a new turn: now when the session is idle, else once its
+ *  turn ends (never into a dialog). */
+export function queuePrompt(sessionId: number, prompt: string): Promise<Result<QueuePromptResult>> {
+  return invokeCmd<QueuePromptResult>('queue_prompt', { args: { session_id: sessionId, prompt } });
+}
+
+export function queuedPrompts(sessionId: number): Promise<Result<QueuedPrompt[]>> {
+  return invokeCmd<QueuedPrompt[]>('queued_prompts', { args: { session_id: sessionId } });
+}
+
+/** Take back a waiting prompt; answers what is still waiting. */
+export function cancelQueuedPrompt(sessionId: number, id: number): Promise<Result<QueuedPrompt[]>> {
+  return invokeCmd<QueuedPrompt[]>('cancel_queued_prompt', { args: { session_id: sessionId, id } });
+}
+
 export const DEFAULT_REVIEW_PROMPT = `Review the work in this worktree. Run \`git diff\` and \`git log\` against the base branch to see what changed.
 
 Pass 1 — correctness: does the code do what it should? Any bugs?

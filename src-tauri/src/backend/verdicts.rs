@@ -138,6 +138,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "this app's own log folder, which it has either way",
         },
     ),
+    (
+        "set_tray_state",
+        Verdict::SameInBoth {
+            why: "this window's own tray icon, which it has either way",
+        },
+    ),
     // ── projects ────────────────────────────────────────────────────────────
     (
         "list_projects",
@@ -477,6 +483,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_org_setting", Verdict::Routed { tool: "org_admin" }),
     ("set_org_member", Verdict::Routed { tool: "org_admin" }),
     ("remove_org_member", Verdict::Routed { tool: "org_admin" }),
+    ("org_member_grants", Verdict::Routed { tool: "org_admin" }),
     ("list_orgs", Verdict::Routed { tool: "work" }),
     ("org_suggestions", Verdict::Routed { tool: "work" }),
     // Org administration phase B: the company's paired devices and people,
@@ -582,6 +589,24 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "spawn_review",
         Verdict::Routed {
             tool: "spawn_review",
+        },
+    ),
+    (
+        "queue_prompt",
+        Verdict::Routed {
+            tool: "queue_prompt",
+        },
+    ),
+    (
+        "queued_prompts",
+        Verdict::Routed {
+            tool: "queued_prompts",
+        },
+    ),
+    (
+        "cancel_queued_prompt",
+        Verdict::Routed {
+            tool: "queued_prompts",
         },
     ),
     (
@@ -768,6 +793,22 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("get_form", Verdict::Routed { tool: "ask" }),
     ("answer_form", Verdict::Routed { tool: "ask" }),
     ("decline_form", Verdict::Routed { tool: "ask" }),
+    // Settings → Federation (Orbit Fleet 11.5): the hub's links to other
+    // fleets' hubs. The master's and the hub owner's own device's; changing
+    // a link also needs that device trusted (the tool checks).
+    (
+        "list_peer_links",
+        Verdict::Routed {
+            tool: "list_peer_links",
+        },
+    ),
+    ("link_peer_hub", Verdict::Routed { tool: "link_peer" }),
+    (
+        "unlink_peer_hub",
+        Verdict::Routed {
+            tool: "unlink_peer",
+        },
+    ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "list_debug_devices",

@@ -6,7 +6,8 @@
 // - A label that opens a dialog ends with "…", and no label ends in "...".
 //
 // What "opens a dialog" means here: a dialog is a component whose markup
-// renders a `<Modal`. It is shown by an `{#if flag}` around it, either where it
+// renders a `<Modal` (or `<DialogSheet`, the one dialog pattern that wraps
+// it). It is shown by an `{#if flag}` around it, either where it
 // is used (`{#if reviewOpen}<ReviewDialog …>`) or inside itself
 // (`{#if $open}<Modal …>`). A button opens it when its `onclick` makes that
 // flag truthy: inline, through a function in the same file, or through an
@@ -289,6 +290,10 @@ export interface DialogIndex {
 
 const nameOf = (path: string) => path.replace(/^.*\//, '').replace(/\.svelte$/, '');
 
+/** The components a dialog draws its frame with: `Modal`, and `DialogSheet`
+ *  (step 5.10), which wraps it. */
+const FRAMES = ['Modal', 'DialogSheet'];
+
 /** Index the dialogs, their store flags and the module functions that open
  *  them. `selfGated` names the store a self-gated dialog's local flag follows
  *  (`ShareSheet`'s `id` is `$shareSheetFor`), for the ones whose `{#if}` reads
@@ -298,12 +303,12 @@ export function indexDialogs(
   ts: Record<string, string>,
   selfGated: Record<string, string | null> = {},
 ): DialogIndex {
-  const dialogs = new Set<string>(['Modal']);
+  const dialogs = new Set<string>(FRAMES);
   const storeFlags = new Set<string>();
   const unnamed: string[] = [];
   for (const [path, src] of Object.entries(svelte)) {
     const markup = markupOf(src);
-    const at = markup.search(/<Modal[\s>]/);
+    const at = markup.search(/<(?:Modal|DialogSheet)[\s>]/);
     if (at < 0) continue;
     const ifs = openIfs(markup, at);
     // A dialog: its Modal is top-level, or under one `{#if}` its markup
@@ -323,7 +328,7 @@ export function indexDialogs(
   for (const [path, src] of Object.entries(svelte)) {
     const markup = markupOf(src);
     for (const m of markup.matchAll(/<([A-Z]\w*)[\s/>]/g)) {
-      if (!dialogs.has(m[1]) || (m[1] === 'Modal' && dialogs.has(nameOf(path)))) continue;
+      if (!dialogs.has(m[1]) || (FRAMES.includes(m[1]) && dialogs.has(nameOf(path)))) continue;
       const flag = gateAt(markup, m.index);
       if (flag?.store) storeFlags.add(flag.name);
     }
@@ -363,7 +368,7 @@ export function buttonsOf(src: string, index: DialogIndex, name = ''): DialogBut
   const local: Flag[] = [];
   for (const m of markup.matchAll(/<([A-Z]\w*)[\s/>]/g)) {
     // A dialog's own Modal is gated by the dialog's own flag, not a button's.
-    if (!index.dialogs.has(m[1]) || (m[1] === 'Modal' && index.dialogs.has(name))) continue;
+    if (!index.dialogs.has(m[1]) || (FRAMES.includes(m[1]) && index.dialogs.has(name))) continue;
     const flag = gateAt(markup, m.index);
     if (flag && !flag.store && !local.some((f) => f.name === flag.name)) local.push(flag);
   }

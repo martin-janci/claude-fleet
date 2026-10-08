@@ -336,6 +336,68 @@ Choice over those same candidates (or `unsure`).
 Code: `service/decide/start_project.rs`, `preview_start_decided` in
 `service/trackers/tickets.rs`; card K1 in the test map.
 
+## `sibling_repos` — the other repository a ticket start also needs (N3)
+
+A ticket's start in the New session dialog offers *Also start in <repo>* for
+the projects the key ran in before (ended links' project and live sessions
+on the key), other than the chosen one and system projects, newest first.
+With `decide.jev.sibling_repos` on and a planned project, Jev is asked one
+Choice: which ONE of those candidates the same task also needs changes in
+(`p<id>`), `none`, or `unsure`.
+
+- **What is sent.** The task's key and title, the first 1,000 characters of
+  its cached description, the chosen repository's `owner/repo` and each
+  candidate's, redacted. Nothing from the repositories.
+- **Shadow.** Asked off the preview's path and only recorded, with `none`
+  (nothing pre-ticked today) as the baseline.
+- **Assist.** The preview waits for the one call (`decide.jev.timeout_ms`)
+  and carries the answer as `suggested_sibling` (confidence 50% or more) for
+  the dialog to pre-tick. You still press Start.
+- **Asked once per input.** The same task, chosen repository and candidates
+  reuse the decided run for 14 days.
+- **Follow-up.** Your start (single or multi-repo) marks the proposal you
+  were shown `confirmed` when its sibling was among the repositories you
+  started, else `corrected` to the sibling you did start or `none`. An
+  agent's start, and a shadow answer nobody saw, mark nothing.
+- **What is recorded.** Subject `work_start_siblings` `item:<id>`, or
+  `key:<HMAC>` for a key no tracker knows.
+
+Code: `service/decide/sibling_repos.rs`, `sibling_candidates` and
+`preview_start_decided` in `service/trackers/tickets.rs`; step 3.12 of the
+redesign's transition plan.
+
+## `quick_answer` — the likely option first (J5)
+
+When an agent asks a question with numbered options, or opens a chat form
+whose first step has one choice of up to nine options, Jev may be asked
+which option the person is likely to pick. The card shows that option first
+with *Proposed by Jev (N%)*; the numbers follow the shown order, and each
+option still sends its own key. A form pre-selects it when the field is
+empty. *Keep the order* (question) or *Change* (form) puts the options back.
+
+- **Never on a push, a permission or a risky option.** A permission dialog
+  and a multi-select question are never asked about. An option whose words
+  name a push, a force, a delete, a deploy, a merge, an "allow" or another
+  step that is hard to undo (`RISKY_WORDS`) is left out of the question, and
+  the card checks the same words again before it moves anything
+  (`src/lib/quick_answer.ts`).
+- **What is sent.** The question's text (600 characters at most) and the
+  safe options' labels, redacted. Nothing from the pane or the repository.
+- **Shadow / assist.** Always asked off the path a person waits on: the
+  reconcile tick asks about a new question after its pass, and `ask { form }`
+  asks after it opened the form. A proposal appears when it is ready, or not
+  at all. Shadow only records, with the option under the cursor (or the
+  form field's default) as the baseline.
+- **Asked once per question.** A question read again is not asked again; a
+  question that changed or went away withdraws its proposal (`ignored`), so
+  an answer never outlives its question.
+- **What is recorded.** Subject `session` `<id>` (on the session row's
+  `proposals`) or `form` `<form_id>` (the form's `proposal`); options are
+  `o<n>`, the option's number from 1, and `unsure`.
+
+Code: `service/decide/quick_answer.rs` (`QuickAnswerTrigger` on the
+reconcile tick, `spawn_for_form` after `ask { form }`).
+
 ## `work_link` — the work item of a session no rule could link (J1)
 
 When three turns of a conversation have gone by and nothing linked the
@@ -383,6 +445,8 @@ in the test map.
 | `decide.jev.status_map` | `off` | `off` / `shadow` / `assist` | Proposing a status category for an Asana section. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.work_link` | `off` | `off` / `shadow` / `assist` | Choosing a ticket for a session no rule could link. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.start_project` | `off` | `off` / `shadow` / `assist` | Pre-selecting the repository of a task's first start. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |

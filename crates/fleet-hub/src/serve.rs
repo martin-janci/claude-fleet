@@ -1089,6 +1089,16 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
         },
         ticks_cancel.clone(),
     );
+    // Routines (redesign 8.5): the scheduler, each routine under its lease;
+    // Pause all stops it. Stopped with the ticks.
+    let routine_handle = fleet_core::service::routines::spawn_routine_tick(
+        fleet_core::service::routines::Deps::live(
+            Arc::clone(&store),
+            Arc::clone(&ssh),
+            Arc::clone(&reg),
+        ),
+        ticks_cancel.clone(),
+    );
     // Assets S1a: rescan stale hosts' assets without anyone pressing Scan.
     // The hub owns its fleet, so it runs this tick (`catalog.scan_check_secs`,
     // `0` = off), exactly like the tracker sync above. Stopped with the ticks.
@@ -1173,6 +1183,7 @@ pub async fn serve(opts: &HubOptions, env: &HashMap<String, String>) -> Result<E
     tick_handles.push(ready_handle);
     tick_handles.push(update_handle);
     tick_handles.push(mission_handle);
+    tick_handles.push(routine_handle);
     if let Some(h) = tracker_handle {
         tick_handles.push(h);
     }

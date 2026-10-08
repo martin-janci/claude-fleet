@@ -11,13 +11,25 @@ export interface VoiceState {
   error: string | null;
   /** The `/voice` tip stays until the first real recording. */
   tipShown: boolean;
+  /** How loud the last recorded chunk was, 0–1, while capturing (redesign
+   *  5.14: the Sonar follows it). Absent from a backend that predates it. */
+  level?: number;
+  /** A recording just ended: Claude Code is turning it into text. Set on
+   *  `stopped` from `capturing`, cleared by the next event or after
+   *  {@link TRANSCRIBE_SHOW_MS}: the session reports no end of its own. */
+  transcribing?: boolean;
 }
 
-interface VoiceStatePayload {
+/** How long the Dot wave stays after a recording ends, at most. */
+export const TRANSCRIBE_SHOW_MS = 4_000;
+
+export interface VoiceStatePayload {
   session_id: number;
   /** `stopped`: a capture ended; the claim may or may not still be held. */
-  state: 'claimed' | 'capturing' | 'stopped' | 'released' | 'error';
+  state: 'claimed' | 'capturing' | 'stopped' | 'released' | 'error' | 'level';
   error?: string;
+  /** `level` only: 0–1. */
+  level?: number;
 }
 
 const initial = (): VoiceState => ({ sessionId: null, state: 'off', error: null, tipShown: false });
@@ -92,23 +104,40 @@ export function abandonFollow(sessionId: number): void {
  *  the reason in its tooltip. `stopped` (a capture ended) returns to
  *  `claimed` only from `capturing`: it can arrive after a release. */
 export async function startVoiceEvents(): Promise<UnlistenFn> {
-  return listen<VoiceStatePayload>('voice:state', (e) => {
-    const p = e.payload;
-    voiceState.update((s) => {
-      // A stale event for a session we no longer hold must not flip the toggle.
-      if (s.sessionId !== null && p.session_id !== s.sessionId) return s;
-      switch (p.state) {
-        case 'released':
-          return { ...s, sessionId: p.session_id, state: 'off', error: p.error ?? null };
-        case 'error':
-          return { ...s, sessionId: p.session_id, state: 'error', error: p.error ?? 'Microphone error' };
-        case 'capturing':
-          return { ...s, sessionId: p.session_id, state: 'capturing', error: null, tipShown: true };
-        case 'stopped':
-          return s.state === 'capturing' ? { ...s, state: 'claimed', error: null } : s;
-        default:
-          return { ...s, sessionId: p.session_id, state: 'claimed', error: null };
-      }
-    });
+  return listen<VoiceStatePayload>('voice:state', (e) => applyVoiceEvent(e.payload));
+}
+
+let transcribeTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** One `voice:state` payload applied to the store (exported for tests). */
+export function applyVoiceEvent(p: VoiceStatePayload): void {
+  if (p.state !== 'level') {
+    clearTimeout(transcribeTimer);
+    transcribeTimer = undefined;
+  }
+  voiceState.update((s) => {
+    // A stale event for a session we no longer hold must not flip the toggle.
+    if (s.sessionId !== null && p.session_id !== s.sessionId) return s;
+    const base = { ...s, level: undefined, transcribing: false };
+    switch (p.state) {
+      case 'level':
+        // A level only moves the Sonar; it never claims or flips anything.
+        return s.state === 'capturing' ? { ...s, level: Math.min(1, Math.max(0, p.level ?? 0)) } : s;
+      case 'released':
+        return { ...base, sessionId: p.session_id, state: 'off', error: p.error ?? null };
+      case 'error':
+        return { ...base, sessionId: p.session_id, state: 'error', error: p.error ?? 'Microphone error' };
+      case 'capturing':
+        return { ...base, sessionId: p.session_id, state: 'capturing', error: null, tipShown: true, level: 0 };
+      case 'stopped':
+        if (s.state !== 'capturing') return s;
+        transcribeTimer = setTimeout(() => {
+          transcribeTimer = undefined;
+          voiceState.update((v) => ({ ...v, transcribing: false }));
+        }, TRANSCRIBE_SHOW_MS);
+        return { ...base, state: 'claimed', error: null, transcribing: true };
+      default:
+        return { ...base, sessionId: p.session_id, state: 'claimed', error: null };
+    }
   });
 }

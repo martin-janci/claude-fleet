@@ -120,6 +120,9 @@ pub fn run() {
             tauri::async_runtime::block_on(async {
                 fleet_core::rt::install(tokio::runtime::Handle::current());
             });
+            // The tray and menu-bar icon (redesign 3.17), idle until the
+            // frontend says otherwise.
+            commands::tray::install(app);
             let handle = app.handle().clone();
             // Built concretely and then coerced, rather than built as the
             // trait object: the hub event bridge needs the concrete type. Both
@@ -374,6 +377,7 @@ pub fn run() {
             commands::health::health_check,
             commands::diagnostics::collect_diagnostics,
             commands::diagnostics::open_log_folder,
+            commands::tray::set_tray_state,
             commands::projects::list_projects,
             commands::projects::refresh_projects,
             commands::projects::add_project,
@@ -501,6 +505,7 @@ pub fn run() {
             commands::orgs::set_org_setting,
             commands::orgs::set_org_member,
             commands::orgs::remove_org_member,
+            commands::orgs::org_member_grants,
             commands::orgs::list_orgs,
             commands::orgs::org_suggestions,
             commands::org_devices::list_devices,
@@ -529,6 +534,9 @@ pub fn run() {
             commands::sessions::rewind_conversation,
             commands::sessions::send_prompt,
             commands::sessions::spawn_review,
+            commands::sessions::queue_prompt,
+            commands::sessions::queued_prompts,
+            commands::sessions::cancel_queued_prompt,
             commands::sessions::recreate_session,
             commands::sessions::restore_host_sessions,
             commands::sessions::discover_lost_sessions,
@@ -562,6 +570,9 @@ pub fn run() {
             commands::forms::get_form,
             commands::forms::answer_form,
             commands::forms::decline_form,
+            commands::federation::list_peer_links,
+            commands::federation::link_peer_hub,
+            commands::federation::unlink_peer_hub,
             commands::debug_devices::list_debug_devices,
             commands::debug_devices::scan_debug_devices,
             commands::debug_devices::update_debug_device,

@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
 
 /// The event the UI follows: `{ session_id, state, error? }`, `state` one of
-/// `claimed` / `capturing` / `stopped` / `released` / `error`. `stopped` is a
+/// `claimed` / `capturing` / `stopped` / `released` / `error`, or `level`
+/// with a `level` 0.0–1.0 for each recorded chunk. `stopped` is a
 /// capture's end and says nothing about the claim (it can follow a
 /// `released`); a `released` with an `error` is a claim taken elsewhere or
 /// lapsed idle.
@@ -42,9 +43,18 @@ pub fn payload(session_id: i64, state: &str, error: Option<String>) -> serde_jso
 
 /// The microphone of this machine, reporting its state for `session_id`.
 pub fn cpal_source(session_id: i64, emit: Emit) -> Arc<dyn VoiceSource> {
+    let level_emit = Arc::clone(&emit);
     Arc::new(capture::CpalSource {
         on_state: Arc::new(move |state, error| emit(payload(session_id, state, error))),
+        on_level: Arc::new(move |level| level_emit(level_payload(session_id, level))),
     })
+}
+
+/// A recording chunk's loudness for the UI (redesign 5.14): a `level`
+/// state that leaves the claim as it is, `level` rounded to two places.
+pub fn level_payload(session_id: i64, level: f32) -> serde_json::Value {
+    let level = (f64::from(level.clamp(0.0, 1.0)) * 100.0).round() / 100.0;
+    serde_json::json!({ "session_id": session_id, "state": "level", "level": level })
 }
 
 /// What the UI is told when a hub socket ends without this window
@@ -245,6 +255,15 @@ mod tests {
         // phone's claim stays.
         state.release(&emit);
         assert_eq!(registry().owner(31).as_deref(), Some("client:phone"));
+    }
+
+    #[test]
+    fn a_level_payload_carries_the_session_and_a_rounded_level() {
+        assert_eq!(
+            level_payload(4, 0.567),
+            serde_json::json!({ "session_id": 4, "state": "level", "level": 0.57 })
+        );
+        assert_eq!(level_payload(4, 3.0)["level"], 1.0);
     }
 
     #[test]
