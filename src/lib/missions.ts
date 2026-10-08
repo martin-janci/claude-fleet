@@ -409,6 +409,25 @@ export function nodeLabel(state: string): string {
   return state === 'ready' ? 'Ready' : state.charAt(0).toUpperCase() + state.slice(1);
 }
 
+/** Node states a mission is working on now (a run or a person's task in
+ *  progress): its current steps. */
+const WORKING = new Set(['running', 'doing']);
+
+/** Whether `detail`'s mission waits on a person: an open card in the
+ *  confirm queue, or a next step only a person takes (`ask`). */
+export function waitsOnPerson(detail: Pick<MissionDetail, 'plan'>): boolean {
+  const plan = detail.plan;
+  return (plan?.cards ?? []).some((c) => c.state === 'open') || (plan?.steps ?? []).some((s) => s.kind === 'ask');
+}
+
+/** The nodes that carry Comet trails (redesign step 9.12): the current
+ *  steps of an active mission, and none while it waits on a person (the
+ *  manual: no loader while waiting on a person). */
+export function trailNodes(detail: MissionDetail): Set<number> {
+  if (detail.mission.state !== 'active' || waitsOnPerson(detail)) return new Set();
+  return new Set((detail.graph?.nodes ?? []).filter((n) => WORKING.has(n.state)).map((n) => n.item_id));
+}
+
 /** The graph's nodes by wave, W1 first; items the graph leaves out (an
  *  older hub) land in one wave of their own. */
 export function wavesOf(detail: MissionDetail): { wave: number; nodes: GraphNode[] }[] {

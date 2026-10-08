@@ -2,7 +2,7 @@
 // its detail with the lifecycle moves the state allows, a new task under its
 // root, and a refusal shown as text.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -715,5 +715,80 @@ describe('splitMoves and finalMoveQuestion (parity P19)', () => {
     expect(splitMoves('draft')).toEqual({ inline: ['active'], menu: ['cancelled'] });
     expect(splitMoves('completed')).toEqual({ inline: [], menu: [] });
     expect(finalMoveQuestion('X', 'cancelled')).toBe('Cancel X? It stops changing; its tasks stay.');
+  });
+});
+
+// Redesign step 9.12 (Missions part): Comet trails beside the mission's
+// current steps while it runs; none while it waits on a person.
+describe('WorkMissions comet trails', () => {
+  const detailWith = (plan: unknown, state = 'active') => ({
+    mission: mission({ state }),
+    items: [item(10, 'Payments v2'), item(11, 'Schema'), item(12, 'API')],
+    graph: {
+      nodes: [
+        { item_id: 11, state: 'running', wave: 1 },
+        { item_id: 12, state: 'ready', wave: 1 },
+      ],
+      waves: 1,
+    },
+    events: [],
+    may_change: true,
+    plan,
+  });
+  const loop = (over: Record<string, unknown> = {}) => ({
+    steps: [],
+    cards: [],
+    autonomy: { level: 1, grant: null },
+    cost_micros: 0,
+    counts: { total: 2, open: 1 },
+    ...over,
+  });
+
+  /** Past the loaders' 400 ms delay, so an absent loader is really absent. */
+  const pastDelay = () => new Promise((r) => setTimeout(r, 450));
+
+  async function open(detail: unknown) {
+    vi.mocked(invoke).mockReset();
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === 'work_missions') return [(detail as { mission: Mission }).mission];
+      if (cmd === 'work_mission') return detail;
+      return null;
+    });
+    render(WorkMissions);
+    await flush();
+    await fireEvent.click(screen.getByTestId('mission-row'));
+    await flush();
+    await pastDelay();
+  }
+
+  beforeEach(() => uiLayout.set('new'));
+  afterEach(() => uiLayout.set('classic'));
+
+  it('draws trails beside the running step only', async () => {
+    await open(detailWith(loop()));
+    const trails = await vi.waitFor(() => screen.getAllByTestId('mission-trails'));
+    expect(trails).toHaveLength(1);
+    expect(trails[0].closest('[data-testid="mission-node"]')?.getAttribute('data-state')).toBe('running');
+  });
+
+  it('stops while the mission waits on a person', async () => {
+    await open(
+      detailWith(
+        loop({ cards: [{ id: 1, mission_id: 4, decision_id: 'd', source: 'loop', kind: 'confirm', state: 'open', created_at: 1 }] }),
+      ),
+    );
+    expect(screen.queryByTestId('mission-trails')).toBeNull();
+  });
+
+  it('stops on an ask step, a paused mission and in Classic', async () => {
+    await open(detailWith(loop({ steps: [{ kind: 'ask', reason: 'Which repo?', auto: false }] })));
+    expect(screen.queryByTestId('mission-trails')).toBeNull();
+    document.body.innerHTML = '';
+    await open(detailWith(loop(), 'paused'));
+    expect(screen.queryByTestId('mission-trails')).toBeNull();
+    document.body.innerHTML = '';
+    uiLayout.set('classic');
+    await open(detailWith(loop()));
+    expect(screen.queryByTestId('mission-trails')).toBeNull();
   });
 });

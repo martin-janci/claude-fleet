@@ -58,10 +58,10 @@ pub struct NewSessionArgs {
     #[serde(default)]
     pub profile: Option<String>,
     /// Which agent runs in the pane (`sessions.agent`, migration 121):
-    /// `"claude"` (the default) or `"shell"`, which is the same as
-    /// `kind: "shell"`. `"codex"` and `"agy"` are known and refused with
-    /// `E_UNSUPPORTED` until fleet can launch them (redesign step 12.1).
-    /// `None` / empty = Claude Code, or a shell for `kind: "shell"`.
+    /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI) or
+    /// `"shell"`, which is the same as `kind: "shell"`. `"agy"` is known and
+    /// refused with `E_UNSUPPORTED` until fleet can launch it. `None` /
+    /// empty = Claude Code, or a shell for `kind: "shell"`.
     #[serde(default)]
     pub agent: Option<String>,
     /// Who or what is starting the session (migration 124): set by the
@@ -697,6 +697,12 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
         ));
     }
     if let Some(p) = args.profile.as_deref() {
+        if args.agent.as_deref() == Some(crate::store::AGENT_CODEX) {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "a credential profile applies to Claude Code sessions; Codex has none",
+            ));
+        }
         crate::validate::claude_profile(p)?;
     }
     if let Some(m) = args.model.as_deref() {
@@ -710,12 +716,12 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
 
 /// Settle `agent` against `kind`: `agent: "shell"` makes a shell session
 /// (and conflicts with any other kind), `kind: "shell"` with no agent is a
-/// shell, and `agent: "claude"` cannot run in a shell session. The row's
-/// `agent` then follows from `kind` (`Store::set_session_kind`), so an
-/// absent agent stays absent here. `codex` / `agy` are refused until the
-/// agent adapters exist; an unknown name is invalid.
+/// shell, and no agent can run in a shell session. A shell row's `agent`
+/// follows from `kind` (`Store::set_session_kind`), so an absent agent
+/// stays absent here; a Codex row is written `codex` by `new_session`.
+/// `agy` is refused until its adapter exists; an unknown name is invalid.
 fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
-    use crate::store::{AGENTS, AGENT_CLAUDE, AGENT_SHELL};
+    use crate::store::{AGENTS, AGENT_CLAUDE, AGENT_CODEX, AGENT_SHELL};
     let shell_kind = args.kind.as_deref() == Some("shell");
     match args.agent.as_deref() {
         None => {}
@@ -728,17 +734,17 @@ fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
                 ))
             }
         },
-        Some(AGENT_CLAUDE) if shell_kind => {
+        Some(AGENT_CLAUDE | AGENT_CODEX) if shell_kind => {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 "a shell session runs no agent; drop agent or kind",
             ))
         }
-        Some(AGENT_CLAUDE) => {}
+        Some(AGENT_CLAUDE | AGENT_CODEX) => {}
         Some(a) if AGENTS.contains(&a) => {
             return Err(IpcError::new(
                 codes::E_UNSUPPORTED,
-                format!("fleet cannot start {a} sessions yet; only claude and shell"),
+                format!("fleet cannot start {a} sessions yet; only claude, codex and shell"),
             ))
         }
         Some(_) => {
@@ -751,13 +757,15 @@ fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
     Ok(())
 }
 
-/// The Claude conversation id a new session runs under, and its pane command.
+/// The conversation id a new session runs under, and its pane command.
 /// Work/review sessions get an app-minted id so a later recreate/restart
 /// resumes THIS conversation, not "most recent for the cwd" — or, with
 /// `resume_claude_session_id`, the given conversation, launched exactly as
-/// `recreate_pane_command` would. A shell session has no id.
+/// `recreate_pane_command` would. A shell session has no id, and neither
+/// does a new session of an agent that picks its own (Codex).
 pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, String) {
-    let Some(agent) = crate::agent_adapter::for_kind(args.kind.as_deref().unwrap_or("work")) else {
+    let kind = args.kind.as_deref().unwrap_or("work");
+    let Some(agent) = crate::agent_adapter::for_session(kind, args.agent.as_deref()) else {
         return (
             None,
             crate::tmux::shell_pane_command(args.start_command.as_deref()),
@@ -779,11 +787,13 @@ pub(crate) fn claude_id_and_pane_cmd(args: &NewSessionArgs) -> (Option<String>, 
                 &launch,
             ),
         ),
-        None => {
-            let id = agent.mint_conversation_id();
-            let pane = agent.launch_command(Some(&id), &args.name, &launch);
-            (Some(id), pane)
-        }
+        None => match agent.mint_conversation_id() {
+            Some(id) => {
+                let pane = agent.launch_command(Some(&id), &args.name, &launch);
+                (Some(id), pane)
+            }
+            None => (None, agent.start_command(&args.name, &launch)),
+        },
     }
 }
 
@@ -1130,6 +1140,15 @@ pub(super) async fn new_session_inner(
         if let Err(e) = store_launch(&s, row.id, &launch) {
             tracing::warn!(session = %args.name, error = %e, "[new_session] storing the launch options failed");
         }
+    }
+    // Not soft: a Codex pane on a row that says Claude would be resumed,
+    // read and answered as Claude's.
+    if let Some(agent) = args
+        .agent
+        .as_deref()
+        .filter(|a| *a != crate::store::AGENT_CLAUDE && !is_shell)
+    {
+        s.set_session_agent(row.id, agent)?;
     }
     finalize_new_session(
         &s,
@@ -1798,7 +1817,7 @@ pub async fn restart_session(
     // restarted shell session comes back as a shell, not a Claude pane. Read
     // the controller under the same lock and refuse to restart ourselves
     // unless forced ([`restart_guard`], which exempts the operator).
-    let (kind, claude_id, session_id, launch, gone_cwd) = {
+    let (kind, agent, claude_id, session_id, launch, gone_cwd) = {
         let s = lock(store)?;
         restart_guard(&s, &args.host_alias, &args.name, args.force)?;
         let row = s.get_session(&args.name, &args.host_alias)?;
@@ -1806,7 +1825,10 @@ pub async fn restart_session(
         match row {
             Some(r) => {
                 if let Some(profile) = switch.as_ref() {
-                    if r.kind == "shell" || crate::store::has_no_pane(&r.kind) {
+                    if r.kind == "shell"
+                        || crate::store::has_no_pane(&r.kind)
+                        || r.agent != crate::store::AGENT_CLAUDE
+                    {
                         return Err(IpcError::new(
                             codes::E_INVALID,
                             "a credential profile applies to Claude sessions only",
@@ -1815,7 +1837,14 @@ pub async fn restart_session(
                     s.set_session_profile(r.id, profile.as_deref())?;
                 }
                 let launch = stored_launch(&s, r.id);
-                (r.kind, r.claude_session_id, Some(r.id), launch, gone_cwd)
+                (
+                    r.kind,
+                    r.agent,
+                    r.claude_session_id,
+                    Some(r.id),
+                    launch,
+                    gone_cwd,
+                )
             }
             None if switch.is_some() => {
                 return Err(IpcError::new(
@@ -1833,10 +1862,18 @@ pub async fn restart_session(
             // person; attributing the session to whoever pressed the button
             // would be a guess, and `unclaimed` is the defined answer for a
             // row nobody can speak for (spec §4.3).
-            None => ("work".to_string(), None, None, Default::default(), gone_cwd),
+            None => (
+                "work".to_string(),
+                crate::store::AGENT_CLAUDE.to_string(),
+                None,
+                None,
+                Default::default(),
+                gone_cwd,
+            ),
         }
     };
-    let pane_cmd: String = recreate_pane_command(&kind, claude_id.as_deref(), &args.name, &launch);
+    let pane_cmd: String =
+        recreate_pane_command(&kind, &agent, claude_id.as_deref(), &args.name, &launch);
     let tmux = exec_for(&args.host_alias, ssh);
     // Automatic self-repair (create-only) before the pane is respawned, then
     // respawn INTO the verified directory (a pane whose cwd was deleted keeps
@@ -2003,11 +2040,12 @@ where
 /// `launch` is the session's stored model / effort ([`stored_launch`]).
 pub(crate) fn recreate_pane_command(
     kind: &str,
+    agent: &str,
     claude_session_id: Option<&str>,
     tmux_name: &str,
     launch: &crate::tmux::ClaudeLaunch,
 ) -> String {
-    let Some(agent) = crate::agent_adapter::for_kind(kind) else {
+    let Some(agent) = crate::agent_adapter::for_session(kind, Some(agent)) else {
         return crate::tmux::shell_pane_command(None);
     };
     let id = claude_session_id.filter(|id| agent.valid_conversation_id(id));
@@ -2092,6 +2130,7 @@ pub async fn recreate_session(
         let cwd_src = cwd_source_for_session(&s, &sess)?;
         let pane_cmd = recreate_pane_command(
             &sess.kind,
+            &sess.agent,
             sess.claude_session_id.as_deref(),
             &sess.tmux_name,
             &stored_launch(&s, sess.id),

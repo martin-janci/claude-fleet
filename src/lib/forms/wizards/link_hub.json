@@ -1,0 +1,22 @@
+{
+  "spec": "fleet.form/1",
+  "title": "Link to a hub",
+  "intro": "Pair this app with a fleet hub. It takes effect the next time the app starts.",
+  "submit": "Pair",
+  "steps": [
+    {
+      "title": "Hub",
+      "fields": [
+        { "name": "url", "type": "text", "label": "Hub URL", "required": true, "placeholder": "https://fleet.example.com" },
+        {
+          "name": "code",
+          "type": "text",
+          "label": "Pairing code",
+          "required": true,
+          "placeholder": "ABCD1234",
+          "help": "On the hub, run fleet-hub pair --name <this machine>. The code works once and expires in minutes."
+        }
+      ]
+    }
+  ]
+}

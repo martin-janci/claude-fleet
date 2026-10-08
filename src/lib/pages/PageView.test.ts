@@ -345,3 +345,38 @@ describe('PageView — a page action (declarative pages P5)', () => {
     expect(screen.queryByTestId('page-action-work.retention_sweep')).toBeNull();
   });
 });
+
+describe('PageView — the notifications matrix (11.9)', () => {
+  it('shows a row per state and a column per channel, and a tick saves that channel', async () => {
+    show('settings.notifications');
+    const grid = screen.getByTestId('settings-matrix');
+    for (const h of ['Desktop', 'Phone', 'Sound']) expect(within(grid).getByText(h)).toBeTruthy();
+    const desktopDone = screen.getByTestId('matrix-notify.desktop-done') as HTMLInputElement;
+    expect(desktopDone.checked).toBe(false);
+    expect((screen.getByTestId('matrix-notify.desktop-blocked') as HTMLInputElement).checked).toBe(true);
+    await fireEvent.click(desktopDone);
+    await waitFor(() =>
+      expect(inv).toHaveBeenCalledWith('set_fleet_setting', {
+        key: 'notify.desktop',
+        value: 'needs_you,failed,blocked,done,routine_failed',
+      }),
+    );
+    // Quiet hours stay ordinary rows.
+    expect(control('notify.quiet_hours')).toBeTruthy();
+  });
+
+  it('is read-only on a hub client', () => {
+    render(PageView, {
+      props: {
+        page: pageOf('settings.notifications'),
+        pages: bundle.pages,
+        descs,
+        values: defaults,
+        sources: bundle.sources,
+        readonly: true,
+        onnavigate: vi.fn(),
+      },
+    });
+    expect((screen.getByTestId('matrix-notify.phone-failed') as HTMLInputElement).disabled).toBe(true);
+  });
+});

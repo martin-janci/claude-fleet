@@ -13,6 +13,7 @@
   import { projects } from './projects';
   import { readPref, uiLayout, writePref } from './prefs';
   import MissionGraph from './MissionGraph.svelte';
+  import Loader from './Loader.svelte';
   import { defaultLaneBy, type LaneBy } from './mission_graph';
   import { PLAN_IMPORT_MAX_ROWS, importLine, importMissionPlan, parsePlan } from './plan_import';
   import { hosts } from './hosts';
@@ -74,6 +75,7 @@
     POLICY_MIN_WAKE_SECS,
     type HumanError,
     type MissionCard,
+    trailNodes,
     type GraphNode,
     type Mission,
     type MissionDetail,
@@ -232,6 +234,9 @@
   const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
   const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open'));
+  // Comet trails beside the mission's current steps (redesign step 9.12,
+  // New layout): only while it runs, never while it waits on a person.
+  const trails = $derived($uiLayout === 'new' && detail ? trailNodes(detail) : new Set<number>());
   let answers = $state<Record<number, string>>({});
   let granting = $state(false);
   let grantLevel = $state(2);
@@ -895,6 +900,9 @@
               {#if it}
                 <li data-testid="mission-node" data-state={n.state}>
                   <span class="glyph s-{n.state}" title={nodeLabel(n.state)} aria-label={nodeLabel(n.state)}>{nodeGlyph(n.state)}</span>
+                  {#if trails.has(n.item_id)}
+                    <Loader name="comet-trails" size={20} label="Working on it" testid="mission-trails" />
+                  {/if}
                   <span class="main">
                     <span class="title">{it.key ? `${it.key} · ` : ''}{it.title}</span>
                     {#if (n.waiting_for ?? []).length > 0}
