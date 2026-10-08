@@ -68,7 +68,9 @@
     {@render icon(item.id)}
     <span>{item.label}</span>
     {#if item.id === 'inbox' && $inboxCount > 0}
-      <span class="count" data-testid="inbox-rail-count" title="{$inboxCount} need you">{$inboxCount}</span>
+      <span class="count count-badge count-badge--hot" data-testid="inbox-rail-count" title="{$inboxCount} need you"
+        >{$inboxCount}</span
+      >
     {/if}
   </button>
 {/snippet}
@@ -131,23 +133,11 @@
     stroke-width: 1.5;
     flex: none;
   }
-  /* The Inbox's Needs you count, a pill on the icon's corner. */
+  /* The Inbox's Needs you count (0.7's hot count badge) on the icon's corner. */
   .count {
     position: absolute;
     top: 3px;
     right: 6px;
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
-    box-sizing: border-box;
-    border-radius: var(--radius-pill);
-    /* The Sessions tab's needs-you badge, so the two read as one count. */
-    background: var(--usage-crit);
-    color: #fff;
-    font-size: 10px;
-    font-weight: 600;
-    line-height: 16px;
-    text-align: center;
   }
   .grow {
     flex: 1 1 auto;

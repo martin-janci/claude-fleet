@@ -94,6 +94,10 @@ function* allEvents(): Generator<Ev> {
 // chord 0.5.4 answered still answers the same.
 const ADDED_SINCE_054: readonly { key: string; mods: Partial<Ev>; mac: boolean; action: string; step: string }[] = [
   { key: ',', mods: { ctrlKey: true }, mac: false, action: 'settings', step: '1.9' },
+  ...(['b', 'B'] as const).flatMap((key) => [
+    { key, mods: { metaKey: true, altKey: true }, mac: true, action: 'inspector', step: '3.5' },
+    { key, mods: { ctrlKey: true, altKey: true }, mac: false, action: 'inspector', step: '3.5' },
+  ]),
 ];
 
 const isAddition = (e: Ev, isMac: boolean): string | null => {
@@ -205,9 +209,19 @@ describe('shortcut registry', () => {
     expect(md).toContain(`| ${mac('new-terminal')} | New terminal (${other('new-terminal')})`);
     expect(md).toContain(`| ${mac('next-terminal')} | Next terminal`);
     expect(md).toContain(`| ${mac('go-to-file')} | Go to file, Files tab only (${other('go-to-file')})`);
-    for (const id of ['open-in-editor', 'inspector', 'new-terminal', 'next-terminal', 'go-to-file']) {
+    for (const id of ['open-in-editor', 'new-terminal', 'next-terminal', 'go-to-file']) {
       expect(SHORTCUTS.find((s) => s.id === id)?.status).toBe('planned');
     }
+    // Step 3.5 wired the inspector.
+    expect(SHORTCUTS.find((s) => s.id === 'inspector')?.status).toBe('live');
+  });
+
+  it('an Alt chord on a letter matches by physical key, as macOS Option rewrites the key', () => {
+    const ev = { key: '∫', code: 'KeyB', metaKey: true, ctrlKey: false, altKey: true, shiftKey: false };
+    expect(matchShortcut('global', ev, true)).toBe('inspector');
+    expect(appChord(ev, true)).toBe('inspector');
+    // Without Alt the code is not consulted: the key decides.
+    expect(matchShortcut('global', { ...ev, key: 'x', altKey: false }, true)).not.toBe('inspector');
   });
 
   it('planned chords match nothing until their step wires them', () => {

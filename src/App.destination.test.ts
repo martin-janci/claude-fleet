@@ -129,12 +129,13 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     uiLayout.set('new');
     const { container, getByTestId } = render(App);
     const term = terminalSlot(container);
-    await fireEvent.click(getByTestId('tab-hosts'));
-    expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
+    // The New layout's tab bar has no Hosts tab (step 3.5): ⌘I and the rail.
+    requestHostsView();
+    await waitFor(() => expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page'));
     await fireEvent.click(getByTestId('rail-accounts'));
     expect(openOverlays(container)).toEqual(['accounts-overlay']);
     expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
-    expect(getByTestId('tab-session').classList.contains('active')).toBe(false);
+    expect(getByTestId('stab-agent').getAttribute('aria-selected')).toBe('false');
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(get(destination)).toBe('session');
     expect(terminalSlot(container)).toBe(term);
