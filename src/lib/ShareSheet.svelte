@@ -361,7 +361,7 @@
   .hint {
     margin: 0 0 0.7rem;
     font-size: 0.85em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .block {
     margin: 0 0 0.8rem;
@@ -371,7 +371,7 @@
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .row {
     display: flex;
@@ -386,7 +386,7 @@
   .note {
     margin: 0.3rem 0 0;
     font-size: 0.8em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .grants {
     list-style: none;
@@ -431,13 +431,13 @@
     margin: 0 0 0.45rem;
     font-size: 0.8em;
     line-height: 1.45;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .consequences code {
     font-size: 0.95em;
   }
   .err {
-    color: var(--danger, #e5534b);
+    color: var(--danger);
     font-size: 0.85em;
     margin: 0 0 0.5rem;
   }
@@ -460,8 +460,8 @@
     border-color: var(--accent);
   }
   button.danger {
-    border-color: var(--danger, #e5534b);
-    color: var(--danger, #e5534b);
+    border-color: var(--danger);
+    color: var(--danger);
   }
   button:disabled {
     opacity: 0.5;
@@ -472,7 +472,7 @@
     font-size: 0.85rem;
     padding: 0.25rem 0.4rem;
     border: 1px solid var(--border);
-    background: var(--bg-input, transparent);
+    background: var(--bg-raise, transparent);
     color: var(--fg);
     border-radius: 4px;
   }
