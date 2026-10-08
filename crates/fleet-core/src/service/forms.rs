@@ -10,7 +10,7 @@ use crate::ssh::SshExec;
 use crate::store::{FormFinish, FormRow, NewForm, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -26,6 +26,9 @@ pub const SECRET_NOTE: &str = "Delete each secret file once you have used it.";
 /// A waiter re-reads at least this often, so a missed wake costs latency only.
 const POLL_FLOOR: Duration = Duration::from_millis(500);
 const SWEEP_TIMEOUT: Duration = Duration::from_secs(30);
+/// One tick removes at most this many secret directories, so a slow fleet
+/// cannot stretch it.
+const MAX_SWEEPS_PER_PASS: usize = 20;
 
 pub fn wait_timeout(timeout_s: Option<u64>) -> Duration {
     Duration::from_secs(timeout_s.unwrap_or(DEFAULT_WAIT_SECS).min(MAX_WAIT_SECS))
@@ -304,12 +307,17 @@ async fn secret_dir(
 ) -> Result<(String, String), IpcError> {
     let tilde = format!("{SECRET_DIR}/{form_id}");
     let home = if host == crate::service::projects::LOCAL_HOST {
-        std::env::var("HOME").unwrap_or_default()
+        local_home(std::env::var("HOME").ok())?
     } else {
         ssh.remote_home(host).await?
     };
     let abs = format!("{home}/{}", tilde.trim_start_matches("~/"));
     Ok((tilde, abs))
+}
+
+fn local_home(home: Option<String>) -> Result<String, IpcError> {
+    home.filter(|h| !h.is_empty())
+        .ok_or_else(|| IpcError::new(codes::E_HOST_WRITE, "HOME is not set"))
 }
 
 async fn remove_secret_dir(ssh: &dyn SshExec, host: &str, form_id: &str) -> Result<(), IpcError> {
@@ -328,9 +336,50 @@ async fn remove_secret_dir(ssh: &dyn SshExec, host: &str, form_id: &str) -> Resu
     }
 }
 
+/// Forms an `answer` is working on right now, in this process.
+static ANSWERING: std::sync::LazyLock<Mutex<BTreeSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(BTreeSet::new()));
+
+/// Holds one form id in [`ANSWERING`] until dropped. The std mutex is only
+/// taken for the insert and the remove, never across an `.await`.
+struct Answering(String);
+
+impl Answering {
+    fn claim(form_id: &str) -> Result<Self, IpcError> {
+        let mut set = ANSWERING.lock().unwrap_or_else(|e| e.into_inner());
+        if !set.insert(form_id.to_string()) {
+            return Err(IpcError::new(
+                codes::E_CONFLICT,
+                format!("form {form_id} is being answered right now"),
+            )
+            .with_details(serde_json::json!({ "form_id": form_id, "state": "pending" })));
+        }
+        Ok(Self(form_id.to_string()))
+    }
+}
+
+impl Drop for Answering {
+    fn drop(&mut self) {
+        ANSWERING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
 fn host_write_error(field: &str, why: &str) -> IpcError {
     IpcError::new(codes::E_HOST_WRITE, format!("{field}: {why}"))
         .with_details(serde_json::json!({ "field": field }))
+}
+
+/// Remove a form's secret directory; clear its durable marker only when the
+/// removal worked, so a failed removal is retried by the sweep.
+async fn forget_secrets(store: &Mutex<Store>, ssh: &dyn SshExec, host: &str, form_id: &str) {
+    if remove_secret_dir(ssh, host, form_id).await.is_ok() {
+        if let Ok(s) = lock(store) {
+            let _ = s.mark_form_swept(form_id);
+        }
+    }
 }
 
 /// Answer `form_id` as `by`. Secrets are written to the host first; any
@@ -343,6 +392,9 @@ pub async fn answer(
     values: &Map<String, Value>,
     by: &str,
 ) -> Result<FormView, IpcError> {
+    // One answer at a time per form: two answerers would write the same
+    // files, and the loser's cleanup would delete the winner's secrets.
+    let _answering = Answering::claim(form_id)?;
     let row = row(store, form_id)?;
     if row.state != "pending" {
         return Err(not_pending(&row));
@@ -365,6 +417,9 @@ pub async fn answer(
         let (dir, abs) = secret_dir(ssh, &row.host_alias, form_id)
             .await
             .map_err(|e| host_write_error(first, &e.message))?;
+        // Durable before the first write: whatever happens next, the sweep
+        // knows this form's directory may exist.
+        lock(store)?.mark_form_secrets_pending(form_id)?;
         for (field, secret) in &answers.secrets {
             let path = format!("{dir}/{field}");
             if let Err(e) = crate::service::provision::write_host_file_secret(
@@ -376,7 +431,7 @@ pub async fn answer(
             )
             .await
             {
-                let _ = remove_secret_dir(ssh, &row.host_alias, form_id).await;
+                forget_secrets(store, ssh, &row.host_alias, form_id).await;
                 return Err(host_write_error(field, &e.message));
             }
             paths.insert(field.clone(), format!("{abs}/{field}"));
@@ -400,7 +455,7 @@ pub async fn answer(
     };
     if !finished {
         if !paths.is_empty() {
-            let _ = remove_secret_dir(ssh, &row.host_alias, form_id).await;
+            forget_secrets(store, ssh, &row.host_alias, form_id).await;
         }
         return Err(not_pending(&self::row(store, form_id)?));
     }
@@ -433,7 +488,16 @@ pub async fn sweep_secret_dirs(store: &Mutex<Store>, ssh: &dyn SshExec, now: i64
         }
     };
     let mut swept = 0;
+    let mut down: BTreeSet<String> = BTreeSet::new();
     for (form_id, host) in due {
+        if swept >= MAX_SWEEPS_PER_PASS {
+            break;
+        }
+        // One failure per host per pass: the rest wait for a later tick
+        // instead of costing a timeout each.
+        if down.contains(&host) {
+            continue;
+        }
         match remove_secret_dir(ssh, &host, &form_id).await {
             Ok(()) => {
                 if let Ok(s) = lock(store) {
@@ -443,7 +507,8 @@ pub async fn sweep_secret_dirs(store: &Mutex<Store>, ssh: &dyn SshExec, now: i64
                 }
             }
             Err(e) => {
-                tracing::debug!(%form_id, %host, error = %e.message, "[forms] sweep deferred")
+                tracing::debug!(%form_id, %host, error = %e.message, "[forms] sweep deferred");
+                down.insert(host);
             }
         }
     }
@@ -596,12 +661,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_secret_write_leaves_the_form_pending() {
+    async fn a_failed_secret_write_leaves_the_form_pending_and_the_marker_when_cleanup_fails() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let fake = FakeSsh::new();
+        // Later rules win: everything fails except the home lookup.
+        fake.on(Match::Any, Reply::fail(1, "disk full"));
+        fake.with_home("/home/u");
+        let err = answer(
+            &st,
+            &fake,
+            &id,
+            &values(json!({ "env": "prod", "pw": PASSWORD })),
+            "ada",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_HOST_WRITE);
+        assert_eq!(err.details.unwrap()["field"], json!("pw"));
+        assert!(
+            fake.calls().iter().any(|c| c
+                .script()
+                .is_some_and(|s| s.contains("rm -rf") && s.contains(&id))),
+            "a cleanup was tried"
+        );
+        let row = st.lock().unwrap().form(&id).unwrap().unwrap();
+        assert_eq!(row.state, "pending");
+        assert!(
+            row.secrets_on_host,
+            "the cleanup failed, so the sweep must still find it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_upload_with_a_working_cleanup_clears_the_marker() {
         let (st, sid) = fixture();
         let id = open(&st, sid, &spec(), None).unwrap().form_id;
         let fake = FakeSsh::new();
         fake.with_home("/home/u");
-        fake.on(Match::Any, Reply::fail(1, "disk full"));
+        fake.on(Match::prefix("cat > "), Reply::fail(1, "disk full"));
+        let err = answer(
+            &st,
+            &fake,
+            &id,
+            &values(json!({ "env": "prod", "pw": PASSWORD })),
+            "ada",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_HOST_WRITE);
+        assert!(
+            fake.calls().iter().any(|c| c
+                .script()
+                .is_some_and(|s| s.contains("rm -rf") && s.contains(&id))),
+            "a cleanup was tried"
+        );
+        let row = st.lock().unwrap().form(&id).unwrap().unwrap();
+        assert_eq!(
+            (row.state.as_str(), row.secrets_on_host),
+            ("pending", false)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_home_lookup_is_a_host_write_error_naming_the_first_secret() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let fake = FakeSsh::new();
+        fake.on(Match::prefix("printenv HOME"), Reply::fail(1, "no shell"));
         let err = answer(
             &st,
             &fake,
@@ -617,6 +744,107 @@ mod tests {
         assert_eq!(
             (row.state.as_str(), row.secrets_on_host),
             ("pending", false)
+        );
+    }
+
+    #[test]
+    fn a_local_host_without_home_is_a_host_write_error() {
+        assert_eq!(local_home(None).unwrap_err().code, codes::E_HOST_WRITE);
+        assert_eq!(
+            local_home(Some(String::new())).unwrap_err().code,
+            codes::E_HOST_WRITE
+        );
+        assert_eq!(local_home(Some("/h".into())).unwrap(), "/h");
+    }
+
+    #[tokio::test]
+    async fn two_answers_at_once_one_wins_and_keeps_its_secret() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let fake = FakeSsh::new();
+        fake.with_home("/home/u");
+        let v = values(json!({ "env": "prod", "pw": PASSWORD }));
+        let (a, b) = tokio::join!(
+            answer(&st, &fake, &id, &v, "ada"),
+            answer(&st, &fake, &id, &v, "bob")
+        );
+        let (ok, err) = match (a, b) {
+            (Ok(v), Err(e)) | (Err(e), Ok(v)) => (v, e),
+            other => panic!("exactly one wins: {:?}", other.0.is_ok()),
+        };
+        assert_eq!(err.code, codes::E_CONFLICT);
+        assert_eq!(ok.state, "answered");
+        let row = st.lock().unwrap().form(&id).unwrap().unwrap();
+        assert!(row.secrets_on_host);
+        assert!(row
+            .answers
+            .unwrap()
+            .contains(&format!("/home/u/.cache/claude-fleet/forms/{id}/pw")));
+    }
+
+    #[tokio::test]
+    async fn a_form_being_answered_refuses_a_second_answer() {
+        let (st, sid) = fixture();
+        let id = open(&st, sid, &spec(), None).unwrap().form_id;
+        let claim = Answering::claim(&id).unwrap();
+        let err = answer(
+            &st,
+            &FakeSsh::new(),
+            &id,
+            &values(json!({ "env": "stg" })),
+            "bob",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code, codes::E_CONFLICT);
+        assert!(
+            err.message.contains("being answered right now"),
+            "{}",
+            err.message
+        );
+        assert_eq!(
+            err.details.unwrap(),
+            json!({ "form_id": id, "state": "pending" })
+        );
+        drop(claim);
+        answer(
+            &st,
+            &FakeSsh::new(),
+            &id,
+            &values(json!({ "env": "stg" })),
+            "bob",
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn one_sweep_pass_tries_an_unreachable_host_once() {
+        let (st, sid) = fixture();
+        open(&st, sid, &spec(), None).unwrap();
+        let first = st
+            .lock()
+            .unwrap()
+            .pending_form_of_session(sid)
+            .unwrap()
+            .unwrap()
+            .form_id;
+        cancel(&st, &first).unwrap();
+        open(&st, sid, &spec(), None).unwrap();
+        {
+            let s = st.lock().unwrap();
+            s.conn_ref()
+                .execute("UPDATE form_requests SET secrets_on_host = 1", [])
+                .unwrap();
+            s.mark_session_killed(sid, 5).unwrap();
+        }
+        let fake = FakeSsh::new();
+        fake.on(Match::Any, Reply::Unreachable);
+        assert_eq!(sweep_secret_dirs(&st, &fake, now_unix()).await, 0);
+        assert_eq!(
+            fake.calls().len(),
+            1,
+            "the second form on the same host waits"
         );
     }
 

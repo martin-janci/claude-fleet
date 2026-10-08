@@ -212,6 +212,18 @@ impl Store {
         rows.collect()
     }
 
+    /// Record, before the first secret is written, that a pending form's
+    /// secrets may be on its host: a crash or a failed cleanup then still
+    /// leaves the marker for the sweep. No `row_version` bump, no event.
+    pub fn mark_form_secrets_pending(&self, form_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE form_requests SET secrets_on_host = 1
+              WHERE form_id = ?1 AND state = 'pending'",
+            [form_id],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_form_swept(&self, form_id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE form_requests SET secrets_on_host = 0 WHERE form_id = ?1",
@@ -343,6 +355,22 @@ mod tests {
         s.mark_form_swept("f_old").unwrap();
         assert!(s.forms_to_sweep(100).unwrap().is_empty());
         assert_eq!(s.purge_forms(100).unwrap(), 1);
+    }
+
+    #[test]
+    fn the_secrets_marker_is_set_on_a_pending_form_only() {
+        let (s, _) = store_with_recorder();
+        let sid = seed(&s);
+        s.insert_form(&new("f_m", sid)).unwrap();
+        s.mark_form_secrets_pending("f_m").unwrap();
+        assert!(s.form("f_m").unwrap().unwrap().secrets_on_host);
+        s.mark_form_swept("f_m").unwrap();
+        s.cancel_forms_of_session(sid).unwrap();
+        s.mark_form_secrets_pending("f_m").unwrap();
+        assert!(
+            !s.form("f_m").unwrap().unwrap().secrets_on_host,
+            "decided: untouched"
+        );
     }
 
     #[test]
