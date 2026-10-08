@@ -56,6 +56,7 @@ pub mod project_picks;
 pub mod projects;
 pub mod prompt_origin;
 pub mod provision;
+pub mod prs;
 pub mod quick_replies;
 #[cfg(test)]
 mod reconcile_tests;
