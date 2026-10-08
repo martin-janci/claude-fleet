@@ -572,6 +572,10 @@
             "$ref": "#/$defs/Item"
           }
         },
+        "matrix": {
+          "description": "Settings fields that are each a subset of the same options, shown as\none grid: a row per option, a column per field, a tick where the\nfield holds the option (Orbit Fleet 11.9, the notifications matrix).",
+          "type": "boolean"
+        },
         "tiles": {
           "description": "A `master_detail` page's overview: its `count` and `money` fields\nshown as tiles (label, value, and the field's `sub` line) rather\nthan rows.",
           "type": "boolean"

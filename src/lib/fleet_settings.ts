@@ -96,6 +96,11 @@ export const SETTING_KEYS = {
   updateCheckIntervalSecs: 'update.check_interval_secs',
   budgetOrgDailyUsd: 'budget.org_daily_usd',
   budgetOrgMonthlyUsd: 'budget.org_monthly_usd',
+  notifyDesktop: 'notify.desktop',
+  notifyPhone: 'notify.phone',
+  notifySound: 'notify.sound',
+  notifyQuietHours: 'notify.quiet_hours',
+  notifyQuietExcept: 'notify.quiet_except',
 } as const;
 
 /** Mirror of `settings::DECIDE_MODES`: what a decision feature's mode may be
@@ -268,6 +273,11 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'update.check_interval_secs': '21600',
   'budget.org_daily_usd': '0',
   'budget.org_monthly_usd': '0',
+  'notify.desktop': 'needs_you,failed,blocked,routine_failed',
+  'notify.phone': 'needs_you,failed,routine_failed',
+  'notify.sound': 'needs_you',
+  'notify.quiet_hours': '',
+  'notify.quiet_except': 'failed',
 };
 
 export type FleetSettings = Record<string, string>;
