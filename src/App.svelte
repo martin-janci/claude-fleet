@@ -33,6 +33,8 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
+  import Toolkit from './lib/Toolkit.svelte';
+  import { toolkitTab } from './lib/toolkit_skills';
   import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
   import type { RailId } from './lib/rail';
@@ -708,7 +710,15 @@
     if (!$selectedSession) return;
     goTo('files');
   }
+  // Every Assets entry point (the Classic tab, the sidebar, the quick
+  // switcher) opens Toolkit's Assets tab in the New layout (step 3.16).
   function showAssets() {
+    toolkitTab.set('assets');
+    goTo('assets');
+  }
+  // The rail's Toolkit reopens the tab it showed last.
+  function showToolkit() {
+    closeHosts();
     goTo('assets');
   }
   function showAccounts() {
@@ -726,6 +736,7 @@
       sidebarView.set(id);
       if (hostsMode || accountsMode || assetsMode) showSession();
     } else if (id === 'accounts') showAccounts();
+    else if (id === 'toolkit') showToolkit();
     else if (id === 'settings') settingsOpen.set(true);
   }
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
@@ -1276,7 +1287,11 @@
       {/if}
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <AssetsPanel visible={assetsMode} />
+          {#if newLayout}
+            <Toolkit visible={assetsMode} />
+          {:else}
+            <AssetsPanel visible={assetsMode} />
+          {/if}
         </div>
       {/if}
       {#if accountsMode}
