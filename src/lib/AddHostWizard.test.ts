@@ -154,4 +154,49 @@ describe('AddHostWizard', () => {
     await waitFor(() => expect(screen.queryByTestId('wizard-drafts')).toBeNull());
     expect(db.size).toBe(0);
   });
+
+  it('each live check shows its own step text next to the loader', async () => {
+    const gates: Array<() => void> = [];
+    const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: unknown) => {
+      if (cmd === 'run_host_setup_check') await new Promise<void>((r) => gates.push(r));
+      return real(cmd, payload);
+    });
+    render(AddHostWizard, { props: { onClose: vi.fn() } });
+    await fireEvent.click(await screen.findByTestId('wizard-host'));
+    await fireEvent.click(screen.getByTestId('wizard-next'));
+    const seen: Array<[string, string]> = [];
+    for (let i = 0; i < 6; i++) {
+      await waitFor(() => expect(gates).toHaveLength(1));
+      const live = screen.getByTestId('wizard-live');
+      expect(live.querySelector('[data-testid^="wizard-loader"]')).toBeTruthy();
+      seen.push([live.dataset.loaderName!, screen.getByTestId('wizard-live-step').textContent!]);
+      gates.shift()!();
+    }
+    expect(seen).toEqual([
+      ['sonar', 'Waiting for mercury to answer…'],
+      ['hex-field', 'Checking tmux on mercury…'],
+      ['hex-field', 'Checking git and gh on mercury…'],
+      ['hex-field', 'Looking for fleet-agent on mercury…'],
+      ['hex-field', 'Measuring free disk space on mercury…'],
+      ['hex-field', "Looking for agents on mercury's PATH…"],
+    ]);
+    await waitFor(() => expect(screen.queryByTestId('wizard-live')).toBeNull());
+  });
+
+  it('shows the Radar while it reads ~/.ssh/config for hosts', async () => {
+    let release!: () => void;
+    const real = inv.getMockImplementation() as (cmd: string, payload?: unknown) => Promise<unknown>;
+    inv.mockImplementation(async (cmd: string, payload?: unknown) => {
+      if (cmd === 'discover_hosts') await new Promise<void>((r) => (release = r));
+      return real(cmd, payload);
+    });
+    render(AddHostWizard, { props: { onClose: vi.fn() } });
+    const live = await screen.findByTestId('wizard-live');
+    expect(live.dataset.loaderName).toBe('radar');
+    expect(screen.getByTestId('wizard-live-step').textContent).toBe('Looking for hosts in ~/.ssh/config…');
+    release();
+    await screen.findByTestId('wizard-host');
+    expect(screen.queryByTestId('wizard-live')).toBeNull();
+  });
 });

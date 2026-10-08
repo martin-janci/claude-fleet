@@ -54,3 +54,19 @@ describe('SessionTabs: the agent tab (step 5.1)', () => {
     expect(tab.querySelector('svg.agent-mark')).toBeNull();
   });
 });
+
+describe('SessionTabs: Share from the header (step 5.8)', () => {
+  it('opens the one Share sheet on the session; disabled with no session', async () => {
+    const { shareSheetFor } = await import('./share');
+    shareSheetFor.set(null);
+    const row = session('mercury', 'dev-s');
+    const { unmount } = mount(row);
+    const btn = screen.getByTestId('share-from-header') as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    btn.click();
+    const { get } = await import('svelte/store');
+    expect(get(shareSheetFor)).toBe(row.id);
+    shareSheetFor.set(null);
+    unmount();
+  });
+});

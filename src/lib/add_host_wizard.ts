@@ -121,6 +121,40 @@ export function checkRows(
   });
 }
 
+/** The loader beside a live wait (redesign step 4.13): its kit name and the
+ *  step text next to it. */
+export interface LiveLoader {
+  name: "radar" | "sonar" | "hex-field";
+  text: string;
+}
+
+/** Radar while ~/.ssh/config is read for hosts. */
+export function discoveryLoader(): LiveLoader {
+  return { name: "radar", text: "Looking for hosts in ~/.ssh/config…" };
+}
+
+/**
+ * The loader for the check under way: Sonar while the SSH check waits for
+ * the host to answer, the Hex field while the host is checked once it has.
+ * `null` when no check runs.
+ */
+export function checkLoader(
+  running: CheckKey | null,
+  sshAlias: string,
+): LiveLoader | null {
+  if (running === null) return null;
+  const host = sshAlias.trim() || "the host";
+  const text: Record<CheckKey, string> = {
+    ssh: `Waiting for ${host} to answer…`,
+    tmux: `Checking tmux on ${host}…`,
+    git: `Checking git and gh on ${host}…`,
+    agent: `Looking for fleet-agent on ${host}…`,
+    disk: `Measuring free disk space on ${host}…`,
+    agents: `Looking for agents on ${host}'s PATH…`,
+  };
+  return { name: running === "ssh" ? "sonar" : "hex-field", text: text[running] };
+}
+
 /** Whether every check has an answer. */
 export function checksComplete(known: readonly SetupCheck[]): boolean {
   return CHECK_KEYS.every((k) => known.some((c) => c.key === k));
