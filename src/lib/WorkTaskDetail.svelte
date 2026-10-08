@@ -40,6 +40,8 @@
   import WorkOrgDialog from './WorkOrgDialog.svelte';
   import WorkRuleEditor from './WorkRuleEditor.svelte';
   import TaskWorkSections from './TaskWorkSections.svelte';
+  import WorkButton from './WorkButton.svelte';
+  import { uiLayout } from './prefs';
   import {
     groupSessionLinks,
     groupSourceText,
@@ -435,6 +437,11 @@
       </div>
     </details>
 
+    {#if $uiLayout === 'new'}
+      <!-- Redesign 6.6: the one split button every task start uses, with
+           its progress ("Checkout", "Setting up…") under it. -->
+      <div class="actions"><WorkButton {task} variant="bar" /></div>
+    {:else}
     <div class="actions">
       <button
         class="btn btn--primary"
@@ -462,6 +469,7 @@
         onclick={(e) => void startNew(e.altKey)}>Start new</button
       >
     </div>
+    {/if}
     {#if startPreview}
       <StartPopover
         base={baseStartArgs(task)}
