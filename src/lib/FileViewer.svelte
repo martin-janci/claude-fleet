@@ -247,7 +247,7 @@
     margin: 0;
   }
   .hint.err {
-    color: #e64a4a;
+    color: var(--danger);
   }
   .bar {
     display: flex;

@@ -280,7 +280,7 @@
 </section>
 
 <style>
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
 
   .mcp-field .mono {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -296,8 +296,8 @@
     min-width: 0;
   }
   .mcp-field button.danger:hover:not(:disabled) {
-    color: #e64a4a;
-    border-color: #e64a4a;
+    color: var(--danger);
+    border-color: var(--danger);
   }
   .mcp-config { font-size: 0.8rem; margin-top: 0.3rem; }
   .mcp-config summary { cursor: pointer; color: var(--fg-muted); }

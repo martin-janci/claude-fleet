@@ -168,7 +168,7 @@
   .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 600; }
   .desc { color: var(--fg-muted); font-size: 0.8rem; flex: 1; }
 
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
     font-size: 0.85rem;

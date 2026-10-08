@@ -227,7 +227,7 @@
   .impact { border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.5rem; }
   .impact ul { margin: 0.2rem 0; padding-left: 1.1rem; }
   .warn { color: var(--usage-warn, #b45309); }
-  .err { color: #e64a4a; }
+  .err { color: var(--danger); }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   p { margin: 0; }
 </style>

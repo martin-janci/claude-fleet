@@ -220,11 +220,11 @@
     color: var(--fg);
     border-radius: 4px;
   }
-  .field input[aria-invalid='true'] { border-color: #e64a4a; }
+  .field input[aria-invalid='true'] { border-color: var(--danger); }
   .sessions { border: 1px solid var(--border); border-radius: 4px; padding: 0.3rem 0.5rem; margin: 0; }
   .sess { display: flex; gap: 0.4rem; align-items: center; font-size: 0.85rem; }
   .note { font-size: 0.8rem; color: var(--fg-muted); margin: 0; }
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
     font-size: 0.85rem;

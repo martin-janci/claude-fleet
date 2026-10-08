@@ -94,8 +94,8 @@
     line-height: 1.35;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
   }
-  .toast.error { border-left-color: #e64a4a; }
-  .toast.success { border-left-color: #50c86e; }
+  .toast.error { border-left-color: var(--danger); }
+  .toast.success { border-left-color: var(--status-done); }
   .toast.warning { border-left-color: #e0a030; }
   .toast.info { border-left-color: var(--accent); }
   .code {

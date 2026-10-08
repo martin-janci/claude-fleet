@@ -85,6 +85,6 @@
   }
   .actions button:disabled { opacity: 0.5; cursor: not-allowed; }
   .actions button.primary { border-color: var(--accent); }
-  .actions button.danger { color: #e64a4a; border-color: #e64a4a; }
-  .actions button.danger:hover:not(:disabled) { background: rgba(230, 74, 74, 0.12); }
+  .actions button.danger { color: var(--danger); border-color: var(--danger); }
+  .actions button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); }
 </style>

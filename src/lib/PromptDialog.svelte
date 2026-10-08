@@ -82,8 +82,8 @@
     color: var(--fg);
     border-radius: 4px;
   }
-  .field input[aria-invalid='true'] { border-color: #e64a4a; }
-  .err { color: #e64a4a; font-size: 0.8rem; margin: 0; }
+  .field input[aria-invalid='true'] { border-color: var(--danger); }
+  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
   .actions { display: flex; gap: 0.4rem; justify-content: flex-end; }
   .actions button {
     font-size: 0.85rem;

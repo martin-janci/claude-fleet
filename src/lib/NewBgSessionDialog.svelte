@@ -101,7 +101,7 @@
 </Modal>
 
 <style>
-  .err { color: #e64a4a; font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
+  .err { color: var(--danger); font-size: 0.8rem; padding: 0.2rem 0; margin: 0; }
 
   .modal {
     display: flex;

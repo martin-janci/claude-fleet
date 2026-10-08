@@ -187,6 +187,17 @@ describe('ConversationPanel', () => {
     expect(screen.getByText(/Older turns not shown/)).toBeTruthy();
   });
 
+  it('draws a done marker and its report as a card whose follow-up fills the composer', async () => {
+    const text = 'Finished.\n\nFLEET_TASK_DONE_ab12\n```json\n{"summary": "Wrote the guide", "outcome": "done", "followups": ["Open a PR"]}\n```';
+    mockedConv.mockReturnValue(ok(conv({ turns: [{ prompt: 'go', at: null, ended_at: null, items: [{ kind: 'text', text }] }] })));
+    render(ConversationPanel, { session: session(), visible: true });
+    await settle();
+    expect(screen.getByTestId('rich-report-outcome').textContent).toContain('Done');
+    await fireEvent.click(screen.getByTestId('rich-report-followup'));
+    await settle();
+    expect((screen.getByTestId('conv-composer-input') as HTMLTextAreaElement).value).toBe('Open a PR');
+  });
+
   it('shows "No conversation yet" for E_NO_TRANSCRIPT', async () => {
     mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
     render(ConversationPanel, { session: session(), visible: true });

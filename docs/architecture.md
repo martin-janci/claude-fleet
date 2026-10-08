@@ -392,6 +392,13 @@ bullet for the area you are about to change.
   `forget` are a person's. Claims are advisory leases in the row. The
   desktop's Debug devices page is the `debug_device` resource; its seven
   commands route to the hub's `debug_devices` tool.
+- **Chat blocks** (guide `docs/chat-blocks.md`; `src/lib/rich_blocks.ts`,
+  `src/lib/RichText.svelte`, `src/lib/rich/`): frontend only. An assistant
+  text block is split into Markdown and cards: a `FLEET_TASK_DONE_<nonce>`
+  line and its JSON (normalised as `service/work/report.rs`
+  `report_from_value` does), or a ```` ```fleet-ui ```` `fleet.ui/1` block.
+  A card acts only by `insertIntoComposer`, never by sending. A reply form
+  refuses secret fields; `ask` is the path for those.
 - **File downloads** (spec
   `docs/superpowers/specs/2026-10-03-file-downloads-design.md`, migration
   095, contract revision 7): `send_file { session_id, path }` (a host's

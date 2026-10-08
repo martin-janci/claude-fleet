@@ -104,11 +104,11 @@
   }
 
   const STATE_COLOR: Record<TaskRow['state'], string> = {
-    queued: '#8a8a8a',
-    running: '#4a90d2',
-    done: '#3cb45a',
-    failed: '#e64a4a',
-    cancelled: '#d29b4a',
+    queued: 'var(--status-idle)',
+    running: 'var(--status-working)',
+    done: 'var(--status-done)',
+    failed: 'var(--status-failed)',
+    cancelled: 'var(--status-waiting)',
   };
 
   let pendingCancel: TaskRow | null = $state(null);
@@ -139,7 +139,7 @@
             <span
               class="pill"
               data-testid="task-state"
-              style="color: {STATE_COLOR[t.state]}; border-color: {STATE_COLOR[t.state]}66; background: {STATE_COLOR[t.state]}18;"
+              style="color: {STATE_COLOR[t.state]}; border-color: color-mix(in srgb, {STATE_COLOR[t.state]} 40%, transparent); background: color-mix(in srgb, {STATE_COLOR[t.state]} 9%, transparent);"
             >{t.state}</span>
             <span class="id">#{t.id}</span>
             <span class="parties" data-testid="task-parties">
@@ -242,14 +242,14 @@
   .elapsed { color: var(--fg-muted); font-size: 0.72rem; }
   .cancel {
     font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 4px; cursor: pointer;
-    border: 1px solid #e64a4a; color: #e64a4a; background: transparent;
+    border: 1px solid var(--danger); color: var(--danger); background: transparent;
   }
-  .cancel:hover { background: rgba(230, 74, 74, 0.1); }
+  .cancel:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
   .prompt { margin: 0; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .result, .error {
     margin: 0; font-size: 0.78rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
     max-height: 5.5rem; overflow: auto; padding: 0.3rem 0.45rem; border-radius: 4px;
   }
   .result { background: rgba(60, 180, 90, 0.1); color: var(--fg); }
-  .error { background: rgba(230, 74, 74, 0.1); color: #e64a4a; }
+  .error { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
 </style>

@@ -158,14 +158,14 @@ export function verdictColor(v: Verdict): string {
   switch (v) {
     case 'ready':
     case 'merged':
-      return '#50c86e';
+      return 'var(--status-done)';
     case 'blocked':
-      return '#e64a4a';
+      return 'var(--status-failed)';
     case 'waiting':
-      return '#d29b4a';
+      return 'var(--status-waiting)';
     case 'unknown':
     case 'closed':
-      return '#8a8f98';
+      return 'var(--status-idle)';
   }
 }
 

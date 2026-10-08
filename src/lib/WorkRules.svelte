@@ -218,5 +218,5 @@
   .actions { display: flex; gap: 0.25rem; flex: 0 0 auto; }
   .muted { color: var(--fg-muted); margin: 0; }
   .notice { margin: 0; }
-  .err { color: #e64a4a; margin: 0; }
+  .err { color: var(--danger); margin: 0; }
 </style>

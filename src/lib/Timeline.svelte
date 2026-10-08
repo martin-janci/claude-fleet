@@ -198,7 +198,7 @@
     white-space: nowrap;
   }
   .kind { white-space: nowrap; font-weight: 600; }
-  .cat-errors .kind { color: #e64a4a; }
+  .cat-errors .kind { color: var(--danger); }
   .cat-prompts .kind { color: var(--accent); }
   .detail {
     overflow: hidden;
@@ -207,5 +207,5 @@
     color: var(--fg-muted);
   }
   .muted { color: var(--fg-muted); font-style: italic; font-size: 0.75rem; margin: 0; }
-  .err { color: #e64a4a; font-size: 0.75rem; margin: 0; }
+  .err { color: var(--danger); font-size: 0.75rem; margin: 0; }
 </style>

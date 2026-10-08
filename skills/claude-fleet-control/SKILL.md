@@ -227,6 +227,17 @@ steps. `pending` → call `ask { wait: form_id }` again. A secret field
 comes back as a file path: use the file, then delete it. Format and
 limits: `docs/forms.md`.
 
+### Cards in your reply
+
+When the person reads you in fleet's Conversation view, a fenced
+```` ```fleet-ui ```` block in your reply is drawn as a card: `steps` (a
+tutorial with checkboxes), `guide` (folding sections), `callout`, `facts`,
+`choices` (buttons that put a prompt in the composer) or `form` (a
+`fleet.form/1` form, no secrets, whose answers arrive as the person's next
+prompt). Each is one JSON object, `{"spec": "fleet.ui/1", "kind": …}`; a
+broken one shows as code with the reason. Format: `docs/chat-blocks.md`.
+Use `ask` instead when you need the answers before you continue.
+
 ## Tasks, subtasks and proposals (shared work context)
 
 - `work_link { action: "create", title, parent?: "item:<id>", project_id?, notes? }` — a native task `TASK-<id>`, or a subtask under `parent`. A standalone task needs the desktop or the master token; a per-host token may add subtasks under a task its own sessions work on.

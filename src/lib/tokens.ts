@@ -35,6 +35,13 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'usage-ok': '#2e7d32',
     'usage-warn': '#b45309',
     'usage-crit': '#c62828',
+    // The status colours; the three severities alias the usage tokens.
+    'status-working': '#1d5bd8',
+    'status-waiting': '#b45309',
+    'status-failed': '#c62828',
+    'status-done': '#2e7d32',
+    'status-idle': '#6e6d75',
+    danger: '#c62828',
     'control-bg': '#ffffff',
     'control-bg-hover': '#f0f0f0',
     'control-bg-active': '#e4e4e4',
@@ -61,6 +68,12 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'usage-ok': '#5dd17a',
     'usage-warn': '#d29b4a',
     'usage-crit': '#ef5350',
+    'status-working': '#7fa3ff',
+    'status-waiting': '#d29b4a',
+    'status-failed': '#ef5350',
+    'status-done': '#5dd17a',
+    'status-idle': '#a09fa8',
+    danger: '#ef5350',
     'control-bg': '#1c1c1c',
     'control-bg-hover': '#262626',
     'control-bg-active': '#303030',
@@ -92,6 +105,13 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'fg', bg: 'accent-soft', min: 4.5, note: 'the draft over a drag tint' },
   { fg: 'accent', bg: 'accent-soft', min: 3, note: 'drag border over its own tint' },
   { fg: 'ring', bg: 'bg', min: 3, note: 'the focus ring alias' },
+  // Status words are text (chips, the row's status label), so each clears
+  // the text floor on both grounds a row sits on.
+  ...(['working', 'waiting', 'failed', 'done', 'idle'] as const).flatMap((s): ContrastPair[] => [
+    { fg: `status-${s}`, bg: 'bg-pane', min: 4.5, note: `${s} status text` },
+    { fg: `status-${s}`, bg: 'bg', min: 4.5, note: `${s} status text on the page ground` },
+  ]),
+  { fg: 'danger', bg: 'bg-pane', min: 4.5, note: 'error text and invalid fields' },
 ];
 
 function channel(v: number): number {
