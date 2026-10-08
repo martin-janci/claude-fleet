@@ -63,12 +63,10 @@
     appChord,
     assetsViewRequest,
     hostsChordLabel,
-    hostsViewOpen,
     hostsViewRequest,
     onHostsCloseRequested,
     openPathRequest,
     requestNewSessionOnHost,
-    workBoardOpen,
     sessionViewChordLabel,
     settingsOpen,
     openSettingsAt,
@@ -92,6 +90,7 @@
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
   import { get } from 'svelte/store';
+  import { destination, goTo, leave } from './lib/destination';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
   const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -482,7 +481,7 @@
   // the terminal shows that session.
   const unsubOpened = onSessionOpened(() => {
     closeHosts();
-    workBoardOpen.set(false);
+    leave('board');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
@@ -523,10 +522,18 @@
     centerCollapsed = !centerCollapsed;
   }
 
+  // Which view owns the right column: the Session tab or one overlay over it
+  // (redesign step 3.1, `lib/destination.ts`). The store outlives a mount,
+  // so a fresh App starts on the Session tab as the old per-mount flags did.
+  destination.set('session');
+  const filesMode = $derived($destination === 'files');
+  const hostsMode = $derived($destination === 'hosts');
+  const assetsMode = $derived($destination === 'assets');
+  const boardMode = $derived($destination === 'board');
+
   // Files mode swaps the center + terminal region for the worktree file
   // viewer. The Files tab needs a selected session (the worktree to browse);
   // deselecting one drops back to the terminal automatically.
-  let filesMode = $state(false);
   // Primitive projections of the selection: `$selectedSession` changes
   // identity on every `session:updated`, but these only change (and re-run
   // the effects below) when the fact they carry does.
@@ -554,7 +561,7 @@
     lastHubState = st;
   });
   $effect(() => {
-    if (selId === null || selNoPane) filesMode = false;
+    if (selId === null || selNoPane) untrack(() => leave('files'));
   });
 
   // Hosts mode reuses the Files-mode mechanism: the center pane collapses and
@@ -564,19 +571,18 @@
   const isMac = detectMac(typeof navigator === 'undefined' ? undefined : navigator);
   const hostsChord = hostsChordLabel(isMac);
   const sessionViewChord = sessionViewChordLabel(isMac);
-  let hostsMode = $state(false);
   let hostsPreselect = $state<string | null>(null);
   // Assets mode shows the asset catalog. Like Hosts it is fleet-scoped (no
   // selected session needed) and renders as an opaque overlay over the
   // terminal, which stays mounted so its PTY survives the round trip.
-  let assetsMode = $state(false);
 
   // Conversation and Terminal are two views of one session under a single
   // Session tab, so neither is "no mode set": which one shows is the stored
   // preference, narrowed by what this row can actually offer. Conversation
   // reuses the Files overlay for a tmux row, so the PTY stays mounted
   // underneath. Unlike Files/Hosts the Session tab keeps the center
-  // (Details) pane — both its views are views *of* the session.
+  // (Details) pane — both its views are views *of* the session. The board
+  // covers the Session tab without leaving it, so its segment stays shown.
   const sessionTabActive = $derived(!filesMode && !assetsMode && !hostsMode);
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
@@ -588,8 +594,9 @@
   let lastViewedHost: string | null = null;
   /** What had focus when Hosts opened (normally the terminal). */
   let hostsReturnFocus: HTMLElement | null = null;
+  // Leaving Hosts any way other than closeHosts() drops the focus to restore.
   $effect(() => {
-    hostsViewOpen.set(hostsMode);
+    if (!hostsMode) hostsReturnFocus = null;
   });
 
   function openHosts(host: string | null = null) {
@@ -605,16 +612,13 @@
     const active = document.activeElement;
     hostsReturnFocus = active instanceof HTMLElement && active !== document.body ? active : null;
     hostsPreselect = preselect;
-    filesMode = false;
-    assetsMode = false;
-    workBoardOpen.set(false);
-    hostsMode = true;
+    goTo('hosts');
   }
 
   function closeHosts(restoreFocus = true) {
     if (!hostsMode) return;
-    hostsMode = false;
     const el = hostsReturnFocus;
+    leave('hosts');
     hostsReturnFocus = null;
     if (restoreFocus && el) {
       void tick().then(() => {
@@ -656,36 +660,22 @@
   });
 
   function showSession() {
-    filesMode = false;
-    assetsMode = false;
-    workBoardOpen.set(false);
+    // Hosts first: closing it is what restores the focus it took.
     closeHosts();
+    goTo('session');
   }
   function showFiles() {
     if (!$selectedSession) return;
-    closeHosts(false);
-    assetsMode = false;
-    workBoardOpen.set(false);
-    filesMode = true;
+    goTo('files');
   }
   function showAssets() {
-    closeHosts(false);
-    filesMode = false;
-    workBoardOpen.set(false);
-    assetsMode = true;
+    goTo('assets');
   }
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
-  // terminal like Assets, opened from the Work view's Board button; it
-  // keeps the center pane, where a card opens its task. Opening it leaves
-  // the other overlays, and each of them closes it.
-  $effect(() => {
-    if (!$workBoardOpen) return;
-    untrack(() => {
-      filesMode = false;
-      assetsMode = false;
-      closeHosts(false);
-    });
-  });
+  // terminal like Assets, opened from the Work view's Board button
+  // (`workBoardOpen`, a view of the same destination store); it keeps the
+  // center pane, where a card opens its task. Opening it leaves the other
+  // overlays, and each of them closes it.
   /**
    * Pick a sub-view. A row that cannot show it is left alone. The pref is
    * written only when the row can genuinely offer both views: on a row that
@@ -713,7 +703,7 @@
    * tab is already showing.
    */
   function flipSessionView() {
-    if (!sessionTabActive || $workBoardOpen) {
+    if (!sessionTabActive || boardMode) {
       showSession();
       return;
     }
@@ -824,21 +814,21 @@
     // input and exiting the whole panel would be surprising.
     if (filesMode) {
       if (isEditable(target)) return;
-      filesMode = false;
+      leave('files');
       return;
     }
     // The board, like Assets: Esc closes it, not while typing or in a
     // dialog (a drag in progress takes its own Esc first).
-    if ($workBoardOpen && !e.defaultPrevented) {
+    if (boardMode && !e.defaultPrevented) {
       if (isEditable(target) || target?.closest?.('dialog')) return;
-      workBoardOpen.set(false);
+      leave('board');
       return;
     }
     // Assets is an overlay with no Esc handling of its own; the same rule as
     // Files applies (not while typing in the catalog's filter field).
     if (assetsMode) {
       if (isEditable(target) || target?.closest?.('dialog')) return;
-      assetsMode = false;
+      leave('assets');
       return;
     }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
@@ -981,9 +971,9 @@
     <div class="view-tabs" role="tablist">
       <button
         class="view-tab"
-        class:active={sessionTabActive && !$workBoardOpen}
+        class:active={sessionTabActive && !boardMode}
         role="tab"
-        aria-selected={sessionTabActive && !$workBoardOpen}
+        aria-selected={sessionTabActive && !boardMode}
         title={!$selectedSession ? 'No session selected' : 'The running session — its conversation and its terminal'}
         onclick={showSession}
         data-testid="tab-session">Session</button
@@ -1143,9 +1133,9 @@
           <AssetsPanel visible={assetsMode} />
         </div>
       {/if}
-      {#if $workBoardOpen}
+      {#if boardMode}
         <div class="view-slot overlay" data-testid="board-overlay">
-          <WorkBoard onclose={() => workBoardOpen.set(false)} />
+          <WorkBoard onclose={() => leave('board')} />
         </div>
       {/if}
     </div>

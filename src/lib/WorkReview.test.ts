@@ -98,6 +98,37 @@ describe('WorkReview', () => {
     });
   });
 
+  it('shows confidence as % and confirms only the high-confidence suggestions in one click (6.5)', async () => {
+    pending = [
+      item({ confidence: 90 }),
+      item({ review_id: 'link:50', session_id: 8, session_name: 'web', link_id: 50, link_version: 1, confidence: 35, rule: 'R6', strength: 'weak', task: { task_id: 'item:20', key: 'PAY-2', title: 'Refund' } }),
+      item({ review_id: 'link:60', kind: 'cross_org', session_id: 9, link_id: 60, link_version: 4, confidence: 95, alternatives: [] }),
+    ];
+    handlers.decide_work_batch = () => ({ results: [{ link_id: 42, ok: true, version: 3 }] });
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    expect(rows.map((r) => within(r).getByTestId('work-review-confidence').textContent)).toEqual(['90%', '35%', '95%']);
+    // Strength and rule stay beside the number: nothing is lost.
+    expect(rows[1].textContent).toContain('weak');
+    // Only a suggestion counts: the cross-org item at 95% is a conflict, not a guess.
+    const btn = screen.getByTestId('work-review-confirm-high');
+    expect(btn.textContent).toBe('Confirm all high-confidence (1)');
+    await fireEvent.click(btn);
+    await flush();
+    expect(calls('decide_work_batch')[0]).toEqual({
+      decisions: [{ session_id: 7, link_id: 42, decision: 'confirm', expected_version: 2, primary: false }],
+    });
+  });
+
+  it('offers no high-confidence confirm when nothing clears the bar, or from an older hub', async () => {
+    pending = [item({ confidence: 84 }), item({ review_id: 'link:50', session_id: 8, link_id: 50, confidence: undefined })];
+    render(WorkReview);
+    await flush();
+    expect(screen.queryByTestId('work-review-confirm-high')).toBeNull();
+    expect(screen.getAllByTestId('work-review-confidence')).toHaveLength(1);
+  });
+
   it('lists every item with its kind and why', async () => {
     render(WorkReview);
     await flush();

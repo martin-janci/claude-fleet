@@ -479,6 +479,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("pair_device", Verdict::Routed { tool: "org_admin" }),
     ("revoke_device", Verdict::Routed { tool: "org_admin" }),
     ("set_device_trust", Verdict::Routed { tool: "org_admin" }),
+    ("update_device", Verdict::Routed { tool: "org_admin" }),
     ("bind_device_org", Verdict::Routed { tool: "org_admin" }),
     ("set_device_person", Verdict::Routed { tool: "org_admin" }),
     (

@@ -1566,6 +1566,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             model: None,
             effort: None,
             profile: None,
+            agent: None,
             owner_person_id: Some(42),
         },
         &st,
@@ -1862,6 +1863,24 @@ fn org_admin_mutation_cases() -> Vec<Case> {
                         device: Some("phone".into()),
                         trusted: Some(true),
                         ..OrgAdminArgs::new("set_device_trust")
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "update_device",
+            "org_admin",
+            json!({ "action": "rename_device", "device": "phone", "name": "Ada's phone" }),
+            r#"{}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::org_devices::routed::update_device(
+                    b,
+                    s,
+                    commands::org_devices::UpdateDeviceArgs {
+                        device: "phone".into(),
+                        name: Some("Ada's phone".into()),
+                        ..Default::default()
                     },
                 ))
                 .map(|_| ())
@@ -3074,6 +3093,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 "model": "opus",
                 "effort": "high",
                 "profile": "work",
+                "agent": "claude",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -3096,6 +3116,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         model: Some("opus".into()),
                         effort: Some("high".into()),
                         profile: Some("work".into()),
+                        agent: Some("claude".into()),
                         // Set, and absent from the asserted JSON above: whose
                         // a session is follows from the CONNECTION, never from
                         // an argument a client could choose (multi-user M1,

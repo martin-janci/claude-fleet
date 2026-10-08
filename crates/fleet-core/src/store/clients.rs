@@ -290,6 +290,90 @@ impl Store {
             )
             .map_err(crate::ipc_error::IpcError::from)
     }
+
+    /// Rename the live client `name` to `to` (validated as at pairing).
+    /// Its grants, catalogs and person follow it, because they hang off
+    /// the row's id; the `auth_epoch` trigger makes its open streams
+    /// re-read who they are. `E_INVALID` when another live client holds
+    /// `to`, `E_NOTFOUND` when no live row holds `name`.
+    pub fn rename_client_token(
+        &self,
+        name: &str,
+        to: &str,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        let name = name.trim();
+        let to = &validate_client_name(to)?;
+        let n = self
+            .conn
+            .execute(
+                "UPDATE client_tokens SET name = ?2 WHERE name = ?1 AND revoked_at IS NULL",
+                rusqlite::params![name, to],
+            )
+            .map_err(|e| {
+                if is_unique_violation(&e) {
+                    crate::ipc_error::IpcError::new(
+                        codes::E_INVALID,
+                        format!("a client named '{to}' already exists"),
+                    )
+                } else {
+                    crate::ipc_error::IpcError::from(e)
+                }
+            })?;
+        if n == 0 {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_NOTFOUND,
+                format!("no active client token named '{name}'"),
+            ));
+        }
+        self.live_client_token(to)
+    }
+
+    /// Set the live client `name`'s mode to `full` or `readonly`. A peer
+    /// link or an updater token keeps its mode, and no device becomes one:
+    /// those are minted on the hub for what they are.
+    pub fn set_client_mode(
+        &self,
+        name: &str,
+        mode: &str,
+    ) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        let name = name.trim();
+        if super::machine_token_kind(mode).is_some() {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_VALIDATE,
+                format!("a device's mode is full or readonly, not {mode:?}"),
+            ));
+        }
+        validate_client_mode(mode)?;
+        let row = self.live_client_token(name)?;
+        if let Some(kind) = super::machine_token_kind(&row.mode) {
+            return Err(crate::ipc_error::IpcError::new(
+                codes::E_VALIDATE,
+                format!("'{name}' is {kind}; its mode is not a device's to change"),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE client_tokens SET mode = ?2 WHERE id = ?1",
+            rusqlite::params![row.id, mode],
+        )?;
+        self.live_client_token(name)
+    }
+
+    fn live_client_token(&self, name: &str) -> Result<ClientTokenRow, crate::ipc_error::IpcError> {
+        self.conn
+            .query_row(
+                "SELECT id, name, token_sha256, mode, created_at, last_seen_at, revoked_at, trusted_at, org_id, assets_admin_at, person_id \
+                 FROM client_tokens WHERE name = ?1 AND revoked_at IS NULL",
+                rusqlite::params![name],
+                map_client_token_row,
+            )
+            .optional()?
+            .ok_or_else(|| {
+                crate::ipc_error::IpcError::new(
+                    codes::E_NOTFOUND,
+                    format!("no active client token named '{name}'"),
+                )
+            })
+    }
 }
 
 impl Store {

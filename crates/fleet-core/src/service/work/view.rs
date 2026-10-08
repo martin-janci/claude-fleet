@@ -554,6 +554,10 @@ pub struct ReviewItem {
     pub strength: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rule: Option<String>,
+    /// 0–100, read off the rule, strength and evidence
+    /// (`work::confidence`); `None` from a hub older than step 6.5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u8>,
     pub preselected: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<ReviewAlternative>,
@@ -3098,6 +3102,12 @@ pub(crate) fn review_of(
             why,
             strength: l.link.strength.clone(),
             rule: l.link.rule.clone(),
+            confidence: Some(super::confidence::confidence(
+                &l.link.source,
+                l.link.strength.as_deref(),
+                l.link.rule.as_deref(),
+                &l.link.evidence,
+            )),
             preselected: l.link.preselected,
             alternatives: alts,
             created_at: l.link.decided_at.unwrap_or(l.link.created_at),

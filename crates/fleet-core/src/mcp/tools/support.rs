@@ -678,7 +678,7 @@ pub(super) fn bound_body(text: Option<&str>) -> String {
 pub(super) fn new_session_summary(p: &NewSessionParams) -> String {
     format!(
         "host={} name={} project_id={} worktree_id={:?} new_worktree={} base_branch={} \
-         kind={} start_command={} friendly_name={} resume_claude_session_id={} model={} effort={} profile={}",
+         kind={} start_command={} friendly_name={} resume_claude_session_id={} model={} effort={} profile={} agent={}",
         bound_text(Some(&p.host_alias)),
         bound_text(Some(&p.name)),
         p.project_id,
@@ -692,6 +692,7 @@ pub(super) fn new_session_summary(p: &NewSessionParams) -> String {
         bound_text(p.model.as_deref()),
         bound_text(p.effort.as_deref()),
         bound_text(p.profile.as_deref()),
+        bound_text(p.agent.as_deref()),
     )
 }
 

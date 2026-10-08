@@ -1509,6 +1509,58 @@ describe('Sidebar triage (W2 Track D)', () => {
     expect(screen.queryByTestId('bulk-bar')).toBeNull();
   });
 
+  it('bulk Archive archives the rows with work, says what it left, and Undo un-archives (step 1.7)', async () => {
+    const work = { link_id: 70, item_id: 5, key: 'TASK-5', title: 'Login', source: 'local' } as SessionRow['work'];
+    const a = { ...sessionFor(1, 'dev-a'), work };
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    const base = (mockedInvoke as ReturnType<typeof vi.fn>).getMockImplementation() as (cmd: string, raw?: unknown) => Promise<unknown>;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, raw?: unknown) => {
+      if (cmd === 'tidy_apply') return { results: [{ session_id: a.id, action: 'archive', ok: true, outcome: 'archived' }] };
+      if (cmd === 'unarchive_session_work') return a;
+      if (cmd === 'tidy_candidates') return { candidates: [] };
+      return base(cmd, raw);
+    });
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-archive'));
+    await waitFor(() => expect(get(toasts).length).toBeGreaterThan(0));
+    const apply = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'tidy_apply');
+    expect((apply[0][1] as { args: { items: unknown[] } }).args.items).toEqual([{ session_id: a.id, action: 'archive', link_id: 70 }]);
+    const t = get(toasts).at(-1)!;
+    expect(t.message).toBe('Archived 1 session · 1 left as they were (no work linked)');
+    expect(t.action?.label).toBe('Undo');
+    t.action!.run();
+    await waitFor(() =>
+      expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'unarchive_session_work')).toHaveLength(1),
+    );
+    expect(screen.queryByTestId('bulk-bar')).toBeNull();
+  });
+
+  it('bulk Clean up opens the Kill dialog in Clean up mode and never kills', async () => {
+    const a = sessionFor(1, 'dev-a');
+    const b = sessionFor(1, 'dev-b');
+    mockBackend(fakeProjects, [a, b]);
+    render(Sidebar);
+    await tick(); await tick();
+    const rows = screen.getAllByTestId('sess-row');
+    await fireEvent.click(rows[0], { shiftKey: true });
+    await fireEvent.click(rows[1], { metaKey: true });
+    await tick();
+    await fireEvent.click(screen.getByTestId('bulk-cleanup'));
+    expect(await screen.findByRole('dialog', { name: 'Clean up 2 sessions?' })).toBeTruthy();
+    await waitFor(() => expect((screen.getByTestId('kill-cleanup') as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(screen.getByTestId('kill-cleanup'));
+    await waitFor(() =>
+      expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'safe_kill_session')).toHaveLength(2),
+    );
+    expect((mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === 'kill_session')).toHaveLength(0);
+  });
+
   it('select mode shows checkboxes and bulk send opens the prompt dialog', async () => {
     const a = sessionFor(1, 'dev-a');
     mockBackend(fakeProjects, [a]);

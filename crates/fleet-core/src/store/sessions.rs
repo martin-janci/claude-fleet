@@ -717,6 +717,11 @@ impl Store {
     /// None). Write-once at spawn_review time. Reconcile never touches these
     /// columns — they survive re-probe because upsert_session's ON CONFLICT clause
     /// omits them.
+    ///
+    /// `agent` (migration 121) follows a move into or out of `shell`: a
+    /// shell session runs no agent, and a session that stops being a shell
+    /// runs Claude Code, the only agent fleet launches today. Any other
+    /// kind change leaves the agent alone.
     pub fn set_session_kind(
         &self,
         id: i64,
@@ -724,7 +729,10 @@ impl Store {
         reviews_session_id: Option<i64>,
     ) -> Result<(), rusqlite::Error> {
         self.conn.execute(
-            "UPDATE sessions SET kind = ?1, reviews_session_id = ?2 WHERE id = ?3",
+            "UPDATE sessions SET kind = ?1, reviews_session_id = ?2, \
+             agent = CASE WHEN ?1 = 'shell' THEN 'shell' \
+                          WHEN agent = 'shell' THEN 'claude' ELSE agent END \
+             WHERE id = ?3",
             rusqlite::params![kind, reviews_session_id, id],
         )?;
         // A review inherits the reviewed session's primary work (M2.2).
@@ -3612,6 +3620,39 @@ mod tests {
             .unwrap();
         assert_eq!(row.kind, "review", "kind must survive re-upsert");
         assert_eq!(row.reviews_session_id, Some(src));
+    }
+
+    /// Migration 121: a shell session runs no agent, and the agent follows a
+    /// kind change into and out of `shell` and survives a re-probe.
+    #[test]
+    fn the_agent_follows_a_move_into_and_out_of_shell() {
+        let store = Store::open_in_memory().expect("store");
+        store.upsert_host("alpha").unwrap();
+        let id = store
+            .upsert_session("s", "alpha", None, None, 1, 1, "running", None)
+            .unwrap();
+        let agent = || store.get_session_by_id(id).unwrap().unwrap().agent;
+        assert_eq!(agent(), AGENT_CLAUDE, "a discovered row runs Claude Code");
+        store.set_session_kind(id, "shell", None).unwrap();
+        assert_eq!(agent(), AGENT_SHELL);
+        store
+            .upsert_session("s", "alpha", None, None, 1, 2, "running", None)
+            .unwrap();
+        assert_eq!(agent(), AGENT_SHELL, "a re-probe keeps the agent");
+        store.set_session_kind(id, "work", None).unwrap();
+        assert_eq!(agent(), AGENT_CLAUDE);
+        // A kind change that does not touch shell leaves a stored agent be.
+        store
+            .conn
+            .execute("UPDATE sessions SET agent = 'codex' WHERE id = ?1", [id])
+            .unwrap();
+        store.set_session_kind(id, "review", None).unwrap();
+        assert_eq!(agent(), "codex");
+        // The column refuses a name migration 121 does not know.
+        assert!(store
+            .conn
+            .execute("UPDATE sessions SET agent = 'gemini' WHERE id = ?1", [id])
+            .is_err());
     }
 
     #[test]

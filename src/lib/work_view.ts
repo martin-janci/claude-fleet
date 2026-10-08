@@ -373,6 +373,18 @@ export interface SessionTasks {
 /** `suggestion` | `cross_org` | `unavailable` | `no_primary`. */
 export type ReviewKind = 'suggestion' | 'cross_org' | 'unavailable' | 'no_primary';
 
+/**
+ * A suggestion at or above this confidence is "high confidence": Review's
+ * "Confirm all high-confidence" ticks exactly these. Mirrors
+ * `work::confidence::HIGH_CONFIDENCE` in fleet-core.
+ */
+export const HIGH_CONFIDENCE_PCT = 85;
+
+/** A review item's suggestion clears the high-confidence bar. */
+export function isHighConfidence(it: Pick<ReviewItem, 'kind' | 'confidence'>): boolean {
+  return it.kind === 'suggestion' && (it.confidence ?? 0) >= HIGH_CONFIDENCE_PCT;
+}
+
 export interface ReviewItem {
   review_id: string;
   kind: ReviewKind | string;
@@ -385,6 +397,8 @@ export interface ReviewItem {
   why?: string[];
   strength?: string | null;
   rule?: string | null;
+  /** 0–100, from detection (`work::confidence`); absent from an older hub. */
+  confidence?: number | null;
   preselected?: boolean;
   alternatives?: { link_id?: number | null; task_id: string; key?: string | null; title?: string | null }[];
   created_at?: number;

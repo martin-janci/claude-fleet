@@ -8,7 +8,20 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
-import { doneWhenRows, eventSentence, moveLabel, progressLabel, stateLabel, type Mission } from './missions';
+import { hosts } from './hosts';
+import {
+  doneWhenRows,
+  eventSentence,
+  moveLabel,
+  autonomyWords,
+  plannerError,
+  plannerRefusal,
+  policyWith,
+  progressLabel,
+  stateLabel,
+  withoutConfigKeys,
+  type Mission,
+} from './missions';
 
 type Handler = (args: Record<string, unknown>) => unknown;
 let handlers: Record<string, Handler>;
@@ -75,7 +88,7 @@ describe('WorkMissions', () => {
       const h = handlers[cmd];
       if (!h) return null;
       const v = h((raw as { args: Record<string, unknown> } | undefined)?.args ?? {});
-      if (v instanceof Error) throw { code: 'E_INVALID', message: v.message };
+      if (v instanceof Error) throw { code: (v as Error & { code?: string }).code ?? 'E_INVALID', message: v.message };
       return v;
     });
   });
@@ -240,6 +253,209 @@ describe('WorkMissions', () => {
     await fireEvent.click(screen.getByTestId('mission-conds-save'));
     await flush();
     expect(calls('set_work_done_when')[0]).toEqual({ item_id: 11, done_when: ['review', 'ci:test'] });
+  });
+
+  describe('the planner in words (step 1.3)', () => {
+    const loopDetail = () => ({
+      mission: current,
+      items: [item(10, 'Payments v2')],
+      events: [],
+      may_change: true,
+      plan: {
+        steps: [],
+        cards: [],
+        autonomy: { asked: 3, ceiling: 1, effective: 1, why: "L1, the fleet's ceiling (orchestrator.max_level)", enabled: true },
+        cost_micros: 0,
+        counts: { total: 1, open: 0 },
+      },
+    });
+    const limit = () =>
+      Object.assign(new Error('the planner ran 4 times in the last hour (policy.max_planner_runs_per_hour)'), { code: 'E_LIMIT' });
+
+    it('a failed run says what happened, with Retry and Details, and no settings key', async () => {
+      current = mission({ state: 'active', level: 3 });
+      handlers.work_mission = loopDetail;
+      handlers.plan_mission = limit;
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      expect(screen.getByTestId('mission-autonomy').textContent).not.toContain('orchestrator.');
+      await fireEvent.click(screen.getByTestId('mission-plan'));
+      await flush();
+      const box = screen.getByTestId('mission-planner-error');
+      expect(box.textContent?.replace(/\s+/g, ' ').trim()).toMatchInlineSnapshot(
+        `"The planner couldn't run It already ran 4 times in the last hour, the most this mission allows. Try again later. Retry Details ✕"`,
+      );
+      expect(box.textContent).not.toMatch(/policy\.|orchestrator\./);
+      expect(screen.queryByTestId('mission-notice')).toBeNull();
+      // Details keeps the raw code and message.
+      expect(screen.queryByTestId('mission-planner-details-text')).toBeNull();
+      await fireEvent.click(screen.getByTestId('mission-planner-details'));
+      expect(screen.getByTestId('mission-planner-details-text').textContent).toBe(
+        'E_LIMIT · the planner ran 4 times in the last hour (policy.max_planner_runs_per_hour)',
+      );
+      // Retry asks again; a good answer clears the error.
+      handlers.plan_mission = () => ({ mission_id: 4, cards: [] });
+      await fireEvent.click(screen.getByTestId('mission-planner-retry'));
+      await flush();
+      expect(calls('plan_mission')).toHaveLength(2);
+      expect(screen.queryByTestId('mission-planner-error')).toBeNull();
+    });
+
+    it('a refused answer says nothing changed and keeps the reason under Details', async () => {
+      current = mission({ state: 'active', level: 3 });
+      handlers.work_mission = loopDetail;
+      handlers.plan_mission = () => ({ mission_id: 4, cards: [], refused: 'no JSON array of commands: "I think we should"' });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-plan'));
+      await flush();
+      const box = screen.getByTestId('mission-planner-error');
+      expect(box.textContent).toContain("The planner's answer couldn't be used");
+      expect(box.textContent).toContain('Nothing was changed');
+      expect(box.textContent).not.toContain('no JSON array');
+      await fireEvent.click(screen.getByTestId('mission-planner-details'));
+      expect(screen.getByTestId('mission-planner-details-text').textContent).toContain('no JSON array');
+      await fireEvent.click(screen.getByTestId('mission-planner-dismiss'));
+      expect(screen.queryByTestId('mission-planner-error')).toBeNull();
+    });
+
+    it('maps each planner failure to words', () => {
+      expect(plannerError({ code: 'E_INVALID_STATE', message: "claude is not on mac's PATH" }).text).toBe(
+        "Claude Code isn't installed on mac, so the planner has nowhere to run.",
+      );
+      expect(plannerError({ code: 'E_SHELL', message: 'the planner on mac gave no answer' }).text).toContain('on mac finished without an answer');
+      expect(plannerError({ code: 'E_SSH_TIMEOUT', message: 'ssh mac: timed out after 10 s' }).text).toContain("couldn't reach");
+      expect(plannerError({ code: 'E_HUB_UNREACHABLE', message: 'hub down' }).text).toContain("hub didn't answer");
+      expect(plannerError({ code: 'E_INVALID_STATE', message: 'Payments is completed' }).text).toContain('has ended');
+      expect(plannerError({ code: 'E_X', message: 'the mission loop is off (orchestrator.enabled)' }).text).toBe('The mission loop is off.');
+      expect(plannerError({ code: 'E_X', message: 'boom' }).details).toBe('E_X · boom');
+      expect(plannerRefusal('bad').details).toBe('bad');
+    });
+
+    it('takes settings keys out of user text', () => {
+      expect(withoutConfigKeys("L1, the fleet's ceiling (orchestrator.max_level)")).toBe("L1, the fleet's ceiling");
+      expect(withoutConfigKeys('ran 4 times (policy.max_planner_runs_per_hour) today')).toBe('ran 4 times today');
+      expect(withoutConfigKeys('see (this) and (e.g. that)')).toBe('see (this) and (e.g. that)');
+    });
+  });
+
+  describe('the header, the grant and the policy (step 1.8)', () => {
+    const policy = {
+      max_parallel: 2,
+      max_retries: 3,
+      require_review: true,
+      task_creation: 'propose',
+      max_tasks: 60,
+      max_planner_runs_per_hour: 6,
+      no_progress_secs: 3600,
+      planner_host: 'mac',
+    };
+    const detailOf = (m: Mission) => ({
+      mission: m,
+      items: [item(10, 'Payments v2')],
+      events: [],
+      may_change: true,
+      plan: {
+        steps: [],
+        cards: [],
+        autonomy: { asked: 3, ceiling: 1, effective: 1, why: "L1, the fleet's ceiling (orchestrator.max_level)", enabled: true },
+        cost_micros: 0,
+        counts: { total: 1, open: 0 },
+      },
+    });
+
+    it('mission_save round-trip: parallel runs and the wake interval save, the rest of the policy is kept', async () => {
+      current = mission({ state: 'active', level: 3, mode: 'continuous', policy });
+      handlers.work_mission = () => detailOf(current);
+      handlers.save_mission = (a) => {
+        const m = (a.mission ?? {}) as Partial<Mission>;
+        current = mission({ ...current, ...m, version: 2 });
+        return current;
+      };
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      expect(screen.getByTestId('mission-detail').textContent).toContain('2 at once');
+      await fireEvent.click(screen.getByTestId('mission-edit'));
+      await flush();
+      expect((screen.getByTestId('mission-edit-parallel') as HTMLInputElement).value).toBe('2');
+      expect((screen.getByTestId('mission-edit-wake') as HTMLInputElement).value).toBe('');
+      // Under five minutes is refused before it is sent.
+      await fireEvent.input(screen.getByTestId('mission-edit-wake'), { target: { value: '2' } });
+      await flush();
+      expect(screen.getByTestId('mission-edit-wake-bad')).toBeTruthy();
+      expect((screen.getByTestId('mission-edit-save') as HTMLButtonElement).disabled).toBe(true);
+      await fireEvent.input(screen.getByTestId('mission-edit-wake'), { target: { value: '30' } });
+      await fireEvent.input(screen.getByTestId('mission-edit-parallel'), { target: { value: '4' } });
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-edit-save'));
+      await flush();
+      const sent = calls('save_mission')[0];
+      expect(sent.expected_version).toBe(1);
+      expect((sent.mission as { policy: unknown }).policy).toEqual({ ...policy, max_parallel: 4, wake_every_secs: 1800 });
+      // What came back is what the header shows, and a second edit starts from it.
+      const meta = screen.getByTestId('mission-detail').textContent ?? '';
+      expect(meta).toContain('wakes every 30 min');
+      expect(meta).toContain('4 at once');
+      await fireEvent.click(screen.getByTestId('mission-edit'));
+      await flush();
+      expect((screen.getByTestId('mission-edit-parallel') as HTMLInputElement).value).toBe('4');
+      expect((screen.getByTestId('mission-edit-wake') as HTMLInputElement).value).toBe('30');
+    });
+
+    it('says the autonomy in words, with how to change it', async () => {
+      current = mission({ state: 'active', level: 3 });
+      handlers.work_mission = () => detailOf(current);
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      const line = screen.getByTestId('mission-autonomy').textContent ?? '';
+      expect(line).toContain('Runs at L1 · L3 asked · L1 ceiling · no grant');
+      expect(line).not.toMatch(/orchestrator\.|policy\./);
+      expect(screen.getByTestId('mission-autonomy-hint').textContent).toBe("The fleet's ceiling holds it at L1. Raise it in Settings.");
+    });
+
+    it('the grant form signs for the hosts ticked, and for any host when none is', async () => {
+      hosts.set([
+        { alias: 'mac', ssh_alias: null, hidden: false, account_uuid: null, reachable: true, claude_version: null, tmux_version: null, probed_at: null },
+        { alias: 'trn', ssh_alias: null, hidden: false, account_uuid: null, reachable: true, claude_version: null, tmux_version: null, probed_at: null },
+      ] as never);
+      current = mission({ state: 'active', level: 2 });
+      handlers.work_mission = () => detailOf(current);
+      handlers.grant_mission = () => ({ id: 1, mission_id: 4, plan_version: 1, level: 2, granted_by: 'fleet', created_at: 1, expires_at: 2 });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-grant'));
+      await flush();
+      const boxes = screen.getAllByTestId('mission-grant-host') as HTMLInputElement[];
+      expect(boxes.map((b) => b.value)).toEqual(['mac', 'trn']);
+      await fireEvent.click(boxes[1]);
+      await fireEvent.click(screen.getByTestId('mission-grant-save'));
+      await flush();
+      expect(calls('grant_mission')[0]).toEqual({ mission_id: 4, level: 2, hours: 8, hosts: ['trn'] });
+      hosts.set([]);
+    });
+
+    it('words every limit', () => {
+      const base = { asked: 2, ceiling: 3, effective: 2, why: '', enabled: true };
+      expect(autonomyWords(base).hint).toBeNull();
+      expect(autonomyWords({ ...base, enabled: false, effective: 0 }).runs).toBe('Loop off');
+      expect(autonomyWords({ ...base, enabled: false, effective: 0 }).hint).toContain('off for the whole fleet');
+      expect(autonomyWords({ ...base, effective: 1 }).hint).toContain('Without a grant');
+      const grant = { id: 1, mission_id: 4, plan_version: 1, level: 1, granted_by: 'p', created_at: 0, expires_at: 2_000 };
+      const w = autonomyWords({ ...base, asked: 3, effective: 1, grant }, 1_000);
+      expect(w.limits).toMatch(/^L3 asked · L3 ceiling · L1 grant until /);
+      expect(w.hint).toContain('The grant signs L1');
+      expect(policyWith({ max_parallel: 2, wake_every_secs: 600 }, { wake_every_secs: null })).toEqual({ max_parallel: 2 });
+    });
   });
 
   it('presses the loop: a wave, a card, a grant and Pause all', async () => {
