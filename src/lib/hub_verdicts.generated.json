@@ -50,6 +50,7 @@
     "work_retention_sweep"
   ],
   "routed": [
+    "abandon_start",
     "accept_work_proposal",
     "accept_work_proposals",
     "ack_work_link",

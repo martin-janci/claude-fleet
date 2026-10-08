@@ -3,6 +3,7 @@
 //! agnostic entry the MCP tools `work` / `work_link` and the desktop commands
 //! share, so a paired desktop and a local one answer the same way.
 
+pub mod abandon;
 pub mod agent_handover;
 pub mod buckets;
 pub mod card;
@@ -480,6 +481,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "resume",
     "start",
     "preview_start",
+    "abandon_start",
     "run",
     "handover",
     "archive",
@@ -551,6 +553,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("resume_work", "work_link", "resume"),
     ("start_work", "work_link", "start"),
     ("preview_start_work", "work_link", "preview_start"),
+    ("abandon_start", "work_link", "abandon_start"),
     ("request_work_handover", "work_link", "handover"),
     ("start_work_multi", "work_link", "start"),
     ("work_tidy", "work", "tidy"),

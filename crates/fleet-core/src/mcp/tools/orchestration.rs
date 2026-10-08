@@ -1045,7 +1045,8 @@ impl FleetTools {
         the primary. trust_project {project_id, on}. resume {key, mode}: \
         new session on past work. start {key|url|item_id}: new session on a \
         ticket (project_ids: one per repo; parallel: beside a live one); \
-        preview_start: where it would land, nothing made. run {item_id, role?}: an \
+        preview_start: where it would land, nothing made. abandon_start \
+        {session_id}: undo an unused start. run {item_id, role?}: an \
         attempt at the item in its own session and worktree, tracked as a task. \
         handover {session_id}: ask it to \
         write its hand-off. summarize {key, link_id}: \
@@ -1746,6 +1747,44 @@ impl FleetTools {
             .map_err(to_mcp_err)?;
             report.results.extend(refused);
             return ok_json(&report);
+        }
+        if args.action == "abandon_start" {
+            // Task → session P-6: cancel a start that made a session and a
+            // checkout nobody has used yet. It KILLS the session, so it takes
+            // the kill's tier (`own`, as `kill_session` and tidy-up's kills
+            // do), through the host fence, and the kill's confirmation —
+            // always for the operator (D12). The service refuses (`E_DIRTY`)
+            // anything with work in it, before anything is touched.
+            let sid = args
+                .session_id
+                .ok_or_else(|| mcp_err("E_INVALID", "abandon_start needs session_id", None))?;
+            let row = self.resolve_target_row(
+                &caller,
+                Some(sid),
+                None,
+                None,
+                Reach::Own,
+                "the session whose start to cancel",
+            )?;
+            // What the cancel would act on, before the confirmation: a
+            // session no start made is refused, never put to a person.
+            {
+                let s = lock(&self.store).map_err(to_mcp_err)?;
+                crate::service::work::abandon::plan_abandon(&s, row.id).map_err(to_mcp_err)?;
+            }
+            self.confirm_gate(
+                "work_link",
+                args.confirm_nonce.as_deref(),
+                &format!(
+                    "Cancel the start of {} on {}: end it, remove its new checkout and branch",
+                    row.tmux_name, row.host_alias
+                ),
+                &caller,
+            )?;
+            let out = crate::service::work::abandon::abandon_start(&self.store, &self.ssh, row.id)
+                .await
+                .map_err(to_mcp_err)?;
+            return ok_json(&out);
         }
         if args.action == "preview_start" {
             // Task → session spec P-1: where `start` with these arguments would
