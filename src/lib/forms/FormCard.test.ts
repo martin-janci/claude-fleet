@@ -255,4 +255,29 @@ describe('FormCard', () => {
     await fireEvent.click(stg);
     expect(stg).toHaveAttribute('aria-checked', 'false');
   });
+
+  // ── Step 10.9: Jev's quick answer on a form ─────────────────────────
+  it('moves Jev’s likely option first and pre-selects it; Change puts it back', async () => {
+    const v = view({ proposal: { field: 'env', value: 'qa', source: 'jev', confidence_pct: 70 } });
+    v.spec.steps[0].fields[0].options = [['stg', 'Staging'], ['qa', 'QA']];
+    inv.mockImplementation(async () => v);
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    const qa = await screen.findByTestId('form-field-env-qa');
+    expect(qa).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['1 QA', '2 Staging']);
+    expect(screen.getByTestId('form-proposed-env')).toHaveTextContent('Proposed by Jev');
+    await fireEvent.click(screen.getByTestId('form-proposed-env-change'));
+    expect(qa).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getAllByRole('radio').map((r) => r.textContent?.trim())).toEqual(['1 Staging', '2 QA']);
+  });
+
+  it('never moves a risky option or a weak proposal', async () => {
+    const risky = view({ proposal: { field: 'env', value: 'prod', source: 'jev', confidence_pct: 30 } });
+    risky.spec.steps[0].fields[0].options = [['stg', 'Staging'], ['prod', 'Push to production']];
+    inv.mockImplementation(async () => risky);
+    render(FormCard, { props: { formId: 'f_a', sessionName: 'dev', blocked: null } });
+    await screen.findByTestId('form-field-env-stg');
+    expect(screen.queryByTestId('form-proposed-env')).toBeNull();
+    expect(screen.getByTestId('form-field-env-prod')).toHaveAttribute('aria-checked', 'false');
+  });
 });

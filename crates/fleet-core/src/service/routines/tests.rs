@@ -431,6 +431,54 @@ async fn the_day_budget_stops_new_runs_until_tomorrow() {
     assert_eq!(next.state, "running");
 }
 
+/// The plan's check for 8.7: the loop skips an account over its threshold,
+/// and fires again once the account is back under it.
+#[tokio::test]
+async fn a_fire_on_an_account_over_the_line_is_skipped() {
+    let f = fx();
+    let r = new_routine(&f, input(&f));
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(
+            &s,
+            "mac",
+            Some("work"),
+            "work",
+            93.0,
+            OCT8 + 9 * H,
+        );
+        // The host's own login is not the routine's: its reading is no reason.
+        crate::service::account_limits::seed_usage(&s, "mac", None, "own", 10.0, OCT8 + 9 * H);
+    }
+    due_at(&f, r.id, OCT8 + 9 * H);
+    tick_once(&f.deps, OCT8 + 9 * H).await;
+    let runs = runs_of(&f, r.id);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, "skipped");
+    let why = runs[0].reason.as_deref().unwrap();
+    assert!(
+        why.contains("profile work on mac") && why.contains("93%"),
+        "{why}"
+    );
+    assert!(f.fake.started.lock().unwrap().is_empty());
+    assert!(routine(&f, r.id).next_run_at.unwrap() > OCT8 + 9 * H);
+    // A newer reading under the line: the next fire runs.
+    {
+        let s = lock(&f.store).unwrap();
+        crate::service::account_limits::seed_usage(
+            &s,
+            "mac",
+            Some("work"),
+            "work",
+            20.0,
+            OCT8 + 24 * H,
+        );
+    }
+    due_at(&f, r.id, OCT8 + 33 * H);
+    tick_once(&f.deps, OCT8 + 33 * H).await;
+    assert_eq!(runs_of(&f, r.id)[1].state, "running");
+}
+
 #[tokio::test]
 async fn pause_all_stops_the_schedule_but_not_a_person() {
     let f = fx();

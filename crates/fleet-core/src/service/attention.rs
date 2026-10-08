@@ -911,6 +911,7 @@ mod tests {
             latency_ms: None,
             worktree_kb: None,
             worktree_at: None,
+            agents_on_path: None,
             harnesses: None,
         };
         let snap = |uuid: &str, status: UsageOutcomeKind, five: f64, week: f64, resets: i64| {

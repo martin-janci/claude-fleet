@@ -326,6 +326,26 @@ fn default_true() -> bool {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct QueuePromptParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Text typed as a new turn.
+    pub prompt: String,
+    /// Omit the untrusted-input marker line. Master token only.
+    #[serde(default)]
+    pub raw: bool,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct QueuedPromptsParams {
+    /// Fleet session id.
+    pub session_id: i64,
+    /// Take back this waiting prompt instead of listing.
+    #[serde(default)]
+    pub cancel: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct SendPromptParams {
     /// Fleet session id, or host_alias + tmux_name.
     #[serde(default)]
@@ -983,6 +1003,14 @@ pub struct SettingHistoryParams {
     /// Newest first, 1-100; 20 when unset.
     #[serde(default)]
     pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct AnswerMcpConfirmParams {
+    /// The confirm_nonce the waiting call was handed.
+    pub nonce: String,
+    /// true runs the call on its retry; false refuses it.
+    pub approved: bool,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]

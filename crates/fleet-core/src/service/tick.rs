@@ -193,6 +193,11 @@ pub fn spawn_reconcile_tick(
     };
     tracing::info!("reconcile tick enabled every {}s", period.as_secs());
 
+    // J5 quick answer: after each pass, new agent questions are asked about
+    // in a task of their own (off by default; one short lock when off).
+    let quick = service::decide::quick_answer::QuickAnswerTrigger::new(
+        service::decide::DecideCtx::jev(std::sync::Arc::clone(&store)),
+    );
     Some(crate::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         // Drop missed ticks rather than firing them back-to-back after a slow
@@ -200,13 +205,16 @@ pub fn spawn_reconcile_tick(
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         run_cancellable_tick(ticker, token, || {
             let store = &store;
+            let quick = &quick;
             let ssh = &ssh;
             async move {
                 let stats = tick_stats();
                 let started = stats.begin(unix_now());
                 let outcome = service::sessions::reconcile_now(store, ssh).await;
                 match &outcome {
-                    Ok(true) => {}
+                    Ok(true) => {
+                        quick.after_pass();
+                    }
                     Ok(false) => {
                         tracing::debug!("a reconcile pass is already running; skipping tick")
                     }
@@ -253,6 +261,21 @@ pub fn spawn_reconcile_tick(
                     }
                     service::loops::report("playbooks", Ok::<_, String>(()), Some(period));
                 }
+                // PR shepherd: projects a person granted a rule for get their
+                // sessions' conflicting or red PRs recorded, and nudged at
+                // `nudge`. No rule, no work: one indexed read and out. Stops
+                // while `automation.paused` is on.
+                if service::loops::gate("pr_shepherd", store, Some(period)) {
+                    let n = service::pr_shepherd::run(store, ssh).await;
+                    if n > 0 {
+                        tracing::info!("reconcile tick: recorded {n} PR shepherd episode(s)");
+                    }
+                    service::loops::report("pr_shepherd", Ok::<_, String>(()), Some(period));
+                }
+                // Step 5.10: a prompt queued for a busy session goes in once the
+                // session is idle; the Stop hook delivers it first, this catches
+                // a hook that never came. Detached and single-flight.
+                service::sessions::deferred::spawn_deliver_all_due(store, ssh);
                 // Wave 5 G-hub-latency Task 1: single-flight, off the tick
                 // body — a slow sweep (it does SSH work) must not stretch
                 // the tick past its period. Mirrors `service::usage::spawn_collect`.

@@ -18,9 +18,11 @@ mod clients;
 mod conversations;
 mod debug_devices;
 mod decisions;
+mod deferred_prompts;
 mod downloads;
 mod forms;
 mod guides;
+mod host_setup;
 mod hosts_accounts;
 mod item_deps;
 mod item_verify;
@@ -34,6 +36,7 @@ mod orgs;
 mod participants;
 mod peer_links;
 mod people;
+mod pr_shepherd;
 mod project_picks;
 mod projects;
 mod pull_requests;
@@ -92,9 +95,11 @@ pub use decisions::{
     DECISION_FOLLOWUPS, DECISION_MAX_CANDIDATES, DECISION_MODES, DECISION_NO_BASELINE,
     DECISION_PERSON_FOLLOWUPS, DECISION_SUBJECT_RUNS_MAX, DECISION_WORD_MAX_CHARS,
 };
+pub use deferred_prompts::{DeferredPromptRow, DEFERRED_MAX_ATTEMPTS};
 pub use downloads::{DownloadRow, NewDownload};
 pub use forms::{FormFinish, FormRow, NewForm, FORM_STATES};
 pub use guides::{GuideProposalRow, NewGuideProposal, DECIDED_GUIDE_KEEP_SECS};
+pub use host_setup::{AgentInstallRow, HostSetupRow, SetupCheck};
 pub use item_deps::{ItemDepRow, DEP_SOURCES};
 pub use item_verify::{
     normalize_done_when, VerificationRow, DONE_WHEN_LINE_MAX_CHARS, DONE_WHEN_MAX,
@@ -136,6 +141,9 @@ pub use peer_links::{
 };
 pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
+};
+pub use pr_shepherd::{
+    ShepherdEpisodeRow, ShepherdRuleRow, SHEPHERD_LEVELS, SHEPHERD_RECIPES_MAX_CHARS,
 };
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};

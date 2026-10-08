@@ -133,6 +133,12 @@ pub enum RowChange {
     /// desktop that made them, so a hub never emits one, and it is host-bound
     /// hidden besides (it names a directory on someone's machine).
     LocalWorkspaceChanged(i64),
+    /// The queue of control-API calls waiting for a person changed: one was
+    /// asked for, answered or expired (redesign step 9.2). Carries nothing —
+    /// the owner's device re-reads `mcp_confirms` (Access::PersonDevice), so
+    /// the tool and its arguments never ride a stream. Kind `confirm`,
+    /// host-bound hidden.
+    ConfirmChanged,
 }
 
 /// The payload of `update:changed`.
@@ -426,6 +432,7 @@ impl RowChange {
             RowChange::UpdateChanged(_) => "update:changed",
             RowChange::DownloadChanged(_) => "download:changed",
             RowChange::LocalWorkspaceChanged(_) => "local_workspace:changed",
+            RowChange::ConfirmChanged => "confirm:changed",
         }
     }
 
@@ -484,6 +491,7 @@ impl RowChange {
             RowChange::UpdateChanged(u) => to_value(u),
             RowChange::DownloadChanged(id) => serde_json::json!({ "id": id }),
             RowChange::LocalWorkspaceChanged(id) => serde_json::json!({ "id": id }),
+            RowChange::ConfirmChanged => serde_json::json!({}),
         }
     }
 }
@@ -566,6 +574,10 @@ pub trait EventBus: Send + Sync {
     /// See [`RowChange::GrantChanged`].
     fn grant_changed(&self, g: &GrantChanged) {
         self.emit(&RowChange::GrantChanged(g.clone()));
+    }
+    /// See [`RowChange::ConfirmChanged`].
+    fn confirm_changed(&self) {
+        self.emit(&RowChange::ConfirmChanged);
     }
 
     /// Flush a single deferred `RowChange`. Used by batched (transactional)
@@ -775,7 +787,7 @@ impl AttentionInputs {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 29] = [
+pub const EVENT_NAMES: [&str; 30] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -805,12 +817,13 @@ pub const EVENT_NAMES: [&str; 29] = [
     "download:changed",
     "grant:changed",
     "local_workspace:changed",
+    "confirm:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 17] = [
+pub const EVENT_KINDS: [&str; 18] = [
     "session",
     "host",
     "account",
@@ -828,6 +841,7 @@ pub const EVENT_KINDS: [&str; 17] = [
     "download",
     "grant",
     "local_workspace",
+    "confirm",
 ];
 
 /// Seconds since the Unix epoch (0 on a clock set before 1970).
@@ -1164,6 +1178,7 @@ impl EventBus for RecordingEventBus {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
             }
             RowChange::DownloadChanged(id) | RowChange::LocalWorkspaceChanged(id) => id.to_string(),
+            RowChange::ConfirmChanged => String::new(),
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -1367,6 +1382,7 @@ mod tests {
                 RowChange::UpdateChanged(_) => pinned_name!("update:changed"),
                 RowChange::DownloadChanged(_) => pinned_name!("download:changed"),
                 RowChange::LocalWorkspaceChanged(_) => pinned_name!("local_workspace:changed"),
+                RowChange::ConfirmChanged => pinned_name!("confirm:changed"),
             }
         }
         // And for every variant a test can build without a full store row,

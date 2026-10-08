@@ -62,6 +62,14 @@ export function projectProposal(p: StartPreview): ProposalLike | null {
   return { value: String(s.project_id), source: 'jev', confidence_pct: s.confidence_pct ?? null };
 }
 
+/** Jev's N3 answer (redesign 3.12): the sibling repository the same task
+ *  also needs, as the shared chip reads it. Only with a planned project. */
+export function siblingProposal(p: StartPreview): ProposalLike | null {
+  const s = p.suggested_sibling;
+  if (s == null || p.missing != null) return null;
+  return { value: String(s.project_id), source: 'jev', confidence_pct: s.confidence_pct ?? null };
+}
+
 /** The project a preview pre-selects: Jev's answer, only above the floor
  *  (ai_proposal `preselect`), so the field and the chip always agree. */
 export function suggestedProjectId(p: StartPreview): number | null {

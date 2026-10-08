@@ -7784,6 +7784,95 @@ async fn an_operator_summary_is_confirm_gated_and_refused_on_a_hub() {
     assert!(e.message.contains("no approver"), "{}", e.message);
 }
 
+/// Redesign step 9.2: on a hub the operator's start waits in the hub's own
+/// queue, and the owner's paired device lists it (`mcp_confirms`) and
+/// answers it (`answer_mcp_confirm`); each move tells the devices
+/// `confirm:changed`. The operator itself can do neither.
+#[tokio::test]
+async fn a_paired_device_lists_and_answers_the_operators_waiting_start() {
+    use crate::service::work::WorkLinkArgs;
+    let bus = Arc::new(crate::events::RecordingEventBus::new());
+    let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+    let t = guarded_tools(s, true);
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let phone = client_caller("phone", TokenMode::Full);
+    let start = |nonce: Option<String>| WorkLinkArgs {
+        action: "start".into(),
+        item_id: Some(9_999),
+        confirm_nonce: nonce,
+        ..Default::default()
+    };
+    let nonce = confirm_nonce_of(
+        &t.work_link(Extension(op.clone()), Parameters(start(None)))
+            .await
+            .unwrap_err(),
+    );
+
+    let listed = result_json(&t.mcp_confirms(Extension(phone.clone())).await.unwrap());
+    let row = &listed.as_array().unwrap()[0];
+    assert_eq!(row["nonce"], nonce.as_str());
+    assert_eq!(row["operator"], true);
+    assert_eq!(row["caller"], "client:ux-agent");
+    assert!(row["asked_at"].as_i64().unwrap() > 0);
+
+    for e in [
+        t.mcp_confirms(Extension(op.clone())).await.unwrap_err(),
+        t.answer_mcp_confirm(
+            Extension(op.clone()),
+            Parameters(AnswerMcpConfirmParams {
+                nonce: nonce.clone(),
+                approved: true,
+            }),
+        )
+        .await
+        .unwrap_err(),
+    ] {
+        assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    }
+
+    bus.take();
+    let answered = t
+        .answer_mcp_confirm(
+            Extension(phone.clone()),
+            Parameters(AnswerMcpConfirmParams {
+                nonce: nonce.clone(),
+                approved: true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&answered), true);
+    assert_eq!(bus.names(), vec!["confirm:changed"]);
+    assert_eq!(
+        result_json(&t.mcp_confirms(Extension(phone.clone())).await.unwrap()),
+        serde_json::json!([])
+    );
+    // Approved: the retry passes the gate (and the unknown item refuses).
+    let after = t
+        .work_link(Extension(op), Parameters(start(Some(nonce.clone()))))
+        .await
+        .unwrap_err();
+    assert!(after.message.starts_with("E_NOTFOUND"), "{}", after.message);
+
+    // A second answer finds nothing and says so, without a frame.
+    bus.take();
+    let again = t
+        .answer_mcp_confirm(
+            Extension(phone),
+            Parameters(AnswerMcpConfirmParams {
+                nonce,
+                approved: false,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result_json(&again), false);
+    assert!(bus.names().is_empty());
+}
+
 #[tokio::test]
 async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
     let (s, pid, on_b) = two_host_store();
@@ -10054,6 +10143,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // because `to_addr` can name the same row by address.
     ("send_message", &["Drive"]),
     ("send_prompt", &["Drive"]),
+    ("queue_prompt", &["Drive"]),
+    ("queued_prompts", &["Drive"]),
     ("session_conversations", &["Read"]),
     ("session_history", &["Read"]),
     ("wait_for_reply", &["Read"]),
@@ -10092,6 +10183,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `'own'` — frontend territory, named in this round's hand-off.
     ("delete_worktree", &["Own"]),
     ("repo_blame", &["Read"]),
+    ("repo_branch_diff", &["Read"]),
     ("repo_branches", &["Read"]),
     ("repo_changes", &["Read"]),
     ("repo_commit", &["Read"]),
@@ -10099,6 +10191,7 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("repo_diff", &["Read"]),
     ("repo_file", &["Read"]),
     ("repo_log", &["Read"]),
+    ("repo_range_diff", &["Read"]),
     ("repo_tree", &["Read"]),
     // session_ops.rs
     ("capture_session", &["Read"]),

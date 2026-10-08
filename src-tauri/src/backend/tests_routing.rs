@@ -379,7 +379,7 @@ fn routed_read_cases() -> Vec<Case> {
 fn routed_read_cases_but_org_admin() -> Vec<Case> {
     use fleet_core::service::repo::SessionIdArgs;
     use fleet_core::service::repo_read::{
-        RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs,
+        DiffRange, RepoCommitArgs, RepoCommitDiffArgs, RepoFileArgs, RepoLogArgs, RepoRangeDiffArgs,
     };
     use fleet_core::service::worktrees::ListHostWorktreesArgs;
 
@@ -395,6 +395,20 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     Some(true),
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "queued_prompts",
+            "queued_prompts",
+            json!({ "session_id": 7 }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::sessions::routed::queued_prompts(
+                    b,
+                    fleet_core::service::sessions::QueuedPromptsArgs { session_id: 7 },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -714,6 +728,16 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     },
                 ))
                 .map(|_| ())
+            }),
+        ),
+        (
+            "mcp_pending_confirms",
+            "mcp_confirms",
+            json!({}),
+            r#"[{"nonce":"n","tool":"kill_session","summary":"","caller":"client:ux-agent","operator":true,"asked_at":1}]"#,
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_pending_confirms(b, &guards)).map(|_| ())
             }),
         ),
         (
@@ -1234,6 +1258,40 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::files::routed::repo_changes(
                     b,
                     SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_branch_diff",
+            "repo_branch_diff",
+            json!({ "session_id": 7 }),
+            r#"{"branch":"feat","upstream":null,"unpushed":[],"unpushedFiles":[],"truncated":false,"base":"origin/main","aheadOfBase":2,"baseFiles":[]}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_branch_diff(
+                    b,
+                    SessionIdArgs { session_id: 7 },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "repo_range_diff",
+            "repo_range_diff",
+            json!({ "session_id": 7, "path": "src/lib.rs", "range": "base" }),
+            r#"{"path":"src/lib.rs","diff":"","binary":false,"truncated":false}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::files::routed::repo_range_diff(
+                    b,
+                    RepoRangeDiffArgs {
+                        session_id: 7,
+                        path: "src/lib.rs".into(),
+                        range: DiffRange::Base,
+                    },
                     s,
                     h,
                 ))
@@ -2332,6 +2390,22 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "mcp_confirm",
+            "answer_mcp_confirm",
+            json!({ "nonce": "n", "approved": true }),
+            "true",
+            Box::new(|b, _, _| {
+                let guards = fleet_core::mcp::McpGuards::new(Arc::new(|_| {}));
+                block_on(commands::mcp::routed::mcp_confirm(
+                    b,
+                    &guards,
+                    "n".into(),
+                    true,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "decide_setting_proposals",
             "decide_setting_proposals",
             json!({ "accept": [4], "reject": [5] }),
@@ -2936,6 +3010,42 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     },
                     s,
                     h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "queue_prompt",
+            "queue_prompt",
+            json!({ "session_id": 7, "prompt": "rebase on main" }),
+            r#"{"session_id":7,"delivered":false,"queued_id":3}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::queue_prompt(
+                    b,
+                    fleet_core::service::sessions::QueuePromptArgs {
+                        session_id: 7,
+                        prompt: "rebase on main".into(),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Taking a prompt back is the same tool with `cancel` set.
+        (
+            "cancel_queued_prompt",
+            "queued_prompts",
+            json!({ "session_id": 7, "cancel": 3 }),
+            "[]",
+            Box::new(|b, s, _h| {
+                block_on(commands::sessions::routed::cancel_queued_prompt(
+                    b,
+                    fleet_core::service::sessions::CancelQueuedPromptArgs {
+                        session_id: 7,
+                        id: 3,
+                    },
+                    s,
                 ))
                 .map(|_| ())
             }),
@@ -6019,6 +6129,7 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/sessions.rs"),
     ),
     ("commands/tasks.rs", include_str!("../commands/tasks.rs")),
+    ("commands/tray.rs", include_str!("../commands/tray.rs")),
     ("commands/upload.rs", include_str!("../commands/upload.rs")),
     ("commands/voice.rs", include_str!("../commands/voice.rs")),
     ("commands/work.rs", include_str!("../commands/work.rs")),

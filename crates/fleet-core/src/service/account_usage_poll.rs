@@ -408,6 +408,7 @@ mod tests {
             latency_ms: None,
             worktree_kb: None,
             worktree_at: None,
+            agents_on_path: None,
             harnesses: None,
         }
     }

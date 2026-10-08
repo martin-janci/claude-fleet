@@ -11,15 +11,17 @@
 //! A session's agent is `sessions.agent` (migration 121), which today
 //! follows `kind`: [`for_kind`] maps `shell` to no adapter (a shell has no
 //! agent) and every other kind to Claude Code, the only adapter so far.
-//! [`by_id`] knows `claude` only; `codex` and `agy` are refused at start
-//! (`normalize_agent`) until their adapters exist.
+//! [`by_id`] knows `claude` and `agy` ([`Agy`], step 12.3, built from agy's
+//! docs and provisional until real agy screens are captured).
 //!
 //! Claude Code moved behind [`ClaudeCode`] with no behaviour change: it
 //! delegates to the functions that did the work before (`tmux`'s launch
 //! chain, `pane_intel`, `transcript`), and their own tests still pin them.
 
+mod agy;
 mod claude;
 
+pub use agy::Agy;
 pub use claude::ClaudeCode;
 
 use crate::service::pane_intel::PaneIntel;
@@ -108,6 +110,7 @@ pub trait AgentAdapter: Send + Sync {
 }
 
 static CLAUDE_CODE: ClaudeCode = ClaudeCode;
+static AGY: Agy = Agy;
 
 /// Claude Code's adapter.
 pub fn claude() -> &'static dyn AgentAdapter {
@@ -119,6 +122,7 @@ pub fn claude() -> &'static dyn AgentAdapter {
 pub fn by_id(agent: &str) -> Option<&'static dyn AgentAdapter> {
     match agent {
         crate::store::AGENT_CLAUDE => Some(claude()),
+        crate::store::AGENT_AGY => Some(&AGY),
         _ => None,
     }
 }

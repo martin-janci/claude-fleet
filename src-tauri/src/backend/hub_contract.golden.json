@@ -339,6 +339,7 @@
     "HostRow": [
       "account_uuid",
       "agent_version",
+      "agents_on_path",
       "alias",
       "auth_overrides",
       "boot_at",
