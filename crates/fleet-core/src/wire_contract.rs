@@ -146,4 +146,11 @@
 //!   `pending_form`. A revision-8 hub serves no `ask`, so a desktop paired
 //!   with one would draw the forms card and fail every answer with an
 //!   unknown tool.
-pub const CONTRACT_REVISION: u32 = 9;
+//! - **10** — *a brand-new tool the desktop routes to.* Debug devices: the
+//!   desktop routes the Debug devices page's seven commands
+//!   (`list_debug_devices`, `scan_debug_devices`, `update_debug_device`,
+//!   `release_debug_device`, `forget_debug_device`, `boot_debug_device`,
+//!   `shutdown_debug_device`) to the hub's new `debug_devices` tool. A
+//!   revision-9 hub serves none of it, so the page would fail every read
+//!   with an unknown tool.
+pub const CONTRACT_REVISION: u32 = 10;

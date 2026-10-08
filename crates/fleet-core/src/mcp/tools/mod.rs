@@ -38,6 +38,7 @@ use rmcp::{
 use std::sync::{Arc, Mutex};
 
 mod assets;
+mod devices;
 mod downloads;
 mod fleet;
 mod forms;
@@ -362,6 +363,7 @@ impl FleetTools {
             + Self::downloads_router()
             + Self::sharing_router()
             + Self::forms_router()
+            + Self::devices_router()
     }
 }
 

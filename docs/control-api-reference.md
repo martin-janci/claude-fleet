@@ -65,6 +65,12 @@ Changeset cards that adopt, sync and fix assets: list (one in full with id), pro
 
 Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
 
+### `debug_devices`
+
+Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it.
+
+Parameters: `action`, `args`, `claim_s`, `contains`, `device`, `downgrade`, `filter`, `host`, `label`, `lines`, `name`, `note`, `path`, `refresh`, `shared`, `since_s`, `timeout_s`
+
 ### `decide_setting_proposals`
 
 Apply or reject settings proposals by id, each on its own; a trusted device only.
@@ -876,6 +882,13 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::forms::get_form`
 - `commands::forms::answer_form`
 - `commands::forms::decline_form`
+- `commands::debug_devices::list_debug_devices`
+- `commands::debug_devices::scan_debug_devices`
+- `commands::debug_devices::update_debug_device`
+- `commands::debug_devices::release_debug_device`
+- `commands::debug_devices::forget_debug_device`
+- `commands::debug_devices::boot_debug_device`
+- `commands::debug_devices::shutdown_debug_device`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`

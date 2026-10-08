@@ -777,6 +777,25 @@ Index by area (names only; see the reference for details):
   bytes are `GET /downloads/<id>` (bearer, not a tool result). Events:
   `download:changed { id }`, ids only, never on a host- or org-bound
   stream. See `docs/hub.md` → *File downloads*.
+- **Debug devices** — `debug_devices`, by `action`. Android phones and
+  emulators, iOS simulators and devices attached to any fleet host,
+  inventoried by a scan of that host (`list { refresh? }`, `scan { host? }`,
+  which also answers the emulators and simulators `boot { host, name }`
+  could start). Every command runs on the device's own host over the
+  fleet's usual SSH, so a session on one host drives a phone plugged into
+  another: `run { device, args, timeout_s? }` takes one `adb` (`shell`,
+  `uninstall`, `reboot`, `forward`, `reverse`, `emu`…), `simctl` (`launch`,
+  `terminate`, `openurl`, `privacy`, `ui`, `status_bar`, `location`…) or
+  `devicectl device` (`info`, `process`…) command, every argument quoted
+  and nothing that reads or writes a host path; `install { device, path }`
+  copies the app from the caller's host (a per-host token: its own host
+  only) to the device's host first; `logs` (`logcat -d`, a simulator's
+  `log show`), `screenshot` (an image content block), `boot`, `shutdown`.
+  `claim { device, claim_s?, note? }` keeps every other caller off the
+  device (`E_CONFLICT`) until it lapses or is released; each use by its
+  holder extends it. A per-host token sees its own host's devices and the
+  ones a person marked `shared` on hosts of its own org; `configure {
+  label, shared }` and `forget` are a person's. See `docs/debug-devices.md`.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a

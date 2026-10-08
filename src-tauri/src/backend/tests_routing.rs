@@ -169,6 +169,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 
 /// A minimal but complete `SessionRow`, null-stripped the way the hub leaves
 /// one. Nothing in the local store ever looks like this.
+const DEBUG_DEVICE_JSON: &str = r#"{"id":3,"title":"Pixel 8","host":"mac","platform":"android","kind":"physical","key":"R5","name":"Pixel 8","state":"online","ready":true,"shared":false,"first_seen_at":1,"last_seen_at":2}"#;
 const FORM_VIEW_JSON: &str = r#"{"form_id":"f_a","session_id":4,"host_alias":"h","title":"T","spec":{},"state":"pending","created_at":1}"#;
 const SESSION_PAYLOAD: &str = r#"{"id":42,"tmux_name":"from-the-hub","host_alias":"hetzner","created_at":1,"last_activity_at":2,"status":"running","kind":"tmux","turn_seq":0,"tags":[]}"#;
 /// `transport` is required on the wire (migration 034): it is a `String`,
@@ -672,6 +673,18 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                     s,
                     Some(4),
                     Some("pending".into()),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "list_debug_devices",
+            "debug_devices",
+            json!({ "action": "list" }),
+            r#"{"devices":[],"hosts":[]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::list_debug_devices(
+                    b, s, ssh,
                 ))
                 .map(|_| ())
             }),
@@ -2016,6 +2029,99 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     ssh,
                     "f_a".into(),
                     values,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "scan_debug_devices",
+            "debug_devices",
+            json!({ "action": "scan", "host": "mac" }),
+            r#"{"hosts":[]}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::scan_debug_devices(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::ScanDebugDevicesArgs {
+                        host: Some("mac".into()),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "update_debug_device",
+            "debug_devices",
+            json!({ "action": "configure", "device": "3", "label": "bench", "shared": true }),
+            DEBUG_DEVICE_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::debug_devices::routed::update_debug_device(
+                    b,
+                    s,
+                    commands::debug_devices::UpdateDebugDeviceArgs {
+                        id: 3,
+                        label: Some("bench".into()),
+                        shared: Some(true),
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "release_debug_device",
+            "debug_devices",
+            json!({ "action": "release", "device": "3" }),
+            DEBUG_DEVICE_JSON,
+            Box::new(|b, s, _| {
+                block_on(commands::debug_devices::routed::release_debug_device(
+                    b,
+                    s,
+                    commands::debug_devices::DebugDeviceArgs { id: 3 },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "forget_debug_device",
+            "debug_devices",
+            json!({ "action": "forget", "device": "3" }),
+            r#"{"removed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::debug_devices::routed::forget_debug_device(
+                    b,
+                    s,
+                    commands::debug_devices::DebugDeviceArgs { id: 3 },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "boot_debug_device",
+            "debug_devices",
+            json!({ "action": "boot", "device": "3" }),
+            r#"{"state":"booted"}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::boot_debug_device(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::DebugDeviceArgs { id: 3 },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "shutdown_debug_device",
+            "debug_devices",
+            json!({ "action": "shutdown", "device": "3" }),
+            DEBUG_DEVICE_JSON,
+            Box::new(|b, s, ssh| {
+                block_on(commands::debug_devices::routed::shutdown_debug_device(
+                    b,
+                    s,
+                    ssh,
+                    commands::debug_devices::DebugDeviceArgs { id: 3 },
                 ))
                 .map(|_| ())
             }),
@@ -5585,6 +5691,10 @@ const SOURCES: &[(&str, &str)] = &[
     ),
     ("commands/mutate.rs", include_str!("../commands/mutate.rs")),
     ("commands/forms.rs", include_str!("../commands/forms.rs")),
+    (
+        "commands/debug_devices.rs",
+        include_str!("../commands/debug_devices.rs"),
+    ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",
