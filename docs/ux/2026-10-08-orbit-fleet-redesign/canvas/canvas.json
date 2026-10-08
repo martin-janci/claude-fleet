@@ -1,0 +1,596 @@
+{
+ "v": 3,
+ "createdOnFiles": {
+  "v": 1,
+  "at": "2026-10-08T12:45:00Z"
+ },
+ "title": "Orbit Fleet redesign",
+ "launch": {
+  "view": "canvas"
+ },
+ "pages": [],
+ "boards": {
+  "Main.dc.html": {
+   "x": 0,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Inbox \u00b7 only what needs you, session in focus",
+   "expand": "fill"
+  },
+  "Work.dc.html": {
+   "x": 1520,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Work \u00b7 tasks with filters open",
+   "expand": "fill"
+  },
+  "Automation.dc.html": {
+   "x": 3040,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Automation \u00b7 routines, agents, runs",
+   "expand": "fill"
+  },
+  "Accounts.dc.html": {
+   "x": 4560,
+   "y": 0,
+   "w": 1440,
+   "h": 900,
+   "title": "Accounts & hosts",
+   "expand": "fill"
+  },
+  "Terminals.dc.html": {
+   "x": 0,
+   "y": 1000,
+   "w": 1440,
+   "h": 900,
+   "title": "Session \u00b7 terminals 0\u2026N beside the agent tab",
+   "expand": "fill"
+  },
+  "Sessions.dc.html": {
+   "x": 1520,
+   "y": 1000,
+   "w": 1440,
+   "h": 900,
+   "title": "Sessions \u00b7 all sessions, view options, shared with me",
+   "expand": "fill"
+  },
+  "Agent.dc.html": {
+   "x": 3040,
+   "y": 1000,
+   "w": 1440,
+   "h": 900,
+   "title": "Session \u00b7 Claude Code agent tab",
+   "expand": "fill"
+  },
+  "Files.dc.html": {
+   "x": 4560,
+   "y": 1000,
+   "w": 1440,
+   "h": 900,
+   "title": "Session \u00b7 Files: changed, commit, push",
+   "expand": "fill"
+  },
+  "Palette.dc.html": {
+   "x": 0,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "\u2318K palette, scoped to the session",
+   "expand": "fill"
+  },
+  "NewSession.dc.html": {
+   "x": 1520,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "New session \u00b7 every 0.5.3 option kept",
+   "expand": "fill"
+  },
+  "Toolkit.dc.html": {
+   "x": 3040,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "Toolkit \u00b7 skills synced across hosts",
+   "expand": "fill"
+  },
+  "Settings.dc.html": {
+   "x": 4560,
+   "y": 2000,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings \u00b7 layout, motion, density",
+   "expand": "fill"
+  },
+  "Missions.dc.html": {
+   "x": 0,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Work \u203a Missions \u00b7 plan by wave, cards, autonomy",
+   "expand": "fill"
+  },
+  "MissionControl.dc.html": {
+   "x": 0,
+   "y": 4100,
+   "w": 1440,
+   "h": 900,
+   "title": "Control \u00b7 coordinator chat, Today tab, views panel",
+   "expand": "fill"
+  },
+  "MCViews.dc.html": {
+   "x": 1520,
+   "y": 4100,
+   "w": 1440,
+   "h": 900,
+   "title": "Control \u00b7 Library and Pull requests views, deep links",
+   "expand": "fill"
+  },
+  "MCSession.dc.html": {
+   "x": 3040,
+   "y": 4100,
+   "w": 1440,
+   "h": 900,
+   "title": "Control \u00b7 a session opened in the panel",
+   "expand": "fill"
+  },
+  "MCTasks.dc.html": {
+   "x": 4560,
+   "y": 4100,
+   "w": 1440,
+   "h": 900,
+   "title": "Control \u00b7 tasks in the chat + Tasks view",
+   "expand": "fill"
+  },
+  "Components.dc.html": {
+   "x": 0,
+   "y": 5200,
+   "w": 1440,
+   "h": 900,
+   "title": "Conversation components \u00b7 form, wizard, progress, results, errors",
+   "expand": "fill"
+  },
+  "Wizard.dc.html": {
+   "x": 1520,
+   "y": 5200,
+   "w": 1440,
+   "h": 900,
+   "title": "Wizard \u00b7 add a host, with live checks",
+   "expand": "fill"
+  },
+  "Tour.dc.html": {
+   "x": 3040,
+   "y": 5200,
+   "w": 1440,
+   "h": 900,
+   "title": "Tutorial \u00b7 first-run tour and Get started checklist",
+   "expand": "fill"
+  },
+  "Guide.dc.html": {
+   "x": 4560,
+   "y": 5200,
+   "w": 1440,
+   "h": 900,
+   "title": "Guide \u00b7 step-by-step, changes real settings",
+   "expand": "fill"
+  },
+  "Tidy.dc.html": {
+   "x": 0,
+   "y": 6300,
+   "w": 1440,
+   "h": 900,
+   "title": "Tidy up \u00b7 failed never lands here",
+   "expand": "fill"
+  },
+  "Today.dc.html": {
+   "x": 1520,
+   "y": 6300,
+   "w": 1440,
+   "h": 900,
+   "title": "Today \u00b7 daily triage and standup",
+   "expand": "fill"
+  },
+  "SessionDetails.dc.html": {
+   "x": 3040,
+   "y": 6300,
+   "w": 1440,
+   "h": 900,
+   "title": "Session \u00b7 Details tab, full",
+   "expand": "fill"
+  },
+  "TaskDetail.dc.html": {
+   "x": 4560,
+   "y": 6300,
+   "w": 1440,
+   "h": 900,
+   "title": "Task detail \u00b7 with the start menu open",
+   "expand": "fill"
+  },
+  "Review.dc.html": {
+   "x": 0,
+   "y": 7300,
+   "w": 1440,
+   "h": 900,
+   "title": "Work \u203a Review \u00b7 confirm session \u2194 ticket",
+   "expand": "fill"
+  },
+  "Board.dc.html": {
+   "x": 1520,
+   "y": 7300,
+   "w": 1440,
+   "h": 900,
+   "title": "Work \u203a Board \u00b7 drag between tracker columns",
+   "expand": "fill"
+  },
+  "FilesTree.dc.html": {
+   "x": 3040,
+   "y": 7300,
+   "w": 1440,
+   "h": 900,
+   "title": "Files \u00b7 Tree and file viewer",
+   "expand": "fill"
+  },
+  "FilesHistory.dc.html": {
+   "x": 4560,
+   "y": 7300,
+   "w": 1440,
+   "h": 900,
+   "title": "Files \u00b7 History graph and Branches",
+   "expand": "fill"
+  },
+  "HostDetail.dc.html": {
+   "x": 0,
+   "y": 8500,
+   "w": 1440,
+   "h": 900,
+   "title": "Host detail \u00b7 health, resources, lost & found",
+   "expand": "fill"
+  },
+  "Assets.dc.html": {
+   "x": 1520,
+   "y": 8500,
+   "w": 1440,
+   "h": 900,
+   "title": "Toolkit \u203a Assets \u00b7 layers and changesets",
+   "expand": "fill"
+  },
+  "AddProject.dc.html": {
+   "x": 3040,
+   "y": 8500,
+   "w": 1440,
+   "h": 900,
+   "title": "Add project \u00b7 from GitHub, URL, folder, new",
+   "expand": "fill"
+  },
+  "Dialogs.dc.html": {
+   "x": 4560,
+   "y": 8500,
+   "w": 1440,
+   "h": 900,
+   "title": "Dialogs \u00b7 Fork, Resume, Send prompt, Kill, Move, Review, Background, Rules",
+   "expand": "fill"
+  },
+  "AgentStates.dc.html": {
+   "x": 0,
+   "y": 9500,
+   "w": 1440,
+   "h": 900,
+   "title": "Fleet agent \u00b7 confirms and six blocked states",
+   "expand": "fill"
+  },
+  "SettingsHub.dc.html": {
+   "x": 1520,
+   "y": 9500,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings \u203a Hub & sync \u00b7 pairing and Control API tokens",
+   "expand": "fill"
+  },
+  "SettingsMore.dc.html": {
+   "x": 3040,
+   "y": 9500,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings \u00b7 Notifications, Presets, Updates, Shortcuts",
+   "expand": "fill"
+  },
+  "States.dc.html": {
+   "x": 4560,
+   "y": 9500,
+   "w": 1440,
+   "h": 900,
+   "title": "States \u00b7 offline, empty, first run, loading, no results",
+   "expand": "fill"
+  },
+  "Toasts.dc.html": {
+   "x": 0,
+   "y": 10700,
+   "w": 1440,
+   "h": 900,
+   "title": "Toasts, notifications and Downloads",
+   "expand": "fill"
+  },
+  "Watch.dc.html": {
+   "x": 1520,
+   "y": 10700,
+   "w": 1440,
+   "h": 900,
+   "title": "Watch view \u00b7 a shared session, read-only",
+   "expand": "fill"
+  },
+  "Light.dc.html": {
+   "x": 3040,
+   "y": 10700,
+   "w": 1440,
+   "h": 900,
+   "title": "Light mode \u00b7 Inbox with a session",
+   "expand": "fill"
+  },
+  "Motion.dc.html": {
+   "x": 4560,
+   "y": 10700,
+   "w": 1440,
+   "h": 900,
+   "title": "Motion \u00b7 four moments frame by frame",
+   "expand": "fill"
+  },
+  "OrgOverview.dc.html": {
+   "x": 0,
+   "y": 11900,
+   "w": 1440,
+   "h": 900,
+   "title": "Organisation \u00b7 overview and switcher",
+   "expand": "fill"
+  },
+  "OrgMembers.dc.html": {
+   "x": 1520,
+   "y": 11900,
+   "w": 1440,
+   "h": 900,
+   "title": "Organisation \u00b7 members and roles",
+   "expand": "fill"
+  },
+  "OrgDevices.dc.html": {
+   "x": 3040,
+   "y": 11900,
+   "w": 1440,
+   "h": 900,
+   "title": "Organisation \u00b7 devices",
+   "expand": "fill"
+  },
+  "OrgSpend.dc.html": {
+   "x": 4560,
+   "y": 11900,
+   "w": 1440,
+   "h": 900,
+   "title": "Organisation \u00b7 spend, budgets, settings",
+   "expand": "fill"
+  },
+  "Sharing.dc.html": {
+   "x": 0,
+   "y": 12900,
+   "w": 1440,
+   "h": 900,
+   "title": "Sharing \u00b7 presence and grants",
+   "expand": "fill"
+  },
+  "Federation.dc.html": {
+   "x": 1520,
+   "y": 12900,
+   "w": 1440,
+   "h": 900,
+   "title": "Federation \u00b7 linked hubs",
+   "expand": "fill"
+  },
+  "DebugDevices.dc.html": {
+   "x": 3040,
+   "y": 12900,
+   "w": 1440,
+   "h": 900,
+   "title": "Debug devices and trackers",
+   "expand": "fill"
+  },
+  "Finish.dc.html": {
+   "x": 1520,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "Work \u203a a finished mission + empty and landing states",
+   "expand": "fill"
+  },
+  "SettingsSections.dc.html": {
+   "x": 4560,
+   "y": 12900,
+   "w": 1440,
+   "h": 900,
+   "title": "Settings \u00b7 Voice, Downloads, Decisions, Playbooks and other sections",
+   "expand": "fill"
+  },
+  "AIPatterns.dc.html": {
+   "x": 3040,
+   "y": 3000,
+   "w": 1440,
+   "h": 900,
+   "title": "AI patterns \u00b7 Proposed by Jev, Drafted, never AI",
+   "expand": "fill"
+  },
+  "LogoMotion.dc.html": {
+   "x": 0,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Logo motion \u00b7 12 behaviours of the Orbit mark",
+   "expand": "fill"
+  },
+  "Loaders.dc.html": {
+   "x": 1520,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Particle loaders \u00b7 12 futuristic loaders, one job each",
+   "expand": "fill"
+  },
+  "LoadersInUse.dc.html": {
+   "x": 3040,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Loaders in use \u00b7 which loader goes where",
+   "expand": "fill"
+  },
+  "Startup.dc.html": {
+   "x": 4560,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Startup \u00b7 loaders by stage + where else they go",
+   "expand": "fill"
+  },
+  "LoadersInFlows.dc.html": {
+   "x": 6080,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Loaders in wizards and chats",
+   "expand": "fill"
+  },
+  "ChatWizards.dc.html": {
+   "x": 7600,
+   "y": 14000,
+   "w": 1440,
+   "h": 900,
+   "title": "Wizards built in chat",
+   "expand": "fill"
+  }
+ },
+ "order": [
+  "Main.dc.html",
+  "Terminals.dc.html",
+  "Work.dc.html",
+  "Missions.dc.html",
+  "Automation.dc.html",
+  "Accounts.dc.html",
+  "Sessions.dc.html",
+  "Agent.dc.html",
+  "Files.dc.html",
+  "Palette.dc.html",
+  "NewSession.dc.html",
+  "Toolkit.dc.html",
+  "Settings.dc.html",
+  "MissionControl.dc.html",
+  "MCViews.dc.html",
+  "MCSession.dc.html",
+  "MCTasks.dc.html",
+  "Components.dc.html",
+  "Wizard.dc.html",
+  "Tour.dc.html",
+  "Guide.dc.html",
+  "Tidy.dc.html",
+  "Today.dc.html",
+  "SessionDetails.dc.html",
+  "TaskDetail.dc.html",
+  "Review.dc.html",
+  "Board.dc.html",
+  "FilesTree.dc.html",
+  "FilesHistory.dc.html",
+  "HostDetail.dc.html",
+  "Assets.dc.html",
+  "AddProject.dc.html",
+  "Dialogs.dc.html",
+  "AgentStates.dc.html",
+  "SettingsHub.dc.html",
+  "SettingsMore.dc.html",
+  "States.dc.html",
+  "Toasts.dc.html",
+  "Watch.dc.html",
+  "Light.dc.html",
+  "Motion.dc.html",
+  "OrgOverview.dc.html",
+  "OrgMembers.dc.html",
+  "OrgDevices.dc.html",
+  "OrgSpend.dc.html",
+  "Sharing.dc.html",
+  "Federation.dc.html",
+  "DebugDevices.dc.html",
+  "Finish.dc.html",
+  "SettingsSections.dc.html",
+  "AIPatterns.dc.html",
+  "LogoMotion.dc.html",
+  "Loaders.dc.html",
+  "LoadersInUse.dc.html",
+  "Startup.dc.html",
+  "LoadersInFlows.dc.html",
+  "ChatWizards.dc.html"
+ ],
+ "notes": {
+  "title": {
+   "x": 0,
+   "y": -300,
+   "text": "Orbit Fleet redesign: rail, left filters and grouping, one object in focus",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "mc": {
+   "x": 0,
+   "y": 3980,
+   "text": "Control: talk to the fleet on the left (\u2318E), Today briefing tab, views on the right for what the chat produced (Library, Pull requests, the session in focus)",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "conv": {
+   "x": 0,
+   "y": 5080,
+   "text": "Conversation components, wizard and tutorials",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "p1": {
+   "x": 0,
+   "y": 6180,
+   "text": "Daily screens: Tidy up, Today, Session and Task detail, Review, Board",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "p2": {
+   "x": 0,
+   "y": 8380,
+   "text": "Files, hosts, assets, dialogs and the fleet agent",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "p3": {
+   "x": 0,
+   "y": 10580,
+   "text": "Settings, states, notifications, sharing, light mode and motion",
+   "kind": "title1",
+   "maxW": 6000
+  },
+  "p4": {
+   "x": 0,
+   "y": 11780,
+   "text": "Organisations, people, sharing, federation",
+   "kind": "title1",
+   "maxW": 4500
+  },
+  "p5": {
+   "x": 0,
+   "y": 13880,
+   "text": "Logo motion and loaders (animated: open a board to see it move)",
+   "kind": "title1",
+   "maxW": 4500
+  }
+ },
+ "designSystems": [
+  {
+   "title": "Fleet",
+   "namespace": "fleet",
+   "artifact": "https://claude.ai/artifact/KvZWoiomzJDRFetDxcb81x",
+   "version": "1791458649-a066",
+   "copiedAt": "2026-10-08T12:45:00Z"
+  }
+ ]
+}

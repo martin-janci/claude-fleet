@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fleet agent states</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#0f0f0f}
+a{color:var(--accent,#60a5fa);text-decoration:none}a:hover{color:#93c5fd}
+.app{--bg:#0f0f0f;--pane:#161616;--raise:#1c1c1c;--hover:#232323;--fg:#ededed;--fg2:#b4b4b4;--muted:#8f8f8f;--line:#2a2a2a;--line2:#3a3a3a;--accent:#60a5fa;--accent-soft:#1c2735;--working:#7fa3ff;--waiting:#d29b4a;--failed:#ef5350;--done:#5dd17a;--idle:#a09fa8;--waiting-soft:color-mix(in srgb,var(--waiting) 13%,transparent);--waiting-faint:color-mix(in srgb,var(--waiting) 7%,transparent);--waiting-line:color-mix(in srgb,var(--waiting) 45%,transparent);--failed-soft:color-mix(in srgb,var(--failed) 12%,transparent);--failed-line:color-mix(in srgb,var(--failed) 35%,transparent);--done-soft:color-mix(in srgb,var(--done) 12%,transparent);--danger-fill:#c62828;--on-danger:#ffffff;--on-waiting:#1a1205;--on-accent:#0b1220;--code:#56b6c2;--syn-str:#98c379;--syn-kw:#c678dd;--chip-bg:#232323;--count-bg:#262626;--track:#2a2a2a;--sunk:#202020;--org-1:#60a5fa;--org-2:#5dd17a;--org-3:#c084fc;--org-4:#a09fa8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:500}
+.btn.danger{background:transparent;border-color:transparent;color:var(--failed)}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.sec{font-size:11px;font-weight:500;color:var(--muted);display:flex;align-items:center;gap:6px;padding:12px 12px 4px}
+.count{font-size:11px;font-weight:500;padding:0 5px;border-radius:4px;background:var(--count-bg);color:var(--fg2);line-height:16px}
+.row{display:flex;gap:10px;padding:7px 12px;border-radius:6px;margin:0 6px;align-items:flex-start}
+.row:hover{background:var(--hover)}
+.rtitle{font-size:13px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rline{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border-radius:6px;color:var(--muted);font-size:11px;line-height:14px;position:relative}
+.rail a:hover{background:var(--hover);color:var(--fg)}
+.tab{font-size:13px;color:var(--muted);padding:10px 0;border-bottom:2px solid transparent}
+.tab.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:500}
+.kv{display:grid;grid-template-columns:84px minmax(0,1fr);gap:6px 10px;font-size:12px;line-height:16px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;color:var(--fg);min-width:0}
+.bar{height:4px;border-radius:2px;background:var(--track);overflow:hidden}
+.bar span{display:block;height:100%;border-radius:2px}
+
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.btn.sm{height:22px;padding:0 6px}.btn.lg{height:28px;padding:0 10px}
+.btn.danger-fill{background:var(--danger-fill);border-color:var(--danger-fill);color:var(--on-danger);font-weight:500}
+.chip.waiting{background:var(--waiting-soft);color:var(--waiting)}.chip.done{background:var(--done-soft);color:var(--done)}
+.chip.failed{background:var(--failed-soft);color:var(--failed)}.chip.accent{background:var(--accent-soft);color:var(--fg)}
+.banner{border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:flex;gap:10px;align-items:center}
+.banner.failed{background:var(--failed-soft);border-color:var(--failed-line)}.banner.waiting{background:var(--waiting-faint);border-color:var(--waiting-line)}
+.row[aria-selected="true"]{box-shadow:inset 2px 0 0 var(--accent)}
+.swatch{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block}
+.st{display:inline-flex;width:8px;height:8px;flex:none}
+.ai{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:16px;font-weight:500;color:var(--accent);padding:0 6px;border-radius:4px;background:var(--accent-soft);white-space:nowrap}
+.ai::before{content:"✦";font-size:10px}
+.ai.draft{color:var(--fg2);background:var(--chip-bg)}.ai.draft::before{content:"✎"}
+.why{font-size:12px;line-height:16px;color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.why a{color:var(--accent)}
+.ai-pre{box-shadow:inset 0 0 0 1px var(--accent);border-radius:4px}
+</style>
+</helmet>
+<div class="app" style="width: 100%; min-height: 900px; display: flex; flex-direction: column;">
+
+<header style="height: 44px; display: flex; align-items: center; gap: 12px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--line); background: var(--pane); flex-wrap: wrap;">
+<span style="display: inline-flex; align-items: center; gap: 8px;"><svg width="22" height="22" viewBox="0 0 108 108" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2430"/><circle cx="54" cy="54" r="24" fill="none" stroke="#F2F4F7" stroke-opacity="0.5" stroke-width="5"/><circle cx="54" cy="54" r="10" fill="#F2F4F7"/><circle cx="54" cy="30" r="7.5" fill="#F2F4F7"/><circle cx="74.78" cy="66" r="7.5" fill="#D29B4A"/><circle cx="33.22" cy="66" r="7.5" fill="#F2F4F7"/></svg><strong style="font-size: 13px; font-weight: 600;">Orbit Fleet</strong></span>
+<button class="btn" style="width: 300px; justify-content: space-between; color: var(--muted);"><span>Search or run a command</span><span class="kbd">⌘K</span></button>
+<div style="flex: 1 1 0;"></div>
+<button class="btn quiet" style="gap: 8px;" aria-label="Account m.janci at 32bit, 75 percent left"><span class="dot" style="background: var(--done);"></span><span>m.janci@32bit.sk</span><span class="meta tnum">5h 75% · wk 85%</span></button>
+<button class="btn quiet" style="gap: 8px;"><span class="dot" style="background: var(--done);"></span><span>admin@32bit.sk</span><span class="meta tnum">85%</span></button>
+<button class="btn quiet" style="gap: 8px;"><span class="dot" style="background: var(--failed);"></span><span>tech.silvester</span><span class="tnum" style="font-size: 12px; color: var(--waiting);">weekly limit · Fri 11:00</span></button>
+<span style="width: 1px; height: 20px; background: var(--line);"></span>
+<button class="btn quiet" style="gap: 8px;"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"></circle><path d="M8 4.5V8l2.5 1.5"></path></svg><span>Automation 3 active</span><span class="meta tnum">$4.10 today</span></button><button class="btn quiet sm" aria-label="Pause all automation">Pause all</button>
+</header>
+
+<div style="flex: 1 1 auto; display: flex; flex-wrap: wrap; min-height: 0;">
+<nav class="rail" aria-label="Main" style="width: 68px; flex: none; padding: 8px 6px; border-right: 1px solid var(--line); background: var(--pane); display: flex; flex-direction: column; gap: 2px;">
+<a href="#control" title="Control  ⌘E" aria-current="page" style="background: var(--accent-soft); color: var(--fg);"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.5"></circle><circle cx="8" cy="8" r="2"></circle><path d="M8 1v2.5M8 12.5V15M1 8h2.5M12.5 8H15"></path></svg>Control</a>
+<a href="#inbox"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 9.5h3.5l1 1.5h3l1-1.5H14"></path><path d="M3.5 3h9L14 9.5V13H2V9.5z"></path></svg>Inbox<span style="position: absolute; top: 4px; right: 8px; font-size: 11px; line-height: 14px; padding: 0 4px; border-radius: 7px; background: var(--waiting); color: var(--on-waiting); font-weight: 600;">4</span></a>
+<a href="#sessions" title="Sessions  ⌘⇧W switches to Work"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="10" rx="1.5"></rect><path d="M4.5 6.5 6.5 8l-2 1.5M8 10h3"></path></svg>Sessions</a>
+<a href="#work" title="Work  ⌘⇧W switches to Sessions"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2.5" y="2.5" width="11" height="11" rx="2"></rect><path d="m5.5 8 1.8 1.8L10.8 6"></path></svg>Work</a>
+<a href="#automation"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 8a5 5 0 1 1-1.5-3.6"></path><path d="M13 2.5v2.5h-2.5"></path><path d="M8 5.5V8l1.8 1.2"></path></svg>Automation</a>
+<a href="#accounts" title="Accounts &amp; hosts  ⌘I"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5.5" r="2.5"></circle><path d="M3 13.5c.6-2.6 2.6-4 5-4s4.4 1.4 5 4"></path></svg>Accounts</a>
+<a href="#toolkit"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9.5 2.5a3 3 0 0 0-3 4L2.5 10.5l3 3 4-4a3 3 0 0 0 4-3l-2 1-2-2z"></path></svg>Toolkit</a>
+<div style="flex: 1 1 auto;"></div>
+<a href="#settings" title="Settings  ⌘,"><svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2"></circle><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4"></path></svg>Settings</a>
+</nav>
+
+<main style="flex: 1 1 900px; min-width: 0; background: var(--bg); padding: 18px 28px; display: flex; flex-direction: column; gap: 14px; overflow: auto;">
+<div style="display: flex; align-items: baseline; gap: 10px;"><h1 style="margin: 0; font-size: 18px; font-weight: 600;">The fleet agent</h1><span class="meta">the operator that answers in Control · it starts, moves and kills sessions for you, always with your confirm</span></div>
+<div style="display: grid; grid-template-columns: minmax(0,1fr) 420px; gap: 24px; align-items: start;">
+<section style="border: 1px solid var(--line2); border-radius: 10px; overflow: hidden; background: var(--pane);">
+<div style="display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line);"><strong>Control</strong><span class="chip"><span class="dot" style="width: 6px; height: 6px; background: var(--done);"></span>agent on mac · claude-fleet MCP</span><div style="flex: 1 1 auto;"></div><span class="chip">context: Sessions › Fix hub-e2e flake</span></div>
+<div style="padding: 14px; display: flex; flex-direction: column; gap: 12px; font-size: 14px; line-height: 21px;">
+<div style="align-self: flex-end; background: var(--accent-soft); padding: 8px 12px; border-radius: 10px;">move this to mercury and start a review run on it</div>
+<p style="margin: 0;">Two steps. Both need your OK because they start and move sessions.</p>
+<div style="border: 1px solid var(--waiting-line); background: var(--waiting-faint); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
+<div class="row" style="margin: 0;"><input type="checkbox" checked><span style="flex: 1 1 auto;">Move "Fix hub-e2e flake" from mac to mercury</span></div>
+<div class="row" style="margin: 0;"><input type="checkbox" checked><span style="flex: 1 1 auto;">Start a review run (pr-review, Codex) on mercury</span></div>
+<div style="display: flex; gap: 6px;"><button class="btn primary">Confirm 2</button><button class="btn quiet">Cancel</button></div></div>
+</div>
+<div style="padding: 10px 14px; border-top: 1px solid var(--line);"><div style="border: 1px solid var(--line2); border-radius: 8px; padding: 8px 10px;" class="meta">Ask the fleet…</div></div>
+</section>
+<div style="display: flex; flex-direction: column; gap: 10px;">
+<div class="meta">When the agent cannot answer, Control says why, in one line, above the composer</div>
+<div style="border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: center;"><span class="dot" style="background: var(--idle);"></span><div style="flex: 1 1 auto;"><div>The agent is not running.</div><div class="meta">absent</div></div><button class="btn primary">Wake the agent</button></div>
+<div style="border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: center;"><span class="dot" style="background: var(--failed);"></span><div style="flex: 1 1 auto;"><div>The agent's pane is gone.</div><div class="meta">lost</div></div><button class="btn primary">Restart the agent</button></div>
+<div style="border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: center;"><span class="dot" style="background: var(--waiting);"></span><div style="flex: 1 1 auto;"><div>The agent has no claude-fleet MCP.</div><div class="meta">no_mcp · re-provision the host</div></div><button class="btn">Open host</button></div>
+<div style="border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: center;"><span class="dot" style="background: var(--failed);"></span><div style="flex: 1 1 auto;"><div>The agent's token was revoked.</div><div class="meta">token_revoked</div></div><button class="btn">Settings › Control API</button></div>
+<div style="border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: center;"><span class="dot" style="background: var(--idle);"></span><div style="flex: 1 1 auto;"><div>No host can run the agent.</div><div class="meta">no_host</div></div><button class="btn">Add a host</button></div>
+<div style="border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: center;"><span class="dot" style="background: var(--failed);"></span><div style="flex: 1 1 auto;"><div>The agent's host is down.</div><div class="meta">host_down · mercury</div></div><button class="btn">Run on mac instead</button></div>
+<div class="meta">Today three states get a button and three only explain. The redesign gives each one a next step.</div>
+</div>
+</div>
+</main>
+
+</div>
+
+<footer style="height: 25px; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-top: 1px solid var(--line); background: var(--pane); font-size: 11px; color: var(--muted); flex-wrap: wrap;">
+<span class="tnum" title="Orbit Fleet 0.5.4 · hub 0.5.4 · database OK"><span class="dot" style="display: inline-block; width: 6px; height: 6px; background: var(--done); margin-right: 6px;" aria-hidden="true"></span>All systems OK</span><span>Downloads</span><span>hub: fleet.rlt.sk</span><span style="margin-left: auto;">? Shortcuts</span>
+</footer>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>
