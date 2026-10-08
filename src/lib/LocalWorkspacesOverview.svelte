@@ -96,7 +96,7 @@
               >
             {/if}
             <button class="ghost small" disabled={busy} onclick={() => (confirmDisconnect = w)}
-              >Disconnect</button
+              >Disconnect…</button
             >
           </div>
         </li>
@@ -112,7 +112,7 @@
         data-testid="lw-cleanup"
         disabled={busy || stale.length === 0}
         onclick={() => (confirmCleanup = true)}
-      >Clean up stale ({stale.length})</button>
+      >Clean up {stale.length} stale…</button>
     </div>
   {/if}
 </Modal>

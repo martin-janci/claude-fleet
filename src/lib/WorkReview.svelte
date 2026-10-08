@@ -25,7 +25,7 @@
     type WorkRef,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import {
     ackWorkLink,
     conflictNotice,
@@ -578,7 +578,7 @@
             >
             {#if it.confidence != null}<span class="conf" class:conf--high={isHighConfidence(it)} title="Confidence from detection" data-testid="work-review-confidence">{it.confidence}%</span>{/if}
             {#if it.strength}<span class="muted">· {it.strength}{#if it.rule}&nbsp;{it.rule}{/if}</span>{/if}
-            {#if it.created_at}<span class="muted">· {timeAgo(it.created_at)}</span>{/if}
+            {#if it.created_at}<span class="muted">· {shortAge(it.created_at)}</span>{/if}
           </div>
           {#each it.why ?? [] as w, wi (wi)}
             <p class="why" data-testid="work-review-why">{w}</p>
@@ -688,8 +688,8 @@
   }
   .kind--cross_org,
   .kind--unavailable {
-    color: var(--usage-warn, #b45309);
-    border-color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
+    border-color: var(--usage-warn);
   }
   .link {
     background: none;
@@ -711,7 +711,7 @@
   }
   .fail {
     margin: 0.1rem 0 0 1.4rem;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 11px;
   }
   .actions {
@@ -751,6 +751,6 @@
     color: var(--fg);
   }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
 </style>

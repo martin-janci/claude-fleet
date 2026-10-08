@@ -30,6 +30,7 @@
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter, effectiveHostFilter, hosts } from './hosts';
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
+  import { moveToHeadroom } from './account_limits';
   import {
     effectiveScope,
     scopeFilter,
@@ -526,6 +527,25 @@
     });
   }
   const bulkArchiveBlocked = $derived(archiveBlocked(selectedRows));
+  /** Bulk Switch account (step 4.4): each selected row this person may
+   *  restart and whose account is past `accounts.pause_at` resumes under the
+   *  login on its host with the most headroom; the rest stay as they are. */
+  const bulkMoveTargets = $derived(bulkTargets(selectedRows, 'restart_session', $sessionBlocked));
+  const bulkMoveAccountBlocked = $derived(
+    hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
+      (selectedRows.length > 0 && bulkMoveTargets.length === 0 ? 'None of the selected sessions is yours to restart.' : null),
+  );
+  async function bulkMoveAccount() {
+    const r = await moveToHeadroom(bulkMoveTargets, restartSession);
+    clearSelected();
+    const parts = [
+      r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
+      r.stayed > 0 ? `${r.stayed} still under the line` : '',
+      r.nowhere > 0 ? `${r.nowhere} with no other login that has room` : '',
+      r.failed > 0 ? `${r.failed} failed` : '',
+    ].filter(Boolean);
+    push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
+  }
   /** Clean up's targets: the rows this person may Safe remove (`own`). */
   const bulkCleanUpTargets = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
   const bulkCleanUpBlocked = $derived(
@@ -1358,6 +1378,8 @@
     onBulkKill={() => ((bulkKillMode = 'kill'), (bulkKillOpen = true))}
     onBulkCleanUp={() => ((bulkKillMode = 'cleanup'), (bulkKillOpen = true))}
     onBulkArchive={() => void bulkArchive()}
+    onBulkMoveAccount={() => void bulkMoveAccount()}
+    {bulkMoveAccountBlocked}
     {bulkArchiveBlocked}
     {bulkCleanUpBlocked}
     {clearSelected}
@@ -1919,7 +1941,7 @@
     font-size: 0.9rem;
     line-height: 1;
     cursor: pointer;
-    min-width: 1.6rem;
+    min-width: var(--control-h);
   }
   .icon-btn:hover:not(:disabled) {
     color: var(--fg);
@@ -1930,7 +1952,7 @@
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
     font-size: 0.85rem;
-    min-width: 1.4rem;
+    min-width: var(--control-h);
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }

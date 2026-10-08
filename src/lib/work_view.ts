@@ -20,6 +20,7 @@ import type { ProposalLike } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import type { DecisionProposal } from './proposals';
 import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
 import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
 import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
@@ -186,6 +187,9 @@ export interface WorkTask {
   blocked_by?: string[];
   /** Spend of its sessions in micro-USD, each session once. Absent when 0. */
   cost_micros?: number;
+  /** What a rule, Jev or an LLM proposes about the task (redesign 2.8).
+   *  Absent when nothing proposes anything. */
+  proposals?: DecisionProposal[];
   last_activity_at?: number | null;
   repos?: string[];
   /** 0 = no placement. */

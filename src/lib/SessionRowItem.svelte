@@ -50,6 +50,7 @@
   import SessionStatusChip from './SessionStatusChip.svelte';
   import SessionRowDetails from './SessionRowDetails.svelte';
   import SessionRowMeta from './SessionRowMeta.svelte';
+  import LimitActions from './LimitActions.svelte';
   import { COMPACT_ROW_PX, uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
@@ -969,6 +970,13 @@
             {promptText}
             reason={blockedLine(triage.bucket, sess, $attentionFacts, (u) => accountLabel($accountByUuid.get(u)))}
           />
+          {#if triage.bucket === 'account_limit'}
+            <LimitActions
+              {sess}
+              resetsAt={$attentionFacts?.limited_accounts?.[sess.account_uuid ?? '']?.resets_at ?? null}
+              accountName={(u) => accountLabel($accountByUuid.get(u))}
+            />
+          {/if}
         {:else if $showRowDetails}
           <SessionRowDetails {sess} {nowSec} {secondaryName} />
         {/if}
@@ -1004,7 +1012,7 @@
     font-size: 0.9rem;
     line-height: 1;
     cursor: pointer;
-    min-width: 1.6rem;
+    min-width: var(--control-h);
   }
   .icon-btn:hover:not(:disabled) {
     color: var(--fg);
@@ -1015,7 +1023,7 @@
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
     font-size: 0.85rem;
-    min-width: 1.4rem;
+    min-width: var(--control-h);
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }
@@ -1134,10 +1142,10 @@
   /* Colour never carries the state alone (7.2): the dot is labelled, and
      each state has its own shape. Running is a filled disc, frozen a ring,
      orphan a square, ghost a dashed ring. */
-  .status-dot.status-running { background: rgb(80, 200, 110); }
-  .status-dot.status-frozen { background: transparent; box-shadow: inset 0 0 0 1.5px rgb(140, 180, 240); }
-  .status-dot.status-orphan { background: rgb(220, 130, 130); border-radius: 1px; }
-  .status-dot.status-ghost { background: transparent; border: 1.5px dashed rgb(160, 120, 200); box-sizing: border-box; opacity: 0.8; }
+  .status-dot.status-running { background: var(--status-done); }
+  .status-dot.status-frozen { background: transparent; box-shadow: inset 0 0 0 1.5px var(--status-working); }
+  .status-dot.status-orphan { background: var(--status-failed); border-radius: 1px; }
+  .status-dot.status-ghost { background: transparent; border: 1.5px dashed var(--status-idle); box-sizing: border-box; opacity: 0.8; }
   .lost-at {
     font-size: 11px;
     opacity: 0.6;
@@ -1226,7 +1234,7 @@
     gap: 0.3rem;
     align-items: center;
     font-size: 11px;
-    color: var(--warn, #f59e0b);
+    color: var(--status-waiting);
   }
   .work-menu {
     display: flex;

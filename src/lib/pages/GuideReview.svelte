@@ -89,7 +89,7 @@
             <button type="button" class="name" onclick={() => onnavigate(g.id)}>{g.title}</button>
             <span class="meta">{(g.sections ?? []).length} steps</span>
             {#if $guidesWritable}
-              <button type="button" class="btn" disabled={busy} data-testid={`guide-remove-${g.id}`} onclick={() => (removing = g)}>Remove</button>
+              <button type="button" class="btn" disabled={busy} data-testid={`guide-remove-${g.id}`} onclick={() => (removing = g)}>Remove…</button>
             {/if}
           </li>
         {/each}

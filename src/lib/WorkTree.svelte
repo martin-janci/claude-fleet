@@ -33,6 +33,7 @@
   import { facetSentence, workFacets } from './filter_facets';
   import WorkReview from './WorkReview.svelte';
   import WorkMissions from './WorkMissions.svelte';
+  import WorkPrs from './WorkPrs.svelte';
   import WorkRules from './WorkRules.svelte';
   import TaskList from './TaskList.svelte';
   import {
@@ -89,7 +90,7 @@
 
   const chord = workViewChordLabel(detectMac(typeof navigator === 'undefined' ? undefined : navigator));
 
-  let tab = $state<'tasks' | 'review' | 'missions'>('tasks');
+  let tab = $state<'tasks' | 'review' | 'missions' | 'prs'>('tasks');
   let page = $state.raw<WorkTreePage | null>(null);
   const archivedHidden = $derived(page?.archived_hidden ?? 0);
   function setArchived(on: boolean) {
@@ -404,10 +405,10 @@
   // right column (`workBoardOpen`), so its tab reads that store; any other tab
   // leaves it.
   const newLayout = $derived($uiLayout === 'new');
-  const shownTab = $derived<'tasks' | 'missions' | 'board'>(
-    $workBoardOpen ? 'board' : tab === 'missions' ? 'missions' : 'tasks',
+  const shownTab = $derived<'tasks' | 'missions' | 'board' | 'prs'>(
+    $workBoardOpen ? 'board' : tab === 'missions' || tab === 'prs' ? tab : 'tasks',
   );
-  function pickTab(t: 'tasks' | 'review' | 'missions' | 'board') {
+  function pickTab(t: 'tasks' | 'review' | 'missions' | 'board' | 'prs') {
     if (t === 'board') {
       workBoardOpen.set(true);
       return;
@@ -593,6 +594,14 @@
             title="These tasks on a board by status"
             onclick={() => pickTab('board')}>Board</button
           >
+          <button
+            class="btn btn--chip btn--toggle"
+            role="tab"
+            aria-selected={shownTab === 'prs'}
+            class:is-active={shownTab === 'prs'}
+            data-testid="work-tab-prs"
+            onclick={() => pickTab('prs')}>Pull requests</button
+          >
         </div>
       {:else}
         <div class="tabs" role="tablist" aria-label="Work view">
@@ -620,9 +629,19 @@
             data-testid="work-tab-missions"
             onclick={() => (tab = 'missions')}>Missions</button
           >
+          <button
+            class="btn btn--chip btn--toggle"
+            role="tab"
+            aria-selected={tab === 'prs'}
+            class:is-active={tab === 'prs'}
+            data-testid="work-tab-prs"
+            onclick={() => (tab = 'prs')}>Pull requests</button
+          >
         </div>
       {/if}
-      {#if tab === 'tasks'}
+      {#if tab === 'tasks' && !newLayout}
+        <!-- The New layout's Group control (step 3.7, in WorkFiltersBar)
+             picks List or Grouped there. -->
         <div class="layout" role="group" aria-label="Layout">
           <button
             class="btn btn--chip btn--toggle"
@@ -696,6 +715,8 @@
       <WorkReview onchanged={() => void loadReviewCount()} />
     {:else if tab === 'missions'}
       <WorkMissions />
+    {:else if tab === 'prs'}
+      <WorkPrs />
     {:else if listMode}
       <TaskList {debounceMs} {maxWaitMs} onpage={onListPage} />
     {:else if error}
@@ -1053,12 +1074,12 @@
     flex: 0 0 auto;
   }
   .needs {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 11px;
   }
   .review {
     font-weight: 700;
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .task-meta {
     display: flex;
@@ -1073,7 +1094,7 @@
     white-space: nowrap;
   }
   .down {
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .occurrences {
     padding-left: 1.4rem;
@@ -1155,10 +1176,10 @@
   .refresh-error {
     margin: 0.2rem 0.4rem;
     font-size: 11px;
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .error p {
     margin: 0 0 0.4rem;

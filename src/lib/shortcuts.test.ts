@@ -98,6 +98,10 @@ const ADDED_SINCE_054: readonly { key: string; mods: Partial<Ev>; mac: boolean; 
     { key, mods: { metaKey: true, altKey: true }, mac: true, action: 'inspector', step: '3.5' },
     { key, mods: { ctrlKey: true, altKey: true }, mac: false, action: 'inspector', step: '3.5' },
   ]),
+  ...(['e', 'E'] as const).flatMap((key) => [
+    { key, mods: { metaKey: true, shiftKey: true }, mac: true, action: 'open-in-editor', step: '5.5' },
+    { key, mods: { ctrlKey: true, altKey: true }, mac: false, action: 'open-in-editor', step: '5.5' },
+  ]),
 ];
 
 const isAddition = (e: Ev, isMac: boolean): string | null => {
@@ -209,11 +213,12 @@ describe('shortcut registry', () => {
     expect(md).toContain(`| ${mac('new-terminal')} | New terminal (${other('new-terminal')})`);
     expect(md).toContain(`| ${mac('next-terminal')} | Next terminal`);
     expect(md).toContain(`| ${mac('go-to-file')} | Go to file, Files tab only (${other('go-to-file')})`);
-    for (const id of ['open-in-editor', 'new-terminal', 'next-terminal', 'go-to-file']) {
+    for (const id of ['new-terminal', 'next-terminal', 'go-to-file']) {
       expect(SHORTCUTS.find((s) => s.id === id)?.status).toBe('planned');
     }
-    // Step 3.5 wired the inspector.
+    // Step 3.5 wired the inspector, 5.5 Open in VS Code.
     expect(SHORTCUTS.find((s) => s.id === 'inspector')?.status).toBe('live');
+    expect(SHORTCUTS.find((s) => s.id === 'open-in-editor')?.status).toBe('live');
   });
 
   it('an Alt chord on a letter matches by physical key, as macOS Option rewrites the key', () => {

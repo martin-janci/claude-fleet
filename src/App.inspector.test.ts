@@ -108,6 +108,22 @@ describe('App: session tabs and the inspector (step 3.5)', () => {
     expect(screen.getByTestId('inspector')).toBeTruthy();
   });
 
+  it('Open in VS Code: the header button and its chord open the selected session (step 5.5)', async () => {
+    uiLayout.set('new');
+    await mountApp();
+    selectSession(rows[0]);
+    const btn = (await screen.findByTestId('open-in-editor')) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    const args = { args: { host_alias: 'mefistos', tmux_name: 'dev-mef' } };
+    await fireEvent.click(btn);
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('open_session_in_editor', args));
+    inv.mockClear();
+    await fireEvent.keyDown(document.body, isMac
+      ? { key: 'e', code: 'KeyE', metaKey: true, shiftKey: true }
+      : { key: 'e', code: 'KeyE', ctrlKey: true, altKey: true });
+    await waitFor(() => expect(inv).toHaveBeenCalledWith('open_session_in_editor', args));
+  });
+
   it('the inspector chord and the header button toggle it, and it is remembered', async () => {
     uiLayout.set('new');
     await mountApp();

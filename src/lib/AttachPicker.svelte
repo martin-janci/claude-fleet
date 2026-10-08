@@ -15,7 +15,8 @@
   import { sessionBlocked } from './share';
   import { crossOrgOf, crossOrgSentence, liveElsewhereOf, type LiveElsewhere } from './work';
   import { readErrorText } from './work_view';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
+  import { claudeStatusLabel } from './attention';
   import { attachCandidates, attachSession, defaultMode, otherWork, type AttachMode, type AttachTarget, type Attached } from './attach';
   import type { IpcError } from './result';
 
@@ -147,8 +148,10 @@
             <span class="dot" class:working={r.claude_status === 'working'} aria-hidden="true">●</span>
             <span class="name">{name(r)}</span>
             <span class="muted">{r.host_alias}</span>
-            <span class="muted"
-              >{r.claude_status === 'working' ? 'working' : r.idle_since ? `idle ${timeAgo(r.idle_since)}` : (r.claude_status ?? '')}</span
+            <span class="muted status-word"
+              >{claudeStatusLabel(r.claude_status === 'working' || !r.idle_since ? r.claude_status : 'idle')}{r.claude_status !== 'working' && r.idle_since
+                ? ` · ${shortAge(r.idle_since, Math.floor(Date.now() / 1000))}`
+                : ''}</span
             >
             <span class="task">{otherWork(r, target) ? `${otherWork(r, target)?.key ?? otherWork(r, target)?.title} ★` : 'no task'}</span>
           </button>
@@ -288,11 +291,11 @@
   }
   .warn {
     margin: 0;
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .err {
     margin: 0;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .acts {
     display: flex;
