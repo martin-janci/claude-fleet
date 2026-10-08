@@ -17,7 +17,7 @@ describe('rail', () => {
   });
 
   it('hides every item whose step has not landed', () => {
-    expect(visibleRailItems().map((i) => i.id)).toEqual(['sessions', 'work', 'accounts', 'settings']);
+    expect(visibleRailItems().map((i) => i.id)).toEqual(['inbox', 'sessions', 'work', 'accounts', 'settings']);
   });
 
   it('names only shortcuts the registry has', () => {
@@ -31,5 +31,7 @@ describe('rail', () => {
     expect(currentRailItem('files', 'sessions')).toBe('sessions');
     expect(currentRailItem('board', 'work')).toBe('work');
     expect(currentRailItem('assets', 'sessions')).toBeNull();
+    expect(currentRailItem('session', 'inbox')).toBe('inbox');
+    expect(currentRailItem('files', 'inbox')).toBe('inbox');
   });
 });
