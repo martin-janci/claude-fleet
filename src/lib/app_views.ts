@@ -4,6 +4,7 @@
 // switcher, Settings, the onboarding card and the Hosts view reach them
 // through these stores instead of prop-drilling. Same pattern as
 // `new_session_request.ts`.
+import { matchShortcut, shortcutLabel, type KeyEventLike } from './shortcuts';
 import { writable } from 'svelte/store';
 import type { AssetsCommand } from './quick_switcher';
 
@@ -111,6 +112,8 @@ export type OpenPathFn = (path: string, line: number | null) => void;
 
 export type AppChord = 'hosts' | 'settings' | 'session-view' | 'agent' | 'scope' | 'today' | 'work-view';
 
+const APP_CHORDS: readonly AppChord[] = ['hosts', 'settings', 'session-view', 'agent', 'scope', 'today', 'work-view'];
+
 /**
  * The app-level chords, platform-correct like the quick switcher's:
  * ⌘I toggles Hosts, ⌘J flips the Session view, ⌘E opens the agent and ⌘,
@@ -120,65 +123,41 @@ export type AppChord = 'hosts' | 'settings' | 'session-view' | 'agent' | 'scope'
  * there. ⌘⇧O / Ctrl+Shift+O cycles the org scope (work graph M5), and
  * ⌘⇧T / Ctrl+Shift+T toggles the Today view over Details (M9.1), and
  * ⌘⇧W / Ctrl+Shift+W flips the sidebar between Sessions and Work (M14).
+ * The chords themselves live in the shortcut registry (`shortcuts.ts`).
  */
-export function appChord(
-  e: { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean },
-  isMac: boolean,
-): AppChord | null {
-  if (e.altKey) return null;
-  const k = e.key.toLowerCase();
-  if (k === 'o' && e.shiftKey && (isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
-    return 'scope';
-  }
-  if (k === 't' && e.shiftKey && (isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
-    return 'today';
-  }
-  if (k === 'w' && e.shiftKey && (isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey)) {
-    return 'work-view';
-  }
-  if (e.metaKey && !e.ctrlKey && !e.shiftKey) {
-    if (k === 'i') return 'hosts';
-    if (k === 'j') return 'session-view';
-    if (k === 'e') return 'agent';
-    if (k === ',') return 'settings';
-    return null;
-  }
-  if (!isMac && e.ctrlKey && e.shiftKey && !e.metaKey) {
-    if (k === 'h') return 'hosts';
-    if (k === 'j') return 'session-view';
-    if (k === 'e') return 'agent';
-  }
-  return null;
+export function appChord(e: KeyEventLike, isMac: boolean): AppChord | null {
+  const id = matchShortcut('global', e, isMac);
+  return APP_CHORDS.includes(id as AppChord) ? (id as AppChord) : null;
 }
 
 /** Label for the Hosts chord, for the tab and Settings. */
 export function hostsChordLabel(isMac: boolean): string {
-  return isMac ? '⌘I' : 'Ctrl+Shift+H';
+  return shortcutLabel('hosts', isMac);
 }
 
 /** Label for the Session-view chord, for the segment's tooltip. */
 export function sessionViewChordLabel(isMac: boolean): string {
-  return isMac ? '⌘J' : 'Ctrl+Shift+J';
+  return shortcutLabel('session-view', isMac);
 }
 
 /** Label for the scope chord, for the selector's tooltip. */
 export function scopeChordLabel(isMac: boolean): string {
-  return isMac ? '⌘⇧O' : 'Ctrl+Shift+O';
+  return shortcutLabel('scope', isMac);
 }
 
 /** Label for the Today chord, for the view's tooltip. */
 export function todayChordLabel(isMac: boolean): string {
-  return isMac ? '⌘⇧T' : 'Ctrl+Shift+T';
+  return shortcutLabel('today', isMac);
 }
 
 /** Label for the agent chord, for the FAB's tooltip and the hint. */
 export function agentChordLabel(isMac: boolean): string {
-  return isMac ? '⌘E' : 'Ctrl+Shift+E';
+  return shortcutLabel('agent', isMac);
 }
 
 /** Label for the Work-view chord, for the switch's tooltip. */
 export function workViewChordLabel(isMac: boolean): string {
-  return isMac ? '⌘⇧W' : 'Ctrl+Shift+W';
+  return shortcutLabel('work-view', isMac);
 }
 
 /** Whether the task board shows over the terminal (sprints design
