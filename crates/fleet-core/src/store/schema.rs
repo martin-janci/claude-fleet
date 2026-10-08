@@ -1576,6 +1576,12 @@ const MIGRATIONS: &[Migration] = &[
     // problem the shepherd saw on a session's PR (two CREATE TABLE IF NOT
     // EXISTS, idempotent as written).
     Migration::plain(136, include_str!("../../migrations/136_pr_shepherd.sql")),
+    // Orbit Fleet 9.3: `control_handoffs`, what Control's agent sent where.
+    // A new table only, `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(
+        137,
+        include_str!("../../migrations/137_control_handoffs.sql"),
+    ),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

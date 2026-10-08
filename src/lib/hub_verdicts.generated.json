@@ -129,6 +129,7 @@
     "catalog_write_layer",
     "claim_debug_device",
     "confirm_session_work",
+    "control_handoffs",
     "create_work_task",
     "debug_device_logs",
     "debug_device_screenshot",

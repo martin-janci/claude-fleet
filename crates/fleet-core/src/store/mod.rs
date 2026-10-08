@@ -15,6 +15,7 @@ mod bench_work_link;
 mod catalog;
 mod changesets;
 mod clients;
+mod control_handoffs;
 mod conversations;
 mod debug_devices;
 mod decisions;
@@ -86,6 +87,9 @@ pub use changesets::{
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
     LINE_SEPARATORS,
+};
+pub use control_handoffs::{
+    handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};

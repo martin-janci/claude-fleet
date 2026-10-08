@@ -445,6 +445,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Redesign step 9.3: the receipts of what Control's agent handed on,
+    // for the owner's device to draw Control's chips and cards from. They
+    // quote the agent's prompts, so the person's own device only.
+    ToolPolicy {
+        name: "control_handoffs",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The page specs, for a phone that renders them (P6). Compiled into the
     // hub like the desktop: the same answer for everyone who may see pages.
     ToolPolicy {

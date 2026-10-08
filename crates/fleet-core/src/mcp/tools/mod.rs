@@ -404,6 +404,16 @@ impl ServerHandler for FleetTools {
             return tool_error_result(e);
         }
         context.extensions.insert(caller.clone());
+        // Control's agent hands work on through ordinary tools; its
+        // successful calls leave a receipt (redesign step 9.3), read from
+        // these arguments once the call has run.
+        let handoff_args = caller.is_operator().then(|| {
+            request
+                .arguments
+                .clone()
+                .map(serde_json::Value::Object)
+                .unwrap_or_default()
+        });
         let tcc = ToolCallContext::new(self, request, context);
         // Tool-execution failures travel as `is_error` results; only rmcp's
         // own protocol errors (unknown tool, bad arguments) stay JSON-RPC.
@@ -422,6 +432,11 @@ impl ServerHandler for FleetTools {
             Ok(result) => Ok(result),
             Err(e) => tool_error_result(e),
         };
+        if let (Some(args), Ok(result)) = (&handoff_args, &out) {
+            if !result.is_error.unwrap_or(false) {
+                crate::service::control_handoffs::record(&self.store, &tool, args, result);
+            }
+        }
         // Choke point 3 (spec §5.1): whatever tool answered — a result or an
         // error's details — this is the last net under it. A session row the
         // caller may not see is dropped (multi-user M1, T8) and a row it may

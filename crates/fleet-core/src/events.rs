@@ -139,6 +139,11 @@ pub enum RowChange {
     /// the tool and its arguments never ride a stream. Kind `confirm`,
     /// host-bound hidden.
     ConfirmChanged,
+    /// Control's agent handed work on and a receipt was written (redesign
+    /// step 9.3). Carries nothing: the owner's device re-reads
+    /// `control_handoffs` (Access::PersonDevice), so what was sent never
+    /// rides a stream. Kind `handoff`, host-bound hidden.
+    HandoffChanged,
 }
 
 /// The payload of `update:changed`.
@@ -433,6 +438,7 @@ impl RowChange {
             RowChange::DownloadChanged(_) => "download:changed",
             RowChange::LocalWorkspaceChanged(_) => "local_workspace:changed",
             RowChange::ConfirmChanged => "confirm:changed",
+            RowChange::HandoffChanged => "handoff:changed",
         }
     }
 
@@ -491,7 +497,7 @@ impl RowChange {
             RowChange::UpdateChanged(u) => to_value(u),
             RowChange::DownloadChanged(id) => serde_json::json!({ "id": id }),
             RowChange::LocalWorkspaceChanged(id) => serde_json::json!({ "id": id }),
-            RowChange::ConfirmChanged => serde_json::json!({}),
+            RowChange::ConfirmChanged | RowChange::HandoffChanged => serde_json::json!({}),
         }
     }
 }
@@ -578,6 +584,10 @@ pub trait EventBus: Send + Sync {
     /// See [`RowChange::ConfirmChanged`].
     fn confirm_changed(&self) {
         self.emit(&RowChange::ConfirmChanged);
+    }
+    /// See [`RowChange::HandoffChanged`].
+    fn handoff_changed(&self) {
+        self.emit(&RowChange::HandoffChanged);
     }
 
     /// Flush a single deferred `RowChange`. Used by batched (transactional)
@@ -688,7 +698,7 @@ pub struct BroadcastEventBus {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 30] = [
+pub const EVENT_NAMES: [&str; 31] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -719,12 +729,13 @@ pub const EVENT_NAMES: [&str; 30] = [
     "grant:changed",
     "local_workspace:changed",
     "confirm:changed",
+    "handoff:changed",
 ];
 
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 18] = [
+pub const EVENT_KINDS: [&str; 19] = [
     "session",
     "host",
     "account",
@@ -743,6 +754,7 @@ pub const EVENT_KINDS: [&str; 18] = [
     "grant",
     "local_workspace",
     "confirm",
+    "handoff",
 ];
 
 /// Seconds since the Unix epoch (0 on a clock set before 1970).
@@ -1048,7 +1060,7 @@ impl EventBus for RecordingEventBus {
                 format!("{}:{}", u.what, u.target.as_deref().unwrap_or_default())
             }
             RowChange::DownloadChanged(id) | RowChange::LocalWorkspaceChanged(id) => id.to_string(),
-            RowChange::ConfirmChanged => String::new(),
+            RowChange::ConfirmChanged | RowChange::HandoffChanged => String::new(),
         };
         self.names.lock().unwrap().push(e.name());
         self.events
@@ -1253,6 +1265,7 @@ mod tests {
                 RowChange::DownloadChanged(_) => pinned_name!("download:changed"),
                 RowChange::LocalWorkspaceChanged(_) => pinned_name!("local_workspace:changed"),
                 RowChange::ConfirmChanged => pinned_name!("confirm:changed"),
+                RowChange::HandoffChanged => pinned_name!("handoff:changed"),
             }
         }
         // And for every variant a test can build without a full store row,

@@ -831,6 +831,19 @@ impl FleetTools {
         ok_json_compact(&answered)
     }
 
+    #[tool(description = "What the agent handed on, newest first: \
+        prompts and tasks sent to sessions, new sessions, missions, tasks \
+        and proposed trees, each with its target's state now.")]
+    pub(super) async fn control_handoffs(
+        &self,
+        Parameters(p): Parameters<ControlHandoffsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit("control_handoffs", "");
+        ok_json_compact(
+            &crate::service::control_handoffs::list(&self.store, p.limit).map_err(to_mcp_err)?,
+        )
+    }
+
     #[tool(description = "The settings page specs, data source shapes, \
         resources and page actions a device renders.")]
     pub(super) async fn list_pages(&self) -> Result<CallToolResult, McpError> {

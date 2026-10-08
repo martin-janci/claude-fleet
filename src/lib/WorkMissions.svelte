@@ -67,6 +67,7 @@
     autonomyWords,
     policyWith,
     wakeLabel,
+    missionOpenRequest,
     POLICY_DEFAULT_PARALLEL,
     POLICY_MAX_PARALLEL,
     POLICY_MIN_WAKE_SECS,
@@ -471,6 +472,14 @@
     if (!mission) return;
     if (await act(deleteMission(mission.id))) back();
   }
+
+  // A "Sent to a mission" chip in Control asked for this one (redesign 9.3).
+  $effect(() => {
+    const r = $missionOpenRequest;
+    if (!r) return;
+    missionOpenRequest.set(null);
+    void open(r.id);
+  });
 
   let stopWatching: (() => void) | null = null;
   onMount(() => {

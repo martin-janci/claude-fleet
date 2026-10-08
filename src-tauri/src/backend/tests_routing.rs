@@ -718,6 +718,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "control_handoffs",
+            "control_handoffs",
+            json!({ "limit": 5 }),
+            r#"[{"id":1,"at":1,"kind":"session","tool":"send_prompt","session_id":3}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::mcp::routed::control_handoffs(b, s, Some(5))).map(|_| ())
+            }),
+        ),
+        (
             "mcp_pending_confirms",
             "mcp_confirms",
             json!({}),

@@ -1006,6 +1006,13 @@ pub struct SettingHistoryParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct ControlHandoffsParams {
+    /// How many, newest first (default 50, at most 500).
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct AnswerMcpConfirmParams {
     /// The confirm_nonce the waiting call was handed.
     pub nonce: String,
