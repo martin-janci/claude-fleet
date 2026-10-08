@@ -6,4 +6,5 @@
 // used (Vitest strips `.css` module content, `?raw` query or not).
 declare module 'node:fs' {
   export function readFileSync(path: string, encoding: 'utf8'): string;
+  export function existsSync(path: string): boolean;
 }

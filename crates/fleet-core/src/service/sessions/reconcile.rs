@@ -203,6 +203,54 @@ pub(super) fn versions_due(claude_version_at: Option<i64>, now: i64) -> bool {
     claude_version_at.is_none_or(|at| now - at >= VERSIONS_REFRESH_SECS)
 }
 
+/// How often a host is asked how much disk fleet's worktrees hold (Orbit
+/// Fleet 4.6). A `du` over checkouts with `node_modules` can take seconds,
+/// so it runs on this interval, after reachability is settled, under
+/// [`WORKTREE_SIZE_TIMEOUT`].
+pub const WORKTREE_SIZE_REFRESH_SECS: i64 = 6 * 3600;
+
+/// The wall clock for one worktree-size read. On timeout the stored size is
+/// kept and the next try waits a full [`WORKTREE_SIZE_REFRESH_SECS`].
+pub(crate) const WORKTREE_SIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The wall clock for the latency round trip (an empty command).
+pub(crate) const ROUND_TRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Whether this pass should ask the host for its worktree size.
+pub(super) fn worktree_size_due(worktree_at: Option<i64>, now: i64) -> bool {
+    worktree_at.is_none_or(|at| now - at >= WORKTREE_SIZE_REFRESH_SECS)
+}
+
+/// `du -sk` over fleet's worktrees on the host (not the projects' main
+/// checkouts), summed into one `wtkb=<kB>` line. Every path is quoted with
+/// [`crate::shell::quote`]; a leading `~/` becomes `"$HOME"/` so it still
+/// expands. `None` when the host has no worktrees to measure.
+pub(super) fn worktree_size_script(paths: &[&str]) -> Option<String> {
+    let quoted: Vec<String> = paths
+        .iter()
+        .filter(|p| !p.is_empty())
+        .map(|p| match p.strip_prefix("~/") {
+            Some(rest) => format!("\"$HOME\"/{}", crate::shell::quote(rest)),
+            None => crate::shell::quote(p),
+        })
+        .collect();
+    if quoted.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "du -sk -- {} 2>/dev/null | awk '{{s += $1}} END {{print \"wtkb=\" s + 0}}'",
+        quoted.join(" ")
+    ))
+}
+
+/// Parse [`worktree_size_script`] output: the `wtkb=` line, else `None`.
+pub(super) fn parse_worktree_size(stdout: &str) -> Option<i64> {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("wtkb="))
+        .and_then(|v| v.trim().parse().ok())
+}
+
 /// One host's probe result, carried from the off-lock probe task to the
 /// under-lock writer.
 pub(super) struct HostProbe {
@@ -251,6 +299,10 @@ pub(super) struct HostProbe {
     /// a newer probe (e.g. `new_session`'s own reconcile) stamped after this
     /// probe listed tmux (BE-3).
     pub(super) started_at: i64,
+    /// The worktree-size read (Orbit Fleet 4.6): `None` = not asked this
+    /// pass; `Some(None)` = asked, no answer (the stamp still moves);
+    /// `Some(Some(kb))` = the size.
+    pub(super) worktree_kb: Option<Option<i64>>,
 }
 
 /// Executor factory + probe budget for the reconcile core. Production uses
@@ -962,6 +1014,9 @@ fn write_reachable_host(
     if let Some(h) = &probe.health {
         s.set_host_health(&host.alias, h, now)?;
     }
+    if let Some(kb) = probe.worktree_kb {
+        s.set_host_worktree_size(&host.alias, kb, now)?;
+    }
     s.ensure_in_tx()?;
     s.apply_host_reconcile_in_tx(HostReconcile {
         alias: &host.alias,
@@ -1624,6 +1679,7 @@ pub(super) async fn probe_with_timeout(
             profiles,
             identity,
             started_at,
+            worktree_kb: None,
         },
         Err(_elapsed) => {
             tracing::warn!(
@@ -1644,9 +1700,21 @@ pub(super) async fn probe_with_timeout(
                 profiles: None,
                 identity: None,
                 started_at,
+                worktree_kb: None,
             };
         }
     };
+    // Latency (Orbit Fleet 4.6): one empty command, timed, once the host
+    // has answered. Its own bound, like the PR probe below, so a slow
+    // round trip never costs the host its "reachable" verdict.
+    if probe.result.is_ok() {
+        if let Some(h) = probe.health.as_mut() {
+            h.latency_ms = tokio::time::timeout(ROUND_TRIP_TIMEOUT, tmux.round_trip_ms())
+                .await
+                .ok()
+                .flatten();
+        }
+    }
     // The PR probe is its own bounded step AFTER reachability is settled: it
     // talks to GitHub, not to the host, and must never cost the host its
     // "reachable" verdict. On timeout the stored outcome fields survive.
@@ -1663,6 +1731,24 @@ pub(super) async fn probe_with_timeout(
                 timeout = ?PR_PROBE_TIMEOUT,
                 "[reconcile] pr probe timed out; outcome fields kept"
             ),
+        }
+    }
+    // Worktree size (Orbit Fleet 4.6): due once per interval, bounded on
+    // its own, best-effort.
+    if let (Ok(_), Some((shell, _, paths))) = (&probe.result, pr_probe) {
+        if worktree_size_due(probe.host.worktree_at, started_at) {
+            let names: Vec<&str> = paths.named.iter().map(|(p, _)| p.as_str()).collect();
+            probe.worktree_kb = Some(match worktree_size_script(&names) {
+                None => Some(0),
+                Some(script) => tokio::time::timeout(
+                    WORKTREE_SIZE_TIMEOUT,
+                    shell.run_script(&probe.host.alias, &script),
+                )
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(|out| parse_worktree_size(&out)),
+            });
         }
     }
     probe
