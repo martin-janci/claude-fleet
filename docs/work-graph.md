@@ -987,7 +987,7 @@ status` and Settings → Trackers. See
 
 `work_admin { action: usage, days? }` (on a hub, `fleet-hub work usage
 [--days N] [--json]`; on a standalone desktop, Settings → Usage → *Work
-graph usage*, also linked from Settings → General → Work)
+graph usage*, also linked from Settings → Work & trackers)
 counts how the work graph is actually used over the last `days` (default
 30, 1 to 365). It is read-only and master-only (a per-host or client token
 is refused, and a paired desktop shows no counts: the page says to read
