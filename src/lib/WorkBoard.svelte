@@ -11,7 +11,8 @@
   // The drag is pointer events, not HTML5 drag and drop: the window takes
   // OS file drops (`dragDropEnabled`), which on Windows swallows the
   // webview's own. ← / → on a focused card move it too. Tracker and agent
-  // text renders as text.
+  // text renders as text. A native card's ✎ (or E on the focused card)
+  // opens the edit dialog: title, description, status, assignees.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { onWorkChangedDebounced, setWorkStatus } from './work';
@@ -25,6 +26,7 @@
     type WorkTask,
   } from './work_view';
   import { providerInfo } from './trackers';
+  import EditTaskDialog from './EditTaskDialog.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import {
@@ -60,6 +62,9 @@
   /** A refused or failed move, on the card it was about. */
   let cardErrors = $state.raw<Map<string, string>>(new Map());
 
+  /** The task whose edit dialog is open. */
+  let editing = $state<string | null>(null);
+  const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
   const moveBlocked = $derived(hubActionBlocked('set_work_status', $hubStatus, $hubConnection));
   const columns = $derived(groupTasksForBoard(tasks, Math.floor(Date.now() / 1000), overrides, moved));
 
@@ -195,6 +200,11 @@
 
   function oncardkey(e: KeyboardEvent, t: WorkTask, col: BoardColumn) {
     if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    if ((e.key === 'e' || e.key === 'E') && !boardMoveRefusal(t) && !editBlocked) {
+      e.preventDefault();
+      editing = t.task_id;
+      return;
+    }
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     const i = BOARD_COLUMNS.indexOf(col) + (e.key === 'ArrowRight' ? 1 : -1);
     if (i < 0 || i >= BOARD_COLUMNS.length) return;
@@ -280,6 +290,10 @@
   </div>
 {/if}
 
+{#if editing}
+  <EditTaskDialog taskId={editing} onclose={() => (editing = null)} ondone={() => void load()} />
+{/if}
+
 {#snippet card(n: TaskNode, col: BoardColumn)}
   {@const t = n.task}
   {@const refusal = boardMoveRefusal(t)}
@@ -317,6 +331,17 @@
         <span class="live" data-testid="work-board-live">● {live.host ? `${live.name} · ${live.host}` : live.name}</span>
       {/if}
     </button>
+    {#if !refusal}
+      <button
+        class="edit"
+        type="button"
+        title={editBlocked ?? 'Edit task (E)'}
+        aria-label="Edit {displayTitle(t)}"
+        disabled={editBlocked !== null}
+        data-testid="work-board-card-edit"
+        onclick={() => (editing = t.task_id)}>✎</button
+      >
+    {/if}
     {#if err}<p class="card-err" role="alert" data-testid="work-board-card-error">{err}</p>{/if}
   </li>
 {/snippet}
@@ -432,6 +457,33 @@
   }
   .card.locked {
     cursor: pointer;
+  }
+  li {
+    position: relative;
+  }
+  .edit {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    padding: 0 5px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg);
+    color: var(--fg-muted);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+    opacity: 0;
+  }
+  li:hover .edit,
+  .edit:focus-visible {
+    opacity: 1;
+  }
+  .edit:hover {
+    color: var(--fg);
+  }
+  .edit:disabled {
+    cursor: not-allowed;
   }
   .card:hover {
     border-color: color-mix(in srgb, var(--accent) 50%, var(--border));

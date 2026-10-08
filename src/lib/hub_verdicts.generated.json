@@ -127,6 +127,7 @@
     "discover_lost_sessions",
     "dismiss_ghost_session",
     "dismiss_reopened",
+    "edit_work_item",
     "ensure_operator",
     "get_fleet_settings",
     "grant_device_catalog",

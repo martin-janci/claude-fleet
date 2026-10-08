@@ -190,6 +190,10 @@ the terminal, To do / Doing / Done from one `work_tree` read with the Work
 view's filters, a native card dragged (pointer events, or ← →) to set its
 status through `set_work_status` → `work_link { set_status }`, a tracker's
 card refused on the card (E11), each card with its live session and host.
+A native task is edited (title, description, status, assignees) from its
+card's ✎ or E, the List row's ✎ and the task page's *Edit*:
+`EditTaskDialog` writes `edit_work_item` → `work_link { edit }` and
+`set_work_status`; a tracker's ticket stays its tracker's to edit.
 It is not yet scoped to a sprint: the Work view's Sprint / Release axis and
 bulk assignment are not built, nor are epics for local items (phase 4). E9–E11 run on their
 defaults.

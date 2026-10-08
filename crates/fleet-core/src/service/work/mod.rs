@@ -211,9 +211,12 @@ pub struct WorkLinkArgs {
     /// create/propose: parent, item:<id>.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    /// create/propose: notes.
+    /// create/propose/edit: notes (edit: "" clears).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// edit: display names ([] clears).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignees: Option<Vec<String>>,
     /// propose: the reason.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
@@ -490,6 +493,7 @@ pub const WORK_LINK_ACTIONS: &[&str] = &[
     "accept",
     "name",
     "set_status",
+    "edit",
     "summarize",
     "set_primary",
     "reconsider",
@@ -558,6 +562,7 @@ pub const ROUTED_WORK_COMMANDS: &[(&str, &str, &str)] = &[
     ("rename_work_item", "work_link", "name"),
     ("create_work_task", "work_link", "create"),
     ("set_work_status", "work_link", "set_status"),
+    ("edit_work_item", "work_link", "edit"),
     ("accept_work_proposal", "work_link", "accept"),
     ("reject_work_proposal", "work_link", "reject"),
     ("summarize_past_work", "work_link", "summarize"),

@@ -322,6 +322,54 @@ pub fn rename_local_item(
         .ok_or_else(|| orgs::not_found("work item", id))
 }
 
+/// `work_link { action: edit, item_id, title?, notes?, assignees? }`: a
+/// person edits a local item (task editing). The same fences as
+/// [`rename_local_item`]: a tracker's ticket is `E_INVALID` (its tracker
+/// owns its text), and an item outside the scope answers as an unknown id.
+pub fn edit_local_item(
+    args: &WorkLinkArgs,
+    store: &Mutex<Store>,
+    scope: &OrgScope,
+) -> Result<WorkItemRow, IpcError> {
+    let id = args
+        .item_id
+        .ok_or_else(|| IpcError::new(codes::E_INVALID, "edit needs item_id"))?;
+    if args.title.is_none() && args.notes.is_none() && args.assignees.is_none() {
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            "edit needs title, notes or assignees",
+        ));
+    }
+    let s = lock(store)?;
+    let Some(item) = s.get_work_item(id)? else {
+        return Err(orgs::not_found("work item", id));
+    };
+    if item.source != "local" {
+        if !scope.sees_org(s.item_org(id)?) {
+            return Err(orgs::not_found("work item", id));
+        }
+        return Err(IpcError::new(
+            codes::E_INVALID,
+            format!(
+                "{} is a tracker's ticket; edit it in its tracker",
+                item.key.as_deref().unwrap_or("this item")
+            ),
+        ));
+    }
+    if !local_item_visible(&s, scope, id)? {
+        return Err(orgs::not_found("work item", id));
+    }
+    s.edit_local_item(
+        id,
+        &crate::store::ItemEdit {
+            title: args.title.as_deref(),
+            notes: args.notes.as_deref(),
+            assignees: args.assignees.as_deref(),
+        },
+    )?
+    .ok_or_else(|| orgs::not_found("work item", id))
+}
+
 /// `item:<id>` → the id.
 fn parent_id(args: &WorkLinkArgs) -> Result<Option<i64>, IpcError> {
     match args.parent.as_deref() {
