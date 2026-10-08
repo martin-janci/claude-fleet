@@ -29,7 +29,7 @@ export type ParamSpec = { name: string; label: string; required: boolean } & (
 );
 
 /** How an action's answer is shown (`ResultView`). */
-export type ResultView = 'pairing';
+export type ResultView = 'pairing' | 'output' | 'image';
 
 export interface ActionSpec {
   id: string;
