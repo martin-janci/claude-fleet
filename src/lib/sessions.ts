@@ -188,6 +188,10 @@ export interface SessionRow {
     /** A multi-select question: a digit TOGGLES an option, `Tab` moves on
      *  with the ticks kept (see `AnswerPrompt.svelte`). Absent = false. */
     multi?: boolean;
+    /** What a permission dialog asks to run, from the tool-call line above
+     *  it (`Bash(git push …)`). Absent when the pane shows none, and from a
+     *  hub older than redesign 5.9. */
+    detail?: string;
   } | null;
   // Chat forms (migration 119): the form this session's agent asked and is
   // waiting on. Optional: an older hub sends none.

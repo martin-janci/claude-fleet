@@ -32,6 +32,9 @@
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
   import type { SessionRow } from './sessions';
+  import { uiLayout } from './prefs';
+  import QuestionCard from './kit/QuestionCard.svelte';
+  import type { Answer } from './kit/status';
   import {
     answerFingerprint,
     isFreeTextOption,
@@ -46,9 +49,15 @@
     /** Sidebar density: choices only, no Escape / Open terminal. */
     compact?: boolean;
     onOpenTerminal?: () => void;
+    /** A single choice went through (redesign 5.9): the Conversation moves
+     *  on to the next session that needs you. `label` is the choice. */
+    onAnswered?: (label: string) => void;
+    /** "Answer in your own words…" (New layout): the dialog is dismissed
+     *  first, then this puts the caret where the words go. */
+    onOwnWords?: () => void;
   }
 
-  const { session, view, compact = false, onOpenTerminal }: Props = $props();
+  const { session, view, compact = false, onOpenTerminal, onAnswered, onOwnWords }: Props = $props();
 
   let busy = $state(false);
   let errorMsg = $state<string | null>(null);
@@ -125,8 +134,8 @@
    *  dialog (`answer_send.ts`). `label` is what the card reports as sent; a
    *  `null` label (a multi-select toggle) leaves the choices up and runs
    *  `onSent` instead. */
-  async function press(key: string, label: string | null, onSent?: () => void) {
-    if (busy || writeBlocked !== null) return;
+  async function press(key: string, label: string | null, onSent?: () => void): Promise<boolean> {
+    if (busy || writeBlocked !== null) return false;
     busy = true;
     errorMsg = null;
     staleMsg = null;
@@ -137,12 +146,15 @@
     } else if ('stale' in out) staleMsg = out.stale;
     else if ('error' in out) errorMsg = out.error;
     busy = false;
+    return out.ok;
   }
 
   function choose(o: AnswerOption) {
     if (o.key === null) return;
     if (!view.multi) {
-      void press(o.key, o.label);
+      void press(o.key, o.label).then((ok) => {
+        if (ok) onAnswered?.(o.label);
+      });
       return;
     }
     if (toggleBlocked !== null || terminalOnly(o)) return;
@@ -175,6 +187,35 @@
     choose(o);
   }
 
+  // The New layout draws the one approval card (kit QuestionCard, redesign
+  // 5.9) from the same choices, gates and sends as the classic card below.
+  const isNew = $derived($uiLayout === 'new');
+  const optionDisabled = (o: AnswerOption) =>
+    busy || writeBlocked !== null || o.key === null || (view.multi && (toggleBlocked !== null || terminalOnly(o)));
+  const answers = $derived<Answer[]>(
+    sent !== null
+      ? []
+      : view.options.map((o) => ({
+          label: o.label,
+          kbd: o.key ?? undefined,
+          disabled: optionDisabled(o),
+          title: writeBlocked ?? optionTitle(o),
+          checked: view.multi ? isChecked(o) : undefined,
+          testid: 'answer-option',
+          onselect: () => choose(o),
+        })),
+  );
+  const cardQuestion = $derived(
+    view.question ?? `Claude is waiting for one of these${view.kind === 'permission' ? ' (permission)' : ''}.`,
+  );
+  /** Own words: Escape dismisses the dialog (the re-read guards it like any
+   *  answer), then the caller's composer takes the words. */
+  function ownWords() {
+    void press('Escape', 'Dismissed').then((ok) => {
+      if (ok) onOwnWords?.();
+    });
+  }
+
   /** In the sidebar this card sits inside a row that is itself a button:
    *  answering a question must not also select the session, or tick its
    *  bulk-select checkbox. The card keeps every click it handles. */
@@ -186,6 +227,63 @@
 
 <svelte:window onkeydown={onWindowKeydown} />
 
+{#if isNew}
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+<div class="answer-new" data-testid="answer-card" data-kind={view.kind} data-layout="new" onclick={(e) => e.stopPropagation()}>
+  <QuestionCard
+    question={cardQuestion}
+    detail={view.detail ?? undefined}
+    {answers}
+    {compact}
+    keys={false}
+    mac={isMac}
+    label={view.kind === 'permission' ? 'Permission request' : 'Question from Claude'}
+    onownwords={onOwnWords && writeBlocked === null && sent === null ? ownWords : undefined}
+  >
+    {#if sent !== null}
+      <p class="sent" role="status" data-testid="answer-sent">✓ Sent: {sent} · <button
+          type="button"
+          class="linkish"
+          data-testid="answer-again"
+          title="The dialog is still on screen — the key may not have registered"
+          onclick={(e) => mine(e, () => (sent = null))}>Choose again</button></p>
+    {:else if view.multi}
+      <div class="multi">
+        <button
+          type="button"
+          class="btn btn--chip continue"
+          data-testid="answer-continue"
+          disabled={busy || writeBlocked !== null}
+          title={writeBlocked ?? 'Keep these ticks and go on (Tab) — Claude asks you to confirm next'}
+          onclick={(e) => mine(e, () => void press(MULTI_CONTINUE_KEY, continueLabel()))}>Continue →</button>
+        {#if !compact}<span class="hint">Tick every answer that applies, then continue.</span>{/if}
+      </div>
+    {/if}
+    {#if !compact && sent === null && (onOpenTerminal || !onOwnWords)}
+      <div class="secondary">
+        {#if !onOwnWords}
+          <button
+            type="button"
+            class="btn btn--chip btn--quiet"
+            data-testid="answer-esc"
+            disabled={busy || writeBlocked !== null}
+            title={writeBlocked ?? 'Dismiss the dialog (Escape)'}
+            onclick={(e) => mine(e, () => void press('Escape', 'Dismissed'))}>Esc — dismiss</button>
+        {/if}
+        {#if onOpenTerminal}
+          <button
+            type="button"
+            class="btn btn--chip btn--quiet"
+            data-testid="answer-open-terminal"
+            onclick={(e) => mine(e, () => onOpenTerminal?.())}>Open terminal</button>
+        {/if}
+      </div>
+    {/if}
+    {#if staleMsg}<p class="stale" role="status" data-testid="answer-stale">{staleMsg}</p>{/if}
+    {#if errorMsg}<p class="err" role="status" data-testid="answer-error">{errorMsg}</p>{/if}
+  </QuestionCard>
+</div>
+{:else}
 <div class="answer" class:compact data-testid="answer-card" data-kind={view.kind} role="group"
   aria-label={view.kind === 'permission' ? 'Permission request' : 'Question from Claude'}>
   {#if view.question}
@@ -256,8 +354,17 @@
   {#if staleMsg}<p class="stale" role="status" data-testid="answer-stale">{staleMsg}</p>{/if}
   {#if errorMsg}<p class="err" role="status" data-testid="answer-error">{errorMsg}</p>{/if}
 </div>
+{/if}
 
 <style>
+  .answer-new {
+    margin: 0.35rem 0 0.6rem;
+  }
+  .answer-new .sent,
+  .answer-new .stale,
+  .answer-new .err {
+    font-size: 12px;
+  }
   .answer {
     display: flex;
     flex-direction: column;

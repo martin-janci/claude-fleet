@@ -130,6 +130,7 @@ pub(crate) fn sample_session() -> SessionRow {
                 checked: false,
             }],
             multi: false,
+            detail: None,
         }),
         work: Some(WorkSummary {
             link_id: 5,

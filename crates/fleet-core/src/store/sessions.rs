@@ -2318,6 +2318,7 @@ mod tests {
                 checked: false,
             }],
             multi: false,
+            detail: None,
         };
         s.conn_ref()
             .execute(
