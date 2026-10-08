@@ -60,6 +60,8 @@
   import SpiralLoader from './SpiralLoader.svelte';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
+  import { uiLayout } from './prefs';
+  import SessionRowMenu from './SessionRowMenu.svelte';
 
   // Rename and selection state stay in the Sidebar (they must survive a
   // sessions store refresh); the row gets them as props and calls back.
@@ -535,6 +537,12 @@
 
   /** `y` / `n` decide the row's top suggestion, `l` links or picks. */
   function onRowKey(e: KeyboardEvent) {
+    if (rowMenuOn && (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey))) {
+      e.preventDefault();
+      const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      rowMenu = { x: r.left + 24, y: r.bottom };
+      return;
+    }
     if (e.target === e.currentTarget && !e.metaKey && !e.ctrlKey && !e.altKey && workBlocked === null) {
       if (e.key === 'y' && suggestion) {
         e.preventDefault();
@@ -554,6 +562,26 @@
       }
     }
     onKeySession(e, sess);
+  }
+
+  // The row's ⋯ menu and right-click (redesign step 3.10, New layout): every
+  // Details action, run by Details (`session_actions.ts`). Ghost and outside-
+  // fleet rows keep their own inline actions.
+  const rowMenuOn = $derived($uiLayout === 'new' && !readOnly && sess.status !== 'ghost');
+  let rowMenu = $state<{ x: number; y: number } | null>(null);
+  function openRowMenu(e: MouseEvent) {
+    e.stopPropagation();
+    if (rowMenu) {
+      rowMenu = null;
+      return;
+    }
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    rowMenu = { x: r.left, y: r.bottom + 2 };
+  }
+  function onRowContextMenu(e: MouseEvent) {
+    if (!rowMenuOn || isRenaming) return;
+    e.preventDefault();
+    rowMenu = { x: e.clientX, y: e.clientY };
   }
 
   function onWorkKey(e: KeyboardEvent) {
@@ -581,6 +609,7 @@
   ondblclick={(e) => sess.status !== 'ghost' && !readOnly && beginLabelEdit(sess, e)}
   onclick={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onSelectSession(sess, e)}
   onkeydown={(e) => !isRenaming && (sess.status !== 'ghost' || selectMode) && onRowKey(e)}
+  oncontextmenu={onRowContextMenu}
   use:hintAnchor={{ id: 'session-actions', when: !!sess.claude_session_id && sess.status !== 'ghost' }}
 >
   {#if selectMode && !readOnly}
@@ -802,6 +831,17 @@
                 title={killBlocked ?? 'Kill session'}
                 aria-label="Kill"
               >×</button>
+            {/if}
+            {#if rowMenuOn}
+              <button
+                class="icon-btn small"
+                data-testid="row-menu-open"
+                onclick={openRowMenu}
+                title="Every action on this session (right-click the row)"
+                aria-label="More actions"
+                aria-haspopup="menu"
+                aria-expanded={rowMenu !== null}
+              >⋯</button>
             {/if}
           </div>
         </div>
@@ -1030,6 +1070,9 @@
 {/if}
 {#if isRenaming && renameError}
   <p class="err inline-err">{renameError}</p>
+{/if}
+{#if rowMenu}
+  <SessionRowMenu session={sess} x={rowMenu.x} y={rowMenu.y} onclose={() => (rowMenu = null)} />
 {/if}
 
 <style>

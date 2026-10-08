@@ -11,6 +11,7 @@ import { clearToasts } from './lib/toasts';
 import { workBoardOpen, requestHostsView } from './lib/app_views';
 import { destination } from './lib/destination';
 import { uiLayout } from './lib/prefs';
+import { sessionActionRequest } from './lib/session_actions';
 
 const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay'];
 
@@ -76,6 +77,32 @@ describe('App: the destination store', () => {
     requestHostsView();
     await waitFor(() => expect(openOverlays(container)).toEqual(['hosts-overlay']));
     expect(get(destination)).toBe('hosts');
+  });
+
+  it('New layout: the board is a Work view, with no close and no Esc', async () => {
+    uiLayout.set('new');
+    try {
+      const { container, queryByTestId } = render(App);
+      workBoardOpen.set(true);
+      await waitFor(() => expect(queryByTestId('board-view')).not.toBeNull());
+      expect(queryByTestId('board-overlay')).toBeNull();
+      expect(queryByTestId('work-board-close')).toBeNull();
+      await fireEvent.keyDown(document.body, { key: 'Escape' });
+      expect(get(destination)).toBe('board');
+      // The terminal stays mounted under it, as under every destination.
+      expect(container.querySelector('.right-body > .view-slot:not(.overlay)')).not.toBeNull();
+    } finally {
+      uiLayout.set('classic');
+    }
+  });
+
+  it('a row action shows the Details pane it runs in', async () => {
+    const { getByTestId, queryByTestId } = render(App);
+    await fireEvent.click(getByTestId('center-collapse'));
+    expect(queryByTestId('center-expand')).not.toBeNull();
+    sessionActionRequest.set({ sessionId: 1, action: 'details', seq: 1 });
+    await waitFor(() => expect(queryByTestId('center-expand')).toBeNull());
+    sessionActionRequest.set(null);
   });
 });
 

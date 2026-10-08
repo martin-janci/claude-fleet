@@ -75,6 +75,7 @@
   import { detectMac, isEditable } from './lib/terminal_keys';
   import { loadSessionUi, saveSessionUi, DEFAULT_UI } from './lib/session_ui';
   import { readPref, writePref, sessionView, uiLayout } from './lib/prefs';
+  import { sessionActionRequest } from './lib/session_actions';
   import { resolveSessionView, otherSessionView, type SessionView } from './lib/session_view';
   import WelcomeDialog from './lib/WelcomeDialog.svelte';
   import HintLayer from './lib/HintLayer.svelte';
@@ -532,6 +533,13 @@
   const hostsMode = $derived($destination === 'hosts');
   const assetsMode = $derived($destination === 'assets');
   const boardMode = $derived($destination === 'board');
+  const newLayout = $derived($uiLayout === 'new');
+  // A row's ⋯ menu asks Details to run an action (step 3.10): Details must be
+  // showing to take it.
+  const unsubRowAction = sessionActionRequest.subscribe((r) => {
+    if (r) centerCollapsed = false;
+  });
+  onDestroy(unsubRowAction);
   // The Accounts page (step 4.1) is New-layout only until the rail (3.2);
   // switching back to Classic leaves it.
   const accountsMode = $derived($destination === 'accounts');
@@ -830,7 +838,7 @@
     }
     // The board, like Assets: Esc closes it, not while typing or in a
     // dialog (a drag in progress takes its own Esc first).
-    if (boardMode && !e.defaultPrevented) {
+    if (boardMode && !newLayout && !e.defaultPrevented) {
       if (isEditable(target) || target?.closest?.('dialog')) return;
       leave('board');
       return;
@@ -1169,8 +1177,11 @@
         </div>
       {/if}
       {#if boardMode}
-        <div class="view-slot overlay" data-testid="board-overlay">
-          <WorkBoard onclose={() => leave('board')} />
+        <!-- In the New layout the board is a Work view (step 3.10): its Work
+             tab opens it, the other tabs leave it, and it has no close of
+             its own. It still sits over the mounted terminal. -->
+        <div class="view-slot overlay" data-testid={newLayout ? 'board-view' : 'board-overlay'}>
+          <WorkBoard onclose={newLayout ? undefined : () => leave('board')} />
         </div>
       {/if}
     </div>
