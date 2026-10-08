@@ -819,8 +819,8 @@ pub fn plan_with(
             codes::E_REPO_MISSING,
             format!(
                 "project repository is missing or not a git checkout at {} on {} — \
-                 it is never recreated by mkdir; restore or re-clone it (a new session \
-                 on a remote host clones automatically)",
+                 it is never recreated by mkdir; restore or re-clone it (on a remote host, \
+                 a new session or Recreate clones it automatically)",
                 spec.project_root, spec.host_alias
             ),
         ));
@@ -2300,7 +2300,7 @@ pub async fn spec_for_session(
 }
 
 /// [`spec_for_session`] over any [`SshExec`] (the remote `$HOME` lookup).
-async fn spec_for_session_with(
+pub(crate) async fn spec_for_session_with(
     store: &Mutex<Store>,
     ssh: &dyn SshExec,
     session_id: i64,
