@@ -77,3 +77,18 @@ export const sessionView = writable<SessionView>(
   readPref<SessionView>('ui.sessionView', 'conversation', isSessionView),
 );
 sessionView.subscribe((v) => writePref('ui.sessionView', v));
+
+// ─── Layout pref (redesign step 0.3) ─────────────────────────────────────
+
+export type UiLayout = 'classic' | 'new';
+
+const isUiLayout = (v: unknown): v is UiLayout => v === 'classic' || v === 'new';
+
+/**
+ * Which shell the app shows: Classic (0.5.x) or New (the Orbit Fleet
+ * redesign, growing behind this switch until the parity sign-off in 7.5).
+ * Classic stays the default until then. Nothing reads it yet besides the
+ * Appearance section; the destination store in 3.1 is the first consumer.
+ */
+export const uiLayout = writable<UiLayout>(readPref<UiLayout>('ui.layout', 'classic', isUiLayout));
+uiLayout.subscribe((v) => writePref('ui.layout', v));
