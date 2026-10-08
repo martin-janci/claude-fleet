@@ -123,6 +123,12 @@ pub enum ResultView {
     /// `pair_device`'s `{ url, code, expires_in_s, qr }`: the one-time
     /// code, its URL to open and the QR to scan, until it expires.
     Pairing,
+    /// A command's `{ exit_code, output, truncated }` (a debug device's
+    /// logs, an install): its text in a scrolling block.
+    Output,
+    /// `{ caption, mime, data }`: one image, base64 (a debug device's
+    /// screenshot).
+    Image,
 }
 
 impl ActionSpec {
@@ -609,7 +615,7 @@ const ORG: ResourceType = ResourceType {
         .badge(Badge::Set { text: "auto-tidy" }),
         FieldSpec::new(
             "jev_allowed",
-            "Send to Jev",
+            "Allow Jev (decision model) for this organisation's work",
             "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
             FieldKind::Bool { on_off: true, default: false },
         )
@@ -978,6 +984,16 @@ const DEBUG_DEVICE: ResourceType = ResourceType {
     ),
     actions: &[
         ActionSpec::new("debug_device.rescan", "Rescan host", "scan_debug_devices", &[("host", Bind::Record("host"))]),
+        ActionSpec::new("debug_device.claim", "Claim", "claim_debug_device", &[DEBUG_DEVICE_ID, ("note", Bind::Param("note"))])
+            .params(&[param("note", "For (optional)", text(200, "testing the login flow"), false)]),
+        ActionSpec::new("debug_device.install", "Install app…", "install_debug_device", &[DEBUG_DEVICE_ID, ("path", Bind::Param("path")), ("host", Bind::Param("host"))])
+            .params(&[
+                param("path", "App (.apk, .app or .ipa)", text(1024, "~/app/build/outputs/apk/debug/app-debug.apk"), true),
+                param("host", "On host (optional; the device's own when empty)", ParamKind::Options { source: OptionSource::Hosts }, false),
+            ])
+            .result(ResultView::Output),
+        ActionSpec::new("debug_device.logs", "Logs", "debug_device_logs", &[DEBUG_DEVICE_ID]).result(ResultView::Output),
+        ActionSpec::new("debug_device.screenshot", "Screenshot", "debug_device_screenshot", &[DEBUG_DEVICE_ID]).result(ResultView::Image),
         ActionSpec::new("debug_device.release", "Release claim", "release_debug_device", &[DEBUG_DEVICE_ID])
             .confirm("Whoever holds it loses the claim; another session may then use the device."),
         ActionSpec::new("debug_device.boot", "Start", "boot_debug_device", &[DEBUG_DEVICE_ID]).variants(&["emulator", "simulator"]),
@@ -1176,6 +1192,9 @@ mod tests {
                 "catalog_list_catalogs",
                 "catalog_remove_catalog",
                 "catalog_unadmit_catalog",
+                "claim_debug_device",
+                "debug_device_logs",
+                "debug_device_screenshot",
                 "disable_person",
                 "flow_back",
                 "flow_cancel",
@@ -1183,6 +1202,7 @@ mod tests {
                 "flow_submit",
                 "forget_debug_device",
                 "grant_device_catalog",
+                "install_debug_device",
                 "list_debug_devices",
                 "list_devices",
                 "list_orgs",

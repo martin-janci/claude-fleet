@@ -152,6 +152,8 @@ const REASONS = {
     'this desktop is a paired client, and a client is never the fleet’s administrator',
   discover_hosts:
     'host discovery reads this machine’s SSH config, and a paired client does not administer the fleet anyway',
+  check_host:
+    'the health checklist reads a host’s settings over this app’s own SSH, and this desktop is a paired client',
   provision_hosts:
     'provisioning rewrites every host’s hook block to report to whichever app ran it, and this desktop is a paired client',
   install_fleet_hook:

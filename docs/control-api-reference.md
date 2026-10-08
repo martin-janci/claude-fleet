@@ -898,6 +898,10 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::debug_devices::forget_debug_device`
 - `commands::debug_devices::boot_debug_device`
 - `commands::debug_devices::shutdown_debug_device`
+- `commands::debug_devices::claim_debug_device`
+- `commands::debug_devices::install_debug_device`
+- `commands::debug_devices::debug_device_logs`
+- `commands::debug_devices::debug_device_screenshot`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
 - `commands::tasks::list_tasks`
@@ -930,6 +934,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::list_accounts`
 - `commands::hosts::add_host`
 - `commands::hosts::probe_host`
+- `commands::hosts::check_host`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::merge_host`

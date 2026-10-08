@@ -805,6 +805,30 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "claim_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "install_debug_device",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "debug_device_logs",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
+        "debug_device_screenshot",
+        Verdict::Routed {
+            tool: "debug_devices",
+        },
+    ),
+    (
         "set_fleet_setting",
         Verdict::Routed {
             tool: "set_setting",
@@ -977,6 +1001,13 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             instead: "merging one host's rows into another is fleet administration, which the \
                       hub reserves for its own operator — run it there with `fleet-hub host merge \
                       <from> <into>`",
+        },
+    ),
+    (
+        "check_host",
+        Verdict::LocalOnly {
+            instead: "the health checklist reads a host's settings over this app's own SSH; \
+                      repair a host's hooks from the hub with `fleet-hub provision --host <alias>`",
         },
     ),
     (
