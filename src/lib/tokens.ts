@@ -67,7 +67,7 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'code': '#0e7490',
     'syn-kw': '#8a3fb0',
     'syn-str': '#3f7d20',
-    'syn-num': '#b76b01',
+    'syn-num': '#9a5a00',
     'org-1': '#2563eb',
     'org-2': '#17723e',
     'org-3': '#8a3fb0',
@@ -192,11 +192,8 @@ export const CONTRAST_PAIRS: ContrastPair[] = [
   { fg: 'usage-warn', bg: 'bg-pane', min: 4.5, note: 'warn text and bars' },
   { fg: 'usage-crit', bg: 'bg-pane', min: 4.5, note: 'crit text and bars' },
   { fg: 'status-working', bg: 'track', min: 3, note: 'a meter fill on its track' },
-  // Code. The light --syn-num is the manual's known exception, 4.1:1 on
-  // bg-pane (3.7:1 in a bg-sunk well); it is held at 4 on bg-pane so it
-  // cannot slip further while the manual decides its fix.
-  ...(['code', 'syn-kw', 'syn-str'] as const).map((fg): ContrastPair => ({ fg, bg: 'bg-sunk', min: 4.5, note: `${fg} in a code well` })),
-  { fg: 'syn-num', bg: 'bg-pane', min: 4, note: 'numbers in code (known 4.1:1 in light)' },
+  // Code, in the bg-sunk well it sits in.
+  ...(['code', 'syn-kw', 'syn-str', 'syn-num'] as const).map((fg): ContrastPair => ({ fg, bg: 'bg-sunk', min: 4.5, note: `${fg} in a code well` })),
   // Organisation swatches are non-text.
   ...([1, 2, 3, 4] as const).map((n): ContrastPair => ({ fg: `org-${n}`, bg: 'bg-pane', min: 3, note: `org ${n} swatch` })),
   // Classic controls.

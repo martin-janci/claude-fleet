@@ -6,9 +6,8 @@
    Change a value in the snapshot first (the manual is the source of truth),
    then here in all four theme blocks, then in tokens.ts.
 
-   Known contrast exceptions kept from the manual: --control-border is about
-   1.5:1 on --bg-pane (a control also has its fill and label), and the light
-   --syn-num is about 4.1:1. */
+   Known contrast exception kept from the manual: --control-border is about
+   1.5:1 on --bg-pane (a control also has its fill and label). */
 
 :root {
   /* Grounds. */
@@ -53,7 +52,7 @@
   --code: #0e7490;
   --syn-kw: #8a3fb0;
   --syn-str: #3f7d20;
-  --syn-num: #b76b01;
+  --syn-num: #9a5a00;
   /* Organisations: 8px swatches, never fills. */
   --org-1: #2563eb;
   --org-2: #17723e;
@@ -289,7 +288,7 @@
   --code: #0e7490;
   --syn-kw: #8a3fb0;
   --syn-str: #3f7d20;
-  --syn-num: #b76b01;
+  --syn-num: #9a5a00;
   /* Organisations: 8px swatches, never fills. */
   --org-1: #2563eb;
   --org-2: #17723e;
