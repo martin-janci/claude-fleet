@@ -81,10 +81,12 @@ describe('the Hub section, standalone', () => {
     expect(section.textContent).toContain('Hub');
     expect(screen.getByTestId('hub-empty')).toBeInTheDocument();
     expect(screen.queryByTestId('hub-disconnect')).toBeNull();
-    // The two fields a pairing needs, and nothing that claims a state it is
-    // not in.
-    expect(screen.getByTestId('hub-url')).toBeInTheDocument();
-    expect(screen.getByTestId('hub-code')).toBeInTheDocument();
+    // The way to pair, and nothing that claims a state it is not in.
+    expect(screen.getByTestId('hub-link').textContent).toContain('Link to a hub');
+    // The link is a wizard (step 10.12): the two fields a pairing needs.
+    await fireEvent.click(screen.getByTestId('hub-link'));
+    expect(await screen.findByTestId('form-field-url')).toBeInTheDocument();
+    expect(screen.getByTestId('form-field-code')).toBeInTheDocument();
   });
 
   it('tells the operator where the code comes from', async () => {
@@ -95,7 +97,8 @@ describe('the Hub section, standalone', () => {
 
   it('will not pair on an empty form', async () => {
     render(SettingsDialog, { props: { onClose: () => {} } });
-    const pair = (await screen.findByTestId('hub-pair')) as HTMLButtonElement;
+    await fireEvent.click(await screen.findByTestId('hub-link'));
+    const pair = (await screen.findByTestId('form-submit')) as HTMLButtonElement;
     expect(pair).toBeDisabled();
   });
 });
@@ -106,11 +109,12 @@ describe('pairing', () => {
       hub_pair: { ...remote, remote: false, restart_required: true },
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.input(await screen.findByTestId('hub-url'), {
+    await fireEvent.click(await screen.findByTestId('hub-link'));
+    await fireEvent.input(await screen.findByTestId('form-field-url'), {
       target: { value: 'https://fleet.example.com' },
     });
-    await fireEvent.input(screen.getByTestId('hub-code'), { target: { value: 'ABCD1234' } });
-    await fireEvent.click(screen.getByTestId('hub-pair'));
+    await fireEvent.input(screen.getByTestId('form-field-code'), { target: { value: 'ABCD1234' } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
 
     await waitFor(() =>
       expect(inv.mock.calls.some((c) => c[0] === 'hub_pair')).toBe(true),
@@ -128,16 +132,19 @@ describe('pairing', () => {
     // worst of both.
     const restart = await screen.findByTestId('hub-restart');
     expect(restart.textContent!.toLowerCase()).toContain('restart');
+    // The code worked once: the wizard closes rather than invite a retry.
+    await waitFor(() => expect(screen.queryByTestId('wizard-link_hub')).toBeNull());
   });
 
   it('shows the hub’s own refusal rather than a generic failure', async () => {
     route({ hub_pair: ipcError('E_INVALID', 'that pairing code is unknown, used or expired') });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.input(await screen.findByTestId('hub-url'), {
+    await fireEvent.click(await screen.findByTestId('hub-link'));
+    await fireEvent.input(await screen.findByTestId('form-field-url'), {
       target: { value: 'https://fleet.example.com' },
     });
-    await fireEvent.input(screen.getByTestId('hub-code'), { target: { value: 'BADCODE1' } });
-    await fireEvent.click(screen.getByTestId('hub-pair'));
+    await fireEvent.input(screen.getByTestId('form-field-code'), { target: { value: 'BADCODE1' } });
+    await fireEvent.click(screen.getByTestId('form-submit'));
     const err = await screen.findByTestId('hub-error');
     expect(err.textContent).toContain('unknown, used or expired');
   });
@@ -152,16 +159,17 @@ describe('pairing', () => {
       ),
     });
     render(SettingsDialog, { props: { onClose: () => {} } });
-    await fireEvent.input(await screen.findByTestId('hub-url'), {
+    await fireEvent.click(await screen.findByTestId('hub-link'));
+    await fireEvent.input(await screen.findByTestId('form-field-url'), {
       target: { value: 'http://10.0.0.5:8787' },
     });
-    await fireEvent.input(screen.getByTestId('hub-code'), { target: { value: 'ABCD1234' } });
+    await fireEvent.input(screen.getByTestId('form-field-code'), { target: { value: 'ABCD1234' } });
 
     // Before the refusal there is nothing to click: the opt-in is not a
     // checkbox someone can tick past without reading.
     expect(screen.queryByTestId('hub-allow-plaintext')).toBeNull();
 
-    await fireEvent.click(screen.getByTestId('hub-pair'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
 
     const err = await screen.findByTestId('hub-error');
     expect(err.textContent).toContain('in the clear');
@@ -177,7 +185,7 @@ describe('pairing', () => {
       return null;
     });
     await fireEvent.click(optIn);
-    await fireEvent.click(screen.getByTestId('hub-pair'));
+    await fireEvent.click(screen.getByTestId('form-submit'));
     await waitFor(() =>
       expect(inv.mock.calls.some((c) => c[0] === 'hub_pair')).toBe(true),
     );
@@ -352,9 +360,11 @@ describe('the Hub section, configured but unavailable', () => {
   it('offers to pair again, prefilled with the configured URL', async () => {
     route();
     render(SettingsDialog, { props: { onClose: () => {} } });
-    const url = (await screen.findByTestId('hub-url')) as HTMLInputElement;
+    expect((await screen.findByTestId('hub-link')).textContent).toContain('Pair again');
+    await fireEvent.click(screen.getByTestId('hub-link'));
+    const url = (await screen.findByTestId('form-field-url')) as HTMLInputElement;
     expect(url.value).toBe('https://fleet.example.com');
-    expect(screen.getByTestId('hub-code')).toBeInTheDocument();
+    expect(screen.getByTestId('form-field-code')).toBeInTheDocument();
   });
 
   // This process runs no control API and no tick, and the backend refuses
