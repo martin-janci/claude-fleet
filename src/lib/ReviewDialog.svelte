@@ -56,8 +56,8 @@
     <p class="muted">Spawns a claude review session in this session's worktree, seeded with the prompt below. Reviews the worktree's current state.</p>
 
     <section class="prompt-section">
-      <h4>Review prompt</h4>
-      <textarea bind:value={prompt} rows="10" data-testid="review-textarea"></textarea>
+      <h4 id="review-prompt-h">Review prompt</h4>
+      <textarea bind:value={prompt} rows="10" aria-labelledby="review-prompt-h" data-testid="review-textarea"></textarea>
     </section>
 
     {#if spawnBlocked}

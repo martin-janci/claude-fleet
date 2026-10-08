@@ -1345,23 +1345,36 @@ pub async fn tick_mission(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError
 
 /// One pass of the loop: every due mission, one after the other.
 pub async fn tick_once(deps: &Deps, now: i64) {
+    let next = Some(TICK_EVERY);
     let due = match deps.store.lock() {
         Ok(s) => {
+            // Pause all (redesign 8.1) before the loop's own switch, so
+            // health says why nothing moves.
+            if !crate::service::loops::gate_in("missions", &s, next) {
+                return;
+            }
             if !settings::get_bool(&s, settings::ORCHESTRATOR_ENABLED) {
+                crate::service::loops::report("missions", Ok::<_, String>(()), next);
                 return;
             }
             s.missions_due(now).unwrap_or_default()
         }
-        Err(_) => return,
+        Err(e) => {
+            crate::service::loops::report("missions", Err(e.to_string()), next);
+            return;
+        }
     };
+    let mut failed: Option<String> = None;
     for id in due {
         if let Err(e) = tick_mission(deps, id, now).await {
             tracing::warn!(mission = id, error = %e.message, "[orchestrate] tick failed");
+            failed = Some(format!("mission {id}: {}", e.message));
             if let Ok(s) = deps.store.lock() {
                 let _ = s.release_mission_lease(id, Some(now + RUNNING_RECHECK_SECS), None);
             }
         }
     }
+    crate::service::loops::report("missions", failed.map_or(Ok(()), Err), next);
 }
 
 /// The loop's periodic task, on the hub and on a standalone desktop. A

@@ -343,6 +343,24 @@ async fn a_tick_takes_the_lease_and_sets_the_next_wake() {
     assert_eq!(s.missions_due(now_unix() + 1).unwrap(), vec![fx.m.id]);
 }
 
+/// Redesign 8.1: Pause all stops the mission loop before it takes a lease.
+#[tokio::test]
+async fn pause_all_stops_the_mission_tick() {
+    let fx = fixture();
+    let now = now_unix();
+    settings::set(
+        &lock(&fx.deps.store).unwrap(),
+        settings::AUTOMATION_PAUSED,
+        "true",
+    )
+    .unwrap();
+    tick_once(&fx.deps, now).await;
+    let m = mission_now(&fx);
+    assert_eq!(m.next_wake_at, fx.m.next_wake_at, "the tick did nothing");
+    let s = lock(&fx.deps.store).unwrap();
+    assert_eq!(s.missions_due(now).unwrap(), vec![fx.m.id], "still due");
+}
+
 #[test]
 fn a_continuous_mission_wakes_on_its_timer() {
     let mut m = fixture().m;

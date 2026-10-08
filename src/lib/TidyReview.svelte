@@ -505,6 +505,7 @@
           {#if c.action === 'resume_or_expire' && c.key}<ResumeButton workKey={c.key} sessionId={c.session_id} />{/if}
           {#if choices.length > 0}
             <select
+              aria-label="What to do with {rowName(c)}"
               data-testid="tidy-choice"
               value={choice.get(c.session_id) ?? defaultChoice(c)}
               onchange={(e) => setChoice(c.session_id, (e.currentTarget as HTMLSelectElement).value)}

@@ -86,6 +86,8 @@
     class="more"
     title="More ways to resume"
     aria-label="More ways to resume {workKey}"
+    aria-haspopup="dialog"
+    aria-expanded={open}
     data-testid="resume-more"
     onclick={more}>▾</button
   >

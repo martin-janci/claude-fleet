@@ -1024,6 +1024,7 @@
           {#if briefOn}
             <textarea
               class="brief"
+              aria-label="Brief for Claude"
               data-testid="ticket-brief"
               rows="6"
               value={briefText}
@@ -1057,11 +1058,13 @@
       <ResumeDialog workKey={plannedKey} onclose={() => (resumeOpen = false)} onresumed={onCancel} />
     {/if}
 
-    <label for="kind-picker">Type</label>
-    <div class="kind-row" id="kind-picker" role="group">
+    <!-- A group, not a labelable control: it is named by aria-labelledby. -->
+    <span class="field-label" id="kind-picker-label">Type</span>
+    <div class="kind-row" id="kind-picker" role="group" aria-labelledby="kind-picker-label">
       <button
         class="kind-pick"
         class:active={chosenKind === 'work'}
+        aria-pressed={chosenKind === 'work'}
         data-testid="kind-work"
         onclick={() => onPickKind('work')}
       >
@@ -1070,6 +1073,7 @@
       <button
         class="kind-pick"
         class:active={chosenKind === 'shell'}
+        aria-pressed={chosenKind === 'shell'}
         data-testid="kind-shell"
         onclick={() => onPickKind('shell')}
       >
@@ -1141,7 +1145,9 @@
       }}
     />
 
-    <label for="wt-picker">Worktree</label>
+    <!-- Not a <label>: the picker is a listbox, which a label cannot name
+         (it names itself with ariaLabel). -->
+    <span class="field-label" aria-hidden="true">Worktree</span>
     {#if worktreeStatus}
       <p class="wt-status" data-testid="wt-status" class:err={hostWorktrees.status === 'error'}>{worktreeStatus}</p>
     {/if}
@@ -1242,7 +1248,7 @@
      scrolls instead of squeezing them toward zero. :global so it reaches
      PickerList's root too. */
   .fields > :global(*) { flex-shrink: 0; }
-  label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
+  label, .field-label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; }
   input {
     font: inherit;
     padding: 0.3rem 0.4rem;

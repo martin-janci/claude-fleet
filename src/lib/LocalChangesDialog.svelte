@@ -161,7 +161,7 @@
 
     <div class="actions">
       <div class="row">
-        <select bind:value={intent} data-testid="lw-ask-intent" disabled={busy}>
+        <select bind:value={intent} aria-label="What to ask Claude" data-testid="lw-ask-intent" disabled={busy}>
           {#each ASK_INTENTS as i (i.intent)}
             <option value={i.intent}>{i.label}</option>
           {/each}

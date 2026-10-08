@@ -8,6 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...
 
 import LocalChangesDialog from './LocalChangesDialog.svelte';
 import type { LocalWorkspace } from './local_workspaces';
+import { expectAccessible } from './a11y_check';
 
 const link = {
   id: 9,
@@ -93,5 +94,14 @@ describe('LocalChangesDialog', () => {
     expect(invoke).toHaveBeenCalledWith('discard_local_workspace_changes', {
       args: { id: 9, paths: ['src/a.rs', 'src/b.rs'] },
     });
+  });
+});
+
+describe('LocalChangesDialog accessibility (7.2)', () => {
+  it('passes the axe and audit checks', async () => {
+    route();
+    const { container } = render(LocalChangesDialog, { link, onclose: () => {} });
+    await screen.findAllByTestId('lw-change');
+    await expectAccessible(container);
   });
 });

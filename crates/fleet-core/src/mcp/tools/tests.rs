@@ -3836,7 +3836,7 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 #[test]
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes per tool served to the master token (the widest
-    /// surface). Measured at 86,933 bytes for 113 tools (769 a tool) on
+    /// surface). Measured at 87,031 bytes for 113 tools (770 a tool) on
     /// 2026-10-08. Raise it only from a measurement the failure prints,
     /// and say in the commit message what was measured and when.
     const BYTES_PER_TOOL: usize = 790;

@@ -465,6 +465,9 @@ pub fn spawn_reprovision_stale(
 ) -> tokio::task::JoinHandle<()> {
     crate::rt::spawn(async move {
         tokio::time::sleep(delay).await;
+        if !crate::service::loops::gate("reprovision", &store, None) {
+            return;
+        }
         let stale: Vec<String> = match store.lock() {
             Ok(s) => crate::service::hosts::active_hosts(
                 s.list_hosts().unwrap_or_default(),
@@ -492,6 +495,7 @@ pub fn spawn_reprovision_stale(
                 ),
             }
         }
+        crate::service::loops::report("reprovision", Ok::<_, String>(()), None);
     })
 }
 

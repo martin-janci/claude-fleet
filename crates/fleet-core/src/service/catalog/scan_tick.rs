@@ -137,6 +137,10 @@ pub fn spawn_catalog_scan_tick(
                 _ = token.cancelled() => break,
                 _ = ticker.tick() => {}
             }
+            // Pause all (redesign 8.1): nothing scanned, nothing synced.
+            if !crate::service::loops::gate("catalog_scan", &store, Some(period)) {
+                continue;
+            }
             // Assets M3: every loaded catalog's HEAD, not just personal's — an
             // org catalog that moves must rescan too. Nothing loaded (no
             // personal), or the lock poisoned: nothing to compare yet.
@@ -219,6 +223,12 @@ pub fn spawn_catalog_scan_tick(
                 tracing::error!("catalog scan tick: the changeset reconcile pass panicked");
             }
             seen = Some(now_key);
+            let outcome = if owed.is_empty() {
+                Ok(())
+            } else {
+                Err(format!("{} host(s) owe a rescan", owed.len()))
+            };
+            crate::service::loops::report("catalog_scan", outcome, Some(period));
         }
     }))
 }
