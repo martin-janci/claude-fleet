@@ -8741,6 +8741,7 @@ async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "-oProxyCommand=x".into(),
+                owner: None,
             }),
         )
         .await
@@ -9179,6 +9180,7 @@ async fn list_github_repos_returns_what_gh_lists_on_the_host() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "hostb".into(),
+                owner: None,
             }),
         )
         .await
@@ -9261,6 +9263,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
                 Extension(who.clone()),
                 Parameters(ListGithubReposParams {
                     host_alias: "hostb".into(),
+                    owner: None,
                 }),
             )
             .await
@@ -9271,6 +9274,7 @@ async fn add_project_and_list_github_repos_are_fenced_to_the_callers_host_and_or
             Extension(who),
             Parameters(ListGithubReposParams {
                 host_alias: "hosta".into(),
+                owner: None,
             }),
         )
         .await
@@ -9302,6 +9306,7 @@ async fn add_project_and_list_github_repos_refuse_an_unregistered_host() {
             Extension(Caller::master()),
             Parameters(ListGithubReposParams {
                 host_alias: "not-a-fleet-host".into(),
+                owner: None,
             }),
         )
         .await

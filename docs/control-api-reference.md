@@ -199,7 +199,7 @@ Parameters: `limit`, `session_id`
 
 Repositories gh on the host can see, for choosing what to clone with add_project.
 
-Parameters: `host_alias`
+Parameters: `host_alias`, `owner`
 
 ### `list_host_worktrees`
 

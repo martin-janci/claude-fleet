@@ -196,7 +196,14 @@ impl FleetTools {
         Extension(caller): Extension<Caller>,
         Parameters(p): Parameters<ListGithubReposParams>,
     ) -> Result<CallToolResult, McpError> {
-        audit("list_github_repos", &format!("host={}", p.host_alias));
+        audit(
+            "list_github_repos",
+            &format!(
+                "host={} owner={}",
+                p.host_alias,
+                p.owner.as_deref().unwrap_or("-")
+            ),
+        );
         // `gh repo list` runs with the host's own GitHub login: a per-host
         // token reads only its own host's, an org-bound client only its
         // org's hosts'.
@@ -205,9 +212,14 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             require_bound_client_sees_host(&s, &caller, &p.host_alias)?;
         }
-        let repos = add_project::list_github_repos_with(&p.host_alias, &self.store, &*self.ssh)
-            .await
-            .map_err(to_mcp_err)?;
+        let repos = add_project::list_github_repos_with(
+            &p.host_alias,
+            p.owner.as_deref(),
+            &self.store,
+            &*self.ssh,
+        )
+        .await
+        .map_err(to_mcp_err)?;
         ok_json(&repos)
     }
 

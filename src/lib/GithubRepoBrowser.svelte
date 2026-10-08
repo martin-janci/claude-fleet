@@ -1,22 +1,34 @@
 <script lang="ts">
-  // The Add-project dialog's "My GitHub" mode: the repositories `gh` can see
-  // on one host, filtered client-side. Picking a row hands its
-  // `owner/repo` back to the dialog, which switches to clone mode with it.
+  // The Add-project dialog's "From GitHub" source (redesign 6.11, the
+  // AddProject board): the repositories `gh` can see on one host, for one
+  // owner, filtered client-side. Rows are ticked, not picked: the dialog
+  // adds every ticked repository. A repository already in the fleet says so
+  // and cannot be ticked.
   import { untrack } from 'svelte';
   import { listGithubRepos, type GithubRepo } from './projects';
-  import PickerList from './PickerList.svelte';
-  import type { PickerItem } from './PickerList.svelte';
+  import { timeAgo } from './session_status';
 
   let {
     host,
-    onpick,
+    owner = '',
+    selected,
+    ontoggle,
+    inFleet,
     autofocus = false,
+    disabled = false,
   }: {
     host: string;
-    onpick: (nameWithOwner: string) => void;
-    /** Move focus to the filter box once the list lands (the mode was opened
-     *  with a click / Enter, not arrowed past on the way to another mode). */
+    /** A GitHub user or organisation; empty lists the host login's own. */
+    owner?: string;
+    /** Ticked `owner/repo`s. */
+    selected: readonly string[];
+    ontoggle: (nameWithOwner: string) => void;
+    /** Whether the fleet already has this repository. */
+    inFleet: (nameWithOwner: string) => boolean;
+    /** Move focus to the filter box once the list lands (the source was
+     *  opened with a click / Enter, not arrowed past on the way). */
     autofocus?: boolean;
+    disabled?: boolean;
   } = $props();
 
   type ListState =
@@ -26,48 +38,59 @@
   let list = $state<ListState>({ status: 'loading' });
   let filter = $state('');
   let activeKey = $state<string | null>(null);
-  /** Bumped by Retry to re-run the listing for the same host. */
+  /** Bumped by Retry to re-run the listing for the same host and owner. */
   let attempt = $state(0);
   let filterEl: HTMLInputElement | undefined = $state();
   let wantFocus = untrack(() => autofocus);
 
-  // A slow reply for a previous host must not land after a newer request
-  // (same guard as NewSessionDialog's `scanSeq`).
+  // A slow reply for a previous host or owner must not land after a newer
+  // request (same guard as NewSessionDialog's `scanSeq`).
   let seq = 0;
   $effect(() => {
     const h = host;
+    const o = owner.trim();
     void attempt;
     const mine = ++seq;
     list = { status: 'loading' };
-    void listGithubRepos(h).then((r) => {
+    void listGithubRepos(h, o || undefined).then((r) => {
       if (mine !== seq) return;
       // gh's own stderr (not installed, "run gh auth login"…) is shown
       // verbatim — never an empty list pretending there are no repos.
-      list = r.ok ? { status: 'ready', repos: r.value ?? [] } : { status: 'error', message: r.error.message };
+      if (!r.ok) {
+        list = { status: 'error', message: r.error.message };
+        return;
+      }
+      // A hub older than 6.11 ignores `owner` and answers the login's own
+      // repositories: keep only the owner's, so the list never says
+      // something it was not asked.
+      const lower = o.toLowerCase();
+      const repos = (r.value ?? []).filter((x) => !lower || x.name_with_owner.toLowerCase().startsWith(`${lower}/`));
+      list = { status: 'ready', repos };
     });
     return () => {
       seq++;
     };
   });
 
-  const items: PickerItem[] = $derived.by(() => {
+  const rows = $derived.by((): GithubRepo[] => {
     if (list.status !== 'ready') return [];
     const q = filter.trim().toLowerCase();
-    return list.repos
-      .filter(
-        (r) =>
-          !q ||
-          r.name_with_owner.toLowerCase().includes(q) ||
-          (r.description ?? '').toLowerCase().includes(q),
-      )
-      .map((r) => ({
-        key: r.name_with_owner,
-        label: r.name_with_owner,
-        description: r.description ?? undefined,
-        meta: r.is_private ? 'private' : undefined,
-        testid: 'gh-repo-row',
-      }));
+    return list.repos.filter(
+      (r) => !q || r.name_with_owner.toLowerCase().includes(q) || (r.description ?? '').toLowerCase().includes(q),
+    );
   });
+
+  /** "TypeScript · updated 2h ago · private": what the board's rows say. */
+  function metaOf(r: GithubRepo): string {
+    const updated = r.updated_at ? Date.parse(r.updated_at) : NaN;
+    return [
+      r.language,
+      Number.isFinite(updated) ? `updated ${timeAgo(updated / 1000)}` : null,
+      r.is_private ? 'private' : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+  }
 
   // Once per request for it (not on every later host switch, which would
   // yank focus off the chip the user just pressed).
@@ -86,20 +109,26 @@
 
   // Keep the highlight on a visible row as the filter narrows the list.
   $effect(() => {
-    if (!items.some((i) => i.key === activeKey)) activeKey = items[0]?.key ?? null;
+    if (!rows.some((r) => r.name_with_owner === activeKey)) activeKey = rows[0]?.name_with_owner ?? null;
   });
 
+  function toggle(name: string) {
+    if (disabled || inFleet(name)) return;
+    ontoggle(name);
+  }
+
   function onFilterKeydown(e: KeyboardEvent) {
-    const i = items.findIndex((it) => it.key === activeKey);
+    const i = rows.findIndex((r) => r.name_with_owner === activeKey);
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
-      const next = items[Math.max(0, Math.min(items.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
-      if (next) activeKey = next.key;
+      const next = rows[Math.max(0, Math.min(rows.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))];
+      if (next) activeKey = next.name_with_owner;
     } else if (e.key === 'Enter') {
-      // Enter picks the highlighted repo rather than submitting the dialog.
+      // Enter ticks the highlighted repository rather than submitting the
+      // dialog; the footer's verb adds what is ticked.
       e.preventDefault();
       e.stopPropagation();
-      if (activeKey) onpick(activeKey);
+      if (activeKey) toggle(activeKey);
     }
   }
 </script>
@@ -112,27 +141,60 @@
 {:else}
   <input
     id="gh-filter"
+    type="text"
     data-testid="gh-filter"
     bind:this={filterEl}
     bind:value={filter}
     onkeydown={onFilterKeydown}
     placeholder="Filter repositories"
     aria-label="Filter repositories"
+    aria-controls="gh-list"
   />
-  <PickerList
-    {items}
-    {activeKey}
-    onactivate={(k) => (activeKey = k)}
-    {onpick}
-    maxHeight="14rem"
-    ariaLabel="GitHub repositories"
-    emptyText={list.repos.length === 0 ? `gh lists no repositories on ${host}.` : 'Nothing matches.'}
-    testid="gh-list"
-  />
+  {#if rows.length === 0}
+    <p class="status" data-testid="gh-empty">
+      {list.repos.length === 0
+        ? owner.trim()
+          ? `gh lists no repositories for ${owner.trim()} on ${host}.`
+          : `gh lists no repositories on ${host}.`
+        : 'Nothing matches.'}
+    </p>
+  {:else}
+    <ul class="repos" id="gh-list" data-testid="gh-list" aria-label="GitHub repositories">
+      {#each rows as r (r.name_with_owner)}
+        {@const added = inFleet(r.name_with_owner)}
+        {@const meta = metaOf(r)}
+        <li>
+          <label
+            class="repo"
+            class:active={r.name_with_owner === activeKey}
+            class:added
+            data-testid="gh-repo-row"
+            data-key={r.name_with_owner}
+            onmouseenter={() => (activeKey = r.name_with_owner)}
+          >
+            <input
+              type="checkbox"
+              data-testid="gh-repo-check"
+              checked={added || selected.includes(r.name_with_owner)}
+              disabled={disabled || added}
+              onchange={() => toggle(r.name_with_owner)}
+            />
+            <span class="text">
+              <span class="name">{r.name_with_owner}</span>
+              {#if meta || r.description}
+                <span class="meta">{[meta, r.description].filter(Boolean).join(' · ')}</span>
+              {/if}
+            </span>
+            {#if added}<span class="pill" data-testid="gh-in-fleet">already in fleet</span>{/if}
+          </label>
+        </li>
+      {/each}
+    </ul>
+  {/if}
 {/if}
 
 <style>
-  .status { font-size: 11px; color: var(--fg-muted); margin: 0; }
+  .status { font-size: 0.8rem; color: var(--fg-muted); margin: 0; }
   .err { color: var(--danger); font-size: 0.8rem; margin: 0; white-space: pre-wrap; }
   .retry {
     align-self: flex-start;
@@ -144,13 +206,39 @@
     border-radius: 4px;
     cursor: pointer;
   }
-  input {
-    font: inherit;
-    padding: 0.3rem 0.4rem;
+  .repos {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 14rem;
+    overflow-y: auto;
     border: 1px solid var(--border);
-    background: var(--bg-pane);
-    color: var(--fg);
-    border-radius: 4px;
-    min-width: 0;
+    border-radius: var(--radius-sm, 4px);
+  }
+  .repo {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2, 8px);
+    padding: var(--space-1, 4px) var(--space-2, 8px);
+    cursor: pointer;
+  }
+  .repo.active { background: var(--bg-hover, var(--bg-pane)); }
+  .repo.added { cursor: default; color: var(--fg-muted); }
+  .text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .name { font-size: var(--text-sm, 12.5px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meta {
+    font-size: var(--text-xs, 11.5px);
+    color: var(--fg-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pill {
+    font-size: var(--text-xs, 11.5px);
+    color: var(--fg-muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0 var(--space-2, 8px);
+    white-space: nowrap;
   }
 </style>
