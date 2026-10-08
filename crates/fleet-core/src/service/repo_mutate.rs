@@ -308,12 +308,14 @@ pub async fn repo_push(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::service::repo_read::git_fixture;
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    #[cfg(unix)]
     fn local_branches(dir: &std::path::Path) -> Vec<String> {
         let out = git_fixture::run_body(
             dir,
@@ -325,6 +327,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn delete_merged_deletes_only_what_the_base_still_contains() {
         let tmp = tempfile::tempdir().unwrap();
@@ -339,6 +342,7 @@ mod tests {
         assert_eq!(local_branches(&work), names(&["fresh", "main", "open"]));
     }
 
+    #[cfg(unix)]
     #[test]
     fn delete_merged_refuses_without_a_base_branch() {
         let tmp = tempfile::tempdir().unwrap();

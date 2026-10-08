@@ -862,8 +862,9 @@ pub async fn repo_commit_diff(
 
 /// A real git repository for the repo tests, and a way to run a service's
 /// shell body against it the way `repo_script` would (with `$root` set and
-/// `set -e`), minus the tmux lookup.
-#[cfg(test)]
+/// `set -e`), minus the tmux lookup. Unix only: these bodies run in the
+/// host's bash, and a Windows runner's `bash` is not that shell.
+#[cfg(all(test, unix))]
 pub(crate) mod git_fixture {
     use crate::shell::quote;
     use std::path::Path;
@@ -1096,6 +1097,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no branch {name} in {bs:?}"))
     }
 
+    #[cfg(unix)]
     #[test]
     fn branches_flag_what_the_base_already_contains() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1117,6 +1119,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn branches_without_any_base_flag_nothing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1148,6 +1151,7 @@ mod tests {
         assert!(!b.merged);
     }
 
+    #[cfg(unix)]
     #[test]
     fn blame_splits_a_file_into_commits_and_uncommitted_lines() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1182,6 +1186,7 @@ mod tests {
         assert_eq!(capped.iter().map(|h| h.lines).sum::<u32>(), 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn blame_of_an_untracked_file_is_git_s_error() {
         let tmp = tempfile::tempdir().unwrap();
