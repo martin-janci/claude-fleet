@@ -346,3 +346,11 @@
   background: var(--accent-soft);
   color: var(--fg);
 }
+
+/* ── AI pre-selection ──
+   A field a proposal filled (redesign step 3.11, manual ai.md) keeps this
+   1px inset accent line until the person touches it. Not a focus ring: the
+   field's own focus ring still shows over it. */
+.ai-pre {
+  box-shadow: inset 0 0 0 1px var(--ai-pre);
+}
