@@ -25,7 +25,7 @@
     type WorkRef,
   } from './work';
   import { workTickets, type TicketRow } from './trackers';
-  import { timeAgo } from './session_status';
+  import { shortAge } from './session_status';
   import {
     ackWorkLink,
     conflictNotice,
@@ -35,6 +35,7 @@
     readErrorText,
     reconsiderWorkLink,
     reviewKindLabel,
+    reviewProposal,
     setPrimaryWork,
     taskLabel,
     undoOf,
@@ -48,6 +49,8 @@
     type SessionTaskLink,
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
+  import ProposedBy from './ProposedBy.svelte';
+  import { uiLayout } from './prefs';
   import type { IpcError, Result } from './result';
 
   let {
@@ -557,13 +560,25 @@
             <span class="kind kind--{it.kind}" data-testid="work-review-kind">{reviewKindLabel(it.kind)}</span>
             <button class="link" type="button" title="Open the task" onclick={() => openTask(it.task.task_id, [{ session_id: it.session_id }])}>{taskLabel(it.task)}</button>
           </div>
+          {#if $uiLayout === 'new' && it.kind === 'suggestion' && it.proposed_by}
+            <!-- Redesign 6.8: the decision model's suggestion (J1) says so,
+                 with its reason; Change opens the same panel as Change….
+                 New layout only; Classic keeps the why line, which names
+                 Jev too. -->
+            <ProposedBy
+              proposal={reviewProposal(it)}
+              field="work_link"
+              testid="work-review-proposed-by"
+              onchange={mine === null && !busy ? () => openChange(it) : undefined}
+            />
+          {/if}
           <div class="sub">
             <button class="link muted" type="button" title="Open the session" onclick={() => openSession(it)}
               >{sessionName(it)}{#if it.host}&nbsp;· {it.host}{/if}</button
             >
             {#if it.confidence != null}<span class="conf" class:conf--high={isHighConfidence(it)} title="Confidence from detection" data-testid="work-review-confidence">{it.confidence}%</span>{/if}
             {#if it.strength}<span class="muted">· {it.strength}{#if it.rule}&nbsp;{it.rule}{/if}</span>{/if}
-            {#if it.created_at}<span class="muted">· {timeAgo(it.created_at)}</span>{/if}
+            {#if it.created_at}<span class="muted">· {shortAge(it.created_at)}</span>{/if}
           </div>
           {#each it.why ?? [] as w, wi (wi)}
             <p class="why" data-testid="work-review-why">{w}</p>
@@ -673,8 +688,8 @@
   }
   .kind--cross_org,
   .kind--unavailable {
-    color: var(--usage-warn, #b45309);
-    border-color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
+    border-color: var(--usage-warn);
   }
   .link {
     background: none;
@@ -696,7 +711,7 @@
   }
   .fail {
     margin: 0.1rem 0 0 1.4rem;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 11px;
   }
   .actions {
@@ -736,6 +751,6 @@
     color: var(--fg);
   }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
 </style>

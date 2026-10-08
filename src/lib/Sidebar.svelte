@@ -30,6 +30,7 @@
   import OnboardingCard from './OnboardingCard.svelte';
   import { hostFilter, effectiveHostFilter, hosts } from './hosts';
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
+  import { moveToHeadroom } from './account_limits';
   import {
     effectiveScope,
     scopeFilter,
@@ -100,6 +101,7 @@
   } from './attention';
   import { attentionIdleMinutes } from './notify';
   import { attentionFacts } from './attention_facts';
+  import { snapshotRows } from './motion_catalog';
   import { push, pushError } from './toasts';
   import { hubStatus, hubBlock, hubActionBlocked } from './hub';
   import { hubConnection, connectionBanner } from './hub_connection';
@@ -526,6 +528,25 @@
     });
   }
   const bulkArchiveBlocked = $derived(archiveBlocked(selectedRows));
+  /** Bulk Switch account (step 4.4): each selected row this person may
+   *  restart and whose account is past `accounts.pause_at` resumes under the
+   *  login on its host with the most headroom; the rest stay as they are. */
+  const bulkMoveTargets = $derived(bulkTargets(selectedRows, 'restart_session', $sessionBlocked));
+  const bulkMoveAccountBlocked = $derived(
+    hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
+      (selectedRows.length > 0 && bulkMoveTargets.length === 0 ? 'None of the selected sessions is yours to restart.' : null),
+  );
+  async function bulkMoveAccount() {
+    const r = await moveToHeadroom(bulkMoveTargets, restartSession);
+    clearSelected();
+    const parts = [
+      r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
+      r.stayed > 0 ? `${r.stayed} still under the line` : '',
+      r.nowhere > 0 ? `${r.nowhere} with no other login that has room` : '',
+      r.failed > 0 ? `${r.failed} failed` : '',
+    ].filter(Boolean);
+    push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
+  }
   /** Clean up's targets: the rows this person may Safe remove (`own`). */
   const bulkCleanUpTargets = $derived(bulkTargets(selectedRows, 'safe_kill_session', $sessionBlocked));
   const bulkCleanUpBlocked = $derived(
@@ -910,6 +931,13 @@
     $sidebarView === 'inbox' ? [...filtered.flatMap((r) => sessionsForProject(r.project.id)), ...orphanSessions] : [],
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
+  // Redesign step 7.4: a row whose state moves it to another group is a new
+  // element there; snapshot every row's place before the groups re-render so
+  // the new one slides from where the old one was (motion_catalog.slideIn).
+  $effect.pre(() => {
+    void [flatGroups, workGroups, inboxList, orphanSessions];
+    untrack(() => snapshotRows(sidebarEl));
+  });
   const inboxRestText = $derived(notWaitingText(notWaiting(inboxPool, attentionOpts)));
 
   // Interactive Claude sessions running entirely outside fleet (Claude
@@ -1358,6 +1386,8 @@
     onBulkKill={() => ((bulkKillMode = 'kill'), (bulkKillOpen = true))}
     onBulkCleanUp={() => ((bulkKillMode = 'cleanup'), (bulkKillOpen = true))}
     onBulkArchive={() => void bulkArchive()}
+    onBulkMoveAccount={() => void bulkMoveAccount()}
+    {bulkMoveAccountBlocked}
     {bulkArchiveBlocked}
     {bulkCleanUpBlocked}
     {clearSelected}
@@ -1919,7 +1949,7 @@
     font-size: 0.9rem;
     line-height: 1;
     cursor: pointer;
-    min-width: 1.6rem;
+    min-width: var(--control-h);
   }
   .icon-btn:hover:not(:disabled) {
     color: var(--fg);
@@ -1930,7 +1960,7 @@
   .icon-btn.small {
     padding: 0.1rem 0.35rem;
     font-size: 0.85rem;
-    min-width: 1.4rem;
+    min-width: var(--control-h);
     border-color: transparent;
   }
   .icon-btn.small:hover { border-color: var(--border); }
@@ -1999,10 +2029,10 @@
     vertical-align: middle;
   }
   .work-dot.dot-progress {
-    background: var(--accent, #3b82f6);
+    background: var(--accent);
   }
   .work-dot.dot-done {
-    background: var(--ok, #22c55e);
+    background: var(--status-done);
   }
   .work-title {
     margin-left: 0.4rem;
@@ -2027,7 +2057,7 @@
   }
   .work-reopened {
     font-size: 11px;
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
     white-space: nowrap;
   }
   .archived-wrap {
@@ -2076,7 +2106,7 @@
   }
   .past-purged {
     font-size: 11px;
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
   .purge-work {
     margin: 0.5rem 0 0;
@@ -2196,7 +2226,7 @@
   .purge-btn {
     opacity: 0;
     transition: opacity var(--dur-base);
-    color: var(--color-error, #f44336);
+    color: var(--danger);
   }
   /* UX-04: `.icon-btn:disabled { opacity: 0.6 }` outranks `opacity: 0` here,
      so before this rule the purge button was INVISIBLE exactly when it

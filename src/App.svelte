@@ -12,6 +12,7 @@
   import Sidebar from './lib/Sidebar.svelte';
   import Details from './lib/Details.svelte';
   import SessionTabs, { type SessionTab } from './lib/SessionTabs.svelte';
+  import { openInEditorIfAllowed } from './lib/editor';
   import { todayOpen } from './lib/today';
   import {
     bumpWorkChanged,
@@ -33,6 +34,8 @@
   import HostsView from './lib/HostsView.svelte';
   import ConversationPanel from './lib/ConversationPanel.svelte';
   import AssetsPanel from './lib/AssetsPanel.svelte';
+  import Toolkit from './lib/Toolkit.svelte';
+  import { toolkitTab } from './lib/toolkit_skills';
   import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
   import type { RailId } from './lib/rail';
@@ -96,6 +99,7 @@
   import HubUnavailableBanner from './lib/HubUnavailableBanner.svelte';
   import { startHubConnection, setGapHandler, hubConnection } from './lib/hub_connection';
   import StatusBarMark from './lib/StatusBarMark.svelte';
+  import ShellHeader from './lib/ShellHeader.svelte';
   import StartupSplash from './lib/StartupSplash.svelte';
   import UpdateReveal from './lib/UpdateReveal.svelte';
   import { markStartup, startCatchUp, takeUpdateReveal, trackActivity } from './lib/startup';
@@ -734,7 +738,15 @@
     if (!$selectedSession) return;
     goTo('files');
   }
+  // Every Assets entry point (the Classic tab, the sidebar, the quick
+  // switcher) opens Toolkit's Assets tab in the New layout (step 3.16).
   function showAssets() {
+    toolkitTab.set('assets');
+    goTo('assets');
+  }
+  // The rail's Toolkit reopens the tab it showed last.
+  function showToolkit() {
+    closeHosts();
     goTo('assets');
   }
   function showAccounts() {
@@ -752,6 +764,7 @@
       sidebarView.set(id);
       if (hostsMode || accountsMode || assetsMode) showSession();
     } else if (id === 'accounts') showAccounts();
+    else if (id === 'toolkit') showToolkit();
     else if (id === 'settings') settingsOpen.set(true);
   }
   // The task board (sprints design 2026-09-28 §6c) is an overlay over the
@@ -919,6 +932,7 @@
     else if (chord === 'scope') (get(sidebarView) === 'work' ? cycleWorkOrg : cycleScope)();
     else if (chord === 'today') todayOpen.update((v) => !v);
     else if (chord === 'inspector') toggleInspector();
+    else if (chord === 'open-in-editor') void openInEditorIfAllowed($selectedSession, selAccess);
     else if (chord === 'work-view') {
       sidebarCollapsed = false;
       toggleSidebarView();
@@ -1057,6 +1071,8 @@
 {/if}
 
 {#if $uiLayout === 'new'}
+  <!-- Redesign 3.17: the Main board's header, above everything else. -->
+  <ShellHeader mac={isMac} />
   <StartupSplash onhubsettings={() => settingsOpen.set(true)} />
   {#if revealVersion}
     <UpdateReveal version={revealVersion} onclose={() => (revealVersion = null)} />
@@ -1071,7 +1087,7 @@
     hubUrl={$hubStatus.configured_url}
     onsettings={() => settingsOpen.set(true)} />
 {/if}
-<main class="layout" style="grid-template-columns: {gridTemplate};">
+<main class="layout" class:with-header={$uiLayout === 'new'} style="grid-template-columns: {gridTemplate};">
   {#if $uiLayout === 'new'}
     <AppRail {isMac} onselect={onRailSelect} />
   {/if}
@@ -1308,7 +1324,11 @@
       {/if}
       {#if assetsMode}
         <div class="view-slot overlay" data-testid="assets-overlay">
-          <AssetsPanel visible={assetsMode} />
+          {#if newLayout}
+            <Toolkit visible={assetsMode} />
+          {:else}
+            <AssetsPanel visible={assetsMode} />
+          {/if}
         </div>
       {/if}
       {#if accountsMode}
@@ -1369,7 +1389,7 @@
       data-testid="footer-downloads"
       title="Files sessions sent to your devices"
       onclick={() => (showDownloads = true)}
-      >⤓ Downloads{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
+      >⤓ Downloads…{unseenDownloads > 0 ? ` (${unseenDownloads})` : ''}</button
     >
     {#if trackersLine}
       <!-- Work graph M12.4: the tracker roll-up, re-read by TrackerAttention. -->
@@ -1443,6 +1463,10 @@
     height: calc(100vh - var(--status-h));
     width: 100vw;
     background: var(--bg);
+  }
+  /* The new layout's header (3.17) occupies --header-h above the grid. */
+  .layout.with-header {
+    height: calc(100vh - var(--status-h) - var(--header-h));
   }
   .status {
     /* border-box: --status-h is the occupied height, border included. */

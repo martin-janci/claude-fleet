@@ -359,6 +359,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("set_mission_state", Verdict::Routed { tool: "work_link" }),
     ("set_mission_repo", Verdict::Routed { tool: "work_link" }),
     ("set_mission_item", Verdict::Routed { tool: "work_link" }),
+    ("import_mission_plan", Verdict::Routed { tool: "work_link" }),
     ("delete_mission", Verdict::Routed { tool: "work_link" }),
     // Orchestration O2: the mission graph's writes.
     ("set_work_dep", Verdict::Routed { tool: "work_link" }),
@@ -767,6 +768,7 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("get_form", Verdict::Routed { tool: "ask" }),
     ("answer_form", Verdict::Routed { tool: "ask" }),
     ("decline_form", Verdict::Routed { tool: "ask" }),
+    ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "list_debug_devices",
         Verdict::Routed {
@@ -1045,10 +1047,24 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "account_spend",
+        Verdict::LocalOnly {
+            instead: "this app collects no usage while a hub owns the fleet, so its store \
+                      has no spend per account; read usage on the hub",
+        },
+    ),
+    (
         "account_usage_history",
         Verdict::LocalOnly {
             instead: "this app does not poll account usage while a hub owns the fleet, so \
                       it keeps no history; read usage on the hub",
+        },
+    ),
+    (
+        "check_account_headroom",
+        Verdict::LocalOnly {
+            instead: "this app does not poll account usage while a hub owns the fleet, so \
+                      it cannot tell which account has headroom; start the session as usual",
         },
     ),
     (
@@ -1595,6 +1611,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         "pty_drain",
         Verdict::SameInBoth {
             why: "the same as pty_write",
+        },
+    ),
+    (
+        "open_session_in_editor",
+        Verdict::SameInBoth {
+            why: "the same story as pty_open: VS Code and the `ssh` that asks the pane \
+                  for its folder are this machine's, built from the alias and tmux name \
+                  passed in; it reads no state.db and the hub is not in the path",
         },
     ),
     // ── the voice relay's microphone claim ──────────────────────────────────

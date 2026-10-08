@@ -91,6 +91,8 @@
     onBulkKill,
     onBulkCleanUp,
     onBulkArchive,
+    onBulkMoveAccount,
+    bulkMoveAccountBlocked = null,
     bulkArchiveBlocked = null,
     bulkCleanUpBlocked = null,
     clearSelected,
@@ -119,6 +121,10 @@
     onBulkCleanUp?: () => void;
     /** Archive into the work's Done, with Undo (step 1.7). */
     onBulkArchive?: () => void;
+    /** Move each selected session past the line to the login on its host
+     *  with the most headroom (step 4.4; the New layout only). */
+    onBulkMoveAccount?: () => void;
+    bulkMoveAccountBlocked?: string | null;
     bulkArchiveBlocked?: string | null;
     bulkCleanUpBlocked?: string | null;
     clearSelected: () => void;
@@ -740,6 +746,15 @@
           onclick={() => onBulkArchive()}
         >Archive</button>
       {/if}
+      {#if onBulkMoveAccount && $uiLayout === 'new'}
+        <button
+          class="btn btn--chip"
+          data-testid="bulk-move-account"
+          disabled={bulkMoveAccountBlocked !== null}
+          title={bulkMoveAccountBlocked ?? 'Resume each session past its account’s limit under the login on its host with the most headroom'}
+          onclick={() => onBulkMoveAccount()}
+        >Switch account</button>
+      {/if}
       {#if onBulkCleanUp}
         <button
           class="btn btn--chip"
@@ -820,8 +835,8 @@
     border-radius: var(--radius-pill);
     font-size: var(--control-font-sm);
     line-height: 16px;
-    background: var(--usage-crit);
-    color: #fff;
+    background: var(--danger-fill);
+    color: var(--on-danger);
   }
   .search {
     flex: 1;

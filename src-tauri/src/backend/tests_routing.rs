@@ -686,6 +686,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "list_pull_requests",
+            "prs",
+            json!({ "action": "list", "state": "open" }),
+            r#"{"items":[],"total":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::prs::routed::list_pull_requests(
+                    b,
+                    s,
+                    fleet_core::service::prs::PrsArgs {
+                        action: "list".into(),
+                        state: Some("open".into()),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_debug_devices",
             "debug_devices",
             json!({ "action": "list" }),
@@ -3604,6 +3622,31 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "import_mission_plan",
+            "work_link",
+            json!({ "session_id": null, "action": "mission_import", "key": null, "item_id": null,
+                    "link_id": null, "source": null, "mission_id": 4,
+                    "plan": [{ "step": "1.1", "title": "Schema", "lane": "A", "needs": ["0.9"] }] }),
+            r#"{"created":1,"updated":0,"unchanged":0,"deps_added":0,"deps_removed":0}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::missions::routed::import_mission_plan(
+                    b,
+                    commands::missions::ImportMissionPlanArgs {
+                        mission_id: 4,
+                        plan: vec![fleet_core::service::work::plan_import::PlanRow {
+                            step: "1.1".into(),
+                            title: "Schema".into(),
+                            lane: Some("A".into()),
+                            needs: vec!["0.9".into()],
+                            status: None,
+                        }],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "delete_mission",
             "work_link",
             json!({ "session_id": null, "action": "mission_delete", "key": null, "item_id": null,
@@ -5807,6 +5850,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/downloads.rs",
         include_str!("../commands/downloads.rs"),
     ),
+    ("commands/editor.rs", include_str!("../commands/editor.rs")),
     ("commands/files.rs", include_str!("../commands/files.rs")),
     ("commands/health.rs", include_str!("../commands/health.rs")),
     (
@@ -5834,6 +5878,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/debug_devices.rs",
         include_str!("../commands/debug_devices.rs"),
     ),
+    ("commands/prs.rs", include_str!("../commands/prs.rs")),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",

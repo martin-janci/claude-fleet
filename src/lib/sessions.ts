@@ -2,6 +2,7 @@ import { writable } from 'svelte/store';
 import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import type { DecisionProposal } from './proposals';
 
 /** The `claude_status` vocabulary (pane_intel `ClaudeStatus`). Anything the
  *  backend has not classified arrives as `null`. */
@@ -58,6 +59,9 @@ export interface PrEvidence {
   state?: string;
   checks: CheckSummary;
 }
+
+/** `sessions.turn_outcome` (migration 129). */
+export type TurnOutcome = 'finished' | 'asked' | 'stuck' | 'working' | 'unsure';
 
 /** `sessions.origin` (migration 124). */
 export type SessionOrigin = 'person' | 'operator' | 'mission' | 'background' | 'token' | 'routine';
@@ -188,6 +192,10 @@ export interface SessionRow {
     /** A multi-select question: a digit TOGGLES an option, `Tab` moves on
      *  with the ticks kept (see `AnswerPrompt.svelte`). Absent = false. */
     multi?: boolean;
+    /** What a permission dialog asks to run, from the tool-call line above
+     *  it (`Bash(git push …)`). Absent when the pane shows none, and from a
+     *  hub older than redesign 5.9. */
+    detail?: string;
   } | null;
   // Chat forms (migration 119): the form this session's agent asked and is
   // waiting on. Optional: an older hub sends none.
@@ -240,6 +248,12 @@ export interface SessionRow {
    *  seconds. A turn that ended after it is unread; absent for a row nobody
    *  has opened since fleet found it. */
   last_viewed_at?: number | null;
+  /** What a finished turn came to when hooks said nothing (migration 129,
+   *  J2 in step 5.11); a hook event always wins over it. */
+  turn_outcome?: TurnOutcome | null;
+  /** What a rule, Jev or an LLM proposes about the session, one per
+   *  feature (redesign 2.8). Absent when nothing proposes anything. */
+  proposals?: DecisionProposal[];
   /** A digest of the versions and ids of the session's live (non-ended)
    *  work links (work graph M14): it moves whenever any of them changes —
    *  added, removed, primary, state — a secondary link too. Absent = 0 (no

@@ -16,9 +16,11 @@
  * whatever the hub answered.
  */
 
+import type { ProposalLike } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
+import type { DecisionProposal } from './proposals';
 import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
 import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
 import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
@@ -185,6 +187,9 @@ export interface WorkTask {
   blocked_by?: string[];
   /** Spend of its sessions in micro-USD, each session once. Absent when 0. */
   cost_micros?: number;
+  /** What a rule, Jev or an LLM proposes about the task (redesign 2.8).
+   *  Absent when nothing proposes anything. */
+  proposals?: DecisionProposal[];
   last_activity_at?: number | null;
   repos?: string[];
   /** 0 = no placement. */
@@ -411,6 +416,31 @@ export interface ReviewItem {
   preselected?: boolean;
   alternatives?: { link_id?: number | null; task_id: string; key?: string | null; title?: string | null }[];
   created_at?: number;
+  /** Who proposed it when no rule read it off a signal: the decision
+   *  model's suggestion (J1, rule R12, redesign 6.8). Absent otherwise, and
+   *  from an older hub. */
+  proposed_by?: ReviewProposer | null;
+}
+
+/** `ReviewItem.proposed_by` (`work::view::ReviewProposer`). */
+export interface ReviewProposer {
+  source: 'jev' | 'rule' | 'llm';
+  /** Why, in fleet's words ("from the first prompt"). */
+  reason: string;
+  confidence_pct?: number | null;
+}
+
+/** The proposal `ProposedBy` shows for a Review item, or null for a rule's
+ *  own reading. */
+export function reviewProposal(it: Pick<ReviewItem, 'proposed_by' | 'task'>): ProposalLike | null {
+  const p = it.proposed_by;
+  if (!p) return null;
+  return {
+    value: it.task.key ?? it.task.task_id,
+    source: p.source,
+    reason: p.reason,
+    confidence_pct: p.confidence_pct ?? null,
+  };
 }
 
 export interface ReviewPage {

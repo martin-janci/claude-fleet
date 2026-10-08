@@ -481,6 +481,8 @@ fn row(
         origin: None,
         origin_ref: None,
         last_viewed_at: None,
+        turn_outcome: None,
+        proposals: Vec::new(),
         pending_form: None,
         parent_session_id: None,
         tags: Vec::new(),

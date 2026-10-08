@@ -1343,7 +1343,7 @@
       <div class="ctx-menu" style="left:{ctxMenu.x}px; top:{ctxMenu.y}px" data-testid="terminal-ctx-menu">
         <button onclick={ctxCopy} disabled={!selAnchor || !selFocus}>Copy</button>
         <button onclick={ctxPaste}>Paste</button>
-        <button onclick={ctxSelectAll}>Select All</button>
+        <button onclick={ctxSelectAll}>Select all</button>
       </div>
     {/if}
     {#if openError}

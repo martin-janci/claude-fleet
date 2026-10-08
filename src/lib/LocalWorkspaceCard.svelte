@@ -211,7 +211,7 @@
           disabled={busy}
           data-testid="lw-review"
           onclick={() => (reviewing = true)}
-        >Review changes</button>
+        >Review changes…</button>
         {#if localN > 0}
           <button
             class="ghost small"
@@ -230,7 +230,7 @@
     {:else}
       <div class="row">
         <button class="ghost small" disabled={busy} data-testid="lw-review" onclick={() => (reviewing = true)}
-          >Review changes</button
+          >Review changes…</button
         >
       </div>
     {/if}
@@ -333,7 +333,7 @@
         disabled={busy}
         data-testid="lw-disconnect"
         onclick={() => (confirmDisconnect = true)}
-      >Disconnect</button>
+      >Disconnect…</button>
       <button class="ghost" data-testid="lw-overview-open" onclick={() => (overview = true)}
         >All local workspaces…</button
       >
