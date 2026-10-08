@@ -237,7 +237,7 @@
     margin: 0;
     padding: 0.4rem 0.6rem;
     font-size: 0.78rem;
-    color: rgb(220, 130, 130);
+    color: var(--status-failed);
     flex: none;
   }
   .blank {

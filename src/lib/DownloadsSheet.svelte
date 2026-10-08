@@ -237,7 +237,7 @@
     color: var(--fg-muted);
   }
   .err {
-    color: var(--danger, #d33);
+    color: var(--danger);
   }
   .actions {
     display: flex;

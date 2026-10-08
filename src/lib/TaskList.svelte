@@ -422,7 +422,7 @@
     flex: none;
   }
   .needs {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 0.55rem;
   }
   .meta {
@@ -468,12 +468,12 @@
     white-space: nowrap;
   }
   .prop {
-    background: color-mix(in srgb, var(--usage-warn, #b45309) 14%, transparent);
-    color: var(--usage-warn, #b45309);
+    background: var(--accent-soft);
+    color: var(--fg);
   }
   .agent {
-    background: color-mix(in srgb, #7c3aed 12%, transparent);
-    color: #7c3aed;
+    background: var(--chip-bg);
+    color: var(--fg-2);
   }
   .children {
     margin: 0 0 4px 24px;
@@ -507,8 +507,8 @@
     border-color: var(--accent);
   }
   .dot--done {
-    background: var(--usage-ok, #2e7d32);
-    border-color: var(--usage-ok, #2e7d32);
+    background: var(--usage-ok);
+    border-color: var(--usage-ok);
   }
   .muted {
     color: var(--fg-muted);
@@ -516,7 +516,7 @@
     margin: 0;
   }
   .err {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     padding: 4px;
     margin: 0;
   }

@@ -430,20 +430,10 @@
     color: var(--diff-del-fg);
   }
   .detail {
-    --diff-add-fg: #1a7f37;
-    --diff-del-fg: #cf222e;
-    --diff-add-bg: rgba(46, 160, 67, 0.14);
-    --diff-del-bg: rgba(248, 81, 73, 0.14);
-  }
-  :global(:root[data-theme='dark']) .detail {
-    --diff-add-fg: #3fb950;
-    --diff-del-fg: #f85149;
-  }
-  @media (prefers-color-scheme: dark) {
-    :global(:root:not([data-theme='light'])) .detail {
-      --diff-add-fg: #3fb950;
-      --diff-del-fg: #f85149;
-    }
+    --diff-add-fg: var(--status-done);
+    --diff-del-fg: var(--status-failed);
+    --diff-add-bg: var(--done-soft);
+    --diff-del-bg: var(--failed-soft);
   }
   .code {
     margin: 0 0 0.35rem;

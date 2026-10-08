@@ -299,7 +299,7 @@
     outline: none;
   }
   .review-sheet:focus-visible {
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
   }
   .review-head {
     display: flex;
@@ -320,7 +320,7 @@
     border-radius: 4px;
   }
   .review-row.cursor {
-    background: var(--bg-hover, rgba(127, 127, 127, 0.15));
+    background: var(--bg-hover);
   }
   .key {
     font-family: var(--font-mono, ui-monospace, monospace);

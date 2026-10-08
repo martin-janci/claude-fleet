@@ -142,8 +142,8 @@
     box-sizing: border-box;
     border-radius: var(--radius-pill);
     /* The Sessions tab's needs-you badge, so the two read as one count. */
-    background: var(--usage-crit);
-    color: #fff;
+    background: var(--danger-fill);
+    color: var(--on-danger);
     font-size: 10px;
     font-weight: 600;
     line-height: 16px;

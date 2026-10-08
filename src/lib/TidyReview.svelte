@@ -548,7 +548,7 @@
     outline: var(--ring-w) solid var(--ring);
   }
   .reopened-pill {
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
   }
   .tidy-sheet {
     order: 1;
@@ -565,7 +565,7 @@
     outline: none;
   }
   .tidy-sheet:focus-visible {
-    border-color: var(--accent, #3b82f6);
+    border-color: var(--accent);
   }
   .sheet-head,
   .sheet-foot {
@@ -604,7 +604,7 @@
     border-radius: 4px;
   }
   .tidy-row.cursor {
-    background: var(--bg-hover, rgba(127, 127, 127, 0.15));
+    background: var(--bg-hover);
   }
   .key {
     font-family: var(--font-mono, ui-monospace, monospace);
@@ -613,14 +613,14 @@
     color: var(--fg-muted);
   }
   .warn {
-    color: var(--usage-warn, #b7791f);
+    color: var(--usage-warn);
     font-size: 0.65rem;
   }
   .badge {
-    color: var(--accent, #3b82f6);
+    color: var(--accent);
   }
   .armed {
-    color: var(--usage-warn, #b7791f);
-    border-color: var(--usage-warn, #b7791f);
+    color: var(--usage-warn);
+    border-color: var(--usage-warn);
   }
 </style>

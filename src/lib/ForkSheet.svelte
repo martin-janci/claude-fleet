@@ -165,7 +165,7 @@
   .hint {
     margin: 0 0 0.6rem;
     font-size: 0.85em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .choices {
     border: none;
@@ -191,7 +191,7 @@
     line-height: 1.3;
   }
   .recommended {
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
     font-size: 0.85em;
   }
   .new-worktree-fields {
@@ -202,20 +202,20 @@
   }
   .new-worktree-fields label {
     font-size: 0.8em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .note {
     margin: 0.2rem 0 0;
     font-size: 0.8em;
-    color: var(--fg-muted, #999);
+    color: var(--fg-muted);
   }
   .problem {
     margin: 0.2rem 0 0;
     font-size: 0.8em;
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
   .err {
-    color: var(--danger, #e5534b);
+    color: var(--danger);
   }
   .actions {
     display: flex;

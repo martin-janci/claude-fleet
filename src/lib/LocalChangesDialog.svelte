@@ -257,7 +257,7 @@
     padding: 0.2rem 0.35rem;
     font-size: 0.8rem;
   }
-  .files li.current { background: var(--bg-hover, rgba(127, 127, 127, 0.12)); }
+  .files li.current { background: var(--bg-hover); }
   .file {
     flex: 1;
     min-width: 0;

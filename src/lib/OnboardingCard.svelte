@@ -194,13 +194,13 @@
   .x {
     background: none;
     border: none;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     cursor: pointer;
     font-size: 0.85rem;
   }
   .prog {
     font-size: 0.7rem;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     margin-bottom: 7px;
   }
   .pbar {
@@ -238,7 +238,7 @@
     opacity: 0.8;
   }
   .step.muted .body {
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
   }
   .ic {
     width: 17px;
@@ -253,7 +253,7 @@
   }
   .ic.done {
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
   }
   .ic.active {
     border: 1.5px solid var(--accent);
@@ -269,7 +269,7 @@
   }
   .opt {
     font-size: 0.6rem;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     border: 1px solid var(--border);
     border-radius: 9px;
     padding: 0 5px;
@@ -277,7 +277,7 @@
   }
   .sub {
     font-size: 0.68rem;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
   }
   .badge {
     font-size: 0.62rem;
@@ -287,16 +287,16 @@
     align-self: flex-start;
   }
   .badge.up {
-    background: #e7f6ec;
-    color: #1a7f37;
+    background: var(--done-soft);
+    color: var(--status-done);
   }
   .badge.warn {
-    background: #fdf1e3;
-    color: #b06a00;
+    background: var(--waiting-soft);
+    color: var(--status-waiting);
   }
   .err {
     font-size: 0.7rem;
-    color: #c0392b;
+    color: var(--status-failed);
     margin: 6px 0 0;
   }
   .done-msg {
@@ -306,7 +306,7 @@
   .dismiss-all {
     font-size: 0.8rem;
     background: var(--accent);
-    color: #fff;
+    color: var(--accent-fg);
     border: none;
     border-radius: 6px;
     padding: 5px 10px;
@@ -318,7 +318,7 @@
     gap: 8px;
     padding: 4px 0 4px 26px;
     font-size: 0.68rem;
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     border-top: 1px solid var(--border);
     flex-wrap: wrap;
   }
@@ -340,7 +340,7 @@
   .mcp-copy {
     background: transparent;
     border: 1px solid var(--border);
-    color: var(--fg-muted, #777);
+    color: var(--fg-muted);
     cursor: pointer;
     padding: 1px 6px;
     font-size: 0.62rem;

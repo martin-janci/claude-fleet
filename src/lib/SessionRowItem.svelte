@@ -1120,10 +1120,10 @@
     flex-shrink: 0;
     background: var(--fg-muted);
   }
-  .status-dot.status-running { background: rgb(80, 200, 110); }
-  .status-dot.status-frozen { background: rgb(140, 180, 240); }
-  .status-dot.status-orphan { background: rgb(220, 130, 130); }
-  .status-dot.status-ghost { background: rgb(160, 120, 200); opacity: 0.55; }
+  .status-dot.status-running { background: var(--status-done); }
+  .status-dot.status-frozen { background: var(--status-working); }
+  .status-dot.status-orphan { background: var(--status-failed); }
+  .status-dot.status-ghost { background: var(--status-idle); opacity: 0.55; }
   .lost-at {
     font-size: 0.7em;
     opacity: 0.6;
@@ -1212,7 +1212,7 @@
     gap: 0.3rem;
     align-items: center;
     font-size: 0.72rem;
-    color: var(--warn, #f59e0b);
+    color: var(--status-waiting);
   }
   .work-menu {
     display: flex;

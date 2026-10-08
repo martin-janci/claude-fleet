@@ -1275,9 +1275,9 @@
     letter-spacing: 0.04em;
     font-size: 0.65rem;
   }
-  .status-running { background: rgba(60, 180, 90, 0.18); color: rgba(80, 200, 110, 1); }
-  .status-frozen { background: rgba(110, 160, 230, 0.18); color: rgba(140, 180, 240, 1); }
-  .status-orphan { background: rgba(180, 100, 100, 0.18); color: rgba(220, 130, 130, 1); }
+  .status-running { background: var(--done-soft); color: var(--status-done); }
+  .status-frozen { background: var(--accent-soft); color: var(--status-working); }
+  .status-orphan { background: var(--failed-soft); color: var(--status-failed); }
 
   .meta {
     display: grid;
@@ -1388,9 +1388,9 @@
     line-height: 1.35;
   }
   .safe-kill-pill.pending {
-    background: rgba(110, 160, 230, 0.14);
-    color: rgba(140, 180, 240, 1);
-    border: 1px solid rgba(110, 160, 230, 0.4);
+    background: var(--accent-soft);
+    color: var(--status-working);
+    border: 1px solid color-mix(in srgb, var(--status-working) 40%, transparent);
   }
   .safe-kill-pill.failed {
     background: color-mix(in srgb, var(--danger) 12%, transparent);
@@ -1398,9 +1398,9 @@
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   }
   .safe-kill-pill.ready {
-    background: rgba(60, 180, 90, 0.15);
-    color: rgba(80, 200, 110, 1);
-    border: 1px solid rgba(60, 180, 90, 0.4);
+    background: var(--done-soft);
+    color: var(--status-done);
+    border: 1px solid color-mix(in srgb, var(--status-done) 40%, transparent);
   }
 
   .link {
@@ -1453,7 +1453,7 @@
     gap: 0.3rem;
   }
   .inspect-line { margin: 0; font-size: 0.8rem; color: var(--fg); }
-  .inspect-line.warn { color: #d29b4a; }
+  .inspect-line.warn { color: var(--status-waiting); }
   .dirty-list {
     margin: 0.2rem 0 0 0;
     padding: 0;
@@ -1470,7 +1470,7 @@
     padding: 0.05rem 0;
   }
   .status-code {
-    color: #d29b4a;
+    color: var(--status-waiting);
     width: 2ch;
     flex: 0 0 auto;
     white-space: pre;

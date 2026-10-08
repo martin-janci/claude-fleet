@@ -105,7 +105,7 @@
   .summary {
     flex-basis: 100%;
     margin-top: 4px;
-    border: 1px solid var(--border, #444);
+    border: 1px solid var(--border);
     border-radius: 4px;
     padding: 4px 6px;
     font-size: 11px;

@@ -104,7 +104,7 @@
     font-size: 0.75em;
     padding: 0 0.35rem;
     line-height: 1.5;
-    border: 1px solid var(--border, #444);
+    border: 1px solid var(--border);
     background: transparent;
     color: inherit;
     cursor: pointer;

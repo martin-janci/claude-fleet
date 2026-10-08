@@ -389,7 +389,7 @@
   }
   .err {
     padding: 8px 12px;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .columns {
     flex: 1;
@@ -525,7 +525,7 @@
     font-size: 0.65rem;
   }
   .needs {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 0.55rem;
     margin-left: auto;
   }
@@ -563,7 +563,7 @@
   .card-err {
     margin: 2px 2px 0;
     font-size: 0.72rem;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .ghost {
     position: fixed;

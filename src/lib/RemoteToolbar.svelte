@@ -54,5 +54,5 @@
   }
   .remote button:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
   .remote button:disabled { opacity: 0.5; cursor: default; }
-  .err { color: #f85149; font-weight: 700; cursor: help; }
+  .err { color: var(--status-failed); font-weight: 700; cursor: help; }
 </style>

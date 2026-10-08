@@ -103,7 +103,7 @@
   .summary {
     margin: 0;
     font-size: 0.75rem;
-    background: var(--bg-alt, rgba(127, 127, 127, 0.12));
+    background: var(--bg-sunk);
     padding: 0.4rem 0.5rem;
     border-radius: 4px;
     white-space: pre-wrap;

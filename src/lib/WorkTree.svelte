@@ -1053,12 +1053,12 @@
     flex: 0 0 auto;
   }
   .needs {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 0.6rem;
   }
   .review {
     font-weight: 700;
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .task-meta {
     display: flex;
@@ -1073,7 +1073,7 @@
     white-space: nowrap;
   }
   .down {
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .occurrences {
     padding-left: 1.4rem;
@@ -1155,10 +1155,10 @@
   .refresh-error {
     margin: 0.2rem 0.4rem;
     font-size: 0.75rem;
-    color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
   }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
   .error p {
     margin: 0 0 0.4rem;

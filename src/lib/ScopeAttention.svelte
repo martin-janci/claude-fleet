@@ -51,7 +51,7 @@
     cursor: pointer;
   }
   .pill.hot {
-    border-color: var(--warn, #f59e0b);
-    color: var(--warn, #f59e0b);
+    border-color: var(--status-waiting);
+    color: var(--status-waiting);
   }
 </style>

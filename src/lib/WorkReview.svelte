@@ -673,8 +673,8 @@
   }
   .kind--cross_org,
   .kind--unavailable {
-    color: var(--usage-warn, #b45309);
-    border-color: var(--usage-warn, #b45309);
+    color: var(--usage-warn);
+    border-color: var(--usage-warn);
   }
   .link {
     background: none;
@@ -696,7 +696,7 @@
   }
   .fail {
     margin: 0.1rem 0 0 1.4rem;
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
     font-size: 0.75rem;
   }
   .actions {
@@ -736,6 +736,6 @@
     color: var(--fg);
   }
   .error {
-    color: var(--usage-crit, #c62828);
+    color: var(--usage-crit);
   }
 </style>

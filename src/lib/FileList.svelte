@@ -321,28 +321,28 @@
     font-weight: 700;
   }
   .b-mod {
-    background: color-mix(in srgb, #d9a000 30%, transparent);
-    color: #d9a000;
+    background: var(--waiting-soft);
+    color: var(--status-waiting);
   }
   .b-add {
-    background: color-mix(in srgb, #3fb950 30%, transparent);
-    color: #3fb950;
+    background: var(--done-soft);
+    color: var(--status-done);
   }
   .b-del {
-    background: color-mix(in srgb, #f85149 30%, transparent);
-    color: #f85149;
+    background: var(--failed-soft);
+    color: var(--status-failed);
   }
   .b-ren {
-    background: color-mix(in srgb, #58a6ff 30%, transparent);
-    color: #58a6ff;
+    background: var(--accent-soft);
+    color: var(--status-working);
   }
   .b-unt {
     background: color-mix(in srgb, var(--fg-muted) 26%, transparent);
     color: var(--fg-muted);
   }
   .b-cnf {
-    background: color-mix(in srgb, #db6d28 32%, transparent);
-    color: #db6d28;
+    background: var(--failed-soft);
+    color: var(--status-failed);
   }
   .row-wrap {
     display: flex;

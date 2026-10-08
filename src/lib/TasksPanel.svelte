@@ -250,6 +250,6 @@
     margin: 0; font-size: 0.78rem; line-height: 1.35; white-space: pre-wrap; overflow-wrap: anywhere;
     max-height: 5.5rem; overflow: auto; padding: 0.3rem 0.45rem; border-radius: 4px;
   }
-  .result { background: rgba(60, 180, 90, 0.1); color: var(--fg); }
+  .result { background: var(--done-soft); color: var(--fg); }
   .error { background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
 </style>
