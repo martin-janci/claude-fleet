@@ -56,6 +56,7 @@
   import { effectiveScope, scopeOf } from './orgs';
   import { inScope } from './tidy';
   import { clearSessionFocus, focusSession } from './session_focus';
+  import { windowHidden } from './window_hidden';
 
   /** How often the candidates are re-read (they change on the scale of hours). */
   const REFRESH_MS = 60_000;
@@ -343,7 +344,9 @@
 
   onMount(() => {
     void refreshTidy();
-    timer = setInterval(() => void refreshTidy(), REFRESH_MS);
+    timer = setInterval(() => {
+      if (!windowHidden()) void refreshTidy();
+    }, REFRESH_MS);
     // A reopen toasts once; what was already open at the first read is the
     // baseline (the pill shows it).
     unsubscribe = reopenedLoads.subscribe((n) => {

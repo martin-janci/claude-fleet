@@ -7,7 +7,7 @@
   // Phases 2 and 3 add Open in…, what each side changed with Review changes,
   // who drives the worktree (Take over / Hand back to AI), Compare / Keep
   // both / Ask AI to resolve on a conflict, and the overview of every link.
-  import { onDestroy, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import type { SessionRow } from './sessions';
   import {
     localWorkspaces,
@@ -62,9 +62,14 @@
   const remoteN = $derived(link?.remote_activity ?? 0);
 
   // "Synced 3 s ago" keeps moving without a row event.
+  // Only while there is a link to say it about (review r16).
   let nowMs = $state(Date.now());
-  const clock = setInterval(() => (nowMs = Date.now()), 1000);
-  onDestroy(() => clearInterval(clock));
+  $effect(() => {
+    if (!link) return;
+    nowMs = Date.now();
+    const clock = setInterval(() => (nowMs = Date.now()), 1000);
+    return () => clearInterval(clock);
+  });
 
   // The card outlives a switch to another session: what was typed for one
   // session must never be enabled for the next (it would bind this

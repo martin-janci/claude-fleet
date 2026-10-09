@@ -27,11 +27,16 @@
 
   onMount(() => {
     const d = setTimeout(() => (waited = true), LOADER_DELAY_MS);
+    return () => clearTimeout(d);
+  });
+  // The clock ticks only while startup is not done: the splash stays mounted
+  // for the app's life, and a 500 ms wake-up for nothing is not free (review
+  // r16). A later drop back to `hub` starts it again.
+  $effect(() => {
+    if (stage === 'done') return;
+    now = Date.now();
     const t = setInterval(() => (now = Date.now()), 500);
-    return () => {
-      clearTimeout(d);
-      clearInterval(t);
-    };
+    return () => clearInterval(t);
   });
 
   $effect(() => {

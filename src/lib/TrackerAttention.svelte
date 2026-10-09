@@ -17,6 +17,7 @@
   import { refreshTrackersHealth, trackerAttentionItems, trackersHealth } from './tracker_health';
   import { decideAttentionItem, decideHealth } from './decide_health';
   import { orgBudgetItems, orgBudgets } from './org_budget';
+  import { windowHidden } from './window_hidden';
 
   /** Tracker health moves on the sync's scale (minutes). */
   const REFRESH_MS = 60_000;
@@ -31,7 +32,7 @@
 
   onMount(() => {
     const t = setInterval(() => {
-      if (get(hubStatus).unavailable) return;
+      if (get(hubStatus).unavailable || windowHidden()) return;
       void refreshTrackersHealth();
     }, REFRESH_MS);
     return () => clearInterval(t);

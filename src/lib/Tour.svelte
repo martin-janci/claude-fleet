@@ -52,14 +52,16 @@
   });
 
   onMount(() => {
-    // The layout moves under the tour (panes resize, the inspector opens on
-    // ⌥⌘B), so the spotlight follows it.
-    const t = setInterval(measure, 500);
     window.addEventListener('resize', measure);
-    return () => {
-      clearInterval(t);
-      window.removeEventListener('resize', measure);
-    };
+    return () => window.removeEventListener('resize', measure);
+  });
+  // The layout moves under the tour (panes resize, the inspector opens on
+  // ⌥⌘B), so the spotlight follows it, while a tour runs and not otherwise:
+  // this component is mounted for the app's life (review r16).
+  $effect(() => {
+    if ($tourStep === null) return;
+    const t = setInterval(measure, 500);
+    return () => clearInterval(t);
   });
 
   function onKeydown(e: KeyboardEvent) {

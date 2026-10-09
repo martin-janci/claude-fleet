@@ -29,6 +29,7 @@
   import { hubStatus } from './hub';
   import { uiLayout } from './prefs';
   import WatchSummary from './WatchSummary.svelte';
+  import { windowHidden } from './window_hidden';
 
   let {
     session,
@@ -134,7 +135,10 @@
     error = null;
     lastAt = null;
     void refresh(id, true);
-    const t = setInterval(() => void refresh(id, false), POLL_MS);
+    // A hidden window skips the tick: each is a capture over SSH (review r16).
+    const t = setInterval(() => {
+      if (!windowHidden()) void refresh(id, false);
+    }, POLL_MS);
     return () => clearInterval(t);
   });
 
