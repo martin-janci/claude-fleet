@@ -58,6 +58,7 @@
     formatTokens,
     SOURCE_LABELS,
     sameConversation,
+    reuseTurns,
     isPinned,
     emptyStateText,
     agentLabel,
@@ -189,7 +190,9 @@
     thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
   } = $props();
 
-  let conv = $state<Conversation | null>(null);
+  // Raw: replaced whole on each read and never mutated, so a deep proxy only
+  // costs every read of a turn a trap (review r16 D3).
+  let conv = $state.raw<Conversation | null>(null);
   // The conversation `conv` was read from (the id the fetch named). Tool
   // details are read from it, not from the row's id at click time: the row
   // can move on (/clear, /resume) before a reload replaces the view.
@@ -369,7 +372,7 @@
       if (!sameConversation(conv, r.value)) {
         // Older turns prepended by Load older are history, not news.
         if (!pinned && !opts.older) unseen += newItemCount(conv, r.value);
-        conv = r.value;
+        conv = reuseTurns(conv, r.value);
         // Pushed events the read now carries are the backend's to keep (or
         // age out); holding copies would grow `pushed` without bound.
         const carried = new Set((conv.events ?? []).map((e) => e.id));
