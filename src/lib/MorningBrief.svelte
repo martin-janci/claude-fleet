@@ -101,7 +101,7 @@
   }
   .muted {
     color: var(--fg-muted);
-    font-size: 12px;
+    font-size: var(--text-xs);
     margin: 0;
   }
   .error {
