@@ -2,7 +2,7 @@
   // Read-only session event timeline (Q9). Renders the `session_events`
   // rows the backend already records (status changes, prompts, stuck,
   // kills, repairs, …) newest first, with filter chips.
-  import { untrack } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import {
     sessionHistory,
     eventCategory,
@@ -25,6 +25,7 @@
     sessionId,
     refreshKey = '',
     onEvents,
+    head,
   }: {
     sessionId: number;
     /** Any change re-fetches (the parent passes turn/status fields so a new
@@ -36,6 +37,9 @@
      *  `session_history` round trip. Optional: Timeline's other uses are
      *  unaffected when it is omitted. */
     onEvents?: (events: SessionEvent[]) => void;
+    /** Pinned above the events whatever their state: the session's J1
+     *  suggested link (redesign 6.8, `TimelineWorkProposal`). */
+    head?: Snippet;
   } = $props();
 
   let events = $state<SessionEvent[]>([]);
@@ -123,6 +127,7 @@
     </div>
   </div>
 
+  {@render head?.()}
   {#if loading}
     <Skeleton />
   {:else if error}

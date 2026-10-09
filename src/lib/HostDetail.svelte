@@ -50,6 +50,7 @@
   import { CHECK_GLYPH, checklistLoaderText, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
   import { uiLayout } from './prefs';
   import Loader from './Loader.svelte';
+  import AgentInstallAction from './AgentInstallAction.svelte';
   import LostTargetForm from './LostTargetForm.svelte';
   import { isOutsideFleet, needsRestoreInto, placeTranscript } from './lost_found';
 
@@ -108,7 +109,11 @@
   let checking = $state(false);
   let provisioning = $state(false);
   const lastCheck = $derived($hostChecks.get(host.alias) ?? null);
-  const checklist = $derived(checklistRows({ host, check: lastCheck, inventory: $inventory, hubVersion }));
+  // Orbit Fleet 4.9: a paired desktop's hub accepts agents, so an SSH host's
+  // fleet-agent row offers the install job.
+  const checklist = $derived(
+    checklistRows({ host, check: lastCheck, inventory: $inventory, hubVersion, agentsAccepted: $hubStatus.remote }),
+  );
   const checkBlocked = $derived(hubBlock('check_host', $hubStatus));
   const provisionBlocked = $derived(hubBlock('provision_hosts', $hubStatus));
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
@@ -578,6 +583,11 @@
           <span class="check-glyph" aria-hidden="true">{CHECK_GLYPH[row.state]}</span>
           <span class="check-label">{row.label}</span>
           <span class="check-detail">{row.detail}</span>
+          {#if row.install}
+            <span class="check-action">
+              <AgentInstallAction alias={host.alias} version={hubVersion} testid="detail-agent-install" ondone={onreprobe} />
+            </span>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -1080,6 +1090,7 @@
   .check-live-step { font-size: var(--text-2xs); color: var(--fg-muted); }
   .checklist { list-style: none; margin: 0.4rem 0; padding: 0; font-size: var(--text-2xs); }
   .checklist li { display: grid; grid-template-columns: 1.2rem 9rem 1fr; gap: 0.4rem; padding: 0.15rem 0; }
+  .checklist .check-action { grid-column: 3; }
   .checklist li[data-state='ok'] .check-glyph { color: var(--usage-ok); }
   .checklist li[data-state='warn'] .check-glyph,
   .checklist li[data-state='warn'] .check-detail { color: var(--usage-warn); }

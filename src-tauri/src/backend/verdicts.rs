@@ -1115,6 +1115,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("probe_host", Verdict::Routed { tool: "probe_host" }),
+    // Orbit Fleet 4.9: only a hub accepts agents, so the job runs there; a
+    // standalone desktop answers with the service's own refusal.
+    (
+        "install_agent",
+        Verdict::Routed {
+            tool: "install_agent",
+        },
+    ),
+    (
+        "agent_installs",
+        Verdict::Routed {
+            tool: "agent_installs",
+        },
+    ),
     (
         "probe_ssh_alias",
         Verdict::LocalOnly {

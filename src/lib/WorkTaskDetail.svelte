@@ -41,11 +41,13 @@
   import WorkOrgDialog from './WorkOrgDialog.svelte';
   import WorkRuleEditor from './WorkRuleEditor.svelte';
   import TaskWorkSections from './TaskWorkSections.svelte';
+  import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import ProposedBy from './ProposedBy.svelte';
   import { proposalFor } from './proposals';
   import WorkButton from './WorkButton.svelte';
   import { uiLayout } from './prefs';
   import {
+    dependencyName,
     groupSessionLinks,
     groupSourceText,
     occurrenceKind,
@@ -194,6 +196,29 @@
   onDestroy(off);
 
   const task: WorkTask | null = $derived(detail?.task ?? null);
+
+  // Redesign 6.3: what a blocked task waits for, named by key. The tasks
+  // are read once each (at most a few), so the line and its links say
+  // "TASK-212" rather than an item id.
+  let deps = $state<Map<string, WorkTask>>(new Map());
+  const depIds = $derived(task?.blocked ? (task.blocked_by ?? []).slice(0, 5) : []);
+  $effect(() => {
+    const ids = depIds;
+    if (ids.length === 0) return;
+    let live = true;
+    void Promise.all(ids.map((id) => workTask(id))).then((rs) => {
+      if (!live) return;
+      const m = new Map<string, WorkTask>();
+      rs.forEach((r, i) => {
+        if (r.ok && r.value?.task) m.set(ids[i], r.value.task);
+      });
+      deps = m;
+    });
+    return () => {
+      live = false;
+    };
+  });
+  const depById = (id: string) => deps.get(id);
   const grouped = $derived(groupSessionLinks(task?.sessions ?? []));
   // A coarse clock for the Result chips' staleness (minute-level is plenty).
   let nowSec = $state(Math.floor(Date.now() / 1000));
@@ -387,6 +412,7 @@
       {#if task.tracker_name}<span>{task.tracker_name}</span>{/if}
       {#if taskStatus(task)}<span class="status" data-testid="work-task-status">{taskStatus(task)}</span>{/if}
       {#if task.resolution}<span class="muted">({task.resolution})</span>{/if}
+      <TaskBlockedSpend {task} lookup={depById} testid="work-task" />
       {#if trackerDown(task)}<span class="warn" data-testid="work-task-tracker-down">{trackerDownLabel(task)} — what is shown is the last sync</span>{/if}
       {#if task.url}
         <button class="btn btn--quiet" type="button" data-testid="work-task-open-url" onclick={() => void openExternal(task.url ?? '')}
@@ -394,6 +420,16 @@
         >
       {/if}
     </div>
+    {#if task.blocked && depIds.length > 0}
+      <p class="line" data-testid="work-task-waits-for">
+        Waits for:
+        {#each depIds as id (id)}
+          <button class="btn btn--quiet" type="button" data-testid="work-task-dependency" onclick={() => selectedTaskId.set(id)}
+            >{dependencyName(id, deps.get(id))}</button
+          >
+        {/each}
+      </p>
+    {/if}
     {#if task.unavailable}
       <p class="warn" data-testid="work-task-unavailable">Unavailable: {unavailableLabel(task.unavailable_reason)}</p>
     {/if}

@@ -4,8 +4,11 @@
   // at a time so each row lands as its answer comes back. Every step change
   // is saved on the backend, so closing the wizard — or the app — keeps what
   // was entered, and the next "+ Add host" offers to continue it. Nothing is
-  // installed: the checks only read. The Layout: Classic picker
-  // (AddHostPicker) stays as it was.
+  // installed without asking: the checks only read. Where a hub could use
+  // fleet-agent, its row offers "Install <version>"; pressing it is the
+  // person's yes, and the job (`install_agent`) starts once the host is
+  // added, its progress beside the Hex field on the last step. The Layout:
+  // Classic picker (AddHostPicker) stays as it was.
   import { onMount } from 'svelte';
   import { discoverHosts, addHost, type SshHost } from './hosts';
   import { probeSshAliasAbortable } from './accounts';
@@ -21,6 +24,7 @@
     checkLoader,
     checkRows,
     discoveryLoader,
+    offersAgentInstall,
     discardHostSetup,
     listHostSetups,
     nextLabel,
@@ -34,6 +38,10 @@
     type WizardAnswers,
   } from './add_host_wizard';
   import Loader from './Loader.svelte';
+  import AgentInstallAction from './AgentInstallAction.svelte';
+  import Button from './kit/Button.svelte';
+  import { installAgent } from './agent_install';
+  import { appVersion } from './app_version';
   import Modal from './Modal.svelte';
 
   let {
@@ -177,7 +185,18 @@
       return;
     }
     await discardHostSetup(sshAlias.trim());
+    // The person pressed Install on the fleet-agent row: start it now that
+    // the host is in fleet. The last step follows the job.
+    if (answers.install_agent) {
+      const j = await installAgent(alias.trim(), $appVersion);
+      if (!j.ok) error = `fleet-agent was not installed: ${j.error.message}`;
+    }
     added = true;
+  }
+
+  async function chooseInstall(on: boolean) {
+    answers = { ...answers, install_agent: on || undefined };
+    await save();
   }
 
   function close() {
@@ -276,13 +295,27 @@
           />
         </label>
       {:else if step === 2}
-        <p class="sub">Fleet connects over SSH and checks what sessions need. Nothing is installed: the checks only read.</p>
+        <p class="sub">Fleet connects over SSH and checks what sessions need. Nothing is installed without asking.</p>
         <ul class="checks" data-testid="wizard-checks">
           {#each rows as c (c.key)}
             <li class="check {c.state}" data-testid="wizard-check" data-key={c.key} data-state={c.state}>
               <span class="glyph" aria-hidden="true">{CHECK_GLYPH[c.state]}</span>
               <span class="label">{c.label}</span>
               <span class="detail">{c.detail || (c.state === 'pending' ? 'next' : '')}</span>
+              {#if offersAgentInstall(c)}
+                <span class="act">
+                  {#if answers.install_agent}
+                    <span class="muted" data-testid="wizard-agent-install-chosen">Installs when {alias || 'the host'} is added</span>
+                    <Button size="sm" variant="quiet" testid="wizard-agent-install-undo" onclick={() => void chooseInstall(false)}
+                      >Undo</Button
+                    >
+                  {:else}
+                    <Button size="sm" testid="wizard-agent-install" onclick={() => void chooseInstall(true)}
+                      >{$appVersion ? `Install ${$appVersion}` : 'Install fleet-agent'}</Button
+                    >
+                  {/if}
+                </span>
+              {/if}
             </li>
           {/each}
         </ul>
@@ -331,12 +364,18 @@
       {:else}
         {#if added}
           <p data-testid="wizard-added"><strong>{alias}</strong> is in fleet.</p>
+          {#if answers.install_agent}
+            <div class="agent-job" data-testid="wizard-agent-job">
+              <AgentInstallAction alias={alias.trim()} version={$appVersion} testid="wizard-agent-install-job" />
+            </div>
+          {/if}
         {:else}
           <dl class="summary" data-testid="wizard-summary">
             <dt>Name</dt><dd class="mono">{alias}</dd>
             <dt>SSH alias</dt><dd class="mono">{sshAlias}</dd>
             <dt>Checks</dt><dd>{checks.filter((c) => c.state === 'ok').length} of {CHECK_KEYS.length} ok</dd>
             <dt>Account</dt><dd>{answers.account ?? 'none yet'}</dd>
+            {#if answers.install_agent}<dt>fleet-agent</dt><dd data-testid="wizard-summary-agent">installs once added</dd>{/if}
           </dl>
         {/if}
       {/if}
@@ -405,6 +444,8 @@
   .checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
   .check { display: grid; grid-template-columns: 1.2rem 1fr auto; gap: 0.5rem; align-items: baseline; font-size: var(--text-xs); }
   .check .detail { color: var(--fg-muted); font-size: var(--text-2xs); }
+  .check .act { grid-column: 2 / -1; display: flex; align-items: center; gap: 0.5rem; }
+  .agent-job { margin-top: 0.5rem; }
   .check.ok .glyph { color: var(--status-done); }
   .check.warn .glyph, .check.warn .detail { color: var(--usage-warn); }
   .check.fail .glyph, .check.fail .detail { color: var(--usage-crit); }

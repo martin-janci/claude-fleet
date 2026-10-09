@@ -642,6 +642,8 @@ pub fn run() {
             commands::hosts::save_host_setup,
             commands::hosts::discard_host_setup,
             commands::hosts::run_host_setup_check,
+            commands::hosts::install_agent,
+            commands::hosts::agent_installs,
             commands::hosts::probe_ssh_alias,
             commands::hosts::remove_host,
             commands::hosts::merge_host,

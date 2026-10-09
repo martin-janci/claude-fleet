@@ -44,6 +44,7 @@
   import ProposedBy from './ProposedBy.svelte';
   import { proposalFor } from './proposals';
   import Timeline from './Timeline.svelte';
+  import TimelineWorkProposal from './TimelineWorkProposal.svelte';
   import { push, pushError } from './toasts';
   import { copyText } from './clipboard';
   import {
@@ -859,7 +860,9 @@
     sessionId={session.id}
     refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
     onEvents={(e) => (timelineEvents = e)}
-  />
+  >
+    {#snippet head()}<TimelineWorkProposal {session} />{/snippet}
+  </Timeline>
 
   {#if !hasNoPane(session) && detailsOwned}
     <section class="block">

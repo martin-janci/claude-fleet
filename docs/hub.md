@@ -648,7 +648,13 @@ The host downloads the release for its platform and checks it against
 into `fleet-agent install --user` (no systemd: `fleet-agent run` under
 `nohup`, which does not survive a reboot), and the host moves onto the agent
 once it says hello; no hello within 120 s puts it back on SSH.
-`agent_installs` shows each job's step and outcome. `FLEET_AGENT_DIST` on the
+`agent_installs` shows each job's step and outcome. A paired desktop (a
+trusted full device) starts the same job from Host detail: on an SSH host the
+health checklist's fleet-agent row reads *not installed* with an *Install
+<version>* button, and the job's step shows beside the Hex field until the
+host is on its agent (the `install_agent` / `agent_installs` commands route
+to the hub; a standalone desktop accepts no agents and says *not needed*).
+Nothing installs without that click. `FLEET_AGENT_DIST` on the
 hub replaces the GitHub release URL (a mirror). The steps below are for a
 host the hub cannot reach.
 

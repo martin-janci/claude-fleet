@@ -146,3 +146,78 @@ export async function loadUsageHistory(
     args: { account_uuid: accountUuid, since },
   });
 }
+
+// ── Spend, routines and paused sessions per account (steps 4.1 / 4.2, the
+// Accounts board's "7 sessions · 2 routines · $18.40 today" and "2 paused
+// sessions → Show · Switch to admin@…").
+
+/** Mirrors `service::account_spend::AccountSpend` (the fields the page reads). */
+export interface AccountSpend {
+  /** `""` gathers sessions whose login fleet has not read yet. */
+  account_uuid: string;
+  cost_micros: number;
+  models?: { model: string; totals: { cost_micros: number } }[];
+  by_day?: { day: string; cost_micros: number }[];
+}
+
+/** Each account's live spend since `since` (unix seconds, from the start of
+ *  its UTC day), from the `usage_daily_account` roll-up. Local only: a
+ *  paired desktop collects no usage (`E_HUB_LOCAL_ONLY`). */
+export function loadAccountSpend(since: number): Promise<Result<AccountSpend[]>> {
+  return invokeCmd<AccountSpend[]>('account_spend', { args: { since } });
+}
+
+/** account uuid → micro-USD, from one `account_spend` answer. */
+export function spendByAccount(rows: readonly AccountSpend[] | null | undefined): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const r of rows ?? []) if (r.account_uuid) m.set(r.account_uuid, (m.get(r.account_uuid) ?? 0) + (r.cost_micros ?? 0));
+  return m;
+}
+
+/** The account a login (a host's own, or one of its profiles) bills, as the
+ *  routines scheduler resolves it; null when the host has not reported one. */
+export function loginAccount(
+  hostAlias: string,
+  profile: string | null | undefined,
+  hosts: readonly HostRow[],
+): string | null {
+  const h = hosts.find((x) => x.alias === hostAlias);
+  if (!h) return null;
+  const p = profile?.trim();
+  if (p) return h.claude_profiles?.find((x) => x.name === p)?.account_uuid ?? null;
+  return h.account_uuid ?? null;
+}
+
+/** How many switched-on routines run as `uuid`. */
+export function routinesOn(
+  uuid: string,
+  routines: readonly { host_alias: string; profile?: string | null; enabled: boolean }[],
+  hosts: readonly HostRow[],
+): number {
+  return routines.filter((r) => r.enabled && loginAccount(r.host_alias, r.profile, hosts) === uuid).length;
+}
+
+/** The limit a usage reading puts an account at (`attentionFacts`). */
+export interface AccountLimitFact {
+  resets_at: number | null;
+}
+
+/** The live sessions on an account that its limit has paused: not working,
+ *  while the limit has not reset (`attention.ts::blockedBy`, "Paused · limit"). */
+export function pausedSessions(
+  a: Pick<AccountSummary, 'uuid' | 'sessions'>,
+  limited: Readonly<Record<string, AccountLimitFact>> | undefined,
+  now: number,
+): SessionRow[] {
+  const limit = limited?.[a.uuid];
+  if (!limit || (limit.resets_at != null && limit.resets_at <= now)) return [];
+  return a.sessions.filter((s) => s.status !== 'ghost' && s.lost_at === null && s.claude_status !== 'working');
+}
+
+/** "7 sessions · 2 routines · $18.40 today": the card's count line. */
+export function countLine(sessions: number, routines: number, spend: string | null): string {
+  const parts = [`${sessions} ${sessions === 1 ? 'session' : 'sessions'}`];
+  if (routines > 0) parts.push(`${routines} ${routines === 1 ? 'routine' : 'routines'}`);
+  if (spend !== null) parts.push(`${spend} today`);
+  return parts.join(' · ');
+}

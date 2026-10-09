@@ -11,6 +11,7 @@
 use crate::backend::FleetBackend;
 use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
+use fleet_core::service::agent_install::{AgentInstallsArgs, InstallAgentArgs};
 use fleet_core::service::host_setup::{self, HostSetupCheckArgs, SaveHostSetupArgs};
 use fleet_core::service::hosts::{
     self, AddHostArgs, HideHostArgs, HostAliasArgs, MergeHostArgs, ProbePreview, ProbeSshAliasArgs,
@@ -19,7 +20,7 @@ use fleet_core::service::hosts::{
 use fleet_core::service::view_scope::ViewScope;
 use fleet_core::ssh::SshClient;
 use fleet_core::ssh_config::SshHost;
-use fleet_core::store::{AccountRow, HostRow, HostSetupRow, SetupCheck, Store};
+use fleet_core::store::{AccountRow, AgentInstallRow, HostRow, HostSetupRow, SetupCheck, Store};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
@@ -83,6 +84,33 @@ pub async fn probe_host(
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<HostRow, IpcError> {
     routed::probe_host(&backend, args, &store, &ssh, &reg).await
+}
+
+/// Orbit Fleet 4.9: install fleet-agent on a host and move it onto the
+/// agent — the job a person starts with the "Install <version>" button.
+/// Only a hub accepts agents, so a paired desktop routes it to the hub's
+/// `install_agent` (which asks for a trusted full device), and a standalone
+/// one gets the service's own refusal (`E_UNSUPPORTED`) from the same code
+/// the hub runs. Returns the job at once; `agent_installs` follows it.
+#[tauri::command]
+pub async fn install_agent(
+    args: InstallAgentArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+) -> Result<AgentInstallRow, IpcError> {
+    routed::install_agent(&backend, args, &store, &ssh).await
+}
+
+/// The fleet-agent install jobs, newest first (the step a running one is
+/// on, why a failed one failed). Routed like `install_agent`.
+#[tauri::command]
+pub async fn agent_installs(
+    args: AgentInstallsArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+) -> Result<Vec<AgentInstallRow>, IpcError> {
+    routed::agent_installs(&backend, args, &store).await
 }
 
 /// Orbit Fleet 4.7: the host detail's health checklist read (agents on
@@ -229,6 +257,37 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.list_accounts().await,
             None => hosts::list_accounts(store),
+        }
+    }
+
+    pub async fn install_agent(
+        backend: &FleetBackend,
+        args: InstallAgentArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+    ) -> Result<AgentInstallRow, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("install_agent", &args).await,
+            None => {
+                let exec: Arc<dyn fleet_core::ssh::SshExec> = ssh.clone();
+                fleet_core::service::agent_install::start(
+                    Arc::clone(store),
+                    exec,
+                    ssh.agent_registry().cloned(),
+                    args,
+                )
+            }
+        }
+    }
+
+    pub async fn agent_installs(
+        backend: &FleetBackend,
+        args: AgentInstallsArgs,
+        store: &Mutex<Store>,
+    ) -> Result<Vec<AgentInstallRow>, IpcError> {
+        match backend.hub() {
+            Some(hub) => hub.route("agent_installs", &args).await,
+            None => fleet_core::service::agent_install::list(store, args.alias.as_deref()),
         }
     }
 

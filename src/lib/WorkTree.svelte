@@ -39,6 +39,8 @@
   import WorkPrs from './WorkPrs.svelte';
   import WorkRules from './WorkRules.svelte';
   import TaskList from './TaskList.svelte';
+  import TaskBlockedSpend from './TaskBlockedSpend.svelte';
+  import { formatCostMicros } from './sessions';
   import {
     buildSections,
     distributeTasks,
@@ -130,6 +132,9 @@
   }
 
   const sections: OrgSection[] = $derived(page ? buildSections(page.groups, page.orgs, states) : []);
+  // A blocked task names what it waits for by key when that task is loaded.
+  const loadedById = $derived(new Map(sections.flatMap((o) => o.groups.flatMap((g) => g.tasks.map((t) => [t.task_id, t] as const)))));
+  const taskById = (id: string) => loadedById.get(id);
   const selectedSessionId = $derived($selectedSession?.id ?? null);
   const expanded = $derived($workExpanded[$workViewKey] ?? {});
 
@@ -788,6 +793,7 @@
               <span class="caret" class:open={orgOpen(o)} aria-hidden="true">▸</span>
               {#if o.color}<span class="org-dot" style="background: {o.color}" aria-hidden="true"></span>{/if}
               <span class="org-name">{o.name}</span>
+              {#if o.cost > 0}<span class="spend" data-testid="work-org-spend" title="Spend of its tasks">{formatCostMicros(o.cost)}</span>{/if}
               <span class="count">{o.count}</span>
             </button>
             {#if orgOpen(o)}
@@ -800,6 +806,7 @@
                         >{g.group.source === 'none' ? 'No group' : g.group.label}</span
                       >
                       <span class="source" title="Where this group comes from">{g.group.source}</span>
+                      {#if g.cost > 0}<span class="spend" data-testid="work-group-spend" title="Spend of its tasks">{formatCostMicros(g.cost)}</span>{/if}
                       <span class="count" data-testid="work-group-count">{g.count}</span>
                     </button>
                     {#if groupOpen(g)}
@@ -834,6 +841,7 @@
                                 >{t.counts?.active ?? 0} active · {t.counts?.ended ?? 0} past</span
                               >
                               {#if trackerDown(t)}<span class="down" data-testid="work-task-tracker-down" title={`tracker state: ${t.tracker_state}`}>{trackerDownLabel(t)}</span>{/if}
+                              <TaskBlockedSpend task={t} lookup={taskById} testid="work-task" />
                             </div>
                             {#if (t.sessions ?? []).length > 0}
                               <ul class="occurrences">
@@ -1062,6 +1070,16 @@
     margin-left: auto;
     color: var(--fg-muted);
     font-size: var(--text-2xs);
+  }
+  .org-head .spend,
+  .group-head .spend {
+    margin-left: auto;
+    color: var(--fg-muted);
+    font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
+  }
+  .spend + .count {
+    margin-left: 6px;
   }
   .source {
     color: var(--fg-muted);

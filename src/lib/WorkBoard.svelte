@@ -36,6 +36,7 @@
   import { providerInfo } from './trackers';
   import { hintAnchor } from './hints';
   import EditTaskDialog from './EditTaskDialog.svelte';
+  import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import {
@@ -60,6 +61,8 @@
   }: { onclose?: () => void; debounceMs?: number; maxWaitMs?: number } = $props();
 
   let tasks = $state.raw<WorkTask[]>([]);
+  const byId = $derived(new Map(tasks.map((t) => [t.task_id, t])));
+  const taskById = (id: string) => byId.get(id);
   let more = $state(false);
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
@@ -365,6 +368,7 @@
         {#if t.project_label}<span>{t.project_label}</span>{/if}
         {#if n.children.length > 0}<span>{n.children.length} subtask{n.children.length === 1 ? '' : 's'}</span>{/if}
         {#if (t.open_proposals ?? 0) > 0}<span class="prop">{t.open_proposals} to review</span>{/if}
+        <TaskBlockedSpend task={t} lookup={taskById} testid="work-board-card" />
       </span>
       {#if live}
         <span class="live" data-testid="work-board-live">● {live.host ? `${live.name} · ${live.host}` : live.name}</span>

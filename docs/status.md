@@ -65,14 +65,24 @@ Multi-account (docs/accounts.md): Hosts shows each host's `/login` from
 another login (migration 113; desktop: session details → Login). Each
 pass reads a host's profiles and their logins (migration 114), attributes a
 profile session to its profile's account and polls that account's usage
-through the profile. Not built: a hub vault for setup-tokens and API keys,
+through the profile. The Accounts page (redesign 4.1/4.2) shows each
+account's sessions, switched-on routines and spend today from the
+`usage_daily_account` roll-up (`account_spend`, local only, so a paired
+desktop shows no $), and an account at its limit says how many sessions it
+paused, with Show and *Switch to <account>* (step 4.4's bulk move, one
+click). Not built: a hub vault for setup-tokens and API keys,
 and automatic switching when an account hits its limit.
 
 The headless `fleet-hub` daemon, `fleet-agent` for hosts the hub cannot reach
 over SSH, paired-client access for phones/browsers, and hub-client mode
 (pairing the desktop itself to a hub) are landed; see `docs/hub.md`. Their
 live acceptance (#156) is recorded in `docs/hub-acceptance.md`: the desktop
-half is partly observed, the TLS, phone and agent-host steps wait on the owner. Since contract revision 5 a hub client adds
+half is partly observed, the TLS, phone and agent-host steps wait on the owner.
+The hub's fleet-agent install job (redesign 4.9, `service/agent_install.rs`)
+starts from a paired desktop's Host detail (*Install <version>* on the
+fleet-agent row, the job's steps beside the Hex field) and from the add-host
+wizard's fleet-agent row where the checks say a hub could use one; a
+standalone desktop reaches its hosts over SSH and offers none. Since contract revision 5 a hub client adds
 projects through the hub (`add_project` / `list_github_repos` tools), per
 `docs/superpowers/specs/2026-09-27-hub-add-project-design.md`. Host
 reboot handling is landed in both halves, per
@@ -211,6 +221,11 @@ M14.4 as one PR, fleet-mobile#54; M14.5's docs are on `main`, so only the
 owner's Part R run is open, and *Assign org…* / *Make a rule…* stay
 desktop-only (owner, 2026-09-28; M14's D31–D36 and Jev's D31–D47 share
 numbers, so write "M14-D3x" / "Jev-D3x").
+Redesign 6.3 in the Work UI: a task with an open dependency shows as *Needs
+you* with its reason line ("Blocked on TASK-212", the plan's status-word
+decision), and its spend (`cost_micros`, its sessions each once) shows on
+the List rows, the Board's cards and Task details (which links what it
+waits for); the grouped tree's org and group rows carry their tasks' spend.
 
 Sprints and releases (design
 `docs/superpowers/specs/2026-09-28-sprints-releases-epics-design.md`): the
@@ -261,8 +276,11 @@ split, calibration, the test map's acceptance lines, D39 `--export-unlinked`
 `service/decide/haiku.rs`: a named host of the SAME org only, prompt on
 stdin). J1's live adapter is built, off (`decide.jev.work_link`,
 `service/decide/work_link.rs`, redesign 6.8): in assist it pre-selects a
-suggestion shown as "Proposed by Jev" (rule R12), and moving it past shadow
-waits on its acceptance lines.
+suggestion shown as "Proposed by Jev" (rule R12) on the session row, in
+Review and at the head of Session Details' timeline (Link / Not this, and
+who proposed a link after it is confirmed); shadow writes no link, so none
+of them shows anything, and moving it past shadow waits on its acceptance
+lines.
 Their diagnostics are built too (evidence, never an acceptance line):
 `--perturb` (dataset C, `bench/perturb.rs`; J3 in `status_map_robust.rs`,
 J1 in `work_link_robust.rs`), J3's paired languages (dataset B, `pair` ids,

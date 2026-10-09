@@ -32,6 +32,8 @@ export interface ChecklistRow {
   label: string;
   state: CheckState;
   detail: string;
+  /** The row offers "Install <version>" (fleet-agent, 4.9). */
+  install?: boolean;
 }
 
 /** Display names for the agent binaries `check_host` looks for. */
@@ -48,14 +50,18 @@ export const REPROVISION_HINT = "re-provision to fix";
  * The checklist rows, in the board's order. `check` is the last `check_host`
  * answer for this host (null before one), `inventory` the asset inventory
  * (every host; filtered here), `hubVersion` the version an agent should match.
+ * `agentsAccepted`: this client's fleet accepts fleet-agent connections (a
+ * paired desktop: the hub does), so an SSH host could move onto one and
+ * the row says it is not installed, with the Install action (4.9).
  */
 export function checklistRows(args: {
   host: HostRow;
   check: HostCheck | null;
   inventory: readonly AssetInventoryRow[];
   hubVersion: string | null;
+  agentsAccepted?: boolean;
 }): ChecklistRow[] {
-  const { host, check, inventory, hubVersion } = args;
+  const { host, check, inventory, hubVersion, agentsAccepted = false } = args;
   const local = host.alias === "local";
   const answered = check !== null && check.error === null;
   const rows: ChecklistRow[] = [];
@@ -111,8 +117,18 @@ export function checklistRows(args: {
       detail: "not read yet",
     });
 
-  // fleet-agent: only an agent-transport host runs one.
-  if (host.transport !== "agent") {
+  // fleet-agent: only an agent-transport host runs one. Where a hub could
+  // take one (paired), an SSH host other than the hub's own machine says it
+  // has none, and Host detail offers to install it.
+  if (host.transport !== "agent" && agentsAccepted && !local) {
+    rows.push({
+      key: "agent",
+      label: "fleet-agent",
+      state: "warn",
+      detail: "not installed · the hub reaches it over SSH",
+      install: true,
+    });
+  } else if (host.transport !== "agent") {
     rows.push({
       key: "agent",
       label: "fleet-agent",

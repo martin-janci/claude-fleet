@@ -1,8 +1,8 @@
 // The add-host wizard (Orbit Fleet redesign step 4.9, board Wizard): five
 // steps — Connection, Check the host, Agents, Accounts, Done — with live
 // checks that land one by one, and a draft the backend keeps so the wizard
-// resumes after the app restarts. Nothing is installed: the
-// checks only read. Pure but for the invoke wrappers; AddHostWizard.svelte
+// resumes after the app restarts. Nothing is installed without asking: the
+// checks only read, and fleet-agent installs only after its row's Install. Pure but for the invoke wrappers; AddHostWizard.svelte
 // renders.
 import { invokeCmd, type Result } from "./result";
 
@@ -30,6 +30,17 @@ export interface HostSetup {
 export interface WizardAnswers {
   /** The account the host is signed in to, as the Accounts step read it. */
   account?: string | null;
+  /** The person pressed "Install <version>" on the fleet-agent row (4.9):
+   *  the job starts once the host is added, since it installs on a host
+   *  of the fleet. Absent: nothing is installed. */
+  install_agent?: boolean;
+}
+
+/** The fleet-agent row offers the install: the checks found none, and the
+ *  backend said a hub here could use one (`warn`; a standalone desktop
+ *  reaches its hosts over SSH and says `na`, "not needed"). */
+export function offersAgentInstall(c: Pick<SetupCheck, "key" | "state">): boolean {
+  return c.key === "agent" && c.state === "warn";
 }
 
 export type CheckKey = "ssh" | "tmux" | "git" | "agent" | "disk" | "agents";

@@ -23,6 +23,7 @@
   import { projects, loadProjects } from './projects';
   import { workButtonFor } from './start_preview';
   import WorkButton from './WorkButton.svelte';
+  import TaskBlockedSpend from './TaskBlockedSpend.svelte';
   import EditTaskDialog from './EditTaskDialog.svelte';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
@@ -39,6 +40,9 @@
   }: { debounceMs?: number; maxWaitMs?: number; onpage?: (p: WorkTreePage) => void } = $props();
 
   let tasks = $state.raw<WorkTask[]>([]);
+  // A blocked task names what it waits for by key when that task is loaded.
+  const byId = $derived(new Map(tasks.map((t) => [t.task_id, t])));
+  const taskById = (id: string) => byId.get(id);
   let orgNames = $state.raw<Map<number, string>>(new Map());
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
@@ -264,6 +268,7 @@
                   {#if t.project_label}<span>{t.project_label}</span>{/if}
                   {#if t.org_id != null && orgNames.get(t.org_id)}<span>{orgNames.get(t.org_id)}</span>{/if}
                   <span title="active / past sessions">{t.counts?.active ?? 0} active · {t.counts?.ended ?? 0} past</span>
+                  <TaskBlockedSpend task={t} lookup={taskById} testid="task-row" />
                 </span>
               </button>
               <span class="right">
