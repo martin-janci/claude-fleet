@@ -57,10 +57,19 @@ describe('Downloads', () => {
     expect(rows.map((r) => r.dataset.state)).toEqual(['fetching']);
   });
 
-  it('shows a copy in flight with a meter and its bytes', async () => {
+  it('shows a copy in flight with a Progress ring and its bytes', async () => {
     await open([row(5, 'fetching', { fetched_bytes: 44 * MB })]);
     expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('50');
+    expect(screen.getByTestId('download-ring-pending')).toBeTruthy();
+    expect(screen.queryByTestId('download-rain-pending')).toBeNull();
     expect(screen.getByTestId('download-progress').textContent).toBe('44.0 MB of 88.0 MB');
+  });
+
+  it('shows Data rain for a copy of unknown size', async () => {
+    await open([row(5, 'fetching')]);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(screen.getByTestId('download-rain-pending')).toBeTruthy();
+    expect(screen.getByTestId('download-progress').textContent).toBe('copying…');
   });
 
   it('offers Show in … for a file saved in this window, and clears finished rows', async () => {

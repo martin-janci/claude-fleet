@@ -10,6 +10,7 @@
     releaseToast,
   } from './toasts';
   import { effectiveMotion } from './motion';
+  import Loader from './Loader.svelte';
   import { timerBarRuns, toastIn, toastOut } from './motion_catalog';
 </script>
 
@@ -35,6 +36,20 @@
       onfocusout={() => releaseToast(t.id)}
       role="group"
     >
+      {#if t.progress !== undefined}
+        <!-- Step 10.10: a long job's toast carries its Progress ring; the
+             toast's action opens the job. -->
+        <span
+          class="job"
+          role="progressbar"
+          aria-label={t.message}
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={Math.round(t.progress * 100)}
+        >
+          <Loader name="progress-ring" size={28} value={t.progress} delay={0} testid="toast-ring" />
+        </span>
+      {/if}
       {#if t.code}
         <code class="code" data-testid="toast-code">{t.code}</code>
       {/if}
@@ -146,6 +161,10 @@
   }
   .msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
   .count { color: var(--fg-muted); font-size: 11px; }
+  .job {
+    display: inline-flex;
+    flex: none;
+  }
   .action {
     flex: 0 0 auto;
     background: transparent;

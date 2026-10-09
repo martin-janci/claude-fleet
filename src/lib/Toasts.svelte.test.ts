@@ -170,3 +170,26 @@ describe('Toasts.svelte', () => {
     expect(screen.queryByTestId('toast-dropped')).toBeNull();
   });
 });
+
+// Step 10.10: a long job's toast carries a 28 px Progress ring.
+describe('long-job toast', () => {
+  it('draws the ring at the job’s progress and follows setToastProgress', async () => {
+    const { setToastProgress } = await import('./toasts');
+    const id = push({ message: 'Copying big.tar…', sticky: true, progress: 0.25 });
+    render(Toasts);
+    const bar = screen.getByRole('progressbar');
+    expect(bar.getAttribute('aria-valuenow')).toBe('25');
+    expect(bar.querySelector('[data-loader="progress-ring"]')?.getAttribute('style')).toContain('--ofl-p: 0.25');
+    expect(setToastProgress(id, 0.8)).toBe(true);
+    await tick();
+    expect(screen.getByRole('progressbar').getAttribute('aria-valuenow')).toBe('80');
+    dismiss(id);
+    expect(setToastProgress(id, 0.9)).toBe(false);
+  });
+
+  it('a plain toast has no ring', () => {
+    push({ message: 'Saved' });
+    render(Toasts);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+  });
+});

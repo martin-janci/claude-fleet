@@ -19,6 +19,8 @@
     fmtSize,
     type Download,
   } from './downloads';
+  import Loader from './Loader.svelte';
+  import { transferLoader } from './transfer_loader';
 
   // The notification centre and the Downloads list, one sheet with a tab
   // each (canvas board Toasts). Downloads are files a session sent from its
@@ -115,13 +117,26 @@
             {#if d.note}<span class="note">{d.note}</span>{/if}
             {#if d.state === 'failed'}<span class="note err">{d.error ?? 'copy failed'}</span>{/if}
             {#if d.state === 'fetching'}
-              {@const f = transferFraction(d)}
-              {#if f !== null}
-                <div class="meter" role="progressbar" aria-label="Copying {d.name}" aria-valuemin="0" aria-valuemax="100" aria-valuenow={Math.round(f * 100)}>
-                  <div class="fill" style:width="{f * 100}%"></div>
-                </div>
-              {/if}
-              <span class="state" data-testid="download-progress">{transferText(d)}</span>
+              {@const l = transferLoader(transferFraction(d))}
+              <!-- Step 10.10: a known size always shows the Progress ring,
+                   an unknown one Data rain. -->
+              <div class="transfer">
+                {#if l.name === 'progress-ring'}
+                  <span
+                    class="ring"
+                    role="progressbar"
+                    aria-label="Copying {d.name}"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    aria-valuenow={Math.round(l.value * 100)}
+                  >
+                    <Loader name="progress-ring" size={20} value={l.value} testid="download-ring" />
+                  </span>
+                {:else}
+                  <Loader name="data-rain" size={20} stage={false} testid="download-rain" />
+                {/if}
+                <span class="state" data-testid="download-progress">{transferText(d)}</span>
+              </div>
             {/if}
           </div>
           <div class="actions">
@@ -193,16 +208,14 @@
     padding: 0.2rem 0.55rem;
   }
   .bar button:disabled { opacity: 0.5; cursor: default; }
-  .meter {
-    height: 4px;
-    margin: 0.25rem 0 0.1rem;
-    border-radius: 2px;
-    background: var(--border);
-    overflow: hidden;
+  .transfer {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.2rem 0 0.1rem;
   }
-  .fill {
-    height: 100%;
-    background: var(--accent);
+  .ring {
+    display: inline-flex;
   }
   .list {
     list-style: none;
