@@ -302,6 +302,38 @@ fn session_conversation_is_registered_readonly_with_documented_params() {
     assert!(guard::is_readonly_tool("session_conversation"));
 }
 
+/// Redesign 14.14: `send_prompt`'s `keys` enumerates every key the hub
+/// presses, so a client (the phone's key bar) can tell a hub that takes the
+/// arrows and Ctrl keys from an older one, whose schema lists none.
+#[test]
+fn send_prompt_keys_enumerate_every_named_key() {
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let t = tools
+        .iter()
+        .find(|t| t.name == "send_prompt")
+        .expect("send_prompt is registered");
+    let listed: Vec<String> = t.input_schema["properties"]["keys"]["enum"]
+        .as_array()
+        .expect("keys has an enum")
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let all: Vec<String> = crate::tmux::NamedKey::all_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(listed, all);
+    for k in ["Up", "Down", "Left", "Right", "BTab", "C-r", "Escape", "1"] {
+        assert!(listed.iter().any(|l| l == k), "{k} is listed");
+    }
+    for refused in ["C-z", "C-s", "C-q"] {
+        assert!(
+            !listed.iter().any(|l| l == refused),
+            "{refused} is never listed"
+        );
+    }
+}
+
 #[test]
 fn require_host_binds_per_host_callers_and_frees_master() {
     let c = host_caller("mefistos", TokenMode::Full);

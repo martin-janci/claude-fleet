@@ -397,9 +397,12 @@ pub struct SendPromptParams {
     /// session.
     #[serde(default)]
     pub client_msg_id: Option<String>,
-    /// Press a key instead: `Enter`, `Escape`, `Tab`, `C-c`, or `1`-`9`
-    /// (that `pending_input` option; toggles it when `multi`). Unmarked, not recorded; `prompt` must be empty.
+    /// Press a key instead: `Enter`, `Escape`, `Tab`, `BTab`, an arrow
+    /// (`Up` …), `C-c` or a listed Ctrl key, or `1`-`9` (that
+    /// `pending_input` option; toggles it when `multi`). Unmarked, not
+    /// recorded; `prompt` must be empty.
     #[serde(default)]
+    #[schemars(extend("enum" = crate::tmux::NamedKey::all_names()))]
     pub keys: Option<String>,
     /// Operator only: the nonce a person approved.
     #[serde(default)]
