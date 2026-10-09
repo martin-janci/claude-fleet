@@ -151,15 +151,15 @@ fn digest() -> Today {
 fn a_brief_covers_one_org_and_runs_on_its_latest_sessions_host() {
     let today = digest();
     assert_eq!(
-        brief_target(&today, None),
+        brief_target(&today, None, |_, _| true),
         Some((Some(2), "venus".to_string())),
         "the most recently active session decides"
     );
     assert_eq!(
-        brief_target(&today, Some(1)),
+        brief_target(&today, Some(1), |_, _| true),
         Some((Some(1), "mercury".to_string()))
     );
-    assert_eq!(brief_target(&today, Some(3)), None);
+    assert_eq!(brief_target(&today, Some(3), |_, _| true), None);
     let (prompt, from) = brief_prompt(&today, Some(1)).unwrap();
     assert!(prompt.starts_with(BRIEF_PROMPT));
     assert!(
@@ -275,4 +275,101 @@ fn every_draft_is_booked_with_its_origin() {
         )
         .unwrap();
     assert_eq!(briefs, 1);
+}
+
+/// Two orgs and two hosts, one in each: `mercury` is Acme's, `venus` Beta's.
+fn two_orgs(store: &Mutex<Store>) -> (i64, i64) {
+    let s = lock(store).unwrap();
+    let acme = s.add_org("Acme", None, false).unwrap().id;
+    let beta = s.add_org("Beta", None, false).unwrap().id;
+    for (host, org) in [("mercury", acme), ("venus", beta)] {
+        s.upsert_host(host).unwrap();
+        s.set_host_org(host, Some(org)).unwrap();
+    }
+    (acme, beta)
+}
+
+/// Review round 15, F20: the brief runs on the latest session whose host
+/// may be sent its org's text, never on another org's host.
+#[test]
+fn a_brief_never_runs_on_another_orgs_host() {
+    let (deps, _, _) = fixture("brief-orgs");
+    let (acme, beta) = two_orgs(&deps.store);
+    let group = |org: i64, sid: i64, host: &str, at: i64| TodayGroup {
+        bucket: BUCKET_IN_PROGRESS.into(),
+        key: Some(format!("K-{sid}")),
+        title: "work".into(),
+        org_id: Some(org),
+        sessions: vec![session(sid, host, Some(org), at)],
+        ..Default::default()
+    };
+    // Beta's session is the latest, but it runs on Acme's host.
+    let today = Today {
+        since: 0,
+        now: 100,
+        groups: vec![group(acme, 1, "mercury", 50), group(beta, 2, "mercury", 90)],
+        shipped: vec![],
+    };
+    let s = lock(&deps.store).unwrap();
+    let sees = |host: &str, org: Option<i64>| host_sees_org(&s, host, org).unwrap();
+    assert_eq!(
+        brief_target(&today, None, sees),
+        Some((Some(acme), "mercury".to_string())),
+        "Beta's text never goes to Acme's host"
+    );
+    assert_eq!(brief_target(&today, Some(beta), sees), None);
+    assert_eq!(
+        brief_target(&today, Some(beta), |_, _| true),
+        Some((Some(beta), "mercury".to_string())),
+        "without the host check it would have run there"
+    );
+}
+
+/// Review round 15, F20: a mission's release note (and so its planner and
+/// triage card, which take the same host) refuses a planner host of another
+/// org, before anything is sent to it.
+#[tokio::test]
+async fn a_release_note_never_runs_on_another_orgs_host() {
+    let (deps, _, m) = fixture("note-orgs");
+    let (acme, _) = two_orgs(&deps.store);
+    {
+        let s = lock(&deps.store).unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE orchestration_projects SET org_id = ?1 WHERE id = ?2",
+                rusqlite::params![acme, m.id],
+            )
+            .unwrap();
+        let policy = crate::store::MissionPolicy {
+            planner_host: Some("venus".into()),
+            ..Default::default()
+        };
+        s.update_mission(
+            m.id,
+            None,
+            &crate::store::MissionPatch {
+                policy: Some(policy),
+                ..Default::default()
+            },
+            "t",
+        )
+        .unwrap();
+        s.set_mission_state(m.id, None, "active", "t").unwrap();
+        s.set_mission_state(m.id, None, "completed", "t").unwrap();
+    }
+    let err = release_note(&note_args(m.id), &deps, &ViewScope::internal())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, codes::E_FORBIDDEN, "{}", err.message);
+    assert!(
+        err.message.contains("venus") && err.message.contains("same organisation"),
+        "{}",
+        err.message
+    );
+    let booked: i64 = lock(&deps.store)
+        .unwrap()
+        .conn_for_test()
+        .query_row("SELECT COUNT(*) FROM aux_usage", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(booked, 0, "nothing ran");
 }
