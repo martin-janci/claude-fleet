@@ -145,15 +145,39 @@ pub(crate) fn editor_command(
     })
 }
 
+/// Refuse a host this machine reaches through its fleet-agent (review r18):
+/// the folder lookup works over the agent, but VS Code's Remote - SSH
+/// needs an `~/.ssh/config` route to `ssh-remote+<alias>`, which an agent
+/// host by definition lacks, so the editor would open a window that can
+/// never connect.
+pub fn refuse_agent_host(host_alias: &str, through_agent: bool) -> Result<(), IpcError> {
+    if through_agent {
+        return Err(IpcError::new(
+            codes::E_UNSUPPORTED,
+            format!(
+                "{host_alias} is reached through fleet-agent, not SSH, so VS Code's Remote - SSH \
+                 cannot open it; give this machine an ssh config entry for it, or open the \
+                 folder from a terminal on the host"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Open the session `tmux_name` on `host_alias` in VS Code on this machine.
-/// Does not wait for the editor.
+/// Does not wait for the editor. `through_agent`: this machine reaches the
+/// host through its fleet-agent ([`refuse_agent_host`]).
 pub async fn open_session_in_editor(
     ssh: &dyn SshExec,
     host_alias: &str,
     tmux_name: &str,
+    through_agent: bool,
 ) -> Result<(), IpcError> {
     crate::validate::host_alias(host_alias)?;
     crate::validate::tmux_name_addressable(tmux_name)?;
+    if host_alias != LOCAL_HOST {
+        refuse_agent_host(host_alias, through_agent)?;
+    }
     let folder = session_folder(ssh, host_alias, tmux_name).await?;
     let os = Os::current();
     let distro = crate::wsl::distro_for(host_alias);
@@ -165,6 +189,20 @@ pub async fn open_session_in_editor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review r18: an agent-transport host is refused with a reason before
+    /// any lookup, not opened as an `ssh-remote+` URI that cannot connect.
+    #[tokio::test]
+    async fn an_agent_host_is_refused_before_anything_runs() {
+        let fake = crate::ssh_fake::FakeSsh::new();
+        let err = open_session_in_editor(&fake, "laptop", "dev-x", true)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::E_UNSUPPORTED);
+        assert!(err.message.contains("fleet-agent"), "{}", err.message);
+        assert!(fake.calls().is_empty(), "{:?}", fake.calls());
+        assert!(refuse_agent_host("mercury", false).is_ok());
+    }
 
     /// r18-W2: a WSL host opens through VS Code's WSL authority.
     #[test]

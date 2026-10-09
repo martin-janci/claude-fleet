@@ -958,6 +958,9 @@ mod tests {
             worktree_kb: None,
             worktree_at: None,
             agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         };
         let snap = |uuid: &str, status: UsageOutcomeKind, five: f64, week: f64, resets: i64| {

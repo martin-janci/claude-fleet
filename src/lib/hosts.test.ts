@@ -104,6 +104,16 @@ describe('hosts store', () => {
     expect(row.transport).toBe('ssh');
   });
 
+  it('a ping moves last_reachable_at only while the host answers (review r13)', () => {
+    hosts.set([{ ...sampleLocal, last_reachable_at: 10 }]);
+
+    applyHostEvents([{ type: 'pinged', alias: 'local', last_pinged_at: 50, reachable: false }]);
+    expect(get(hosts)[0].last_reachable_at).toBe(10);
+
+    applyHostEvents([{ type: 'pinged', alias: 'local', last_pinged_at: 60, reachable: true }]);
+    expect(get(hosts)[0].last_reachable_at).toBe(60);
+  });
+
   it('a pinged event for a host we do not hold invents nothing', () => {
     hosts.set([sampleLocal]);
 

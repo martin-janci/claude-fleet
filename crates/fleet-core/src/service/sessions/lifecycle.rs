@@ -1576,7 +1576,9 @@ pub(super) async fn kill_session_with(
         if let Ok(s) = store.lock() {
             record_kill(&s, id, Some(&sid));
         }
-        super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
+        super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
+            .await
+            .map_err(after_the_kill)?;
         return Ok(id);
     }
     let tmux = (deps.exec)(&args.host_alias);
@@ -1599,8 +1601,36 @@ pub(super) async fn kill_session_with(
             tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
         }
     }
-    super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
+    super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
+        .await
+        .map_err(after_the_kill)?;
     Ok(id)
+}
+
+/// The `details` key [`kill_session`] sets on an error that came AFTER the
+/// session was killed: the trailing reconcile failed, the kill did not.
+pub const KILL_LANDED: &str = "kill_landed";
+
+/// Mark a post-kill failure (review r18 M4): a caller that must know whether
+/// the session is gone — `move_session`'s finalise — reads it with
+/// [`kill_landed`] instead of taking every `Err` for "still alive".
+pub(crate) fn after_the_kill(e: IpcError) -> IpcError {
+    let mut details = match e.details {
+        Some(serde_json::Value::Object(ref m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    details.insert(KILL_LANDED.into(), serde_json::Value::Bool(true));
+    let details = serde_json::Value::Object(details);
+    e.with_details(details)
+}
+
+/// Whether a [`kill_session`] error came after the kill itself succeeded.
+pub fn kill_landed(e: &IpcError) -> bool {
+    e.details
+        .as_ref()
+        .and_then(|d| d.get(KILL_LANDED))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 #[derive(Serialize, Deserialize)]

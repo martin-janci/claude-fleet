@@ -228,15 +228,14 @@ impl Store {
         tmux_version: Option<&str>,
         last_pinged_at: i64,
     ) -> Result<(), rusqlite::Error> {
-        self.conn.execute(
-            "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4 WHERE alias=?5",
-            rusqlite::params![
-                if reachable { 1 } else { 0 },
-                claude_version,
-                tmux_version,
-                last_pinged_at,
-                alias
-            ],
+        super::reconcile::write_host_probe(
+            &self.conn,
+            alias,
+            reachable,
+            claude_version,
+            tmux_version,
+            last_pinged_at,
+            None,
         )?;
         self.emit_host(alias, |bus, row| bus.host_probed(row))
     }

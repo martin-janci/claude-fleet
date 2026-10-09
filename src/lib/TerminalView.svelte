@@ -1640,9 +1640,12 @@
       {:else if $selectedSession && $hostByAlias.get($selectedSession.host_alias)?.reachable === false}
         <!-- Review r13 (step 3.14): an offline host is said in the pane with
              the states kit, not as ssh's own words. -->
+        {@const offline = $hostByAlias.get($selectedSession.host_alias)}
         <HostOffline
           alias={$selectedSession.host_alias}
-          lastSeen={$hostByAlias.get($selectedSession.host_alias)?.health_at ?? null}
+          lastSeen={offline?.last_reachable_at ?? offline?.health_at ?? null}
+          reason={offline?.last_probe_error ?? null}
+          code={offline?.last_probe_error_code ?? null}
           ontry={() => void openTerm()} />
       {:else}
         <div class="err" data-testid="terminal-open-error">{openError}</div>

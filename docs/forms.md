@@ -205,11 +205,9 @@ full-screen loader. What the button does belongs to the screen that opens
 the wizard; the spec is data only. fleet-core's
 `every_wizard_spec_is_valid` validates every file there.
 
-`add_host` is the guided Add host wizard (4.9) in one step, for the chat
-and Get started; the Hosts page keeps 4.9's drafts and per-step checks.
-Its run (`add_host_wizard.ts`) offers the hosts in `~/.ssh/config`, runs
-4.9's checks in order (Sonar while each waits), refuses a host SSH cannot
-reach, then adds it. `pair_device` (`pair_device_wizard.ts`) offers the
+`add_host` is the guided Add host wizard (4.9) in one step, kept as a
+spec only: no screen opens it yet (its run was removed as dead code), and
+the Hosts page keeps 4.9's drafts and per-step checks. `pair_device` (`pair_device_wizard.ts`) offers the
 hub's orgs and calls `pair_device`; on the Devices page its code and QR are
 PairingResult's, with its Halo.
 

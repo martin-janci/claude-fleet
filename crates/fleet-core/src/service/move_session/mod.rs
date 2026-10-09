@@ -582,7 +582,7 @@ pub struct SourceState {
 
 /// Parse the inspect script's `\x1e`-separated output.
 pub fn parse_inspection(stdout: &str) -> Result<SourceState, IpcError> {
-    let parts: Vec<&str> = stdout.split('\x1e').collect();
+    let parts: Vec<&str> = marked(stdout).split('\x1e').collect();
     if parts.len() != 7 {
         return Err(IpcError::new(
             codes::E_PARSE,
@@ -738,7 +738,7 @@ pub struct TargetPrep {
 
 /// Parse and sanity-check the target prep script's output.
 pub fn parse_target_prep(stdout: &str, claude_id: &str) -> Result<TargetPrep, IpcError> {
-    let line = stdout.lines().last().unwrap_or("").trim_end();
+    let line = marked(stdout).lines().last().unwrap_or("").trim_end();
     let parts: Vec<&str> = line.split('\t').collect();
     if parts.len() != 4 {
         return Err(IpcError::new(
@@ -876,12 +876,14 @@ if [ -n "$gd" ]; then
   elif [ -f "$gd/BISECT_LOG" ]; then midop=bisect
   fi
 fi
+printf '\n{OUT_MARKER}\n'
 printf '%s\036%s\036%s\036%s\036%s\036%s\036%s' "$wt" "$porcelain" "$head" "$cur" "$rsha" "$ahead" "$midop"
 "#,
         name = quote(tmux_name),
         hint = quote(hint.unwrap_or("")),
         br = quote(branch),
         status = carry::STATUS_PORCELAIN,
+        OUT_MARKER = carry::OUT_MARKER,
     )
 }
 
@@ -903,10 +905,12 @@ fi
 if [ -z "$f" ]; then printf '{NO_TRANSCRIPT} %s\n' "$id" >&2; exit 4; fi
 n=$(wc -c < "$f" | tr -d ' ')
 m=$(stat -c %Y -- "$f" 2>/dev/null || stat -f %m -- "$f" 2>/dev/null)
+printf '\n{OUT_MARKER}\n'
 printf '%s\t%s\t%s\n' "$n" "$m" "$f"
 "#,
         id = quote(claude_id),
         sp = quote(stored_path.unwrap_or("")),
+        OUT_MARKER = carry::OUT_MARKER,
     )
 }
 
@@ -919,9 +923,25 @@ pub struct Located {
     pub path: String,
 }
 
+/// What a move script printed after its [`carry::OUT_MARKER`] line: every
+/// script runs under `bash -lc`, so a login profile's banner can precede the
+/// body (review r18 M3). Output with no marker line is taken whole (a fake,
+/// or a script that never reached it, which its exit status reports).
+fn marked(stdout: &str) -> &str {
+    carry::payload_str(stdout).unwrap_or(stdout)
+}
+
+/// [`marked`] for raw bytes (the transcript read).
+fn marked_bytes(stdout: Vec<u8>) -> Vec<u8> {
+    match carry::payload(&stdout) {
+        Some(p) => p.to_vec(),
+        None => stdout,
+    }
+}
+
 /// Parse [`locate_script`] output.
 pub fn parse_locate(stdout: &str) -> Result<Located, IpcError> {
-    let line = stdout.trim();
+    let line = marked(stdout).trim();
     let mut parts = line.splitn(3, '\t');
     let size = parts.next().and_then(|n| n.trim().parse::<u64>().ok());
     let mtime = parts.next().map(|m| m.trim().parse::<i64>().unwrap_or(-1));
@@ -1000,7 +1020,11 @@ impl Drop for MoveClaim {
 
 /// Read at most `limit` bytes of the transcript.
 pub fn read_script(path: &str, limit: u64) -> String {
-    format!("# cf-move:read\nhead -c {limit} -- {}\n", quote(path))
+    format!(
+        "# cf-move:read\nprintf '\\n{}\\n'\nhead -c {limit} -- {}\n",
+        carry::OUT_MARKER,
+        quote(path)
+    )
 }
 
 /// Best-effort: refresh `origin/<branch>` in the target's main checkout so a
@@ -1054,6 +1078,7 @@ d="$HOME/.claude/projects/$enc"
 mkdir -p -- "$d" || exit 7
 f="$d/$id.jsonl"
 if [ -f "$f" ]; then n=$(wc -c < "$f" | tr -d ' '); else n=-1; fi
+printf '\n{OUT_MARKER}\n'
 printf '%s\t%s\t%s\t%s\n' "$h" "$enc" "$f" "$n"
 "#,
         cwd = quote(cwd),
@@ -1062,14 +1087,16 @@ printf '%s\t%s\t%s\t%s\n' "$h" "$enc" "$f" "$n"
         id = quote(claude_id),
         status = carry::STATUS_PORCELAIN,
         TARGET_DIRTY = carry::TARGET_DIRTY,
+        OUT_MARKER = carry::OUT_MARKER,
     )
 }
 
 /// Size of the target transcript, or -1.
 pub fn size_script(path: &str) -> String {
     format!(
-        "# cf-move:size\nf={}\nif [ -f \"$f\" ]; then wc -c < \"$f\" | tr -d ' '; else echo -1; fi\n",
-        quote(path)
+        "# cf-move:size\nf={}\nprintf '\\n{}\\n'\nif [ -f \"$f\" ]; then wc -c < \"$f\" | tr -d ' '; else echo -1; fi\n",
+        quote(path),
+        carry::OUT_MARKER,
     )
 }
 
@@ -2658,7 +2685,7 @@ async fn move_session_inner(
             ),
         ));
     }
-    let mut bytes = out.stdout;
+    let mut bytes = marked_bytes(out.stdout);
     if bytes.len() as u64 > snap.cap {
         return Err(too_large(bytes.len() as u64, snap.cap));
     }
@@ -3280,27 +3307,7 @@ async fn move_session_inner(
                 tracing::warn!(session_id = row.id, error = %e, "[move] carrying the origin failed");
             }
         }
-        // The GRANTS, on the other hand, are DROPPED — the owner's decision of
-        // 2026-09-30 (spec §4.3). A grant is a statement about a ROW: it is
-        // keyed on `sessions.id`, the target is a new row with a new id, and
-        // the session the grantee was shown now lives on a different machine.
-        // Re-granting is one click for the owner; narrowing is the safe
-        // direction, so the move revokes rather than carries. This runs on the
-        // SOURCE row (`snap.row.id`) and holds whether or not the source is
-        // kept: a `keep_source` move leaves the old session running, and its
-        // shares end with the move the owner asked for, not silently with the
-        // row's reaping.
-        //
-        // Hard too, and for the same reason the carry is: a soft-failed revoke
-        // leaves a share live on a session the owner believes they have moved.
-        s.revoke_all_grants_on_session(snap.row.id).map_err(|e| {
-            partial(
-                "revoking the source session's grants",
-                &partial_ctx,
-                Some(row.id),
-                &e,
-            )
-        })?;
+        // The GRANTS are dropped once the target is confirmed, below.
         // Soft-fail like new_session: the session is live either way.
         if let Err(e) = s.set_claude_session_id(row.id, &id) {
             tracing::warn!(
@@ -3368,7 +3375,7 @@ async fn move_session_inner(
     let deadline = tokio::time::Instant::now() + opts.confirm_timeout;
     let confirmed = loop {
         let size_ok = match sh(ssh, &target, &size_script(&prep.path), GIT_TIMEOUT).await {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            Ok(o) if o.status.success() => marked(&String::from_utf8_lossy(&o.stdout))
                 .trim()
                 .parse::<i64>()
                 .is_ok_and(|n| n >= copied as i64),
@@ -3405,6 +3412,34 @@ async fn move_session_inner(
     // Confirmed: refresh the counters to what this row now shows.
     partial_ctx.to_turn_seq = Some(target_row.turn_seq);
     partial_ctx.to_last_turn_at = target_row.last_turn_at;
+    {
+        let s = lock(store)?;
+        // The GRANTS are DROPPED — the owner's decision of
+        // 2026-09-30 (spec §4.3). A grant is a statement about a ROW: it is
+        // keyed on `sessions.id`, the target is a new row with a new id, and
+        // the session the grantee was shown now lives on a different machine.
+        // Re-granting is one click for the owner; narrowing is the safe
+        // direction, so the move revokes rather than carries. This runs on the
+        // SOURCE row (`snap.row.id`) and holds whether or not the source is
+        // kept: a `keep_source` move leaves the old session running, and its
+        // shares end with the move the owner asked for, not silently with the
+        // row's reaping.
+        //
+        // Only now, with the target confirmed (review r18): a move that
+        // stops before this point is partial with the source still live,
+        // and its shares must still stand on it — nothing restores them.
+        //
+        // Hard too, and for the same reason the carry is: a soft-failed revoke
+        // leaves a share live on a session the owner believes they have moved.
+        s.revoke_all_grants_on_session(snap.row.id).map_err(|e| {
+            partial(
+                "revoking the source session's grants",
+                &partial_ctx,
+                Some(target_row.id),
+                &e,
+            )
+        })?;
+    }
 
     progress.start(MoveStep::Handoff);
     // 6/7. The source: check it wrote nothing since the copy, kill it (unless
@@ -3627,6 +3662,8 @@ mod tests {
         target_status: &'static str,
         /// `kill_tmux_session` fails.
         kill_fails: bool,
+        /// `kill_tmux_session` kills, then fails in the reconcile after it.
+        kill_then_reconcile_fails: bool,
         /// Starting the target makes the source transcript grow (a turn
         /// taken on the source after the copy).
         grow_source_on_start: bool,
@@ -3672,6 +3709,7 @@ mod tests {
                 worktree_id,
                 target_status: "running",
                 kill_fails: false,
+                kill_then_reconcile_fails: false,
                 grow_source_on_start: false,
                 grow_source_on_kill: false,
                 refresh_target_fails: false,
@@ -3824,6 +3862,12 @@ mod tests {
                 );
             }
             self.log.lock().unwrap().push(format!("kill {host} {name}"));
+            if self.kill_then_reconcile_fails {
+                return Err(crate::service::sessions::after_the_kill(IpcError::new(
+                    codes::E_SSH_TIMEOUT,
+                    "reconcile timed out",
+                )));
+            }
             Ok(())
         }
     }
@@ -4187,6 +4231,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(revoked, 1);
+    }
+
+    /// Review r18: a move that stops before the target is confirmed is
+    /// partial with the source still live, so its shares still stand.
+    #[tokio::test]
+    async fn a_move_that_never_confirms_the_target_keeps_the_source_shares() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.target_status = "ghost";
+        let bob = {
+            let s = f.store.lock().unwrap();
+            let ann = s.create_person("ann", None).unwrap().id;
+            let bob = s.create_person("bob", None).unwrap().id;
+            s.conn_ref()
+                .execute(
+                    "UPDATE sessions SET owner_person_id = ?1 WHERE id = ?2",
+                    rusqlite::params![ann, f.source_id],
+                )
+                .unwrap();
+            s.grant_session(
+                f.source_id,
+                crate::store::GrantRecipient::Person(bob),
+                crate::store::GRANT_WATCH,
+                ann,
+            )
+            .unwrap();
+            bob
+        };
+        let err = run(&f, &hooks, false).await.unwrap_err();
+        assert_eq!(err.code, codes::E_MOVE_PARTIAL, "{}", err.message);
+        let s = f.store.lock().unwrap();
+        assert_eq!(
+            s.grants_for_person(bob).unwrap().len(),
+            1,
+            "bob still watches the live source"
+        );
     }
 
     /// Migration 122: a moved session keeps who started it.
@@ -4797,6 +4877,23 @@ mod tests {
             seen.last().map(String::as_str),
             Some("handoff:failed"),
             "{seen:?}"
+        );
+    }
+
+    /// Review r18 M4: a kill that landed but whose trailing reconcile failed
+    /// is a finished move with a warning, not "both alive".
+    #[tokio::test]
+    async fn a_kill_that_landed_before_its_reconcile_failed_finishes_the_move() {
+        let f = fixture();
+        let mut hooks = FakeHooks::new(&f.fake, f.project_id, f.worktree_id);
+        hooks.kill_then_reconcile_fails = true;
+        let rep = run(&f, &hooks, false).await.expect("the move finishes");
+        assert!(
+            rep.warnings
+                .iter()
+                .any(|w| w.contains("was killed, but the reconcile after the kill failed")),
+            "{:?}",
+            rep.warnings
         );
     }
 
@@ -6658,13 +6755,39 @@ mod tests {
     /// Every carry script runs under `bash -lc`, so a login profile can print
     /// a banner before the script body ever does: the parsers anchor on the
     /// output marker, and the relayed bundle must be the payload alone.
-    /// (Only the carry scripts are marker-protected; inspect, locate and
-    /// read are not — pre-existing, and out of this test's scope.)
+    /// The move's own inspect, locate, read, prep and size scripts are
+    /// marker-protected too (review r18 M3): the transcript that lands on the
+    /// target is the transcript, not the banner plus it.
     #[tokio::test]
     async fn a_login_banner_before_every_carry_script_does_not_break_the_move() {
         let f = fixture();
         let banner = |payload: &str| format!("Welcome to alpha!\n{}", out(payload));
         f.fake
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:inspect"),
+                Reply::ok(&banner(&inspection("", HEAD, "0"))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:locate"),
+                Reply::ok(&banner(&locate_out(TRANSCRIPT.len(), MTIME))),
+            )
+            .on_host(
+                "alpha",
+                Match::script_contains("# cf-move:read"),
+                Reply::ok(&banner(TRANSCRIPT)),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-move:prep"),
+                Reply::ok(&banner(&format!("{HEAD}\t{TGT_ENC}\t{}\t-1\n", tgt_path()))),
+            )
+            .on_host(
+                "beta",
+                Match::script_contains("# cf-move:size"),
+                Reply::ok(&banner(&format!("{}\n", TRANSCRIPT.len()))),
+            )
             .on_host(
                 "beta",
                 Match::script_contains("# cf-carry:seed"),
@@ -6707,6 +6830,12 @@ mod tests {
             .filter(|c| c.stdin.is_some())
             .collect();
         assert_eq!(uploads[0].stdin_str().as_deref(), Some(BUNDLE));
+        assert!(
+            uploads
+                .iter()
+                .any(|c| c.stdin_str().as_deref() == Some(TRANSCRIPT)),
+            "the transcript upload carries no banner"
+        );
     }
 
     #[tokio::test]

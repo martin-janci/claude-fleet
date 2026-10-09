@@ -54,14 +54,44 @@ pub(super) struct LocalScan {
 
 /// Whether `rel` is a plain relative path that stays below the root: no
 /// empty, `.` or `..` component, no NUL, not absolute, no backslash or drive
-/// colon (which Windows would read as a separator or a drive).
+/// colon (which Windows would read as a separator or a drive). On a Windows
+/// machine every component must also be a name Windows can hold
+/// ([`windows_name_ok`], review r18): such a file stays on the remote side.
 pub(crate) fn safe_rel(rel: &str) -> bool {
+    safe_rel_for(rel, cfg!(windows))
+}
+
+/// [`safe_rel`] with the local side's platform as a parameter, so both rule
+/// sets are tested everywhere.
+pub(crate) fn safe_rel_for(rel: &str, windows: bool) -> bool {
     !rel.is_empty()
         && !rel.starts_with('/')
         && !rel.contains(['\0', '\\', ':'])
         && rel
             .split('/')
-            .all(|c| !c.is_empty() && c != "." && c != "..")
+            .all(|c| !c.is_empty() && c != "." && c != ".." && (!windows || windows_name_ok(c)))
+}
+
+/// Whether Windows can create a file or folder named `c`: none of
+/// `<>:"|?*` or a control character, no trailing dot or space, and not a
+/// reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`,
+/// `LPT1`–`LPT9`) in any case, with or without an extension (`aux.c`).
+pub(crate) fn windows_name_ok(c: &str) -> bool {
+    if c.chars()
+        .any(|ch| matches!(ch, '<' | '>' | ':' | '"' | '|' | '?' | '*') || (ch as u32) < 32)
+    {
+        return false;
+    }
+    if c.ends_with(['.', ' ']) {
+        return false;
+    }
+    let stem = c.split('.').next().unwrap_or(c).trim_end_matches(' ');
+    let upper = stem.to_ascii_uppercase();
+    let reserved = matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+            && upper.len() == 4
+            && matches!(upper.as_bytes()[3], b'1'..=b'9'));
+    !reserved
 }
 
 pub(super) fn abs(root: &Path, rel: &str) -> PathBuf {
@@ -479,6 +509,45 @@ mod tests {
             "a\0b",
         ] {
             assert!(!safe_rel(bad), "{bad:?}");
+        }
+    }
+
+    /// Review r18: a name Windows cannot hold stays on the remote side when
+    /// the local side is Windows, and is fine everywhere else.
+    #[test]
+    fn a_windows_local_side_refuses_names_windows_cannot_hold() {
+        for bad in [
+            "aux.c",
+            "src/AUX",
+            "con",
+            "Prn.txt",
+            "nul.tar.gz",
+            "com1",
+            "LPT9.log",
+            "a/trailing.",
+            "trailing ",
+            "a<b",
+            "q?",
+            "star*",
+            "pipe|",
+            "quo\"te",
+        ] {
+            assert!(!safe_rel_for(bad, true), "{bad:?}");
+            assert!(
+                safe_rel_for(bad, false) || bad.contains(':'),
+                "{bad:?} elsewhere"
+            );
+        }
+        for ok in [
+            "auxiliary.c",
+            "com10",
+            "com0",
+            "console.log",
+            "a/b.txt",
+            ".gitignore",
+            "lpt",
+        ] {
+            assert!(safe_rel_for(ok, true), "{ok}");
         }
     }
 
