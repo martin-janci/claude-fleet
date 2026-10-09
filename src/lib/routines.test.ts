@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
+import { destination } from './destination';
+import { automationTab } from './automation';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -13,7 +15,6 @@ import {
   pauseRoutine,
   retryRoutine,
   routineStateWords,
-  routinesDialogOpen,
   routinesRequest,
   runWords,
   trackFailingRoutines,
@@ -54,7 +55,7 @@ beforeEach(() => {
   failing.set([]);
   sessions.set([]);
   routinesRequest.set(null);
-  routinesDialogOpen.set(false);
+  destination.set('session');
 });
 
 describe('words', () => {
@@ -118,7 +119,9 @@ describe('the Inbox', () => {
     expect(get(selectedSession)?.id).toBe(77);
     expect(fixRoutine(failed())).toBe('definition');
     expect(get(routinesRequest)).toMatchObject({ select: 3, tab: 'definition' });
-    expect(get(routinesDialogOpen)).toBe(true);
+    // The definition opens in Automation's Routines tab (8.4).
+    expect(get(destination)).toBe('automation');
+    expect(get(automationTab)).toBe('routines');
   });
 
   it('keeps the list fresh, and stops asking an older hub', async () => {
