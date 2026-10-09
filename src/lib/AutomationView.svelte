@@ -11,6 +11,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Button from './kit/Button.svelte';
+  import { tablistKeys } from './tablist_keys';
   import Count from './kit/Count.svelte';
   import StatusDot from './kit/StatusDot.svelte';
   import type { OfState } from './kit/status';
@@ -154,7 +155,7 @@
       <h1>Automation</h1>
       <NewRoutineMenu onpick={(t) => openRoutines({ template: t })} />
     </div>
-    <div class="seg" role="tablist" aria-label="Automation" data-testid="automation-tabs">
+    <div class="seg" role="tablist" aria-label="Automation" data-testid="automation-tabs" use:tablistKeys>
       {#each TABS as t (t.id)}
         {@const n = t.id === 'runs' ? (runs ? runsTotal : undefined) : t.count?.()}
         <button
@@ -290,28 +291,28 @@
   .side-head { display: flex; flex-direction: column; gap: var(--space-2); padding: 14px var(--space-3) var(--space-2); }
   .title-row { display: flex; align-items: center; justify-content: space-between; }
   .seg { display: flex; gap: 2px; padding: 2px; background: var(--bg-raise); border: 1px solid var(--control-border, var(--border)); border-radius: var(--radius-sm); }
-  .seg button { flex: 1 1 0; height: 22px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: calc(var(--radius-sm) - 1px); background: transparent; color: var(--fg-2); font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .seg button { flex: 1 1 0; height: 22px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--fg-2); font: inherit; font-size: var(--text-xs); cursor: pointer; white-space: nowrap; }
   .seg button:hover { color: var(--fg); }
   .seg button[aria-selected='true'] { background: var(--bg-hover); color: var(--fg); font-weight: 500; }
   .side-foot { position: sticky; bottom: 0; margin-top: auto; display: flex; align-items: center; gap: var(--space-2); padding: 10px var(--space-3); border-top: 1px solid var(--border); background: var(--bg-pane); }
-  h1 { margin: 0; font-size: 16px; line-height: 22px; font-weight: 600; }
+  h1 { margin: 0; font-size: var(--text-lg); line-height: 22px; font-weight: 600; }
   .grow { flex: 1; }
-  .today { font-size: 12px; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+  .today { font-size: var(--text-xs); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
   .banner { margin: 0; padding: var(--space-2, 8px) var(--space-4, 16px); font-size: var(--text-sm, 12.5px); background: color-mix(in srgb, var(--status-waiting) 14%, transparent); }
   .err { margin: 0; padding: var(--space-2, 8px) var(--space-4, 16px); font-size: var(--text-sm, 12.5px); color: var(--status-failed); }
   .loading { display: flex; justify-content: center; padding: var(--space-6, 24px); }
   .body { flex: 1; min-height: 0; overflow: auto; padding: var(--space-4) var(--space-6); display: flex; flex-direction: column; gap: var(--space-3); }
   .hint, .none { margin: 0; font-size: var(--text-sm, 12.5px); color: var(--fg-muted); }
   .table { list-style: none; margin: 0; padding: 0; max-width: 960px; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
-  .table li { display: grid; grid-template-columns: 16px 80px minmax(0, 1fr) 64px 52px 64px; gap: 4px 10px; align-items: center; padding: 9px 12px; font-size: 13px; }
+  .table li { display: grid; grid-template-columns: 16px 80px minmax(0, 1fr) 64px 52px 64px; gap: 4px 10px; align-items: center; padding: 9px 12px; font-size: var(--text-sm); }
   .table li + li { border-top: 1px solid var(--border); }
   .table.agents li { grid-template-columns: 16px minmax(0, 1fr) auto; }
   .main { min-width: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
-  .summary { flex-basis: 100%; font-size: 12px; color: var(--fg-muted); overflow-wrap: anywhere; }
+  .summary { flex-basis: 100%; font-size: var(--text-xs); color: var(--fg-muted); overflow-wrap: anywhere; }
   .outcome.failed { color: var(--status-failed); }
-  .outcome { font-size: 12px; color: var(--fg-2); }
+  .outcome { font-size: var(--text-xs); color: var(--fg-2); }
   .outcome.needs_person { color: var(--status-waiting); }
-  .meta, .when, .num { font-size: 12px; color: var(--fg-muted); }
+  .meta, .when, .num { font-size: var(--text-xs); color: var(--fg-muted); }
   .tnum, .num { font-variant-numeric: tabular-nums; }
   .state { flex: none; }
   .outcomes { list-style: none; margin: 0; padding: 0; }
@@ -320,5 +321,5 @@
   .outcomes .of-row[aria-selected='true'] { background: var(--accent-soft); }
   .outcomes .of-row :global(.of-dot) { margin-top: 0; }
   .dot-gap { width: 8px; flex: none; }
-  .txt { flex: 1 1 auto; font-size: 13px; line-height: 18px; }
+  .txt { flex: 1 1 auto; font-size: var(--text-sm); line-height: 18px; }
 </style>
