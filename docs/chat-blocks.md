@@ -272,7 +272,11 @@ most 20 problems are reported.
 
 ## Where it lives
 
-`src/lib/rich_blocks.ts` splits a text block and checks a block.
+`src/lib/rich_blocks.ts` splits a text block and checks a block. It also
+draws a work handover (the text between `WORK_HANDOVER_BEGIN_<nonce>` and
+`WORK_HANDOVER_END_<nonce>`, which fleet asks a session for) as a card;
+`src/lib/handover.ts` reads its sections. That one is not a `fleet.ui/1`
+block: it is prose, and a section the parser cannot name stays Markdown.
 `src/lib/RichText.svelte` draws the segments, with the cards in
 `src/lib/rich/`; `rich/progress_board.ts` pairs the progress cards of one
 id. The transcript already carries the text, so the hub contract is

@@ -7,6 +7,7 @@ vi.mock('./clipboard', () => ({ copyText: vi.fn(() => Promise.resolve(true)) }))
 
 import RichText from './RichText.svelte';
 import { composerDrafts } from './conversation';
+import { TASK_223 } from './handover_fixture';
 
 const ui = (o: Record<string, unknown>) => '```fleet-ui\n' + JSON.stringify({ spec: 'fleet.ui/1', ...o }) + '\n```';
 
@@ -92,5 +93,26 @@ describe('RichText', () => {
     render(RichText, { source: ui({ kind: 'callout', tone: 'loud', body: 'x' }) });
     expect(screen.getByTestId('rich-invalid').textContent).toContain('`tone` must be one of');
     expect(screen.getByTestId('md-copy')).toBeTruthy();
+  });
+
+  it('draws a work handover as a card: key, open counts, sections, steps that only fill the composer', async () => {
+    render(RichText, { source: `Here it is.\nWORK_HANDOVER_BEGIN_7c86\n${TASK_223}\nWORK_HANDOVER_END_7c86`, sessionId: 4 });
+    expect(screen.queryByText(/WORK_HANDOVER_/)).toBeNull();
+    expect(screen.getByTestId('rich-handover-key').textContent).toBe('TASK-223');
+    expect(screen.getByTestId('rich-handover-title').textContent).toBe('Polish functionalities');
+    expect(screen.getByTestId('rich-handover-blocked')).toBeTruthy();
+    expect(screen.getByTestId('rich-handover-glance').textContent).toMatch(/2\s*Blockers.*3\s*Next steps.*2\s*Gotchas/);
+    expect(screen.getByTestId('rich-handover-next').querySelectorAll('li')).toHaveLength(3);
+    expect(screen.getByTestId('rich-handover-gotchas').querySelectorAll('li')).toHaveLength(2);
+    const ask = screen.getAllByTestId('rich-handover-ask');
+    await fireEvent.click(ask[2]);
+    expect(composerDrafts.get(4)).toBe('Once it is closed, the branch and its worktree can be removed.');
+  });
+
+  it('keeps the handover card read-only without a session', () => {
+    render(RichText, { source: 'WORK_HANDOVER_BEGIN_n1\nDone: the parser.\nWORK_HANDOVER_END_n1' });
+    expect(screen.getByTestId('rich-handover-done').textContent).toContain('the parser.');
+    expect(screen.queryByTestId('rich-handover-ask')).toBeNull();
+    expect(screen.queryByTestId('rich-handover-glance')).toBeNull();
   });
 });
