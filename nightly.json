@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "track": "nightly",
+  "sequence": 1,
+  "generated_at": "2026-10-09T20:10:39Z",
+  "expires_at": "2026-10-23T20:10:39Z",
+  "current": "0.6.1-dev.53.desktop.gbb255e2",
+  "recommended": "0.6.1-dev.53.desktop.gbb255e2",
+  "minimum_supported": {},
+  "mandatory": [],
+  "rollback": null,
+  "withdrawn": [],
+  "releases": [
+    {
+      "version": "0.6.1-dev.53.desktop.gbb255e2",
+      "manifest": "https://github.com/martin-janci/claude-fleet/releases/download/v0.6.1-dev.53.desktop.gbb255e2/release-manifest.json",
+      "manifest_sha256": "79af52c4dad4da160f5ee908766a91748f6cb7687d11be9ae1e272848bbae868"
+    }
+  ],
+  "next_keys": []
+}
