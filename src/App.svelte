@@ -10,6 +10,8 @@
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
+  import FirstRun from './lib/FirstRun.svelte';
+  import SettingsDialog from './lib/SettingsDialog.svelte';
   import Lazy from './lib/Lazy.svelte';
   import { lazyViews, preloadLazyViews } from './lib/lazy_views';
   import { windowHidden } from './lib/window_hidden';
@@ -785,6 +787,14 @@
   });
   const taskShowing = $derived($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen);
   const boardShown = $derived($destination === 'board');
+  // The list column and the session header belong to Inbox, Sessions and
+  // Work (the Main, Sessions and Work boards). Control and Accounts take the
+  // whole width; Automation and Toolkit bring their own navigation. The
+  // Sidebar stays mounted under a fleet page, hidden, so its chords and
+  // state survive the round trip.
+  const listHidden = $derived(fleetPageShown);
+  // A task in the Work view is not a session: no session tabs over it.
+  const sessionChrome = $derived(!!$selectedSession && !fleetPageShown && !(taskShowing && !boardShown));
   const detailsMain = $derived(
     !wideMode && !boardShown && ($destination === 'details' || taskShowing || !$selectedSession),
   );
@@ -872,23 +882,22 @@
   }
 
   // The Tidy-up sheet lives in the sidebar: a request for it (the Today
-  // view's Stale section) brings a collapsed sidebar back so it can open.
+  // view's Stale section) brings a collapsed sidebar back so it can open,
+  // and leaves a fleet page, which hides the list.
   $effect(() => {
-    if ($tidyRequest) sidebarCollapsed = false;
+    if ($tidyRequest) untrack(revealList);
   });
 
   // The Add project dialog is mounted by the Sidebar, which is unmounted while
   // the rail is collapsed: a request from the switcher's Add row brings it
   // back, and the mounted Sidebar then consumes the request.
   $effect(() => {
-    if ($addProjectRequest) sidebarCollapsed = false;
+    if ($addProjectRequest) untrack(revealList);
   });
-
-  // Review r08: Settings (and Get started) are mounted by the Sidebar too, and
-  // the rail's Settings and ⌘, must open them while it is collapsed.
-  $effect(() => {
-    if ($settingsOpen) sidebarCollapsed = false;
-  });
+  function revealList() {
+    sidebarCollapsed = false;
+    if (fleetPageShown) showSession();
+  }
 
   // "Insert into composer" (work graph M9.2) shows where the text went: the
   // selected session's conversation.
@@ -977,8 +986,8 @@
   // the inspector (steps 3.2, 3.5). Setting a slot to `0px` hides it while
   // keeping each child's grid placement stable.
   const gridTemplate = $derived.by(() => {
-    const sb = sidebarCollapsed ? '20px' : `${sidebarPx}px`;
-    const sbResizer = sidebarCollapsed ? '0px' : '4px';
+    const sb = listHidden ? '0px' : sidebarCollapsed ? '20px' : `${sidebarPx}px`;
+    const sbResizer = listHidden || sidebarCollapsed ? '0px' : '4px';
     const insp = inspectorShown ? 'minmax(var(--inspector-min), var(--inspector-max))' : '0px';
     return `var(--rail-w) ${sb} ${sbResizer} 1fr ${insp}`;
   });
@@ -1034,6 +1043,13 @@
 
 <!-- Redesign 3.17: the Main board's header, above everything else. -->
 <ShellHeader mac={isMac} />
+<!-- Redesign 10.5: the first-run tour and Get started float above the
+     layout; Settings opens over it. Both used to be mounted by the Sidebar,
+     which a fleet page hides and a collapsed rail unmounts. -->
+<FirstRun mac={isMac} />
+{#if $settingsOpen}
+  <SettingsDialog onClose={() => settingsOpen.set(false)} />
+{/if}
 <StartupSplash onhubsettings={() => settingsOpen.set(true)} />
 {#if revealVersion}
   <UpdateReveal version={revealVersion} onclose={() => (revealVersion = null)} />
@@ -1047,9 +1063,12 @@
     hubUrl={$hubStatus.configured_url}
     onsettings={() => settingsOpen.set(true)} />
 {/if}
-<main class="layout" style="grid-template-columns: {gridTemplate};">
+<main class="layout" class:list-off={listHidden} style="grid-template-columns: {gridTemplate};">
   <AppRail {isMac} onselect={onRailSelect} />
-  {#if sidebarCollapsed}
+  {#if sidebarCollapsed && listHidden}
+    <div></div>
+    <div></div>
+  {:else if sidebarCollapsed}
     <button
       class="strip-expand"
       onclick={toggleSidebar}
@@ -1069,20 +1088,20 @@
   {/if}
 
   <div class="right-col" data-testid="pane-terminal">
-    <SessionTabs
-      session={$selectedSession}
-      name={selName}
-      current={currentTab}
-      terminalCount={selTerminals?.shells.length ?? 0}
-      disabled={tabDisabled}
-      assetsActive={$destination === 'assets'}
-      {inspectorOpen}
-      inspectorAvailable={inspectorRoom}
-      {isMac}
-      onselect={onSessionTab}
-      onassets={showAssets}
-      oninspector={toggleInspector}
-    />
+    {#if sessionChrome}
+      <SessionTabs
+        session={$selectedSession}
+        name={selName}
+        current={currentTab}
+        terminalCount={selTerminals?.shells.length ?? 0}
+        disabled={tabDisabled}
+        {inspectorOpen}
+        inspectorAvailable={inspectorRoom}
+        {isMac}
+        onselect={onSessionTab}
+        oninspector={toggleInspector}
+      />
+    {/if}
     <div class="right-body">
       {#if $selectedSession && selNoPane}
         <!-- Rows with no pane (bg agents, external Claude sessions) have no
@@ -1398,6 +1417,12 @@
     overflow: auto;
     border-left: 1px solid var(--border);
     background: var(--bg-pane);
+  }
+  /* A fleet page's 0px list column: the Sidebar stays mounted but neither
+     shows its border nor takes focus. */
+  .layout.list-off > :global([data-testid='pane-sidebar']),
+  .layout.list-off > :global([data-testid='resizer-sidebar']) {
+    visibility: hidden;
   }
   .right-col {
     display: flex;

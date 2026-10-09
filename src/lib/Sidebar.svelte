@@ -29,8 +29,6 @@
   import { readPref, writePref } from './prefs';
   import { accessOf } from './access';
   import AddProjectDialog from './AddProjectDialog.svelte';
-  import SettingsDialog from './SettingsDialog.svelte';
-  import FirstRun from './FirstRun.svelte';
   import { hostFilter, effectiveHostFilter, hosts, hostByAlias } from './hosts';
   import { bootstrapError } from './bootstrap_state';
   import { errorText } from './error_copy';
@@ -58,7 +56,6 @@
     hostsViewOpen,
     addProjectRequest,
     requestHostsView,
-    settingsOpen,
   } from './app_views';
   import { hintAnchor } from './hints';
   import { openNewSessionPicker } from './switcher_request';
@@ -1459,8 +1456,6 @@
     {loadError}
     {onRefresh}
     {onCollapse}
-    showSettings={$settingsOpen}
-    onOpenSettings={() => settingsOpen.set(true)}
     needsYouCount={needsYouTotal}
     {selectMode}
     {toggleSelectMode}
@@ -2055,13 +2050,6 @@
     <code>{pendingRecreate.host_alias}</code> and the running claude state inside it,
     then starts a fresh session in the same worktree. Continue?
   </ConfirmDialog>
-{/if}
-
-<!-- Redesign 10.5: the first-run tour and Get started; both float above
-     the layout. -->
-<FirstRun mac={isMac} />
-{#if $settingsOpen}
-  <SettingsDialog onClose={() => settingsOpen.set(false)} />
 {/if}
 
 {#if nameWorkFor}

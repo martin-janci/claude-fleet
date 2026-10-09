@@ -179,13 +179,13 @@ describe('App layout', () => {
     }
   });
 
-  it('marks only Assets active (no session tab) when Assets is open', async () => {
-    const { getByTestId } = render(App);
-    await fireEvent.click(getByTestId('stab-assets'));
-    expect(getByTestId('stab-assets').getAttribute('aria-pressed')).toBe('true');
-    for (const t of ['conversation', 'agent', 'files', 'details']) {
-      expect(getByTestId(`stab-${t}`).getAttribute('aria-selected')).toBe('false');
-    }
+  it('Assets live in Toolkit, not in the session header (UX audit A1)', async () => {
+    const { getByTestId, queryByTestId } = render(App);
+    expect(queryByTestId('stab-assets')).toBeNull();
+    await fireEvent.click(getByTestId('rail-toolkit'));
+    expect(getByTestId('rail-toolkit').getAttribute('aria-current')).toBe('page');
+    expect(queryByTestId('assets-overlay')).not.toBeNull();
+    expect(queryByTestId('session-tabs')).toBeNull();
   });
 
   it('a quick-switcher request opens the Assets overlay, and the panel takes the request', async () => {
@@ -193,7 +193,7 @@ describe('App layout', () => {
     expect(queryByTestId('assets-overlay')).toBeNull();
     requestAssetsView({ select: 'asset:personal:skill/w' });
     await waitFor(() => expect(queryByTestId('assets-overlay')).not.toBeNull());
-    expect(getByTestId('stab-assets').getAttribute('aria-pressed')).toBe('true');
+    expect(getByTestId('rail-toolkit').getAttribute('aria-current')).toBe('page');
     await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
   });
 
@@ -340,7 +340,8 @@ describe('App: the Conversation tab', () => {
     await toggleHosts();
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
     expect(hostsOpen()).toBe('true');
-    expect(sessionTab()).toBe('false');
+    // Hosts is a fleet page: the session tabs leave with the session (UX audit N1).
+    expect(screen.queryByTestId('session-tabs')).toBeNull();
   });
 
   it('a pane-less row shows Conversation without overwriting the stored preference', async () => {
@@ -420,7 +421,7 @@ describe('App: the Conversation tab', () => {
     expect(await screen.findByTestId('conversation-panel')).toBeInTheDocument();
     await toggleHosts();
     expect(hostsOpen()).toBe('true');
-    expect(sessionTab()).toBe('false');
+    expect(screen.queryByTestId('session-tabs')).toBeNull();
     expect(screen.getByTestId('hosts-overlay')).toBeInTheDocument();
     await toggleHosts();
     expect(screen.queryByTestId('hosts-overlay')).toBeNull();

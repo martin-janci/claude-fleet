@@ -8,8 +8,8 @@
   // redesign step 3.5, Main board): the session's name, state and where it
   // runs, then Conversation · the agent tab · Files · Details. The agent tab
   // is the terminal, named after the agent in it ("Claude Code", "Codex").
-  // Terminals (5.3) is the session's shells, with their count. Assets stays on the right until
-  // Toolkit (3.16) takes it; Accounts & hosts is on the rail and ⌘I.
+  // Terminals (5.3) is the session's shells, with their count. Assets are not
+  // the session's: they live in Toolkit (rail, ⌘K); Accounts & hosts is on the rail and ⌘I.
   //
   // App owns what each tab does;
   // this file only draws them and says which is current.
@@ -37,13 +37,11 @@
     terminalCount?: number;
     /** Per-tab reason it cannot open now; absent means it can. */
     disabled: Partial<Record<SessionTab, string>>;
-    assetsActive: boolean;
     inspectorOpen: boolean;
     /** Whether this layout has room for the inspector now. */
     inspectorAvailable: boolean;
     isMac: boolean;
     onselect: (tab: SessionTab) => void;
-    onassets: () => void;
     oninspector: () => void;
   }
   let {
@@ -52,12 +50,10 @@
     current,
     terminalCount = 0,
     disabled,
-    assetsActive,
     inspectorOpen,
     inspectorAvailable,
     isMac,
     onselect,
-    onassets,
     oninspector,
   }: Props = $props();
 
@@ -173,15 +169,6 @@
         >
       {/each}
     </div>
-    <span class="grow"></span>
-    <button
-      type="button"
-      class="tab-strip__tab fleet"
-      aria-pressed={assetsActive}
-      title="The asset catalog and its per-host drift state"
-      data-testid="stab-assets"
-      onclick={onassets}>Assets</button
-    >
   </div>
 </div>
 
@@ -245,11 +232,6 @@
     border-radius: var(--radius-sm);
     background: var(--bg-sunk);
     color: var(--fg-2);
-  }
-  .tab-strip__tab.fleet[aria-pressed='true'] {
-    color: var(--fg);
-    font-weight: 500;
-    border-bottom-color: var(--accent);
   }
   .editor-open svg,
   .share-open svg,
