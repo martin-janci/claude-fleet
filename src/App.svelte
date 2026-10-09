@@ -644,9 +644,25 @@
         leave('control');
       });
   });
-  // Classic has no Inbox (step 3.3): it shows the Sessions list instead.
+  // Classic has no Inbox (step 3.3): it shows the Sessions list instead, and
+  // remembers that it did, so going back to New brings the Inbox back rather
+  // than leaving the persisted view on Sessions for good (review r07). Only
+  // while the view is still the Sessions it fell back to: a view picked in
+  // Classic stands.
+  const INBOX_BEFORE_CLASSIC = 'sidebar.inbox-before-classic';
   $effect(() => {
-    if ($uiLayout !== 'new' && $sidebarView === 'inbox') untrack(() => sidebarView.set('sessions'));
+    const layout = $uiLayout;
+    const view = $sidebarView;
+    untrack(() => {
+      if (layout !== 'new') {
+        if (view !== 'inbox') return;
+        writePref(INBOX_BEFORE_CLASSIC, true);
+        sidebarView.set('sessions');
+      } else if (readPref(INBOX_BEFORE_CLASSIC, false, isBool)) {
+        writePref(INBOX_BEFORE_CLASSIC, false);
+        if (view === 'sessions') sidebarView.set('inbox');
+      }
+    });
   });
 
   // Files mode swaps the center + terminal region for the worktree file
