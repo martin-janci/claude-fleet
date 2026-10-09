@@ -173,6 +173,38 @@ pub fn needs_insecure(hub_url: &str) -> Result<bool, IpcError> {
     }
 }
 
+/// Make sure the host has tmux, which every fleet session runs in (review
+/// r09/r18): present, it says `tmux=present`; absent, it installs it with
+/// the first package manager it finds that can run without a prompt —
+/// Homebrew as the user, else apt-get, dnf, yum, zypper or apk as root or
+/// through `sudo -n` (never a password prompt) — and says `tmux=installed`.
+/// When none can, it prints `error=<why, naming tmux>` and exits 4.
+pub fn tmux_script() -> String {
+    r#"if command -v tmux >/dev/null 2>&1; then printf 'tmux=present\n'; exit 0; fi
+if [ "$(id -u)" = 0 ]; then S=''; elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then S='sudo -n'; else S=none; fi
+ok=1
+if command -v brew >/dev/null 2>&1; then brew install tmux </dev/null >/dev/null 2>&1 && ok=0
+fi
+if [ "$ok" != 0 ] && [ "$S" != none ]; then
+  if command -v apt-get >/dev/null 2>&1; then
+    { $S env DEBIAN_FRONTEND=noninteractive apt-get install -y -q tmux || { $S apt-get update -q && $S env DEBIAN_FRONTEND=noninteractive apt-get install -y -q tmux; }; } </dev/null >/dev/null 2>&1 && ok=0
+  elif command -v dnf >/dev/null 2>&1; then $S dnf install -y -q tmux </dev/null >/dev/null 2>&1 && ok=0
+  elif command -v yum >/dev/null 2>&1; then $S yum install -y -q tmux </dev/null >/dev/null 2>&1 && ok=0
+  elif command -v zypper >/dev/null 2>&1; then $S zypper --non-interactive install tmux </dev/null >/dev/null 2>&1 && ok=0
+  elif command -v apk >/dev/null 2>&1; then $S apk add --no-progress tmux </dev/null >/dev/null 2>&1 && ok=0
+  fi
+fi
+if [ "$ok" = 0 ] && command -v tmux >/dev/null 2>&1; then printf 'tmux=installed\n'; exit 0; fi
+if [ "$S" = none ]; then
+  printf 'error=tmux is not installed on this host, and it cannot be installed without a password (no root, no passwordless sudo, no Homebrew): install tmux there, then run the install again\n'
+else
+  printf 'error=tmux is not installed on this host, and no package manager here installed it: install tmux there, then run the install again\n'
+fi
+exit 4
+"#
+    .to_string()
+}
+
 fn line_value<'a>(out: &'a str, key: &str) -> Option<&'a str> {
     out.lines()
         .find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
@@ -336,11 +368,33 @@ pub fn start(
 /// At process start: every job still `running` was run by a process that is
 /// gone (a job lives in the process that started it), so none of them may
 /// hold off a new install for [`STALE_AFTER_SECS`].
+///
+/// A job cut off in its `connect` step had already put the host on
+/// `transport=agent` (review r18 A3), and the revert its wait would have
+/// made on a timeout never ran: the host is put back on SSH, the transport
+/// it had before (an install refuses a host that is already an agent host).
+/// If the agent did come up, installing again moves it over once more.
 pub fn fail_interrupted(store: &Store) -> Result<usize, IpcError> {
-    Ok(store.fail_stale_agent_installs(
+    let cut_off: Vec<String> = store
+        .agent_installs(None, 1000)?
+        .into_iter()
+        .filter(|j| j.state == "running" && j.step == "connect")
+        .map(|j| j.host_alias)
+        .collect();
+    let n = store.fail_stale_agent_installs(
         crate::store::now_unix() + 1,
         "interrupted: the hub stopped while it ran; start it again",
-    )?)
+    )?;
+    for alias in cut_off {
+        let on_agent = store
+            .get_host_row(&alias)?
+            .is_some_and(|h| h.transport == "agent");
+        if on_agent {
+            store.set_host_transport(&alias, "ssh")?;
+            tracing::info!(host = %alias, "an agent install the hub stopped during left the host on agent: back on SSH");
+        }
+    }
+    Ok(n)
 }
 
 /// The jobs, newest first; one left running by a process that is gone is
@@ -397,7 +451,25 @@ async fn run(
         format!("no fleet-agent release for {uname:?}: releases are for x86_64 and aarch64 Linux")
     })?;
 
-    // 2. download
+    // 2. tmux, which every session runs in (review r09/r18)
+    step(store, id, "tmux", "checking that the host has tmux");
+    let out =
+        crate::ssh::run_shell_bounded(ssh, host, &tmux_script(), CONNECT_TIMEOUT, DOWNLOAD_WALL)
+            .await
+            .map_err(|e| fail("could not check for tmux", e))?;
+    if !out.status.success() {
+        let text = String::from_utf8_lossy(&out.stdout);
+        return Err(line_value(&text, "error")
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                format!(
+                    "tmux is not installed on this host and could not be installed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )
+            }));
+    }
+
+    // 3. download
     step(
         store,
         id,
@@ -425,7 +497,7 @@ async fn run(
             }));
     }
 
-    // 3. start, the token on stdin
+    // 4. start, the token on stdin
     let token = {
         let s = lock(store).map_err(|e| e.message)?;
         match s.get_host_token(&plan.alias).map_err(|e| e.message)? {
@@ -465,7 +537,7 @@ async fn run(
     }
     let supervised = line_value(&text, "started") == Some("systemd");
 
-    // 4. connect
+    // 5. connect
     step(store, id, "connect", "waiting for the agent to connect");
     lock(store)
         .and_then(|s| s.set_host_transport(&plan.alias, "agent"))
@@ -543,6 +615,86 @@ mod tests {
         assert!(plan(&store, &args).is_ok());
         let s = store.lock().unwrap();
         assert_eq!(s.agent_install(old).unwrap().unwrap().state, "failed");
+    }
+
+    /// Review r09/r18: the job makes sure the host has tmux, installing it
+    /// only where that needs no password, and otherwise fails naming tmux.
+    #[cfg(unix)]
+    #[test]
+    fn the_tmux_step_installs_it_without_a_prompt_or_says_why_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let tool = |name: &str, body: &str| {
+            use std::os::unix::fs::PermissionsExt;
+            let p = bin.join(name);
+            std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let run = || {
+            crate::proc::std_command("/bin/bash")
+                .args(["-c", &tmux_script()])
+                .env("PATH", &bin)
+                .output()
+                .unwrap()
+        };
+        // Not root, no sudo, no package manager: it says why, naming tmux.
+        tool("id", "echo 1000");
+        let out = run();
+        assert_eq!(out.status.code(), Some(4));
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let why = line_value(&text, "error").unwrap();
+        assert!(why.contains("tmux") && why.contains("password"), "{why}");
+        // Root with apt-get: installed.
+        tool("id", "echo 0");
+        tool(
+            "env",
+            "while [ \"${1#*=}\" != \"$1\" ]; do shift; done; exec \"$@\"",
+        );
+        tool(
+            "apt-get",
+            &format!(
+                "[ \"$1\" = install ] && printf '#!/bin/sh\\n' > {0}/tmux && /bin/chmod +x {0}/tmux",
+                bin.display()
+            ),
+        );
+        let out = run();
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(
+            line_value(&String::from_utf8_lossy(&out.stdout), "tmux"),
+            Some("installed")
+        );
+        // Present: nothing to do.
+        let out = run();
+        assert_eq!(
+            line_value(&String::from_utf8_lossy(&out.stdout), "tmux"),
+            Some("present")
+        );
+    }
+
+    /// Review r18 A3: a hub stopped while a job waited for the agent to
+    /// connect left the host on `transport=agent`; the startup sweep puts it
+    /// back on SSH. A job stopped earlier never moved it, and a host it did
+    /// not touch keeps its transport.
+    #[tokio::test]
+    async fn a_hub_stopped_mid_connect_puts_the_host_back_on_ssh_at_start() {
+        let store = store_with_ssh_host();
+        {
+            let s = store.lock().unwrap();
+            let id = s.insert_agent_install("mercury", "0.5.4").unwrap().id;
+            s.set_agent_install_step(id, "connect", Some("waiting"))
+                .unwrap();
+            s.set_host_transport("mercury", "agent").unwrap();
+            s.insert_host("venus", Some("venus")).unwrap();
+            s.set_host_transport("venus", "agent").unwrap();
+            let early = s.insert_agent_install("venus", "0.5.4").unwrap().id;
+            s.set_agent_install_step(early, "download", Some("fetching"))
+                .unwrap();
+        }
+        assert_eq!(fail_interrupted(&store.lock().unwrap()).unwrap(), 2);
+        let s = store.lock().unwrap();
+        assert_eq!(s.get_host_row("mercury").unwrap().unwrap().transport, "ssh");
+        assert_eq!(s.get_host_row("venus").unwrap().unwrap().transport, "agent");
     }
 
     /// r18: the "already running" check and the insert share one store
