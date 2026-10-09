@@ -12,6 +12,8 @@ import { hosts } from './hosts';
 import { uiLayout } from './prefs';
 import {
   doneWhenRows,
+  finalMoveQuestion,
+  splitMoves,
   eventSentence,
   moveLabel,
   autonomyWords,
@@ -126,6 +128,68 @@ describe('WorkMissions', () => {
     await flush();
     expect(calls('set_mission_state')[0]).toEqual({ mission_id: 4, state: 'active', expected_version: 1 });
     expect(screen.getByTestId('mission-move-paused').textContent).toBe('Pause');
+  });
+
+  describe('the ⋯ menu for the moves that end a mission (parity P19)', () => {
+    async function openActive() {
+      current = mission({ state: 'active' });
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+    }
+
+    it('New: Pause stays a button; Complete, Mark failed and Cancel ask first from ⋯', async () => {
+      uiLayout.set('new');
+      try {
+        await openActive();
+        expect(screen.getByTestId('mission-move-paused').textContent).toBe('Pause');
+        for (const to of ['completed', 'failed', 'cancelled']) expect(screen.queryByTestId(`mission-move-${to}`)).toBeNull();
+        await fireEvent.click(screen.getByTestId('mission-more'));
+        expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Complete…', 'Mark failed…', 'Cancel…']);
+        await fireEvent.click(screen.getByTestId('mission-menu-failed'));
+        expect(screen.queryByTestId('mission-more-menu')).toBeNull();
+        expect(screen.getByTestId('mission-move-confirm-row').textContent).toContain('Mark Payments v2 failed?');
+        expect(calls('set_mission_state')).toEqual([]);
+        await fireEvent.click(screen.getByTestId('mission-move-keep'));
+        expect(screen.queryByTestId('mission-move-confirm-row')).toBeNull();
+        await fireEvent.click(screen.getByTestId('mission-more'));
+        await fireEvent.click(screen.getByTestId('mission-menu-completed'));
+        await fireEvent.click(screen.getByTestId('mission-move-confirm'));
+        await flush();
+        expect(calls('set_mission_state')).toEqual([{ mission_id: 4, state: 'completed', expected_version: 1 }]);
+        expect(screen.queryByTestId('mission-more')).toBeNull();
+      } finally {
+        uiLayout.set('classic');
+      }
+    });
+
+    it('New: Esc closes the menu and a draft offers only Cancel in it', async () => {
+      uiLayout.set('new');
+      try {
+        render(WorkMissions);
+        await flush();
+        await fireEvent.click(screen.getByTestId('mission-row'));
+        await flush();
+        expect(screen.getByTestId('mission-move-active').textContent).toBe('Start');
+        await fireEvent.click(screen.getByTestId('mission-more'));
+        expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['Cancel…']);
+        await fireEvent.keyDown(screen.getByTestId('mission-more-menu'), { key: 'Escape' });
+        expect(screen.queryByTestId('mission-more-menu')).toBeNull();
+      } finally {
+        uiLayout.set('classic');
+      }
+    });
+
+    it('Classic keeps the flat buttons, with no ⋯', async () => {
+      uiLayout.set('classic');
+      await openActive();
+      expect(screen.queryByTestId('mission-more')).toBeNull();
+      expect(screen.getByTestId('mission-move-failed').textContent).toBe('Mark failed');
+      await fireEvent.click(screen.getByTestId('mission-move-cancelled'));
+      await flush();
+      expect(calls('set_mission_state')).toEqual([{ mission_id: 4, state: 'cancelled', expected_version: 1 }]);
+    });
   });
 
   it('adds a new task under the root and into the mission', async () => {
@@ -641,6 +705,16 @@ describe('missions helpers', () => {
     expect(eventSentence({ id: 4, at: 1, kind: 'dep_added', actor: 'fleet', work_item_id: 3, payload: { depends_on: 2 } })).toBe(
       'Task 3 waits for 2',
     );
+  });
+});
+
+describe('splitMoves and finalMoveQuestion (parity P19)', () => {
+  it('keeps Start, Pause and Resume inline and puts the ending moves in ⋯', () => {
+    expect(splitMoves('active')).toEqual({ inline: ['paused'], menu: ['completed', 'failed', 'cancelled'] });
+    expect(splitMoves('paused')).toEqual({ inline: ['active'], menu: ['completed', 'failed', 'cancelled'] });
+    expect(splitMoves('draft')).toEqual({ inline: ['active'], menu: ['cancelled'] });
+    expect(splitMoves('completed')).toEqual({ inline: [], menu: [] });
+    expect(finalMoveQuestion('X', 'cancelled')).toBe('Cancel X? It stops changing; its tasks stay.');
   });
 });
 
