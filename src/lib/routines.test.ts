@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
+import { destination } from './destination';
+import { automationTab } from './automation';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -13,8 +15,8 @@ import {
   pauseRoutine,
   retryRoutine,
   routineStateWords,
-  routinesDialogOpen,
   routinesRequest,
+  runSourceHint,
   runWords,
   trackFailingRoutines,
   type FailingRoutine,
@@ -54,7 +56,7 @@ beforeEach(() => {
   failing.set([]);
   sessions.set([]);
   routinesRequest.set(null);
-  routinesDialogOpen.set(false);
+  destination.set('session');
 });
 
 describe('words', () => {
@@ -71,6 +73,9 @@ describe('words', () => {
     expect(runWords({ state: 'done', outcome: 'needs_person' })).toBe('Needs you');
     expect(runWords({ state: 'done', outcome: 'nothing' })).toBe('Nothing to do');
     expect(runWords({ state: 'running' })).toBe('Working');
+    expect(runSourceHint({ outcome: 'nothing', outcome_source: 'jev' })).toMatch(/^Jev read this/);
+    expect(runSourceHint({ outcome: 'did_work', outcome_source: 'rule' })).toBeUndefined();
+    expect(runSourceHint({ outcome_source: 'jev' })).toBeUndefined();
     expect(routineStateWords({ enabled: false, paused_reason: 'over its budget' })).toBe('Paused by fleet');
     expect(routineStateWords({ enabled: false })).toBe('Paused');
   });
@@ -118,7 +123,9 @@ describe('the Inbox', () => {
     expect(get(selectedSession)?.id).toBe(77);
     expect(fixRoutine(failed())).toBe('definition');
     expect(get(routinesRequest)).toMatchObject({ select: 3, tab: 'definition' });
-    expect(get(routinesDialogOpen)).toBe(true);
+    // The definition opens in Automation's Routines tab (8.4).
+    expect(get(destination)).toBe('automation');
+    expect(get(automationTab)).toBe('routines');
   });
 
   it('keeps the list fresh, and stops asking an older hub', async () => {

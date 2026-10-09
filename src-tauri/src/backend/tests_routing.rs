@@ -4382,6 +4382,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "mission_triage",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_triage", "item_id": null, "mission_id": 1, "refresh": true }),
+            "{}",
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::mission_triage(
+                    b,
+                    commands::missions::MissionTriageArgs {
+                        mission_id: 1,
+                        refresh: true,
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── multi-user M1 (T13): the three sharing mutations ─────────────
         //
         // `level` crosses as the string the user chose and is validated by

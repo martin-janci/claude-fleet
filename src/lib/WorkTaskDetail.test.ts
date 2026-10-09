@@ -731,6 +731,32 @@ describe('WorkTaskDetail', () => {
     expect(before(sessionsHead, screen.getByTestId('task-steps'))).toBe(true);
     expect(screen.getByTestId('task-step').textContent).toContain('Read ABC-12');
   });
+  describe('K5: Jev proposes a group (redesign 6.9)', () => {
+    const proposed: TaskDetail = {
+      ...localTask,
+      task: { ...localTask.task, proposals: [{ feature: 'work_placement', value: 'Payments', source: 'jev', confidence_pct: 77 }] },
+    };
+
+    it('offers Place in the proposed group, and places on click', async () => {
+      handlers.work_task = () => proposed;
+      handlers.place_work = () => ({ ...proposed.task, group: { id: 'label:Payments', label: 'Payments', source: 'manual' }, placement_version: 1 });
+      render(WorkTaskDetail, { props: { taskId: 'item:77' } });
+      await flush();
+      expect(screen.getByTestId('work-task-group-proposal').textContent).toContain('Jev proposes “Payments”');
+      expect(screen.getByTestId('work-task-group-proposed-by').textContent).toContain('77%');
+      await fireEvent.click(screen.getByTestId('work-task-group-proposal-place'));
+      await flush();
+      expect(calls('place_work')[0]).toEqual({ task_id: 'item:77', group: 'Payments', expected_version: 0 });
+      expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
+    });
+
+    it('shows nothing once a person placed the task', async () => {
+      handlers.work_task = () => ({ ...proposed, task: { ...proposed.task, group: { id: 'label:Infra', label: 'Infra', source: 'manual' } } });
+      render(WorkTaskDetail, { props: { taskId: 'item:77' } });
+      await flush();
+      expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
+    });
+  });
 
   it('is accessible', async () => {
     handlers.work_task = () => ({

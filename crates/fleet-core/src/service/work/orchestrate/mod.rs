@@ -20,6 +20,7 @@ pub mod guard;
 pub mod integrate;
 pub mod planner;
 pub mod steps;
+pub mod triage;
 
 use self::planner::{Command, PlannerOutput};
 use self::steps::{plan_steps, Step, StepInput, AUTO_LEVEL};

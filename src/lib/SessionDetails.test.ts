@@ -171,6 +171,28 @@ describe('SessionDetails', () => {
     expect(rows[0].textContent).toContain('dev-sib');
   });
 
+  describe('N1: Jev proposes a session on the same work (redesign 6.9)', () => {
+    const me = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10, worktree_key: 'main', proposals: [{ feature: 'related_session', value: 's3', source: 'jev' as const, confidence_pct: 81 }] };
+    const twin = { ...sampleSession, id: 3, tmux_name: 'dev-twin', host_alias: 'mefistos', project_id: 2, worktree_id: 20, worktree_key: 'fix' };
+
+    it('lists it under Related sessions', async () => {
+      sessions.set([me, twin]);
+      render(SessionDetails, { props: { session: me } });
+      await tick();
+      expect(screen.getByTestId('related-sessions').textContent).toContain('Related sessions (1)');
+      expect(screen.getByTestId('related-proposed-row').textContent).toContain('dev-twin');
+      expect(screen.getByTestId('related-proposed-row').textContent).toContain('Same work?');
+      expect(screen.getByTestId('related-proposed-by').textContent).toContain('81%');
+    });
+
+    it('shows nothing when the session is not in the list', async () => {
+      sessions.set([me]);
+      render(SessionDetails, { props: { session: me } });
+      await tick();
+      expect(screen.queryByTestId('related-proposed')).toBeNull();
+    });
+  });
+
   it('hides Related panel when session has no siblings', async () => {
     const lone = { ...sampleSession, id: 1, project_id: 1, worktree_id: 10, worktree_key: 'main' };
     sessions.set([lone]);

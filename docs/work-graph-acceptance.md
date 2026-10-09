@@ -581,14 +581,14 @@ Notes:
 
 ## Part K: the operator's confirmations (M9.7)
 
-### Step 32: the operator cannot start or kill on a hub
+### Step 32: the operator's start and kill wait for you on a hub
 
 **Action.** In the agent panel, ask the operator: "Start work on T4" and
 then "Kill the session on T3".
 
-**Expected.** Both are refused (`E_FORBIDDEN`, no approver on a hub), and
-the operator says so and suggests doing it from the sidebar, or archive /
-snooze for a tidy. Nothing started or died.
+**Expected.** Both wait for your approval (`E_CONFIRM_REQUIRED`; redesign
+9.2): each shows as a card in Control's transcript, or in the dialog, on
+your paired device. Nothing starts or dies until you approve it there.
 
 Result: [ ] pass / [ ] fail
 
