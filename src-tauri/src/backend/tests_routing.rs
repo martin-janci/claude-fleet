@@ -799,6 +799,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "list_update_targets",
+            "update_status",
+            json!({}),
+            r#"{"targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::updates::routed::list_update_targets(b, s)).map(|_| ())
+            }),
+        ),
+        (
             "get_form",
             "ask",
             json!({ "get": "f_a" }),
@@ -6162,6 +6171,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/presence.rs",
         include_str!("../commands/presence.rs"),
+    ),
+    (
+        "commands/updates.rs",
+        include_str!("../commands/updates.rs"),
     ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (

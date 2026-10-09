@@ -819,6 +819,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "unlink_peer",
         },
     ),
+    // Settings → Updates (Orbit Fleet 11.9b): what each part of the fleet
+    // runs, from the hub's update picture.
+    (
+        "list_update_targets",
+        Verdict::Routed {
+            tool: "update_status",
+        },
+    ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
     (
         "session_presence",

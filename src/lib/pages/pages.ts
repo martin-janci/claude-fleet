@@ -245,7 +245,9 @@ export async function loadDescriptors(): Promise<Result<Descriptor[]>> {
   return r;
 }
 
-export function fetchSource(ref: SourceRef): Promise<Result<unknown>> {
+export function fetchSource(ref: SourceRef, spec?: SourceSpec): Promise<Result<unknown>> {
+  // A live source has its own command, which routes to the hub (11.9b).
+  if (spec?.live) return invokeCmd<unknown>(spec.live.command);
   return invokeCmd<unknown>('fetch_page_source', { id: ref.id, params: ref.params ?? null });
 }
 

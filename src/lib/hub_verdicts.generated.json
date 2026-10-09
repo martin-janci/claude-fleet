@@ -178,6 +178,7 @@
     "list_sessions",
     "list_tasks",
     "list_trackers",
+    "list_update_targets",
     "mcp_confirm",
     "mcp_pending_confirms",
     "move_session",
