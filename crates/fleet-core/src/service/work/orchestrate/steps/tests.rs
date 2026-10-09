@@ -28,6 +28,8 @@ fn mission(policy: MissionPolicy) -> MissionRow {
         repos: vec![],
         policy,
         next_wake_at: None,
+        cost_micros: None,
+        budget_micros: None,
     }
 }
 

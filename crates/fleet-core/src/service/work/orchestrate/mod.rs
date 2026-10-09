@@ -127,6 +127,45 @@ pub struct MissionPlan {
     /// What its workers spent, in micro-USD.
     pub cost_micros: i64,
     pub counts: MissionTaskCounts,
+    /// What the next run will likely cost, for the run cards and the spend
+    /// ask: this mission's average, else every mission's; absent with no
+    /// history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_estimate: Option<RunEstimate>,
+}
+
+/// An average run's cost (`Store::run_cost_estimate`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunEstimate {
+    /// Micro-USD per run.
+    pub micros: i64,
+    /// How many finished runs it averages.
+    pub runs: i64,
+    /// `mission` (its own runs) | `fleet` (every mission's, when it has none).
+    pub basis: String,
+}
+
+/// [`RunEstimate`] for mission `id`.
+pub fn run_estimate(s: &Store, id: i64) -> Result<Option<RunEstimate>, IpcError> {
+    let own = s.run_cost_estimate(Some(id))?.map(|e| (e, "mission"));
+    let any = match own {
+        Some(o) => Some(o),
+        None => s.run_cost_estimate(None)?.map(|e| (e, "fleet")),
+    };
+    Ok(any.map(|((micros, runs), basis)| RunEstimate {
+        micros,
+        runs,
+        basis: basis.into(),
+    }))
+}
+
+/// Fill a listed mission's spend: what it cost and its live grant's budget.
+pub fn fill_spend(s: &Store, m: &mut MissionRow, now: i64) -> Result<(), IpcError> {
+    m.cost_micros = Some(s.mission_cost_micros(m.id)?);
+    m.budget_micros = s
+        .live_mission_grant(m.id, now)?
+        .and_then(|g| g.budget_micros);
+    Ok(())
 }
 
 /// Every member's attempts, newest first.
@@ -177,6 +216,7 @@ pub fn plan_for(s: &Store, m: &MissionRow) -> Result<Option<MissionPlan>, IpcErr
         cards: s.mission_cards(m.id, CARDS_SHOWN)?,
         cost_micros: s.mission_cost_micros(m.id)?,
         counts: s.mission_task_counts(m.id)?,
+        run_estimate: run_estimate(s, m.id)?,
         autonomy: a,
     }))
 }

@@ -300,6 +300,31 @@ impl Store {
         )?)
     }
 
+    /// What one run costs on average: the usage of the worker sessions of
+    /// finished runs over their count, for `mission_id`'s members, or for
+    /// every mission's when `None`. `None` until a finished run spent
+    /// something. A worker session can carry more than one run, so this is an
+    /// estimate, as the phone's spend ask shows it.
+    pub fn run_cost_estimate(
+        &self,
+        mission_id: Option<i64>,
+    ) -> Result<Option<(i64, i64)>, IpcError> {
+        let (runs, spent): (i64, i64) = self.conn.query_row(
+            "WITH done AS ( \
+                 SELECT t.id, t.worker_session_id FROM tasks t \
+                   JOIN work_items i ON i.id = t.work_item_id \
+                  WHERE t.finished_at IS NOT NULL AND t.worker_session_id IS NOT NULL \
+                    AND i.orchestration_project_id IS NOT NULL \
+                    AND (?1 IS NULL OR i.orchestration_project_id = ?1)) \
+             SELECT (SELECT COUNT(*) FROM done), \
+                    (SELECT COALESCE(SUM(s.usage_cost_micros), 0) FROM sessions s \
+                      WHERE s.id IN (SELECT worker_session_id FROM done))",
+            [mission_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((runs > 0 && spent > 0).then(|| (spent / runs, runs)))
+    }
+
     /// Planner calls logged since `since` (events of kind `planned`).
     pub fn mission_planner_runs_since(&self, mission_id: i64, since: i64) -> Result<i64, IpcError> {
         Ok(self.conn.query_row(
