@@ -97,8 +97,8 @@ describe('the Blocked buckets', () => {
     expect(
       blockedLine('account_limit', s, { limited_accounts: { acc: { window: 'five_hour', resets_at: null } } }, name),
     ).toBe('Paused · 5-hour limit on tech.silvester');
-    expect(blockedLine('host_down', s, facts, name)).toBe('Blocked · mefistos is down');
-    expect(blockedLine('no_credentials', s, facts, name)).toBe('Blocked · tech.silvester is signed out');
+    expect(blockedLine('host_down', s, facts, name)).toBe('Needs you · blocked on mefistos, which is down');
+    expect(blockedLine('no_credentials', s, facts, name)).toBe('Needs you · blocked on tech.silvester, which is signed out');
     expect(blockedLine('waiting', s, facts, name)).toBeNull();
   });
 });

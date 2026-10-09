@@ -26,6 +26,32 @@ pub struct UpdateTargetRow {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offers: Option<String>,
     pub reported_at: i64,
+    /// An update in flight (step 10.10): the page draws its loader beside
+    /// the `update` cell. Absent when nothing is moving.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<RowTransfer>,
+}
+
+/// A row's transfer, for a page table (`DataItem.svelte`): which cell it
+/// sits beside and how far it is, when that is known.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowTransfer {
+    pub column: String,
+    /// 0–100 when the size is known (Progress ring); `None` draws Data rain.
+    pub percent: Option<u8>,
+}
+
+/// An install's steps once its download is in: a known count, so the ring
+/// says how far it is. A download reports no bytes, so it has no size.
+fn in_flight(phase: &str) -> Option<(&'static str, Option<u8>)> {
+    Some(match phase {
+        "downloading" => ("Downloading", None),
+        "verifying" => ("Verifying", Some(25)),
+        "installing" => ("Installing", Some(50)),
+        "validating" => ("Checking it runs", Some(75)),
+        "rolling_back" => ("Rolling back", None),
+        _ => return None,
+    })
 }
 
 /// The fields of `update_status`'s `targets` the page reads.
@@ -69,6 +95,9 @@ fn update(t: &Target) -> String {
     if matches!(t.phase.as_str(), "failed" | "rollback_failed") {
         return "Update failed".into();
     }
+    if let Some((words, _)) = in_flight(&t.phase) {
+        return words.into();
+    }
     match t.status.as_str() {
         "up_to_date" => "Up to date",
         "update_available" => "Update available",
@@ -103,6 +132,10 @@ fn rows(status: Value) -> Result<Vec<UpdateTargetRow>, IpcError> {
                 .clone()
                 .filter(|v| *v != t.version && t.status != "up_to_date"),
             reported_at: t.reported_at,
+            transfer: in_flight(&t.phase).map(|(_, percent)| RowTransfer {
+                column: "update".into(),
+                percent,
+            }),
         })
         .collect();
     let rank = |p: &str| {
@@ -219,6 +252,30 @@ mod tests {
                 ("Device 7", "Phone", "Update available", Some("0.5.4")),
             ]
         );
+    }
+
+    /// 10.10: an update in flight carries its loader: a download (no
+    /// bytes reported) has no size, an install's later steps do.
+    #[test]
+    fn an_update_in_flight_carries_its_transfer() {
+        let mut down = target("agent:venus", "agent", "update_available", Some("0.5.4"));
+        down["phase"] = json!("downloading");
+        let mut inst = target("agent:mars", "agent", "update_available", Some("0.5.4"));
+        inst["phase"] = json!("installing");
+        let idle = target("hub:self", "hub", "up_to_date", None);
+        let got = rows(json!({ "targets": [down, inst, idle] })).unwrap();
+        let by = |d: &str| got.iter().find(|r| r.device == d).unwrap().clone();
+        assert_eq!(by("venus").update, "Downloading");
+        assert_eq!(
+            by("venus").transfer,
+            Some(RowTransfer {
+                column: "update".into(),
+                percent: None
+            })
+        );
+        assert_eq!(by("mars").update, "Installing");
+        assert_eq!(by("mars").transfer.and_then(|t| t.percent), Some(50));
+        assert_eq!(by("Hub").transfer, None);
     }
 
     #[test]

@@ -33,6 +33,7 @@ import {
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { expectAccessible } from './a11y_check';
+import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd);
@@ -174,7 +175,7 @@ describe('HostsView: list', () => {
     expect(htz.textContent).toContain('○');
     const mef = screen.getAllByTestId('host-row').find((r) => r.dataset.alias === 'mefistos')!;
     expect(within(mef).queryByTestId('host-offline')).toBeNull();
-    expect(within(mef).getByTestId('host-counts').textContent).toBe('6 ⚡2 ⏸1');
+    expect(within(mef).getByTestId('host-counts').textContent).toBe('6 · 2 working · 1 needs you');
   });
 
   it('shows one attention mark with an explaining title, and no × or 🚫 in rows', async () => {
@@ -1034,5 +1035,28 @@ describe('HostsView: accessibility', () => {
     await tick();
     expect(screen.getByTestId('hosts-table')).toBeTruthy();
     await expectAccessible(container);
+  });
+});
+
+// Redesign 1.5: one primary per view, the destructive action last behind a
+// confirm.
+describe('HostsView action hierarchy (redesign 1.5)', () => {
+  it('one primary, + Add host…, with a host open; Remove host… is last and asks first', async () => {
+    mount({ preselect: 'mefistos' });
+    await tick();
+    expect(detailAlias()).toBe('mefistos');
+    expectOnePrimary(screen.getByTestId('hosts-view'), 'hosts-add');
+    // The detail's own actions are plain; its Danger section is the last one
+    // and Remove host… its last button.
+    const sections = Array.from(detail().querySelectorAll(':scope > section'));
+    const danger = sections.at(-1)!;
+    expect(danger.getAttribute('aria-label')).toBe('Danger');
+    const remove = screen.getByTestId('detail-remove');
+    expectLastButton(danger, remove);
+    expect(remove.classList.contains('danger')).toBe(true);
+    await fireEvent.click(remove);
+    await tick();
+    expect(screen.getByTestId('confirm-remove')).toBeTruthy();
+    expect(calls('remove_host')).toHaveLength(0);
   });
 });

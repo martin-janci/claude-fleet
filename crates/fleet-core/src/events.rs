@@ -93,6 +93,10 @@ pub enum RowChange {
     SyncProgress(SyncProgress),
     /// A step boundary of an in-flight move. Not a store row.
     MoveProgress(MoveProgress),
+    /// A step boundary of an in-flight `new_session` (redesign step 5.13):
+    /// worktree, tmux, agent. Keyed by the caller's own opaque start token,
+    /// never by host or name. Not a store row.
+    StartProgress(StartProgress),
     /// A tracker item's normalised row changed (work graph M3). Emitted
     /// only on a real change: a sync pass that finds nothing new is silent.
     /// Never sent to a host-bound `/events` stream (the interim fence of
@@ -421,6 +425,51 @@ pub struct MoveProgress {
     pub detail: Option<String>,
 }
 
+/// The three steps a session start goes through (redesign step 5.13), in
+/// order. `src/lib/start_steps.ts` mirrors them (`START_STEPS`).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StartStep {
+    /// Resolving the checkout: clone, `git worktree add`, self-repair.
+    Worktree,
+    /// `tmux new-session` and the reconcile pass that registers the row.
+    Tmux,
+    /// The agent's launch recorded on the row (model, effort, agent, owner).
+    Agent,
+}
+
+impl StartStep {
+    pub const ALL: [StartStep; 3] = [StartStep::Worktree, StartStep::Tmux, StartStep::Agent];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            StartStep::Worktree => "worktree",
+            StartStep::Tmux => "tmux",
+            StartStep::Agent => "agent",
+        }
+    }
+
+    /// 1-based position in [`Self::ALL`].
+    pub const fn index(self) -> u8 {
+        self as u8 + 1
+    }
+}
+
+/// One step boundary of an in-flight `new_session`. `token` is the opaque
+/// string the caller minted and passed as `start_token`, so only the client
+/// that started the session can tell whose start this is: the frame names
+/// no host, no session, no person. `state` is `started`, `done` or `failed`
+/// (never `warned`); the error itself reaches the caller through the
+/// command's result.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct StartProgress {
+    pub token: String,
+    pub step: StartStep,
+    pub index: u8,
+    pub total: u8,
+    pub state: MoveStepState,
+}
+
 impl RowChange {
     /// The frontend event name (`src/lib/events.ts` `RowEvent.name`).
     pub fn name(&self) -> &'static str {
@@ -445,6 +494,7 @@ impl RowChange {
             RowChange::CatalogLoaded(_) => "catalog:loaded",
             RowChange::SyncProgress(_) => "sync:progress",
             RowChange::MoveProgress(_) => "move:progress",
+            RowChange::StartProgress(_) => "start:progress",
             RowChange::WorkItemUpdated(_) => "work:item",
             RowChange::TrackerUpdated(_) => "work:tracker",
             RowChange::TrackerRemoved(_) => "work:tracker_removed",
@@ -506,6 +556,7 @@ impl RowChange {
             RowChange::CatalogLoaded(s) => to_value(s),
             RowChange::SyncProgress(p) => to_value(p),
             RowChange::MoveProgress(p) => to_value(p),
+            RowChange::StartProgress(p) => to_value(p),
             RowChange::WorkItemUpdated(r) => to_value(r),
             RowChange::TrackerUpdated(r) => to_value(r),
             RowChange::TrackerRemoved(id) => serde_json::json!({ "id": id }),
@@ -595,6 +646,10 @@ pub trait EventBus: Send + Sync {
     /// See [`RowChange::MoveProgress`].
     fn move_progress(&self, p: &MoveProgress) {
         self.emit(&RowChange::MoveProgress(p.clone()));
+    }
+    /// See [`RowChange::StartProgress`].
+    fn start_progress(&self, p: &StartProgress) {
+        self.emit(&RowChange::StartProgress(p.clone()));
     }
     /// See [`RowChange::GrantChanged`].
     fn grant_changed(&self, g: &GrantChanged) {
@@ -816,7 +871,7 @@ impl AttentionInputs {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 32] = [
+pub const EVENT_NAMES: [&str; 33] = [
     "session:created",
     "session:updated",
     "session:killed",
@@ -837,6 +892,7 @@ pub const EVENT_NAMES: [&str; 32] = [
     "catalog:loaded",
     "sync:progress",
     "move:progress",
+    "start:progress",
     "work:item",
     "work:tracker",
     "work:tracker_removed",
@@ -854,7 +910,7 @@ pub const EVENT_NAMES: [&str; 32] = [
 /// Every event kind — the part of a [`RowChange::name`] before the `:`, which
 /// is what the `/events` route's `?kinds=` filter matches on.
 /// `event_kinds_cover_every_name` keeps it in step with the variants.
-pub const EVENT_KINDS: [&str; 19] = [
+pub const EVENT_KINDS: [&str; 20] = [
     "session",
     "host",
     "account",
@@ -866,6 +922,7 @@ pub const EVENT_KINDS: [&str; 19] = [
     "catalog",
     "sync",
     "move",
+    "start",
     "work",
     "settings",
     "update",
@@ -1189,6 +1246,9 @@ impl EventBus for RecordingEventBus {
             RowChange::MoveProgress(p) => {
                 format!("{}:{}:{}", p.session_id, p.step.as_str(), p.state.as_str())
             }
+            RowChange::StartProgress(p) => {
+                format!("{}:{}:{}", p.token, p.step.as_str(), p.state.as_str())
+            }
             RowChange::WorkItemUpdated(r) => r.id.to_string(),
             RowChange::TrackerUpdated(r) => format!("{}:{}", r.id, r.state),
             RowChange::TrackerRemoved(id) => id.to_string(),
@@ -1406,6 +1466,7 @@ mod tests {
                 RowChange::CatalogLoaded(_) => pinned_name!("catalog:loaded"),
                 RowChange::SyncProgress(_) => pinned_name!("sync:progress"),
                 RowChange::MoveProgress(_) => pinned_name!("move:progress"),
+                RowChange::StartProgress(_) => pinned_name!("start:progress"),
                 RowChange::WorkItemUpdated(_) => pinned_name!("work:item"),
                 RowChange::TrackerUpdated(_) => pinned_name!("work:tracker"),
                 RowChange::TrackerRemoved(_) => pinned_name!("work:tracker_removed"),
@@ -2042,6 +2103,49 @@ mod tests {
         );
         let back: MoveProgress = serde_json::from_value(change.payload()).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn start_progress_keeps_its_wire_shape() {
+        let p = StartProgress {
+            token: "st-1".into(),
+            step: StartStep::Tmux,
+            index: StartStep::Tmux.index(),
+            total: 3,
+            state: MoveStepState::Started,
+        };
+        let change = RowChange::StartProgress(p.clone());
+        assert_eq!(change.name(), "start:progress");
+        assert_eq!(
+            change.payload(),
+            serde_json::json!({
+                "token": "st-1", "step": "tmux", "index": 2, "total": 3, "state": "started"
+            })
+        );
+        let back: StartProgress = serde_json::from_value(change.payload()).unwrap();
+        assert_eq!(back, p);
+        for step in StartStep::ALL {
+            assert_eq!(
+                serde_json::to_value(step).unwrap(),
+                serde_json::json!(step.as_str())
+            );
+        }
+    }
+
+    /// `start_steps.ts` names the same three start steps, in order.
+    #[test]
+    fn frontend_declares_the_start_steps_in_order() {
+        let ts = crate::repo_files::read("src/lib/start_steps.ts");
+        let line = ts
+            .lines()
+            .find(|l| l.contains("export const START_STEPS"))
+            .expect("start_steps.ts declares START_STEPS");
+        let want = StartStep::ALL
+            .iter()
+            .map(|s| format!("'{}'", s.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(line.contains(&format!("[{want}]")), "{line}");
     }
 
     /// The frontend's step list is the same nine names, in the same order.

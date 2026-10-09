@@ -55,9 +55,9 @@ impl FleetTools {
 
     #[tool(description = "A session's shell terminals: tmux sessions \
         <name>--sh<N> (N 1-9) beside its agent, started in the agent's \
-        directory and never listed as sessions. action=list (default), open \
-        (n, or the lowest free) or close (n). Closing one never stops the \
-        session. Returns the open terminals.")]
+        directory (at=home: home) and never listed as sessions. \
+        action=list (default), open (n, or the lowest free) or close (n). \
+        Closing one never stops the session. Returns the open terminals.")]
     pub(super) async fn shell_terminals(
         &self,
         Extension(caller): Extension<Caller>,
@@ -85,6 +85,7 @@ impl FleetTools {
                 session_id: row.id,
                 action: p.action,
                 n: p.n,
+                at: p.at,
             },
             &self.store,
             &self.ssh,

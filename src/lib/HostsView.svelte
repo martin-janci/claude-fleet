@@ -1,4 +1,6 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
+  import { viewKey } from './shortcuts';
   // The Hosts view: a master–detail screen for every host, grouped by Claude
   // account with each account's usage shown once (spec:
   // docs/superpowers/specs/2026-09-13-hosts-view-and-account-usage-design.md,
@@ -311,32 +313,32 @@
     // A dialog (confirm, add-host) owns its own keys.
     if (e.defaultPrevented || target?.closest?.('dialog')) return;
     if (target === filterEl) return onFilterKeydown(e);
-    if (e.metaKey || e.ctrlKey || e.altKey || isEditable(target)) return;
+    if (isEditable(target)) return;
+    // The keys are the registry's `hosts` rows (step 0.1).
+    const act = viewKey('hosts', e);
+    if (!act) return;
 
     const inDetail = !!detailEl && !!target && detailEl.contains(target);
     const alias = selectedAlias;
     let handled = true;
-    switch (e.key) {
-      case 'ArrowDown':
-      case 'j':
+    switch (act) {
+      case 'hosts.down':
         if (inDetail) moveInDetail(1);
         else move(1);
         break;
-      case 'ArrowUp':
-      case 'k':
+      case 'hosts.up':
         if (inDetail) moveInDetail(-1);
         else move(-1);
         break;
-      case 'Home':
+      case 'hosts.first':
         if (inDetail) moveInDetail('home');
         else move('home');
         break;
-      case 'End':
+      case 'hosts.last':
         if (inDetail) moveInDetail('end');
         else move('end');
         break;
-      case 'Enter':
-      case 'ArrowRight':
+      case 'hosts.detail':
         // Enter on a detail button activates it natively.
         if (showTable) {
           if (target === tableEl && alias) void openHost(alias);
@@ -344,29 +346,29 @@
         } else if (inDetail || target !== listEl) handled = false;
         else focusDetail();
         break;
-      case 'ArrowLeft':
+      case 'hosts.list':
         if (inDetail) focusList();
         else handled = false;
         break;
-      case 'Escape':
+      case 'hosts.close':
         if (legendOpen) legendOpen = false;
         else if (inDetail) focusList();
         else if (detailOpen) void backToTable();
         else onClose();
         break;
-      case 'r':
+      case 'hosts.reprobe':
         if (alias) void reprobe(alias);
         break;
-      case 'u':
+      case 'hosts.usage':
         if (alias) void refreshUsage(alias);
         break;
-      case 's':
+      case 'hosts.filter-sidebar':
         if (alias) onFilterSidebar(alias);
         break;
-      case 'n':
+      case 'hosts.new-session':
         if (alias) onNewSession(alias);
         break;
-      case 'e':
+      case 'hosts.edit':
         // Review r08: on the New table the legend's `e` and `/` open the
         // list and detail first, then do what they do there.
         if (showTable) {
@@ -381,14 +383,14 @@
         }
         startEdit(inDetail ? 'detail' : 'list', selectedHost?.account_uuid);
         break;
-      case '/':
+      case 'hosts.search':
         if (inDetail) handled = false;
         else if (showTable) {
           detailOpen = true;
           void tick().then(() => filterEl?.focus());
         } else filterEl?.focus();
         break;
-      case '?':
+      case 'hosts.legend':
         legendOpen = !legendOpen;
         break;
       default:
@@ -442,9 +444,12 @@
     <span class="summary" data-testid="hosts-summary">{$hosts.length} · {onlineCount} online</span>
     <span class="cadence">usage every 5 min</span>
     <span class="grow"></span>
+    <!-- Redesign 1.5: the view's one primary. A host's own actions, in the
+         detail beside it, are plain; its destructive one is last, behind a
+         confirm (HostDetail's Danger section). -->
     <button
       type="button"
-      class="head-btn"
+      class="btn btn--primary"
       data-testid="hosts-add"
       disabled={addHostBlocked !== null}
       title={addHostBlocked ?? ''}
@@ -461,7 +466,7 @@
 
   {#if outage}
     <div class="banner" role="status" data-testid="usage-outage-banner">
-      <span class="banner-text"><span aria-hidden="true">⚠</span> {outage.text}</span>
+      <span class="banner-text"><Icon name="warning" size={12} /> {outage.text}</span>
       <button type="button" class="head-btn" data-testid="outage-copy" onclick={copyOutage}>{copied ? 'Copied' : 'Copy details'}</button>
       <button
         type="button"

@@ -114,6 +114,8 @@ const isUiDensity = (v: unknown): v is UiDensity => v === 'comfortable' || v ===
 export const uiDensity = writable<UiDensity>(readPref<UiDensity>('ui.rowDensity', 'compact', isUiDensity));
 uiDensity.subscribe((v) => writePref('ui.rowDensity', v));
 
-/** A Compact row's height: 20 of them fit a 1080p window with 280 px to spare
- *  for the title bar, header and the list's own chrome. */
+/** A Compact row's height: what `.sess-row.compact`'s min-height
+ *  (`calc(2 * var(--text-2xs-lh) + var(--space-3))`) resolves to. 20 of
+ *  them fit a 1080p window with the shell's chrome (SessionRowDensity.test.ts
+ *  renders and measures them). */
 export const COMPACT_ROW_PX = 40;

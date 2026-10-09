@@ -149,7 +149,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .split.with-views {
-    grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+    grid-template-columns: minmax(0, 1fr) minmax(var(--inspector-min), var(--list-w));
   }
   .body {
     min-height: 0;

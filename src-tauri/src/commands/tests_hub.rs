@@ -903,3 +903,30 @@ fn a_frontend_error_is_queued_clamped_with_its_code() {
     .unwrap_err();
     assert_eq!(e.code, fleet_core::ipc_error::codes::E_VALIDATE);
 }
+
+// ── Open offline (redesign step 3.15) ────────────────────────────────────────
+
+#[test]
+fn an_offline_session_attaches_exactly_and_quoted() {
+    let s = super::OfflineSession::from(fleet_core::tmux::TmuxSession {
+        name: "it's api".into(),
+        created: 10,
+        last_activity: 20,
+        attached: true,
+        path: "/tmp".into(),
+        pane_id: Some("%3".into()),
+    });
+    assert_eq!(s.name, "it's api");
+    assert_eq!((s.created, s.last_activity, s.attached), (10, 20, true));
+    assert_eq!(
+        s.attach,
+        format!("tmux attach -t {}", fleet_core::shell::quote("=it's api"))
+    );
+    // Exact: `=` stops tmux from matching `api` against `api-review`.
+    assert!(s.attach.contains("=it"));
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(
+        v.as_object().unwrap().keys().cloned().collect::<Vec<_>>(),
+        ["attach", "attached", "created", "last_activity", "name"]
+    );
+}

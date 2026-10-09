@@ -484,6 +484,7 @@ fn row(
         turn_outcome: None,
         proposals: Vec::new(),
         pending_form: None,
+        form_draft: None,
         parent_session_id: None,
         tags: Vec::new(),
         usage: Default::default(),
@@ -7794,7 +7795,9 @@ fn a_new_shell_session_refuses_a_profile() {
         profile: Some("work".into()),
         agent: None,
         origin: None,
+        over_limit_ok: false,
         owner_person_id: None,
+        start_token: None,
     };
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, "E_INVALID");
     args.kind = None;

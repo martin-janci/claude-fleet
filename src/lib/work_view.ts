@@ -22,7 +22,7 @@ import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
 import type { DecisionProposal } from './proposals';
-import { acceptCommandRow, sessions, type SessionEvent, type SessionRow } from './sessions';
+import { acceptCommandRow, formatCostMicros, sessions, type SessionEvent, type SessionRow } from './sessions';
 import { bumpWorkChanged, workChanged, type WorkChangeKind, type WorkEvidence } from './work';
 import { pickTask, selectedTaskId, taskFocused, type TaskSessionLink } from './selection';
 import { trackerStateBadge } from './trackers';
@@ -71,11 +71,13 @@ export interface WorkTreeFilters {
 /** `WorkTask.stage`, in board order (the Work board's status chips). */
 export const WORK_STAGES = ['backlog', 'in_progress', 'in_review', 'blocked', 'done'] as const;
 export type WorkStage = (typeof WORK_STAGES)[number];
+// A blocked stage reads Needs you, one of the six status words; the
+// task line says what it is blocked on (step 6.3).
 export const WORK_STAGE_LABELS: Record<WorkStage, string> = {
   backlog: 'Backlog',
   in_progress: 'In progress',
   in_review: 'In review',
-  blocked: 'Blocked',
+  blocked: 'Needs you',
   done: 'Done',
 };
 
@@ -469,6 +471,33 @@ export interface ReviewItem {
    *  model's suggestion (J1, rule R12, redesign 6.8). Absent otherwise, and
    *  from an older hub. */
   proposed_by?: ReviewProposer | null;
+  /** The tracker ticket this suggestion's LOCAL task may duplicate (J7
+   *  `tracker_duplicate`, redesign 6.8): a live Jev proposal only. Absent
+   *  otherwise, and from an older hub. */
+  duplicate_of?: ReviewDuplicate | null;
+}
+
+/** `ReviewItem.duplicate_of` (`work::view::ReviewDuplicate`). */
+export interface ReviewDuplicate {
+  task_id: string;
+  item_id: number;
+  key?: string | null;
+  title: string;
+  source: 'jev' | 'rule' | 'llm';
+  confidence_pct?: number | null;
+}
+
+/** The proposal `ProposedBy` shows beside a Review item's "May duplicate"
+ *  (J7), or null when nothing is flagged. */
+export function reviewDuplicateProposal(it: Pick<ReviewItem, 'duplicate_of'>): ProposalLike | null {
+  const d = it.duplicate_of;
+  if (!d) return null;
+  return {
+    value: d.key ?? d.task_id,
+    source: d.source,
+    reason: 'same work as a tracker ticket',
+    confidence_pct: d.confidence_pct ?? null,
+  };
 }
 
 /** `ReviewItem.proposed_by` (`work::view::ReviewProposer`). */
@@ -1012,6 +1041,8 @@ export interface GroupSection {
   tasks: WorkTask[];
   /** More tasks exist than are loaded. */
   more: boolean;
+  /** Spend of the tasks it counts, micro-USD (redesign 6.3); 0 when none. */
+  cost: number;
 }
 
 export interface OrgSection {
@@ -1020,6 +1051,8 @@ export interface OrgSection {
   name: string;
   color: string | null;
   count: number;
+  /** Spend of its groups' tasks, micro-USD (redesign 6.3 "spend on org rows"). */
+  cost: number;
   groups: GroupSection[];
 }
 
@@ -1083,6 +1116,7 @@ export function buildSections(
         name: g.org_id == null ? 'Unassigned' : (meta?.name ?? g.org_name ?? `Organisation ${g.org_id}`),
         color: meta?.color ?? null,
         count: 0,
+        cost: 0,
         groups: [],
       };
       byOrg.set(ok, o);
@@ -1092,11 +1126,13 @@ export function buildSections(
     const st = states.get(k);
     const tasks = st?.tasks ?? [];
     o.count += g.count;
+    o.cost += g.cost_micros ?? 0;
     o.groups.push({
       key: k,
       orgId: g.org_id ?? null,
       group: g.group,
       count: g.count,
+      cost: g.cost_micros ?? 0,
       tasks,
       more: st?.own ? st.cursor != null : tasks.length < g.count,
     });
@@ -1149,6 +1185,37 @@ export function taskStatus(t: Pick<WorkTask, 'status_name' | 'status_category'>)
     default:
       return '';
   }
+}
+
+/** A task's spend ("$3.20"), or null when its sessions cost nothing yet
+ *  (redesign 6.3: summed from its sessions, each once). */
+export function taskSpend(t: Pick<WorkTask, 'cost_micros'>): string | null {
+  return (t.cost_micros ?? 0) > 0 ? formatCostMicros(t.cost_micros) : null;
+}
+
+/** How a task a blocked one waits for reads: its key, else its title, else
+ *  "task 212" from its id (one this view has not loaded). */
+export function dependencyName(id: string, known?: Pick<WorkTask, 'key' | 'title'> | null): string {
+  if (known?.key) return known.key;
+  const title = (known?.title ?? '').trim();
+  if (title) return title;
+  const m = /^item:(\d+)$/.exec(id);
+  return m ? `task ${m[1]}` : id;
+}
+
+/** The reason line of a blocked task: "Blocked on TASK-212", two named,
+ *  then "+N more". The plan's status-word decision shows a blocked task
+ *  as Needs you with this line; null for a task that waits for nothing. */
+export function blockedOnLine(
+  t: Pick<WorkTask, 'blocked' | 'blocked_by'>,
+  lookup: (id: string) => Pick<WorkTask, 'key' | 'title'> | null | undefined = () => null,
+): string | null {
+  if (!t.blocked) return null;
+  const deps = t.blocked_by ?? [];
+  if (deps.length === 0) return 'Blocked on another task';
+  const names = deps.slice(0, 2).map((id) => dependencyName(id, lookup(id)));
+  const more = deps.length > 2 ? ` +${deps.length - 2} more` : '';
+  return `Blocked on ${names.join(', ')}${more}`;
 }
 
 /** `KEY title`, or the title alone, or the task id. */

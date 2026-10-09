@@ -15,8 +15,9 @@ it are drawn as cards instead:
   a job's progress, results, an error or a settings change.
 
 A card is a view of the reply. Nothing is stored and nothing is sent from
-one, with one exception: a `setting` card applies a settings change an
-agent proposed, after the person confirms it. A card that acts (choices, a form, a follow-up) only fills the
+one, with two exceptions: a `setting` card applies a settings change an
+agent proposed, after the person confirms it, and a `wizard` card runs one of
+the app's wizards when the person presses its last button. A card that acts (choices, a form, a follow-up) only fills the
 session's composer, and the person presses Enter. It acts only when the
 composer is on screen for the conversation shown. An earlier conversation
 or a row with no REPL draws the card with its actions turned off.
@@ -42,6 +43,7 @@ it closes.
 | read numbers, a chart or a table you measured | `results` |
 | see what failed and pick what to do about it | `error` |
 | apply a settings change you proposed | `setting` |
+| run one of the app's wizards (add a project, a host, a session, …) | `wizard` |
 
 A block's form is not `ask`: you do not wait for it, and its answers arrive
 as the person's next prompt. Use it when the answers can wait for the next
@@ -233,6 +235,27 @@ call). *Not now* writes nothing: the proposal still waits in Settings ›
 Review. After Apply, *Undo in Settings* opens the setting where it lives.
 A proposal that was already decided shows as such; a device that may not
 change settings shows the change with no Apply.
+
+### `wizard`: one of the app's wizards
+
+| Key | Required | Meaning |
+|---|---|---|
+| `wizard` | yes | `add_host`, `add_project`, `get_started`, `new_session` or `pair_device` |
+| `why` | no | ≤ 500 chars, why you open it, in one sentence |
+
+`{"spec": "fleet.ui/1", "kind": "wizard", "wizard": "add_project", "why":
+"You asked for the receipts repo on mercury."}` opens the app's own Add
+project form at that point of the reply (`docs/forms.md` → *Wizards are
+forms too*). The spec is the app's (`src/lib/forms/wizards/<id>.json`),
+never yours: the block only names it. The card builds while it reads what
+it offers (your hosts, your SSH config), then the person fills it in;
+nothing runs until they press its last button, which does what the
+wizard's own screen does (adds the project, starts the session). The card
+then shrinks to one line, and that line goes into your session's composer,
+unsent: `Done in the "Add project" form: acme/pos on mercury`, or the
+person's note when they declined. On an earlier conversation, or a row with
+no composer on screen, the card is a line saying it opens in the live
+conversation.
 
 ## Checking a block
 

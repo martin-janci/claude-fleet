@@ -1136,6 +1136,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("probe_host", Verdict::Routed { tool: "probe_host" }),
+    // Orbit Fleet 4.9: only a hub accepts agents, so the job runs there; a
+    // standalone desktop answers with the service's own refusal.
+    (
+        "install_agent",
+        Verdict::Routed {
+            tool: "install_agent",
+        },
+    ),
+    (
+        "agent_installs",
+        Verdict::Routed {
+            tool: "agent_installs",
+        },
+    ),
     (
         "probe_ssh_alias",
         Verdict::LocalOnly {
@@ -1408,6 +1422,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             why: "reports whether THIS process's event stream to the hub is up. Asking the \
                   hub would be circular, and the answer matters most exactly when the hub \
                   cannot be reached",
+        },
+    ),
+    (
+        "offline_local_sessions",
+        Verdict::SameInBoth {
+            why: "lists the tmux sessions on THIS machine for Open offline, when the hub \
+                  cannot be reached. It reads this machine's own tmux server only: no \
+                  state.db, no SSH, no host the hub manages, and it writes nothing",
         },
     ),
     (

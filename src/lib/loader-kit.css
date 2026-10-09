@@ -100,3 +100,35 @@
   animation-iteration-count: 1 !important;
   animation-fill-mode: forwards !important;
 }
+
+/* Host stream (Loader.svelte's HOST_STREAM): twelve dots flow from the host
+ * a session leaves to the host it goes to. Reduced and Off motion leave them
+ * resting along the path (their inline `left`) with the kit's fade. */
+.ofl-hs i {
+  position: absolute;
+  left: 0;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ofl-hs-flow var(--loop-slow) linear infinite;
+}
+.ofl--still .ofl-hs i {
+  opacity: 0.5;
+}
+@keyframes ofl-hs-flow {
+  from {
+    left: 0%;
+    opacity: 0;
+  }
+  15% {
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  to {
+    left: 100%;
+    opacity: 0;
+  }
+}

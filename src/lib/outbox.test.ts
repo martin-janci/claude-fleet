@@ -440,7 +440,7 @@ describe('receipt', () => {
     expect(receipt({ ...base, state: 'waiting' }, true, 1_000)).toEqual({ tone: 'muted', label: 'Waiting for the message above' });
     expect(receipt({ ...base, state: 'sending' }, false, 1_000)).toEqual({ tone: 'muted', label: 'Sending…' });
     expect(receipt({ ...base, state: 'sent' }, false, 1_000)).toEqual({ tone: 'muted', label: 'Sent' });
-    expect(receipt({ ...base, state: 'queued' }, false, 1_000)).toEqual({ tone: 'warn', label: 'Queued · Claude reads it after this turn' });
+    expect(receipt({ ...base, state: 'queued' }, false, 1_000)).toEqual({ tone: 'warn', label: 'Claude reads it after this turn' });
     expect(receipt({ ...base, state: 'received' }, false, 1_000)).toEqual({ tone: 'ok', label: 'Claude is on it' });
     expect(receipt({ ...base, state: 'failed', error: 'mefistos unreachable' }, false, 1_000)).toEqual({
       tone: 'crit',

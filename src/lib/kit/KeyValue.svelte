@@ -11,6 +11,8 @@
     tnum?: boolean;
     /** A richer value: a status dot, a link, a Meter. */
     content?: Snippet;
+    /** The value's test id. */
+    testid?: string;
   }
 
   let { items, testid }: { items: Fact[]; testid?: string } = $props();
@@ -19,7 +21,12 @@
 <dl class="of of-kv" data-testid={testid}>
   {#each items as f, i (i)}
     <dt>{f.label}</dt>
-    <dd class:mono={f.mono} class:tnum={f.tnum} style:overflow-wrap={f.mono ? 'anywhere' : undefined}>
+    <dd
+      class:mono={f.mono}
+      class:tnum={f.tnum}
+      style:overflow-wrap={f.mono ? 'anywhere' : undefined}
+      data-testid={f.testid}
+    >
       {#if f.content}{@render f.content()}{:else}{f.value ?? ''}{/if}
     </dd>
   {/each}

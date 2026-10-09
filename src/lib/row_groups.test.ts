@@ -24,6 +24,14 @@ describe('groupRows (redesign step 3.6)', () => {
     expect(groups[0].key).toBe('state:action_required');
   });
 
+  it('puts a Blocked row under Needs you: six words, one header each (plan: status words)', () => {
+    const down = session('down', 'g', { claude_status: 'idle', last_activity_at: NOW - 60 });
+    const groups = groupRows([working, down, stuck], 'state', { ...opts, facts: { down_hosts: ['down'] } });
+    expect(groups.map((g) => g.label)).toEqual(['Needs you', 'Working']);
+    expect(groups[0].rows.map((s) => s.tmux_name).sort()).toEqual(['c', 'g']);
+    expect(STATE_LABELS.blocked).toBe('Needs you');
+  });
+
   it('has a word for every attention state', () => {
     for (const st of ATTENTION_STATES) expect(STATE_LABELS[st]).toBeTruthy();
   });

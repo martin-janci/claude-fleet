@@ -26,7 +26,7 @@
 </script>
 
 {#if shown}
-  <div class="skeleton" class:still={$effectiveMotion !== 'full'} role="status" aria-busy="true" aria-label={label} data-testid="skeleton">
+  <div class="skeleton" class:fade={$effectiveMotion === 'reduced'} class:still={$effectiveMotion === 'off'} role="status" aria-busy="true" aria-label={label} data-testid="skeleton">
     {#each { length: rows } as _, i (i)}
       <div class="bar" style:width="{WIDTHS[i % WIDTHS.length]}%"></div>
     {/each}
@@ -44,8 +44,8 @@
   .bar {
     height: 0.7rem;
     border-radius: var(--radius-sm);
-    background: var(--bg-hover, var(--border));
-    animation: pulse 1.6s ease-in-out infinite;
+    background: var(--bg-hover);
+    animation: pulse var(--loop-slow) ease-in-out infinite;
   }
   .slow {
     margin: 0.2rem 0 0;
@@ -55,7 +55,9 @@
   @keyframes pulse {
     50% { opacity: 0.55; }
   }
-  /* The app's Motion setting (Reduced or Off), which already folds in the
-     OS preference (motion.ts): the bars rest instead of pulsing. */
+  /* The app's Motion setting, which already folds in the OS preference
+     (motion.ts), by the Loader kit's rule: Reduced turns the pulse into one
+     slow fade, Off rests the bars. */
+  .fade .bar { animation: motion-fade var(--loader-reduced) ease-in-out infinite; }
   .still .bar { animation: none; }
 </style>
