@@ -16,6 +16,10 @@
   import type { OrgSettingRow } from '../orgs';
   import type { TrackerRow } from '../trackers';
   import { evalCondition, type Section } from './pages';
+  import { tick } from 'svelte';
+  import KitTabs from '../kit/Tabs.svelte';
+  import { orgEyebrow, recordTabs, trustOf } from './layouts';
+  import { requestHostsView, settingsOpen } from '../app_views';
   import {
     ago,
     applies,
@@ -55,6 +59,9 @@
     run,
     reload,
     now = () => Math.floor(Date.now() / 1000),
+    resources = [],
+    tab = $bindable('overview'),
+    initialAction = null,
   }: {
     resource: ResourceType;
     sections: Section[];
@@ -69,11 +76,55 @@
     reload: () => void;
     /** Unix seconds; injectable for tests. */
     now?: () => number;
+    /** Every resource of the bundle, for a need that runs another's action. */
+    resources?: ResourceType[];
+    /** The open tab when the record is shown as tabs (an org). */
+    tab?: string;
+    /** A record action whose form opens at once (picked on a table row). */
+    initialAction?: string | null;
   } = $props();
 
   const recordActions = $derived((resource.actions ?? []).filter((a) => applies(resource, a, record)));
   /** The record action whose form is open. */
-  let openAction = $state<string | null>(null);
+  // svelte-ignore state_referenced_locally
+  let openAction = $state<string | null>(initialAction);
+
+  /** Boards OrgOverview / OrgMembers / OrgSpend: an org's sections as tabs
+   *  under a header; any other record keeps one column of sections. */
+  const tabs = $derived(recordTabs(resource, sections, record));
+  const tabAt = $derived(tabs.find((t) => t.id === tab) ?? tabs[0]);
+  const shownSections = $derived(tabs.length ? (tabAt?.sections ?? []) : sections);
+  let root = $state<HTMLElement>();
+
+  /** Rename / Colour in the header: the Settings tab, at that field. */
+  async function goEdit(field: string) {
+    tab = 'settings';
+    await tick();
+    root?.querySelector<HTMLElement>(`[data-testid="edit-${field}"]`)?.focus();
+  }
+
+  /** What a need offers to do about it, from actions that exist: a budget
+   *  opens Spend, an untrusted device is trusted through the device's own
+   *  update, unclaimed sessions open that host's sessions. */
+  function needAction(n: AdminNeed): { label: string; go: () => void } | null {
+    if (n.kind === 'budget')
+      return tabs.some((t) => t.id === 'spend') ? { label: 'Spend', go: () => (tab = 'spend') } : null;
+    if (n.kind === 'untrusted_device') {
+      const t = trustOf(resources, n.device);
+      if (!t) return null;
+      return {
+        label: 'Trust device…',
+        go: () => ask(`Trust ${n.device}`, t.confirm ? [t.confirm] : [`Trust ${n.device}?`], () => void exec(t.action, t.args)),
+      };
+    }
+    return {
+      label: 'Review',
+      go: () => {
+        settingsOpen.set(false);
+        requestHostsView(n.host);
+      },
+    };
+  }
 
   /** A field shown, not edited, in words. */
   function shown(f: FieldSpec): string {
@@ -165,12 +216,31 @@
   }
 </script>
 
-<div class="record" data-testid={`record-${resource.id}-${idOf(resource, record)}`}>
-  <header>
-    {#if resource.color_field}
-      <span class="swatch" style:background={String(record[resource.color_field] ?? '') || 'transparent'}></span>
+<div class="record" class:tabbed={tabs.length > 0} bind:this={root} data-testid={`record-${resource.id}-${idOf(resource, record)}`}>
+  <header class:org-head={tabs.length > 0}>
+    {#if tabs.length > 0}
+      <div class="head-text">
+        <p class="eyebrow" data-testid="record-eyebrow">{orgEyebrow(record)}</p>
+        <h5 class="big">
+          {#if resource.color_field}
+            <span class="dot" style:background={String(record[resource.color_field] ?? '') || 'var(--fg-muted)'}></span>
+          {/if}{titleOf(resource, record)}
+        </h5>
+      </div>
+      {#if !readonly && resource.update}
+        <button type="button" class="btn btn--quiet push" data-testid="record-rename" onclick={() => void goEdit('name')}>Rename</button>
+        {#if resource.color_field}
+          <button type="button" class="btn btn--quiet" data-testid="record-colour" onclick={() => void goEdit(resource.color_field!)}
+            >Colour</button
+          >
+        {/if}
+      {/if}
+    {:else}
+      {#if resource.color_field}
+        <span class="swatch" style:background={String(record[resource.color_field] ?? '') || 'transparent'}></span>
+      {/if}
+      <h5>{titleOf(resource, record)}</h5>
     {/if}
-    <h5>{titleOf(resource, record)}</h5>
     {#if !readonly}
       {#each recordActions as a (a.id)}
         <button
@@ -206,7 +276,17 @@
     </div>
   {/each}
 
-  {#each sections.filter((s) => evalCondition(s.when, values)) as section (section.title)}
+  {#if tabs.length > 0}
+    <KitTabs
+      tabs={tabs.map((t) => ({ id: t.id, label: t.label, count: t.count }))}
+      selected={tabAt?.id ?? ''}
+      onselect={(id) => (tab = id)}
+      label={titleOf(resource, record)}
+      testid="record-tabs" />
+  {/if}
+
+  <div class="sections" class:overview={tabAt?.id === 'overview'}>
+  {#each shownSections.filter((s) => evalCondition(s.when, values)) as section (section.title)}
     <section class="section">
       <h6>{section.title}</h6>
       {#if section.tiles}
@@ -247,6 +327,14 @@
                       <li class={`need ${line.tone}`} data-testid={`item-${f.id}`}>
                         <span class="need-mark" aria-hidden="true">{line.tone === 'warn' ? '!' : 'i'}</span>
                         <span class="need-text">{line.text}</span>
+                        {#if !readonly}
+                          {@const act = needAction(it as AdminNeed)}
+                          {#if act}
+                            <button type="button" class="btn btn--quiet need-act" disabled={busy} data-testid={`need-action-${(it as AdminNeed).kind}`} onclick={act.go}
+                              >{act.label}</button
+                            >
+                          {/if}
+                        {/if}
                         <span class="need-detail">{line.detail}</span>
                       </li>
                     {:else}
@@ -409,6 +497,7 @@
       {/if}
     </section>
   {/each}
+  </div>
 
   {#if !readonly && changed.length > 0}
     <footer class="apply" data-testid="record-apply-bar">
@@ -651,5 +740,61 @@
   .by-person th:not(:first-child),
   .by-person td:not(:first-child) {
     text-align: right;
+  }
+  /* An org as tabs (boards OrgOverview, OrgMembers, OrgSpend). */
+  .org-head {
+    align-items: flex-start;
+    margin-bottom: 0.5rem;
+  }
+  .record header.org-head .btn {
+    margin-left: 0;
+  }
+  .record header.org-head .btn.push {
+    margin-left: auto;
+  }
+  .head-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+  .eyebrow {
+    margin: 0;
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+  }
+  h5.big {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: var(--text-lg);
+  }
+  .dot {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 50%;
+  }
+  .tabbed .sections.overview {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 1.25rem;
+  }
+  .tabbed .sections.overview > .section:first-child {
+    grid-column: 1 / -1;
+  }
+  @media (max-width: 720px) {
+    .tabbed .sections.overview {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .need {
+    grid-template-columns: 1.1rem 1fr auto;
+  }
+  .need-detail {
+    grid-column: 2;
+  }
+  .need-act {
+    grid-row: 1 / span 2;
+    grid-column: 3;
+    align-self: center;
   }
 </style>
