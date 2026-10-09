@@ -3726,6 +3726,24 @@
     },
     {
       "default_widget": "select",
+      "key": "decide.jev.mission_triage",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: mission triage",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
       "key": "decide.jev.routine_run_outcome",
       "kind": {
         "options": [

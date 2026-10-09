@@ -517,6 +517,32 @@ redesign's transition plan.
 |---|---|---|
 | D48 | May Claude's reply text (J2's pane tail / last reply) go to Jev? | **Yes, per org, only where the org consents to reply text: a consent of its own, separate from D31 and required on top of it, off by default.** Decided by the owner on 2026-10-08. Built as the org's `decide.jev.reply_consent` row in `org_settings` (never inherited from a fleet value; *Also allow Claude's reply text* in Organisations, `fleet-hub org set <id> --jev-reply on`) and `decide.jev.unassigned_reply` for sessions with no org |
 
+## `mission_triage` — a stuck mission's outcome and next step (K3)
+
+When a mission is stuck (its loop braked on budget or no progress, an item
+failed, or nothing is ready while something is blocked), Missions and
+Today's Nudge ask Jev two closed questions about it: the outcome so far
+(`done`, `partial`, `blocked`, `failed`) and the next step (`retry`,
+`split`, `give_up`, `ask`), each with `unsure`. The Nudge shows both as
+*Proposed by Jev · why · Change*, and a person picks the step.
+
+- **Never decides completion.** An outcome of `done` is a reading, not an
+  act: triage never completes a mission, never sets Verified and never
+  changes a mission's state. Each step goes through the action a person
+  already has (Retry, the planner, Cancel, the mission's question card).
+- **What is sent.** Fleet's own stuck reason, the mission's goal and
+  done-when lines, the counts of done, failed and blocked items, and the
+  last failure text (600 characters), redacted by the envelope.
+- **The card's words** are an LLM draft written on demand (*Draft* /
+  *Regenerate*), on the mission's planner host, and booked in `aux_usage`
+  with origin `triage`.
+- **What is recorded.** Subject `mission` `<id>:outcome` and
+  `<id>:next`; a run on the same input is reused for 7 days.
+
+Code: `service/decide/mission_triage.rs`,
+`service/work/orchestrate/triage.rs`; step 9.10 of the redesign's
+transition plan.
+
 ## `work_link` — the work item of a session no rule could link (J1)
 
 When three turns of a conversation have gone by and nothing linked the
@@ -664,10 +690,17 @@ is asked.
   its `related_session` proposal: in the New layout, its Details list the
   other session under Related sessions as *Same work? · Proposed by Jev ·
   N%*. Nothing is stopped, merged or moved.
+- **Tidy › Duplicates** (New layout). Of a running pair the proposal ties
+  together, the less recently used session, once idle for
+  `work.tidy_idle_hours`, is a Tidy-up candidate with the reason
+  `same_work`: *Same work as another session*, naming the one kept, marked
+  *Proposed by Jev*. It is never ticked for the person and auto-tidy never
+  acts on it, whatever `work.auto_tidy_reasons` says; with no work linked,
+  its kill is held to the clean-and-pushed rule of `idle_unlinked`.
 - **Asked once per input.** A new candidate (another session starts) is a
   new input; the same input reuses the decided run.
-- **Follow-up.** None yet: no person's act answers it until Tidy-up's
-  Duplicates offers one. A shadow answer is never marked.
+- **Follow-up.** None yet: tidying a `same_work` candidate is not recorded
+  against the run. A shadow answer is never marked.
 
 Code: `service/decide/related_session.rs`, called beside `work_link` in the
 prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
@@ -693,6 +726,7 @@ prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
 | `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.summary_check` | `off` | `off` / `shadow` / `assist` | Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support. Experimental. |
 | `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
+| `decide.jev.mission_triage` | `off` | `off` / `shadow` / `assist` | Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.routine_run_outcome` | `off` | `off` / `shadow` / `assist` | Reading whether a routine run did work, found nothing to do or needs you, from the end of its screen. Shadow only records; assist sets the outcome, so a run with nothing to do stays out of the Inbox. A failed exit or a rule wins. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |

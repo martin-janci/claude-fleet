@@ -568,6 +568,9 @@ pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
 /// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
 /// read from the pane tail). Needs the reply-text consent (D48) on top.
 pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
+/// `mission_triage`'s mode (K3: a stuck mission's outcome and next step,
+/// redesign step 9.10).
+pub const DECIDE_JEV_MISSION_TRIAGE: &str = "decide.jev.mission_triage";
 /// `routine_run_outcome`'s mode (N6: what a finished routine run came to
 /// when its exit and the rules say nothing, read from the pane tail). Needs
 /// the reply-text consent (D48) on top.
@@ -1431,6 +1434,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: set the state")]),
+    Spec::new(
+        DECIDE_JEV_MISSION_TRIAGE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: mission triage",
+        "Proposing a stuck mission's outcome and next step. Never completes a mission or sets Verified. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
         DECIDE_JEV_ROUTINE_RUN_OUTCOME,
         "off",
@@ -2700,6 +2712,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
         assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
         assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());
+        assert_eq!(resolve(DECIDE_JEV_MISSION_TRIAGE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_ROUTINE_RUN_OUTCOME, None), "off");
         assert!(validate(DECIDE_JEV_ROUTINE_RUN_OUTCOME, "auto").is_err());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());

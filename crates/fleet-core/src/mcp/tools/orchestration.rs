@@ -1115,7 +1115,10 @@ impl FleetTools {
         budget_cents?, hosts?, max_parallel?, profile?}; mission_revoke; \
         missions_pause_all. mission_release_note {mission_id}: a drafted \
         release note of a completed mission; today_brief {refresh?, org_id?, \
-        since?}: Today's morning brief, drafted only on refresh. \
+        since?}: Today's morning brief, drafted only on refresh; \
+        mission_triage {mission_id, refresh?}: a stuck mission's card, Jev's \
+        proposed outcome and next step (never applied), and with refresh its \
+        drafted words. \
         Work view: \
         primary:false links a secondary; expected_* guard (E_CONFLICT).")]
     pub(super) async fn work_link(
@@ -1675,6 +1678,13 @@ impl FleetTools {
                 // Redesign 9.11: an LLM draft, on demand.
                 "mission_release_note" => ok_json(
                     &orch::drafts::release_note(&args, &self.mission_deps(), &view_scope)
+                        .await
+                        .map_err(to_mcp_err)?,
+                ),
+                // Redesign 9.10: a stuck mission's card; Jev proposes,
+                // nothing changes.
+                "mission_triage" => ok_json(
+                    &orch::triage::triage(&args, &self.mission_deps(), &view_scope)
                         .await
                         .map_err(to_mcp_err)?,
                 ),

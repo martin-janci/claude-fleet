@@ -17,6 +17,7 @@
   import { candidatesFor, inScope, refreshTidy, requestTidy, tidyReport } from './tidy';
   import { uiLayout } from './prefs';
   import MorningBrief from './MorningBrief.svelte';
+  import MissionNudge from './MissionNudge.svelte';
   import {
     loadToday,
     localMidnight,
@@ -193,6 +194,8 @@
   {#if $uiLayout === 'new'}
     <!-- Redesign 9.11: the brief drafted last; a new one only on Refresh. -->
     <MorningBrief />
+    <!-- Redesign 9.10: stuck missions, with the next step Jev proposes. -->
+    <MissionNudge />
   {/if}
 
   {#if view}

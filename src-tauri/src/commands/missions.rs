@@ -10,6 +10,7 @@ use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::graph::{self, GraphChange};
 use fleet_core::service::work::missions::{self, MissionDeleted, MissionDetail, MissionInput};
 use fleet_core::service::work::orchestrate::drafts::{Brief, Draft};
+use fleet_core::service::work::orchestrate::triage::Triage;
 use fleet_core::service::work::orchestrate::{self, Deps, PlanOutcome, StartOutcome, StepResult};
 use fleet_core::service::work::plan_import::{self, PlanImport, PlanRow};
 use fleet_core::service::work::verify::{self, VerifyOutcome};
@@ -189,6 +190,15 @@ pub struct TodayBriefArgs {
     pub since: Option<i64>,
     #[serde(default)]
     pub org_id: Option<i64>,
+}
+
+/// `mission_triage` (redesign 9.10): a stuck mission's card, its words
+/// drafted only when `refresh`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MissionTriageArgs {
+    pub mission_id: i64,
+    #[serde(default)]
+    pub refresh: bool,
 }
 
 /// The standalone desktop's reader: one person at the keyboard, as
@@ -404,6 +414,17 @@ pub async fn mission_release_note(
     reg: State<'_, Arc<CancellationRegistry>>,
 ) -> Result<Draft, IpcError> {
     routed::mission_release_note(&backend, args, &store, &ssh, &reg).await
+}
+
+#[tauri::command]
+pub async fn mission_triage(
+    args: MissionTriageArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<Triage, IpcError> {
+    routed::mission_triage(&backend, args, &store, &ssh, &reg).await
 }
 
 #[tauri::command]
@@ -795,6 +816,25 @@ pub(crate) mod routed {
             None => {
                 orchestrate::drafts::release_note(&wire, &deps(store, ssh, reg), &internal_view())
                     .await
+            }
+        }
+    }
+
+    pub async fn mission_triage(
+        backend: &FleetBackend,
+        args: MissionTriageArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<Triage, IpcError> {
+        let wire = WorkLinkArgs {
+            refresh: args.refresh.then_some(true),
+            ..write("mission_triage", Some(args.mission_id))
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("mission_triage", &wire).await,
+            None => {
+                orchestrate::triage::triage(&wire, &deps(store, ssh, reg), &internal_view()).await
             }
         }
     }

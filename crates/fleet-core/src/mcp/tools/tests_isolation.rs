@@ -3327,6 +3327,24 @@ async fn run_matrix(isolate: bool) {
         },
     )
     .await;
+    // Redesign 9.10: B's mission is not stuck, so whoever sees it gets an
+    // empty card; triage changes nothing either way.
+    m.row(
+        "work_link",
+        "mission_triage",
+        move |_, _| json!({ "action": "mission_triage", "mission_id": mission_b }),
+        |_, who, a| {
+            if readonly_refused(who, a) {
+                return;
+            }
+            match who {
+                w if w.is_host() => is_code(who, a, "E_FORBIDDEN", "a session does not run"),
+                Who::BoundA => is_code(who, a, "E_NOTFOUND", "another org's mission"),
+                _ => is_ok(who, a, "mission_triage"),
+            }
+        },
+    )
+    .await;
     // Last of the loop's rows: it pauses B's mission for the rows after.
     m.row(
         "work_link",
