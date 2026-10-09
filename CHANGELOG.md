@@ -8,6 +8,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [0.6.1] - 2026-10-09
+
+### Added
+- **updates:** the desktop downloads from the hub's mirror; org admins set their org's policy
+- **updates:** update now — an operator's install at once
+- **work:** Work tasks list and filters panel as on the board
+- **ui:** Overview in Control's header opens the Today briefing
+- **ui:** Automation page matches the Automation board
+- **ui:** Settings rows read like the Settings board
+- **ui:** session list rows and header match the Sessions board
+- **updates:** a dev track from every green main push
+- **ui:** move the prompt-chip editor to Toolkit › Prompts & snippets
+- **ui:** Automation and Toolkit get their own left column
+- **ui:** Settings is a rail destination page, not a modal
+- **updates:** the rest of S9 — org policy, artifact mirror, binary target
+- **ui:** session header per the Main board (named buttons, context meter, meta line)
+- **ui:** inspector and Details tab per the Main and SessionDetails boards
+- **updates:** staged rollouts and the maintenance window (S9, part)
+- **release:** sign and list the phone's amendment (S8, fleet side)
+- **updates:** push update:decision, hub-e2e section U, signed amendments
+- **desktop:** the desktop updates itself (S7)
+- **release:** the nightly update track (S2b)
+- **updater:** fleet-updater, the Docker hub's update sidecar (S6)
+
+### Changed
+- **windows:** leave fleet-updater out of the Windows clippy leg too
+- **windows:** leave out fleet-updater, Unix-only like fleet-agent and fleet-hub
+- **hub-e2e:** run the fake-tracker refusal check without timeout(1)
+
+### Fixed
+- **work:** key the planner slot by store too, so parallel tests stop refusing each other's planner
+- **work:** stages filter uses contains (clippy manual_contains)
+- **ui:** Automation page uses type and radius tokens, tab keys and status words
+- **llm:** say a Claude login expired instead of "not a JSON array"
+- **ui:** Control keeps a Needs-you session in its Views panel; header per the board
+- **ui:** the shell follows the destination, not the 0.5 session column
+- **desktop:** colour the update banner through theme tokens
+
+### Documentation
+- **updates:** status of the dev track, update now, the mirror and org admins' policy
 ## [0.6.0] - 2026-10-09
 
 The Orbit Fleet layout replaces the 0.5.x layout: the rail, the left list
@@ -3373,6 +3413,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.1]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.1
 [0.6.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.0
 [0.5.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.4
 [0.5.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.3
