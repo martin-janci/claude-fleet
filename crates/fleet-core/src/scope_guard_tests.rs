@@ -1919,37 +1919,40 @@ const ORG_HALF_SITES: &[OrgHalf] = &[
         file: "crates/fleet-core/src/service/downloads.rs",
         func: "visible",
         nth: 0,
-        code: "None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),",
-        person_half: "`may_own` in the OTHER arm of the same match, on the \
-                      session row the file came out of — the `own` TIER, not \
-                      `sees_session_row`: a download is an unconstrained \
-                      absolute-path read of the owner's host, which §4.3 \
-                      invariant 5 says no grant confers. This arm is the \
-                      session-is-GONE case (a reaped row, or a download with \
-                      no `session_id`): there is no person left to ask, and \
-                      `DownloadRow.org_id` — recorded for exactly this — is \
-                      the whole of the fence. The residue is BOUNDED, not \
-                      merely acknowledged: `downloads::send` is the `own` \
-                      tier too, so every row that could reach this arm was \
-                      created by the session's owner or by its own Claude \
-                      and never by a grantee, which is why a person column \
-                      on `downloads` would change no answer here",
-    },    OrgHalf {
+        code: "scope.org.sees_session_org_only(&row.host_alias, row.org_id)",
+        person_half: "Two halves. While the session row exists, `may_own` in \
+                      the OTHER arm of the same match decides, on the session \
+                      the file came out of: the `own` TIER, not \
+                      `sees_session_row`, because a download is an \
+                      unconstrained absolute-path read of the owner's host, \
+                      which §4.3 invariant 5 says no grant confers. This arm \
+                      is the session-is-GONE case (a reaped row, or a \
+                      download with no `session_id`): `DownloadRow.org_id` is \
+                      the org half, and `may_own_person_row` on \
+                      `DownloadRow.owner_person_id` (copied from the session \
+                      when the row is written, migration 148) is the person \
+                      half, chained with `&&` on the next line. Before 148 \
+                      this arm had no person half, and every person in the \
+                      org saw a reaped session's downloads (review r04 F3). A \
+                      row whose session was gone before 148 keeps a NULL \
+                      owner and falls to the hub's own readers and a \
+                      single-person hub's one person",
+    },
+    OrgHalf {
         file: "crates/fleet-core/src/service/library.rs",
         func: "visible_with",
         nth: 0,
-        code: "None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),",
-        person_half: "`may_own` in the OTHER arm of the same match, on the \
-                      session row the file was put beside: the downloads' \
-                      `own` tier, because a Library row names a path on the \
-                      owner's host. This arm is the session-is-GONE case, the \
-                      same as `downloads::visible`'s: no person is left to \
-                      ask and `LibraryItemRow.org_id`, recorded for exactly \
-                      this, is the whole of the fence. The residue is BOUNDED \
-                      the same way: `library::add` takes the session only \
-                      when `may_own` holds, so every row that could reach \
-                      this arm was recorded by the session's owner and never \
-                      by a grantee",
+        code: "scope.org.sees_session_org_only(&row.host_alias, row.org_id)",
+        person_half: "The same two halves as `downloads::visible`. While the \
+                      session row exists, `may_own` in the OTHER arm decides \
+                      (the `own` tier, because a Library row names a path on \
+                      the owner's host). Once it is gone, \
+                      `LibraryItemRow.org_id` is the org half and \
+                      `may_own_person_row` on `LibraryItemRow.owner_person_id` \
+                      (migration 148) is the person half, chained with `&&` \
+                      on the next line (review r04 F3). A row whose session \
+                      was gone before 148 keeps a NULL owner and falls to the \
+                      hub's own readers and a single-person hub's one person",
     },
 ];
 
