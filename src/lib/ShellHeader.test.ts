@@ -4,6 +4,7 @@ import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import ShellHeader from './ShellHeader.svelte';
 import { accounts } from './accounts';
 import { accountUsage } from './account_usage_store';
@@ -20,7 +21,9 @@ beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string) => {
     if (cmd === 'work_missions') return [mission(1, 'active'), mission(2, 'active'), mission(3, 'paused')];
-    if (cmd === 'pause_all_missions') return [1, 2];
+    if (cmd === 'list_runs') return { runs: [{ id: 'aux:1', source: 'aux', kind: 'planner', owner: 'p', started_at: 1, outcome: 'ok', cost_micros: 4_100_000, session_ids: [] }], total: 1 };
+    if (cmd === 'get_fleet_settings') return { 'automation.paused': 'false' };
+    if (cmd === 'set_fleet_setting') return { 'automation.paused': 'true' };
     throw { code: 'E_TEST', message: `unexpected ${cmd}` };
   });
   accounts.set([ADMIN]);
@@ -28,6 +31,7 @@ beforeEach(() => {
   switcherRequest.set(null);
   accountsPageRequest.set(null);
   destination.set('session');
+  fleetSettings.set({ ...SETTING_DEFAULTS });
 });
 
 describe('ShellHeader (3.17)', () => {
@@ -59,12 +63,20 @@ describe('ShellHeader (3.17)', () => {
     expect(screen.getByTestId('header-accounts-more').textContent).toBe('+1');
   });
 
-  it('Pause all pauses every active mission', async () => {
+  it('Automation says today’s spend and opens the Automation screen (8.4)', async () => {
+    render(ShellHeader, { mac: true });
+    await waitFor(() => expect(screen.getByTestId('header-spend').textContent).toBe('$4.10 today'));
+    await fireEvent.click(screen.getByTestId('header-automation'));
+    expect(get(destination)).toBe('automation');
+  });
+
+  it('Pause all sets automation.paused, then reads Resume (8.4)', async () => {
     render(ShellHeader, { mac: true });
     const btn = screen.getByTestId('header-pause-all') as HTMLButtonElement;
-    await waitFor(() => expect(btn.disabled).toBe(false));
     await fireEvent.click(btn);
-    expect(invoke).toHaveBeenCalledWith('pause_all_missions', { args: {} });
+    expect(invoke).toHaveBeenCalledWith('set_fleet_setting', { key: 'automation.paused', value: 'true' });
+    await waitFor(() => expect(btn.textContent).toBe('Resume'));
+    expect(screen.getByTestId('header-automation').textContent).toContain('paused');
   });
 
   it('passes the axe and audit checks', async () => {

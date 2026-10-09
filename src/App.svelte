@@ -39,6 +39,7 @@
   import AccountsPage from './lib/AccountsPage.svelte';
   import AppRail from './lib/AppRail.svelte';
   import ControlView from './lib/ControlView.svelte';
+  import AutomationView from './lib/AutomationView.svelte';
   import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
   import WorkBoard from './lib/WorkBoard.svelte';
@@ -595,6 +596,8 @@
   const detailsMode = $derived($destination === 'details');
   // Control (step 9.1) is the New layout's: Classic keeps the agent's sheet.
   const controlMode = $derived($destination === 'control');
+  // Automation (step 8.4): a fleet page like Control, reached from the rail.
+  const automationMode = $derived($destination === 'automation');
   $effect(() => {
     if ($uiLayout !== 'new')
       untrack(() => {
@@ -661,7 +664,7 @@
   // (Details) pane — both its views are views *of* the session. The board
   // covers the Session tab without leaving it, so its segment stays shown.
   const sessionTabActive = $derived(
-    !filesMode && !assetsMode && !hostsMode && !accountsMode && !detailsMode && !controlMode,
+    !filesMode && !assetsMode && !hostsMode && !accountsMode && !detailsMode && !controlMode && !automationMode,
   );
   const effectiveView = $derived(
     resolveSessionView($sessionView, selNoPane, selHasClaudeId, selOwned),
@@ -771,10 +774,13 @@
     if (id === 'inbox' || id === 'sessions' || id === 'work') {
       sidebarCollapsed = false;
       sidebarView.set(id);
-      if (hostsMode || accountsMode || assetsMode || controlMode) showSession();
+      if (hostsMode || accountsMode || assetsMode || controlMode || automationMode) showSession();
     } else if (id === 'control') {
       closeHosts();
       goTo('control');
+    } else if (id === 'automation') {
+      closeHosts();
+      goTo('automation');
     } else if (id === 'accounts') showAccounts();
     else if (id === 'toolkit') showToolkit();
     else if (id === 'settings') settingsOpen.set(true);
@@ -829,7 +835,7 @@
     writePref('layout.inspector', inspectorOpen);
   });
   const taskShowing = $derived($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen && !$todayOpen);
-  const wideMode = $derived(filesMode || hostsMode || assetsMode || accountsMode || controlMode);
+  const wideMode = $derived(filesMode || hostsMode || assetsMode || accountsMode || controlMode || automationMode);
   const detailsMain = $derived(
     newLayout && !wideMode && !boardMode && (detailsMode || $todayOpen || taskShowing || !$selectedSession),
   );
@@ -1007,6 +1013,11 @@
       leave('control');
       return;
     }
+    if (automationMode) {
+      if (isEditable(target) || target?.closest?.('dialog')) return;
+      leave('automation');
+      return;
+    }
     // Inside the Hosts view, HostsView owns Esc (back to the list, clear the
     // filter, close from the list). This catches only an Esc with focus lost
     // to the page or left on the right column's chrome; a dialog, an input
@@ -1029,7 +1040,7 @@
     const sbResizer = sidebarCollapsed ? '0px' : '4px';
     // In files mode the center pane collapses to zero — the file viewer
     // takes the whole region right of the sidebar.
-    const wide = filesMode || hostsMode || assetsMode || accountsMode || controlMode;
+    const wide = filesMode || hostsMode || assetsMode || accountsMode || controlMode || automationMode;
     const center = wide ? '0px' : centerCollapsed ? '20px' : `${centerPx}px`;
     const centerResizer = wide || centerCollapsed ? '0px' : '4px';
     // The New layout (steps 3.2, 3.5): the rail in front, no center pane,
@@ -1282,7 +1293,7 @@
              normal session reconnects its PTY. The Conversation is the only
              view these rows have. -->
         <div class="view-slot">
-          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode && !controlMode} />
+          <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode && !controlMode && !automationMode} />
         </div>
       {:else}
         <!-- TerminalView stays mounted underneath so the PTY and its ANSI
@@ -1317,7 +1328,7 @@
             <WatchView
               session={$selectedSession}
               access={selAccess}
-              visible={!hostsMode && !assetsMode && !accountsMode && !controlMode && !filesMode && !conversationMode}
+              visible={!hostsMode && !assetsMode && !accountsMode && !controlMode && !automationMode && !filesMode && !conversationMode}
             />
           {:else}
             <TerminalView />
@@ -1330,7 +1341,7 @@
         {/if}
         {#if conversationMode && $selectedSession}
           <div class="view-slot overlay">
-            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode && !controlMode} onOpenTerminal={() => setSessionView('terminal')} />
+            <ConversationPanel session={$selectedSession} visible={!hostsMode && !assetsMode && !accountsMode && !controlMode && !automationMode} onOpenTerminal={() => setSessionView('terminal')} />
           </div>
         {/if}
       {/if}
@@ -1364,6 +1375,11 @@
       {#if controlMode}
         <div class="view-slot overlay" data-testid="control-overlay">
           <ControlView {isMac} contextInput={agentContextInput} />
+        </div>
+      {/if}
+      {#if automationMode}
+        <div class="view-slot overlay" data-testid="automation-overlay">
+          <AutomationView />
         </div>
       {/if}
       {#if boardMode}
