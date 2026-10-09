@@ -27,7 +27,7 @@
     const r = await todayBrief(refresh);
     busy = false;
     if (r.ok) {
-      show(r.value.draft);
+      show(r.value?.draft);
     } else if (!refresh && HUB_HAS_NO_DRAFTS.includes(r.error.code)) {
       served = false;
     } else {
