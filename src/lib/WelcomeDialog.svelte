@@ -6,10 +6,10 @@
 </script>
 
 <!-- Escape and backdrop click both mean "skip for now" (handled by Modal). -->
-<Modal label="Welcome to claude-fleet" onclose={onskip} width="380px">
+<Modal label="Welcome to Orbit Fleet" onclose={onskip} width="380px">
   <div class="panel">
     <div class="logo" aria-hidden="true"></div>
-    <h2>Welcome to claude-fleet</h2>
+    <h2>Welcome to Orbit Fleet</h2>
     <p>
       Run long-lived Claude Code sessions in tmux across your machines. Let's get
       you set up — add a host, pick a project, and start your first session.

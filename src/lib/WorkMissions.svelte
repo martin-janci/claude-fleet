@@ -598,7 +598,7 @@
             >Autonomy
             <select bind:value={editLevel} data-testid="mission-edit-level">
               <option value={0}>L0 · asks for everything</option>
-              <option value={1}>L1 · I press Start</option>
+              <option value={1}>L1 · You press Start</option>
               <option value={2}>L2 · runs within a grant</option>
               <option value={3}>L3 · reviews and integrates</option>
             </select></label
@@ -757,7 +757,7 @@
                 <label class="field inline"
                   >Level
                   <select bind:value={grantLevel}>
-                    <option value={1}>L1 · I press every step</option>
+                    <option value={1}>L1 · You press every step</option>
                     <option value={2}>L2 · runs, retries, reviews</option>
                     <option value={3}>L3 · also creates tasks</option>
                   </select></label
