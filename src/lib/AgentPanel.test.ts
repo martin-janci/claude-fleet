@@ -10,6 +10,7 @@ import { get } from 'svelte/store';
 import AgentPanel from './AgentPanel.svelte';
 import { operatorError, operatorState, operatorSession } from './operator';
 import { sessions } from './sessions';
+import { composerInsert } from './conversation';
 import { hostsViewRequest, settingsOpen, settingsSection } from './app_views';
 import { expectAccessible } from './a11y_check';
 
@@ -137,6 +138,24 @@ describe('AgentPanel: a next step for every blocked state (step 9.1)', () => {
     expect(screen.getByRole('button', { name: 'Restart the agent' })).toBeTruthy();
     // Opening Control makes sure there is an agent.
     expect(invoke).toHaveBeenCalledWith('operator_status', undefined);
+  });
+});
+
+describe('AgentPanel: first run (board Finish)', () => {
+  it('an agent with no turn yet says what Control is for, and a starter fills the box without sending', async () => {
+    operatorSession.set(row({ last_turn_at: null, last_prompt: null }));
+    await mount('ready');
+    expect(screen.getByTestId('control-empty-hero').textContent).toContain('Ask Control about your fleet');
+    const starters = screen.getAllByTestId('control-starter');
+    expect(starters.map((b) => b.textContent)).toEqual(['What needs me?', 'Plan a task', 'Start a session on local']);
+    await fireEvent.click(starters[0]);
+    expect(get(composerInsert)).toMatchObject({ sessionId: 7, draft: 'What needs me right now?' });
+    expect(invoke).not.toHaveBeenCalledWith('send_prompt', expect.anything());
+  });
+  it('is gone once the agent has a turn', async () => {
+    operatorSession.set(row({ last_turn_at: 50, last_prompt: 'hi' }));
+    await mount('ready');
+    expect(screen.queryByTestId('control-empty-hero')).toBeNull();
   });
 });
 

@@ -43,6 +43,7 @@
   import HandoffCards from './HandoffCards.svelte';
   import { controlThinking } from './control_loaders';
   import ControlRouteReceipts from './ControlRouteReceipts.svelte';
+  import ControlEmptyHero from './ControlEmptyHero.svelte';
 
   let { contextInput = null }: { contextInput?: AgentContextInput | null } = $props();
 
@@ -67,6 +68,8 @@
   // send while the agent is mid-turn. A frozen row would leave both stale.
   // See `operatorRow` in operator.ts.
   const session = $derived($operatorRow);
+  // Board Finish, "Control · first run": an agent that has had no turn yet.
+  const firstRun = $derived(!!session && session.last_turn_at == null && !session.last_prompt);
   const rawCtx = $derived(contextInput ? agentContext(contextInput) : null);
   const ctx = $derived(rawCtx && rawCtx.chipLabel !== droppedLabel ? rawCtx : null);
 
@@ -182,6 +185,7 @@
     {/if}
    </div>
   {:else if session}
+    {#if firstRun}<ControlEmptyHero sessionId={session.id} host={$operatorHost} />{/if}
     <!-- `blockWhileBusy` is the gate the sheet's own composer had before it
          was deleted (`busy = statusNote !== null` at v0.2.35) and lost in
          the refactor. It is passed explicitly, and only here: the
