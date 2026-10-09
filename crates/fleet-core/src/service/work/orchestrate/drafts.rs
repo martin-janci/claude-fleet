@@ -27,7 +27,7 @@ use super::{changeable, mission_id, planner_host, Deps};
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::service::settings;
 use crate::service::view_scope::ViewScope;
-use crate::service::work::today::{Today, TodayGroup, BUCKET_IN_PROGRESS};
+use crate::service::work::today::{Today, TodayGroup, TodaySession, BUCKET_IN_PROGRESS};
 use crate::service::work::WorkLinkArgs;
 use crate::store::{MissionRow, Store};
 use serde::{Deserialize, Serialize};
@@ -140,10 +140,10 @@ pub fn release_note_prompt(f: &NoteFacts) -> (String, String) {
 /// as the brief's prompt and its "from" words. `None` when the org has
 /// nothing today.
 pub fn brief_prompt(today: &Today, org: Option<i64>) -> Option<(String, String)> {
-    let groups: Vec<&TodayGroup> = today
+    let groups: Vec<TodayGroup> = today
         .groups
         .iter()
-        .filter(|g| group_org(g) == org)
+        .filter_map(|g| org_part(g, org))
         .take(ITEMS_MAX)
         .collect();
     let shipped: Vec<_> = today
@@ -157,7 +157,7 @@ pub fn brief_prompt(today: &Today, org: Option<i64>) -> Option<(String, String)>
     }
     let mut lines = Vec::new();
     for bucket in ["waiting", BUCKET_IN_PROGRESS, "stale"] {
-        let rows: Vec<&&TodayGroup> = groups.iter().filter(|g| g.bucket == bucket).collect();
+        let rows: Vec<&TodayGroup> = groups.iter().filter(|g| g.bucket == bucket).collect();
         if rows.is_empty() {
             continue;
         }
@@ -203,10 +203,31 @@ pub fn brief_prompt(today: &Today, org: Option<i64>) -> Option<(String, String)>
     Some((format!("{BRIEF_PROMPT}\n\n{}", lines.join("\n")), from))
 }
 
-/// A group's org: its own, else its first session's.
-fn group_org(g: &TodayGroup) -> Option<i64> {
-    g.org_id
-        .or_else(|| g.sessions.first().and_then(|s| s.org_id))
+/// The org a session of `g` counts for in a brief: its own, else its
+/// group's. The one rule [`brief_target`] (which org, which host) and
+/// [`brief_prompt`] (what the prompt carries) share, so a brief never
+/// targets one org and describes another (review r15).
+fn brief_org(g: &TodayGroup, s: &TodaySession) -> Option<i64> {
+    s.org_id.or(g.org_id)
+}
+
+/// The part of `g` a brief for `org` covers: the group with only its
+/// sessions that count for `org` (the no-work group mixes orgs), or `None`
+/// when none does. A group with no session belongs to its own org.
+fn org_part(g: &TodayGroup, org: Option<i64>) -> Option<TodayGroup> {
+    if g.sessions.is_empty() {
+        return (g.org_id == org).then(|| g.clone());
+    }
+    let sessions: Vec<TodaySession> = g
+        .sessions
+        .iter()
+        .filter(|s| brief_org(g, s) == org)
+        .cloned()
+        .collect();
+    (!sessions.is_empty()).then(|| TodayGroup {
+        sessions,
+        ..g.clone()
+    })
 }
 
 /// PURE: the org a brief covers and the host it runs on: the org of the
@@ -217,9 +238,9 @@ pub fn brief_target(today: &Today, wanted: Option<i64>) -> Option<(Option<i64>, 
         .groups
         .iter()
         .flat_map(|g| g.sessions.iter().map(move |s| (g, s)))
-        .filter(|(g, s)| wanted.is_none() || s.org_id.or(g.org_id) == wanted)
+        .filter(|(g, s)| wanted.is_none() || brief_org(g, s) == wanted)
         .max_by_key(|(_, s)| s.last_activity_at)
-        .map(|(g, s)| (s.org_id.or(g.org_id), s.host_alias.clone()))
+        .map(|(g, s)| (brief_org(g, s), s.host_alias.clone()))
 }
 
 /// The hosts with a draft running now.

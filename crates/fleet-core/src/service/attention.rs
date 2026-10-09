@@ -250,7 +250,7 @@ impl Facts {
     /// A host is down once a ping said so (`reachable` false with a
     /// `last_pinged_at`); one never pinged is unknown, not down. An account
     /// is at its limit when its 5-hour or weekly window is fully used and
-    /// has not reset yet (the weekly one wins: it is the longer wait). A
+    /// has not reset yet (both at their limit: the one that frees last). A
     /// login counts as gone on `login_expired` and `token_rejected` only: an
     /// expired access token refreshes by itself, and `no_credentials` is the
     /// usage script finding no token file, which on a macOS host (the token
