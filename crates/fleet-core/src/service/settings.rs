@@ -553,6 +553,12 @@ pub const DECIDE_JEV_RESTORE_TARGET: &str = "decide.jev.restore_target";
 /// `duplicate`'s mode (flagging a proposed task that may duplicate an
 /// existing one, K4).
 pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
+/// `work_placement`'s mode (proposing a Work-view group for a task nobody
+/// placed, K5).
+pub const DECIDE_JEV_WORK_PLACEMENT: &str = "decide.jev.work_placement";
+/// `related_session`'s mode (noticing another session of the same person
+/// on the same work, N1).
+pub const DECIDE_JEV_RELATED_SESSION: &str = "decide.jev.related_session";
 /// `control_route`'s mode (K2: where a message typed in Control goes,
 /// redesign step 9.9).
 pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
@@ -1377,6 +1383,24 @@ pub const SPECS: &[Spec] = &[
         Kind::Choice(DECIDE_MODES),
         "Jev: duplicate task",
         "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_WORK_PLACEMENT,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: task group",
+        "Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RELATED_SESSION,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: related session",
+        "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
@@ -2669,6 +2693,8 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_WORK_PLACEMENT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RELATED_SESSION, None), "off");
         assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SUMMARY_CHECK, None), "off");
         assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");

@@ -250,6 +250,16 @@ pub enum AdminAction {
 }
 
 impl AdminAction {
+    /// The actions on trackers themselves, which the hub owner's trusted
+    /// phone may take (`work_admin` from a device); the rest is the
+    /// operator's.
+    pub fn is_tracker_action(&self) -> bool {
+        matches!(
+            self,
+            Self::List | Self::Add | Self::Update | Self::SetCredential | Self::Test | Self::Remove
+        )
+    }
+
     /// Every action name `parse` accepts (aliases aside), for the isolation
     /// matrix and the error sentence.
     pub const NAMES: &'static [&'static str] = &[

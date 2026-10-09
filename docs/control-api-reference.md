@@ -371,6 +371,12 @@ Compute a sync plan: scan the hosts, compare every catalog asset with what is in
 
 Parameters: `allow_unlayered`, `host_alias`, `kind`, `name`
 
+### `pr_shepherd`
+
+The PR shepherd's standing rules per project: status (rules, episodes, merges), grant {project_id, level: watch | nudge | merge, hours?, recipes?}, revoke {project_id}, pause_all. The owner's own device; writes need a trusted full device.
+
+Parameters: `action`, `hours`, `level`, `limit`, `project_id`, `recipes`
+
 ### `probe_host`
 
 Re-probe a host's reachability and versions. Returns the host row.

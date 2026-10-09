@@ -386,7 +386,6 @@ fn fleet_admin_tools_are_master_only() {
     assert!(!phone.is_master());
     for t in [
         "provision_hosts",
-        "add_host",
         "remove_host",
         "merge_host",
         "forget_project",
@@ -434,6 +433,67 @@ fn fleet_admin_tools_are_master_only() {
 
 // ---- client-token gating (Task 3: prove the gates hold for the new
 // caller kind — a paired client such as a phone) ----
+
+/// Martin's "Owner's phone" and trackers "Allow on phone" (contract 13):
+/// the hub owner's trusted `full` phone adds hosts, installs fleet-agent and
+/// manages trackers; an untrusted or readonly one, a second person's and a
+/// host token do not, and a phone never reaches work_admin's org,
+/// retention, usage or bucket actions.
+#[tokio::test]
+async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
+    let trusted = |mut c: Caller| {
+        if let Some(cl) = c.client.as_mut() {
+            cl.trusted = true;
+        }
+        c
+    };
+    let phone = trusted(client_caller("phone", TokenMode::Full));
+    assert!(super::fleet::owner_device_admin(&phone, "x").is_ok());
+    assert!(super::fleet::owner_device_admin(&Caller::master(), "x").is_ok());
+    for refused in [
+        client_caller("phone", TokenMode::Full),
+        trusted(client_caller("phone", TokenMode::Readonly)),
+    ] {
+        let e = super::fleet::owner_device_admin(&refused, "adding a host").unwrap_err();
+        assert!(
+            e.message.contains("fleet-hub client trust phone"),
+            "{}",
+            e.message
+        );
+    }
+    for t in ["add_host", "install_agent", "work_admin"] {
+        assert!(guard::access_allows(&phone, t), "{t}");
+        assert!(
+            !guard::access_allows(&another_person(phone.clone()), t),
+            "{t}: a second person's phone"
+        );
+        assert!(
+            !guard::access_allows(&host_caller("mefistos", TokenMode::Full), t),
+            "{t}: a host token"
+        );
+    }
+
+    let t = test_tools(Store::open_in_memory().unwrap());
+    let call = |c: Caller, action: &str| {
+        let t = t.clone();
+        let args = serde_json::from_value(serde_json::json!({ "action": action })).unwrap();
+        async move { t.work_admin(Extension(c), Parameters(args)).await }
+    };
+    assert!(call(phone.clone(), "list").await.is_ok());
+    for action in ["list_orgs", "status", "sweep_now", "usage"] {
+        let e = call(phone.clone(), action).await.unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN"),
+            "{action}: {}",
+            e.message
+        );
+    }
+    let e = call(client_caller("phone", TokenMode::Full), "list")
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    assert!(call(Caller::master(), "list_orgs").await.is_ok());
+}
 
 #[test]
 fn a_client_is_refused_every_fleet_admin_tool() {
@@ -2398,6 +2458,7 @@ fn router_sum_serves_every_tool() {
         include_str!("forms.rs"),
         include_str!("devices.rs"),
         include_str!("prs.rs"),
+        include_str!("pr_shepherd.rs"),
         include_str!("routines.rs"),
         include_str!("start_rules.rs"),
         include_str!("presence.rs"),
@@ -3577,7 +3638,14 @@ fn a_client_token_is_served_work_and_work_link_by_mode_and_never_work_admin() {
 
     let full = served(&client_caller("phone", TokenMode::Full));
     assert!(has(&full, "work") && has(&full, "work_link"));
-    assert!(!has(&full, "work_admin"), "work_admin is master only");
+    // Contract 13: the owner's full phone is served work_admin for its
+    // trackers; the handler asks for trust (`owner_device_admin`).
+    assert!(
+        has(&full, "work_admin"),
+        "the owner's phone manages trackers"
+    );
+    let other = served(&another_person(client_caller("phone", TokenMode::Full)));
+    assert!(!has(&other, "work_admin"), "a second person's phone never");
 
     for (tool, table) in [
         (
@@ -8596,6 +8664,7 @@ fn the_settings_tools_reach_the_master_and_the_hub_owners_own_device_only() {
         "setting_history",
         "decide_setting_proposals",
         "list_pages",
+        "pr_shepherd",
     ] {
         assert!(
             enforce_admin(&colleague, t).is_err(),
@@ -8947,7 +9016,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         assert!(!can(&host, t), "{t}: never a host's token");
         assert!(!can(&bound, t), "{t}: never an org-bound device");
     }
-    for t in ["set_setting", "decide_setting_proposals"] {
+    for t in ["set_setting", "decide_setting_proposals", "pr_shepherd"] {
         assert!(can(&laptop, t), "{t}: reached, then trust decides");
         assert!(!can(&phone_ro, t), "{t}: a write");
         assert!(!can(&host, t) && !can(&bound, t), "{t}");
@@ -8965,6 +9034,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "setting_history",
         "decide_setting_proposals",
         "list_pages",
+        "pr_shepherd",
     ] {
         assert!(!can(&colleague, t), "{t}: never a second person's device");
         assert!(
@@ -9009,6 +9079,7 @@ fn settings_reach_a_persons_device_and_never_a_host_or_an_org_bound_client() {
         "setting_history",
         "decide_setting_proposals",
         "list_pages",
+        "pr_shepherd",
     ] {
         assert!(!can(&master, t), "{t}: not served to the master");
     }

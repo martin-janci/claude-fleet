@@ -4,14 +4,14 @@
 // built-in agents are the operator, the mission orchestrator and Jev. Pause
 // all is `automation.paused`: every loop that acts on its own stands still
 // until it is cleared. Routines a person writes (8.5, 8.6) join the Routines
-// tab beside the built-in ones.
+// tab beside the built-in ones; the start rules (8.11) are the Rules tab.
 import { derived, writable } from 'svelte/store';
 import { healthCheck, type LoopHealth } from './ipc';
 import { listRuns, type RunRow } from './runs';
 import { fleetSettings, setFleetSetting, SETTING_KEYS, settingBool, type FleetSettings } from './fleet_settings';
 import type { Result } from './result';
 
-export type AutomationTab = 'routines' | 'runs' | 'agents';
+export type AutomationTab = 'routines' | 'rules' | 'runs' | 'agents';
 
 export const automationTab = writable<AutomationTab>('routines');
 

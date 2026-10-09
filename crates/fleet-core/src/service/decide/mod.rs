@@ -52,6 +52,9 @@ mod lost_target_tests;
 pub mod quick_answer;
 #[cfg(test)]
 mod quick_answer_tests;
+pub mod related_session;
+#[cfg(test)]
+mod related_session_tests;
 pub mod routine_run_outcome;
 #[cfg(test)]
 mod routine_run_outcome_tests;
@@ -73,6 +76,9 @@ mod turn_outcome_tests;
 pub mod work_link;
 #[cfg(test)]
 mod work_link_tests;
+pub mod work_placement;
+#[cfg(test)]
+mod work_placement_tests;
 
 pub use jev::{
     Answer, BackendError, DecisionBackend, JevBackend, JevRequest, JevResponse, NoulCriteria,
@@ -123,6 +129,10 @@ pub enum Feature {
     RestoreTarget,
     /// Flagging a proposed task that may duplicate an existing one (K4).
     Duplicate,
+    /// Proposing a Work-view group for a task nobody placed (K5).
+    WorkPlacement,
+    /// Noticing another session of the same person on the same work (N1).
+    RelatedSession,
     /// Where a message typed in Control goes: a mission, a session, or
     /// Control itself (K2, redesign step 9.9).
     ControlRoute,
@@ -137,7 +147,7 @@ pub enum Feature {
 }
 
 impl Feature {
-    pub const ALL: [Feature; 13] = [
+    pub const ALL: &[Feature] = &[
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -147,6 +157,8 @@ impl Feature {
         Feature::AdoptTarget,
         Feature::RestoreTarget,
         Feature::Duplicate,
+        Feature::WorkPlacement,
+        Feature::RelatedSession,
         Feature::ControlRoute,
         Feature::SummaryCheck,
         Feature::TurnOutcome,
@@ -164,6 +176,8 @@ impl Feature {
             Feature::AdoptTarget => "adopt_target",
             Feature::RestoreTarget => "restore_target",
             Feature::Duplicate => "duplicate",
+            Feature::WorkPlacement => "work_placement",
+            Feature::RelatedSession => "related_session",
             Feature::ControlRoute => "control_route",
             Feature::SummaryCheck => "summary_check",
             Feature::TurnOutcome => "turn_outcome",
@@ -172,7 +186,7 @@ impl Feature {
     }
 
     pub fn parse(s: &str) -> Option<Feature> {
-        Feature::ALL.into_iter().find(|f| f.as_str() == s)
+        Feature::ALL.iter().copied().find(|f| f.as_str() == s)
     }
 
     /// `decide.jev.<feature>`.
@@ -187,6 +201,8 @@ impl Feature {
             Feature::AdoptTarget => settings::DECIDE_JEV_ADOPT_TARGET,
             Feature::RestoreTarget => settings::DECIDE_JEV_RESTORE_TARGET,
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
+            Feature::WorkPlacement => settings::DECIDE_JEV_WORK_PLACEMENT,
+            Feature::RelatedSession => settings::DECIDE_JEV_RELATED_SESSION,
             Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
             Feature::SummaryCheck => settings::DECIDE_JEV_SUMMARY_CHECK,
             Feature::TurnOutcome => settings::DECIDE_JEV_TURN_OUTCOME,
@@ -1114,7 +1130,8 @@ pub fn health(s: &Store, now: i64) -> Option<DecideHealth> {
     }
     let enabled = settings::get_bool(s, settings::DECIDE_JEV_ENABLED);
     let modes: BTreeMap<String, String> = Feature::ALL
-        .into_iter()
+        .iter()
+        .copied()
         .map(|f| (f, FeatureMode::of(s, f)))
         .filter(|(_, m)| *m != FeatureMode::Off)
         .map(|(f, m)| (f.as_str().to_string(), m.as_str().to_string()))
@@ -1244,7 +1261,8 @@ pub fn status(s: &Store, now: i64, days: i64) -> Result<DecideStatus, IpcError> 
         enabled: settings::get_bool(s, settings::DECIDE_JEV_ENABLED),
         owns_the_fleet: owns_the_fleet(s),
         modes: Feature::ALL
-            .into_iter()
+            .iter()
+            .copied()
             .map(|f| {
                 (
                     f.as_str().to_string(),
