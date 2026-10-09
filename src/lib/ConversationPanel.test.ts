@@ -25,7 +25,12 @@ vi.mock('@tauri-apps/api/webview', () => ({
 }));
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
-  return { ...actual, sendPrompt: vi.fn() };
+  const sendPrompt = vi.fn();
+  // `answerDialog` is `send_prompt` with a key and no prompt (Orbit Fleet
+  // 11.7); routed through the one mock so the tests below keep asserting the
+  // keystroke as the pane receives it.
+  const answerDialog = vi.fn((host: string, tmux: string, key: string) => sendPrompt(host, tmux, '', { keys: key }));
+  return { ...actual, sendPrompt, answerDialog };
 });
 vi.mock('./forms/forms', async () => ({
   ...(await vi.importActual<typeof import('./forms/forms')>('./forms/forms')),

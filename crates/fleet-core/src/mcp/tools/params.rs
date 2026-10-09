@@ -1281,8 +1281,8 @@ pub struct SessionShareParams {
     /// Or an org.
     #[serde(default)]
     pub org: Option<String>,
-    /// watch (read it) or drive (also prompt it). Nothing else — "own" is
-    /// not a grantable level.
+    /// watch (read it), answer (also answer its dialogs) or drive (also
+    /// prompt it). Nothing else — "own" is not a grantable level.
     pub level: String,
 }
 
