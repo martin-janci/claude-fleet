@@ -28,7 +28,7 @@
       <details class="details"><summary>Details</summary><code data-testid="hub-unavailable-details">{reason}</code></details>
     {/snippet}
     {#snippet action()}
-      <Button size="sm" onclick={onsettings} testid="hub-unavailable-settings">Settings → Hub</Button>
+      <Button size="sm" onclick={onsettings} testid="hub-unavailable-settings">Settings → Hub &amp; sync</Button>
     {/snippet}
   </Banner>
 </div>

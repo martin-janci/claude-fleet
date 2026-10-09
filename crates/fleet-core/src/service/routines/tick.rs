@@ -308,7 +308,7 @@ fn event_fires(s: &Store, r: &RoutineRow, sid: i64) -> Result<bool, IpcError> {
 async fn tick_cron(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
     let r = {
         let s = lock(&deps.store)?;
-        if !s.take_routine_lease(id, now)? {
+        if !s.take_routine_lease(id, crate::service::tick::lease_clock(now))? {
             return Ok(());
         }
         match s.get_routine(id)? {
@@ -344,7 +344,7 @@ async fn tick_cron(deps: &Deps, id: i64, now: i64) -> Result<(), IpcError> {
 pub(super) async fn tick_event(deps: &Deps, r: &RoutineRow, now: i64) -> Result<(), IpcError> {
     let (r, fires) = {
         let s = lock(&deps.store)?;
-        if !s.take_routine_lease(r.id, now)? {
+        if !s.take_routine_lease(r.id, crate::service::tick::lease_clock(now))? {
             return Ok(());
         }
         // The row as it is now, under the lease: the pass read it before

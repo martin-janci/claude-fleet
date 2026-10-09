@@ -19,6 +19,7 @@
     formatResetShort,
     freshness,
     leftPct,
+    severityLeft,
     severity,
     severityBadge,
     windowOf,
@@ -233,7 +234,7 @@
       return { kind, title, left: null, level: 'none', badge: null, reset: '', resetShort: '', unknown: true };
     }
     const left = leftPct(w);
-    const level = severity(kind, left, w.resets_at, now, a.account.has_extra_usage);
+    const level = severity(kind, severityLeft(w), w.resets_at, now, a.account.has_extra_usage);
     const b = severityBadge(level, a.account.has_extra_usage);
     return {
       kind,

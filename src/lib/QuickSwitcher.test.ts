@@ -310,13 +310,19 @@ describe('QuickSwitcher tickets', () => {
   });
 
   it('Enter on a ticket with no session opens the dialog prefilled with the ticket', async () => {
+    // Asked for a proposal first (3.12); a hub without the preview proposes nothing.
+    const base = vi.mocked(__invoke).getMockImplementation()!;
+    vi.mocked(__invoke).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'preview_start_work') throw { code: 'E_INVALID', message: 'unknown work_link action preview_start' };
+      return base(cmd, args as never);
+    });
     render(QuickSwitcher);
     const input = await openSwitcher();
     await vi.waitFor(() => expect(screen.getAllByTestId('switcher-ticket')).toHaveLength(2));
     await fireEvent.input(input, { target: { value: 'abc-1' } });
     await tick();
     await fireEvent.keyDown(input, { key: 'Enter' });
-    await tick();
+    await vi.waitFor(() => expect(get(newSessionRequest)).not.toBeNull());
     const req = get(newSessionRequest);
     expect(req?.initialName).toBe('ABC-1 ABC-1 title');
     expect(req?.ticket?.key).toBe('ABC-1');
@@ -407,8 +413,6 @@ describe('QuickSwitcher ticket starts propose a project (New layout)', () => {
   let suggested: { project_id: number; confidence_pct?: number } | null;
   let calls: [string, unknown][];
   beforeEach(async () => {
-    const { uiLayout } = await import('./prefs');
-    uiLayout.set('new');
     projects.set([project, other]);
     suggested = { project_id: 2, confidence_pct: 88 };
     calls = [];
@@ -431,8 +435,6 @@ describe('QuickSwitcher ticket starts propose a project (New layout)', () => {
     });
   });
   afterEach(async () => {
-    const { uiLayout } = await import('./prefs');
-    uiLayout.set('classic');
   });
 
   async function enterOnTicket(mod = false) {
@@ -473,15 +475,6 @@ describe('QuickSwitcher ticket starts propose a project (New layout)', () => {
     expect(req.project.project.id).toBe(2);
     expect(req.initialHost).toBe('mefistos');
     expect(req.proposal).toMatchObject({ value: '2', source: 'rule', reason: 'ABC work runs here' });
-    expect(calls.some(([c]) => c === 'preview_start_work')).toBe(false);
-  });
-
-  it('Classic asks nothing and attaches no proposal', async () => {
-    const { uiLayout } = await import('./prefs');
-    uiLayout.set('classic');
-    const req = await enterOnTicket();
-    expect(req.project.project.id).toBe(1);
-    expect(req.proposal ?? null).toBeNull();
     expect(calls.some(([c]) => c === 'preview_start_work')).toBe(false);
   });
 
@@ -1031,8 +1024,7 @@ describe('QuickSwitcher — the header command field (3.17)', () => {
 });
 
 // ---- Pin, hide and groups under the New layout (parity H1–H3) ----------------
-// The same keys as the New session mode tests above, with `uiLayout` at 'new':
-// pin, hide and groups are not layout-gated, and these prove it.
+// The same keys as the session mode tests above: pin, hide and groups.
 
 describe('QuickSwitcher in the New layout', () => {
   const NOW = Math.floor(Date.now() / 1000);
@@ -1045,8 +1037,6 @@ describe('QuickSwitcher in the New layout', () => {
   const epic = p(5, 'me', 'ppt-epic-145', null);
 
   beforeEach(async () => {
-    const { uiLayout } = await import('./prefs');
-    uiLayout.set('new');
     projects.set([fleet, ...om, epic]);
     sessions.set([]);
     projectPicks.set(new Map());
@@ -1059,8 +1049,6 @@ describe('QuickSwitcher in the New layout', () => {
   });
 
   afterEach(async () => {
-    const { uiLayout } = await import('./prefs');
-    uiLayout.set('classic');
   });
 
   async function openNew() {

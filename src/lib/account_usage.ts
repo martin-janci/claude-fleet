@@ -42,6 +42,16 @@ export function leftPct(w: UsageWindow): number {
   return Math.min(100, Math.max(0, Math.round(100 - u)));
 }
 
+/**
+ * The % left a window's severity is judged on: 0 only when the raw figure
+ * says the window is used up (as `attention_facts.ts` decides Blocked), so
+ * 99.6% used, which rounds to 0% left, is low and never LIMIT (review r05).
+ */
+export function severityLeft(w: UsageWindow): number {
+  const u = Number.isFinite(w.utilization) ? w.utilization : 100;
+  return u >= 100 ? 0 : Math.max(1, leftPct(w));
+}
+
 /** % used as displayed: always `100 - leftPct`, so the two never disagree. */
 export function usedPct(w: UsageWindow): number {
   return 100 - leftPct(w);
@@ -296,7 +306,7 @@ export function chipLabel(
   const fr = freshness(kind, snapshot.fetched_at, w.resets_at, now);
   if (fr === 'expired') return '? left';
   const left = leftPct(w);
-  const level = severity(kind, left, w.resets_at, now, hasExtraUsage);
+  const level = severity(kind, severityLeft(w), w.resets_at, now, hasExtraUsage);
   const name = kind === 'weekly' ? 'weekly ' : '';
   const reset = w.resets_at === null ? '' : ` · ${formatResetShort(kind, w.resets_at, now, locale, timeZone)}`;
   if (fr === 'stale') {

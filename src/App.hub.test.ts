@@ -644,12 +644,13 @@ describe('the Session tab for a shared session', () => {
       render(App);
       await waitFor(() => expect(screen.getAllByTestId('sess-row').length).toBeGreaterThan(0));
       selectSession(theirs as never);
+      // The Agent tab is the terminal view (the snapshot, for a watcher).
       await waitFor(() =>
-        expect(screen.getByTestId('subtab-terminal').getAttribute('aria-pressed')).toBe('false'),
+        expect(screen.getByTestId('stab-agent').getAttribute('aria-selected')).toBe('false'),
       );
-      await fireEvent.click(screen.getByTestId('subtab-terminal'));
+      await fireEvent.click(screen.getByTestId('stab-agent'));
       await waitFor(() =>
-        expect(screen.getByTestId('subtab-terminal').getAttribute('aria-pressed')).toBe('true'),
+        expect(screen.getByTestId('stab-agent').getAttribute('aria-selected')).toBe('true'),
       );
       expect(screen.queryByTestId('terminal-host')).toBeNull();
     } finally {

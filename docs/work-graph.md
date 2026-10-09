@@ -806,7 +806,7 @@ counts toward *Needs you*. The sheet groups candidates by reason:
 | `pr_merged_idle` | its PR is merged and it is idle | Safe kill |
 | `not_planned` | the ticket was closed as won't-do or duplicate | Safe kill |
 | `duplicate_worktree` | two sessions work in one worktree | Kill (the worktree stays) |
-| `same_work` | Jev proposed (`decide.jev.related_session`, assist) that two running sessions do the same work; the idler is suggested. New layout only | not ticked; never automatic |
+| `same_work` | Jev proposed (`decide.jev.related_session`, assist) that two running sessions do the same work; the idler is suggested | not ticked; never automatic |
 | `ghost_expiring` | a lost session is a day from being reaped | Resume or let it expire |
 | `idle_unlinked` | no work linked, idle and unprompted `work.tidy_idle_unlinked_days` | not ticked |
 
@@ -1145,7 +1145,7 @@ them with `get_settings`. This table is generated from
 in [the settings reference](settings-reference.md).
 
 <!-- BEGIN GENERATED: settings work. -->
-<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
+<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `work.retention.journal_days` | `365` | 0–3650 days, `0` = forever | Days a work journal row is kept once its conversation ended and its work is done or unlinked. |

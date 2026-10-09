@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Skeleton from './states/Skeleton.svelte';
   import Icon from './kit/Icon.svelte';
   import { tablistKeys } from './tablist_keys';
   import { onWorkChangedDebounced } from './work';
@@ -29,7 +30,6 @@
   import { providerInfo, unavailableLabel } from './trackers';
   import { timeAgo } from './session_status';
   import { workBoardOpen, workViewChordLabel } from './app_views';
-  import { uiLayout } from './prefs';
   import { detectMac } from './terminal_keys';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
   import { facetSentence, workFacets } from './filter_facets';
@@ -418,10 +418,9 @@
     () => maxWaitMs,
   );
 
-  // The New layout's tabs (step 3.10). The board is a destination of the
+  // The tabs (step 3.10). The board is a destination of the
   // right column (`workBoardOpen`), so its tab reads that store; any other tab
   // leaves it.
-  const newLayout = $derived($uiLayout === 'new');
   const shownTab = $derived<'tasks' | 'missions' | 'board' | 'prs'>(
     $workBoardOpen ? 'board' : tab === 'missions' || tab === 'prs' ? tab : 'tasks',
   );
@@ -585,12 +584,11 @@
 <div class="work-tree" data-testid="work-tree" aria-busy={loading} bind:this={root}>
   <header class="work-header">
     <div class="row">
-      {#if newLayout}
-        <!-- The New layout's fixed Work tabs (redesign step 3.10): Tasks,
-             Missions, Board and Pull requests, with the links waiting for
-             review as a count after them (a tablist holds only tabs). Review
-             is part of Tasks; the board is a Work view of its own, not an
-             overlay toggled from the layout chips. -->
+        <!-- The fixed Work tabs (redesign step 3.10): Tasks, Missions, Board
+             and Pull requests, with the links waiting for review as a count
+             after them (a tablist holds only tabs). Review is part of Tasks;
+             the board is a Work view of its own, not an overlay toggled from
+             the layout chips. -->
         <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
             class="btn btn--chip btn--toggle"
@@ -638,77 +636,6 @@
             onclick={() => pickTab('review')}>{reviewTotal}</button
           >
         {/if}
-      {:else}
-        <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
-          <button
-            class="btn btn--chip btn--toggle"
-            role="tab"
-            aria-selected={tab === 'tasks'}
-            class:is-active={tab === 'tasks'}
-            data-testid="work-tab-tasks"
-            onclick={showTasks}>Tasks</button
-          >
-          <button
-            class="btn btn--chip btn--toggle"
-            role="tab"
-            aria-selected={tab === 'review'}
-            class:is-active={tab === 'review'}
-            data-testid="work-tab-review"
-            onclick={() => (tab = 'review')}>Review{#if reviewTotal}&nbsp;· {reviewTotal}{/if}</button
-          >
-          <button
-            class="btn btn--chip btn--toggle"
-            role="tab"
-            aria-selected={tab === 'missions'}
-            class:is-active={tab === 'missions'}
-            data-testid="work-tab-missions"
-            onclick={() => (tab = 'missions')}>Missions</button
-          >
-          <button
-            class="btn btn--chip btn--toggle"
-            role="tab"
-            aria-selected={tab === 'prs'}
-            class:is-active={tab === 'prs'}
-            data-testid="work-tab-prs"
-            onclick={() => (tab = 'prs')}>Pull requests</button
-          >
-        </div>
-      {/if}
-      {#if tab === 'tasks' && !newLayout}
-        <!-- The New layout's Group control (step 3.7, in WorkFiltersBar)
-             picks List or Grouped there. -->
-        <div class="layout" role="group" aria-label="Layout">
-          <button
-            class="btn btn--chip btn--toggle"
-            type="button"
-            aria-pressed={listMode}
-            class:is-active={listMode}
-            data-testid="work-layout-list"
-            title="By status: To do, Doing, Done"
-            onclick={() => workLayout.set('list')}>List</button
-          >
-          <button
-            class="btn btn--chip btn--toggle"
-            type="button"
-            aria-pressed={!listMode}
-            class:is-active={!listMode}
-            data-testid="work-layout-grouped"
-            title="Organisation → group"
-            onclick={() => workLayout.set('grouped')}>Grouped</button
-          >
-          {#if !newLayout}
-            <button
-              class="btn btn--chip btn--toggle"
-              type="button"
-              aria-pressed={$workBoardOpen}
-              class:is-active={$workBoardOpen}
-              data-testid="work-layout-board"
-              title="A board of these tasks by status, beside the terminal"
-              onclick={() => workBoardOpen.update((v) => !v)}>Board</button
-            >
-          {/if}
-        </div>
-      {/if}
       <button
         class="btn btn--quiet btn--icon"
         type="button"
@@ -733,7 +660,7 @@
         <button class="btn btn--quiet" type="button" data-testid="work-tree-refresh-retry" onclick={() => void load()}>Retry</button>
       </p>
     {/if}
-    {#if newLayout && tab === 'review' && !$workBoardOpen}
+    {#if tab === 'review' && !$workBoardOpen}
       <div class="review-strip" data-testid="work-review-strip">
         <span>Review: {reviewTotal ?? 0} waiting</span>
         <button
@@ -760,7 +687,7 @@
         <button class="btn" type="button" data-testid="work-tree-retry" onclick={() => void load()}>Retry</button>
       </div>
     {:else if !page}
-      <p class="state muted" data-testid="work-tree-loading">Loading work…</p>
+      <div class="state" data-testid="work-tree-loading"><Skeleton rows={4} label="Loading work" /></div>
     {:else if sections.length === 0}
       {@const facets = workFacets($workViewFilters, {
         orgName: (id) => page?.orgs.find((o) => o.id === id)?.name,
@@ -881,7 +808,7 @@
                           </li>
                         {/each}
                         {#if sectionBusy.has(g.key)}
-                          <li class="state muted" data-testid="work-section-loading">Loading…</li>
+                          <li class="state" data-testid="work-section-loading"><Skeleton rows={1} label="Loading" /></li>
                         {/if}
                         {#if sectionErrors.get(g.key)}
                           <li class="state error" role="alert" data-testid="work-section-error">

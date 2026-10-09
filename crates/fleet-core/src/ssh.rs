@@ -332,6 +332,12 @@ impl SshClient {
         self.inner.route.as_ref()?.agent_alias(host)
     }
 
+    /// Whether commands for `host` go through its fleet-agent rather than
+    /// this machine's `ssh` (an agent-transport host this process serves).
+    pub fn routes_through_agent(&self, host: &str) -> bool {
+        self.agent_route(host).is_some()
+    }
+
     /// The agent transport. Only ever reached after [`Self::agent_route`] has
     /// said `Some`, so the `expect` is unreachable for any caller below.
     fn agent(&self) -> &Arc<crate::agent::AgentTransport> {
@@ -649,7 +655,7 @@ impl SshClient {
     }
 
     /// Upload a local file to `remote_path` on `host` by piping its bytes into
-    /// `cat > <quoted path>` over the ControlMaster. The remote parent
+    /// [`atomic_upload_command`] over the ControlMaster. The remote parent
     /// directory must already exist (caller `mkdir -p`s it). Returns Err on a
     /// non-zero ssh/cat exit. Uses the same `-o` muxing as `run`. Bounded by
     /// `UPLOAD_WALL_CLOCK` (uploads legitimately outlive a probe's budget).
@@ -673,9 +679,9 @@ impl SshClient {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        // Single remote word: the remote login shell runs `cat > 'path'`,
-        // reading the piped file from stdin. Path is single-quoted.
-        let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
+        // The remote login shell runs `sh -c '<script>'`, the script reading
+        // the piped file from stdin into a temp file beside the target.
+        let remote_cmd = atomic_upload_command(remote_path);
         let mut cmd = self.remote_command(host, &mux_opts, &[&remote_cmd]);
         cmd.stdin(std::process::Stdio::from(file));
         let out = self
@@ -1382,6 +1388,22 @@ async fn run_local_with_stdin(
 /// scripted `FakeSsh`, which records every call and answers from canned
 /// replies. Services take `&dyn SshExec` so all three are interchangeable.
 ///
+/// The remote command an upload pipes the file into: stdin to a temp file
+/// in the target's own directory, then `mv` over the target, so an
+/// interrupted upload never leaves a torn file where a whole one was
+/// expected (a transcript, review r18 M5); the temp file is removed when
+/// either step fails. Run as `sh -c '<script>'`, one word for the remote
+/// login shell whatever shell that is; every value is `shell::quote`d.
+pub(crate) fn atomic_upload_command(remote_path: &str) -> String {
+    let script = format!(
+        "f={}; t=\"$f.cf-upload.$$\"; \
+         if cat > \"$t\" && mv -f -- \"$t\" \"$f\"; then exit 0; fi; \
+         rm -f -- \"$t\"; exit 1",
+        crate::shell::quote(remote_path)
+    );
+    format!("sh -c {}", crate::shell::quote(&script))
+}
+
 /// Semantics every implementation must keep, because the callers rely on
 /// them:
 ///
@@ -1391,7 +1413,8 @@ async fn run_local_with_stdin(
 ///   bound (`E_SSH_TIMEOUT`) and cancellation (`E_CANCELLED`).
 /// - `args` are space-joined and re-tokenised by the remote login shell, so
 ///   a multi-word script must already be `shell::quote`d by the caller.
-/// - `upload_file` streams the local file over stdin into `cat > <path>` and
+/// - `upload_file` streams the local file over stdin into a temp file beside
+///   `<path>` and renames it over `<path>` ([`atomic_upload_command`]), and
 ///   fails with `E_UPLOAD` on a non-zero exit.
 /// - `remote_home` resolves `$HOME` on the host (`E_SSH` if it cannot).
 #[async_trait::async_trait]
@@ -1737,9 +1760,9 @@ struct ConnectionSlot {
 /// `SshExec` over the local machine: the argv is space-joined exactly as ssh
 /// would join it and handed to `bash -c`, so the same re-tokenisation the
 /// remote login shell performs happens here too (a script that is not
-/// `quote`d breaks identically on both). `upload_file` is `cat > <path>` fed
-/// from the local file. No ControlMaster, no keepalives — the only failure
-/// modes are a missing `bash`, a non-zero exit, and the wall clock.
+/// `quote`d breaks identically on both). `upload_file` is
+/// [`atomic_upload_command`] fed from the local file. No ControlMaster, no
+/// keepalives — the only failure modes are a missing `bash`, a non-zero exit, and the wall clock.
 ///
 /// Used by the opt-in `tmux_roundtrip` integration test to drive the real
 /// `RemoteTmux` command builder against a private local tmux server.
@@ -1924,7 +1947,7 @@ impl SshExec for LocalExec {
                 format!("open {}: {e}", local_path.display()),
             )
         })?;
-        let remote_cmd = format!("cat > {}", crate::shell::quote(remote_path));
+        let remote_cmd = atomic_upload_command(remote_path);
         let mut cmd = self.command(&[remote_cmd.as_str()]);
         cmd.stdin(std::process::Stdio::from(file));
         let out = self
@@ -2029,6 +2052,47 @@ pub fn control_dir_is_private(dir: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review r18 M5: an upload lands whole or not at all. A read that fails
+    /// part way (a directory as the "file") leaves the old target in place
+    /// and no temp file beside it; a good one replaces the target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_upload_replaces_the_target_whole_or_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("it's a.jsonl");
+        std::fs::write(&target, "old\n").unwrap();
+        let exec = LocalExec::default();
+        let remote = target.to_string_lossy().to_string();
+
+        let err = exec
+            .upload_file("h", dir.path(), &remote, Duration::from_secs(10))
+            .await
+            .expect_err("reading a directory fails part way");
+        assert_eq!(err.code, codes::E_UPLOAD);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "old\n");
+        let names = |d: &Path| -> Vec<String> {
+            let mut v: Vec<String> = std::fs::read_dir(d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(
+            names(dir.path()),
+            vec!["it's a.jsonl".to_string()],
+            "no temp left"
+        );
+
+        let src = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(src.path(), "new\n").unwrap();
+        exec.upload_file("h", src.path(), &remote, Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(names(dir.path()), vec!["it's a.jsonl".to_string()]);
+    }
 
     /// Only a directory of this user's own, closed to everyone else, holds
     /// ControlMaster sockets.

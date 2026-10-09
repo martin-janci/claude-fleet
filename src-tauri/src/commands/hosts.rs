@@ -188,7 +188,7 @@ pub async fn run_host_setup_check(
     Ok(check)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_host(
     args: HostAliasArgs,
     backend: State<'_, Arc<FleetBackend>>,
@@ -201,7 +201,7 @@ pub fn remove_host(
 /// Host identity & health, task 5. LocalOnly like `remove_host`: the hub
 /// tool is master-only and a paired desktop holds a client token, so
 /// routing it would always come back `E_FORBIDDEN`.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn merge_host(
     args: MergeHostArgs,
     backend: State<'_, Arc<FleetBackend>>,
@@ -211,7 +211,7 @@ pub fn merge_host(
     hosts::merge_host(args, &store)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn hide_host(
     args: HideHostArgs,
     backend: State<'_, Arc<FleetBackend>>,
@@ -221,7 +221,7 @@ pub fn hide_host(
     hosts::hide_host(args, &store)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_account_nickname(
     args: SetAccountNicknameArgs,
     backend: State<'_, Arc<FleetBackend>>,

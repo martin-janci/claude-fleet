@@ -3158,7 +3158,7 @@ causes are:
 In that state it runs no reconcile tick, no account-usage poll, no embedded
 control API and no event stream. Every fleet command is refused with
 `E_HUB_UNAVAILABLE` and the reason. A red banner at the top of the window
-names the hub and the reason, with a button to Settings → Hub. There you can
+names the hub and the reason, with a button to Settings → Hub & sync. There you can
 pair again, or Disconnect to go back to standalone. Either takes effect at the
 next launch.
 
@@ -3271,11 +3271,11 @@ normally or run the same in both modes, which this table leaves out because
 they tell an operator nothing they came to docs to learn. Regenerate with:
 
 ```text
-REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
+REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
 ```
 
 <!-- BEGIN GENERATED: hub-client verdicts -->
-<!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
+<!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen -->
 
 Every command below refuses in hub client mode; the full table, with the commands that route to a hub tool, is `src-tauri/src/backend/verdicts.rs`.
 

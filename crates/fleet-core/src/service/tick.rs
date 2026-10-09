@@ -399,10 +399,28 @@ pub fn spawn_account_usage_tick(
     })
 }
 
+/// The clock a lease is stamped with: read when the lease is taken, not
+/// the pass's start (review r06), so a routine or mission reached late in a long pass
+/// does not get a lease that is already near its end. Never before `now`,
+/// the pass's own clock.
+pub fn lease_clock(now: i64) -> i64 {
+    now.max(crate::store::now_unix())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Review r06: a lease is stamped with the clock when it is taken, not
+    /// the pass's start, and never before the pass's own clock.
+    #[test]
+    fn a_lease_is_stamped_with_a_fresh_clock() {
+        let pass_start = crate::store::now_unix() - 600;
+        assert!(super::lease_clock(pass_start) >= pass_start + 600);
+        let ahead = crate::store::now_unix() + 3600;
+        assert_eq!(super::lease_clock(ahead), ahead);
+    }
 
     /// (a) A token cancelled before the loop ever runs must exit without
     /// starting a single pass — not even the one a freshly constructed

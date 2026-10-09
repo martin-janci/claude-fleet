@@ -84,12 +84,29 @@ impl Store {
     /// waiting (delivered by a racing call, cancelled, failed): only the
     /// caller that gets `true` types it.
     pub fn claim_deferred_prompt(&self, id: i64, now: i64) -> Result<bool> {
+        self.claim_deferred_prompt_in(id, now, None)
+    }
+
+    /// [`Self::claim_deferred_prompt`] for one idle moment, the one that
+    /// began at `idle_since`: `false` as well when another of the session's
+    /// prompts was claimed since then (review r06: the Stop hook's delivery
+    /// and the reconcile backstop each saw the same idle session and typed
+    /// one prompt each). `None`: no moment is known, no such check.
+    pub fn claim_deferred_prompt_in(
+        &self,
+        id: i64,
+        now: i64,
+        idle_since: Option<i64>,
+    ) -> Result<bool> {
         let n = self
             .conn
             .prepare_cached(&format!(
-                "UPDATE deferred_prompts SET delivered_at = ?2 WHERE id = ?1 AND {PENDING}"
+                "UPDATE deferred_prompts SET delivered_at = ?2 WHERE id = ?1 AND {PENDING} \
+                 AND NOT EXISTS (SELECT 1 FROM deferred_prompts d \
+                   WHERE d.session_id = deferred_prompts.session_id \
+                     AND d.delivered_at >= ?3)"
             ))?
-            .execute(rusqlite::params![id, now])?;
+            .execute(rusqlite::params![id, now, idle_since])?;
         Ok(n == 1)
     }
 

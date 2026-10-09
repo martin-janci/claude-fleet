@@ -1,6 +1,6 @@
 <!--
   The first-run tour (Orbit Fleet redesign step 10.5, board Tour): a
-  spotlight on one part of the New layout and a popover beside it with the
+  spotlight on one part of the window and a popover beside it with the
   step, what the part is for, and "Try it" with the key that uses it. The
   popover never takes the key: the app does what the key does and the
   step ticks "done". Skip, Escape and the last step's Done end it for good.

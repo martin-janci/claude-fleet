@@ -17,7 +17,6 @@
     type MemberGrants,
     type OrgMember,
   } from '../orgs';
-  import { uiLayout } from '../prefs';
 
   let {
     record,
@@ -44,9 +43,9 @@
   const orgId = $derived(Number(record.id));
   const orgName = $derived(String(record.name ?? 'the org'));
   const showDevices = $derived(members.some((m) => m.devices !== undefined));
-  // Redesign 11.7c, New layout: each member's live sessions, the ones you
+  // Redesign 11.7c: each member's live sessions, the ones you
   // may not open counted and never named.
-  const showSessions = $derived($uiLayout === 'new' && members.some((m) => (m.live_sessions ?? 0) > 0));
+  const showSessions = $derived(members.some((m) => (m.live_sessions ?? 0) > 0));
   const PRIVATE_TITLE = 'Private: you see that it exists, not what it is';
   const nameOf = (m: OrgMember) => m.display_name || m.name;
 

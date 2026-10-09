@@ -7,6 +7,7 @@ import {
   formatResetShort,
   freshness,
   leftPct,
+  severityLeft,
   severity,
   windowOf,
   type UsageSeverity,
@@ -59,8 +60,7 @@ export function headerAccount(
     const left = leftPct(w);
     // At the limit only on the raw figure (as `attention_facts.ts`): 99.6%
     // used shows 0% left but is low, not stopped.
-    const levelLeft = w.utilization >= 100 ? 0 : Math.max(1, left);
-    shown.push({ kind, left, resetsAt: w.resets_at, level: severity(kind, levelLeft, w.resets_at, now) });
+    shown.push({ kind, left, resetsAt: w.resets_at, level: severity(kind, severityLeft(w), w.resets_at, now) });
   }
   const h = health(shown.map((s) => s.level));
   const stop = shown.find((s) => s.level === 'limit');

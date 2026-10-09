@@ -1,12 +1,11 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FilesPanel from './FilesPanel.svelte';
 import type { SessionRow } from './sessions';
 import type { ChangedFile } from './files';
-import { uiLayout } from './prefs';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -16,7 +15,6 @@ let draftFails = false;
 
 beforeEach(() => {
   draftFails = false;
-  uiLayout.set('new');
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string) => {
     switch (cmd) {
@@ -30,8 +28,6 @@ beforeEach(() => {
     }
   });
 });
-
-afterEach(() => uiLayout.set('classic'));
 
 function mount() {
   return render(FilesPanel, { props: { session: { id: 7 } as SessionRow } });
@@ -62,10 +58,4 @@ describe('FilesPanel Changed: commit message draft', () => {
     expect((screen.getByTestId('commit-draft-input') as HTMLTextAreaElement).value).toBe('');
   });
 
-  it('the classic layout keeps the plain message box', async () => {
-    uiLayout.set('classic');
-    mount();
-    await screen.findByPlaceholderText('Commit message…');
-    expect(screen.queryByTestId('commit-draft-run')).toBeNull();
-  });
 });

@@ -1,5 +1,5 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
@@ -7,7 +7,7 @@ import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import FilesPanel from './FilesPanel.svelte';
 import type { SessionRow } from './sessions';
 import { goToFileMatches } from './files';
-import { uiLayout, sessionView } from './prefs';
+import { sessionView } from './prefs';
 import { destination } from './destination';
 import { composerInsert } from './conversation';
 import { expectAccessible } from './a11y_check';
@@ -35,8 +35,6 @@ beforeEach(() => {
     }
   });
 });
-
-afterEach(() => uiLayout.set('classic'));
 
 // ⌥⌘P off a Mac is Ctrl+Alt+P; jsdom's navigator is not a Mac.
 const chord = () =>
@@ -75,7 +73,6 @@ describe('FilesPanel Go to file', () => {
 
 describe('FileViewer actions (new layout)', () => {
   it('Mention in chat puts @path in the composer and goes to the conversation', async () => {
-    uiLayout.set('new');
     sessionView.set('terminal');
     destination.set('files');
     render(FilesPanel, { props: { session: { id: 7, host_alias: 'local', tmux_name: 'x' } as SessionRow } });
@@ -88,10 +85,4 @@ describe('FileViewer actions (new layout)', () => {
     expect(screen.getByTestId('viewer-open-editor')).toBeTruthy();
   });
 
-  it('classic shows none of them', async () => {
-    render(FilesPanel, { props: { session: { id: 1 } as SessionRow } });
-    await fireEvent.click(await screen.findByText('README.md'));
-    await screen.findByTestId('file-viewer');
-    expect(screen.queryByTestId('viewer-mention')).toBeNull();
-  });
 });

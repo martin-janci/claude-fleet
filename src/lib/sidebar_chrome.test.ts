@@ -1,14 +1,14 @@
 // Redesign step 1.4, "Verified by: chrome above the first row measured".
 // 1.4 took the permanent rows out of the list's chrome (the theme line, the
 // board's instruction sentence, empty task sections, a busy status bar).
-// This renders the session list in both layouts and measures what sits above
+// This renders the session list and measures what sits above
 // its first session row: which lines they are, and how tall they come out
 // from the tokens that size them (jsdom lays nothing out, so the height is
 // computed from the header's own CSS and app.css's tokens). A line added
 // above the first row fails here, with the new total.
 import { readFileSync } from 'node:fs';
 import { render } from '@testing-library/svelte';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => null) }));
@@ -16,7 +16,6 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => null) }));
 import Sidebar from './Sidebar.svelte';
 import { projects } from './projects';
 import { sessions } from './sessions';
-import { uiLayout } from './prefs';
 import { onboardingDismissed } from './onboarding';
 import { session } from './hosts_fixture';
 
@@ -72,8 +71,7 @@ function chromeAboveFirstRow(container: HTMLElement): Chrome {
   return { lines, px };
 }
 
-async function mount(layout: 'classic' | 'new') {
-  uiLayout.set(layout);
+async function mount() {
   onboardingDismissed.set(true);
   projects.set([{ project: { id: 1, owner: 'o', repo: 'r', base_path: '/r', last_session_at: 1, adopted: false, system: false }, worktrees: [] }] as never);
   sessions.set([session('local', 'dev-a', { project_id: 1 } as never)]);
@@ -83,32 +81,15 @@ async function mount(layout: 'classic' | 'new') {
   return r;
 }
 
-afterEach(() => uiLayout.set('classic'));
-
 describe('chrome above the first row (step 1.4)', () => {
-  it('Classic: the view switch, search and filters, the triage row, then the project', async () => {
-    const { container } = await mount('classic');
-    const c = chromeAboveFirstRow(container);
-    expect(c.lines).toEqual(['row.r0', 'row', 'row.r2', 'proj-row']);
-    expect(c.px).toBe(139);
-    // What 1.4 removed stays removed.
-    expect(container.textContent).not.toMatch(/theme:/);
-    expect(container.querySelector('[data-testid="theme-toggle"]')).toBeNull();
-  });
-
-  it('New: the view switch and one Filters line, then the project', async () => {
-    const { container } = await mount('new');
+  it('the view switch and one Filters line, then the project', async () => {
+    const { container } = await mount();
     const c = chromeAboveFirstRow(container);
     expect(c.lines).toEqual(['row.r0', 'filters-section', 'proj-row']);
     expect(c.px).toBe(105);
+    // What 1.4 removed stays removed, and it stays under four control lines.
     expect(container.textContent).not.toMatch(/theme:/);
-  });
-
-  it('New draws less chrome than Classic, and both stay under four control lines', async () => {
-    const classic = chromeAboveFirstRow((await mount('classic')).container);
-    document.body.innerHTML = '';
-    const next = chromeAboveFirstRow((await mount('new')).container);
-    expect(next.px).toBeLessThan(classic.px);
-    for (const c of [classic, next]) expect(c.lines.length).toBeLessThanOrEqual(4);
+    expect(container.querySelector('[data-testid="theme-toggle"]')).toBeNull();
+    expect(c.lines.length).toBeLessThanOrEqual(4);
   });
 });

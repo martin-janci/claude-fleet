@@ -156,7 +156,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   row('global', 'hosts', 'Accounts and hosts', split(['Meta+I'], ['Ctrl+Shift+H', 'Meta+I'])),
   row('global', 'session-view', 'Flip the Session view (agent tab)',
     split(['Meta+J'], ['Ctrl+Shift+J', 'Meta+J'])),
-  row('global', 'agent', 'The fleet agent (Control in the New layout)', split(['Meta+E'], ['Ctrl+Shift+E', 'Meta+E'])),
+  row('global', 'agent', 'The fleet agent (Control)', split(['Meta+E'], ['Ctrl+Shift+E', 'Meta+E'])),
   // Ctrl+, off the Mac is new in 1.9 (keyboard.md); the Super form stays.
   row('global', 'settings', 'Settings', split(['Meta+,'], ['Ctrl+,', 'Meta+,'])),
   row('global', 'work-view', 'Switch Sessions and Work', split(['Meta+Shift+W'], ['Ctrl+Shift+W'])),
@@ -165,7 +165,7 @@ export const SHORTCUTS: readonly Shortcut[] = [
   // The design manual's new chords (keyboard.md); ⌥⌘ is Ctrl+Alt elsewhere.
   row('global', 'open-in-editor', 'Open in VS Code', split(['Meta+Shift+E'], ['Ctrl+Alt+E'])),
   row('global', 'inspector', 'Inspector', split(['Alt+Meta+B'], ['Ctrl+Alt+B'])),
-  // Step 5.3: matched by TerminalView in the new layout, where the strip is.
+  // Step 5.3: matched by TerminalView , where the strip is.
   row('global', 'new-terminal', 'New terminal', split(['Alt+Meta+T'], ['Ctrl+Alt+T']), { step: '5.3' }),
   row('global', 'next-terminal', 'Next terminal', split(['Meta+`'], ['Ctrl+`']), { step: '5.3' }),
   row('global', 'go-to-file', 'Go to file (Files tab only)',

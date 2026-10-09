@@ -1,7 +1,7 @@
 <!--
   Get started (Orbit Fleet redesign step 10.5, board Tour): the six things
-  that make a working fleet, floating in the New layout's bottom-right
-  corner instead of the sidebar's onboarding card. "–" folds it to its
+  that make a working fleet, floating in the bottom-right corner (it
+  replaced the sidebar's onboarding card, deleted with Classic in 13.1). "–" folds it to its
   title line; ✕ hides it until Settings → Setup guide replays it.
 -->
 <script lang="ts">

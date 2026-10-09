@@ -694,6 +694,16 @@ fn hosts_has_agents_on_path(conn: &Connection) -> rusqlite::Result<bool> {
     Ok(n > 0)
 }
 
+/// `already_applied` guard of migration 150.
+fn hosts_has_last_reachable_at(conn: &Connection) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('hosts') WHERE name = 'last_reachable_at'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 /// already_applied guard of migration 148.
 fn downloads_has_owner(conn: &Connection) -> rusqlite::Result<bool> {
     let n: i64 = conn.query_row(
@@ -1693,6 +1703,13 @@ const MIGRATIONS: &[Migration] = &[
     // reconcile tick (`service::bg_sessions::spawn_enforce_stop_limits`).
     // `IF NOT EXISTS`, safe to re-run.
     Migration::plain(149, include_str!("../../migrations/149_bg_stop_limits.sql")),
+    // Review r13: the host row's last probe error and last-reachable stamp
+    // (three ADD COLUMNs, guarded on the first).
+    Migration {
+        version: 150,
+        sql: include_str!("../../migrations/150_host_probe_error.sql"),
+        already_applied: Some(hosts_has_last_reachable_at),
+    },
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

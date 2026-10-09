@@ -89,13 +89,13 @@
     /** Set when staging/committing has no hub tool (`hubBlock('repo_write', …)`
      *  from `FilesPanel`) — the reason, shown as the checkbox's/button's title. */
     writeBlocked?: string | null;
-    /** The new layout's committed groups under Changed (redesign step 5.6):
-     *  null keeps the classic flat list of the worktree's own changes. */
+    /** The committed groups under Changed (redesign step 5.6): null keeps
+     *  the flat list of the worktree's own changes. */
     branch?: BranchDiff | null;
     /** The range the selected row came from; null for a worktree row. */
     selectedRange?: DiffRange | null;
     onSelectRange?: (path: string, range: DiffRange, status: string) => void;
-    /** The new layout's commit message draft (redesign step 5.12): drafts
+    /** The commit message draft (redesign step 5.12): drafts
      *  from the staged changes on the session's host. Absent, the plain
      *  message box. */
     draftCommit?: () => Promise<Result<CommitDraft>>;

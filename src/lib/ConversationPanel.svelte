@@ -22,7 +22,6 @@
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
-  import { needsMore, wrapsPastOneLine } from './composer_overflow';
   import { contextLevel } from './attention';
   import { shortAge } from './session_status';
   import { onTimelineEvent, onConversationsChanged } from './live_events';
@@ -129,7 +128,6 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
-  import { uiLayout } from './prefs';
   import { inboxQueue, nextInInbox } from './inbox';
   import { push as pushToast } from './toasts';
   import { projectSkills } from './project_skills';
@@ -175,7 +173,7 @@
     // (AgentPanel's removable context chip). Only shown when there IS a
     // composer to sit above.
     composerAbove,
-    // The new layout's working indicator in another voice (redesign step
+    // The working indicator in another voice (redesign step
     // 9.13): Control's chat reads the running turn itself and answers the
     // loader and the line to show instead of the Atom's "Thinking · …".
     thinkingAs,
@@ -240,8 +238,6 @@
   let box: HTMLTextAreaElement | undefined = $state();
   // The chip row holds one line; whatever does not fit collapses behind
   // "More". Measured, not computed, since it depends on layout.
-  let chipsRow: HTMLDivElement | undefined = $state();
-  let chipsOverflow = $state(false);
   let chipsExpanded = $state(false);
   // Slash-command menu: highlighted row, and the draft the user dismissed
   // the menu for (Escape) so it stays hidden until the text changes.
@@ -715,12 +711,12 @@
         : indicator.label
       : null,
   );
-  // The new layout's loaders (redesign step 5.13): a session this window
+  // The loaders (redesign step 5.13): a session this window
   // just started shows the Pulse sequence until its agent reports a status;
   // a working agent gets the Atom beside what it is doing.
-  const starting = $derived($uiLayout === 'new' && $startingSessions.has(session.id));
+  const starting = $derived($startingSessions.has(session.id));
   const thinking = $derived(
-    $uiLayout === 'new' && indicator?.kind === 'working'
+    indicator?.kind === 'working'
       ? thinkingLabel(doing ? { label: doing.label, since: doing.sinceMs !== null ? formatDuration(doing.sinceMs) : null } : null)
       : null,
   );
@@ -748,10 +744,10 @@
       dividerAnchor = newDividerAnchor(c.turns, seenAt);
     });
   });
-  const showDivider = $derived($uiLayout === 'new' && viewing === null && dividerAnchor !== null);
+  const showDivider = $derived(viewing === null && dividerAnchor !== null);
 
   // ─── After an answer (redesign 5.9) ────────────────────────────────────────
-  // In the New layout an answered card moves you on to the next session that
+  // An answered card moves you on to the next session that
   // needs you, with Undo to come back. The answer itself has gone to the pane
   // already; Undo takes you back to it, it cannot unsend a key.
   function afterAnswer(label: string) {
@@ -1164,34 +1160,6 @@
     if (!visible || !canPrompt) return;
     void tick().then(() => box?.focus());
   });
-  function measureChips() {
-    if (!chipsRow) return;
-    const row = chipsRow;
-    // Untracked: the effect below calls this, and reading `chipsExpanded`
-    // there would make every toggle re-create the observer.
-    const expanded = untrack(() => chipsExpanded);
-    chipsOverflow = expanded
-      ? wrapsPastOneLine(Array.from(row.children, (c) => (c as HTMLElement).offsetTop))
-      : needsMore(row.scrollWidth, row.clientWidth);
-    if (!chipsOverflow) chipsExpanded = false;
-  }
-  $effect(() => {
-    if (!chipsRow) return;
-    // The row's own border-box need not change when the preset count does,
-    // so a ResizeObserver on it alone can miss a preset-list change. Read
-    // the store here so the effect re-runs (and re-measures) whenever it does.
-    void $composerPresets;
-    measureChips();
-    // ResizeObserver is absent in jsdom; the resize listener is what the
-    // component test drives, and both paths call the same measurement.
-    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measureChips);
-    ro?.observe(chipsRow);
-    window.addEventListener('resize', measureChips);
-    return () => {
-      ro?.disconnect();
-      window.removeEventListener('resize', measureChips);
-    };
-  });
   // ONE signal, two uses: the sentence under the box, and — only where the
   // host asked for it — the gate that refuses the send. Both read this same
   // `$derived`, so they cannot disagree about whether the session is busy.
@@ -1306,22 +1274,20 @@
   const ctxLevel = $derived(contextLevel(session.context_pct));
   const suggestCompact = $derived(ctxLevel === 'warn' || ctxLevel === 'crit');
   const isCompactPreset = (p: ComposerPreset) => /^\/compact\b/.test(p.text.trim());
-  // The New layout shows three quick prompts and puts the rest under ⋯
+  // The composer shows three quick prompts and puts the rest under ⋯
   // (redesign 5.9); a suggested Compact stays out in front.
   const CHIPS_SHOWN = 3;
   const validPresets = $derived($composerPresets.filter((p) => p.label.trim() && p.text.trim()));
   const chipList = $derived(
-    $uiLayout === 'new' && !chipsExpanded
+    !chipsExpanded
       ? validPresets.filter((p, i) => i < CHIPS_SHOWN || (suggestCompact && isCompactPreset(p)))
-      : $uiLayout === 'new'
-        ? validPresets
-        : $composerPresets,
+      : validPresets,
   );
-  const chipsHidden = $derived($uiLayout === 'new' && !chipsExpanded ? validPresets.length - chipList.length : 0);
+  const chipsHidden = $derived(!chipsExpanded ? validPresets.length - chipList.length : 0);
   // The project's own skills and commands join the built-ins in the New
   // layout (redesign 5.9), read once the draft starts a slash command.
   let projectCmds = $state<SlashCommand[]>([]);
-  const slashDraft = $derived($uiLayout === 'new' && draft.startsWith('/') && !/\s/.test(draft));
+  const slashDraft = $derived(draft.startsWith('/') && !/\s/.test(draft));
   $effect(() => {
     if (!slashDraft) return;
     const id = session.id;
@@ -1330,7 +1296,7 @@
     });
   });
   const slashMatches = $derived(
-    slashDismissedFor === draft ? [] : matchSlashCommands(draft, $uiLayout === 'new' ? projectCmds : []),
+    slashDismissedFor === draft ? [] : matchSlashCommands(draft, projectCmds),
   );
   // Ids for the combobox wiring, per panel instance so two panels never hand
   // the same id to assistive tech.
@@ -2358,8 +2324,8 @@
             {session}
             view={answerView}
             {onOpenTerminal}
-            onAnswered={$uiLayout === 'new' ? afterAnswer : undefined}
-            onOwnWords={$uiLayout === 'new' && showComposer ? () => void tick().then(() => box?.focus()) : undefined}
+            onAnswered={afterAnswer}
+            onOwnWords={showComposer ? () => void tick().then(() => box?.focus()) : undefined}
           />
         {:else if indicator?.kind === 'blocked'}
           <div class="blocked" data-testid="conv-blocked" role="status">
@@ -2389,7 +2355,9 @@
             {:else}
               <Loader size={16} paused={!indicator} class="indicator-loader" />
             {/if}
-            <span class="indicator-label"
+            <!-- With nothing running in the transcript, "Thinking" keeps the
+                 pane's own spinner line ("Cooking… 3s") as its tooltip. -->
+            <span class="indicator-label" title={thinking && !doing && indicator?.kind === 'working' ? indicator.label : undefined}
               >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? `Waiting for ${agentName}…` : (thinkingOwn?.label ?? thinking ?? indicatorLabel)}</span
             >
           </div>
@@ -2498,7 +2466,7 @@
             onclick={() => void sendText('')}>⏎ Press Enter</button>
         </div>
       {/if}
-      <div class="chips" data-testid="conv-chips" data-expanded={$uiLayout === 'new' || chipsExpanded} bind:this={chipsRow}>
+      <div class="chips" data-testid="conv-chips">
         {#each chipList as p, i (i)}
           {#if p.label.trim() && p.text.trim()}
             {@const suggested = suggestCompact && isCompactPreset(p)}
@@ -2522,8 +2490,8 @@
           {/if}
         {/each}
       </div>
-      {#if $uiLayout === 'new' && (chipsExpanded || chipsHidden > 0)}
-        <!-- New layout (redesign 5.9): three chips, the rest under ⋯. -->
+      {#if chipsExpanded || chipsHidden > 0}
+        <!-- Redesign 5.9: three chips, the rest under ⋯. -->
         <button
           type="button"
           class="btn btn--chip chips-more"
@@ -2532,13 +2500,6 @@
           aria-label={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
           title={chipsExpanded ? 'Fewer quick prompts' : `${chipsHidden} more quick prompts`}
           onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : '⋯'}</button>
-      {:else if $uiLayout !== 'new' && chipsOverflow}
-        <button
-          type="button"
-          class="btn btn--chip chips-more"
-          data-testid="conv-chips-more"
-          aria-expanded={chipsExpanded}
-          onclick={() => preserveThread(() => (chipsExpanded = !chipsExpanded))}>{chipsExpanded ? 'Less' : 'More'} ▾</button>
       {/if}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
@@ -2762,17 +2723,11 @@
     display: flex;
     gap: var(--control-gap);
     margin: 0 0 6px;
-    /* One row by default; growth is a deliberate toggle, not a reflow. */
-    flex-wrap: nowrap;
-    overflow: hidden;
+    flex-wrap: wrap;
   }
   /* Marks an auto-send chip: a click sends rather than fills. */
   .chip-send {
     opacity: 0.6;
-  }
-  .chips[data-expanded='true'] {
-    flex-wrap: wrap;
-    overflow: visible;
   }
   .composer-shell {
     position: relative;

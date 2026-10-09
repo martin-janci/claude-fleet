@@ -4,14 +4,14 @@
 
 <script lang="ts">
   import { tablistKeys } from './tablist_keys';
-  // The New layout's session header and its one tab bar (Orbit Fleet
+  // The session header and its one tab bar (Orbit Fleet
   // redesign step 3.5, Main board): the session's name, state and where it
   // runs, then Conversation · the agent tab · Files · Details. The agent tab
   // is the terminal, named after the agent in it ("Claude Code", "Codex").
   // Terminals (5.3) is the session's shells, with their count. Assets stays on the right until
   // Toolkit (3.16) takes it; Accounts & hosts is on the rail and ⌘I.
   //
-  // App owns what each tab does (the same functions Classic's tabs call);
+  // App owns what each tab does;
   // this file only draws them and says which is current.
   import type { SessionRow } from './sessions';
   import { sessionAgent } from './sessions';

@@ -2326,7 +2326,7 @@ pub(crate) async fn spec_for_session_with(
         }
         (
             seed_for_session(&s, &row)?,
-            crate::service::sessions::stored_launch(&s, row.id),
+            crate::service::sessions::stored_launch(&s, row.id)?,
         )
     };
     let (seed, launch) = seed;

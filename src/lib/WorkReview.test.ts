@@ -17,7 +17,6 @@ import type { ReviewItem, SessionTaskLink } from './work_view';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
-import { uiLayout } from './prefs';
 
 const item = (over: Partial<ReviewItem> = {}): ReviewItem => ({
   review_id: 'link:42',
@@ -142,7 +141,6 @@ describe('WorkReview', () => {
       }),
       item({ review_id: 'link:50', session_id: 8, link_id: 50 }),
     ];
-    uiLayout.set('new');
     render(WorkReview);
     await flush();
     const rows = screen.getAllByTestId('work-review-item');
@@ -157,25 +155,13 @@ describe('WorkReview', () => {
     await fireEvent.click(within(rows[0]).getByTestId('work-review-proposed-by-change'));
     await flush();
     expect(within(rows[0]).getByTestId('work-review-change-panel')).toBeTruthy();
-    uiLayout.set('classic');
-  });
-
-  it('keeps Classic as it was: the why line names Jev, no pill (6.8 parity)', async () => {
-    pending = [item({ rule: 'R12', why: ['Jev proposed ABC-12 (82%) · R12'], proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 82 } })];
-    uiLayout.set('classic');
-    render(WorkReview);
-    await flush();
-    expect(screen.queryByTestId('work-review-proposed-by')).toBeNull();
-    expect(screen.getByTestId('work-review-why').textContent).toBe('Jev proposed ABC-12 (82%) · R12');
   });
 
   it('shows no Jev pill under the confidence floor (6.8)', async () => {
     pending = [item({ rule: 'R12', proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 40 } })];
-    uiLayout.set('new');
     render(WorkReview);
     await flush();
     expect(screen.queryByTestId('work-review-proposed-by')).toBeNull();
-    uiLayout.set('classic');
   });
 
   it('lists every item with its kind and why', async () => {
@@ -464,17 +450,12 @@ describe('WorkReview', () => {
       }),
       ...items.slice(1),
     ];
-    uiLayout.set('new');
-    try {
-      const { container } = render(WorkReview);
-      await flush();
-      await expectAccessible(container);
-      await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-proposed-by-change'));
-      await flush();
-      await expectAccessible(container);
-    } finally {
-      uiLayout.set('classic');
-    }
+    const { container } = render(WorkReview);
+    await flush();
+    await expectAccessible(container);
+    await fireEvent.click(within(screen.getAllByTestId('work-review-item')[0]).getByTestId('work-review-proposed-by-change'));
+    await flush();
+    await expectAccessible(container);
   });
 });
 

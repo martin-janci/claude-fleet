@@ -1,5 +1,5 @@
 // The first-run tour (Orbit Fleet redesign step 10.5, board Tour): six
-// steps, each a spotlight on one part of the New layout with a popover
+// steps, each a spotlight on one part of the window with a popover
 // that says what it is for and asks the person to try its key. The tour
 // starts once, after the welcome, and Skip is remembered; Settings →
 // Appearance → Setup guide takes it again.

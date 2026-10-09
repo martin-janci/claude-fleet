@@ -72,7 +72,7 @@
     /** Hover actions for `actionable` rows; mouse only (aria-hidden, not focusable). */
     rowActions?: Snippet<[PickerItem]>;
     /** Something always shown at the row's end, before the chip and meta
-     *  (the New layout's account pill, redesign 4.3). Its clicks stay its own. */
+     *  (the account pill, redesign 4.3). Its clicks stay its own. */
     rowTrail?: Snippet<[PickerItem]>;
     /** Click on a group heading that carries a `groupKey`. */
     ongroupclick?: (groupKey: string) => void;

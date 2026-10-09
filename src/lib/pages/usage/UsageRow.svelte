@@ -10,6 +10,7 @@
     formatResetShort,
     freshness,
     leftPct,
+    severityLeft,
     paceFraction,
     paceLabel,
     severity,
@@ -54,7 +55,7 @@
   const known = $derived(win !== null && fresh !== 'expired');
   const left = $derived(win && known ? leftPct(win) : null);
   const level = $derived(
-    win && left !== null ? severity(window, left, win.resets_at, now, hasExtraUsage) : null,
+    win && left !== null ? severity(window, severityLeft(win), win.resets_at, now, hasExtraUsage) : null,
   );
   const badge = $derived(level ? severityBadge(level, hasExtraUsage) : null);
   const leftText = $derived(

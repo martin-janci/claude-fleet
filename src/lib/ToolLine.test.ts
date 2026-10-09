@@ -1,5 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { uiLayout } from './prefs';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
@@ -255,11 +254,9 @@ describe('ToolLine', () => {
 });
 
 describe('ToolLine state mark (redesign 5.14, New layout)', () => {
-  afterEach(() => uiLayout.set('classic'));
   const mark = () => screen.getByTestId('conv-tool-state');
 
   it('only the running call carries a Comet; finished calls go still', () => {
-    uiLayout.set('new');
     const { unmount } = render(ToolLine, { line: line({ done: false, ended_at: null }), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: true });
     expect(mark().getAttribute('data-state')).toBe('running');
     expect(mark().querySelector('[data-testid^="loader"]')).toBeTruthy();
@@ -276,13 +273,7 @@ describe('ToolLine state mark (redesign 5.14, New layout)', () => {
     expect(mark().querySelector('[data-testid^="loader"]')).toBeNull();
   });
 
-  it('Classic has no state mark', () => {
-    render(ToolLine, { line: line({ done: false, ended_at: null }), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: true });
-    expect(screen.queryByTestId('conv-tool-state')).toBeNull();
-  });
-
   it('is accessible', async () => {
-    uiLayout.set('new');
     mockedDetail.mockResolvedValue({ ok: true, value: detail() });
     const { container } = render(ToolLine, { line: line(), sessionId: 1, claudeSessionId: 'c1', nowMs: 0, live: true });
     await expectAccessible(container);

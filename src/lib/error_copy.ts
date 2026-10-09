@@ -59,8 +59,8 @@ export function errorSentence(e: Pick<IpcError, 'code' | 'message'>): string {
  * and keychain errors, which belong under Details.
  */
 export function hubUnavailableWords(reason: string): string {
-  if (/no client token is stored/.test(reason)) return "This app isn't paired with the hub yet. Pair it again from Settings → Hub";
-  if (/not a usable hub address/.test(reason)) return "The hub address in Settings → Hub isn't a valid address";
+  if (/no client token is stored/.test(reason)) return "This app isn't paired with the hub yet. Pair it again from Settings → Hub & sync";
+  if (/not a usable hub address/.test(reason)) return "The hub address in Settings → Hub & sync isn't a valid address";
   if (/plain ?text|https:\/\//i.test(reason))
     return 'The hub address uses plain http to another machine, which would send this app\'s sign-in unencrypted. Use an https:// address';
   if (/client token|token store/.test(reason)) return "This app can't read its saved sign-in for the hub";

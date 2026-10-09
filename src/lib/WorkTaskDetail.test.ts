@@ -14,7 +14,6 @@ import { openExternal } from './open_external';
 import WorkTaskDetail from './WorkTaskDetail.svelte';
 import { expectAccessible } from './a11y_check';
 import { expectOnePrimary } from './action_hierarchy_check';
-import { uiLayout } from './prefs';
 import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
@@ -88,6 +87,15 @@ function calls(cmd: string) {
 
 async function flush() {
   for (let i = 0; i < 10; i++) await tick();
+}
+
+/** The task page's action bar: one WorkButton (redesign 6.6). */
+const bar = () => document.querySelector('.wb--bar') as HTMLElement;
+async function fromMenu(testid: string) {
+  await fireEvent.click(within(bar()).getByTestId('work-button-menu'));
+  await flush();
+  await fireEvent.click(within(bar()).getAllByTestId(testid)[0]);
+  await flush();
 }
 
 describe('WorkTaskDetail', () => {
@@ -212,7 +220,7 @@ describe('WorkTaskDetail', () => {
     expect(screen.getByTestId('work-task-group').textContent).toContain('most recent session (acme/api)');
   });
 
-  it('Open, Continue (resume last) and Start new', async () => {
+  it('the action bar opens the live session; ▾ continues the last conversation and starts new', async () => {
     handlers.resume_work = () => session('mefistos', 'resumed', { id: 11 });
     handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
     handlers.preview_start_work = () => ({
@@ -228,15 +236,18 @@ describe('WorkTaskDetail', () => {
     });
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-open'));
+    await fireEvent.click(within(bar()).getByTestId('work-button-primary'));
     expect(get(selectedSession)?.id).toBe(7);
-    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    await fromMenu('work-button-continue');
     await flush();
     expect(calls('resume_work')[0]).toEqual({ key: 'ABC-12', mode: 'last', link_id: 41, host_alias: null, brief: null });
     expect(get(selectedSession)?.id).toBe(11);
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     expect(calls('preview_start_work')[0]).toEqual({ item_id: 12, with_brief: true });
+    // Start new… always asks where: the popover, then Start.
+    await fireEvent.click(screen.getByTestId('start-popover-go'));
+    await flush();
     expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true, project_id: 3, host_alias: 'mefistos' });
     expect(get(selectedSession)?.id).toBe(12);
   });
@@ -247,7 +258,7 @@ describe('WorkTaskDetail', () => {
     handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
     const { rerender } = render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fireEvent.click(within(bar()).getByTestId('work-button-primary'));
     await rerender({ taskId: 'item:77' });
     await flush();
     release({
@@ -294,7 +305,7 @@ describe('WorkTaskDetail', () => {
         : preview();
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     const pop = screen.getByTestId('start-popover');
     expect(pop.textContent).toContain('This task is done.');
@@ -336,8 +347,7 @@ describe('WorkTaskDetail', () => {
     });
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
-    await flush();
+    await fromMenu('work-button-start-new');
     await fireEvent.click(screen.getByTestId('start-popover-brief-draft-ask'));
     await flush();
     expect(calls('preview_start_work').at(-1)).toEqual({
@@ -382,11 +392,11 @@ describe('WorkTaskDetail', () => {
         : { ...base, plan: null, missing: 'project', suggested_project: { project_id: 4, confidence_pct: 88, run_id: 5 } };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     await flush();
     expect((screen.getByTestId('start-popover-project') as HTMLSelectElement).value).toBe('4');
-    expect(screen.getByTestId('start-popover-suggested').textContent).toContain('Proposed by Jev (88%)');
+    expect(screen.getByTestId('start-popover-suggested').textContent).toMatch(/Proposed by Jev\s+88%/);
     // The pre-selection is read back with its host and plan; nothing starts by itself.
     expect(calls('preview_start_work').at(-1)).toEqual({ item_id: 12, with_brief: true, project_id: 4 });
     expect(calls('start_work')).toHaveLength(0);
@@ -402,7 +412,7 @@ describe('WorkTaskDetail', () => {
     };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     expect(calls('start_work')[0]).toEqual({ item_id: 12, with_brief: true });
     expect(get(selectedSession)?.id).toBe(12);
@@ -423,7 +433,7 @@ describe('WorkTaskDetail', () => {
     });
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await fromMenu('work-button-start-new');
     await flush();
     expect(screen.getByTestId('start-popover-go').textContent).toContain('Start parallel');
     expect(screen.getByTestId('start-popover-open-live')).toBeTruthy();
@@ -662,10 +672,10 @@ describe('WorkTaskDetail', () => {
     };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    await fromMenu('work-button-continue');
     await flush();
-    expect(screen.getByTestId('work-task-action-error').textContent).toContain('is live in api');
-    await fireEvent.click(screen.getByTestId('work-task-open-existing'));
+    expect(screen.getByTestId('work-button-error').textContent).toContain('is live in api');
+    await fireEvent.click(screen.getByTestId('work-button-open-existing'));
     expect(get(selectedSession)?.id).toBe(7);
   });
 
@@ -675,9 +685,9 @@ describe('WorkTaskDetail', () => {
     };
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    await fromMenu('work-button-continue');
     await flush();
-    await fireEvent.click(screen.getByTestId('work-task-open-existing'));
+    await fireEvent.click(screen.getByTestId('work-button-open-existing'));
     expect(get(selectedSession)?.id).toBe(9);
   });
 
@@ -750,8 +760,7 @@ describe('WorkTaskDetail', () => {
       task: { ...localTask.task, proposals: [{ feature: 'work_placement', value: 'Payments', source: 'jev', confidence_pct: 77 }] },
     };
 
-    it('offers Place in the proposed group in the New layout, and places on click', async () => {
-      uiLayout.set('new');
+    it('offers Place in the proposed group, and places on click', async () => {
       handlers.work_task = () => proposed;
       handlers.place_work = () => ({ ...proposed.task, group: { id: 'label:Payments', label: 'Payments', source: 'manual' }, placement_version: 1 });
       render(WorkTaskDetail, { props: { taskId: 'item:77' } });
@@ -762,61 +771,35 @@ describe('WorkTaskDetail', () => {
       await flush();
       expect(calls('place_work')[0]).toEqual({ task_id: 'item:77', group: 'Payments', expected_version: 0 });
       expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
-      uiLayout.set('classic');
-    });
-
-    it('shows nothing in the classic layout', async () => {
-      uiLayout.set('classic');
-      handlers.work_task = () => proposed;
-      render(WorkTaskDetail, { props: { taskId: 'item:77' } });
-      await flush();
-      expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
     });
 
     it('shows nothing once a person placed the task', async () => {
-      uiLayout.set('new');
       handlers.work_task = () => ({ ...proposed, task: { ...proposed.task, group: { id: 'label:Infra', label: 'Infra', source: 'manual' } } });
       render(WorkTaskDetail, { props: { taskId: 'item:77' } });
       await flush();
       expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
-      uiLayout.set('classic');
     });
   });
 
   // Redesign 1.5: one primary per view. A task has nothing destructive to
   // put last: its edits (Place, Assign org, Make a rule) each preview first.
-  it('has one primary in each layout: Open in Classic, the Work button in New', async () => {
-    for (const layout of ['classic', 'new'] as const) {
-      uiLayout.set(layout);
-      try {
-        const r = render(WorkTaskDetail, { props: { taskId: 'ABC-12' } });
-        await flush();
-        const root = screen.getByTestId('work-task-detail');
-        const primary = expectOnePrimary(root);
-        if (layout === 'classic') expect(primary.getAttribute('data-testid')).toBe('work-task-open');
-        else expect(primary.closest('[data-testid="work-button"]')).not.toBeNull();
-        r.unmount();
-      } finally {
-        uiLayout.set('classic');
-      }
-    }
+  it('has one primary: the Work button', async () => {
+    render(WorkTaskDetail, { props: { taskId: 'ABC-12' } });
+    await flush();
+    const primary = expectOnePrimary(screen.getByTestId('work-task-detail'));
+    expect(primary.closest('[data-testid="work-button"]')).not.toBeNull();
   });
 
   it('is accessible', async () => {
-    uiLayout.set('new');
-    try {
-      handlers.work_task = () => ({
-        ...trackerTask,
-        subtasks: [{ task_id: 'item:41', item_id: 41, key: 'TASK-41', title: 'SELECT stats', origin: 'manual', status: 'todo', live_sessions: 0 }],
-        steps: [{ label: 'ABC-12 login', claude_session_id: 'c1', steps: [{ text: 'Read ABC-12', state: 'completed', at: 1 }] }],
-      });
-      const { container } = render(WorkTaskDetail, { taskId: 'item:12' });
-      await flush();
-      (screen.getByTestId('work-task-more') as HTMLDetailsElement).open = true;
-      await flush();
-      await expectAccessible(container);
-    } finally {
-      uiLayout.set('classic');
-    }
+    handlers.work_task = () => ({
+      ...trackerTask,
+      subtasks: [{ task_id: 'item:41', item_id: 41, key: 'TASK-41', title: 'SELECT stats', origin: 'manual', status: 'todo', live_sessions: 0 }],
+      steps: [{ label: 'ABC-12 login', claude_session_id: 'c1', steps: [{ text: 'Read ABC-12', state: 'completed', at: 1 }] }],
+    });
+    const { container } = render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    (screen.getByTestId('work-task-more') as HTMLDetailsElement).open = true;
+    await flush();
+    await expectAccessible(container);
   });
 });

@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 import * as sessionsModule from './sessions';
 
@@ -13,7 +13,6 @@ import { hosts } from './hosts';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
-import { uiLayout } from './prefs';
 
 beforeEach(() => {
   (mockedInvoke as ReturnType<typeof vi.fn>).mockReset();
@@ -144,10 +143,9 @@ describe('NewSessionDialog', () => {
     expect((newSessionCall![1] as any).args.host_alias).toBe('mefistos');
   });
 
-  // Step 5.13: while the create runs, the new layout's dialog shows the
-  // Pulse on its worktree step; nothing shows in Classic.
+  // Step 5.13: while the create runs, the dialog shows the Pulse on its
+  // worktree step.
   it('new layout: the create in flight shows the Pulse on the worktree step', async () => {
-    uiLayout.set('new');
     let finish!: () => void;
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockImplementation(async (args) => {
       // The backend's first frame: the worktree step started (start:progress).
@@ -167,7 +165,6 @@ describe('NewSessionDialog', () => {
       await vi.waitFor(() => expect(screen.queryByTestId('new-session-pulse')).toBeNull());
     } finally {
       spy.mockRestore();
-      uiLayout.set('classic');
     }
   });
 
@@ -865,6 +862,35 @@ describe('NewSessionDialog host-scoped worktrees', () => {
     expect(screen.getByText('Create')).not.toBeDisabled();
   });
 
+  // Review r13 D19: a sentence, not the command's name or the raw SSH text
+  // (that sits under Details), and Scan again reruns the scan.
+  it('a failed scan says so in a sentence, keeps the detail under Details, and Scan again rescans', async () => {
+    let fail = true;
+    const calls: string[] = [];
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd !== 'list_host_worktrees') return null;
+      const a = (args as { args: { host_alias: string; project_id: number } }).args;
+      calls.push(a.host_alias);
+      if (fail) throw { code: 'E_SSH', message: 'ssh: connect to host mefistos: timed out' };
+      return { host_alias: a.host_alias, project_id: a.project_id, cloned: true, worktrees: [remoteMain] };
+    });
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    await pickHost('mefistos');
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('wt-status-text')).toHaveTextContent(
+        "Couldn't list the worktrees on mefistos. Couldn't reach the host over SSH.",
+      ),
+    );
+    expect(screen.getByTestId('wt-status-text').textContent).not.toMatch(/list_host_worktrees|ssh:/);
+    expect(screen.getByTestId('wt-status-details')).toHaveTextContent('E_SSH: ssh: connect to host mefistos: timed out');
+    fail = false;
+    await fireEvent.click(screen.getByTestId('wt-scan-again'));
+    await vi.waitFor(() => expect(worktreeLabels()).toEqual(['main', '+ new worktree']));
+    expect(calls).toEqual(['mefistos', 'mefistos']);
+    expect(screen.queryByTestId('wt-status')).toBeNull();
+  });
+
   it('a slow earlier scan cannot overwrite a later host', async () => {
     hosts.update((h) => [...h, { alias: 'vps', ssh_alias: 'vps', reachable: true, claude_version: null, tmux_version: null, hidden: false, last_pinged_at: 1, account_uuid: null, provisioned: false, transport: 'ssh' }]);
     let resolveMef!: (v: unknown) => void;
@@ -1389,9 +1415,9 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
     expect(screen.getByTestId('host-usage-warning').textContent).toContain('Also used by mefistos.');
   });
 
-  // Review r05 A8: in the New layout the line and warning describe the
-  // account the picked login runs on, not the host's own login.
-  it('the host line follows the picked login\'s account in the New layout', async () => {
+  // Review r05 A8: the line and warning describe the account the picked
+  // login runs on, not the host's own login.
+  it('the host line follows the picked login\'s account', async () => {
     const { NOW, ADMIN, GMAIL, inv } = await setup();
     inv.mockImplementation(async (cmd: string) => {
       if (cmd === 'refresh_account_usage') throw { code: 'E_RATE_LIMITED', message: 'floor' };
@@ -1409,24 +1435,19 @@ describe('NewSessionDialog: account headroom on the host chips', () => {
       }
       return null;
     });
-    uiLayout.set('new');
-    try {
-      render(NewSessionDialog, {
-        props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, initialHost: 'mefistos', ...USAGE },
-      });
-      await vi.waitFor(() => expect((screen.getByTestId('launch-account') as HTMLSelectElement).value).toBe('spare'));
-      await vi.waitFor(() =>
-        expect(screen.getByTestId('host-usage-line').textContent).toContain('mj-janci@users.noreply.github.com'),
-      );
-      expect(screen.queryByTestId('host-usage-warning')).toBeNull();
-      // Back to the host's own login: its low account warns again.
-      await fireEvent.change(screen.getByTestId('launch-account'), { target: { value: '' } });
-      await vi.waitFor(() =>
-        expect(screen.getByTestId('host-usage-warning').textContent).toContain('admin-janci@users.noreply.github.com'),
-      );
-    } finally {
-      uiLayout.set('classic');
-    }
+    render(NewSessionDialog, {
+      props: { project, onCreate: () => {}, onCancel: () => {}, clock: () => NOW, initialHost: 'mefistos', ...USAGE },
+    });
+    await vi.waitFor(() => expect((screen.getByTestId('launch-account') as HTMLSelectElement).value).toBe('spare'));
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('host-usage-line').textContent).toContain('mj-janci@users.noreply.github.com'),
+    );
+    expect(screen.queryByTestId('host-usage-warning')).toBeNull();
+    // Back to the host's own login: its low account warns again.
+    await fireEvent.change(screen.getByTestId('launch-account'), { target: { value: '' } });
+    await vi.waitFor(() =>
+      expect(screen.getByTestId('host-usage-warning').textContent).toContain('admin-janci@users.noreply.github.com'),
+    );
   });
 
   it('opening also refreshes the usage of the hosts\' profile accounts', async () => {
@@ -1879,8 +1900,6 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
 
   it("New layout: Jev's proposed sibling is pre-ticked with the chip, and Untick clears it (3.12 N3)", async () => {
     const { projects } = await import('./projects');
-    const { uiLayout } = await import('./prefs');
-    uiLayout.set('new');
     projects.set([
       project as never,
       { project: { ...project.project, id: 2, repo: 'web', base_path: '/r/web' }, worktrees: [] } as never,
@@ -1903,22 +1922,15 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
       const chip = screen.getByTestId('ticket-also-in-proposed');
       expect(chip.textContent).toContain('Proposed by Jev');
       expect(chip.textContent).toContain('81%');
+      expect(also.closest('label')).toHaveClass('ai-pre');
       await fireEvent.click(screen.getByTestId('ticket-also-in-proposed-change'));
       await tick();
       expect(also.checked).toBe(false);
+      expect(also.closest('label')).not.toHaveClass('ai-pre');
       expect(screen.queryByTestId('ticket-also-in-proposed')).toBeNull();
     } finally {
-      uiLayout.set('classic');
       projects.set([]);
     }
-  });
-
-  it('Classic asks no sibling proposal (3.12 N3)', async () => {
-    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async () => null);
-    render(NewSessionDialog, { props: { project, ticket, onCreate: () => {}, onCancel: () => {} } });
-    await tick();
-    const calls = (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.some((c) => c[0] === 'preview_start_work')).toBe(false);
   });
 
   it('forgets ticked repos when the ticket changes, and never starts in one not shown (M9.6)', async () => {
@@ -1992,7 +2004,8 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
     expect(screen.getByTestId('ticket-brief-draft-meta').textContent).toContain(
       'by haiku on local · from the ticket and 2 earlier notes',
     );
-    const ask = mock.mock.calls.find((c) => c[0] === 'preview_start_work')![1] as { args: Record<string, unknown> };
+    // The last preview is the draft's (the sibling proposal previews first).
+    const ask = mock.mock.calls.filter((c) => c[0] === 'preview_start_work').at(-1)![1] as { args: Record<string, unknown> };
     expect(ask.args).toMatchObject({ item_id: 42, project_id: 1, host_alias: 'local', with_brief: true, draft_brief: true });
     // Nothing started by drafting; the person's edit of the draft is what goes.
     expect(mock.mock.calls.some((c) => c[0] === 'start_work')).toBe(false);
@@ -2087,10 +2100,10 @@ describe('NewSessionDialog, starting work on a ticket (work graph M3)', () => {
 });
 
 describe('NewSessionDialog accessibility (7.2)', () => {
-  it('passes the axe and audit checks; the type picker is a named group of toggles', async () => {
+  it('passes the axe and audit checks; the agent picker is a named group of toggles', async () => {
     const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await tick();
-    const group = screen.getByRole('group', { name: 'Type' });
+    const group = screen.getByRole('group', { name: 'Agent' });
     expect(group.querySelectorAll('[aria-pressed="true"]')).toHaveLength(1);
     await expectAccessible(container);
   });
@@ -2169,7 +2182,6 @@ describe('NewSessionDialog in the New layout', () => {
   const calls = (cmd: string) => (mockedInvoke as ReturnType<typeof vi.fn>).mock.calls.filter((c) => c[0] === cmd);
 
   beforeEach(() => {
-    uiLayout.set('new');
     (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) => {
       if (cmd === 'check_account_headroom') return logins;
       if (cmd === 'new_session') return { id: 1 };
@@ -2178,7 +2190,6 @@ describe('NewSessionDialog in the New layout', () => {
       return null;
     });
   });
-  afterEach(() => uiLayout.set('classic'));
 
   it('offers Claude Code and Shell; Codex only where it is on the PATH, Agy as coming', async () => {
     const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
@@ -2311,15 +2322,6 @@ describe('NewSessionDialog in the New layout', () => {
     await vi.waitFor(() => expect(onCancel).toHaveBeenCalled());
   });
 
-  it('the Classic layout keeps Type, the profile field and no Run row', async () => {
-    uiLayout.set('classic');
-    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
-    await tick();
-    expect(screen.getByTestId('kind-work').textContent?.trim()).toBe('Claude');
-    expect(screen.queryByTestId('agent-codex')).toBeNull();
-    expect(screen.getByTestId('launch-profile')).toBeTruthy();
-    expect(screen.queryByTestId('run-background')).toBeNull();
-  });
 });
 
 // Redesign step 4.11 (New layout): with no host the project's rule keeps,
@@ -2341,14 +2343,12 @@ describe('NewSessionDialog host placement', () => {
     });
   }
 
-  beforeEach(() => uiLayout.set('new'));
-  afterEach(() => uiLayout.set('classic'));
-
   it('pre-selects the proposed host with the chip, and the start answers it', async () => {
     answer({ host_alias: 'mefistos', confidence_pct: 80, run_id: 7 });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(screen.getByTestId('new-session-host-proposed')).toBeTruthy());
     expect(active()).toBe('mefistos');
+    expect(document.querySelector('[data-alias="mefistos"]')).toHaveClass('ai-pre');
     expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('Proposed by Jev');
     expect(screen.getByTestId('new-session-host-proposed').textContent).toContain('80%');
     await vi.waitFor(() => expect(worktreeLabels()).toContain('main'));
@@ -2379,7 +2379,7 @@ describe('NewSessionDialog host placement', () => {
     expect(active()).toBe('local');
   });
 
-  it('below the floor, or in Classic, nothing is pre-selected', async () => {
+  it('below the floor, nothing is pre-selected', async () => {
     answer({ host_alias: 'mefistos', confidence_pct: 30 });
     render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(calls('propose_host_placement')).toHaveLength(1));
@@ -2391,12 +2391,4 @@ describe('NewSessionDialog host placement', () => {
     expect(calls('record_host_placement')).toHaveLength(0);
   });
 
-  it('the Classic layout never asks', async () => {
-    uiLayout.set('classic');
-    answer({ host_alias: 'mefistos', confidence_pct: 80 });
-    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
-    await tick();
-    await tick();
-    expect(calls('propose_host_placement')).toHaveLength(0);
-  });
 });

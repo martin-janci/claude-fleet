@@ -415,6 +415,10 @@ pub const MAX_ARG_BYTES: usize = 4096;
 /// Output `run` keeps; the rest is cut and `truncated` set.
 pub const RUN_OUTPUT_BYTES: usize = 256 * 1024;
 
+/// Output past [`RUN_OUTPUT_BYTES`] that `run` and `install` read and drop
+/// so the command ends on its own status; past this the pipe closes.
+pub const RUN_DRAIN_BYTES: usize = 16 * 1024 * 1024;
+
 /// Check `args` for `run` on `target`: a known verb first, bounded sizes.
 pub fn check_run_args(target: &Target, args: &[String]) -> Result<(), IpcError> {
     let bad = |m: String| Err(IpcError::new(codes::E_INVALID, m));
@@ -473,15 +477,20 @@ fn command_line(target: &Target, args: &[String]) -> String {
 
 /// Run `args` (already [`check_run_args`]-checked) and print, after
 /// [`OUT_MARKER`], the first [`RUN_OUTPUT_BYTES`] of its stdout and stderr,
-/// then `__CF_RC__ <exit status>` on a line of its own.
+/// then `__CF_RC__ <exit status>` on a line of its own. The rest of the
+/// output is drained, not cut off: closing the pipe would kill the command
+/// with SIGPIPE and report 141 instead of its own status (review r01). The
+/// drain is bounded ([`RUN_DRAIN_BYTES`]), so a command that streams for
+/// ever is still stopped, and reports 141 then.
 pub fn run_script(target: &Target, args: &[String]) -> String {
     format!(
         "# cf-devices:run\n{PREAMBLE}{needs}printf '\\n{OUT_MARKER}\\n'\n\
-         {cmd} </dev/null 2>&1 | head -c {cap}\nrc=${{PIPESTATUS[0]}}\n\
+         {cmd} </dev/null 2>&1 | {{ head -c {cap}; head -c {drain} >/dev/null; }}\nrc=${{PIPESTATUS[0]}}\n\
          printf '\\n__CF_RC__ %s\\n' \"$rc\"\n",
         needs = needs(target),
         cmd = command_line(target, args),
         cap = RUN_OUTPUT_BYTES,
+        drain = RUN_DRAIN_BYTES,
     )
 }
 
@@ -663,11 +672,12 @@ pub fn install_script(target: &Target, path: &str, downgrade: bool) -> String {
     format!(
         "# cf-devices:install\n{PREAMBLE}{needs}p={p}\ncase \"$p\" in '~/'*) p=\"$HOME/${{p#\\~/}}\";; esac\n\
          [ -e \"$p\" ] || cf_fail \"no such file: $p\"\nprintf '\\n{OUT_MARKER}\\n'\n\
-         {cmd} </dev/null 2>&1 | head -c {cap}\nrc=${{PIPESTATUS[0]}}\n\
+         {cmd} </dev/null 2>&1 | {{ head -c {cap}; head -c {drain} >/dev/null; }}\nrc=${{PIPESTATUS[0]}}\n\
          printf '\\n__CF_RC__ %s\\n' \"$rc\"\n",
         needs = needs(target),
         p = quote(path),
         cap = RUN_OUTPUT_BYTES,
+        drain = RUN_DRAIN_BYTES,
     )
 }
 
@@ -1006,6 +1016,7 @@ mod tests {
             "#!/bin/bash\n\
              if [ \"$1\" = devices ]; then printf 'List of devices attached\\nR5CT1   device usb:1 model:Pixel_7 transport_id:1\\n'; exit 0; fi\n\
              if [ \"$1\" = -s ] && [ \"$3\" = shell ] && [ \"$4\" = getprop ]; then echo 14; exit 0; fi\n\
+             if [ \"$1\" = -s ] && [ \"$3\" = shell ] && [ \"$4\" = flood ]; then head -c 400000 /dev/zero | tr '\\0' x; exit 9; fi\n\
              if [ \"$1\" = -s ] && [ \"$3\" = shell ]; then shift 3; echo \"ran: $*\"; exit 7; fi\n\
              exit 1\n",
         )
@@ -1046,6 +1057,14 @@ mod tests {
         ));
         let r = parse_run(&out.stdout).unwrap();
         assert_eq!((r.exit_code, r.output.as_str()), (7, "ran: echo a b"));
+
+        // Past the cap: cut and flagged, but the status is the command's
+        // own, not head's SIGPIPE 141 (review r01).
+        let out = run(&run_script(&t, &["shell".into(), "flood".into()]));
+        let r = parse_run(&out.stdout).unwrap();
+        assert_eq!(r.exit_code, 9);
+        assert!(r.truncated);
+        assert_eq!(r.output.len(), RUN_OUTPUT_BYTES);
 
         // No xcrun on Linux: a simulator command fails with the reason.
         let sim = Target::Simulator { udid: "U".into() };

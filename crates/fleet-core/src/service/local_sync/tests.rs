@@ -1340,3 +1340,13 @@ fn a_folder_that_is_or_holds_home_is_refused() {
     // No home known: only the root and `..` are refused.
     assert!(super::refuse_broad_folder(&home, None).is_ok());
 }
+
+/// Review r18: `~\proj` is the home folder on Windows, and only there.
+#[test]
+fn a_backslash_after_the_tilde_is_home_on_windows_only() {
+    assert_eq!(home_relative("~/proj", false), Some("proj"));
+    assert_eq!(home_relative("~/proj", true), Some("proj"));
+    assert_eq!(home_relative("~\\proj", true), Some("proj"));
+    assert_eq!(home_relative("~\\proj", false), None);
+    assert_eq!(home_relative("/abs", true), None);
+}

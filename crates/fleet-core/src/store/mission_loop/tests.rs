@@ -248,3 +248,25 @@ fn a_members_status_moving_on_the_tracker_wakes_its_mission() {
     s.upsert_tracker_item(t, &write(("Done", "done"))).unwrap();
     assert_eq!(s.missions_due(now_unix()).unwrap(), vec![m]);
 }
+
+/// Review r01/r06: a wake that lands while a tick holds the lease survives
+/// the tick's release, which would otherwise put the mission back to sleep
+/// on what the tick read before the wake.
+#[test]
+fn a_wake_during_a_tick_survives_the_release() {
+    let s = Store::open_in_memory().unwrap();
+    let m = sleeping(&s);
+    let now = now_unix();
+    s.wake_mission(m).unwrap();
+    assert!(s.take_mission_lease(m, now).unwrap());
+    // Mid-tick: a run finishes.
+    s.wake_mission(m).unwrap();
+    s.release_mission_lease(m, Some(now + 3600), Some(now))
+        .unwrap();
+    assert_eq!(s.missions_due(now_unix()).unwrap(), vec![m], "still woken");
+    // A tick with no wake in between sleeps until its own time.
+    assert!(s.take_mission_lease(m, now).unwrap());
+    s.release_mission_lease(m, Some(now + 3600), Some(now))
+        .unwrap();
+    assert!(s.missions_due(now_unix()).unwrap().is_empty());
+}

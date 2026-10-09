@@ -7,8 +7,7 @@
   // installed without asking: the checks only read. Where a hub could use
   // fleet-agent, its row offers "Install <version>"; pressing it is the
   // person's yes, and the job (`install_agent`) starts once the host is
-  // added, its progress beside the Hex field on the last step. The Layout:
-  // Classic picker (AddHostPicker) stays as it was.
+  // added, its progress beside the Hex field on the last step.
   import { onMount } from 'svelte';
   import { discoverHosts, addHost, type SshHost } from './hosts';
   import { probeSshAliasAbortable } from './accounts';

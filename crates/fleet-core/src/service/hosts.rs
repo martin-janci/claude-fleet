@@ -235,6 +235,21 @@ pub async fn add_host(
     // arrives from the agent registry — through the router, which needs the
     // row to exist — on the first `probe_host` or reconcile pass after the
     // agent connects.
+    //
+    // Re-adding a host that is ALREADY an agent host changes nothing the
+    // agent registry has not already said (review r18 A6): its reachable,
+    // versions and account stay as the last probe left them, rather than
+    // reading offline until the next one.
+    if args.transport.as_deref() == Some("agent") {
+        let s = lock(store)?;
+        if s.get_host_row(&args.alias)?
+            .is_some_and(|h| h.transport == "agent")
+        {
+            s.insert_host(&args.alias, Some(&args.ssh_alias))?;
+            drop(s);
+            return list_one(store, &args.alias);
+        }
+    }
     let (reachable, claude_ver, tmux_ver, account) = if args.transport.as_deref() == Some("agent") {
         (false, None, None, None)
     } else {
@@ -254,10 +269,7 @@ pub async fn add_host(
             s.set_host_transport(&args.alias, t)?;
         }
         // Link account if probe found one
-        if let Some(acc) = account
-            .as_ref()
-            .and_then(|a| account_row_from(a, now_unix()))
-        {
+        if let Some(acc) = probed_account_row(&s, account.as_ref(), now_unix())? {
             s.upsert_account(&acc)?;
             s.set_host_account(&args.alias, Some(&acc.uuid))?;
         } else {
@@ -369,10 +381,7 @@ pub async fn probe_host(
     };
     {
         let s = lock(store)?;
-        if let Some(acc) = account
-            .as_ref()
-            .and_then(|a| account_row_from(a, now_unix()))
-        {
+        if let Some(acc) = probed_account_row(&s, account.as_ref(), now_unix())? {
             s.upsert_account(&acc)?;
             s.set_host_account(&args.alias, Some(&acc.uuid))?;
         } else {
@@ -816,7 +825,7 @@ pub(crate) fn sync_host_account(
         .into_iter()
         .find(|h| h.alias == alias)
         .and_then(|h| h.account_uuid);
-    let Some(row) = account.and_then(|a| account_row_from(a, now_unix())) else {
+    let Some(row) = probed_account_row(s, account, now_unix())? else {
         return Ok(stored_uuid);
     };
     // Refresh the account row's fields (email/org/seat_tier) whether or not
@@ -844,7 +853,7 @@ pub(crate) fn sync_host_profiles(
             let now = now_unix();
             let mut rows = Vec::with_capacity(profiles.len());
             for p in profiles {
-                let account = p.account.as_ref().and_then(|a| account_row_from(a, now));
+                let account = probed_account_row(s, p.account.as_ref(), now)?;
                 if let Some(a) = account.as_ref() {
                     s.upsert_account(a)?;
                 }
@@ -934,6 +943,46 @@ fn account_row_from(a: &OauthAccount, now: i64) -> Option<crate::store::AccountR
     })
 }
 
+/// [`account_row_from`] over what the store already knows (review r16): a
+/// field this probe's `oauthAccount` leaves out keeps the stored value, so
+/// two logins of one account that report different fields do not rewrite
+/// the row (and emit `account:upserted`) back and forth on every probe.
+fn probed_account_row(
+    s: &Store,
+    a: Option<&OauthAccount>,
+    now: i64,
+) -> Result<Option<crate::store::AccountRow>, IpcError> {
+    let Some(mut row) = a.and_then(|a| account_row_from(a, now)) else {
+        return Ok(None);
+    };
+    if let Some(prior) = s.get_account_by_uuid(&row.uuid)? {
+        merge_known_account_fields(&mut row, a.and_then(|a| a.has_extra_usage_enabled), &prior);
+    }
+    Ok(Some(row))
+}
+
+/// PURE: fill `row`'s absent fields from `prior`. `extra` is the probe's
+/// own `hasExtraUsageEnabled`, `None` when it did not say.
+fn merge_known_account_fields(
+    row: &mut crate::store::AccountRow,
+    extra: Option<bool>,
+    prior: &crate::store::AccountRow,
+) {
+    let keep = |new: &mut Option<String>, old: &Option<String>| {
+        if new.is_none() {
+            new.clone_from(old);
+        }
+    };
+    keep(&mut row.email, &prior.email);
+    keep(&mut row.display_name, &prior.display_name);
+    keep(&mut row.organization_name, &prior.organization_name);
+    keep(&mut row.organization_uuid, &prior.organization_uuid);
+    keep(&mut row.seat_tier, &prior.seat_tier);
+    if extra.is_none() {
+        row.has_extra_usage = prior.has_extra_usage;
+    }
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -982,6 +1031,9 @@ mod tests {
             worktree_kb: None,
             worktree_at: None,
             agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         }
     }
@@ -1141,6 +1193,41 @@ mod tests {
                 .unwrap()
                 .has_extra_usage_enabled,
             None
+        );
+    }
+
+    /// Review r16: two logins of one account reporting different
+    /// `oauthAccount` fields do not rewrite each other's known values.
+    #[test]
+    fn an_absent_probe_field_keeps_the_stored_value() {
+        let s = Store::open_in_memory().unwrap();
+        let full = OauthAccount {
+            uuid: Some("acc".into()),
+            email: Some("a@x".into()),
+            organization_name: Some("Org".into()),
+            has_extra_usage_enabled: Some(true),
+            ..Default::default()
+        };
+        let row = probed_account_row(&s, Some(&full), 100).unwrap().unwrap();
+        s.upsert_account(&row).unwrap();
+        let sparse = OauthAccount {
+            uuid: Some("acc".into()),
+            email: Some("a@x".into()),
+            ..Default::default()
+        };
+        let row = probed_account_row(&s, Some(&sparse), 101).unwrap().unwrap();
+        assert_eq!(row.organization_name.as_deref(), Some("Org"));
+        assert!(row.has_extra_usage, "absent is not false");
+        let said_no = OauthAccount {
+            has_extra_usage_enabled: Some(false),
+            ..sparse
+        };
+        let row = probed_account_row(&s, Some(&said_no), 102)
+            .unwrap()
+            .unwrap();
+        assert!(
+            !row.has_extra_usage,
+            "a probe that says so still changes it"
         );
     }
 
@@ -1648,6 +1735,45 @@ mod tests {
             fake.calls()
         );
         assert!(host_row(&store, "gamma").is_some(), "the row is persisted");
+    }
+
+    /// Review r18 A6: re-adding a connected agent host as an agent host
+    /// keeps what its agent last reported, rather than reading offline (and
+    /// with no account) until the next probe.
+    #[tokio::test]
+    async fn re_adding_a_connected_agent_host_keeps_its_reachability_and_account() {
+        let store = Mutex::new(Store::open_in_memory().unwrap());
+        let fake = fake_fleet();
+        let args = || AddHostArgs {
+            alias: "gamma".into(),
+            ssh_alias: "gamma.example".into(),
+            transport: Some("agent".into()),
+        };
+        add_host(args(), &store, &fake).await.unwrap();
+        {
+            let s = store.lock().unwrap();
+            s.update_host_probe("gamma", true, Some("2.1.0"), Some("3.4"), 7)
+                .unwrap();
+            s.upsert_account(&crate::store::AccountRow {
+                uuid: "acct-1".into(),
+                email: None,
+                display_name: None,
+                organization_name: None,
+                organization_uuid: None,
+                seat_tier: None,
+                last_seen_at: Some(7),
+                nickname: None,
+                has_extra_usage: false,
+            })
+            .unwrap();
+            s.set_host_account("gamma", Some("acct-1")).unwrap();
+        }
+        let row = add_host(args(), &store, &fake).await.unwrap();
+        assert!(row.reachable, "still connected");
+        assert_eq!(row.claude_version.as_deref(), Some("2.1.0"));
+        assert_eq!(row.account_uuid.as_deref(), Some("acct-1"));
+        assert_eq!(row.last_pinged_at, Some(7));
+        assert!(fake.calls().is_empty(), "never SSH-probed");
     }
 
     #[tokio::test]

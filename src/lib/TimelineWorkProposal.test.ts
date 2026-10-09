@@ -1,14 +1,13 @@
 // Redesign 6.8: the J1 suggested link at the head of the Details timeline.
 // Shown only for the decision model's own suggestion (rule R12), which the
-// backend writes only in assist mode; a rule's suggestion and Classic show
+// backend writes only in assist mode; a rule's suggestion shows
 // nothing here. Link / Not this are a person's clicks.
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import TimelineWorkProposal from './TimelineWorkProposal.svelte';
-import { uiLayout } from './prefs';
 import { session } from './hosts_fixture';
 import { linkProposal, type WorkLink } from './work';
 import type { SessionRow, SessionWork } from './sessions';
@@ -40,9 +39,7 @@ describe('J1 in the Details timeline (6.8)', () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'session_work_links' ? [link] : null));
-    uiLayout.set('new');
   });
-  afterEach(() => uiLayout.set('classic'));
 
   it('reads the proposer from an R12 link, with the confidence its evidence holds', () => {
     expect(linkProposal(link)).toEqual({
@@ -84,7 +81,7 @@ describe('J1 in the Details timeline (6.8)', () => {
     expect((await screen.findByTestId('timeline-proposed-by')).textContent).toContain('Proposed by Jev');
   });
 
-  it('a rule suggestion, a low-confidence answer and Classic show nothing of Jev', async () => {
+  it('a rule suggestion and a low-confidence answer show nothing of Jev', async () => {
     const { unmount } = render(TimelineWorkProposal, { session: row({ work_suggested: { ...jev, source: 'prompt', rule: 'R5' } }) });
     expect(screen.queryByTestId('timeline-work-proposal')).toBeNull();
     unmount();
@@ -95,8 +92,5 @@ describe('J1 in the Details timeline (6.8)', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('session_work_links', { args: { session_id: 7 } }));
     expect(screen.queryByTestId('timeline-proposed-by')).toBeNull();
     low.unmount();
-    uiLayout.set('classic');
-    render(TimelineWorkProposal, { session: row() });
-    expect(screen.queryByTestId('timeline-work-proposal')).toBeNull();
   });
 });

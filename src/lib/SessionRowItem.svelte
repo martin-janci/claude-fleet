@@ -13,7 +13,6 @@
     type SessionRow,
   } from './sessions';
   import { selectedSession } from './selection';
-  import { forgetSessionUi } from './session_ui';
   import { hostByAlias } from './hosts';
   import { hintAnchor } from './hints';
   import { bucketState, rank } from './attention';
@@ -57,7 +56,6 @@
   import { uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
-  import { uiLayout } from './prefs';
   import SessionRowMenu from './SessionRowMenu.svelte';
   import PulseSteps from './PulseSteps.svelte';
   import { sessionPulse } from './session_loaders';
@@ -140,8 +138,8 @@
 
   const sessSelected = $derived($selectedSession?.id === sess.id);
   // Step 5.14: a session this window just started, until its agent is up
-  // (`session_starting.ts`). New layout only, as every redesign surface is.
-  const starting = $derived($uiLayout === 'new' && $startingSessions.has(sess.id));
+  // (`session_starting.ts`).
+  const starting = $derived($startingSessions.has(sess.id));
   const startPulse = $derived(sessionPulse(sess));
   /** "Worktree ✓ · tmux ✓ · Claude Code starting", as the board words it. */
   const startText = $derived(
@@ -201,9 +199,7 @@
     const r = await dismissGhostSession(sess.id);
     if (!r.ok) {
       pushError(r.error, 'Dismiss failed');
-      return;
     }
-    forgetSessionUi(sess.host_alias, sess.tmux_name);
   }
 
   /** Remove an inactive bg agent from the list. The row itself disappears
@@ -582,10 +578,10 @@
     onKeySession(e, sess);
   }
 
-  // The row's ⋯ menu and right-click (redesign step 3.10, New layout): every
+  // The row's ⋯ menu and right-click (redesign step 3.10): every
   // Details action, run by Details (`session_actions.ts`). Ghost and outside-
   // fleet rows keep their own inline actions.
-  const rowMenuOn = $derived($uiLayout === 'new' && !readOnly && sess.status !== 'ghost');
+  const rowMenuOn = $derived(!readOnly && sess.status !== 'ghost');
   let rowMenu = $state<{ x: number; y: number } | null>(null);
   function openRowMenu(e: MouseEvent) {
     e.stopPropagation();
@@ -758,7 +754,7 @@
             <WorkChip
               workKey={suggestionKey}
               suggested
-              proposed={$uiLayout === 'new' && suggestion.rule === JEV_RULE}
+              proposed={suggestion.rule === JEV_RULE}
               testid="work-suggestion"
               onclick={(e) => (workBlocked === null ? openWorkMenu(e) : e.stopPropagation())}
             />
@@ -766,9 +762,9 @@
           <span class="chips" data-testid="row-chips">
             <SessionStatusChip {sess} />
           </span>
-          {#if $uiLayout === 'new' && sess.account_uuid}
+          {#if sess.account_uuid}
             <!-- Redesign 4.3: the account this session runs on, on every row
-                 (outside the chip strip a Compact row hides), New layout only. -->
+                 (outside the chip strip a Compact row hides). -->
             <AccountPill uuid={sess.account_uuid} />
           {/if}
           {#if compact}

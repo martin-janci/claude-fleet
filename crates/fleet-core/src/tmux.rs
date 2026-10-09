@@ -446,7 +446,8 @@ pub(crate) fn read_local_profiles(home: &std::path::Path) -> Option<Vec<HostProf
 }
 
 /// Shell script listing the most recently modified Claude transcripts under
-/// `$HOME/.claude/projects/*/*.jsonl` (a `*/subagents/*` path is skipped),
+/// `$CLAUDE_CONFIG_DIR/projects/*/*.jsonl` (`$HOME/.claude` when unset; a
+/// `*/subagents/*` path is skipped),
 /// newest first, up to `limit` (clamped to `1..=500` here — `limit` is
 /// then a bare integer in the script, so it needs no shell quoting). For
 /// each transcript kept it prints `@@F\t<mtime>\t<claude session id>`
@@ -460,15 +461,18 @@ pub(crate) fn read_local_profiles(home: &std::path::Path) -> Option<Vec<HostProf
 /// `/proc/uptime` is readable (Linux), else `bootraw=<kern.boottime output>`
 /// (macOS, via `sysctl`) — the same parser turns either into a boot epoch.
 ///
-/// `date -r FILE +%s` behaves the same on GNU and BSD coreutils (unlike
-/// `stat`, deliberately avoided — its flags differ across the two), so this
-/// runs unmodified on both the Linux and macOS hosts fleet targets.
+/// The mtime is GNU `stat -c %Y`, else BSD `stat -f %m`, else `date -r FILE
+/// +%s` (review r18: `date -r FILE` alone is not portable — an older BSD
+/// `date -r` takes seconds, not a file); a file none of them can date is
+/// skipped rather than sorted on garbage. Runs unmodified on the Linux and
+/// macOS hosts fleet targets.
 pub fn discover_transcripts_script(limit: usize) -> String {
     let limit = limit.clamp(1, 500);
     format!(
         "now=$(date +%s)\n\
 if [ -r /proc/uptime ]; then printf 'bootsec=%s\\n' \"$(( now - $(cut -d. -f1 /proc/uptime) ))\"; else printf 'bootraw=%s\\n' \"$(sysctl -n kern.boottime 2>/dev/null)\"; fi\n\
-for f in \"$HOME\"/.claude/projects/*/*.jsonl; do [ -f \"$f\" ] || continue; case \"$f\" in */subagents/*) continue;; esac; printf '%s\\t%s\\n' \"$(date -r \"$f\" +%s)\" \"$f\"; done | sort -rn | head -n {limit} | while IFS=\"$(printf '\\t')\" read -r m f; do\n\
+d=\"${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}\"\n\
+for f in \"$d\"/projects/*/*.jsonl; do [ -f \"$f\" ] || continue; case \"$f\" in */subagents/*) continue;; esac; m=$(stat -c %Y -- \"$f\" 2>/dev/null || stat -f %m -- \"$f\" 2>/dev/null || date -r \"$f\" +%s 2>/dev/null); case \"$m\" in ''|*[!0-9]*) continue;; esac; printf '%s\\t%s\\n' \"$m\" \"$f\"; done | sort -rn | head -n {limit} | while IFS=\"$(printf '\\t')\" read -r m f; do\n\
   printf '@@F\\t%s\\t%s\\n' \"$m\" \"$(basename \"$f\" .jsonl)\"\n\
   printf '@@L\\t%s\\n' \"$(tail -c 4194304 \"$f\" | grep -a '\"cwd\"' | tail -n 1 | cut -c1-8192)\"\n\
 done"
@@ -2935,6 +2939,38 @@ mod tests {
             .map(|p| p.claude_session_id.as_str())
             .collect();
         assert_eq!(ids, vec![uuid1], "raw:\n{stdout}");
+    }
+
+    /// Review r18: a host whose Claude keeps its state under
+    /// `CLAUDE_CONFIG_DIR` has its transcripts found there. Unix only, as
+    /// the other script tests here: the script runs on a host's bash, and
+    /// Windows runners' `bash` is the WSL stub.
+    #[cfg(unix)]
+    #[test]
+    fn discover_transcripts_script_honours_claude_config_dir() {
+        let home = tempfile::tempdir().unwrap();
+        let conf = tempfile::tempdir().unwrap();
+        let proj = conf.path().join("projects").join("-w-c");
+        std::fs::create_dir_all(&proj).unwrap();
+        let id = "33333333-3333-4333-8333-333333333333";
+        std::fs::write(
+            proj.join(format!("{id}.jsonl")),
+            "{\"cwd\":\"/w/c\",\"gitBranch\":\"main\"}\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new("bash")
+            .args(["-c", &discover_transcripts_script(10)])
+            .env("HOME", home.path())
+            .env("CLAUDE_CONFIG_DIR", conf.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let (_boot, probes) = crate::service::sessions::parse_discover_output(&stdout);
+        assert_eq!(probes.len(), 1, "raw:\n{stdout}");
+        assert_eq!(probes[0].claude_session_id, id);
+        assert!(probes[0].mtime > 0, "dated: {stdout}");
+        assert_eq!(probes[0].cwd.as_deref(), Some("/w/c"));
     }
 
     #[test]

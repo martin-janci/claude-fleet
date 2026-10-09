@@ -60,7 +60,7 @@ Tick each before starting.
   and [hub.md → Upgrade and rollback](hub.md#upgrade-and-rollback). Step 1
   takes them; keep them until the run is recorded.
 - [ ] **One hub**, reachable from the desktop and the phone, and a desktop
-  **paired with it** (Settings → Hub). `mcp.confirm_destructive` is **off**
+  **paired with it** (Settings → Hub & sync). `mcp.confirm_destructive` is **off**
   on the hub (its default; see [hub.md → Security notes](hub.md#security-notes)).
 - [ ] **At least two hosts** provisioned from the hub, each with tmux,
   git and Claude Code logged in. Call them *host A* and *host B* below.
@@ -147,7 +147,7 @@ Notes (time to healthy, the migration lines):
 **Action.** Install the release under test on the desktop and start it.
 
 **Expected.** It starts without a schema error and reconnects to the hub
-(Settings → Hub shows it connected).
+(Settings → Hub & sync shows it connected).
 
 Result: [ ] pass / [ ] fail
 

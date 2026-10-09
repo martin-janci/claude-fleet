@@ -51,7 +51,6 @@
   } from './work_view';
   import WorkConflictNotice from './WorkConflictNotice.svelte';
   import ProposedBy from './ProposedBy.svelte';
-  import { uiLayout } from './prefs';
   import type { IpcError, Result } from './result';
 
   let {
@@ -561,11 +560,9 @@
             <span class="kind kind--{it.kind}" data-testid="work-review-kind">{reviewKindLabel(it.kind)}</span>
             <button class="link" type="button" title="Open the task" onclick={() => openTask(it.task.task_id, [{ session_id: it.session_id }])}>{taskLabel(it.task)}</button>
           </div>
-          {#if $uiLayout === 'new' && it.kind === 'suggestion' && it.proposed_by}
+          {#if it.kind === 'suggestion' && it.proposed_by}
             <!-- Redesign 6.8: the decision model's suggestion (J1) says so,
-                 with its reason; Change opens the same panel as Change….
-                 New layout only; Classic keeps the why line, which names
-                 Jev too. -->
+                 with its reason; Change opens the same panel as Change…. -->
             <ProposedBy
               proposal={reviewProposal(it)}
               field="work_link"

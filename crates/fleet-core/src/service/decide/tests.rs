@@ -707,6 +707,23 @@ async fn what_is_sent_is_redacted() {
     assert!(body.contains("ACME-1"), "ids stay: {body}");
 }
 
+/// Review r15 F08: a state object's keys go through the redaction as its
+/// values do, at every depth.
+#[test]
+fn state_keys_are_redacted_too() {
+    let mut req = choice_request();
+    req.state = json!({
+        "https://intranet.acme.io/x": 1,
+        "people": {"dave@acme.io": "on call"},
+        "rows": [{"see http://wiki/y": true}],
+    });
+    let sent = serde_json::to_string(&req.redacted()).unwrap();
+    for gone in ["intranet", "dave@", "wiki/y"] {
+        assert!(!sent.contains(gone), "{gone} was sent: {sent}");
+    }
+    assert!(sent.contains("on call"), "{sent}");
+}
+
 #[test]
 fn the_fingerprint_is_a_keyed_hmac_not_a_plain_hash() {
     use sha2::Digest as _;

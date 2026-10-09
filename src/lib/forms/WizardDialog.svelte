@@ -50,6 +50,7 @@
       {initial}
       sending={wizard.sending}
       buttonLoader={false}
+      ownDefaults
       serverProblems={problems}
       onsubmit={run}
       oncancel={onclose} />

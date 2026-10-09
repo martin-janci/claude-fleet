@@ -18,7 +18,6 @@
   import { orgs } from '../orgs';
   import { trackers } from '../trackers';
   import { push, pushError } from '../toasts';
-  import { uiLayout } from '../prefs';
   import WizardDialog from '../forms/WizardDialog.svelte';
   import type { Values } from '../forms/forms';
   import { pairDevice, pairDeviceWizard } from '../forms/pair_device_wizard';
@@ -69,10 +68,10 @@
 
   const current = $derived(records.find((r) => idOf(resource, r) === selected) ?? null);
 
-  /** Redesign 10.12, New layout: "Pair a device" is the pair_device wizard
+  /** Redesign 10.12: "Pair a device" is the pair_device wizard
    *  (one fleet.form/1 spec, the same one the chat shows) rather than the
    *  inline create form; its answer is the same PairingResult. */
-  const pairWizard = $derived(resource.id === 'device' && $uiLayout === 'new');
+  const pairWizard = $derived(resource.id === 'device');
   let wizardOpen = $state(false);
   let wizardBusy = $state(false);
   let wizardError = $state<string | null>(null);

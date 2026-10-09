@@ -25,7 +25,7 @@ use crate::ipc_error::{codes, IpcError};
 use crate::service::account_usage::{self, AccountUsageSnapshot, UsageCache};
 use crate::ssh::SshExec;
 use crate::store::{HostRow, Store, UsageSnapshotRow};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::Semaphore;
 
@@ -69,6 +69,9 @@ pub(crate) fn distinct_account_uuids(hosts: &[HostRow]) -> Vec<String> {
 pub(crate) struct AccountUsagePoller {
     in_flight: Mutex<HashSet<String>>,
     limit: Arc<Semaphore>,
+    /// The reset time of each account's limit as the last pass saw it, for
+    /// [`reannounce_lapsed`].
+    limits: Mutex<HashMap<String, i64>>,
 }
 
 impl AccountUsagePoller {
@@ -76,7 +79,56 @@ impl AccountUsagePoller {
         Self {
             in_flight: Mutex::new(HashSet::new()),
             limit: Arc::new(Semaphore::new(MAX_CONCURRENT_FETCHES)),
+            limits: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+/// PURE: whether a limit that reset at `was_reset` has lapsed with no new
+/// reading to say so: the facts no longer hold the account limited, and the
+/// last answer (`fetched_at`) is from before the reset. A reading after it
+/// went through [`fetch_and_emit`], which announced the move itself.
+fn limit_lapsed(was_reset: Option<i64>, limited_now: bool, fetched_at: Option<i64>) -> bool {
+    match was_reset {
+        Some(r) => !limited_now && fetched_at.is_none_or(|f| f < r),
+        None => false,
+    }
+}
+
+/// Review r05 F9: an account's limit that resets between two readings
+/// (a host down, or simply before the next poll) changes no snapshot, so
+/// [`fetch_and_emit`] never re-announces its sessions, and a phone keeps the
+/// `account_limit` stamp on them. Each pass compares the bus's facts with
+/// the reset it saw last and re-announces the account's live sessions once
+/// the reset has passed.
+fn reannounce_lapsed(
+    poller: &AccountUsagePoller,
+    account: &str,
+    bus: &dyn EventBus,
+    cache: &Mutex<UsageCache>,
+    store: Option<&Mutex<Store>>,
+) {
+    let limit = bus.attention_facts().limited_accounts.get(account).copied();
+    let was_reset = {
+        let mut limits = poller.limits.lock().unwrap_or_else(PoisonError::into_inner);
+        match limit.and_then(|l| l.resets_at) {
+            Some(r) => limits.insert(account.to_string(), r),
+            None => limits.remove(account),
+        }
+    };
+    let fetched_at = lock_cache(cache).snapshot(account).fetched_at;
+    if !limit_lapsed(was_reset, limit.is_some(), fetched_at) {
+        return;
+    }
+    let Some(store) = store else { return };
+    let sent = match store.lock() {
+        Ok(s) => s
+            .reemit_live_sessions_on_account(account)
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = sent {
+        tracing::warn!(account = %account, "re-announcing the account's sessions failed: {e}");
     }
 }
 
@@ -221,6 +273,7 @@ pub(crate) fn poll_due_accounts(
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut handles = Vec::new();
     for account in distinct_account_uuids(&hosts) {
+        reannounce_lapsed(poller, &account, bus.as_ref(), &cache, store.as_deref());
         // Cheap pre-filter: skip the common case (not due yet) without
         // touching the in-flight set or spawning anything.
         if !lock_cache(&cache).due(&account) {
@@ -438,6 +491,9 @@ mod tests {
             worktree_kb: None,
             worktree_at: None,
             agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         }
     }
@@ -1145,5 +1201,57 @@ mod tests {
             frames().iter().all(|f| f.0 != "session:updated"),
             "a new reading that moves no block re-announces nothing"
         );
+    }
+
+    /// Review r05 F9: a limit that resets with no new reading re-announces
+    /// the account's live sessions once; a reading after the reset (which
+    /// announced itself) or a limit still in force does not.
+    #[test]
+    fn a_limit_that_lapses_with_no_new_reading_re_announces_its_sessions() {
+        assert!(limit_lapsed(Some(100), false, Some(50)));
+        assert!(limit_lapsed(Some(100), false, None));
+        assert!(
+            !limit_lapsed(Some(100), false, Some(150)),
+            "a newer reading said so"
+        );
+        assert!(!limit_lapsed(Some(100), true, Some(50)), "still limited");
+        assert!(!limit_lapsed(None, false, Some(50)), "never seen limited");
+
+        let bus = Arc::new(crate::events::BroadcastEventBus::new(64));
+        let s = Store::open_with_bus_in_memory(bus.clone()).unwrap();
+        s.upsert_account(&crate::store::AccountRow {
+            uuid: "acct-1".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.insert_host("h1", None).unwrap();
+        let id = s
+            .upsert_session("idle-1", "h1", None, None, 1, 1, "running", None)
+            .unwrap();
+        s.conn_for_test()
+            .execute(
+                "UPDATE sessions SET account_uuid = 'acct-1', claude_status = 'idle' WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        let store = Mutex::new(s);
+        let cache = Mutex::new(UsageCache::default());
+        let poller = AccountUsagePoller::new();
+        // The last pass saw the account limited until a reset that has
+        // passed; the bus no longer holds it limited.
+        poller
+            .limits
+            .lock()
+            .unwrap()
+            .insert("acct-1".into(), crate::store::now_unix() - 60);
+        let mut rx = bus.subscribe();
+        reannounce_lapsed(&poller, "acct-1", bus.as_ref(), &cache, Some(&store));
+        let mut sent = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            sent.push((m.name, m.payload.get("id").and_then(|v| v.as_i64())));
+        }
+        assert_eq!(sent, vec![("session:updated", Some(id))]);
+        reannounce_lapsed(&poller, "acct-1", bus.as_ref(), &cache, Some(&store));
+        assert!(rx.try_recv().is_err(), "once per lapse");
     }
 }

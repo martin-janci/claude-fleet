@@ -12,7 +12,6 @@ import { hosts } from './hosts';
 import { accounts } from './accounts';
 import { sessions } from './sessions';
 import { accountUsage } from './account_usage_store';
-import { uiLayout } from './prefs';
 import { hubStatus } from './hub';
 import {
   ADMIN,
@@ -246,9 +245,8 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
   });
 
   it('an account at its limit offers Show and Switch to the account with headroom; nothing moves before the click', async () => {
-    uiLayout.set('new');
     accountUsage.set(atLimit());
-    try {
+    {
       render(AccountsPage, props);
       const paused = await screen.findByTestId('account-paused');
       expect(paused.textContent).toContain('2 paused sessions → Show');
@@ -265,18 +263,11 @@ describe('AccountsPage: spend, routines and paused sessions (4.1 / 4.2)', () => 
       expect(inv.mock.calls.find((c) => c[0] === 'restart_session')?.[1]).toEqual({
         args: { host_alias: 'mefistos', name: 'admin-1', profile: 'work' },
       });
-    } finally {
-      uiLayout.set('classic');
     }
   });
 
   it('an account under its limit shows no paused line', () => {
-    uiLayout.set('new');
-    try {
-      render(AccountsPage, props);
-      expect(screen.queryByTestId('account-paused')).toBeNull();
-    } finally {
-      uiLayout.set('classic');
-    }
+    render(AccountsPage, props);
+    expect(screen.queryByTestId('account-paused')).toBeNull();
   });
 });

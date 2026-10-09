@@ -8,15 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
-## [Unreleased]
+## [0.6.0] - 2026-10-09
+
+The Orbit Fleet layout replaces the 0.5.x layout: the rail, the left list
+with filters and grouping, and the inspector. The Classic layout and the
+Layout switch in Settings → Appearance are gone.
 
 ### Changed
-- **hub:** the hub contract is revision 13 (it was 10): upgrade the hub together with the desktop, since a revision-10 hub does not serve the new tools (`wire_contract.rs`)
+- **redesign:** the Classic layout and the `ui.layout` pref are removed; a stored layout choice is cleared at start
+- **hub:** the hub contract is revision 14 (it was 10): upgrade the hub together with the desktop, since a revision-10 hub does not serve the new tools (`wire_contract.rs`)
 - **share:** a grant's level gains Answer, between Watch and Drive; a client that reads the level as a closed enum must accept `answer`
 - **control:** on a hub the operator's starts and kills wait for the owner's paired device to confirm them instead of being refused
 
 ### Added
-- **redesign:** the Orbit Fleet New layout, off by default (Settings → Appearance → Layout): the rail, the inspector, Inbox, Get started and a first-run tour
+- **redesign:** the Orbit Fleet layout, now the only one: the rail, the inspector, Inbox, Get started and a first-run tour
 - **control:** Control with Chat and Today tabs, the Views panel, confirmation cards, handoff receipts, tasks from the agent's plan and the Library with Upload
 - **automation:** routines on a schedule, an event or Run now; one list of runs; start rules that send a task key to a project; the Automation screen
 - **agents:** sessions can run the Codex CLI, offered where the host has it
@@ -27,6 +32,381 @@ Entries before 0.2.4 were plain version bumps and were not recorded individually
 - **notifications:** a per-state matrix for desktop and phone, and quiet hours
 - **orgs:** spend by person; federation links managed from the desktop
 
+### Added
+- **watch:** review backlog: a summary capped at the last 40 turns says so
+- **redesign:** hub contract 14
+- **missions:** the list carries spend and budget, the plan a run estimate
+- **bg:** new_bg_session takes a project, read-only and stop-after limits
+- **redesign:** check_account_headroom hub tool, desktop routes to it
+- **redesign:** 6.9 Tidy › Duplicates: Jev's same-work pair suggests the idler
+- **pr-shepherd:** Jev pr_triage in shadow (step 4)
+- **pr-shepherd:** owner's pr_shepherd tool on the control API
+- **redesign:** 8.4 Routines and Rules tabs in Automation
+- **redesign:** 9.10 K3 mission triage: Jev proposes a stuck mission's outcome and next step
+- **redesign:** 8.10 Jev reads what a routine run came to
+- **redesign:** contract 13 also records session_summary_since
+- **redesign:** contract 13 and the owner's-phone admin grant
+- **redesign:** 11.11 Since 13:20 summary in Watch and Details
+- **redesign:** 6.9 N1 related_session: Jev proposes another session doing the same work
+- **redesign:** 11.11 session_summary_since desktop command
+- **control:** Jev K2 routes each Control message (redesign 9.9)
+- **redesign:** 10.10 Galaxy while Get started builds the first fleet
+- **redesign:** 11.11 session_summary_since hub tool
+- **redesign:** 11.11 watcher summary service and J9 summary check
+- **redesign:** Codex Conversation tab, UI half: name the row's agent
+- **redesign:** 10.5 Get started's first session is the New session wizard
+- **redesign:** 10.5 first-run tour and Get started
+- **redesign:** 6.9 K5 work_placement: Jev proposes a group for a task nobody placed
+- **redesign:** 10.12 Get started's first session on the New session wizard
+- **redesign:** 12.2 follow-up, Codex conversations in the Conversation tab (#669)
+- **redesign:** fold Runs and Control handoffs into contract 12; fix migration 141's stamp
+- **redesign:** 8.4 the Automation screen and its rail item
+- **redesign:** 9.13 comet onto the "Sent to a session" chip
+- **redesign:** 8.11 the start popover offers the rule; Automation's Rules list
+- **redesign:** 4.12 Lost and found with proposals (#666)
+- **redesign:** 10.10 a long copy's toast opens Downloads
+- **redesign:** 8.6 Routines UI, Morning PR sweep, failed runs in the Inbox
+- **redesign:** 6.10 Draft brief from a ticket
+- **redesign:** 10.12 the New session wizard as a form
+- **redesign:** 10.10 transfer loaders in Downloads and long-copy toasts
+- **control:** the Library view in Control's panel (redesign 9.7)
+- **redesign:** 12.4 agent picker offers Codex where the host has it
+- **library:** library_items index and the library tool (redesign 9.7)
+- **redesign:** 12.3 follow-up: new sessions may run agy
+- **redesign:** 5.11 J2 turn outcome from the pane tail, hooks always win
+- **redesign:** 9.11 LLM drafts in Control: release note and morning brief
+- **redesign:** 5.3 Terminals tab and 5.14 Pulse on the new row
+- **redesign:** hub contract 12, the tools routed since 11
+- **redesign:** 11.7a share level Answer between watch and drive
+- **redesign:** 9.13 Control chat Atom indicator
+- **redesign:** 7.2 session lists as trees, rows keep their own controls
+- **redesign:** 10.12 Add host and Pair a device wizards as forms
+- **redesign:** 9.12 Comet trails for running missions in Control
+- **redesign:** 6.11 follow-ups: clone on several hosts, Organisation and Tracker
+- **redesign:** 10.12 the Add project wizard in the chat
+- **redesign:** 11.9b Updates page lists every part of the fleet
+- **pr-shepherd:** merge queue at the merge level
+- **redesign:** 5.12 LLM drafts in the workspace
+- **redesign:** 9.3 handoff receipts and 9.6 tasks in Control
+- **redesign:** 12.2 Codex adapter (#632)
+- **redesign:** 5.13 ⌘N shows the Pulse while the create runs
+- **redesign:** mission ⋯ menu for Complete, Mark failed and Cancel (parity P19)
+- **redesign:** 5.4 pop out a terminal into its own window
+- **redesign:** 10.12 wizards as forms, in a dialog or in the chat
+- **redesign:** 11.7b presence and 11.7c private sessions as counts
+- **redesign:** 8.7 routines name their account; bg sessions warn over the line
+- **redesign:** 11.9 notifications matrix and quiet hours
+- **control:** open a session inside the Views panel (redesign 9.5)
+- **redesign:** 4.13 host loaders in the add-host wizard and host checks
+- **control:** Views panel beside Control's chat (redesign 9.4)
+- **redesign:** 5.13 session loaders, on events not on time
+- **redesign:** 8.11 start rules: a rule picks a task's project before history and Jev
+- **redesign:** 9.12 Comet trails beside a running mission's current steps
+- **redesign:** 6.11 Add project with four sources
+- **redesign:** 12.3 Agy adapter, provisional until real agy screens are captured
+- **redesign:** 6.9 K4 duplicate: Jev flags a proposed task that may repeat an existing one
+- **redesign:** 5.6 Go to file on the Files tab, and the viewer's path actions
+- **control:** confirms as transcript cards, answered on a hub (redesign 9.2)
+- **redesign:** account_usage hub tool, list_account_usage routed
+- **redesign:** 8.10 routine run outcome, without Jev
+- **redesign:** 11.8 spend by person, all or nothing
+- **redesign:** 5.3 shell terminals
+- **redesign:** 3.17 the status bar ends on Shortcuts
+- **redesign:** 5.6 Changed shows what is not pushed and the branch against its base
+- **redesign:** 11.12 federation loaders
+- **redesign:** 12.4 store which agents each host has on PATH
+- **redesign:** 5.8 Share from the session header; Shared with me group
+- **redesign:** 8.7 account-aware automation
+- **redesign:** 4.10 account_uuid in the phone view
+- **redesign:** 3.12 the New session dialog pre-ticks Jev's sibling repository
+- **redesign:** 3.17 tray and menu-bar icon states
+- **redesign:** 10.9 Jev quick answer: the likely option first
+- **redesign:** 5.14 loaders in the session chat: running tool call and voice input
+- **redesign:** 12.1 agent adapter trait, Claude Code behind it
+- **redesign:** 6.2 Work filters for a person and a column; group by org, person, mission, account or repo
+- **redesign:** 4.2 cost per account and per model
+- **redesign:** 8.5 routines backend
+- **redesign:** 3.17 the header and brand
+- **redesign:** 6.8 Jev's suggested link with its reason
+- **redesign:** 4.11 Jev N5 host placement in New session
+- **redesign:** 5.1 Agent tab named and marked from the session's agent
+- **redesign:** 7.4 motion catalog: rows slide between groups, one wash, toasts with a timer bar
+- **redesign:** 5.9 one approval card, move to next with Undo, New divider, project skills in /
+- **redesign:** 2.6 hub contract 11 and the three Blocked reasons on the wire
+- **redesign:** 3.15 startup with loaders
+- **redesign:** 11.2 members: shares since, remove dialog, pairing code
+- **pr-shepherd:** nudge a session to fix its conflicting or red PR
+- **redesign:** 3.12 N3 sibling_repos: Jev proposes the sibling repository a ticket start also needs
+- **redesign:** 9.1 Control rail item with the agent and Today
+- **redesign:** 2.8 proposals on the wire and sessions.turn_outcome
+- **redesign:** 7.2 24 px targets
+- **redesign:** 4.5 New session agent and account pickers
+- **redesign:** 6.1 board columns from tracker status names
+- **redesign:** 5.5 Open in VS Code
+- **redesign:** 6.4 pull requests
+- **redesign:** 4.4 Limit handling
+- **redesign:** 7.8 copy pass
+- **redesign:** 3.16 Toolkit rail item with Skills and Assets tabs
+- **redesign:** 3.14 connection states with loaders
+- **redesign:** 8.2 book claude -p runs as cost with their origin
+- **redesign:** 11.5 Federation page, link and unlink a hub
+- **redesign:** 3.7 one Filters section and Group control
+- **redesign:** 7.2 the 11 px type floor
+- **redesign:** 10.1 form receipt, options answered with 1–9, expiry shown
+- **redesign:** 7.2 accessibility pass, axe in component tests
+- **redesign:** 3.5 session tabs and inspector
+- **redesign:** 7.3 light mode: every component colours through the theme tokens
+- **redesign:** 3.12 the proposed project carries one chip wherever a session starts
+- **redesign:** 3.13 loaders in the new shell
+- **redesign:** 0.9 design-system kit in Svelte
+- **redesign:** 2.4 Blocked reasons and Paused · limit
+- **redesign:** 11.4 Control API tokens table
+- **redesign:** 3.3 Inbox: what needs you, Today as its tab, All sessions
+- **redesign:** 6.6 one Continue / Start new split button wherever a task starts
+- **redesign:** 5.10 dialogs in one pattern, prompts that wait for idle
+- **redesign:** 4.9 add-host wizard with live checks and a fleet-agent install job
+- **redesign:** 2.3 last viewed and done_unread
+- **redesign:** 0.8 Comet on a filled primary button takes its text colour
+- **redesign:** 0.8 loader kit
+- **redesign:** 3.11 ProposedBy, DraftField and the never-decides list
+- **redesign:** 3.9 ⌘K palette: > # @ prefixes, session commands, settings in plain words
+- **redesign:** 11.1 org overview tiles, 14-day spend and Needs an admin
+- **redesign:** 3.8 keyboard: list keys, next needs you, ⌘1–9, 1–9 answers, ? sheet
+- **work:** plan missions and Import plan for the task graph
+- **redesign:** 4.3 Account pills
+- **redesign:** 8.1 every loop reports, and Pause all
+- **redesign:** 3.2 Rail
+- **redesign:** 2.2 session origin
+- **redesign:** 1.5 action hierarchy in session details
+- **work:** task graph view for a mission
+- **redesign:** 1.2 one attention line; no native white buttons
+- **redesign:** 7.7 Decisions in the Settings tree
+- **redesign:** 1.1 honest badge; a mass loss folds into one row
+- **redesign:** 10.6 states kit
+- **redesign:** 3.6 rows: density, two-line Compact row, group by state, host or agent
+- **redesign:** 4.7 host detail health checklist
+- **redesign:** 0.6 motion tokens and the Motion pref
+- **redesign:** 6.3 blocked tasks and cost per task
+- **redesign:** 10.4 guides open as a card in chat
+- **redesign:** 4.1 Accounts page
+- **redesign:** 5.2 PTY map
+- **redesign:** 10.3 settings-change card with Apply
+- **redesign:** 7.1 one Settings tree
+- **redesign:** 11.6 claim, install, logs and screenshot on Debug devices
+- **redesign:** 3.10 row ⋯ menu, Board as a Work view, Review as a count
+- **redesign:** 1.9 Ctrl+, opens Settings; one New session dialog
+- **redesign:** 0.7 controls: tabs, segmented control, badge and chips
+- **redesign:** 4.6 Hosts page split from accounts
+- **redesign:** 2.5 persist account usage snapshots
+- **redesign:** 3.4 one selection store for sessions and tasks
+- **redesign:** 1.4 remove permanent rows
+- **redesign:** 0.4 one attention model, seven states
+- **redesign:** 10.7 notification centre and Downloads with progress, Show in Finder, Retry
+- **redesign:** 4.8 adopt a tmux pane started outside fleet
+- **redesign:** 3.1 destination store replaces the overlay flags
+- **redesign:** 10.2 progress, results and error chat kinds
+- **redesign:** 2.1 agent kind on sessions
+- **redesign:** 1.7 Kill lists uncommitted files and offers Clean up
+- **redesign:** 11.3 rename a device and change its mode
+- **redesign:** 5.7 blame and merged branches in Files
+- **redesign:** 1.8 mission autonomy in words, grant hosts, parallel and wake edits
+- **redesign:** 0.1 shortcut registry and freeze test
+- **redesign:** 6.5 review confidence
+- **redesign:** 0.5 light syn-num from design system v4
+- **redesign:** 1.3 planner errors in words, with Retry and Details
+- **redesign:** 0.5 design tokens from the Orbit Fleet manual
+- **redesign:** 0.3 layout pref and Appearance settings
+- **redesign:** 1.6 one task status for List and Board
+
+### Changed
+- **decide:** review backlog: build the stranger's scope through Caller::view_scope
+- **catalog:** review backlog: admin calls, apply follow-through and undo run off the async workers
+- review r15: the Jev mark on a row is attribution, not a status (fixes copy_lint)
+- **pty:** review backlog: rustfmt the generation test
+- **watch:** review backlog: the Since summary survives the same session re-rendered
+- review r15: finish the deferred findings (F08, F14, F15, F17, F22)
+- review r16: seven off-screen views load in their own chunks (#771)
+- review r16: tracker refresh pauses while the window is hidden (#770)
+- review r11: arrow keys on the main view tabs (#766)
+- review r20-sweep: the sidebar's purge and background-session buttons draw kit icons
+- review r20: Move to headroom reads the account a session bills
+- review r04: refresh the scope guard rows for F3's owner half (#763)
+- review r15: fit the merged brief_target test and the tool-surface budget
+- review r16: sidebar reads row places only under Full motion (#758)
+- review r20: backlog sweep r04/r13/r17/r18
+- review r16: conversation panel stops deep-proxying its transcript (#753)
+- review r20: backlog sweep r05/r06/r15 (backend)
+- review r20-sweep: backend items from the r01 backlog
+- review r20-sweep: the roll-a-name button draws the kit's dice icon
+- review r04: K2 K3 live streams re-check their caller (#746)
+- review r20: backlog sweep r05/r06/r15 (frontend)
+- review r20: New session keeps a profile typed before the logins arrive
+- **ai:** the morning brief's refusal line uses the type token
+- review r20: a failed worker's summary reaches Jev only with reply consent
+- review r04: F3 a reaped session's files stay the owner's (#742)
+- review r18: local sync from Windows keeps the host's executable bit (#739)
+- review r20-sweep: migration 147 indexes the live org grants
+- **scope_guard:** name library::visible_with, the function #721 moved the org-only arm into
+- review r18: AltGr text never fires a chord on Windows; wizard re-checks a new host (#732)
+- review r04: F1 F2 org admins never take over an existing person
+- review r20-sweep: the manual's line icons replace emoji on desktop actions
+- review r20-sweep: row events, timers and the agent grip
+- **review r16:** equal Sets and facts no longer re-render every row (#727)
+- review r17 flakes: tool tests never reconcile the real machine, budgets only under FLEET_SCALE_BUDGETS, hub-e2e waits for its unclaimed row
+- review r18: move, agent install, SSH socket, VS Code on WSL, update order (#725)
+- review r10: adopt app.css tokens into tokens.json, add scrims, theme the terminal menu
+- **review r16:** hub probes and queries, desktop selection and timers (#721)
+- review r04: S1 S2 S3 F4 F5 T1 T2 security fixes
+- review r20: docs and in-app help match main
+- review r02: routines on a removed project or host, unjudged-runs index, v0.5.4 upgrade test (#714)
+- review r19: the notifications matrix reaches the desktop; status of built-but-off flags
+- review r08: name the r08-1 and r08-2 proofs in the parity table
+- review r08: a board card opens its task in New; Settings opens with the sidebar collapsed
+- **a11y:** review r11: drop the caret and scroller rows main now carries
+- review r10: type, radius, font and shadow tokens across the app (R10-01..07)
+- review r14: desktop copy follows the manual's voice
+- review r12: kit loaders only, one per screen, Motion setting respected
+- review r08: Hosts reachable from Accounts & hosts; / and e on the Hosts table
+- review r10: tokens in the serial files' styles (R10-01..04), r11 transcript focus ring
+- **hub-e2e:** expect answer for a key press and hub confirms that wait (#695)
+- **decide:** Feature::ALL is a slice, so a merge cannot miscount it
+- **ui:** delete the Classic layout and the ui.layout switch (13.1)
+- drop the merge's duplicate uiLayout import
+- **redesign:** 9.11 reach and isolation-matrix rows for the draft actions
+- **redesign:** pin the clock in Federation's Constellation test (11.12)
+- regenerate the control-API reference (list_update_targets)
+- wip runs
+- **pages:** spend_by_person is a read-only org list
+- **redesign:** 7.5 New-layout parity tests for P3, P8, P9, P11, P15, P21, P26, H1–H3, H7, H8
+- Regenerate page docs after the merge (REGEN_PAGE_DOCS)
+- Resolve the conflict markers left in tick.rs: keep the PR shepherd and deferred-prompt delivery
+- renumber a branch's migrations to main's next free numbers
+- stop every PR rewriting the same generated count lines
+- Regenerate the hub verdict table after merging main into 10.6
+- **redesign:** 1.1 move the fold tests above 3.6's block so main's 3.8 tests merge cleanly
+- run the macOS and Windows legs on main, not on every pull request
+- **repo:** gate the by_name helper with the Unix-only tests it serves
+- **repo:** run the real-git repo tests on Unix only
+- **redesign:** 2.1 keep each owner comment next to its field
+
+### Fixed
+- **tests:** green main on Windows
+- **devices:** review backlog: run/install report the command's own exit status past the output cap
+- **local-sync:** review backlog: ~\ is home on Windows; names Windows cannot hold stay remote
+- **tmux:** review backlog: transcript discovery honours CLAUDE_CONFIG_DIR and dates files portably
+- **agent-install:** review backlog: install tmux without a prompt or say why; restore SSH for a job a hub stop cut off mid-connect
+- **ssh:** review backlog: uploads land through a temp file and mv; Open in VS Code refuses an agent-routed host
+- **move:** review backlog: marker-anchored move reads, a landed kill is not both-alive, grants dropped only once the target is confirmed
+- **hosts:** review backlog: an offline host says why and when it last answered
+- **accounts:** review backlog: a failed launch read fails the start, a lapsed limit re-announces, an absent probe field keeps the stored value
+- **store:** review backlog: NewHandoff's default kind is one its CHECK accepts
+- **presence:** review backlog: viewers of an unclaimed session see each other
+- **decide:** review backlog: control_route offers sessions past 8 missions and follows only a run the caller sees
+- **routines:** review backlog: leases are stamped with a fresh clock
+- **missions:** review backlog: a wake during a tick survives its release; one queued prompt per idle moment
+- **orchestrate:** review backlog: one account_limit per held episode, one planner call per mission, unique card ids
+- **forms:** review backlog: an agent's form starts with no risky default
+- **desktop:** review backlog: no desktop command locks the store on the main thread
+- **pty:** review backlog: pty_drain takes the open generation pty_open returned
+- **accounts:** review backlog: LIMIT only on the raw figure everywhere
+- **work:** review backlog: Work views show a skeleton after 400 ms, not loading text at once
+- **sessions:** review backlog: a failed worktree scan says so plainly and offers Scan again
+- **hub:** review backlog: point at Settings → Hub & sync by the page's name
+- **forms:** review backlog: remove the unused one-step add-host wizard run
+- **frontend:** back in New, the Inbox Classic stood in for comes back (review r07 F11)
+- **app:** review r13 bootstrap failure, status bar copy and Retry
+- **sidebar:** review r13 empty, failed and offline list states
+- **control:** AI never decides — operator, cross-org drafts, briefs, completion (r15)
+- **accounts:** review r05 A8 — the host line describes the picked login's account
+- **accounts:** review r05 F9 re-announce sessions when their account's block moves
+- **accounts:** review r05 F8 a profile not saved at start fails the start
+- **states:** review r13 a loading conversation shows a skeleton after 400 ms
+- **ai:** review r15: Jev never orders a risky question; no silent or late reorder (F10-F13, F23)
+- **ai:** the "Since" summary and a Summarise result carry the Drafted pill (F16)
+- **review:** r06 concurrency: double starts, stale kills, pause mid-pass, event order
+- **frontend:** restore sessions.ts quoting so the share sweep reads it again
+- **review:** an agent's settings proposal starts unticked (F09)
+- **hub:** review r01 F13, one failed reconnect after a stream ends no longer arms the breaker
+- **runs,prs,health:** review r02 backlog — newer aux kinds filter, PR states in SQL, one clock in the health parity test
+- **accounts:** review r05 F2 collapse the profile guard (clippy)
+- **decide:** review r15: Jev asks only with each org's consent (F01-F07)
+- review round 1 follow-up — card cap, Runs kinds, limit window
+- **accounts:** review r05 F7 a window with no reset time lapses
+- **frontend:** projects, usage and downloads re-lists lose to newer frames (review r07 F10)
+- **states:** review r13 error, empty and stale states outside the serial files
+- **hub:** review r03 R3-4 keep work_rev in the phone's session view
+- **accounts:** review r05 F5 the over-limit hold checks the start's host
+- **review:** r06 D2/D3 list-vs-event races in sessions and hosts
+- **accounts:** review r05 F4 the routine header names its flat account
+- **frontend:** late answers no longer undo newer state (review r07)
+- **hub:** review r03 R3-1 keep the owner in the phone's session view
+- review round 1 — restore names, host checks, routine reads, Runs outcomes
+- **a11y:** review r11: arrow keys on every hand-built tablist
+- **accounts:** review r05 F3 no_credentials is not a signed-out login
+- **frontend:** opening a session leaves the Automation page too (review r07 F1)
+- **accounts:** review r05 F1+F2 relaunch re-reads the session's login
+- **accounts:** review r05 A1-A3, A5-A7, A9 keep the desktop's account pill, limits and waits true
+- **accounts:** review r05 A4 a host change drops the last host's login
+- **work:** review round 1 — the mission loop settles reviews and resumes on time
+- **a11y:** review r11: focus rings and focus return
+- drop the duplicate uiLayout import in SessionDetails.svelte
+- **library:** name the Library's org-only arm in ORG_HALF_SITES
+- **redesign:** MorningBrief tolerates an empty today_brief answer
+- **notify:** the phone's default notifications include Blocked (#682)
+- **redesign:** copy lint sees the Routines dialog's own store
+- **scripts:** renumber-migrations keeps a closing line both sides share
+- **redesign:** HandoffCards uses the declared --bg-raise token
+- **redesign:** a11y and copy re-sweep of the New screens since 7.2 and 7.8
+- Feature::ALL holds 7 after the merge (duplicate + host_placement + quick_answer)
+- **redesign:** 8.10 close the 137 entry the renumber merge dropped
+- **scripts:** renumber-migrations stages only the files it edited
+- **redesign:** 4.11 five decide features after the merge; regenerated docs
+- **redesign:** 5.10 keep main's copy lint after the merge
+- **redesign:** OrgMembers colours through tokens only
+- **redesign:** 5.10 copy lint reads DialogSheet as a dialog frame
+- **redesign:** OrgMembers colours through tokens (light-mode test)
+- **redesign:** 4.11 shorter settings hint, regenerated reference; main carries pause_at
+- **redesign:** 11.2 members table colours through theme tokens
+- **redesign:** 7.3 debt: Sidebar colours through tokens now that 7.4 holds it
+- **redesign:** 4.4 mirror accounts.pause_at in fleet_settings.ts
+- **redesign:** 7.2 QuickSwitcher under the 11 px floor
+- **redesign:** 1.1 fold caret reads --dur-fast, not a raw duration
+- **frontend:** take main's node:fs shim verbatim
+- **redesign:** port #546's org-guard classification for blocked_on
+- **redesign:** classify 6.3's org guard in blocked_on
+- **recreate:** re-clone a missing remote checkout instead of refusing
+- **redesign:** port #546's classification of 6.3's org guard
+- **redesign:** classify 6.3's org guard in blocked_on
+- **frontend:** type existsSync in the node:fs shim
+- **frontend:** type existsSync in the node:fs shim
+- **test:** declare existsSync in the node:fs type shim
+- **frontend:** match #535's node:fs shim text exactly
+- **frontend:** type existsSync in the node:fs shim
+- **frontend:** type existsSync in the node:fs shim
+
+### Documentation
+- drop the switch-back-to-Classic note now that Classic is gone
+- **gen:** review backlog: generated headers name cargo fleet-test, regenerated
+- **control-api:** name check_account_headroom in the tool index
+- regenerate settings and page docs after merging main
+- regenerate settings, page and API docs for 5.11
+- regenerate the control API reference and hub verdicts for routines
+- regenerate control API reference after merging main
+- regenerate the control API reference for 9.11
+- remove committed conflict markers from control-api.md (#645)
+- regenerate the control API reference for draft_commit_message
+- **redesign:** phone parity audit for 14.13
+- **redesign:** 7.5 parity gap audit; P2, P3, P13, P16, P25 read Both
+- **redesign:** parity row P30 for confirms as cards (9.2)
+- regenerate control-api-reference (stale on main)
+- list open_session_in_editor in the control API reference
+- **hub:** regenerate the verdict table after merging main
+- **redesign:** 0.2 parity checklist and PR template
+- **ux:** add phone tutorials step 14.22 and its two boards to the redesign snapshot (#520)
+- **ux:** add five more phone boards and steps 14.18-14.21
+- **ux:** add eight more phone boards and steps 14.14-14.17 to the snapshot
+- **ux:** add the phone app redesign to the Orbit Fleet snapshot
+- **ux:** Orbit Fleet redesign plan, design system and canvas snapshot
 ## [0.5.4] - 2026-10-08
 
 ### Added
@@ -2993,6 +3373,7 @@ added by hand for that reason — see #152._
   index, and new Getting Started, Concepts, and Troubleshooting guides; refreshed
   and cross-linked the Control API guide.
 
+[0.6.0]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.6.0
 [0.5.4]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.4
 [0.5.3]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.3
 [0.5.2]: https://github.com/martin-janci/claude-fleet/releases/tag/v0.5.2

@@ -1,8 +1,7 @@
-// Redesign step 6.6: in the New layout every place a session starts from a
-// task uses one split button (WorkButton) with the same words, "Continue" and
-// "Start new"; Classic keeps its own buttons.
+// Redesign step 6.6: every place a session starts from a task uses one split
+// button (WorkButton) with the same words, "Continue" and "Start new".
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
 
@@ -16,7 +15,6 @@ import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import { link, task } from './work_view_fixture';
-import { uiLayout } from './prefs';
 import type { TaskDetail } from './work_view';
 
 type Handler = (args: Record<string, unknown>) => unknown;
@@ -64,11 +62,8 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => uiLayout.set('classic'));
-
 describe('the task page', () => {
   it('New: one split button, Continue when a past session can resume', async () => {
-    uiLayout.set('new');
     handlers.work_task = () => pastOnly;
     handlers.resume_work = () => session('mefistos', 'resumed', { id: 11 });
     render(WorkTaskDetail, { taskId: 'item:12' });
@@ -83,7 +78,6 @@ describe('the task page', () => {
   });
 
   it('New: Start new starts from a clean preview and shows the start progress', async () => {
-    uiLayout.set('new');
     handlers.work_task = () => fresh;
     handlers.preview_start_work = cleanPreview;
     handlers.start_work = () => {
@@ -104,13 +98,6 @@ describe('the task page', () => {
     expect(screen.getByTestId('work-button').querySelector('[data-testid="start-progress"]')).not.toBeNull();
   });
 
-  it('Classic keeps Open, Continue and Start new as three buttons', async () => {
-    handlers.work_task = () => fresh;
-    render(WorkTaskDetail, { taskId: 'item:12' });
-    await flush();
-    expect(screen.getByTestId('work-task-start').textContent).toBe('Start new');
-    expect(screen.queryByTestId('work-button')).toBeNull();
-  });
 });
 
 describe('a subtask', () => {
@@ -122,36 +109,21 @@ describe('a subtask', () => {
   } as TaskDetail;
 
   it('New: starts through the same split button', async () => {
-    uiLayout.set('new');
     render(TaskWorkSections, { detail, part: 'work' });
     await flush();
     expect(screen.queryByTestId('task-subtask-start')).toBeNull();
     expect(screen.getByTestId('work-button-primary').textContent).toBe('Start new');
   });
 
-  it('Classic keeps its Start button', async () => {
-    render(TaskWorkSections, { detail, part: 'work' });
-    await flush();
-    expect(screen.getByTestId('task-subtask-start').textContent).toBe('Start');
-    expect(screen.queryByTestId('work-button')).toBeNull();
-  });
 });
 
 describe('the words', () => {
-  it('a past-work Resume says Continue in New and Resume in Classic', async () => {
-    const { unmount } = render(ResumeButton, { workKey: 'ABC-12' });
-    expect(screen.getByTestId('resume-quick').textContent).toBe('Resume');
-    unmount();
-    uiLayout.set('new');
+  it('a past-work Resume says Continue', async () => {
     render(ResumeButton, { workKey: 'ABC-12' });
     expect(screen.getByTestId('resume-quick').textContent).toBe('Continue');
   });
 
-  it('a task row says Start in Classic and Start new in New', async () => {
-    const { unmount } = render(WorkButton, { task: task({ sessions: [] }) });
-    expect(screen.getByTestId('work-button-primary').textContent).toBe('Start');
-    unmount();
-    uiLayout.set('new');
+  it('a task row says Start new', async () => {
     render(WorkButton, { task: task({ sessions: [] }) });
     expect(screen.getByTestId('work-button-primary').textContent).toBe('Start new');
   });

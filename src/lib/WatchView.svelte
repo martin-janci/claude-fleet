@@ -27,7 +27,6 @@
   import { captureSession, type SessionRow } from './sessions';
   import { noAttachReason, type SessionAccess } from './access';
   import { hubStatus } from './hub';
-  import { uiLayout } from './prefs';
   import WatchSummary from './WatchSummary.svelte';
   import { errorSentence } from './error_copy';
   import { windowHidden } from './window_hidden';
@@ -177,7 +176,7 @@
     <p class="why" data-testid="watch-reason">{why}</p>
   {/if}
 
-  {#if pollable && $uiLayout === 'new'}
+  {#if pollable}
     <!-- Orbit Fleet 11.11: what happened since the watcher last looked. -->
     <WatchSummary {session} />
   {/if}

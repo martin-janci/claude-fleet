@@ -1,16 +1,15 @@
 // Redesign 8.11 (From AI to rule): the start popover offers "Add rule
-// PD-* → acme/pos?" in the New layout and says when a rule picked the
-// repository; Automation › Rules lists offers and rules and edits, turns off
-// and deletes them. Classic shows none of it.
+// PD-* → acme/pos?" and says when a rule picked the repository;
+// Automation › Rules lists offers and rules and edits, turns off and
+// deletes them.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import StartPopover from './StartPopover.svelte';
 import StartRules from './StartRules.svelte';
-import { uiLayout } from './prefs';
 import { projects } from './projects';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
@@ -69,7 +68,6 @@ beforeEach(() => {
   localStorage.clear();
   listed = [];
 });
-afterEach(() => uiLayout.set('classic'));
 
 describe('start rule helpers', () => {
   it('writes a rule as pattern, repository and host', () => {
@@ -87,8 +85,7 @@ describe('start rule helpers', () => {
 describe('the start popover', () => {
   const props = { base: { item_id: 12, with_brief: true }, preview, heading: 'Start PD-12', onclose: () => {}, onstarted: () => {}, debounceMs: 0 };
 
-  it('offers the rule in the New layout and adds it', async () => {
-    uiLayout.set('new');
+  it('offers the rule and adds it', async () => {
     render(StartPopover, { props });
     await flush();
     expect(screen.getByTestId('start-popover-rule-offer').textContent).toContain('PD-* → acme/pos');
@@ -100,7 +97,6 @@ describe('the start popover', () => {
   });
 
   it('dismisses the offer for good', async () => {
-    uiLayout.set('new');
     render(StartPopover, { props });
     await flush();
     await fireEvent.click(screen.getByTestId('start-popover-rule-dismiss'));
@@ -111,18 +107,11 @@ describe('the start popover', () => {
   });
 
   it('says when a rule picked the repository', async () => {
-    uiLayout.set('new');
     render(StartPopover, { props: { ...props, preview: { ...preview, rule_offer: null, plan: { ...plan, rule_id: 9 } } } });
     await flush();
     expect(screen.getByTestId('start-popover-by-rule')).toBeTruthy();
   });
 
-  it('shows none of it in Classic', async () => {
-    render(StartPopover, { props: { ...props, preview: { ...preview, plan: { ...plan, rule_id: 9 } } } });
-    await flush();
-    expect(screen.queryByTestId('start-popover-rule-offer')).toBeNull();
-    expect(screen.queryByTestId('start-popover-by-rule')).toBeNull();
-  });
 });
 
 describe('Automation › Rules', () => {

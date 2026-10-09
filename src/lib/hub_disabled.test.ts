@@ -16,7 +16,6 @@ import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import HostDetail from './HostDetail.svelte';
 import AssetsPanel from './AssetsPanel.svelte';
-import OnboardingCard from './OnboardingCard.svelte';
 import HostsView from './HostsView.svelte';
 import Sidebar from './Sidebar.svelte';
 import SessionDetails from './SessionDetails.svelte';
@@ -73,9 +72,8 @@ const inv = () => mockedInvoke as ReturnType<typeof vi.fn>;
 beforeEach(() => {
   inv().mockReset();
   addProjectRequest.set(null);
-  // `null` for everything except the one list the setup checklist iterates
-  // unguarded: a standalone OnboardingCard (also mounted inside Sidebar) does
-  // `tunnels.some(...)`, and the real command never answers null.
+  // `null` for everything except `tunnel_status`, a list the real command
+  // never answers null.
   inv().mockImplementation(async (cmd: string) => (cmd === 'tunnel_status' ? [] : null));
   hubStatus.set({ ...STANDALONE });
   hubConnection.set({ state: 'standalone' });
@@ -343,36 +341,6 @@ describe('the asset catalog on a hub client', () => {
       expect(inv().mock.calls.some((c) => c[0] === 'catalog_config')).toBe(true),
     );
     expect(screen.queryByTestId('assets-remote')).toBeNull();
-  });
-});
-
-describe('the setup checklist on a hub client', () => {
-  // Three of the six unprompted commands live here: check_local_prereqs,
-  // tunnel_status and mcp_status, all fired from an $effect on mount.
-  it('asks for none of the three local-only snapshots', async () => {
-    hubStatus.set(remote);
-    render(OnboardingCard, { props: { onaddhost: vi.fn(), onnewsession: vi.fn() } });
-    await tick();
-    await tick();
-    for (const cmd of ['check_local_prereqs', 'tunnel_status', 'mcp_status']) {
-      expect(inv().mock.calls.some((c) => c[0] === cmd), cmd).toBe(false);
-    }
-  });
-
-  it('says the checklist is about running a fleet from this machine', async () => {
-    hubStatus.set(remote);
-    render(OnboardingCard, { props: { onaddhost: vi.fn(), onnewsession: vi.fn() } });
-    const note = await screen.findByTestId('onboarding-remote');
-    expect(note.textContent).toContain('fleet.example.com');
-    expect(screen.queryByTestId('onboarding-steps')).toBeNull();
-  });
-
-  it('standalone is untouched: the three snapshots are still fetched', async () => {
-    render(OnboardingCard, { props: { onaddhost: vi.fn(), onnewsession: vi.fn() } });
-    await waitFor(() =>
-      expect(inv().mock.calls.some((c) => c[0] === 'check_local_prereqs')).toBe(true),
-    );
-    expect(screen.queryByTestId('onboarding-remote')).toBeNull();
   });
 });
 

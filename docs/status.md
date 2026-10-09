@@ -17,9 +17,8 @@ first-run tour (10.5). Control is the operator's place: its Chat and Today
 tabs, the Views panel (9.4, 9.5), confirmations as cards (9.2), "Sent to a
 session" and "Sent to a mission" receipts (9.3, migration 140), tasks in
 Control (9.6) and the Library (9.7, `library_items`, migration 143, the
-`library` tool). Classic stays until step 13.1, and step 7.5 (parity
-sign-off) waits on every 0.5.4 row of the parity contract reading *Both*
-and the owner using New for a week. The redesign's backend is not behind
+`library` tool). New became the default in step 7.6 (#657) and Classic
+was removed in step 13.1 (#699). The redesign's backend is not behind
 the switch: M2's session facts (`sessions.agent`, `origin`,
 `last_viewed_at`, `turn_outcome`; migrations 121, 124, 125, 129) and
 account usage history (122), the Hosts page's probe facts (123), token use

@@ -1600,7 +1600,9 @@ pub(super) async fn kill_session_with(
         if let Ok(s) = store.lock() {
             record_kill(&s, id, Some(&sid));
         }
-        super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
+        super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
+            .await
+            .map_err(after_the_kill)?;
         return Ok(id);
     }
     let tmux = (deps.exec)(&args.host_alias);
@@ -1623,8 +1625,36 @@ pub(super) async fn kill_session_with(
             tracing::warn!(session_id = id, error = %e, "[kill] marking the killed row failed");
         }
     }
-    super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias).await?;
+    super::reconcile::reconcile_one_host_with(store, deps, &args.host_alias)
+        .await
+        .map_err(after_the_kill)?;
     Ok(id)
+}
+
+/// The `details` key [`kill_session`] sets on an error that came AFTER the
+/// session was killed: the trailing reconcile failed, the kill did not.
+pub const KILL_LANDED: &str = "kill_landed";
+
+/// Mark a post-kill failure (review r18 M4): a caller that must know whether
+/// the session is gone — `move_session`'s finalise — reads it with
+/// [`kill_landed`] instead of taking every `Err` for "still alive".
+pub(crate) fn after_the_kill(e: IpcError) -> IpcError {
+    let mut details = match e.details {
+        Some(serde_json::Value::Object(ref m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    details.insert(KILL_LANDED.into(), serde_json::Value::Bool(true));
+    let details = serde_json::Value::Object(details);
+    e.with_details(details)
+}
+
+/// Whether a [`kill_session`] error came after the kill itself succeeded.
+pub fn kill_landed(e: &IpcError) -> bool {
+    e.details
+        .as_ref()
+        .and_then(|d| d.get(KILL_LANDED))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1866,7 +1896,7 @@ pub async fn restart_session(
                 // once the relaunch succeeded ([`relaunch_recording_login`]):
                 // written first, a refused repair or a failed respawn left the
                 // row naming a login the pane never ran under.
-                let mut launch = stored_launch(&s, r.id);
+                let mut launch = stored_launch(&s, r.id)?;
                 if let Some(profile) = switch.as_ref() {
                     launch.profile = profile.clone();
                 }
@@ -2169,14 +2199,20 @@ pub(crate) fn store_start_launch(
 /// The model / effort / profile a session was started or last switched to, checked
 /// again ([`crate::tmux::ClaudeLaunch::checked`]). A failed read is the
 /// host's default: a rebuilt pane must not fail over a cosmetic column.
-pub(crate) fn stored_launch(s: &Store, session_id: i64) -> crate::tmux::ClaudeLaunch {
-    match s.session_launch(session_id) {
-        Ok((model, effort, profile)) => crate::tmux::ClaudeLaunch::checked(model, effort, profile),
-        Err(e) => {
-            tracing::warn!(session_id, error = %e, "reading the session's launch options failed");
-            crate::tmux::ClaudeLaunch::default()
-        }
-    }
+pub(crate) fn stored_launch(
+    s: &Store,
+    session_id: i64,
+) -> Result<crate::tmux::ClaudeLaunch, IpcError> {
+    // A read that fails fails the start, like a failed profile write (review
+    // r05 F8): falling back to the defaults would relaunch the session under
+    // the host's login, not the one it was started with.
+    let (model, effort, profile) = s.session_launch(session_id).map_err(|e| {
+        IpcError::new(
+            codes::E_INTERNAL,
+            format!("reading session {session_id}'s launch options failed: {e}"),
+        )
+    })?;
+    Ok(crate::tmux::ClaudeLaunch::checked(model, effort, profile))
 }
 
 #[derive(Serialize, Deserialize, rmcp::schemars::JsonSchema)]
@@ -2236,7 +2272,7 @@ pub async fn recreate_session(
             &sess.agent,
             sess.claude_session_id.as_deref(),
             &sess.tmux_name,
-            &stored_launch(&s, sess.id),
+            &stored_launch(&s, sess.id)?,
         );
         (sess, cwd_src, pane_cmd)
     };

@@ -76,6 +76,19 @@ export function neverDecides(target: string): boolean {
   return NEVER.has(target);
 }
 
+/** The words that put a form field on {@link NEVER_DECIDES}, whatever its
+ *  options are called: an agent's "Priority" select with the options
+ *  low/high is still a priority (review r15 F14). */
+const NEVER_FIELD_WORDS =
+  /\b(priority|priorit\w*|size|estimate|story points?|roles?|share|sharing|access|trust\w*|org|orgs|organi[sz]ations?|autonomy|approv\w*|permissions?|verif\w*|complet\w*|kill|clean ?up|settings?)\b/i;
+
+/** Whether a form field asks something AI never decides, read from its
+ *  name, label and help (`max_priority` reads as `max priority`). */
+export function neverDecidesField(f: { name: string; label?: string; help?: string }): boolean {
+  const words = [f.name.replace(/[_-]+/g, ' '), f.label ?? '', f.help ?? ''].join(' ');
+  return NEVER_FIELD_WORDS.test(words);
+}
+
 /**
  * The value to pre-select for `target`, or `null` when nothing may be:
  * no proposal, a target AI never decides, `unsure`, or a model answer

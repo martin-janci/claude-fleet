@@ -8,7 +8,7 @@ import { CONFIRM_CHANGED_EVENT } from './events';
  * The queue of control-API calls waiting for a person (redesign step 9.2).
  * One queue, two places to answer it: the operator's own requests — its
  * starts and kills, always confirmed (M9.7) — become cards in Control's
- * transcript in the New layout while that transcript is on screen
+ * transcript while that transcript is on screen
  * (`ConfirmCards`); everything else, and the operator's requests whenever no
  * transcript is showing, stays in the dialog (`McpConfirmDialog`), so a
  * request is never parked where nobody can see it.

@@ -35,6 +35,52 @@ const KILL_MEMORY_SECS: i64 = 2
     * (crate::service::sessions::HOST_PROBE_TIMEOUT.as_secs()
         + crate::service::sessions::PR_PROBE_TIMEOUT.as_secs()) as i64;
 
+/// How much of a failed probe's message the host row keeps.
+const PROBE_ERROR_CHARS: usize = 200;
+
+/// The one write of a probe's outcome to its host row (`update_host_probe`
+/// and the reconcile burst both use it). `last_pinged_at` moves on every
+/// probe, failed ones too (down_hosts and the event diff rely on it);
+/// `last_reachable_at` moves only when the host answered, and the last probe
+/// error is set by a failed probe and cleared by an answered one (migration
+/// 150, review r13). A failed probe with no error to name keeps whatever
+/// error was recorded before.
+pub(super) fn write_host_probe(
+    conn: &rusqlite::Connection,
+    alias: &str,
+    reachable: bool,
+    claude_version: Option<&str>,
+    tmux_version: Option<&str>,
+    last_pinged_at: i64,
+    probe_error: Option<(&str, &str)>,
+) -> Result<usize, rusqlite::Error> {
+    let (code, message) = match probe_error {
+        Some((code, message)) => (
+            Some(code),
+            Some(message.chars().take(PROBE_ERROR_CHARS).collect::<String>()),
+        ),
+        None => (None, None),
+    };
+    conn.execute(
+        "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4, \
+             last_reachable_at = CASE WHEN ?1 = 1 THEN ?4 ELSE last_reachable_at END, \
+             last_probe_error_code = CASE WHEN ?1 = 1 THEN NULL \
+                 ELSE COALESCE(?6, last_probe_error_code) END, \
+             last_probe_error = CASE WHEN ?1 = 1 THEN NULL \
+                 WHEN ?6 IS NOT NULL THEN ?7 ELSE last_probe_error END \
+         WHERE alias=?5",
+        rusqlite::params![
+            if reachable { 1 } else { 0 },
+            claude_version,
+            tmux_version,
+            last_pinged_at,
+            alias,
+            code,
+            message,
+        ],
+    )
+}
+
 type KillMap = std::collections::HashMap<(String, String), i64>;
 
 /// The sessions fleet itself killed recently: `(host_alias, tmux_name)` →
@@ -262,6 +308,7 @@ impl Store {
         Ok(deleted)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_host_probe_in_tx(
         tx: &rusqlite::Connection,
         alias: &str,
@@ -269,20 +316,20 @@ impl Store {
         claude_version: Option<&str>,
         tmux_version: Option<&str>,
         last_pinged_at: i64,
+        probe_error: Option<(&str, &str)>,
         out: &mut Vec<RowChange>,
     ) -> Result<(), rusqlite::Error> {
         // Read before the write, so the emit below can tell a probe that found
         // something new from one that found the host exactly as it was.
         let prior = fetch_host(tx, alias)?;
-        tx.execute(
-            "UPDATE hosts SET reachable=?1, claude_version=?2, tmux_version=?3, last_pinged_at=?4 WHERE alias=?5",
-            rusqlite::params![
-                if reachable { 1 } else { 0 },
-                claude_version,
-                tmux_version,
-                last_pinged_at,
-                alias
-            ],
+        write_host_probe(
+            tx,
+            alias,
+            reachable,
+            claude_version,
+            tmux_version,
+            last_pinged_at,
+            probe_error,
         )?;
         if let Some(row) = fetch_host(tx, alias)? {
             // Reconcile probes every host every pass, and `last_pinged_at`
@@ -295,6 +342,9 @@ impl Store {
             let only_the_stamp_moved = prior.is_some_and(|before| {
                 HostRow {
                     last_pinged_at: row.last_pinged_at,
+                    // Moves with the ping while the host answers; the ping
+                    // handlers derive it from `reachable` (hosts.ts).
+                    last_reachable_at: row.last_reachable_at,
                     claude_version_at: row.claude_version_at,
                     disk_home_free_kb: row.disk_home_free_kb,
                     disk_home_total_kb: row.disk_home_total_kb,
@@ -928,6 +978,25 @@ impl Store {
         &self,
         spec: HostReconcile<'_>,
     ) -> Result<(), rusqlite::Error> {
+        self.apply_host_reconcile_with_error(spec, None)
+    }
+
+    /// [`Self::apply_host_reconcile`] for a probe that failed: `error`
+    /// (code, message) is kept on the host row as its last probe error
+    /// (migration 150) so the offline state can say why.
+    pub fn apply_host_reconcile_failed(
+        &mut self,
+        spec: HostReconcile<'_>,
+        error: (&str, &str),
+    ) -> Result<(), rusqlite::Error> {
+        self.apply_host_reconcile_with_error(spec, Some(error))
+    }
+
+    fn apply_host_reconcile_with_error(
+        &self,
+        spec: HostReconcile<'_>,
+        probe_error: Option<(&str, &str)>,
+    ) -> Result<(), rusqlite::Error> {
         // What this host's names were killed at (#171). Not a
         // check-then-insert window: the caller holds the one `Mutex<Store>`
         // for this whole call, and `mark_session_killed` — the only writer of
@@ -944,6 +1013,7 @@ impl Store {
                 spec.claude_version,
                 spec.tmux_version,
                 spec.last_pinged_at,
+                probe_error,
                 &mut out,
             )?;
             // Only a reachable probe rewrites the session set. An unreachable
@@ -1234,6 +1304,9 @@ mod tests {
             worktree_kb: None,
             worktree_at: None,
             agents_on_path: None,
+            last_reachable_at: None,
+            last_probe_error_code: None,
+            last_probe_error: None,
             harnesses: None,
         }
     }
@@ -1753,6 +1826,80 @@ mod tests {
         assert_eq!(revived.status, "running", "the resurrect still happens");
         assert_eq!(revived.owner_person_id, Some(ann));
         assert_eq!(revived.visibility, crate::store::VISIBILITY_PRIVATE);
+    }
+
+    #[test]
+    fn a_failed_probe_keeps_its_error_and_the_last_reachable_stamp() {
+        // Review r13: `last_pinged_at` moves on a failed probe (down_hosts
+        // and the event diff rely on it), so "last answered" needs its own
+        // stamp, and the offline state needs the reason.
+        let (mut store, bus) = store_with_recorder();
+        store.upsert_host("alpha").unwrap();
+        store
+            .apply_host_reconcile(empty_probe("alpha", 100))
+            .unwrap();
+        let up = store.get_host_row("alpha").unwrap().unwrap();
+        assert_eq!(up.last_reachable_at, Some(100));
+        assert_eq!(up.last_probe_error_code, None);
+
+        let down = || HostReconcile {
+            reachable: false,
+            ..empty_probe("alpha", 200)
+        };
+        bus.take();
+        store
+            .apply_host_reconcile_failed(down(), ("E_SSH_TIMEOUT", "ssh timed out"))
+            .unwrap();
+        let h = store.get_host_row("alpha").unwrap().unwrap();
+        assert!(!h.reachable);
+        assert_eq!(h.last_pinged_at, Some(200), "the ping still moves");
+        assert_eq!(h.last_reachable_at, Some(100), "last answered stays put");
+        assert_eq!(h.last_probe_error_code.as_deref(), Some("E_SSH_TIMEOUT"));
+        assert_eq!(h.last_probe_error.as_deref(), Some("ssh timed out"));
+        assert_eq!(bus.names(), vec!["host:probed"], "the error is news");
+
+        // The same failure again is only a ping.
+        bus.take();
+        store
+            .apply_host_reconcile_failed(
+                HostReconcile {
+                    last_pinged_at: 300,
+                    ..down()
+                },
+                ("E_SSH_TIMEOUT", "ssh timed out"),
+            )
+            .unwrap();
+        assert_eq!(bus.names(), vec!["host:pinged"]);
+
+        // A long message is cut short.
+        let long = "x".repeat(1000);
+        store
+            .apply_host_reconcile_failed(down(), ("E_SSH", &long))
+            .unwrap();
+        let h = store.get_host_row("alpha").unwrap().unwrap();
+        assert_eq!(
+            h.last_probe_error.unwrap().chars().count(),
+            PROBE_ERROR_CHARS
+        );
+
+        // The next answered probe clears the error and moves the stamp.
+        store
+            .apply_host_reconcile(empty_probe("alpha", 400))
+            .unwrap();
+        let h = store.get_host_row("alpha").unwrap().unwrap();
+        assert_eq!(h.last_reachable_at, Some(400));
+        assert_eq!(h.last_probe_error_code, None);
+        assert_eq!(h.last_probe_error, None);
+
+        // update_host_probe shares the write.
+        store
+            .update_host_probe("alpha", false, None, None, 500)
+            .unwrap();
+        let h = store.get_host_row("alpha").unwrap().unwrap();
+        assert_eq!(
+            (h.last_pinged_at, h.last_reachable_at),
+            (Some(500), Some(400))
+        );
     }
 
     #[test]

@@ -32,10 +32,22 @@ impl FleetTools {
         )?;
         let person = super::fleet::owner_for(&caller, &s);
         let device = caller.client.as_ref().map(|c| c.name.as_str());
+        let by_grant = caller
+            .view_scope(&s)
+            .map_err(to_mcp_err)?
+            .grants
+            .level(row.id)
+            .is_some();
+        let owner = presence::presence_owner(
+            row.owner_person_id,
+            row.visibility == crate::store::VISIBILITY_UNCLAIMED,
+            by_grant,
+            person,
+        );
         let view = presence::session_presence(
             &s,
             &self.presence,
-            row.owner_person_id,
+            owner,
             person,
             device,
             &args,

@@ -20,7 +20,6 @@
   import { get } from 'svelte/store';
   import ResumeButton from './ResumeButton.svelte';
   import Loader from './Loader.svelte';
-  import { uiLayout } from './prefs';
   import { proposedByLabel } from './ai_proposal';
   import {
     applyItems,
@@ -44,7 +43,6 @@
     TIDY_CHOICE_LABELS,
     KEEP_DAYS,
     tidyEvidence,
-    JEV_REASONS,
     type TidyApplyItem,
     type TidyCandidate,
     type TidyChoice,
@@ -64,12 +62,8 @@
 
   // The sidebar's scope (work graph M5) narrows the view, like every other
   // list: a candidate shows when its session is in the chosen scope.
-  // Jev's reasons (6.9, Tidy › Duplicates) are New-layout only.
-  const candidates = $derived(
-    inScope($tidyReport.candidates, $sessions, $effectiveScope, $scopeOf).filter(
-      (c) => $uiLayout === 'new' || !JEV_REASONS.has(c.reason),
-    ),
-  );
+  // Jev's reasons (6.9, Tidy › Duplicates) show with the rest.
+  const candidates = $derived(inScope($tidyReport.candidates, $sessions, $effectiveScope, $scopeOf));
   // A request from the Today view's Stale section (M10.4) narrows the sheet
   // to those sessions until "Show all"; the pill's own opening shows all.
   let only = $state<Set<number> | null>(null);
@@ -455,7 +449,7 @@
         {notMine === 1 ? 'it is' : 'they are'}. Tidying one is the owner's to do.
       </p>
     {/if}
-    {#if busy && $uiLayout === 'new'}
+    {#if busy}
       <!-- Redesign step 5.13: the safe kills check each worktree before it
            goes, so the scan gets the manual's Hex field over the list. -->
       <div class="tidy-scan" data-testid="tidy-scan">

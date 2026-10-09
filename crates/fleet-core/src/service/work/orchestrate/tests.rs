@@ -527,6 +527,23 @@ fn the_loop_holds_runs_on_an_account_over_the_line() {
         why.contains("profile work on mac") && why.contains("91%"),
         "{why}"
     );
+    // Review r01: another event in between does not start a new episode.
+    event(&s, fx.m.id, "card", "me", None, serde_json::json!({}));
+    let mut steps = vec![run.clone()];
+    hold_runs_over_limit(&s, &fx.m, Some(&g), &mut steps, now).unwrap();
+    assert_eq!(limit_events(&s), 1, "one held episode, said once");
+    // A run that went ends the episode: the next hold is said again.
+    event(
+        &s,
+        fx.m.id,
+        "step",
+        "loop",
+        Some(item),
+        serde_json::json!({ "step": "run" }),
+    );
+    let mut steps = vec![run.clone()];
+    hold_runs_over_limit(&s, &fx.m, Some(&g), &mut steps, now).unwrap();
+    assert_eq!(limit_events(&s), 2, "a new episode");
     // Under the line again: the run goes.
     crate::service::account_limits::seed_usage(&s, "mac", Some("work"), "work", 30.0, now);
     let mut steps = vec![run.clone()];
@@ -668,4 +685,33 @@ fn a_mission_lists_its_spend_and_estimates_a_run_from_finished_ones() {
     // A plain store read leaves both out of the wire.
     let raw = serde_json::to_value(mission_now(&fx)).unwrap();
     assert!(raw.get("cost_micros").is_none(), "{raw}");
+}
+
+/// Review r01: two planner runs in one second card their answers apart (the
+/// ids do not collide), and a mission has one planner call at a time.
+#[test]
+fn two_planner_runs_in_one_second_keep_both_answers_and_run_one_at_a_time() {
+    let fx = fixture();
+    let item = member(&fx, "a");
+    let cmds = vec![Command::Run {
+        item_id: item,
+        role: None,
+    }];
+    let first = card_commands(&fx.deps, &fx.m, &cmds, 1_000).unwrap();
+    let second = card_commands(&fx.deps, &fx.m, &cmds, 1_000).unwrap();
+    assert_eq!(
+        (first.len(), second.len()),
+        (1, 1),
+        "neither run's card is dropped"
+    );
+    assert_ne!(first[0].decision_id, second[0].decision_id);
+
+    let slot = PlannerSlot::take(&fx.m).unwrap();
+    assert_eq!(
+        PlannerSlot::take(&fx.m).err().map(|e| e.code),
+        Some(codes::E_EXISTS.to_string()),
+        "a second call waits for the first"
+    );
+    drop(slot);
+    assert!(PlannerSlot::take(&fx.m).is_ok(), "the slot is given back");
 }

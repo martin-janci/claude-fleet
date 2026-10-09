@@ -13,7 +13,7 @@
   // `mcp_confirm` to anything less trusted than this window.
   //
   // The queue is shared with Control's confirm cards (redesign step 9.2,
-  // `confirms.ts`): in the New layout the operator's own requests are
+  // `confirms.ts`): the operator's own requests are
   // answered as cards in its transcript while one is on screen, and this
   // dialog shows everything else.
   import { onMount } from 'svelte';

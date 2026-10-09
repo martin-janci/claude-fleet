@@ -11,13 +11,12 @@
 
   The gating is the backend's: a J1 answer becomes a suggestion only in
   assist mode (`service/decide/work_link.rs`); shadow records it and writes
-  no link, so nothing shows here. New layout only, like the row's ✦.
+  no link, so nothing shows here.
 -->
 <script lang="ts">
   import ProposedBy from './ProposedBy.svelte';
   import WorkChip from './WorkChip.svelte';
   import Button from './kit/Button.svelte';
-  import { uiLayout } from './prefs';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
   import { sessionBlocked } from './share';
@@ -37,10 +36,10 @@
   let { session }: { session: SessionRow } = $props();
 
   const suggestion = $derived(
-    $uiLayout === 'new' && session.work_suggested?.rule === JEV_RULE ? session.work_suggested : null,
+    session.work_suggested?.rule === JEV_RULE ? session.work_suggested : null,
   );
   const linked = $derived(
-    $uiLayout === 'new' && !suggestion && session.work?.rule === JEV_RULE && (session.work.state ?? 'confirmed') === 'confirmed'
+    !suggestion && session.work?.rule === JEV_RULE && (session.work.state ?? 'confirmed') === 'confirmed'
       ? session.work
       : null,
   );

@@ -34,7 +34,7 @@
     refreshComposerPresetsIfIdle,
     presetsConflict,
   } from './composer_presets';
-  import { copyOnSelect, uiLayout } from './prefs';
+  import { copyOnSelect } from './prefs';
   import { startTour } from './tour';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
@@ -782,21 +782,19 @@
           Replay setup guide
         </button>
       </div>
-      {#if $uiLayout === 'new'}
-        <div class="hook-section">
-          <p class="hook-desc">Walk through the main parts of the window again, six short steps.</p>
-          <button
-            class="hook-btn"
-            data-testid="settings-take-tour"
-            onclick={() => {
-              settingsOpen.set(false);
-              startTour();
-            }}
-          >
-            Take the tour
-          </button>
-        </div>
-      {/if}
+      <div class="hook-section">
+        <p class="hook-desc">Walk through the main parts of the window again, six short steps.</p>
+        <button
+          class="hook-btn"
+          data-testid="settings-take-tour"
+          onclick={() => {
+            settingsOpen.set(false);
+            startTour();
+          }}
+        >
+          Take the tour
+        </button>
+      </div>
       <div class="hook-section">
         <p class="hook-desc">Show inline tips the first time a feature is used.</p>
         <label class="toggle">

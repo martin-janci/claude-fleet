@@ -7,7 +7,7 @@
      allow, a step hard to undo), so Approve on a push or a permission is
      never the highlighted one.
      Redesign 5.9 makes it the one approval card: `AnswerPrompt` draws every
-     agent dialog through it in the New layout, in the Conversation and, as
+     agent dialog through it, in the Conversation and, as
      `compact`, on a session row. -->
 <script lang="ts">
   import type { Snippet } from 'svelte';

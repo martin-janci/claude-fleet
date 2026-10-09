@@ -17,7 +17,6 @@ import { hubConnection } from './hub_connection';
 import { applyGrantChanges, resetAccessForTests, setMyGrants } from './access';
 import { session as fixtureSession } from './hosts_fixture';
 import { expectAccessible } from './a11y_check';
-import { uiLayout } from './prefs';
 
 /** A desktop paired with a hub whose live link is down: every routed
  *  mutation (tidy_apply, dismiss_reopened) is blocked with a reason. */
@@ -104,36 +103,22 @@ describe('TidyReview', () => {
       ] as SessionRow[]);
     };
 
-    it('groups it in the New layout, names the kept session, marks Jev, never ticks it', async () => {
-      uiLayout.set('new');
-      try {
-        pair();
-        await mount();
-        await fireEvent.click(await screen.findByTestId('tidy-pill'));
-        await tick();
-        expect(screen.getAllByTestId('tidy-group').map((g) => g.textContent)).toEqual([
-          'Done and idle · 1',
-          'Same work as another session · 1',
-        ]);
-        expect(screen.getByTestId('tidy-same-work')).toHaveTextContent('same work as payments retry');
-        expect(screen.getByTestId('tidy-same-work-by')).toHaveTextContent('Proposed by Jev');
-        const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
-        expect(checks.map((c) => c.checked)).toEqual([true, false]);
-        expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
-      } finally {
-        uiLayout.set('classic');
-      }
-    });
-
-    it('is not shown in the classic layout', async () => {
-      uiLayout.set('classic');
+    it('groups it, names the kept session, marks Jev, never ticks it', async () => {
       pair();
       await mount();
-      expect(await screen.findByTestId('tidy-pill')).toHaveTextContent('1 to tidy');
-      await fireEvent.click(screen.getByTestId('tidy-pill'));
+      await fireEvent.click(await screen.findByTestId('tidy-pill'));
       await tick();
-      expect(screen.queryByTestId('tidy-same-work')).toBeNull();
+      expect(screen.getAllByTestId('tidy-group').map((g) => g.textContent)).toEqual([
+        'Done and idle · 1',
+        'Same work as another session · 1',
+      ]);
+      expect(screen.getByTestId('tidy-same-work')).toHaveTextContent('same work as payments retry');
+      expect(screen.getByTestId('tidy-same-work-by')).toHaveTextContent('Proposed by Jev');
+      const checks = screen.getAllByTestId('tidy-check') as HTMLInputElement[];
+      expect(checks.map((c) => c.checked)).toEqual([true, false]);
+      expect(screen.getByTestId('tidy-apply')).toHaveTextContent('Tidy 1');
     });
+
   });
 
   it('clicking a row shows only that session; its checkbox does not; Cancel lifts it', async () => {

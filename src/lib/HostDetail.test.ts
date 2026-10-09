@@ -36,7 +36,6 @@ import { hostFilter, setHostHarnesses } from './hosts';
 import { onHostsCloseRequested } from './app_views';
 import { lostTarget, placeTranscript } from './lost_found';
 import { projects } from './projects';
-import { uiLayout } from './prefs';
 import {
   adoptSession,
   restoreHostSessions,
@@ -583,11 +582,12 @@ describe('HostDetail find lost conversations', () => {
     expect(list.textContent).toContain('before reboot');
     expect(list.textContent).toContain('proj-a');
     expect(list.textContent).toContain('already in fleet');
-    expect(list.textContent).toContain('no fleet project for this path');
+    // The one with no project is restored into one (4.12).
+    expect(screen.getAllByTestId('discover-restore-into')).toHaveLength(1);
     expect(screen.getAllByTestId('discover-resume')).toHaveLength(1);
   });
 
-  it('a candidate in a project but not at a resumable path has no Resume and says why', async () => {
+  it('a candidate in a project but not at a resumable path has no Resume, only Restore into', async () => {
     const subdir = candidate({
       cwd: '/work/a/src',
       claude_session_id: 'cs-sub',
@@ -600,9 +600,7 @@ describe('HostDetail find lost conversations', () => {
     await fireEvent.click(screen.getByTestId('discover-lost'));
     await tick();
 
-    const list = screen.getByTestId('discover-list');
-    expect(list.textContent).toContain('path is not a fleet worktree');
-    expect(list.textContent).not.toContain('no fleet project for this path');
+    expect(screen.getByTestId('discover-restore-into')).toBeTruthy();
     expect(screen.queryByTestId('discover-resume')).toBeNull();
   });
 
@@ -617,7 +615,7 @@ describe('HostDetail find lost conversations', () => {
     await tick();
 
     expect(screen.queryByTestId('discover-resume')).toBeNull();
-    expect(screen.getByTestId('discover-list').textContent).toContain('path is not a fleet worktree');
+    expect(screen.getByTestId('discover-restore-into')).toBeTruthy();
   });
 
   it('Resume calls newSessionAbortable with the exact args, including resume_claude_session_id', async () => {
@@ -762,6 +760,23 @@ describe('an offline host (states kit, step 10.6)', () => {
     expect(document.activeElement).toBe(rows[0]);
   });
 
+  it('says why the last probe failed and when the host last answered', () => {
+    mount('mercury', {
+      host: host('mercury', {
+        reachable: false,
+        last_pinged_at: NOW - 5,
+        last_reachable_at: NOW - 600,
+        last_probe_error: 'SSH timed out after 10 s',
+        last_probe_error_code: 'E_SSH_TIMEOUT',
+      }),
+      now: NOW,
+    });
+    const off = screen.getByTestId('host-offline-state');
+    expect(off.textContent).toContain('last answered 10 m ago');
+    expect(off.textContent).toContain('SSH timed out after 10 s');
+    expect(screen.getByTestId('host-offline-code').textContent).toBe('E_SSH_TIMEOUT');
+  });
+
   it('a reachable host shows no offline state', () => {
     mount('mercury', { host: host('mercury', { reachable: true }) });
     expect(screen.queryByTestId('host-offline-state')).toBeNull();
@@ -789,22 +804,13 @@ describe('HostDetail Lost and found with proposals (4.12)', () => {
     mockedDiscover.mockReset();
     mockedNewSession.mockReset();
     projects.set([{ project: papaya, worktrees: [] }]);
-    uiLayout.set('new');
   });
-  afterEach(() => uiLayout.set('classic'));
 
   function withScratch() {
     const scratch = session('mefistos', 'fleet-trn-scratch', { started_at: null, created_at: NOW - 7200 });
     const ours = session('mefistos', 'dev-acme-papaya-pos', { started_at: NOW - 60 });
     return { scratch, hostSessions: [scratch, ours] };
   }
-
-  it('the classic layout lists no panes outside fleet', () => {
-    uiLayout.set('classic');
-    const { hostSessions } = withScratch();
-    mount('mefistos', { hostSessions });
-    expect(screen.queryByTestId('outside-panes')).toBeNull();
-  });
 
   it('lists a pane fleet did not start, and Adopt asks to confirm the prefilled project', async () => {
     const { scratch, hostSessions } = withScratch();
@@ -869,16 +875,4 @@ describe('HostDetail Lost and found with proposals (4.12)', () => {
     expect(screen.getByTestId('discover-list').textContent).toContain('resumed');
   });
 
-  it('the classic layout keeps the old words for a conversation it cannot resume', async () => {
-    uiLayout.set('classic');
-    mockedDiscover.mockResolvedValueOnce({
-      ok: true,
-      value: [candidate({ project_id: null, resumable: false, derived_tmux_name: null })],
-    });
-    mount('mefistos');
-    await fireEvent.click(screen.getByTestId('discover-lost'));
-    await tick();
-    expect(screen.queryByTestId('discover-restore-into')).toBeNull();
-    expect(screen.getByTestId('discover-list').textContent).toContain('no fleet project for this path');
-  });
 });

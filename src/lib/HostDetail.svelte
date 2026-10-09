@@ -48,7 +48,6 @@
   import { inventory } from './assets';
   import { provisionHost } from './mcp';
   import { CHECK_GLYPH, checklistLoaderText, checklistRows, hostChecks, needsReprovision, runHostCheck } from './host_check';
-  import { uiLayout } from './prefs';
   import Loader from './Loader.svelte';
   import AgentInstallAction from './AgentInstallAction.svelte';
   import LostTargetForm from './LostTargetForm.svelte';
@@ -124,7 +123,7 @@
   const provisionBlocked = $derived(hubBlock('provision_hosts', $hubStatus));
   const reprovisionAdvised = $derived(needsReprovision(checklist, host));
   // Orbit Fleet 4.13: the Hex field beside what is running, Layout: New only.
-  const liveText = $derived($uiLayout === 'new' ? checklistLoaderText(host.alias, checking, provisioning) : null);
+  const liveText = $derived(checklistLoaderText(host.alias, checking, provisioning));
 
   async function runChecks() {
     if (checkBlocked !== null || checking) return;
@@ -340,9 +339,7 @@
   // by hand is adopted into a project; a found conversation that cannot
   // resume where it ran is restored into one. Both forms are prefilled
   // (LostTargetForm) and both confirm.
-  // The new layout's: the classic one keeps its words unchanged.
-  const lostAndFound = $derived($uiLayout === 'new');
-  const outsidePanes = $derived(lostAndFound ? hostSessions.filter(isOutsideFleet) : []);
+  const outsidePanes = $derived(hostSessions.filter(isOutsideFleet));
   let adoptingId = $state<number | null>(null);
   let restoringId = $state<string | null>(null);
   const adoptHubBlocked = $derived(hubActionBlocked('adopt_session', $hubStatus, $hubConnection));
@@ -538,12 +535,14 @@
     </div>
     {#if !host.reachable && !isLocal}
       <!-- The states kit: an offline host is said here, in its own pane.
-           "Last answered" is the last health sample, written only when the
-           host answered: `last_pinged_at` moves on a failed probe too
-           (review r13). -->
+           "Last answered" is `last_reachable_at` (or, from an older hub, the
+           last health sample): `last_pinged_at` moves on a failed probe too
+           (review r13). The reason is the last probe's error. -->
       <HostOffline
         alias={host.alias}
-        lastSeen={host.health_at ?? null}
+        lastSeen={host.last_reachable_at ?? host.health_at ?? null}
+        reason={host.last_probe_error ?? null}
+        code={host.last_probe_error_code ?? null}
         {now}
         sessions={hostSessions.length}
         paused={hostSessions.map(sessionName)}
@@ -754,7 +753,7 @@
                   {#if resumeErrors[c.claude_session_id]}
                     <p class="error" data-testid="discover-item-error">{resumeErrors[c.claude_session_id]}</p>
                   {/if}
-                {:else if lostAndFound && needsRestoreInto(c)}
+                {:else if needsRestoreInto(c)}
                   {#if restoringId === c.claude_session_id}
                     <LostTargetForm
                       action="Restore"
@@ -779,10 +778,6 @@
                       onclick={() => (restoringId = c.claude_session_id)}>Restore into…</button
                     >
                   {/if}
-                {:else if c.project_id !== null}
-                  <span class="muted" title="Resume starts Claude in the project root or a registered worktree; this conversation ran elsewhere, so resuming would start a new, empty one">path is not a fleet worktree</span>
-                {:else}
-                  <span class="muted">no fleet project for this path</span>
                 {/if}
               </li>
             {/each}

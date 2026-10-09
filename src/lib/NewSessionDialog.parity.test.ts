@@ -1,5 +1,5 @@
 // Redesign step 4.5, "Verified by": every 0.5.4 option of the New session
-// dialog is still present, in both layouts. The list below is 0.5.4's
+// dialog is still present. The list below is 0.5.4's
 // NewSessionDialog.svelte (v0.5.4), field by field and option by option: the
 // name and its re-roll, the type (Claude / Shell), Model, Effort and Login
 // profile with their choices, the shell's start command, the host chips, the
@@ -7,7 +7,7 @@
 // the cwd preview, Cancel and Create. The redesign may add (the agent
 // picker, the account picker, Run: in background); it may not take away.
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { tick } from 'svelte';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => null) }));
@@ -16,7 +16,6 @@ import NewSessionDialog from './NewSessionDialog.svelte';
 import { hosts } from './hosts';
 import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
-import { uiLayout } from './prefs';
 import { MODEL_OPTIONS, LAUNCH_EFFORT_OPTIONS } from './conversation';
 
 const project = {
@@ -36,7 +35,6 @@ beforeEach(() => {
   ] as never);
   localStorage.clear();
 });
-afterEach(() => uiLayout.set('classic'));
 
 const options = (id: string) => Array.from((screen.getByTestId(id) as HTMLSelectElement).options).map((o) => o.value);
 
@@ -96,12 +94,9 @@ const PARITY_054 = [
 ];
 
 describe('New session: every 0.5.4 option is still present (step 4.5)', () => {
-  for (const layout of ['classic', 'new'] as const) {
-    it(`${layout} layout`, async () => {
-      uiLayout.set(layout);
-      render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
-      await tick();
-      expect(await walkParityList()).toEqual(PARITY_054);
-    });
-  }
+  it('walks the 0.5.4 list', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await tick();
+    expect(await walkParityList()).toEqual(PARITY_054);
+  });
 });

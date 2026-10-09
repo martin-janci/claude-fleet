@@ -14,7 +14,7 @@
   } from './files';
   import { repoLog, repoCommit, repoBranches, repoCheckout, repoCheckoutCommit, repoCreateBranch, repoDeleteBranch, repoDeleteMergedBranches, repoStage, repoUnstage, repoCommitCreate, draftCommitMessage, type Commit, type CommitDetail, type Branch } from './history';
   import type { Result } from './result';
-  import { readPref, writePref, uiLayout } from './prefs';
+  import { readPref, writePref } from './prefs';
   import { openPathRequest } from './app_views';
   import FileList from './FileList.svelte';
   import FileViewer from './FileViewer.svelte';
@@ -52,10 +52,9 @@
   // When set, the body shows a calm placeholder instead of raw git errors.
   let worktreeGone = $state(false);
   let selectedPath = $state<string | null>(null);
-  // The new layout's committed groups under Changed (redesign step 5.6) and
-  // the group the selected row came from; null for a worktree row. A hub
-  // or build without `repo_branch_diff` leaves `branch` null: the classic
-  // flat list, nothing lost.
+  // The committed groups under Changed (redesign step 5.6) and the group the
+  // selected row came from; null for a worktree row. A hub or build without
+  // `repo_branch_diff` leaves `branch` null: the flat list, nothing lost.
   let branch = $state<BranchDiff | null>(null);
   let selectedRange = $state<DiffRange | null>(null);
   // Line to show for a path opened from the Conversation tab; cleared as
@@ -157,7 +156,7 @@
     loading = false;
     if (r.ok) changes = r.value;
     else applyFailure(r);
-    if (r.ok && $uiLayout === 'new') void loadBranch(sid);
+    if (r.ok) void loadBranch(sid);
   }
 
   async function loadBranch(sid: number): Promise<void> {
@@ -484,13 +483,13 @@
             enableStaging={true}
             onStageToggle={stageToggle}
             onCommit={commitStaged}
-            draftCommit={$uiLayout === 'new' ? () => draftCommitMessage(session.id) : undefined}
+            draftCommit={() => draftCommitMessage(session.id)}
             {writeBlocked}
-            branch={mode === 'changes' && $uiLayout === 'new' ? branch : null}
+            branch={mode === 'changes' ? branch : null}
             {selectedRange}
             {onSelectRange}
           />
-          {#if mode === 'changes' && branch && $uiLayout === 'new'}
+          {#if mode === 'changes' && branch}
             <BranchPushBar {session} {branch} ondone={onRefresh} {writeBlocked} />
           {/if}
         {/if}

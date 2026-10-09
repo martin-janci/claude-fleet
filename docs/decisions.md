@@ -661,7 +661,7 @@ one Choice over them (or `unsure`). One host left, or none, asks nothing.
 - **Shadow.** Asked off the dialog's path and only recorded, with the first
   candidate (`local` first, then by alias) as the baseline.
 - **Assist.** The dialog waits for the one call and pre-selects the host with
-  *Proposed by Jev (N%)* (New layout). You still press Create; picking
+  *Proposed by Jev (N%)*. You still press Create; picking
   another host is yours. A host over its limit or offline is never proposed.
 - **Asked once per input.** Re-opening the dialog on the same numbers reuses
   the decided run for 7 days.
@@ -689,7 +689,7 @@ none, nothing is asked. A proposal accepted at once (a planner card with
 - **Shadow.** Asked off the proposing call's path and only recorded, with
   `none` as the baseline (today nothing flags a duplicate).
 - **Assist.** A usable answer (at least 50%, not `none`) stays on the
-  proposal as its `duplicate` proposal: in the New layout the proposal's
+  proposal as its `duplicate` proposal: the proposal's
   card on the task page shows *May duplicate KEY · Proposed by Jev · N%*
   with **Merge** (reject the proposal; the existing task covers it) and
   **Keep both** (accept it). Nothing is rejected or accepted by itself.
@@ -722,8 +722,8 @@ nothing is asked. A subtask sits under its parent and is never asked about.
   `none` as the baseline (today such a task sits in no group of a person's).
 - **Assist.** A usable answer (at least 50%, a group) stays on the task as
   its `work_placement` proposal. The Work view reads it back with the
-  label (a proposal whose group is no longer in use is dropped), and in the
-  New layout the task's Group line shows *Jev proposes “X” · Proposed by
+  label (a proposal whose group is no longer in use is dropped), and the
+  task's Group line shows *Jev proposes “X” · Proposed by
   Jev · N%* with **Place in X**. Jev never places a task and never writes a
   rule.
 - **Asked once.** A decided run about the same task and input is never
@@ -752,10 +752,10 @@ is asked.
 - **Shadow.** Asked off the hook's path and only recorded, with `none` as
   the baseline (nothing notices this today).
 - **Assist.** A usable answer (at least 50%, a session) stays on the row as
-  its `related_session` proposal: in the New layout, its Details list the
+  its `related_session` proposal: its Details list the
   other session under Related sessions as *Same work? · Proposed by Jev ·
   N%*. Nothing is stopped, merged or moved.
-- **Tidy › Duplicates** (New layout). Of a running pair the proposal ties
+- **Tidy › Duplicates**. Of a running pair the proposal ties
   together, the less recently used session, once idle for
   `work.tidy_idle_hours`, is a Tidy-up candidate with the reason
   `same_work`: *Same work as another session*, naming the one kept, marked
@@ -844,7 +844,7 @@ redesign's transition plan.
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
-<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
+<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `decide.jev.enabled` | `false` | on / off | The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted. Experimental. Asks to confirm. |

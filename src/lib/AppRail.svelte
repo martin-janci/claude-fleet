@@ -1,5 +1,5 @@
 <!--
-  The New layout's rail (Orbit Fleet redesign step 3.2), drawn by the kit's
+  The rail (Orbit Fleet redesign step 3.2), drawn by the kit's
   Rail (design manual: Rail). The order and which items show live in
   `rail.ts`; this file names the current one, the titles with their
   shortcuts, and the Inbox's Needs you count. The shortcuts themselves stay
@@ -13,6 +13,7 @@
   import { shortcutLabel } from './shortcuts';
   import { inboxCount } from './inbox';
   import Rail from './kit/Rail.svelte';
+  import { hintAnchor } from './hints';
 
   interface Props {
     isMac: boolean;
@@ -42,9 +43,16 @@
       bottom: item.id === 'settings',
     })),
   );
+
+  // The agent hint anchors on Control, where the floating button used to be
+  // (13.1). The kit's Rail draws the link, so the anchor is found in it.
+  function controlHint(host: HTMLElement) {
+    const el = host.querySelector<HTMLElement>('[data-rail="control"]');
+    return el ? hintAnchor(el, { id: 'agent-fab' }) : undefined;
+  }
 </script>
 
-<div class="rail-host">
+<div class="rail-host" use:controlHint>
   <Rail items={entries} current={current ?? undefined} onselect={(id) => onselect(id as RailId)} testid="rail" />
 </div>
 

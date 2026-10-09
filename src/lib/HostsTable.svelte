@@ -29,6 +29,7 @@
     now,
     idleSecs,
     tableEl = $bindable(),
+    emptyText = null,
     onselect,
     onopen,
   }: {
@@ -42,6 +43,9 @@
     now: number;
     idleSecs: number;
     tableEl?: HTMLElement;
+    /** What the empty table says instead of "No hosts yet" (a hub contract
+     *  skew: the list never arrived). */
+    emptyText?: string | null;
     onselect: (alias: string) => void;
     onopen: (alias: string) => void;
   } = $props();
@@ -139,7 +143,7 @@
       </span>
     </div>
   {:else}
-    <p class="empty" data-testid="hosts-table-empty">No hosts yet — add one.</p>
+    <p class="empty" data-testid="hosts-table-empty">{emptyText ?? 'No hosts yet — add one.'}</p>
   {/each}
 </div>
 

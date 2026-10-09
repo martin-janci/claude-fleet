@@ -640,7 +640,7 @@ async fn rewind_conversation_with(
         };
         // A fork opens on the source's model / effort, as recreate, repair
         // and move do; a rewind keeps them through `restart_session`.
-        let launch = crate::service::sessions::stored_launch(&s, sess.id);
+        let launch = crate::service::sessions::stored_launch(&s, sess.id)?;
         (
             sess,
             claude_id,
