@@ -8,6 +8,7 @@
 import { writable, get } from 'svelte/store';
 import { listen } from '@tauri-apps/api/event';
 import { invokeCmd, type Result } from './result';
+import { subscribeToRowEvents } from './events';
 
 /** Mirror of `self_update::DesktopUpdate`. */
 export interface DesktopUpdate {
@@ -119,6 +120,19 @@ export function startUpdateChecks(firstDelayMs = 15_000): () => void {
   const unlisten = listen<{ downloaded: number; total: number | null }>('update:progress', (e) =>
     updateProgress.set(e.payload),
   );
+  // The hub says a decision moved (a pin, a new channel, a policy): ask now
+  // rather than at the next interval. Which target it was does not matter:
+  // a check is cheap, and this window does not know its own client id.
+  let nudged: ReturnType<typeof setTimeout> | null = null;
+  const unsubscribe = subscribeToRowEvents({
+    onUpdateDecision: () => {
+      if (nudged || stopped) return;
+      nudged = setTimeout(() => {
+        nudged = null;
+        void checkForUpdate();
+      }, 2_000);
+    },
+  }).catch(() => null);
   const run = async () => {
     if (stopped) return;
     const r = await checkForUpdate();
@@ -133,6 +147,8 @@ export function startUpdateChecks(firstDelayMs = 15_000): () => void {
   return () => {
     stopped = true;
     if (timer) clearTimeout(timer);
+    if (nudged) clearTimeout(nudged);
     void unlisten.then((f) => f());
+    void unsubscribe.then((u) => (typeof u === 'function' ? u() : undefined));
   };
 }

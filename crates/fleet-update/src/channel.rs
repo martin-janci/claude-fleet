@@ -269,8 +269,38 @@ pub struct Manifests {
     pub raw: BTreeMap<Version, RawDoc>,
 }
 
-/// Fetch and verify the manifests of `versions` the channel lists. One that
-/// fails to fetch or verify is left out.
+/// The amendments the channel lists for `version` (design §4), fetched and
+/// verified: one that fails either is left out (its component is then simply
+/// not offered).
+pub async fn fetch_amendments<F: Fetch + ?Sized>(
+    fetch: &F,
+    channel: &VerifiedChannel,
+    version: &Version,
+    keys: &TrustedKeys,
+) -> Vec<(
+    crate::channel_doc::AmendmentRef,
+    RawDoc,
+    crate::manifest::Amendment,
+)> {
+    let mut out = Vec::new();
+    let Some(listed) = channel.doc.release(version) else {
+        return out;
+    };
+    for a in &listed.amendments {
+        let Ok(raw) = fetch_raw(fetch, &a.manifest).await else {
+            continue;
+        };
+        if let Some(am) =
+            crate::verify::verify_amendment(raw.body.as_bytes(), &raw.sig, keys, a, version)
+        {
+            out.push((a.clone(), raw, am));
+        }
+    }
+    out
+}
+
+/// Fetch and verify the manifests of `versions` the channel lists, with
+/// their amendments folded in. One that fails to fetch or verify is left out.
 pub async fn fetch_manifests<F: Fetch + ?Sized>(
     fetch: &F,
     channel: &VerifiedChannel,
@@ -285,7 +315,10 @@ pub async fn fetch_manifests<F: Fetch + ?Sized>(
         let Ok(raw) = fetch_raw(fetch, &listed.manifest).await else {
             continue;
         };
-        if let Some(m) = verify_listed_manifest(&raw, listed, keys) {
+        if let Some(mut m) = verify_listed_manifest(&raw, listed, keys) {
+            for (_, _, a) in fetch_amendments(fetch, channel, &v, keys).await {
+                m.amend(&a);
+            }
             out.verified.insert(v.clone(), m);
             out.raw.insert(v, raw);
         }

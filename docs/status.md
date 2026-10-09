@@ -645,14 +645,18 @@ against `keys.rs` before it leaves the runner
 (`scripts/release-update-scripts-test.sh`, CI hub-headless). See
 `docs/RELEASING.md` → *Update manifest and channels*.
 
-**Half of S4b is landed:** `X-Fleet-Client` (`fleet_update::client_header`)
+**S4b is landed** (rollouts aside, which are S9): `X-Fleet-Client` (`fleet_update::client_header`)
 recorded into `update_observed` on `last_seen_at`'s once-a-minute beat in
 `authorize`; the `update:changed` row event (kind `update`, ids only, in
 `HOST_BOUND_HIDDEN_KINDS`); `fleet_health.updates` (`service::update::health`:
 `update_required`, `update_failed`, `update_rolled_back`, `rollback_failed`,
 `channel_stale`); and `update_status { target }`, the design's
-`update_check_for`. Left: the per-target `update:decision` push, hub-e2e
-section U, rollouts (S9).
+`update_check_for`; `update:decision` on `/events`
+(`service::update::push_decisions`, woken by a pin, a refreshed channel or an
+`update.*` setting; the desktop checks again on it); and hub-e2e section U (an
+`e2e` hub fetches a channel signed by a throwaway key from a fake GitHub
+through `FLEET_E2E_UPDATE_PORT`, and a paired desktop is told
+`update_available`, `update_required` and `client_too_new`).
 
 **S6 is landed, opt-in:** `crates/fleet-updater` (image
 `ghcr.io/martin-janci/fleet-updater`, built beside the hub's by
@@ -671,8 +675,8 @@ rollback. It keeps the previous build's config and image id in its state
 file instead of a renamed `-prev` container, so compose never sees two
 containers for one service. `scripts/updater-e2e.sh` (CI hub-headless,
 `ci-local.sh --updater-e2e`) runs it against a real Docker daemon. Not
-built: the `/events` push that would wake it early (S4b), its own
-self-update.
+built: its own self-update (its token does not reach `/events`, so it
+keeps to its interval).
 
 **S7 is landed:** the desktop updates itself (`src-tauri/src/self_update.rs`,
 `update_check` / `update_install`, both `SameInBoth`; `src/lib/updates.ts`,
@@ -701,8 +705,8 @@ since a3033c2 / #384 (v0.4.1); the secret half is only the
 `RELEASE_SIGNING_KEY` repository secret and the owner's backup. The first
 channel was published with v0.4.1 (2026-09-28); `stable` / `beta` list every
 release since. `FLEET_UPDATE_E2E_KEYS`
-(read by `e2e` builds only) is reserved for S4b's hub-e2e section U;
-nothing uses it yet. **S2b is landed:** `nightly.yml` cuts a nightly of
+(read by `e2e` builds only) is what hub-e2e section U and
+`scripts/updater-e2e.sh` sign with. **S2b is landed:** `nightly.yml` cuts a nightly of
 a green `main` commit (`scripts/cut-nightly.sh`: scripts/release.sh's own
 commit on top of it, never pushed to a branch, only its tag) and dispatches
 the same `release.yml` / `hub-image.yml` at it — per push at most every two
@@ -710,7 +714,7 @@ hours `X.Y.Z-dev.N.g<sha>` (hub and tarballs; `release-assets.sh
 has-desktop` is false), once a day `X.Y.Z-dev.N.desktop.g<sha>` with the
 desktop bundles (owner's §13.3 answer). `update.track` offers `nightly`;
 Git mode scans past releases without the caller's artifact, and the hub
-keeps 20 manifests. Pruned to the newest 12 + 3. The rest of S4b, S8 and S9
+keeps 20 manifests. Pruned to the newest 12 + 3. S8 and S9
 are not built; §13 question 7 waits on the owner (2 is answered: a signed
 amendment).
 

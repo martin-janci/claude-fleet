@@ -1100,3 +1100,157 @@ async fn a_clients_header_records_its_build_and_keeps_its_own_reports() {
     assert!(s.update_observed("agent:h1").unwrap().is_none());
     assert!(s.update_observed("operator").unwrap().is_none());
 }
+
+/// S4b: `update:decision` is pushed when, and only when, what a target would
+/// be told moves — a pin here.
+#[tokio::test]
+async fn a_moved_decision_is_pushed_once() {
+    let bus = Arc::new(crate::events::RecordingEventBus::new());
+    let store = Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+    let key = TestKey::new(9);
+    let fetch = MapFetch::default();
+    publish(&fetch, &key, 10);
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    let id = lock(&store)
+        .unwrap()
+        .insert_client_token("decision-push-desk", "sha-decision-push", "full")
+        .unwrap()
+        .id;
+    let c = client(id, TokenMode::Full, None);
+    check(&store, &c, &desktop_req("0.3.3"), &keys(&key), NOW).unwrap();
+    let target = format!("client:{id}");
+    // The PUSHED cache is process-wide; start this target from nothing.
+    super::PUSHED.lock().unwrap().remove(&target);
+    bus.take();
+    // First sight records, pushes nothing: the client was just told.
+    assert!(!push_decisions(&store, &keys(&key), NOW).contains(&target));
+    assert!(bus.take().is_empty());
+    // The operator holds it on what it runs: the decision moves.
+    pin(&store, "desktop", &target, "0.3.3", false, None, NOW).unwrap();
+    bus.take();
+    assert!(push_decisions(&store, &keys(&key), NOW).contains(&target));
+    assert_eq!(
+        bus.take(),
+        vec![format!("update:decision:{target}:up_to_date")]
+    );
+    // Nothing moved since: silent.
+    assert!(!push_decisions(&store, &keys(&key), NOW).contains(&target));
+    assert!(bus.take().is_empty());
+}
+
+/// Design §4 / §13.2: the phone's APK arrives after its release as a signed
+/// amendment. Until it is listed, a phone is offered nothing for that
+/// release; once listed, the hub fetches it, verifies it on every read, and
+/// folds it into the release's manifest. One the release key did not sign
+/// folds nothing.
+#[tokio::test]
+async fn the_phones_apk_arrives_as_a_signed_amendment() {
+    let key = TestKey::new(9);
+    let c = crate::wire_contract::CONTRACT_REVISION;
+    let fetch = MapFetch::default();
+    // 0.3.4 without the phone (its release has not run yet).
+    let mut releases = Vec::new();
+    for v in ["0.3.3", "0.3.4"] {
+        let mut m: serde_json::Value =
+            serde_json::from_str(&manifest_json(v, c, [c, c], 1, [1, 1])).unwrap();
+        m["components"].as_object_mut().unwrap().remove("android");
+        m["compatibility"]["contract"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mobile_accepts");
+        let m = m.to_string();
+        let url = format!("https://github.com/martin-janci/claude-fleet/releases/download/v{v}/release-manifest.json");
+        fetch.put(&url, &m);
+        fetch.put(&format!("{url}.minisig"), &key.sign(m.as_bytes()));
+        releases.push(serde_json::json!({"version": v, "manifest": url, "manifest_sha256": sha256_hex(m.as_bytes())}));
+    }
+    let channel = |seq: u64, releases: &serde_json::Value| {
+        let ch = serde_json::json!({
+            "schema": 1, "track": "stable", "sequence": seq,
+            "generated_at": "2026-09-30T00:00:00Z", "expires_at": "2026-10-14T00:00:00Z",
+            "current": "0.3.4", "recommended": "0.3.4", "releases": releases
+        })
+        .to_string();
+        fetch.put(&format!("{BASE}stable.json"), &ch);
+        fetch.put(
+            &format!("{BASE}stable.json.minisig"),
+            &key.sign(ch.as_bytes()),
+        );
+    };
+    channel(10, &serde_json::json!(releases));
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    let id = lock(&store)
+        .unwrap()
+        .insert_client_token("phone-amend", "sha-phone-amend", "full")
+        .unwrap()
+        .id;
+    let phone = client(id, TokenMode::Full, None);
+    let req = CheckRequest {
+        update_proto: 1,
+        component: Component::Android,
+        platform: Platform::new("android", "aarch64", "apk"),
+        installed: Installed::version(Version::new(0, 3, 3)),
+        speaks: Speaks {
+            contract_accepts: Some(Window::new(0, c)),
+            agent_proto: None,
+        },
+        phase: UpdatePhase::Idle,
+        attempt: None,
+    };
+    let before = check(&store, &phone, &req, &keys(&key), NOW).unwrap();
+    assert!(before.target.is_none(), "{:?}", before.reason);
+
+    // fleet-mobile's release: a signed amendment, listed on the channel.
+    let publish_amendment = |signer: &TestKey, seq: u64| {
+        let a = fleet_update::publish::build_android_amendment(
+            &fleet_update::publish::AndroidAmendmentInput {
+                version: &Version::new(0, 3, 4),
+                url: "https://github.com/martin-janci/fleet-mobile/releases/download/v0.3.4/fleet-mobile-0.3.4.apk",
+                sha256: &"aa".repeat(32),
+                size: 9,
+                version_code: 34,
+                signer_sha256: &"bb".repeat(32),
+                mobile_accepts: Window::new(0, c),
+            },
+        )
+        .unwrap();
+        let body = serde_json::to_string(&a).unwrap();
+        let url = format!("{BASE}amendments/0.3.4/android.json");
+        fetch.put(&url, &body);
+        fetch.put(&format!("{url}.minisig"), &signer.sign(body.as_bytes()));
+        let mut rs = releases.clone();
+        rs[1]["amendments"] = serde_json::json!([{
+            "component": "android", "manifest": url, "manifest_sha256": sha256_hex(body.as_bytes())
+        }]);
+        channel(seq, &serde_json::json!(rs));
+    };
+
+    // Signed by a key nobody trusts: nothing is folded in.
+    publish_amendment(&TestKey::new(3), 11);
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    let forged = check(&store, &phone, &req, &keys(&key), NOW).unwrap();
+    assert!(forged.target.is_none(), "{:?}", forged.reason);
+
+    publish_amendment(&key, 12);
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    let after = check(&store, &phone, &req, &keys(&key), NOW).unwrap();
+    assert_eq!(after.status, Status::UpdateAvailable, "{:?}", after.reason);
+    let t = after.target.unwrap();
+    assert_eq!(t.version, Version::new(0, 3, 4));
+    assert!(matches!(
+        t.artifact,
+        fleet_update::Artifact::Apk {
+            version_code: 34,
+            ..
+        }
+    ));
+}

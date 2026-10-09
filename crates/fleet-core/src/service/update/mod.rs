@@ -124,6 +124,54 @@ pub fn settings_changed(key: &str) {
     if key == settings::UPDATE_TRACK || key == settings::UPDATE_CHECK_INTERVAL_SECS {
         REFRESH_WAKE.notify_one();
     }
+    // A mode, a floor or a track moves decisions without a new channel.
+    decisions_may_have_changed();
+}
+
+/// Wakes the decision pusher ([`push_decisions`]) in `fleet-hub serve`.
+static DECIDE_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// A pin, a policy setting or a refreshed channel: what some target would be
+/// told may have changed.
+pub fn decisions_may_have_changed() {
+    DECIDE_WAKE.notify_one();
+}
+
+/// The status and version `/events` last carried per target.
+static PUSHED: Mutex<BTreeMap<String, (String, Option<String>)>> = Mutex::new(BTreeMap::new());
+
+/// `update:decision` (design §6.4) for every target whose decision differs
+/// from the last one this hub computed for it, so a client checks again now
+/// rather than on its next interval. A target seen for the first time is
+/// recorded, not pushed: it has only just been told by its own check.
+/// Returns the targets pushed.
+pub fn push_decisions(store: &Mutex<Store>, keys: &TrustedKeys, now: i64) -> Vec<String> {
+    let rows = match lock(store).and_then(|s| s.update_observed_all()) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut pushed = Vec::new();
+    for o in rows {
+        let Ok(d) = check_for(store, &Caller::master(), &o.target, keys, now) else {
+            continue;
+        };
+        let status = serde_json::to_value(d.status)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let version = d.target.as_ref().map(|t| t.version.to_string());
+        let before = PUSHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(o.target.clone(), (status.clone(), version.clone()));
+        if before.is_some_and(|b| b != (status.clone(), version.clone())) {
+            if let Ok(s) = lock(store) {
+                s.emit_update_decision(&o.target, &status, version.as_deref());
+            }
+            pushed.push(o.target);
+        }
+    }
+    pushed
 }
 
 /// The policy for one target: the fleet's mode for its component, and the
@@ -256,7 +304,23 @@ pub fn load_cached(store: &Store, track: Track, keys: &TrustedKeys, now: i64) ->
             body: m.body,
             sig: m.sig,
         };
-        if let Some(verified) = verify_listed_manifest(&raw, listed, keys) {
+        if let Some(mut verified) = verify_listed_manifest(&raw, listed, keys) {
+            // Its amendments (the phone's APK, design §4), verified again on
+            // every read like everything else in the cache.
+            for a in &listed.amendments {
+                let key = amendment_key(&v, &a.component);
+                if let Some(row) = store.update_doc("amendment", &key).ok().flatten() {
+                    if let Some(am) = fleet_update::verify::verify_amendment(
+                        row.body.as_bytes(),
+                        &row.sig,
+                        keys,
+                        a,
+                        &v,
+                    ) {
+                        verified.amend(&am);
+                    }
+                }
+            }
             manifests.verified.insert(v.clone(), verified);
             manifests.raw.insert(v, raw);
         }
@@ -270,6 +334,11 @@ pub fn load_cached(store: &Store, track: Track, keys: &TrustedKeys, now: i64) ->
         manifests,
         fetched_at: row.fetched_at,
     })
+}
+
+/// The `update_docs` key of one release's amendment for one component.
+fn amendment_key(v: &Version, component: &str) -> String {
+    format!("{v}/{component}")
 }
 
 /// One decision, as the hub makes it for `target`.
@@ -976,13 +1045,16 @@ pub fn pin(
     let s = lock(store)?;
     require_target_exists(&s, &t, target)?;
     s.set_update_desired(&row)?;
+    decisions_may_have_changed();
     Ok(row)
 }
 
 pub fn unpin(store: &Mutex<Store>, component: &str, target: &str) -> Result<bool, IpcError> {
     let c = parse_component(component)?;
     validate_target(c, target)?;
-    lock(store)?.clear_update_desired(c.as_str(), target)
+    let removed = lock(store)?.clear_update_desired(c.as_str(), target)?;
+    decisions_may_have_changed();
+    Ok(removed)
 }
 
 // ── Git mode: a standalone check ──
@@ -1126,6 +1198,11 @@ pub async fn refresh(
             .collect();
         (track, seen, pinned, cached_sha)
     };
+    let cached_amendments: BTreeMap<String, String> = lock(store)?
+        .update_docs("amendment")?
+        .into_iter()
+        .map(|d| (d.key, fleet_update::verify::sha256_hex(d.body.as_bytes())))
+        .collect();
     let result = async {
         let (channel, raw) = fetch_channel(fetch, base_url, track, keys, seen, now)
             .await
@@ -1153,11 +1230,33 @@ pub async fn refresh(
             .cloned()
             .collect();
         let fetched = fetch_manifests(fetch, &channel, to_fetch, keys).await;
-        Ok::<_, IpcError>((channel, raw, wanted, fetched))
+        // Amendments arrive after their release (the phone's APK, design §4),
+        // so they are fetched on their own: whatever the channel now lists
+        // for a kept release that the cache does not hold byte for byte.
+        let mut amendments: Vec<(String, RawDoc)> = Vec::new();
+        for v in &wanted {
+            let Some(listed) = channel.doc.release(v) else {
+                continue;
+            };
+            let stale = listed.amendments.iter().any(|a| {
+                cached_amendments
+                    .get(&amendment_key(v, &a.component))
+                    .map(|s| s.eq_ignore_ascii_case(&a.manifest_sha256))
+                    != Some(true)
+            });
+            if stale {
+                for (a, raw, _) in
+                    fleet_update::channel::fetch_amendments(fetch, &channel, v, keys).await
+                {
+                    amendments.push((amendment_key(v, &a.component), raw));
+                }
+            }
+        }
+        Ok::<_, IpcError>((channel, raw, wanted, fetched, amendments))
     }
     .await;
     let s = lock(store)?;
-    let (channel, raw, wanted, fetched) = match result {
+    let (channel, raw, wanted, fetched, amendments) = match result {
         Ok(r) => r,
         Err(e) => {
             let _ = s.set_setting(
@@ -1186,10 +1285,25 @@ pub async fn refresh(
             fetched_at: now,
         })?;
     }
+    for (key, a) in &amendments {
+        s.put_update_doc(&UpdateDocRow {
+            kind: "amendment".into(),
+            key: key.clone(),
+            body: a.body.clone(),
+            sig: a.sig.clone(),
+            sequence: None,
+            fetched_at: now,
+        })?;
+    }
     let keep: Vec<String> = wanted.iter().map(|v| v.to_string()).collect();
     let pruned = s.prune_update_manifests(&keep)?;
-    if channel.doc.sequence != seen || !fetched.raw.is_empty() || pruned > 0 {
+    if channel.doc.sequence != seen
+        || !fetched.raw.is_empty()
+        || !amendments.is_empty()
+        || pruned > 0
+    {
         s.emit_update_changed("channel", None);
+        decisions_may_have_changed();
     }
     let manifests = s.update_docs("manifest")?.len();
     let outcome = RefreshOutcome {
@@ -1272,6 +1386,24 @@ pub fn spawn_refresh_tick(
             }
         }
         let keys = trusted_keys();
+        // The decision pusher: woken by a pin, a setting or a new channel.
+        {
+            let (store, keys, cancel) = (store.clone(), keys.clone(), cancel.clone());
+            crate::rt::spawn(async move {
+                let _ = push_decisions(&store, &keys, crate::store::now_unix());
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        _ = DECIDE_WAKE.notified() => {}
+                    }
+                    let pushed = push_decisions(&store, &keys, crate::store::now_unix());
+                    if !pushed.is_empty() {
+                        tracing::info!(targets = ?pushed, "update decisions changed");
+                    }
+                }
+            });
+        }
         // The last failure's code: a failure warns once, and again only when
         // the reason changes, so a hub offline for a week does not warn every
         // tick.

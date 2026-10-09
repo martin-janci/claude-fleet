@@ -5,7 +5,7 @@
 //! §7.4.
 
 use super::Store;
-use crate::events::{EventBus as _, RowChange, UpdateChanged};
+use crate::events::{EventBus as _, RowChange, UpdateChanged, UpdateDecision};
 use crate::ipc_error::IpcError;
 use rusqlite::OptionalExtension;
 
@@ -109,6 +109,15 @@ impl Store {
         self.bus.emit(&RowChange::UpdateChanged(UpdateChanged {
             what: what.into(),
             target: target.map(String::from),
+        }));
+    }
+
+    /// Emit `update:decision` for one target (update design §6.4).
+    pub fn emit_update_decision(&self, target: &str, status: &str, version: Option<&str>) {
+        self.bus.emit(&RowChange::UpdateDecision(UpdateDecision {
+            target: target.into(),
+            status: status.into(),
+            version: version.map(String::from),
         }));
     }
 
@@ -398,6 +407,16 @@ impl Store {
                 "DELETE FROM update_docs WHERE kind = 'manifest' AND key = ?1",
                 [&d.key],
             )?;
+        }
+        // An amendment (`<version>/<component>`) goes with its release.
+        for d in self.update_docs("amendment")? {
+            let version = d.key.split('/').next().unwrap_or_default();
+            if !keep.iter().any(|k| k == version) {
+                n += self.conn.execute(
+                    "DELETE FROM update_docs WHERE kind = 'amendment' AND key = ?1",
+                    [&d.key],
+                )?;
+            }
         }
         Ok(n)
     }

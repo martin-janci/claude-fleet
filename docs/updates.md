@@ -337,6 +337,20 @@ crashes on start and one that migrates and never gets ready.
   target's reported build or phase, a pin, or the verified channel
   changes. A per-host token and an org-bound client never receive it; they
   read their own row through `update_status`.
+- **Decisions.** `/events` also carries `update:decision` (`{target, status,
+  version}`) when what the hub would tell a target moves — an operator's
+  pin, a newly verified channel, an `update.*` setting — so a desktop checks
+  again within seconds instead of at its next interval. A target seen for
+  the first time is not pushed: it was just told by its own check. The same
+  streams receive it as `update:changed`; `fleet-updater` (whose token
+  reaches `/update/*` only) keeps to its interval.
+- **Decisions.** `/events` also carries `update:decision` (`{target, status,
+  version}`) when what the hub would tell a target moves — an operator's
+  pin, a newly verified channel, an `update.*` setting — so a desktop checks
+  again within seconds instead of at its next interval. A target seen for
+  the first time is not pushed: it was just told by its own check. The same
+  streams receive it as `update:changed`; `fleet-updater` (whose token
+  reaches `/update/*` only) keeps to its interval.
 
 ## Settings
 

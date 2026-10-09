@@ -13,6 +13,10 @@
 //!     [--component C] [--reason R] [--deadline RFC3339] [--now UNIX] [--expires-days N] --out FILE
 //!     OP: resign | withdraw | recommend | rollback | clear-rollback | minimum
 //!         | clear-minimum | mandatory
+//! fleet-release amendment --version V --apk-url URL --sha256 HEX --size N --version-code N
+//!     --signer-sha256 HEX --mobile-accepts MIN,MAX --out FILE
+//! fleet-release channel-amend --track T --channel FILE --amendment FILE --amendment-url URL
+//!     [--now UNIX] [--expires-days N] --out FILE
 //! fleet-release verify --keys-file FILE --kind manifest|channel [--track T]
 //!     --file FILE --sig FILE.minisig
 //! ```
@@ -114,6 +118,8 @@ fn run(args: &[String]) -> Result<String, String> {
         "manifest" => manifest(&o),
         "channel-add" => add(&o),
         "channel-edit" => edit(&o),
+        "amendment" => amendment(&o),
+        "channel-amend" => amend(&o),
         "verify" => verify(&o),
         other => Err(format!("unknown command {other:?}")),
     }
@@ -230,6 +236,7 @@ fn add(o: &Opts) -> Result<String, String> {
         version: m.release.version.clone(),
         manifest: o.req("manifest-url")?.into(),
         manifest_sha256: sha256_hex(&bytes),
+        amendments: Vec::new(),
     };
     let doc = channel_add(
         load_channel(o.opt("channel"))?,
@@ -247,6 +254,68 @@ fn add(o: &Opts) -> Result<String, String> {
         doc.sequence,
         m.release.version,
         doc.recommended
+    ))
+}
+
+/// `amendment`: the phone's signed addition to a release's manifest.
+fn amendment(o: &Opts) -> Result<String, String> {
+    let version = o.version("version")?;
+    let a = fleet_update::publish::build_android_amendment(
+        &fleet_update::publish::AndroidAmendmentInput {
+            version: &version,
+            url: o.req("apk-url")?,
+            sha256: o.req("sha256")?,
+            size: o.num("size", 0)?.max(0) as u64,
+            version_code: o.num("version-code", 0)?.max(0) as u64,
+            signer_sha256: o.req("signer-sha256")?,
+            mobile_accepts: window(o.req("mobile-accepts")?)?,
+        },
+    )?;
+    let out = o.req("out")?;
+    let mut bytes = serde_json::to_vec_pretty(&a).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    write(out, &bytes)?;
+    Ok(format!("wrote {out}: the android amendment of {version}"))
+}
+
+/// `channel-amend`: list an amendment of a release the channel carries.
+fn amend(o: &Opts) -> Result<String, String> {
+    let track = o.track()?;
+    let doc = load_channel(Some(o.req("channel")?))?.ok_or("--channel does not exist")?;
+    if doc.track != track {
+        return Err(format!(
+            "--channel is the {} channel, not {}",
+            doc.track.as_str(),
+            track.as_str()
+        ));
+    }
+    let bytes = read(o.req("amendment")?)?;
+    let a: fleet_update::manifest::Amendment =
+        serde_json::from_slice(&bytes).map_err(|e| format!("--amendment does not parse: {e}"))?;
+    let component = a
+        .components
+        .keys()
+        .next()
+        .ok_or("--amendment adds no component")?
+        .clone();
+    let doc = fleet_update::publish::channel_amend(
+        doc,
+        &a.version,
+        fleet_update::channel_doc::AmendmentRef {
+            component: component.clone(),
+            manifest: o.req("amendment-url")?.into(),
+            manifest_sha256: sha256_hex(&bytes),
+        },
+        o.now()?,
+        o.num("expires-days", DEFAULT_EXPIRES_DAYS)?,
+    )?;
+    let out = o.req("out")?;
+    write(out, &to_bytes(&doc))?;
+    Ok(format!(
+        "wrote {out}: {} #{} amends {} with {component}",
+        track.as_str(),
+        doc.sequence,
+        a.version
     ))
 }
 

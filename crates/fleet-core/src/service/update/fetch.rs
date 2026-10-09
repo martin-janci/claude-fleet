@@ -18,6 +18,9 @@ pub const FETCH_HOSTS: &[&str] = &[
     "release-assets.githubusercontent.com",
 ];
 const MAX_REDIRECTS: usize = 3;
+/// See [`HttpsFetch::new`]: the e2e fake GitHub's port (`e2e` debug builds only).
+#[cfg(all(feature = "e2e", debug_assertions))]
+pub const E2E_UPDATE_PORT_ENV: &str = "FLEET_E2E_UPDATE_PORT";
 
 pub struct HttpsFetch {
     transport: Arc<dyn HttpTransport>,
@@ -28,8 +31,23 @@ impl HttpsFetch {
     /// (`FLEET_UPDATE_CHANNEL_URL`, a mirror).
     pub fn new(extra_base: Option<&str>) -> Self {
         let extra = extra_base.and_then(host_of).map(str::to_string);
-        let policy =
+        let policy: crate::net::https::HostPolicy =
             Arc::new(move |h: &str| FETCH_HOSTS.contains(&h) || extra.as_deref() == Some(h));
+        // hub-e2e section U (test-only): the same https:// URLs and host fence,
+        // the bytes to a fake GitHub on 127.0.0.1:$FLEET_E2E_UPDATE_PORT. Only
+        // an `e2e` debug build reads the variable; no shipped build has it.
+        #[cfg(all(feature = "e2e", debug_assertions))]
+        if let Some(port) = std::env::var(E2E_UPDATE_PORT_ENV)
+            .ok()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .filter(|p| *p != 0)
+        {
+            return HttpsFetch {
+                transport: Arc::new(crate::net::e2e_loopback::LoopbackTransport::new(
+                    policy, port,
+                )),
+            };
+        }
         HttpsFetch {
             transport: Arc::new(DirectTransport::new(policy)),
         }
