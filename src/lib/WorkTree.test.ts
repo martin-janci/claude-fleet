@@ -264,6 +264,34 @@ describe('WorkTree', () => {
     expect(screen.getAllByTestId('work-task')[1].classList.contains('selected')).toBe(true);
   });
 
+  // Review r13 D15 (the Work half): a first load shows nothing for 400 ms and
+  // then a skeleton, never a "Loading work…" line that flashes on a quick load.
+  it('the first load shows no text before 400 ms, then a skeleton', async () => {
+    vi.useFakeTimers();
+    try {
+      treeImpl = () => new Promise(() => {});
+      render(WorkTree);
+      await tick();
+      const box = screen.getByTestId('work-tree-loading');
+      expect(box.textContent?.trim()).toBe('');
+      expect(within(box).queryByTestId('skeleton')).toBeNull();
+      vi.advanceTimersByTime(400);
+      await tick();
+      expect(within(box).getByTestId('skeleton').getAttribute('aria-label')).toBe('Loading work');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The other Work views hold the same rule; the source says it.
+  it('no Work view writes a "Loading …" line of its own', async () => {
+    const { readFileSync } = await import('node:fs');
+    for (const f of ['WorkBoard', 'WorkTree', 'WorkPrs', 'WorkMissions']) {
+      const s = readFileSync(`src/lib/${f}.svelte`, 'utf8');
+      expect(s, f).not.toMatch(/>\s*Loading[^<]*…\s*</);
+    }
+  });
+
   it('empty, error with Retry, and an older hub', async () => {
     treeImpl = () => ({ ...firstPage, tasks: [], groups: [], total: 0 });
     const { unmount } = render(WorkTree);

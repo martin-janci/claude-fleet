@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Skeleton from './states/Skeleton.svelte';
   import Icon from './kit/Icon.svelte';
   // The task board (sprints design 2026-09-28 §6c): every task the Work
   // view's filters match, from one `work_tree` read (archived on, so Done
@@ -265,7 +266,7 @@
       <button class="btn btn--quiet" type="button" onclick={() => void load()}>Retry</button>
     </p>
   {:else if !loaded}
-    <p class="muted pad" data-testid="work-board-loading">Loading tasks…</p>
+    <div class="pad" data-testid="work-board-loading"><Skeleton rows={4} label="Loading tasks" /></div>
   {:else}
     {#if more}
       <p class="muted pad" data-testid="work-board-more">Showing the 200 most recent tasks. Narrow the Work view's filters to see the rest.</p>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Skeleton from './states/Skeleton.svelte';
   import Icon from './kit/Icon.svelte';
   import { tablistKeys } from './tablist_keys';
   // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
@@ -1179,7 +1180,7 @@
         <button class="btn" type="button" onclick={() => void load()}>Retry</button>
       </div>
     {:else if !loaded}
-      <p class="muted" data-testid="missions-loading">Loading missions…</p>
+      <div data-testid="missions-loading"><Skeleton rows={3} label="Loading missions" /></div>
     {:else if missions.length === 0}
       <p class="muted" data-testid="missions-empty">
         No missions yet. A mission is a goal with the tasks that reach it; create one to gather the work.
