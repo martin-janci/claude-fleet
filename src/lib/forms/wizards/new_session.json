@@ -1,0 +1,115 @@
+{
+  "spec": "fleet.form/1",
+  "title": "New session",
+  "intro": "Start an agent or a shell in a project on one host.",
+  "submit": "Start session",
+  "steps": [
+    {
+      "title": "Where",
+      "fields": [
+        { "name": "project", "type": "select", "label": "Project", "required": true, "options": [["1", "owner/repo"]] },
+        { "name": "host", "type": "select", "label": "Host", "required": true, "options": [["local", "This machine"]] },
+        {
+          "name": "agent",
+          "type": "select",
+          "label": "Agent",
+          "required": true,
+          "value": "claude",
+          "options": [
+            ["claude", "Claude Code"],
+            ["codex", "Codex"],
+            ["shell", "Shell"]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Worktree",
+      "fields": [
+        {
+          "name": "worktree",
+          "type": "select",
+          "label": "Worktree",
+          "required": true,
+          "value": "new",
+          "options": [["new", "New worktree"]]
+        },
+        {
+          "name": "branch",
+          "type": "text",
+          "label": "Branch",
+          "max_len": 200,
+          "placeholder": "fix-login",
+          "help": "Empty gets a generated name.",
+          "when": { "field": "worktree", "eq": "new" }
+        },
+        {
+          "name": "base_branch",
+          "type": "text",
+          "label": "From branch",
+          "max_len": 200,
+          "placeholder": "main",
+          "help": "Empty starts from the repository's default branch.",
+          "when": { "field": "worktree", "eq": "new" }
+        }
+      ]
+    },
+    {
+      "title": "Launch",
+      "fields": [
+        { "name": "label", "type": "text", "label": "Label", "max_len": 120, "help": "Empty takes the branch's name." },
+        {
+          "name": "model",
+          "type": "select",
+          "label": "Model",
+          "value": "default",
+          "options": [
+            ["default", "Host default"],
+            ["best", "Best available"],
+            ["fable", "Fable"],
+            ["opus", "Opus"],
+            ["opus[1m]", "Opus (1M context)"],
+            ["sonnet", "Sonnet"],
+            ["sonnet[1m]", "Sonnet (1M context)"],
+            ["haiku", "Haiku"],
+            ["opusplan", "Opus plan / Sonnet"]
+          ],
+          "when": { "field": "agent", "eq": "claude" }
+        },
+        {
+          "name": "effort",
+          "type": "select",
+          "label": "Effort",
+          "value": "default",
+          "options": [
+            ["default", "Host default"],
+            ["low", "Low"],
+            ["medium", "Medium"],
+            ["high", "High"],
+            ["xhigh", "Extra high"],
+            ["max", "Max"]
+          ],
+          "when": { "field": "agent", "eq": "claude" }
+        },
+        {
+          "name": "profile",
+          "type": "text",
+          "label": "Login profile",
+          "max_len": 64,
+          "placeholder": "work",
+          "help": "Runs under ~/.claude-profiles/<name> on the host. Empty uses the host's login.",
+          "when": { "field": "agent", "eq": "claude" }
+        },
+        {
+          "name": "start_command",
+          "type": "text",
+          "label": "Run on start",
+          "max_len": 500,
+          "placeholder": "npm run dev",
+          "help": "Empty opens a bare shell.",
+          "when": { "field": "agent", "eq": "shell" }
+        }
+      ]
+    }
+  ]
+}
