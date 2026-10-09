@@ -211,3 +211,46 @@ export function renderLoadersCss(bundle: string): string {
     extractCss(bundle)
   );
 }
+
+// ---- counted loaders -------------------------------------------------------
+//
+// Two particle loaders can say how many: Radar (one blip per host that
+// answers, step 3.15) and Assemble (one particle per session). The manual
+// draws a fixed set; `countedMarkup` keeps the first `count` of them and, for
+// Radar, places more blips than the board drew on the same sweep.
+
+/** Loaders whose particles can follow a count, and the most they show. */
+export const COUNTED: Readonly<Record<string, number>> = { radar: 24, assemble: 64 };
+
+const PARTICLE = /<i style="[^"]*"><\/i>/g;
+
+/** Radar's sweep period (bundle.css `ofl-blip`, `ofl-spin` on `.ofl-sweep`). */
+const RADAR_SWEEP_S = 2.4;
+
+/** A blip the board did not draw: the n-th on a golden-angle spiral, lit as
+ *  the sweep passes it (the board's own blips trail their angle by ~0.57 s). */
+function radarBlip(n: number): string {
+  const angle = (n * 137.508) % 360;
+  const r = 18 + ((n * 7) % 24);
+  const rad = (angle * Math.PI) / 180;
+  const left = (50 + r * Math.sin(rad)).toFixed(0);
+  const top = (50 - r * Math.cos(rad)).toFixed(0);
+  const delay = (((angle / 360) * RADAR_SWEEP_S - 0.57 + RADAR_SWEEP_S) % RADAR_SWEEP_S).toFixed(2);
+  return `<i style="left:${left}%;top:${top}%;animation-delay:${delay}s;background:var(--done)"></i>`;
+}
+
+/** The loader's markup with one particle per item, up to COUNTED's cap. A
+ *  loader that does not count gets its markup back unchanged. */
+export function countedMarkup(spec: LoaderSpec, count: number): string {
+  const cap = COUNTED[spec.id];
+  if (cap === undefined) return spec.markup;
+  const n = Math.max(0, Math.min(cap, Math.floor(count)));
+  // The board repeats a blip to close its loop; one blip per item, so once.
+  const drawn = [...new Set(spec.markup.match(PARTICLE) ?? [])];
+  const kept = drawn.slice(0, n);
+  if (spec.id === 'radar') for (let i = drawn.length; kept.length < n; i++) kept.push(radarBlip(i));
+  const first = spec.markup.search(PARTICLE);
+  if (first < 0) return spec.markup;
+  const without = spec.markup.replace(PARTICLE, '');
+  return without.slice(0, first) + kept.join('') + without.slice(first);
+}

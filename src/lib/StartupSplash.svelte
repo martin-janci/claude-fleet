@@ -3,7 +3,9 @@
   // loader at a time, the one for what is really happening (startup.ts has
   // the stages). Nothing at all for the first 400 ms, so a launch that is
   // quick never flashes it, and nothing on a warm start. When the last list
-  // answers it shrinks away and the app is under it, already loaded.
+  // answers it shrinks away and the app is under it, already loaded. A hub
+  // client whose hub is lost can Open offline: this computer's sessions in
+  // place of the splash (OfflineFleet, offline.ts) until the hub answers.
   import { onMount, untrack } from 'svelte';
   import Loader, { LOADER_DELAY_MS } from './Loader.svelte';
   import { hubStatus } from './hub';
@@ -13,7 +15,10 @@
   import { attentionIdleMinutes } from './notify';
   import { waitingForYou } from './waiting_count';
   import { durationMs } from './motion';
+  import { tokenPx } from './layout_tokens';
   import { GIVE_UP_MS, splashShown, startupFacts, startupStage, warmStart } from './startup';
+  import OfflineFleet from './OfflineFleet.svelte';
+  import { leaveOffline, offlineMode, openOffline } from './offline';
 
   let { onhubsettings }: { onhubsettings: () => void } = $props();
 
@@ -74,7 +79,12 @@
   const hubLost = $derived(stage === 'hub' && hubSince !== null && now - hubSince >= SIGNAL_LOST_AFTER_MS);
   const hubName = $derived($hubStatus.url ?? $hubStatus.configured_url ?? 'the hub');
 
+  // Loader sizes from the splash tokens (app.css), read once.
+  const markPx = tokenPx('--splash-mark', 96);
+  const stagePx = tokenPx('--splash-stage', 160);
+
   const visibleHosts = $derived($hosts.filter((h) => !h.hidden));
+  const answered = $derived(visibleHosts.filter((h) => h.reachable).length);
   const workRows = $derived($sessions.length);
   const needYou = $derived(
     waitingForYou($sessions, { idleSecs: $attentionIdleMinutes * 60, now: Math.floor(now / 1000) }),
@@ -97,7 +107,7 @@
         ? 'Your sessions keep running on their hosts.'
         : hubName
       : stage === 'hosts' && visibleHosts.length > 0
-        ? `${visibleHosts.filter((h) => h.reachable).length} of ${visibleHosts.length} answered`
+        ? `${answered} of ${visibleHosts.length} answered`
         : stage === 'sessions' && workRows > 0
           ? `${workRows} ${workRows === 1 ? 'session' : 'sessions'}${needYou > 0 ? ` · ${needYou} need you` : ''}`
           : null,
@@ -105,7 +115,14 @@
 
   function hubSettings() {
     dismissed = true;
+    leaveOffline();
     onhubsettings();
+  }
+  // Open offline (new for a paired desktop): this computer's sessions only,
+  // in place of the splash, until the hub answers.
+  function offline() {
+    dismissed = true;
+    void openOffline();
   }
 </script>
 
@@ -121,15 +138,15 @@
     <div class="mark">
       {#key hubLost ? 'hub-lost' : stage}
         {#if stage === 'store'}
-          <Loader name="draw-on" size={96} testid="startup-loader" />
+          <Loader name="draw-on" size={markPx} testid="startup-loader" />
         {:else if stage === 'hub' && hubLost}
-          <Loader name="signal-lost" size={96} delay={0} testid="startup-loader" />
+          <Loader name="signal-lost" size={markPx} delay={0} testid="startup-loader" />
         {:else if stage === 'hub'}
-          <Loader name="chase" size={96} testid="startup-loader" />
+          <Loader name="chase" size={markPx} testid="startup-loader" />
         {:else if stage === 'hosts'}
-          <Loader name="radar" size={150} testid="startup-loader" />
+          <Loader name="radar" size={stagePx} count={answered} testid="startup-loader" />
         {:else}
-          <Loader name="assemble" size={160} testid="startup-loader" />
+          <Loader name="assemble" size={stagePx} count={workRows} testid="startup-loader" />
         {/if}
       {/key}
     </div>
@@ -144,11 +161,16 @@
     {/if}
     {#if hubLost}
       <div class="actions">
+        <button type="button" class="btn" data-testid="startup-offline" onclick={offline}>Open offline</button>
         <button type="button" class="btn btn--primary" data-testid="startup-retry" onclick={() => void retryHubNow()}>Retry</button>
         <button type="button" class="btn" data-testid="startup-hub-settings" onclick={hubSettings}>Hub settings…</button>
       </div>
     {/if}
   </div>
+{/if}
+
+{#if $offlineMode}
+  <OfflineFleet onhubsettings={hubSettings} />
 {/if}
 
 <style>
@@ -175,7 +197,7 @@
     }
   }
   .mark {
-    min-height: 160px;
+    min-height: var(--splash-stage);
     display: flex;
     align-items: center;
     justify-content: center;

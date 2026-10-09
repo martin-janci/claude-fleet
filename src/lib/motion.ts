@@ -8,9 +8,10 @@ import { readPref, writePref } from './prefs';
  *
  * - **full**: the manual's 80 to 280 ms (`--dur-fast`, `--dur-base`, `--dur-slow`).
  * - **reduced**: only short fades; every UI duration is `--dur-fast` (80 ms),
- *   and loaders (0.8) turn each loop into one `--loader-reduced` fade.
- * - **off**: no UI motion; every duration is 0 ms. Loaders still fade, so a
- *   wait never looks frozen.
+ *   and loaders (0.8) and every other loop (`--loop-*`: a pulsing step, a
+ *   skeleton, a stream of dots) turn into one `--loader-reduced` fade.
+ * - **off**: no UI motion; every duration is 0 ms and other loops rest.
+ *   Loaders still fade, so a wait never looks frozen.
  *
  * `system` (the default) is Full, or Reduced when the OS asks for less motion.
  * Every transition in the app reads a `--dur-*` token, never a raw time

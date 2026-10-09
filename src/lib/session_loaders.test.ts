@@ -12,6 +12,7 @@ import HostStream from './HostStream.svelte';
 import { startSteps } from './start_progress';
 import type { SessionEvent } from './timeline';
 import { expectAccessible } from './a11y_check';
+import { motionPref } from './motion';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 
@@ -96,9 +97,43 @@ describe('the start is followed on events, not on time', () => {
     expect(states()).toEqual(['done', 'done', 'active']);
     await expectAccessible(container);
   });
+
+  // Step 0.6, the Loader kit's rule: Reduced fades the active step, Off holds it.
+  it('the active step fades under Reduced motion and rests under Off', async () => {
+    try {
+      motionPref.set('reduced');
+      const { unmount } = render(PulseSteps, { props: { pulse: sessionPulse(null), title: 't' } });
+      const active = () => screen.getAllByTestId('pulse-sat')[0];
+      expect(active().classList.contains('sat--fade')).toBe(true);
+      expect(active().classList.contains('sat--still')).toBe(false);
+      unmount();
+      motionPref.set('off');
+      render(PulseSteps, { props: { pulse: sessionPulse(null), title: 't' } });
+      expect(active().classList.contains('sat--still')).toBe(true);
+      expect(active().classList.contains('sat--fade')).toBe(false);
+    } finally {
+      motionPref.set('system');
+    }
+  });
 });
 
 describe('HostStream', () => {
+  it('rests its dots under Reduced (with a slow fade) and Off (without)', () => {
+    try {
+      motionPref.set('reduced');
+      const { unmount } = render(HostStream, { props: { from: 'mac', to: 'mercury' } });
+      let el = screen.getByTestId('host-stream');
+      expect([el.classList.contains('hs--still'), el.classList.contains('hs--fade')]).toEqual([true, true]);
+      unmount();
+      motionPref.set('off');
+      render(HostStream, { props: { from: 'mac', to: 'mercury' } });
+      el = screen.getByTestId('host-stream');
+      expect([el.classList.contains('hs--still'), el.classList.contains('hs--fade')]).toEqual([true, false]);
+    } finally {
+      motionPref.set('system');
+    }
+  });
+
   it('names both hosts', async () => {
     const { container } = render(HostStream, { props: { from: 'mac', to: 'mercury' } });
     await waitFor(() => expect(screen.getByTestId('host-stream').textContent).toContain('mac'));

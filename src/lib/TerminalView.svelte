@@ -1932,7 +1932,7 @@
     opacity: 0.6;
   }
   .cursor.blink {
-    animation: cf-cursor-blink 1.1s steps(1, end) infinite;
+    animation: cf-cursor-blink var(--loop-fast) steps(1, end) infinite;
   }
   @keyframes cf-cursor-blink {
     50% { opacity: 0; }

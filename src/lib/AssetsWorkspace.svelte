@@ -792,7 +792,7 @@
   /* Narrow: the rail shrinks to icons (its buttons keep their names), then the
      Inspector stacks under the list. */
   @media (max-width: 1100px) {
-    .ws { grid-template-columns: 56px minmax(0, 1fr) minmax(280px, 340px); }
+    .ws { grid-template-columns: 56px minmax(0, 1fr) minmax(var(--inspector-min), var(--list-w)); }
   }
   @media (max-width: 860px) {
     .ws {

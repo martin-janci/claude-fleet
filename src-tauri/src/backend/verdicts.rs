@@ -1404,6 +1404,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     (
+        "offline_local_sessions",
+        Verdict::SameInBoth {
+            why: "lists the tmux sessions on THIS machine for Open offline, when the hub \
+                  cannot be reached. It reads this machine's own tmux server only: no \
+                  state.db, no SSH, no host the hub manages, and it writes nothing",
+        },
+    ),
+    (
         "hub_stranded_token",
         Verdict::SameInBoth {
             why: "asks THIS machine's own token store whether a pairing that crashed before \

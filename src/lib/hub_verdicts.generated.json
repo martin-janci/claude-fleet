@@ -354,6 +354,7 @@
     "list_pages",
     "local_workspace_changes",
     "local_workspace_diff",
+    "offline_local_sessions",
     "open_local_workspace",
     "open_log_folder",
     "open_session_in_editor",

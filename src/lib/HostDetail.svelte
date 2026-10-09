@@ -107,6 +107,12 @@
   // Orbit Fleet 4.7: the health checklist. Run on demand (an SSH round trip
   // per host; never on every selection move), remembered per host.
   let checking = $state(false);
+  // Show sessions (step 3.14's offline host): to this pane's own list.
+  let sessionsBlock = $state<HTMLElement | null>(null);
+  function showSessions() {
+    sessionsBlock?.scrollIntoView?.({ block: 'start' });
+    sessionsBlock?.querySelector<HTMLElement>('[data-testid="detail-session"]')?.focus();
+  }
   let provisioning = $state(false);
   const lastCheck = $derived($hostChecks.get(host.alias) ?? null);
   // Orbit Fleet 4.9: a paired desktop's hub accepts agents, so an SSH host's
@@ -540,6 +546,8 @@
         lastSeen={host.health_at ?? null}
         {now}
         sessions={hostSessions.length}
+        paused={hostSessions.map(sessionName)}
+        onshow={hostSessions.length > 0 ? showSessions : null}
         ontry={onreprobe}
         trying={probing}
         tryBlocked={reprobeBlocked} />
@@ -665,7 +673,7 @@
   </section>
 
   <!-- 3. Sessions -->
-  <section class="block" aria-label="Sessions on {host.alias}">
+  <section class="block" aria-label="Sessions on {host.alias}" bind:this={sessionsBlock}>
     <div class="section-head">
       <h3>Sessions <span class="muted">{hostSessions.length}</span></h3>
       <div class="actions">

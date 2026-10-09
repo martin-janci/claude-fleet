@@ -2,6 +2,8 @@
 // map "Tray and menu bar"): Breathe idle, Chase working, Halo needs you,
 // Signal lost. Worked out here from what the window already knows and handed
 // to `set_tray_state` (src-tauri/src/commands/tray.rs) when it changes.
+// Step 3.14: the same call carries the Inbox count, which the macOS dock
+// wears as its Halo badge (cleared at zero).
 import { derived, type Readable } from 'svelte/store';
 import { invokeCmd } from './result';
 import { sessions } from './sessions';
@@ -51,13 +53,18 @@ export const trayState: Readable<TrayState> = derived(
   ([$lost, $needs, $working]) => trayStateOf({ lost: $lost, needsYou: $needs, working: $working }),
 );
 
-/** Keeps the tray icon on `trayState`; returns the stop. A window with no
- *  tray (or no backend, in a browser) ignores the answer. */
-export function startTraySync(set: (s: TrayState) => unknown = (state) => invokeCmd('set_tray_state', { state })): () => void {
-  let last: TrayState | null = null;
-  return trayState.subscribe((s) => {
-    if (s === last) return;
-    last = s;
-    void set(s);
+/** Keeps the tray icon on `trayState` and the dock's Halo badge on the
+ *  Inbox count; returns the stop. A window with no tray or dock (or no
+ *  backend, in a browser) ignores the answer. */
+export function startTraySync(
+  set: (s: TrayState, needsYou: number) => unknown = (state, needsYou) =>
+    invokeCmd('set_tray_state', { state, needsYou }),
+): () => void {
+  let last: string | null = null;
+  return derived([trayState, inboxCount], ([s, n]) => [s, n] as const).subscribe(([s, n]) => {
+    const key = `${s}:${n}`;
+    if (key === last) return;
+    last = key;
+    void set(s, n);
   });
 }

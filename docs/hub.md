@@ -3167,6 +3167,15 @@ it again would be a second brain for the same hosts, and that is the failure
 this mode exists to prevent. With no `hub.remote_url` at all, the app is
 standalone exactly as before.
 
+**When the hub does not answer at launch.** The splash chases the hub, and
+after 6 s reads Signal lost with three choices: Retry, Hub settings…, and
+Open offline. Open offline lists this computer's own tmux sessions and
+nothing of the hub's fleet (`offline_local_sessions`, which reads this
+machine's tmux server and writes nothing), with Copy attach command and Open
+in VS Code for each. It is not standalone: no reconcile, no host the hub
+manages, no `state.db` row. When the hub answers, the offline view steps aside
+for the app.
+
 ### What is different from standalone
 
 - **Live, from the hub.** The desktop follows the hub's `GET /events` and

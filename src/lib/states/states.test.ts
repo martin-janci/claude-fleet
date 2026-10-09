@@ -25,14 +25,24 @@ describe('skeleton', () => {
     expect(s.querySelectorAll('.bar')).toHaveLength(4);
   });
 
-  // Review r12: the app's Motion setting, not only the OS query, stills it.
-  it('rests its bars under Reduced motion', async () => {
+  // Review r12: the app's Motion setting, not only the OS query, governs it,
+  // by the Loader kit's rule: Reduced fades slowly, Off rests.
+  it('fades its bars under Reduced motion and rests them under Off', async () => {
     vi.useFakeTimers();
     motionPref.set('reduced');
     try {
+      const { unmount } = render(Skeleton);
+      await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
+      let el = screen.getByTestId('skeleton');
+      expect(el.classList.contains('fade')).toBe(true);
+      expect(el.classList.contains('still')).toBe(false);
+      unmount();
+      motionPref.set('off');
       render(Skeleton);
       await vi.advanceTimersByTimeAsync(LOADING_DELAY_MS);
-      expect(screen.getByTestId('skeleton').classList.contains('still')).toBe(true);
+      el = screen.getByTestId('skeleton');
+      expect(el.classList.contains('still')).toBe(true);
+      expect(el.classList.contains('fade')).toBe(false);
     } finally {
       motionPref.set('system');
     }
@@ -84,6 +94,30 @@ describe('host offline', () => {
     expect(t).toContain('SSH timed out after 10 s.');
     expect(t).toContain('2 sessions are probably still running in tmux');
     expect(screen.getByTestId('host-offline-code').textContent).toBe('E_SSH_TIMEOUT');
+  });
+
+  // Redesign 3.14: the paused sessions, Show sessions, and Wake host only
+  // where the host can be woken.
+  it('lists its sessions as Paused and offers Show sessions', async () => {
+    const onshow = vi.fn();
+    render(HostOffline, { props: { alias: 'mercury', paused: ['api', 'web', 'docs', 'ops', 'ml', 'ci'], onshow } });
+    const list = screen.getByTestId('host-offline-paused');
+    const items = Array.from(list.querySelectorAll('li')).map((li) => li.textContent?.trim());
+    expect(items).toEqual(['Paused api', 'Paused web', 'Paused docs', 'Paused ops', 'and 2 more']);
+    await fireEvent.click(screen.getByTestId('host-offline-show'));
+    expect(onshow).toHaveBeenCalledOnce();
+  });
+
+  it('offers Wake host only for a host that can be woken', async () => {
+    const { rerender } = render(HostOffline, { props: { alias: 'mercury', ontry: vi.fn() } });
+    expect(screen.queryByTestId('host-offline-wake')).toBeNull();
+    expect(screen.queryByTestId('host-offline-paused')).toBeNull();
+    const onwake = vi.fn();
+    await rerender({ alias: 'mercury', ontry: vi.fn(), onwake });
+    await fireEvent.click(screen.getByTestId('host-offline-wake'));
+    expect(onwake).toHaveBeenCalledOnce();
+    await rerender({ alias: 'mercury', ontry: vi.fn(), onwake, waking: true });
+    expect(screen.getByTestId('host-offline-wake').textContent).toBe('Waking…');
   });
 
   it('marks it with Signal lost, which plays once and rests (redesign 3.14)', () => {

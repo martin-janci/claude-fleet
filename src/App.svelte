@@ -114,6 +114,7 @@
   import { get } from 'svelte/store';
   import { destination, goTo, leave } from './lib/destination';
   import { tablistKeys } from './lib/tablist_keys';
+  import { clampListWidth, listWidthDefault } from './lib/layout_tokens';
 
   const isNumber = (v: unknown): v is number => typeof v === 'number';
   const isBool = (v: unknown): v is boolean => typeof v === 'boolean';
@@ -121,7 +122,7 @@
   // Sidebar width is global. Sidebar collapsed state is also global — unlike
   // the center pane (which the user wants per-session), the sidebar is the
   // project tree itself and doesn't make sense to differ between sessions.
-  let sidebarPx = $state(readPref('layout.sidebar', 280, isNumber));
+  let sidebarPx = $state(readPref('layout.sidebar', listWidthDefault(), isNumber));
   let sidebarCollapsed = $state(readPref('layout.sidebar-collapsed', false, isBool));
   // sidebarPx changes on every resize-drag frame; debounce the localStorage
   // write so a drag persists once (on settle) instead of per frame.
@@ -595,7 +596,7 @@
   });
 
   function onResizeSidebar(delta: number) {
-    sidebarPx = Math.max(180, Math.min(640, sidebarPx + delta));
+    sidebarPx = clampListWidth(sidebarPx + delta);
   }
   function onResizeCenter(delta: number) {
     centerPx = Math.max(220, Math.min(800, centerPx + delta));

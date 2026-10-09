@@ -20,6 +20,7 @@
   // `orbit` (loader-use.test.ts holds every caller to that).
   import { onMount } from 'svelte';
   import { LOADER_SPECS, type LoaderName } from './loader-kit.generated';
+  import { COUNTED, countedMarkup } from './loader-kit-extract';
   import { effectiveMotion } from './motion';
 
   let {
@@ -29,6 +30,7 @@
     paused = false,
     delay = LOADER_DELAY_MS,
     value,
+    count,
     stage,
     class: klass = '',
     testid = 'loader',
@@ -45,6 +47,9 @@
     delay?: number;
     /** Progress ring only: 0–1 when the size is known. */
     value?: number;
+    /** Radar and Assemble only: one blip or particle per item (hosts that
+     *  answered, sessions), up to the kit's cap (`COUNTED`). */
+    count?: number;
     /** Dark stage behind it; on by default for particle loaders but Comet. */
     stage?: boolean;
     class?: string;
@@ -60,6 +65,8 @@
   const boxH = $derived(comet ? edge : Math.round(spec.height * scale));
   const onStage = $derived(stage ?? (spec.kind === 'particle' && !comet));
   const determinate = $derived(spec.id === 'progress-ring' && value !== undefined);
+  const counted = $derived(count !== undefined && COUNTED[spec.id] !== undefined);
+  const markup = $derived(counted ? countedMarkup(spec, count ?? 0) : spec.markup);
   const still = $derived($effectiveMotion !== 'full');
 
   let shown = $state(false);
@@ -116,6 +123,7 @@
     class:ofl--determinate={determinate}
     data-testid={testid}
     data-loader={spec.id}
+    data-count={counted ? count : undefined}
     style:width="{boxW}px"
     style:height="{boxH}px"
     style:--s={comet ? `${edge}px` : undefined}
@@ -126,7 +134,7 @@
   >
     {#if comet}
       <!-- Generated from the manual; no user text reaches it. -->
-      {@html spec.markup}
+      {@html markup}
     {:else}
       <span
         class="ofl__box"
@@ -135,7 +143,7 @@
         style:transform="scale({scale})"
       >
         <!-- Generated from the manual; no user text reaches it. -->
-        {@html spec.markup}
+        {@html markup}
       </span>
     {/if}
   </span>

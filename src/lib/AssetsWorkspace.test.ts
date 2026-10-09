@@ -1331,7 +1331,7 @@ describe('AssetsWorkspace carries (Task 15)', () => {
   const media = (q: string) => new RegExp(`@media \\(max-width: ${q}\\)\\s*\\{([\\s\\S]*?)\\n  \\}`).exec(css)?.[1] ?? '';
 
   it('the layout narrows: the rail to 56px under 1100px, the Inspector under the list under 860px', () => {
-    expect(media('1100px')).toMatch(/grid-template-columns:\s*56px minmax\(0, 1fr\) minmax\(280px, 340px\)/);
+    expect(media('1100px')).toMatch(/grid-template-columns:\s*56px minmax\(0, 1fr\) minmax\(var\(--inspector-min\), var\(--list-w\)\)/);
     const narrow = media('860px');
     expect(narrow).toMatch(/grid-template-columns:\s*56px minmax\(0, 1fr\);/);
     expect(narrow).toContain("grid-template-areas: 'rail main' 'rail insp' 'foot foot'");

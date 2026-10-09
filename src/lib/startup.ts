@@ -4,24 +4,31 @@
 //
 //   store     Draw-on      the backend's first answer (hub status, health,
 //                          the row subscription). The database itself is
-//                          opened and migrated in the backend's setup,
-//                          before this window runs any script, so there is
-//                          no migration to show a Progress ring for.
+//                          opened and migrated in the backend's setup
+//                          closure (src-tauri lib.rs), which Tauri runs on
+//                          the main thread after building this window but
+//                          before its event loop starts: the page cannot
+//                          load, paint or receive an event until the
+//                          migration is over, so there is no migration to
+//                          show a Progress ring for. Showing one would mean
+//                          opening the store after the window, behind every
+//                          command that takes it as managed state.
 //   hub       Chase        a hub client whose link is not up yet; standalone
 //                          skips it. After 6 s it reads Signal lost, with
-//                          Retry and Hub settings.
+//                          Open offline (offline.ts), Retry and Hub settings.
 //   hosts     Radar        the host list, one blip per host that answers
 //   sessions  Assemble     the session list ("22 sessions · 4 need you")
 //   done                   the splash shrinks away; a host that has not
 //                          answered keeps "still connecting" in the status bar
 //
 // Warm start (opened again within 8 h of last being used) shows no splash at
-// all: the last screen at once, and Breathe in the status bar while the list
-// re-syncs. After an update, the Wordmark reveal plays once with the new
+// all: the last screen at once (the stored destination, destination.ts),
+// and Breathe in the status bar while the list re-syncs. After an update, the Wordmark reveal plays once with the new
 // version and a link to what changed.
 import { writable } from 'svelte/store';
 import type { HubConnection } from './hub_connection';
 import type { HostRow } from './hosts';
+import { restoreLastDestination } from './destination';
 
 export type StartupStage = 'store' | 'hub' | 'hosts' | 'sessions' | 'done';
 
@@ -97,13 +104,17 @@ export function isWarm(lastActiveAt: number | null, now: number): boolean {
  *  status bar's mark. */
 export const warmStart = writable<boolean>(false);
 
-/** Read the stamp the last run left, decide warm or cold, and keep the stamp
- *  fresh from now on: on every hide and once a minute while open. Returns
+/** Read the stamp the last run left, decide warm or cold (warm puts the last
+ *  destination back), and keep the stamp fresh from now on: on every hide and once a minute while open. Returns
  *  the cleanup. */
 export function trackActivity(now: () => number = Date.now): () => void {
   const raw = read(LAST_ACTIVE_KEY);
   const last = raw === null ? null : Number(raw);
-  warmStart.set(isWarm(Number.isFinite(last) ? last : null, now()));
+  const warm = isWarm(Number.isFinite(last) ? last : null, now());
+  warmStart.set(warm);
+  // The last screen at once: the session is restored by its own pref
+  // (`session.last`), the destination over it here.
+  if (warm) restoreLastDestination();
   const stamp = () => write(LAST_ACTIVE_KEY, String(now()));
   stamp();
   const t = setInterval(stamp, 60_000);
