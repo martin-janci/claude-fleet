@@ -65,6 +65,67 @@ pub async fn handle_check(
     }
 }
 
+/// `GET /update/artifact/<sha256>`: a release file from the hub's mirror
+/// (`update.mirror`, S9), for a target that cannot reach GitHub. Any
+/// credential that may ask `/update/check` may fetch; a hub link may not.
+/// 404 for a sha no verified manifest lists, or with the mirror off.
+pub async fn handle_artifact(
+    State(state): State<ReportState>,
+    Extension(caller): Extension<Caller>,
+    axum::extract::Path(sha256): axum::extract::Path<String>,
+) -> Response {
+    if let Err(e) = update::identity(&caller) {
+        return refusal(e);
+    }
+    let fetch = update::HttpsFetch::new(Some(&update::channel_base_url()));
+    let path = match update::mirror::local_copy(
+        state.store(),
+        &fetch,
+        &update::trusted_keys(),
+        &sha256,
+        crate::store::now_unix(),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) if e.code == codes::E_NOTFOUND => {
+            return (StatusCode::NOT_FOUND, "no such artifact\n").into_response()
+        }
+        Err(e) => {
+            tracing::warn!(code = %e.code, error = %e.message, "[update] mirror fetch failed");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"code": e.code, "message": e.message})),
+            )
+                .into_response();
+        }
+    };
+    let file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
+        Err(_) => return (StatusCode::NOT_FOUND, "no such artifact\n").into_response(),
+    };
+    let len = match file.metadata().await {
+        Ok(m) => m.len(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let mut resp = Response::new(axum::body::Body::from_stream(
+        tokio_util::io::ReaderStream::new(file),
+    ));
+    let h = resp.headers_mut();
+    h.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/octet-stream"),
+    );
+    h.insert(
+        axum::http::header::CONTENT_LENGTH,
+        axum::http::HeaderValue::from(len),
+    );
+    if let Ok(v) = axum::http::HeaderValue::from_str(&sha256) {
+        h.insert("x-fleet-sha256", v);
+    }
+    resp
+}
+
 pub async fn handle_report(
     State(state): State<ReportState>,
     Extension(caller): Extension<Caller>,

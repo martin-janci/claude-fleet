@@ -1,0 +1,87 @@
+name: android-amendment
+
+# The phone's part of a release (update-channel design §4, slice S8; owner's
+# answer to §13.2: a signed amendment). fleet-mobile builds its signed APK
+# under the same version AFTER this repository's release, so its release job
+# sends `repository_dispatch` (event type `android-release`) here with what
+# it published; this signs an amendment that adds the `android` component to
+# that release's manifest and lists it on every track that carries the
+# release (scripts/update-channels.sh amend). Hubs then offer the APK to
+# paired phones. A person can run it by hand too (workflow_dispatch).
+#
+# The payload is untrusted input from another repository's workflow: every
+# field arrives through env:, is validated by fleet-release (sha256s are 64
+# hex, the URL is https:// on fleet-mobile's own releases), and the document
+# is signed only after that.
+
+on:
+  repository_dispatch:
+    types: [android-release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (no v)
+        required: true
+      apk_url:
+        description: https URL of the APK on fleet-mobile's release
+        required: true
+      sha256:
+        description: The APK's sha256 (hex)
+        required: true
+      size:
+        description: The APK's size in bytes
+        required: true
+      version_code:
+        description: The APK's versionCode
+        required: true
+      signer_sha256:
+        description: sha256 of the APK's signing certificate (hex)
+        required: true
+      contract_min:
+        description: The phone's MIN_HUB_CONTRACT
+        required: true
+      contract_max:
+        description: The phone's MAX_HUB_CONTRACT
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-channels
+  cancel-in-progress: false
+
+jobs:
+  amend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: ./.github/actions/fleet-release
+      - name: Sign the amendment and list it
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          FLEET_RELEASE: target/release/fleet-release
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ github.event.client_payload.version || inputs.version }}
+          APK_URL: ${{ github.event.client_payload.apk_url || inputs.apk_url }}
+          SHA256: ${{ github.event.client_payload.sha256 || inputs.sha256 }}
+          SIZE: ${{ github.event.client_payload.size || inputs.size }}
+          VERSION_CODE: ${{ github.event.client_payload.version_code || inputs.version_code }}
+          SIGNER: ${{ github.event.client_payload.signer_sha256 || inputs.signer_sha256 }}
+          CMIN: ${{ github.event.client_payload.contract_min || inputs.contract_min }}
+          CMAX: ${{ github.event.client_payload.contract_max || inputs.contract_max }}
+        run: |
+          set -euo pipefail
+          case "$VERSION" in *[!0-9A-Za-z.-]* | '') echo "::error::bad version '$VERSION'"; exit 1 ;; esac
+          case "$APK_URL" in
+            "https://github.com/$OWNER/fleet-mobile/releases/download/v$VERSION/"*.apk) ;;
+            *) echo "::error::the APK must be on fleet-mobile's v$VERSION release, got '$APK_URL'"; exit 1 ;;
+          esac
+          "$FLEET_RELEASE" amendment --version "$VERSION" --apk-url "$APK_URL" \
+            --sha256 "$SHA256" --size "$SIZE" --version-code "$VERSION_CODE" \
+            --signer-sha256 "$SIGNER" --mobile-accepts "$CMIN,$CMAX" --out android.json
+          scripts/update-channels.sh amend "v$VERSION" android.json

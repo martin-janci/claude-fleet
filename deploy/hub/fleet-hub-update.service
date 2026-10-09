@@ -1,0 +1,24 @@
+# A hub run from fleet-hub.service (no Docker) updating itself: one pass of
+# `fleet-hub update apply` from a timer. docs/updates.md → "A hub without
+# Docker".
+#
+#   sudo cp fleet-hub-update.service fleet-hub-update.timer /etc/systemd/system/
+#   fleet-hub pair --name updater --mode updater        # as the hub's user
+#   sudo fleet-hub update pair '<the URL it printed>'
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.timer
+#
+# It runs as root: it writes /usr/local/lib/fleet-hub and /usr/local/bin/fleet-hub
+# and restarts fleet-hub.service. The hub's healthcheck and backups run as
+# the unit's user (--user) with its environment file.
+[Unit]
+Description=claude-fleet hub update pass (fleet-hub update apply)
+After=fleet-hub.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/fleet-hub.env
+Environment=FLEET_HUB_DATA_DIR=/var/lib/fleet-hub
+ExecStart=/usr/local/bin/fleet-hub update apply
+# A pass that installs waits for readiness and the soak; give it room.
+TimeoutStartSec=30min

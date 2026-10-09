@@ -59,6 +59,12 @@ pub struct ManifestInput<'a> {
     pub desktop_accepts: Window,
     pub assets: &'a [Asset],
     pub hub_image: Option<&'a HubImage>,
+    /// The desktop's updater bundles (`.app.tar.gz`, `.AppImage`,
+    /// `-setup.exe`) by asset name → `tauri-plugin-updater`'s `signature`:
+    /// the base64 of a `minisign -S` signature by the release key, made by
+    /// `scripts/release-manifest.sh` (S7). A bundle without one is offered as
+    /// a download only.
+    pub tauri_sigs: &'a BTreeMap<String, String>,
 }
 
 /// The track a version belongs to (U9): a pre-release is `beta` (`-rc.N`) or
@@ -74,8 +80,8 @@ pub fn track_of(v: &Version) -> Track {
 }
 
 /// Build the release manifest from the release's actual assets. Names that
-/// are not an installable artifact (SHA256SUMS, the manifest itself, the
-/// Tauri updater bundles until they are signed — S7) are left out.
+/// are not an installable artifact (SHA256SUMS, the manifest itself, an
+/// updater bundle nobody signed) are left out.
 pub fn build_manifest(i: &ManifestInput) -> Result<ReleaseManifest, String> {
     let v = i.version.to_string();
     let mut components: BTreeMap<String, ComponentRelease> = BTreeMap::new();
@@ -124,7 +130,47 @@ pub fn build_manifest(i: &ManifestInput) -> Result<ReleaseManifest, String> {
             "nsis",
         ),
     ];
+    // What tauri-plugin-updater installs in place, once signed.
+    let updatable = [
+        (
+            format!("claude-fleet_{v}_aarch64.app.tar.gz"),
+            "macos-aarch64",
+            None,
+        ),
+        (
+            format!("claude-fleet_{v}_x64.app.tar.gz"),
+            "macos-x86_64",
+            None,
+        ),
+        (
+            format!("claude-fleet_{v}_amd64.AppImage"),
+            "linux-x86_64",
+            Some("appimage"),
+        ),
+        (
+            format!("claude-fleet_{v}_x64-setup.exe"),
+            "windows-x86_64",
+            Some("nsis"),
+        ),
+    ];
     for a in i.assets {
+        if let (Some((_, platform, variant)), Some(sig)) = (
+            updatable.iter().find(|(n, _, _)| *n == a.name),
+            i.tauri_sigs.get(&a.name),
+        ) {
+            push(
+                "desktop",
+                Artifact::Tauri {
+                    platform: (*platform).into(),
+                    variant: variant.map(String::from),
+                    name: a.name.clone(),
+                    sha256: a.sha256.clone(),
+                    size: a.size,
+                    tauri_signature: sig.clone(),
+                },
+            );
+            continue;
+        }
         if let Some(target) = a
             .name
             .strip_prefix(&format!("fleet-hub-{v}-"))
@@ -248,6 +294,13 @@ pub fn channel_add(
     // A re-run (CI retrying a publish) must not undo the publisher's later
     // `Recommend` hold-back, nor make a withdrawn release recommended.
     let first_listing = doc.release(&v).is_none() && !doc.is_withdrawn(&v);
+    // A re-run keeps the amendments the release gained since (the phone's).
+    let mut release = release;
+    if release.amendments.is_empty() {
+        if let Some(old) = doc.release(&v) {
+            release.amendments = old.amendments.clone();
+        }
+    }
     doc.releases.retain(|r| r.version != v);
     doc.releases.push(release);
     doc.releases.sort_by(|a, b| b.version.cmp(&a.version));
@@ -260,6 +313,70 @@ pub fn channel_add(
     trim(&mut doc, keep);
     stamp(&mut doc, now, expires_days);
     Ok(doc)
+}
+
+/// List an amendment of a release already on the track (design §4, §13.2):
+/// one per component, replaced on a re-run. Refused for a release the
+/// channel does not list — an amendment never brings a release in.
+pub fn channel_amend(
+    mut doc: ChannelDoc,
+    version: &Version,
+    amendment: crate::channel_doc::AmendmentRef,
+    now: i64,
+    expires_days: i64,
+) -> Result<ChannelDoc, String> {
+    let r = doc
+        .releases
+        .iter_mut()
+        .find(|r| &r.version == version)
+        .ok_or_else(|| format!("{version} is not on the {} channel", doc.track.as_str()))?;
+    r.amendments.retain(|a| a.component != amendment.component);
+    r.amendments.push(amendment);
+    stamp(&mut doc, now, expires_days);
+    Ok(doc)
+}
+
+/// The phone's amendment (§4): its APK, its contract window.
+pub struct AndroidAmendmentInput<'a> {
+    pub version: &'a Version,
+    pub url: &'a str,
+    pub sha256: &'a str,
+    pub size: u64,
+    pub version_code: u64,
+    pub signer_sha256: &'a str,
+    pub mobile_accepts: Window,
+}
+
+pub fn build_android_amendment(
+    i: &AndroidAmendmentInput,
+) -> Result<crate::manifest::Amendment, String> {
+    let hex64 = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+    if !hex64(i.sha256) || !hex64(i.signer_sha256) {
+        return Err("sha256 and signer_sha256 must be 64 hex digits".into());
+    }
+    if !i.url.starts_with("https://") {
+        return Err(format!("the APK URL must be https://, got {:?}", i.url));
+    }
+    let mut components = BTreeMap::new();
+    components.insert(
+        "android".to_string(),
+        ComponentRelease {
+            version: i.version.clone(),
+            artifacts: vec![Artifact::Apk {
+                url: i.url.into(),
+                sha256: i.sha256.to_ascii_lowercase(),
+                size: i.size,
+                version_code: i.version_code,
+                signer_sha256: i.signer_sha256.to_ascii_lowercase(),
+            }],
+        },
+    );
+    Ok(crate::manifest::Amendment {
+        schema: MANIFEST_SCHEMA,
+        version: i.version.clone(),
+        mobile_accepts: Some(i.mobile_accepts),
+        components,
+    })
 }
 
 fn trim(doc: &mut ChannelDoc, keep: usize) {
@@ -428,7 +545,65 @@ mod tests {
             desktop_accepts: Window::new(6, 6),
             assets: &assets,
             hub_image: image,
+            tauri_sigs: &BTreeMap::new(),
         })
+    }
+
+    #[test]
+    fn a_signed_updater_bundle_is_a_tauri_artifact_and_an_unsigned_one_a_download() {
+        let ver = v("0.5.5");
+        let names = [
+            "claude-fleet_0.5.5_aarch64.app.tar.gz",
+            "claude-fleet_0.5.5_aarch64.dmg",
+            "claude-fleet_0.5.5_amd64.AppImage",
+            "claude-fleet_0.5.5_amd64.deb",
+            "claude-fleet_0.5.5_x64-setup.exe",
+            "fleet-hub-0.5.5-x86_64-unknown-linux-gnu.tar.gz",
+        ];
+        let assets: Vec<Asset> = names.iter().map(|n| asset(n)).collect();
+        let sigs: BTreeMap<String, String> = [
+            ("claude-fleet_0.5.5_aarch64.app.tar.gz", "c2lnLW1hYw=="),
+            ("claude-fleet_0.5.5_amd64.AppImage", "c2lnLWFwcGltYWdl"),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        let m = build_manifest(&ManifestInput {
+            version: &ver,
+            commit: "c",
+            build_id: "b",
+            published_at: 0,
+            assets_base: "https://x/",
+            notes_url: "",
+            hub: &compat(),
+            desktop_accepts: Window::new(6, 6),
+            assets: &assets,
+            hub_image: None,
+            tauri_sigs: &sigs,
+        })
+        .unwrap();
+        let d = crate::Component::Desktop;
+        let mac = m
+            .artifact_for(d, &Platform::new("macos", "aarch64", "tauri"))
+            .unwrap();
+        assert!(
+            matches!(mac, Artifact::Tauri { tauri_signature, name, .. }
+                if tauri_signature == "c2lnLW1hYw==" && name.ends_with(".app.tar.gz")),
+            "{mac:?}"
+        );
+        let appimage = m
+            .artifact_for(d, &Platform::new("linux", "x86_64", "appimage"))
+            .unwrap();
+        assert!(matches!(appimage, Artifact::Tauri { .. }), "{appimage:?}");
+        // No signature: the installer is a download a person runs.
+        let nsis = m
+            .artifact_for(d, &Platform::new("windows", "x86_64", "nsis"))
+            .unwrap();
+        assert!(matches!(nsis, Artifact::Download { .. }), "{nsis:?}");
+        assert!(matches!(
+            m.artifact_for(d, &Platform::new("linux", "x86_64", "deb")),
+            Some(Artifact::Download { .. })
+        ));
     }
 
     #[test]
@@ -510,6 +685,7 @@ mod tests {
             desktop_accepts: Window::new(6, 6),
             assets: &none,
             hub_image: None,
+            tauri_sigs: &BTreeMap::new(),
         })
         .unwrap_err();
         assert!(e.contains("no hub artifact"), "{e}");
@@ -527,7 +703,82 @@ mod tests {
             version: v(ver),
             manifest: format!("https://x/v{ver}/release-manifest.json"),
             manifest_sha256: sha256_hex(ver.as_bytes()),
+            amendments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_amendment_is_listed_kept_across_a_rerun_and_never_brings_a_release_in() {
+        let doc = channel_add(None, Track::Stable, rref("0.5.5"), 100, 14, 30).unwrap();
+        let a = crate::channel_doc::AmendmentRef {
+            component: "android".into(),
+            manifest: "https://raw/amendments/0.5.5/android.json".into(),
+            manifest_sha256: "ab".repeat(32),
+        };
+        let seq = doc.sequence;
+        let doc = channel_amend(doc, &v("0.5.5"), a.clone(), 200, 14).unwrap();
+        assert!(doc.sequence > seq);
+        assert_eq!(
+            doc.release(&v("0.5.5")).unwrap().amendments,
+            vec![a.clone()]
+        );
+        // A re-amend replaces, never duplicates.
+        let doc = channel_amend(doc, &v("0.5.5"), a.clone(), 300, 14).unwrap();
+        assert_eq!(doc.release(&v("0.5.5")).unwrap().amendments.len(), 1);
+        // The release job re-running keeps it.
+        let doc = channel_add(Some(doc), Track::Stable, rref("0.5.5"), 400, 14, 30).unwrap();
+        assert_eq!(
+            doc.release(&v("0.5.5")).unwrap().amendments,
+            vec![a.clone()]
+        );
+        assert!(channel_amend(doc, &v("0.9.9"), a, 500, 14).is_err());
+    }
+
+    #[test]
+    fn the_android_amendment_folds_in_and_never_overrides() {
+        let a = build_android_amendment(&AndroidAmendmentInput {
+            version: &v("0.4.1"),
+            url:
+                "https://github.com/o/fleet-mobile/releases/download/v0.4.1/fleet-mobile-0.4.1.apk",
+            sha256: &"aa".repeat(32),
+            size: 7,
+            version_code: 41,
+            signer_sha256: &"bb".repeat(32),
+            mobile_accepts: Window::new(0, 14),
+        })
+        .unwrap();
+        let mut m = manifest_for("0.4.1", None).unwrap();
+        assert!(m.component(crate::Component::Android).is_none());
+        assert!(m.amend(&a));
+        assert!(matches!(
+            m.artifact_for(
+                crate::Component::Android,
+                &Platform::new("android", "aarch64", "apk")
+            ),
+            Some(Artifact::Apk {
+                version_code: 41,
+                ..
+            })
+        ));
+        assert_eq!(
+            m.compatibility.contract.mobile_accepts,
+            Some(Window::new(0, 14))
+        );
+        // Another release's amendment folds nothing.
+        let mut other = manifest_for("0.4.2", None).unwrap();
+        assert!(!other.amend(&a));
+        assert!(other.component(crate::Component::Android).is_none());
+        // Bad input is refused.
+        assert!(build_android_amendment(&AndroidAmendmentInput {
+            version: &v("0.4.1"),
+            url: "http://x/a.apk",
+            sha256: &"aa".repeat(32),
+            size: 1,
+            version_code: 1,
+            signer_sha256: &"bb".repeat(32),
+            mobile_accepts: Window::new(0, 1),
+        })
+        .is_err());
     }
 
     #[test]

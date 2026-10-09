@@ -984,6 +984,61 @@ impl HubBackend {
             })
     }
 
+    /// The hub's `/update` routes (update-channel design §6.5): the ONLY calls
+    /// this window makes that skip the wire-contract gate. A desktop whose hub
+    /// it can no longer read is exactly the desktop that must still learn what
+    /// to update to; the routes' own schema is `update_proto`, frozen and only
+    /// ever extended, never the MCP contract. `update_routes_are_the_only_contract_exemption`
+    /// pins this list.
+    pub const UPDATE_PATHS: &'static [&'static str] = &["/update/check", "/update/report"];
+
+    /// POST `body` to one of [`Self::UPDATE_PATHS`] and return the answer's
+    /// body. Refused only when the hub is unusable this launch (no transport);
+    /// never by the contract verdict.
+    pub async fn post_update(&self, path: &str, body: String) -> Result<String, IpcError> {
+        if !Self::UPDATE_PATHS.contains(&path) {
+            return Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!("{path} is not an update route"),
+            ));
+        }
+        if let Some(refused) = self.unavailable_error("update_check") {
+            return Err(refused);
+        }
+        let url = format!("{}{path}", self.cfg.base_url);
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.transport.post_json(&url, &self.cfg.token, body),
+        )
+        .await
+        .map_err(|_| IpcError::new(codes::E_HUB_UNREACHABLE, format!("{path}: timed out")))?
+        .map_err(|e| {
+            IpcError::new(
+                codes::E_HUB_UNREACHABLE,
+                format!(
+                    "{path} at {} failed: {}",
+                    self.cfg.base_url,
+                    self.redact(&e)
+                ),
+            )
+        })?;
+        match resp.status {
+            200 => Ok(resp.body),
+            401 => Err(IpcError::new(
+                codes::E_UNAUTHORIZED,
+                "the hub revoked this client — pair again in Settings",
+            )),
+            403 => Err(IpcError::new(
+                codes::E_FORBIDDEN,
+                format!("the hub refused {path}: {}", self.redact(&resp.body)),
+            )),
+            status => Err(IpcError::new(
+                codes::E_HUB_UNREACHABLE,
+                format!("{path}: HTTP {status}: {}", self.redact(&resp.body)),
+            )),
+        }
+    }
+
     /// `commands::tasks::list_tasks`.
     pub async fn list_tasks(
         &self,

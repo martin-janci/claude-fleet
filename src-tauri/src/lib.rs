@@ -7,6 +7,7 @@ pub mod backend;
 mod bootstrap;
 mod commands;
 mod pty;
+mod self_update;
 mod voice;
 
 pub use app_events::AppHandleEventBus;
@@ -110,6 +111,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             use tauri::Manager;
             // Core tasks (ticks, MCP server, hook side-jobs) spawn through
@@ -140,6 +142,11 @@ pub fn run() {
             // The data dir was resolved once, before logging started; IPC
             // handlers read it from managed state instead of re-resolving.
             app.manage(commands::diagnostics::AppDataDir(data_dir.clone()));
+            // Every request to a hub names this build (update design §6.3).
+            if let Err(e) = fleet_core::http_client::set_client_header(self_update::client_header()) {
+                tracing::warn!(error = %e, "X-Fleet-Client not set");
+            }
+            app.manage(self_update::SelfUpdate::default());
             let db_path = data_dir.join("state.db");
             let store = Store::open_with_bus(&db_path, bus).unwrap_or_else(|e| {
                 // Still a hard fail (the app can't run without its DB), but
@@ -584,6 +591,8 @@ pub fn run() {
             commands::federation::link_peer_hub,
             commands::federation::unlink_peer_hub,
             commands::updates::list_update_targets,
+            commands::updates::update_check,
+            commands::updates::update_install,
             commands::debug_devices::list_debug_devices,
             commands::debug_devices::scan_debug_devices,
             commands::debug_devices::update_debug_device,

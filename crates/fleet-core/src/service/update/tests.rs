@@ -717,16 +717,19 @@ async fn a_new_track_or_interval_wakes_the_refresh_tick() {
 }
 
 #[test]
-fn nightly_is_not_offered_until_it_is_published() {
+fn nightly_is_a_track_once_it_is_published() {
+    settings::validate(settings::UPDATE_TRACK, "nightly").unwrap();
     assert_eq!(
-        settings::validate(settings::UPDATE_TRACK, "nightly")
+        settings::validate(settings::UPDATE_TRACK, "hourly")
             .unwrap_err()
             .code,
         codes::E_INVALID
     );
     let s = Store::open_in_memory().unwrap();
-    // A value stored before nightly was withdrawn reads as the default.
     s.set_setting(settings::UPDATE_TRACK, "nightly").unwrap();
+    assert_eq!(track(&s), Track::Nightly);
+    // Anything else stored reads as the default.
+    s.set_setting(settings::UPDATE_TRACK, "hourly").unwrap();
     assert_eq!(track(&s), Track::Stable);
 }
 
@@ -1096,4 +1099,822 @@ async fn a_clients_header_records_its_build_and_keeps_its_own_reports() {
     record_client_header(&s, &Caller::master(), &h, NOW).unwrap();
     assert!(s.update_observed("agent:h1").unwrap().is_none());
     assert!(s.update_observed("operator").unwrap().is_none());
+}
+
+/// S4b: `update:decision` is pushed when, and only when, what a target would
+/// be told moves — a pin here.
+#[tokio::test]
+async fn a_moved_decision_is_pushed_once() {
+    let bus = Arc::new(crate::events::RecordingEventBus::new());
+    let store = Mutex::new(Store::open_with_bus_in_memory(bus.clone()).unwrap());
+    let key = TestKey::new(9);
+    let fetch = MapFetch::default();
+    publish(&fetch, &key, 10);
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    let id = lock(&store)
+        .unwrap()
+        .insert_client_token("decision-push-desk", "sha-decision-push", "full")
+        .unwrap()
+        .id;
+    let c = client(id, TokenMode::Full, None);
+    check(&store, &c, &desktop_req("0.3.3"), &keys(&key), NOW).unwrap();
+    let target = format!("client:{id}");
+    // The PUSHED cache is process-wide; start this target from nothing.
+    super::PUSHED.lock().unwrap().remove(&target);
+    bus.take();
+    // First sight records, pushes nothing: the client was just told.
+    assert!(!push_decisions(&store, &keys(&key), NOW).contains(&target));
+    assert!(bus.take().is_empty());
+    // The operator holds it on what it runs: the decision moves.
+    pin(&store, "desktop", &target, "0.3.3", false, None, NOW).unwrap();
+    bus.take();
+    assert!(push_decisions(&store, &keys(&key), NOW).contains(&target));
+    assert_eq!(
+        bus.take(),
+        vec![format!("update:decision:{target}:up_to_date")]
+    );
+    // Nothing moved since: silent.
+    assert!(!push_decisions(&store, &keys(&key), NOW).contains(&target));
+    assert!(bus.take().is_empty());
+}
+
+/// Design §4 / §13.2: the phone's APK arrives after its release as a signed
+/// amendment. Until it is listed, a phone is offered nothing for that
+/// release; once listed, the hub fetches it, verifies it on every read, and
+/// folds it into the release's manifest. One the release key did not sign
+/// folds nothing.
+#[tokio::test]
+async fn the_phones_apk_arrives_as_a_signed_amendment() {
+    let key = TestKey::new(9);
+    let c = crate::wire_contract::CONTRACT_REVISION;
+    let fetch = MapFetch::default();
+    // 0.3.4 without the phone (its release has not run yet).
+    let mut releases = Vec::new();
+    for v in ["0.3.3", "0.3.4"] {
+        let mut m: serde_json::Value =
+            serde_json::from_str(&manifest_json(v, c, [c, c], 1, [1, 1])).unwrap();
+        m["components"].as_object_mut().unwrap().remove("android");
+        m["compatibility"]["contract"]
+            .as_object_mut()
+            .unwrap()
+            .remove("mobile_accepts");
+        let m = m.to_string();
+        let url = format!("https://github.com/martin-janci/claude-fleet/releases/download/v{v}/release-manifest.json");
+        fetch.put(&url, &m);
+        fetch.put(&format!("{url}.minisig"), &key.sign(m.as_bytes()));
+        releases.push(serde_json::json!({"version": v, "manifest": url, "manifest_sha256": sha256_hex(m.as_bytes())}));
+    }
+    let channel = |seq: u64, releases: &serde_json::Value| {
+        let ch = serde_json::json!({
+            "schema": 1, "track": "stable", "sequence": seq,
+            "generated_at": "2026-09-30T00:00:00Z", "expires_at": "2026-10-14T00:00:00Z",
+            "current": "0.3.4", "recommended": "0.3.4", "releases": releases
+        })
+        .to_string();
+        fetch.put(&format!("{BASE}stable.json"), &ch);
+        fetch.put(
+            &format!("{BASE}stable.json.minisig"),
+            &key.sign(ch.as_bytes()),
+        );
+    };
+    channel(10, &serde_json::json!(releases));
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    let id = lock(&store)
+        .unwrap()
+        .insert_client_token("phone-amend", "sha-phone-amend", "full")
+        .unwrap()
+        .id;
+    let phone = client(id, TokenMode::Full, None);
+    let req = CheckRequest {
+        update_proto: 1,
+        component: Component::Android,
+        platform: Platform::new("android", "aarch64", "apk"),
+        installed: Installed::version(Version::new(0, 3, 3)),
+        speaks: Speaks {
+            contract_accepts: Some(Window::new(0, c)),
+            agent_proto: None,
+        },
+        phase: UpdatePhase::Idle,
+        attempt: None,
+    };
+    let before = check(&store, &phone, &req, &keys(&key), NOW).unwrap();
+    assert!(before.target.is_none(), "{:?}", before.reason);
+
+    // fleet-mobile's release: a signed amendment, listed on the channel.
+    let publish_amendment = |signer: &TestKey, seq: u64| {
+        let a = fleet_update::publish::build_android_amendment(
+            &fleet_update::publish::AndroidAmendmentInput {
+                version: &Version::new(0, 3, 4),
+                url: "https://github.com/martin-janci/fleet-mobile/releases/download/v0.3.4/fleet-mobile-0.3.4.apk",
+                sha256: &"aa".repeat(32),
+                size: 9,
+                version_code: 34,
+                signer_sha256: &"bb".repeat(32),
+                mobile_accepts: Window::new(0, c),
+            },
+        )
+        .unwrap();
+        let body = serde_json::to_string(&a).unwrap();
+        let url = format!("{BASE}amendments/0.3.4/android.json");
+        fetch.put(&url, &body);
+        fetch.put(&format!("{url}.minisig"), &signer.sign(body.as_bytes()));
+        let mut rs = releases.clone();
+        rs[1]["amendments"] = serde_json::json!([{
+            "component": "android", "manifest": url, "manifest_sha256": sha256_hex(body.as_bytes())
+        }]);
+        channel(seq, &serde_json::json!(rs));
+    };
+
+    // Signed by a key nobody trusts: nothing is folded in.
+    publish_amendment(&TestKey::new(3), 11);
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    let forged = check(&store, &phone, &req, &keys(&key), NOW).unwrap();
+    assert!(forged.target.is_none(), "{:?}", forged.reason);
+
+    publish_amendment(&key, 12);
+    refresh(&store, &fetch, BASE, &keys(&key), NOW)
+        .await
+        .unwrap();
+    let after = check(&store, &phone, &req, &keys(&key), NOW).unwrap();
+    assert_eq!(after.status, Status::UpdateAvailable, "{:?}", after.reason);
+    let t = after.target.unwrap();
+    assert_eq!(t.version, Version::new(0, 3, 4));
+    assert!(matches!(
+        t.artifact,
+        fleet_update::Artifact::Apk {
+            version_code: 34,
+            ..
+        }
+    ));
+}
+
+// ── rollouts and the maintenance window (S9) ──
+
+fn desktops(store: &Mutex<Store>, k: &TrustedKeys, n: i64) -> Vec<(String, Status)> {
+    (1..=n)
+        .map(|id| {
+            let d = check(
+                store,
+                &client(id, TokenMode::Full, None),
+                &desktop_req("0.3.3"),
+                k,
+                NOW,
+            )
+            .unwrap();
+            (format!("client:{id}"), d.status)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_rollout_opens_wave_by_wave_and_completes() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    assert!(desktops(&store, &k, 40)
+        .iter()
+        .all(|(_, s)| *s == Status::UpdateAvailable));
+
+    let r = rollout_start(
+        &store,
+        "desktop",
+        "0.3.4",
+        Some(vec![10, 100]),
+        None,
+        &k,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (r.wave, r.waves.clone(), r.halt_failure_ratio),
+        (0, vec![10, 100], 0.2)
+    );
+    let v = Version::new(0, 3, 4);
+    let first = desktops(&store, &k, 40);
+    for (t, s) in &first {
+        let in_wave = fleet_update::decide::in_cohort(t, &v, 10);
+        assert_eq!(
+            *s,
+            if in_wave {
+                Status::UpdateAvailable
+            } else {
+                Status::Hold
+            },
+            "{t}"
+        );
+    }
+    assert!(first.iter().any(|(_, s)| *s == Status::Hold));
+    let why = check_for(
+        &store,
+        &Caller::master(),
+        &first.iter().find(|(_, s)| *s == Status::Hold).unwrap().0,
+        &k,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(why.reason.code, fleet_update::wire::ReasonCode::NotInWave);
+
+    // One active rollout per component.
+    let again = rollout_start(&store, "desktop", "0.3.4", None, None, &k, NOW).unwrap_err();
+    assert_eq!(again.code, codes::E_CONFLICT);
+
+    // The wave soaks for update.rollout_wave_secs (an hour) first.
+    assert!(rollout::advance(&store, NOW + 60).unwrap().is_empty());
+    let moved = rollout::advance(&store, NOW + 3600).unwrap();
+    assert_eq!((moved[0].what, moved[0].wave), ("advanced", 1));
+    assert!(desktops(&store, &k, 40)
+        .iter()
+        .all(|(_, s)| *s == Status::UpdateAvailable));
+
+    let moved = rollout::advance(&store, NOW + 7200).unwrap();
+    assert_eq!(moved[0].what, "completed");
+    let s = lock(&store).unwrap();
+    assert!(s.update_rollout_active("desktop").unwrap().is_none());
+    let st = s.update_rollouts(5).unwrap();
+    assert_eq!(st[0].outcome.as_deref(), Some("completed"));
+}
+
+#[tokio::test]
+async fn a_failing_wave_halts_the_rollout_and_says_so() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    desktops(&store, &k, 40);
+    rollout_start(
+        &store,
+        "desktop",
+        "0.3.4",
+        Some(vec![50, 100]),
+        Some(0.2),
+        &k,
+        NOW,
+    )
+    .unwrap();
+    let v = Version::new(0, 3, 4);
+    let in_wave: Vec<i64> = (1..=40)
+        .filter(|id| fleet_update::decide::in_cohort(&format!("client:{id}"), &v, 50))
+        .collect();
+    assert!(in_wave.len() >= 3);
+    // One installed it, one failed: 50% of the attempts failed.
+    report(
+        &store,
+        &client(in_wave[0], TokenMode::Full, None),
+        &desktop_report("a", UpdatePhase::Success, "0.3.4"),
+        NOW,
+    )
+    .unwrap();
+    report(
+        &store,
+        &client(in_wave[1], TokenMode::Full, None),
+        &desktop_report("b", UpdatePhase::Failed, "0.3.3"),
+        NOW,
+    )
+    .unwrap();
+    {
+        let s = lock(&store).unwrap();
+        let r = s.update_rollout_active("desktop").unwrap().unwrap();
+        let t = rollout::tally(&s, &r).unwrap();
+        assert_eq!(
+            (t.in_wave as usize, t.installed, t.failed),
+            (in_wave.len(), 1, 1)
+        );
+    }
+
+    let moved = rollout::advance(&store, NOW + 3600).unwrap();
+    assert_eq!(moved[0].what, "halted");
+    // Paused: nobody new is offered it, and fleet_health names the rollout.
+    let d = check(
+        &store,
+        &client(in_wave[2], TokenMode::Full, None),
+        &desktop_req("0.3.3"),
+        &k,
+        NOW + 3600,
+    )
+    .unwrap();
+    assert_eq!(
+        (d.status, d.reason.code),
+        (Status::Hold, fleet_update::wire::ReasonCode::RolloutPaused)
+    );
+    {
+        let s = lock(&store).unwrap();
+        let h = health(&s, &Caller::master(), &k, NOW + 3600).unwrap();
+        let a = h
+            .attention
+            .iter()
+            .find(|a| a.reason == ATTENTION_ROLLOUT_PAUSED)
+            .unwrap();
+        assert_eq!(
+            (a.component.as_str(), a.version.as_str()),
+            ("desktop", "0.3.4")
+        );
+        assert!(
+            a.detail.as_deref().unwrap().starts_with("halted: 1 of 2"),
+            "{:?}",
+            a.detail
+        );
+        // A scoped caller does not see the fleet's rollouts.
+        let own = health(
+            &s,
+            &client(in_wave[2], TokenMode::Full, Some(3)),
+            &k,
+            NOW + 3600,
+        )
+        .unwrap();
+        assert!(own
+            .attention
+            .iter()
+            .all(|a| a.reason != ATTENTION_ROLLOUT_PAUSED));
+    }
+    let st = status(&store, &Caller::master(), &k, NOW + 3600).unwrap();
+    assert_eq!(st.rollouts[0].tally.failed, 1);
+    assert!(st.rollouts[0].rollout.paused_at.is_some());
+    let own = status(
+        &store,
+        &client(in_wave[2], TokenMode::Full, Some(3)),
+        &k,
+        NOW + 3600,
+    )
+    .unwrap();
+    assert!(own.rollouts.is_empty());
+    // A paused rollout does not move by itself.
+    assert!(rollout::advance(&store, NOW + 99_999).unwrap().is_empty());
+
+    let r = rollout_resume(&store, "desktop", NOW + 4000).unwrap();
+    assert_eq!((r.paused_at, r.wave_started_at), (None, NOW + 4000));
+    let r = rollout_pause(&store, "desktop", Some("looking"), NOW + 4100).unwrap();
+    assert_eq!(r.paused_reason.as_deref(), Some("looking"));
+    let r = rollout_abort(&store, "desktop", NOW + 4200).unwrap();
+    assert_eq!(r.outcome.as_deref(), Some("aborted"));
+    // Back to the channel's recommendation for everyone.
+    let d = check(
+        &store,
+        &client(in_wave[2], TokenMode::Full, None),
+        &desktop_req("0.3.3"),
+        &k,
+        NOW + 4300,
+    )
+    .unwrap();
+    assert_eq!(d.status, Status::UpdateAvailable);
+    assert_eq!(
+        rollout_abort(&store, "desktop", NOW).unwrap_err().code,
+        codes::E_NOTFOUND
+    );
+}
+
+#[tokio::test]
+async fn a_rollout_needs_a_release_the_channel_offers_and_sane_waves() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let e = rollout_start(&store, "desktop", "0.9.9", None, None, &k, NOW).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    for waves in [
+        vec![],
+        vec![50],
+        vec![50, 10, 100],
+        vec![0, 100],
+        vec![10, 101],
+        vec![10, 10, 100],
+    ] {
+        let e = rollout_start(
+            &store,
+            "desktop",
+            "0.3.4",
+            Some(waves.clone()),
+            None,
+            &k,
+            NOW,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, codes::E_INVALID, "{waves:?}");
+    }
+    let e = rollout_start(&store, "desktop", "0.3.4", None, Some(1.5), &k, NOW).unwrap_err();
+    assert_eq!(e.code, codes::E_INVALID);
+    let r = rollout_start(&store, "desktop", "0.3.4", None, None, &k, NOW).unwrap();
+    assert_eq!(r.waves, rollout::DEFAULT_WAVES);
+    // Another component's rollout is its own.
+    rollout_start(&store, "hub", "0.3.4", None, None, &k, NOW).unwrap();
+}
+
+#[test]
+fn the_window_runs_in_utc_and_may_cross_midnight() {
+    let at = |h: i64, m: i64| 1_790_726_400 + h * 3600 + m * 60; // 2026-09-30T00:00Z
+    assert!(rollout::in_window(120, 300, at(2, 0)));
+    assert!(!rollout::in_window(120, 300, at(5, 0)));
+    assert!(!rollout::in_window(120, 300, at(1, 59)));
+    assert!(rollout::in_window(22 * 60, 6 * 60, at(23, 30)));
+    assert!(rollout::in_window(22 * 60, 6 * 60, at(3, 0)));
+    assert!(!rollout::in_window(22 * 60, 6 * 60, at(12, 0)));
+}
+
+#[tokio::test]
+async fn automatic_installs_wait_for_the_window_and_offers_do_not() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    {
+        let s = lock(&store).unwrap();
+        // NOW is 10:12 UTC.
+        settings::set(&s, settings::UPDATE_WINDOW, "02:00-05:00").unwrap();
+    }
+    let ask = |at| {
+        check(
+            &store,
+            &client(1, TokenMode::Full, None),
+            &desktop_req("0.3.3"),
+            &k,
+            at,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        ask(NOW).status,
+        Status::UpdateAvailable,
+        "notify is not held"
+    );
+    settings::set(
+        &lock(&store).unwrap(),
+        settings::UPDATE_DESKTOP_MODE,
+        "automatic",
+    )
+    .unwrap();
+    let d = ask(NOW);
+    assert_eq!(
+        (d.status, d.reason.code),
+        (Status::Hold, fleet_update::wire::ReasonCode::OutsideWindow)
+    );
+    let three_am = NOW - (10 * 3600 + 12 * 60) + 3 * 3600;
+    assert_eq!(ask(three_am).status, Status::UpdateAvailable);
+    settings::set(&lock(&store).unwrap(), settings::UPDATE_WINDOW, "").unwrap();
+    assert_eq!(ask(NOW).status, Status::UpdateAvailable);
+}
+
+// ── per-org policy (S9) ──
+
+/// A paired desktop bound to `org` (its id in the store), and its caller.
+fn org_desktop(store: &Mutex<Store>, name: &str, org: Option<i64>) -> Caller {
+    let s = lock(store).unwrap();
+    let row = s
+        .insert_client_token(name, &sha256_hex(name.as_bytes()), "full")
+        .unwrap();
+    s.set_client_org(name, org).unwrap();
+    client(row.id, TokenMode::Full, org)
+}
+
+#[tokio::test]
+async fn an_orgs_policy_overrides_the_fleets_for_its_targets_only() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let acme = lock(&store)
+        .unwrap()
+        .add_org("acme", None, false)
+        .unwrap()
+        .id;
+    let inside = org_desktop(&store, "in-acme", Some(acme));
+    let outside = org_desktop(&store, "no-org", None);
+    let ask = |c: &Caller, v: &str| check(&store, c, &desktop_req(v), &k, NOW).unwrap();
+    assert_eq!(ask(&inside, "0.3.3").status, Status::UpdateAvailable);
+
+    // manual for acme: the offer is held there, and only there.
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            mode: Some("manual".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(ask(&inside, "0.3.3").status, Status::Hold);
+    assert_eq!(ask(&outside, "0.3.3").status, Status::UpdateAvailable);
+
+    // The org's floor makes 0.3.3 required for acme.
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            minimum: Some("0.3.4".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    let d = ask(&inside, "0.3.3");
+    assert_eq!(
+        (d.status, d.reason.code),
+        (
+            Status::UpdateRequired,
+            fleet_update::wire::ReasonCode::BelowPolicyMinimum
+        )
+    );
+    assert_eq!(ask(&outside, "0.3.3").status, Status::UpdateAvailable);
+
+    // An org pin wins over the fleet's, a target's own wins over both.
+    pin(&store, "desktop", "", "0.3.4", false, None, NOW).unwrap();
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            pin_version: Some("0.3.3".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(ask(&inside, "0.3.4").status, Status::Rollback);
+    assert_eq!(ask(&outside, "0.3.3").status, Status::UpdateAvailable);
+    let own = inside.client.as_ref().unwrap().id;
+    pin(
+        &store,
+        "desktop",
+        &format!("client:{own}"),
+        "0.3.4",
+        false,
+        None,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(ask(&inside, "0.3.4").status, Status::UpToDate);
+
+    // status lists the rows; clear_policy removes them.
+    let st = status(&store, &Caller::master(), &k, NOW).unwrap();
+    assert_eq!(st.policies.len(), 1);
+    assert_eq!(st.policies[0].pin_version.as_deref(), Some("0.3.3"));
+    assert!(clear_org_policy(&store, acme, "desktop").unwrap());
+    assert!(!clear_org_policy(&store, acme, "desktop").unwrap());
+    assert!(status(&store, &Caller::master(), &k, NOW)
+        .unwrap()
+        .policies
+        .is_empty());
+}
+
+#[tokio::test]
+async fn an_orgs_window_and_an_agent_host_in_it() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let k = keys(&key);
+    let acme = {
+        let s = lock(&store).unwrap();
+        let acme = s.add_org("acme", None, false).unwrap().id;
+        s.insert_host("box1", None).unwrap();
+        s.set_host_org("box1", Some(acme)).unwrap();
+        acme
+    };
+    assert_eq!(
+        target_org(&lock(&store).unwrap(), "agent:box1").unwrap(),
+        Some(acme)
+    );
+    assert_eq!(
+        target_org(&lock(&store).unwrap(), "hub:self").unwrap(),
+        None
+    );
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            mode: Some("automatic".into()),
+            window: Some("02:00-05:00".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+    let inside = org_desktop(&store, "in-acme", Some(acme));
+    let d = check(&store, &inside, &desktop_req("0.3.3"), &k, NOW).unwrap();
+    assert_eq!(d.reason.code, fleet_update::wire::ReasonCode::OutsideWindow);
+    // The fleet's own window does not apply to acme's targets: theirs does.
+    settings::set(
+        &lock(&store).unwrap(),
+        settings::UPDATE_WINDOW,
+        "10:00-11:00",
+    )
+    .unwrap();
+    let d = check(&store, &inside, &desktop_req("0.3.3"), &k, NOW).unwrap();
+    assert_eq!(d.reason.code, fleet_update::wire::ReasonCode::OutsideWindow);
+}
+
+#[tokio::test]
+async fn an_org_policy_is_validated() {
+    let key = TestKey::new(9);
+    let (store, _) = published_store(&key).await;
+    let acme = lock(&store)
+        .unwrap()
+        .add_org("acme", None, false)
+        .unwrap()
+        .id;
+    let bad =
+        |c: &str, i: OrgPolicyInput| set_org_policy(&store, acme, c, i, NOW).unwrap_err().code;
+    assert_eq!(bad("desktop", OrgPolicyInput::default()), codes::E_INVALID);
+    assert_eq!(
+        bad(
+            "android",
+            OrgPolicyInput {
+                mode: Some("automatic".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(
+            "desktop",
+            OrgPolicyInput {
+                mode: Some("yolo".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(
+            "desktop",
+            OrgPolicyInput {
+                minimum: Some("soon".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(
+            "desktop",
+            OrgPolicyInput {
+                window: Some("late".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    assert_eq!(
+        bad(
+            "toaster",
+            OrgPolicyInput {
+                mode: Some("manual".into()),
+                ..Default::default()
+            }
+        ),
+        codes::E_INVALID
+    );
+    let e = set_org_policy(
+        &store,
+        9999,
+        "desktop",
+        OrgPolicyInput {
+            mode: Some("manual".into()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_NOTFOUND);
+    // An empty window is a valid "any time".
+    set_org_policy(
+        &store,
+        acme,
+        "desktop",
+        OrgPolicyInput {
+            window: Some(String::new()),
+            ..Default::default()
+        },
+        NOW,
+    )
+    .unwrap();
+}
+
+// ── the artifact mirror (S9) ──
+
+/// `publish`, with 0.3.4's agent tarball carrying `bytes`' real sha256.
+fn publish_agent_bytes(fetch: &MapFetch, key: &TestKey, bytes: &[u8]) -> String {
+    let hub_contract = crate::wire_contract::CONTRACT_REVISION;
+    let sha = sha256_hex(bytes);
+    let mut releases = Vec::new();
+    for v in ["0.3.3", "0.3.4"] {
+        let mut m: serde_json::Value = serde_json::from_str(&manifest_json(
+            v,
+            hub_contract,
+            [hub_contract, hub_contract],
+            fleet_proto::PROTO_VERSION,
+            [fleet_proto::MIN_SUPPORTED_PROTO, fleet_proto::PROTO_VERSION],
+        ))
+        .unwrap();
+        if v == "0.3.4" {
+            let a = &mut m["components"]["agent"]["artifacts"][0];
+            a["sha256"] = sha.clone().into();
+            a["size"] = (bytes.len() as u64).into();
+        }
+        let m = m.to_string();
+        let url = format!("https://github.com/martin-janci/claude-fleet/releases/download/v{v}/release-manifest.json");
+        fetch.put(&url, &m);
+        fetch.put(&format!("{url}.minisig"), &key.sign(m.as_bytes()));
+        releases.push(serde_json::json!({"version": v, "manifest": url, "manifest_sha256": sha256_hex(m.as_bytes())}));
+    }
+    let ch = serde_json::json!({
+        "schema": 1, "track": "stable", "sequence": 10,
+        "generated_at": "2026-09-30T00:00:00Z", "expires_at": "2026-10-14T00:00:00Z",
+        "current": "0.3.4", "recommended": "0.3.4", "releases": releases
+    })
+    .to_string();
+    fetch.put(&format!("{BASE}stable.json"), &ch);
+    fetch.put(
+        &format!("{BASE}stable.json.minisig"),
+        &key.sign(ch.as_bytes()),
+    );
+    sha
+}
+
+fn agent_req(version: &str) -> CheckRequest {
+    CheckRequest {
+        update_proto: 1,
+        component: Component::Agent,
+        platform: Platform::new("linux", "x86_64", "tarball"),
+        installed: Installed::version(Version::parse(version).unwrap()),
+        speaks: Speaks {
+            contract_accepts: None,
+            agent_proto: Some(fleet_proto::PROTO_VERSION),
+        },
+        phase: UpdatePhase::Idle,
+        attempt: None,
+    }
+}
+
+#[tokio::test]
+async fn the_mirror_serves_only_what_a_signed_manifest_lists() {
+    let key = TestKey::new(9);
+    let k = keys(&key);
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let fetch = MapFetch::default();
+    let bytes = b"fleet-agent 0.3.4 tarball bytes";
+    let sha = publish_agent_bytes(&fetch, &key, bytes);
+    refresh(&store, &fetch, BASE, &k, NOW).await.unwrap();
+    let tarball = "https://example.test/releases/download/v0.3.4/fleet-agent-0.3.4.tar.gz";
+
+    // Off by default: no mirror path, and the route knows nothing.
+    let d = check(&store, &host("box"), &agent_req("0.3.3"), &k, NOW).unwrap();
+    assert_eq!(d.status, Status::UpdateAvailable, "{:?}", d.reason);
+    assert_eq!(d.target.as_ref().unwrap().mirror, None);
+    let off = mirror::local_copy(&store, &fetch, &k, &sha, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(off.code, codes::E_NOTFOUND);
+
+    let dir = std::env::temp_dir().join(format!("fleet-mirror-test-{}", std::process::id()));
+    let dir = mirror::init(&dir).unwrap();
+    settings::set(&lock(&store).unwrap(), settings::UPDATE_MIRROR, "true").unwrap();
+    let d = check(&store, &host("box"), &agent_req("0.3.3"), &k, NOW).unwrap();
+    assert_eq!(
+        d.target.as_ref().unwrap().mirror.as_deref(),
+        Some(format!("/update/artifact/{sha}").as_str())
+    );
+
+    // Tampered upstream bytes are refused and nothing is kept.
+    fetch.put(tarball, "not the signed bytes");
+    let bad = mirror::local_copy(&store, &fetch, &k, &sha, NOW)
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code, codes::E_UPDATE_UNVERIFIED);
+    assert!(!dir.join(&sha).exists());
+
+    // The real bytes are fetched once and then served from disk.
+    fetch.put(tarball, std::str::from_utf8(bytes).unwrap());
+    let path = mirror::local_copy(&store, &fetch, &k, &sha, NOW)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    fetch.0.lock().unwrap().remove(tarball);
+    assert_eq!(
+        mirror::local_copy(&store, &fetch, &k, &sha, NOW)
+            .await
+            .unwrap(),
+        path
+    );
+
+    // A sha no manifest lists, or not a sha at all, is not served.
+    for other in [
+        "0".repeat(64),
+        "../../etc/passwd".into(),
+        sha.to_uppercase(),
+    ] {
+        let e = mirror::local_copy(&store, &fetch, &k, &other, NOW)
+            .await
+            .unwrap_err();
+        assert_eq!(e.code, codes::E_NOTFOUND, "{other}");
+    }
+    // A file the manifests no longer list is pruned.
+    std::fs::write(dir.join("f".repeat(64)), b"old").unwrap();
+    assert_eq!(mirror::prune(&lock(&store).unwrap(), &k, NOW), 1);
+    assert!(path.exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }

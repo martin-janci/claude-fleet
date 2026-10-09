@@ -1455,7 +1455,8 @@
       "kind": {
         "options": [
           "stable",
-          "beta"
+          "beta",
+          "nightly"
         ],
         "type": "choice"
       },
@@ -1576,6 +1577,62 @@
       "tags": [],
       "unit": "hours",
       "value": "21600"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "",
+      "help": "A daily range in UTC, like 02:00-05:00, in which automatic updates install. Outside it they wait; an offer to a person is not held. Empty: any time.",
+      "key": "update.window",
+      "kind": {
+        "type": "time_range"
+      },
+      "label": "Maintenance window",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": ""
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "3600",
+      "help": "How long each wave of a staged rollout runs before the next opens, if its failure ratio stays under the rollout's halt ratio.",
+      "key": "update.rollout_wave_secs",
+      "kind": {
+        "max": 315360000,
+        "min": 300,
+        "type": "secs"
+      },
+      "label": "Rollout wave soak",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "hours",
+      "value": "3600"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "false",
+      "help": "Serve the agent and hub tarballs, desktop bundles and the phone's APK from this hub, for machines that cannot reach GitHub. Each file is fetched once and checked against the signed release.",
+      "key": "update.mirror",
+      "kind": {
+        "type": "bool"
+      },
+      "label": "Mirror release files",
+      "modified": false,
+      "restart": "none",
+      "tags": [],
+      "unit": "none",
+      "value": "false"
     },
     {
       "ai": "never",
@@ -4463,7 +4520,19 @@
               "type": "field"
             },
             {
-              "text": "Nothing installs itself yet: fleet-updater, the desktop and the phone arrive in later slices (S6–S8), so on a standalone desktop these rows have no effect. There is no nightly track until it is published (S2b).",
+              "key": "update.window",
+              "type": "field"
+            },
+            {
+              "key": "update.rollout_wave_secs",
+              "type": "field"
+            },
+            {
+              "key": "update.mirror",
+              "type": "field"
+            },
+            {
+              "text": "This desktop updates itself (paired, its hub decides; standalone, these rows do), only to a release the release key signed. The Docker hub updates itself through fleet-updater (opt-in). nightly: the hub on each green main push, the desktop once a day.",
               "tone": "info",
               "type": "notice"
             }
@@ -4473,7 +4542,7 @@
         {
           "items": [
             {
-              "text": "This desktop installs nothing yet: these rows say what the fleet follows, and the desktop updater is slice S6. See docs/updates.md.",
+              "text": "The desktop row is also this desktop's own: notify offers a restart to update, automatic installs at the next launch, manual installs only a pin. See docs/updates.md.",
               "tone": "info",
               "type": "notice"
             },

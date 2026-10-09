@@ -30,8 +30,13 @@ use crate::Version;
 /// Documents are small; anything larger is not one of ours.
 pub const MAX_DOC_BYTES: u64 = 1 << 20;
 /// How many releases newer than the installed one a Git check fetches
-/// manifests for. The newest permitted one wins, so a handful is plenty.
+/// manifests for once they install here. The newest permitted one wins, so a
+/// handful is plenty.
 pub const MAX_MANIFESTS: usize = 5;
+/// How many it looks at, at most, to find those: on `nightly` most releases
+/// are per-push builds with no desktop bundle (S2b), and they are skipped
+/// past rather than counted.
+pub const MAX_MANIFESTS_SCANNED: usize = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateError {
@@ -264,8 +269,38 @@ pub struct Manifests {
     pub raw: BTreeMap<Version, RawDoc>,
 }
 
-/// Fetch and verify the manifests of `versions` the channel lists. One that
-/// fails to fetch or verify is left out.
+/// The amendments the channel lists for `version` (design §4), fetched and
+/// verified: one that fails either is left out (its component is then simply
+/// not offered).
+pub async fn fetch_amendments<F: Fetch + ?Sized>(
+    fetch: &F,
+    channel: &VerifiedChannel,
+    version: &Version,
+    keys: &TrustedKeys,
+) -> Vec<(
+    crate::channel_doc::AmendmentRef,
+    RawDoc,
+    crate::manifest::Amendment,
+)> {
+    let mut out = Vec::new();
+    let Some(listed) = channel.doc.release(version) else {
+        return out;
+    };
+    for a in &listed.amendments {
+        let Ok(raw) = fetch_raw(fetch, &a.manifest).await else {
+            continue;
+        };
+        if let Some(am) =
+            crate::verify::verify_amendment(raw.body.as_bytes(), &raw.sig, keys, a, version)
+        {
+            out.push((a.clone(), raw, am));
+        }
+    }
+    out
+}
+
+/// Fetch and verify the manifests of `versions` the channel lists, with
+/// their amendments folded in. One that fails to fetch or verify is left out.
 pub async fn fetch_manifests<F: Fetch + ?Sized>(
     fetch: &F,
     channel: &VerifiedChannel,
@@ -280,7 +315,10 @@ pub async fn fetch_manifests<F: Fetch + ?Sized>(
         let Ok(raw) = fetch_raw(fetch, &listed.manifest).await else {
             continue;
         };
-        if let Some(m) = verify_listed_manifest(&raw, listed, keys) {
+        if let Some(mut m) = verify_listed_manifest(&raw, listed, keys) {
+            for (_, _, a) in fetch_amendments(fetch, channel, &v, keys).await {
+                m.amend(&a);
+            }
             out.verified.insert(v.clone(), m);
             out.raw.insert(v, raw);
         }
@@ -332,12 +370,32 @@ impl<F: Fetch> UpdateChannel for GitUpdateChannel<F> {
         .await?;
         self.seen.record(self.track, channel.doc.sequence);
 
-        // Manifests of the newest releases above what is installed.
-        let wanted = wanted_versions(&channel, Some(&req.installed.version), MAX_MANIFESTS);
+        // Manifests of the newest releases above what is installed, newest
+        // first, until MAX_MANIFESTS of them carry an artifact for this caller.
+        let wanted = wanted_versions(
+            &channel,
+            Some(&req.installed.version),
+            MAX_MANIFESTS_SCANNED,
+        );
+        let mut found = Manifests::default();
+        let mut installable = 0;
+        for v in wanted {
+            let one = fetch_manifests(&self.fetch, &channel, [v], &self.keys).await;
+            for (v, m) in one.verified {
+                if m.artifact_for(req.component, &req.platform).is_some() {
+                    installable += 1;
+                }
+                found.verified.insert(v, m);
+            }
+            found.raw.extend(one.raw);
+            if installable >= MAX_MANIFESTS {
+                break;
+            }
+        }
         let Manifests {
             verified: manifests,
             raw: raws,
-        } = fetch_manifests(&self.fetch, &channel, wanted, &self.keys).await;
+        } = found;
 
         let mut decision = decide(&DecideInput {
             component: req.component,
@@ -545,6 +603,61 @@ mod tests {
         assert_eq!(
             v.url.as_deref(),
             Some("https://example.test/releases/download/v0.3.4/claude-fleet_0.3.4_aarch64.app.tar.gz")
+        );
+    }
+
+    /// nightly (S2b): a desktop bundle once a day, the hub on every push. The
+    /// day's desktop build is found past a dozen newer hub-only ones.
+    #[tokio::test]
+    async fn git_mode_finds_the_newest_release_it_can_install_past_ones_it_cannot() {
+        let (fetch, key) = (MapFetch::default(), TestKey::new(7));
+        let mut releases = Vec::new();
+        let mut vs = vec!["0.3.5-dev.1.desktop.gaaaaaaa".to_string()];
+        vs.extend((2..14).map(|n| format!("0.3.5-dev.{n}.gbbbbbbb")));
+        for v in &vs {
+            let mut m: serde_json::Value =
+                serde_json::from_str(&manifest_json(v, 5, [5, 5], 1, [1, 1])).unwrap();
+            m["release"]["track"] = "nightly".into();
+            if !v.contains(".desktop.") {
+                m["components"].as_object_mut().unwrap().remove("desktop");
+            }
+            let m = m.to_string();
+            let url = format!("https://example.test/v{v}/release-manifest.json");
+            fetch.put(&url, &m);
+            fetch.put(&format!("{url}.minisig"), &key.sign(m.as_bytes()));
+            releases.push(serde_json::json!({"version": v, "manifest": url, "manifest_sha256": sha256_hex(m.as_bytes())}));
+        }
+        let newest = vs.last().unwrap();
+        let ch = serde_json::json!({
+            "schema": 1, "track": "nightly", "sequence": 3,
+            "generated_at": "2026-09-30T00:00:00Z", "expires_at": "2026-10-14T00:00:00Z",
+            "current": newest, "recommended": newest, "releases": releases
+        })
+        .to_string();
+        fetch.put(&format!("{BASE}nightly.json"), &ch);
+        fetch.put(
+            &format!("{BASE}nightly.json.minisig"),
+            &key.sign(ch.as_bytes()),
+        );
+        let ch = GitUpdateChannel::new(
+            fetch,
+            BASE,
+            Track::Nightly,
+            Policy::default(),
+            TrustedKeys::from_base64([key.public().as_str()]).unwrap(),
+            Box::new(MemorySequenceStore::default()),
+        )
+        .with_clock(|| NOW);
+        let out = ch.check(&req("0.3.4")).await.unwrap();
+        assert_eq!(
+            out.decision.status,
+            Status::UpdateAvailable,
+            "{:?}",
+            out.decision.reason
+        );
+        assert_eq!(
+            out.verified.unwrap().version,
+            Version::parse("0.3.5-dev.1.desktop.gaaaaaaa").unwrap()
         );
     }
 

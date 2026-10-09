@@ -276,6 +276,25 @@ mod tests {
         );
     }
 
+    /// `/update/artifact/<sha256>`: the mirror's door. Off (the default) or
+    /// for a sha no manifest lists, a 404; a hub link is refused, an updater
+    /// and an unknown token are told apart as everywhere else.
+    #[tokio::test]
+    async fn the_artifact_mirror_route_sits_behind_the_update_identity() {
+        let (addr, _store) = app().await;
+        let path = format!("/update/artifact/{}", "a".repeat(64));
+        assert_eq!(http(addr, "GET", &path, "upd-tok", "").await.0, 404);
+        assert_eq!(http(addr, "GET", &path, "ro-tok", "").await.0, 404);
+        assert_eq!(
+            http(addr, "GET", "/update/artifact/..%2F..%2Fetc", "upd-tok", "")
+                .await
+                .0,
+            404
+        );
+        assert_eq!(http(addr, "GET", &path, "peer-link-tok", "").await.0, 403);
+        assert_eq!(http(addr, "GET", &path, "nope", "").await.0, 401);
+    }
+
     #[tokio::test]
     async fn an_updater_token_has_one_door_and_a_peer_token_none_here() {
         let (addr, _store) = app().await;

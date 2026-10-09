@@ -9,6 +9,11 @@
 #   update-channels.sh edit <track> <op> [version] [component] [reason] [deadline]
 #       a publisher's change: withdraw | recommend | rollback | clear-rollback
 #       | minimum | clear-minimum | mandatory. Run by update-channels.yml.
+#   update-channels.sh amend <tag> <amendment.json>
+#       a signed addition to a listed release (design §4, §13.2): the phone's
+#       APK from fleet-mobile's release. Written to amendments/<version>/ on
+#       this branch, signed, and listed on every track that carries the
+#       release. Run by android-amendment.yml.
 #   update-channels.sh resign
 #       re-sign every track with a fresh sequence and expiry, so a quiet
 #       channel never goes stale (14 days). Run weekly by update-channels.yml.
@@ -93,6 +98,8 @@ case "$cmd" in
     for t in $tracks; do
       args=(channel-add --track "$t" --manifest "$work/release-manifest.json" --manifest-url "$url" --out "$tree/$t.json")
       [ -f "$tree/$t.json" ] && args+=(--channel "$tree/$t.json")
+      # nightly.yml keeps only the newest 15 nightly releases; list no more.
+      [ "$t" = nightly ] && args+=(--keep 15)
       "$FLEET_RELEASE" "${args[@]}"
       sign "$t"
     done
@@ -110,6 +117,32 @@ case "$cmd" in
     "$FLEET_RELEASE" "${args[@]}"
     sign "$track"
     msg="channel: $op on $track${3:+ ($3)}"
+    ;;
+  amend)
+    tag="${1:?usage: update-channels.sh amend <tag> <amendment.json>}"
+    file="${2:?usage: update-channels.sh amend <tag> <amendment.json>}"
+    version="${tag#v}"
+    : "${REPO:?REPO is required for amend}"
+    component="$(python3 -c 'import json,sys; c=json.load(open(sys.argv[1]))["components"]; print(next(iter(c)))' "$file")"
+    case "$component" in *[!a-z]* | '') echo "::error::odd component '$component' in $file"; exit 1 ;; esac
+    dir="$tree/amendments/$version"
+    mkdir -p "$dir"
+    cp "$file" "$dir/$component.json"
+    minisign -S -s "$work/key" -m "$dir/$component.json" -x "$dir/$component.json.minisig" \
+      -t "claude-fleet $tag $component amendment" >/dev/null
+    "$here/release-verify-sig.sh" "$work/pubkeys" "$dir/$component.json" "$dir/$component.json.minisig" amendment
+    url="https://raw.githubusercontent.com/$REPO/$branch/amendments/$version/$component.json"
+    for f in "$tree"/*.json; do
+      [ -e "$f" ] || continue
+      t="$(basename "$f" .json)"
+      # Only the tracks that list the release.
+      grep -q "\"version\": \"$version\"" "$f" || continue
+      "$FLEET_RELEASE" channel-amend --track "$t" --channel "$f" --amendment "$dir/$component.json" \
+        --amendment-url "$url" --out "$f"
+      sign "$t"
+    done
+    [ "${#changed[@]}" -gt 0 ] || { echo "::error::no track lists $version; nothing to amend"; exit 1; }
+    msg="channel: $component amendment of $tag"
     ;;
   resign)
     for f in "$tree"/*.json; do

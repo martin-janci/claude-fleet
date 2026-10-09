@@ -12,6 +12,8 @@
 //! by anything but `refresh` is simply not a channel.
 
 mod fetch;
+pub mod mirror;
+pub mod rollout;
 #[cfg(test)]
 mod tests;
 
@@ -34,7 +36,9 @@ use serde::Serialize;
 use crate::ipc_error::{codes, lock, IpcError};
 use crate::mcp::auth::{Caller, TokenMode};
 use crate::service::settings;
-use crate::store::{Store, UpdateDesiredRow, UpdateDocRow, UpdateObservedRow};
+use crate::store::{
+    Store, UpdateDesiredRow, UpdateDocRow, UpdateObservedRow, UpdateOrgPolicyRow, UpdateRolloutRow,
+};
 
 /// Where CI publishes the channel documents (design U10).
 pub const CHANNEL_BASE_URL: &str =
@@ -43,7 +47,10 @@ pub const CHANNEL_BASE_URL: &str =
 /// documents come from: what is trusted is still the signature.
 pub const CHANNEL_URL_ENV: &str = "FLEET_UPDATE_CHANNEL_URL";
 /// How many of a track's newest releases the hub keeps manifests for.
-pub const MANIFESTS_KEPT: usize = 10;
+/// Twenty, not ten: on `nightly` most releases are per-push builds with no
+/// desktop bundle, and the newest one a desktop can install must still be
+/// among them (nightly.yml cuts at most one every two hours, S2b).
+pub const MANIFESTS_KEPT: usize = 20;
 /// Internal (not a registry setting): the last refresh's outcome.
 const LAST_REFRESH_KEY: &str = "update.last_refresh";
 
@@ -83,11 +90,11 @@ pub fn channel_base_url() -> String {
 
 // ── policy ──
 
-/// The track the hub follows. `nightly` is not offered until S2b publishes
-/// it, so a stored `nightly` resolves to the default, `stable`.
+/// The track the hub follows.
 pub fn track(store: &Store) -> Track {
     match settings::get_string(store, settings::UPDATE_TRACK).as_str() {
         "beta" => Track::Beta,
+        "nightly" => Track::Nightly,
         _ => Track::Stable,
     }
 }
@@ -99,11 +106,7 @@ pub fn mode(store: &Store, c: Component) -> Mode {
         Component::Desktop => settings::UPDATE_DESKTOP_MODE,
         Component::Android | Component::Ios => settings::UPDATE_MOBILE_MODE,
     };
-    match settings::get_string(store, key).as_str() {
-        "manual" => Mode::Manual,
-        "automatic" => Mode::Automatic,
-        _ => Mode::Notify,
-    }
+    parse_mode(&settings::get_string(store, key))
 }
 
 pub fn check_interval_secs(store: &Store) -> u64 {
@@ -121,22 +124,127 @@ pub fn settings_changed(key: &str) {
     if key == settings::UPDATE_TRACK || key == settings::UPDATE_CHECK_INTERVAL_SECS {
         REFRESH_WAKE.notify_one();
     }
+    // A mode, a floor or a track moves decisions without a new channel.
+    decisions_may_have_changed();
 }
 
-/// The policy for one target: the fleet's mode for its component, and the
-/// operator's pin (its own, else the component's).
-fn policy(store: &Store, c: Component, target: &str) -> Result<Policy, IpcError> {
-    let pin = store.update_desired_for(c.as_str(), target)?.and_then(|d| {
-        Version::parse(&d.version).ok().map(|version| Pin {
-            version,
-            mandatory: d.mandatory,
-        })
+/// The decision pusher's beat without a wake: rollout waves and the
+/// maintenance window move decisions by the clock alone.
+const DECIDE_BEAT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Wakes the decision pusher ([`push_decisions`]) in `fleet-hub serve`.
+static DECIDE_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// A pin, a policy setting or a refreshed channel: what some target would be
+/// told may have changed.
+pub fn decisions_may_have_changed() {
+    DECIDE_WAKE.notify_one();
+}
+
+/// The status and version `/events` last carried per target.
+static PUSHED: Mutex<BTreeMap<String, (String, Option<String>)>> = Mutex::new(BTreeMap::new());
+
+/// `update:decision` (design §6.4) for every target whose decision differs
+/// from the last one this hub computed for it, so a client checks again now
+/// rather than on its next interval. A target seen for the first time is
+/// recorded, not pushed: it has only just been told by its own check.
+/// Returns the targets pushed.
+pub fn push_decisions(store: &Mutex<Store>, keys: &TrustedKeys, now: i64) -> Vec<String> {
+    let rows = match lock(store).and_then(|s| s.update_observed_all()) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    let mut pushed = Vec::new();
+    for o in rows {
+        let Ok(d) = check_for(store, &Caller::master(), &o.target, keys, now) else {
+            continue;
+        };
+        let status = serde_json::to_value(d.status)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+        let version = d.target.as_ref().map(|t| t.version.to_string());
+        let before = PUSHED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(o.target.clone(), (status.clone(), version.clone()));
+        if before.is_some_and(|b| b != (status.clone(), version.clone())) {
+            if let Ok(s) = lock(store) {
+                s.emit_update_decision(&o.target, &status, version.as_deref());
+            }
+            pushed.push(o.target);
+        }
+    }
+    pushed
+}
+
+/// The org a target belongs to: a paired client's binding, an agent host's
+/// `hosts.org_id`. The hub itself and an unbound client have none.
+pub fn target_org(store: &Store, target: &str) -> Result<Option<i64>, IpcError> {
+    if let Some(id) = target
+        .strip_prefix("client:")
+        .and_then(|s| s.parse::<i64>().ok())
+    {
+        return Ok(store.client_token_binding(id)?.and_then(|b| b.org_id));
+    }
+    if let Some(alias) = target.strip_prefix("agent:") {
+        return store.host_org(alias);
+    }
+    Ok(None)
+}
+
+fn parse_mode(s: &str) -> Mode {
+    match s {
+        "manual" => Mode::Manual,
+        "automatic" => Mode::Automatic,
+        _ => Mode::Notify,
+    }
+}
+
+/// The policy for one target: the fleet's `update.*` settings for its
+/// component, overridden by its org's row (S9) where it has one; the pin
+/// is the target's own, else its org's, else the component's.
+fn policy(store: &Store, c: Component, target: &str, now: i64) -> Result<Policy, IpcError> {
+    let as_pin = |version: &str, mandatory: bool| {
+        Version::parse(version)
+            .ok()
+            .map(|version| Pin { version, mandatory })
+    };
+    let desired = store.update_desired_for(c.as_str(), target)?;
+    let own = desired
+        .as_ref()
+        .filter(|d| !d.target.is_empty())
+        .and_then(|d| as_pin(&d.version, d.mandatory));
+    let fleet_pin = desired
+        .as_ref()
+        .filter(|d| d.target.is_empty())
+        .and_then(|d| as_pin(&d.version, d.mandatory));
+    let org = match target_org(store, target)? {
+        Some(id) => store.update_org_policy(id, c.as_str())?,
+        None => None,
+    };
+    let org_pin = org.as_ref().and_then(|o| {
+        o.pin_version
+            .as_deref()
+            .and_then(|v| as_pin(v, o.pin_mandatory))
     });
+    let mode = org
+        .as_ref()
+        .and_then(|o| o.mode.as_deref())
+        .map(parse_mode)
+        .unwrap_or_else(|| mode(store, c));
+    let outside_window = match org.as_ref().and_then(|o| o.window.as_deref()) {
+        Some(w) => rollout::outside(w, mode, now),
+        None => rollout::outside_window(store, mode, now),
+    };
     Ok(Policy {
-        mode: mode(store, c),
-        minimum: None,
-        pin,
-        outside_window: false,
+        mode,
+        minimum: org
+            .as_ref()
+            .and_then(|o| o.minimum.as_deref())
+            .and_then(|v| Version::parse(v).ok()),
+        pin: own.or(org_pin).or(fleet_pin),
+        outside_window,
         check_interval_secs: check_interval_secs(store),
     })
 }
@@ -253,7 +361,23 @@ pub fn load_cached(store: &Store, track: Track, keys: &TrustedKeys, now: i64) ->
             body: m.body,
             sig: m.sig,
         };
-        if let Some(verified) = verify_listed_manifest(&raw, listed, keys) {
+        if let Some(mut verified) = verify_listed_manifest(&raw, listed, keys) {
+            // Its amendments (the phone's APK, design §4), verified again on
+            // every read like everything else in the cache.
+            for a in &listed.amendments {
+                let key = amendment_key(&v, &a.component);
+                if let Some(row) = store.update_doc("amendment", &key).ok().flatten() {
+                    if let Some(am) = fleet_update::verify::verify_amendment(
+                        row.body.as_bytes(),
+                        &row.sig,
+                        keys,
+                        a,
+                        &v,
+                    ) {
+                        verified.amend(&am);
+                    }
+                }
+            }
             manifests.verified.insert(v.clone(), verified);
             manifests.raw.insert(v, raw);
         }
@@ -269,6 +393,11 @@ pub fn load_cached(store: &Store, track: Track, keys: &TrustedKeys, now: i64) ->
     })
 }
 
+/// The `update_docs` key of one release's amendment for one component.
+fn amendment_key(v: &Version, component: &str) -> String {
+    format!("{v}/{component}")
+}
+
 /// One decision, as the hub makes it for `target`.
 #[allow(clippy::too_many_arguments)]
 fn decide_for(
@@ -281,7 +410,8 @@ fn decide_for(
     speaks: &Speaks,
     now: i64,
 ) -> Result<Decision, IpcError> {
-    let policy = policy(store, component, target)?;
+    let policy = policy(store, component, target, now)?;
+    let rollout = rollout::for_decide(store, component)?;
     let empty = BTreeMap::new();
     let mut d = decide(&DecideInput {
         component,
@@ -292,7 +422,7 @@ fn decide_for(
         channel: cached.map(|c| &c.channel),
         manifests: cached.map(|c| &c.manifests.verified).unwrap_or(&empty),
         policy: &policy,
-        rollout: None,
+        rollout: rollout.as_ref(),
         target_id: target,
         source: Source::Hub,
         track: track(store),
@@ -300,6 +430,11 @@ fn decide_for(
     });
     if let Some(c) = cached {
         attach_evidence(&mut d, &c.raw, &c.manifests.raw);
+    }
+    if mirror::enabled(store) {
+        if let Some(t) = d.target.as_mut() {
+            t.mirror = t.artifact.content().map(|(sha, _)| mirror::path_for(sha));
+        }
     }
     Ok(d)
 }
@@ -586,6 +721,21 @@ pub struct UpdateStatus {
     pub components: Vec<ComponentSummary>,
     pub targets: Vec<TargetStatus>,
     pub pins: Vec<UpdateDesiredRow>,
+    /// Active rollouts, then the five that ended last (S9); empty for a
+    /// scoped caller.
+    #[serde(default)]
+    pub rollouts: Vec<RolloutStatus>,
+    /// Per-org overrides of the fleet's policy (S9); empty for a scoped caller.
+    #[serde(default)]
+    pub policies: Vec<UpdateOrgPolicyRow>,
+}
+
+/// One rollout and its open wave's tally so far.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RolloutStatus {
+    #[serde(flatten)]
+    pub rollout: UpdateRolloutRow,
+    pub tally: rollout::WaveTally,
 }
 
 /// Every observed target (or only `own`), with what the hub would tell it
@@ -716,6 +866,22 @@ pub fn status(
         } else {
             s.update_desired_all()?
         },
+        rollouts: if own.is_some() {
+            Vec::new()
+        } else {
+            s.update_rollouts(5)?
+                .into_iter()
+                .map(|r| {
+                    let tally = rollout::tally(&s, &r)?;
+                    Ok(RolloutStatus { rollout: r, tally })
+                })
+                .collect::<Result<_, IpcError>>()?
+        },
+        policies: if own.is_some() {
+            Vec::new()
+        } else {
+            s.update_org_policies()?
+        },
     })
 }
 
@@ -800,6 +966,9 @@ pub const ATTENTION_ROLLBACK_FAILED: &str = "rollback_failed";
 /// The verified channel is past its signed `expires_at`: nothing new is
 /// offered until the publisher re-signs or the hub can fetch it again.
 pub const ATTENTION_CHANNEL_STALE: &str = "channel_stale";
+/// A rollout paused itself (its wave's failure ratio reached the halt ratio)
+/// or an operator paused it: the rest of the fleet waits (S9).
+pub const ATTENTION_ROLLOUT_PAUSED: &str = "rollout_paused";
 
 /// One thing about the fleet's updates a person should look at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -820,7 +989,7 @@ pub struct UpdateAttention {
 }
 
 /// `fleet_health.updates` (update design §9): the channel's state and what
-/// needs a person. `rollout_paused` joins it with rollouts (S9).
+/// needs a person.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct UpdatesHealth {
     /// `fresh`, `stale`, or `none` (no channel verifies yet).
@@ -862,6 +1031,19 @@ pub fn health(
             "stale"
         }
     };
+    if own.is_none() {
+        for r in s.update_rollouts(0)? {
+            if let Some(why) = r.paused_reason.clone().filter(|_| r.paused_at.is_some()) {
+                attention.push(UpdateAttention {
+                    reason: ATTENTION_ROLLOUT_PAUSED.into(),
+                    target: format!("rollout:{}", r.id),
+                    component: r.component,
+                    version: r.version,
+                    detail: Some(why),
+                });
+            }
+        }
+    }
     for t in target_rows(s, cached.as_ref(), own.as_deref(), now)? {
         let (reason, detail) = match t.phase.as_str() {
             "rollback_failed" => (ATTENTION_ROLLBACK_FAILED, t.last_error.clone()),
@@ -973,13 +1155,161 @@ pub fn pin(
     let s = lock(store)?;
     require_target_exists(&s, &t, target)?;
     s.set_update_desired(&row)?;
+    decisions_may_have_changed();
     Ok(row)
 }
 
 pub fn unpin(store: &Mutex<Store>, component: &str, target: &str) -> Result<bool, IpcError> {
     let c = parse_component(component)?;
     validate_target(c, target)?;
-    lock(store)?.clear_update_desired(c.as_str(), target)
+    let removed = lock(store)?.clear_update_desired(c.as_str(), target)?;
+    decisions_may_have_changed();
+    Ok(removed)
+}
+
+/// What `update_admin { action: set_policy }` may set for one org.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OrgPolicyInput {
+    pub mode: Option<String>,
+    pub minimum: Option<String>,
+    pub window: Option<String>,
+    pub pin_version: Option<String>,
+    pub pin_mandatory: bool,
+    pub reason: Option<String>,
+}
+
+/// `update_admin { action: set_policy, org_id, component, … }`: one org's
+/// override of the fleet's update policy for one component (S9). Fields left
+/// out keep the fleet's value; the row replaces any earlier one whole.
+pub fn set_org_policy(
+    store: &Mutex<Store>,
+    org_id: i64,
+    component: &str,
+    input: OrgPolicyInput,
+    now: i64,
+) -> Result<UpdateOrgPolicyRow, IpcError> {
+    let c = parse_component(component)?;
+    let invalid = |m: String| IpcError::new(codes::E_INVALID, m);
+    if let Some(m) = input.mode.as_deref() {
+        let allowed: &[&str] = if matches!(c, Component::Android | Component::Ios) {
+            settings::UPDATE_MOBILE_MODES
+        } else {
+            settings::UPDATE_MODES
+        };
+        if !allowed.contains(&m) {
+            return Err(invalid(format!(
+                "mode for {} must be one of {}, got {m:?}",
+                c.as_str(),
+                allowed.join(" | ")
+            )));
+        }
+    }
+    let version = |what: &str, v: &Option<String>| -> Result<Option<String>, IpcError> {
+        v.as_deref()
+            .map(|v| {
+                Version::parse(v)
+                    .map(|v| v.to_string())
+                    .map_err(|e| invalid(format!("{what} {v:?}: {e}")))
+            })
+            .transpose()
+    };
+    let minimum = version("minimum", &input.minimum)?;
+    let pin_version = version("pin", &input.pin_version)?;
+    if let Some(w) = input.window.as_deref() {
+        if settings::parse_time_range(w).is_none() {
+            return Err(invalid(format!(
+                "window {w:?}: a daily HH:MM-HH:MM in UTC, or \"\" for any time"
+            )));
+        }
+    }
+    if input.mode.is_none() && minimum.is_none() && input.window.is_none() && pin_version.is_none()
+    {
+        return Err(invalid(
+            "set_policy needs at least one of mode, minimum, window, version".into(),
+        ));
+    }
+    let s = lock(store)?;
+    if s.get_org(org_id)?.is_none() {
+        return Err(IpcError::new(
+            codes::E_NOTFOUND,
+            format!("no such org {org_id}"),
+        ));
+    }
+    let row = UpdateOrgPolicyRow {
+        org_id,
+        component: c.as_str().into(),
+        mode: input.mode,
+        minimum,
+        window: input.window.map(|w| w.trim().to_string()),
+        pin_version,
+        pin_mandatory: input.pin_mandatory,
+        reason: input.reason,
+        set_by: "operator".into(),
+        set_at: now,
+    };
+    s.set_update_org_policy(&row)?;
+    decisions_may_have_changed();
+    Ok(row)
+}
+
+/// `update_admin { action: clear_policy, org_id, component }`.
+pub fn clear_org_policy(
+    store: &Mutex<Store>,
+    org_id: i64,
+    component: &str,
+) -> Result<bool, IpcError> {
+    let c = parse_component(component)?;
+    let removed = lock(store)?.clear_update_org_policy(org_id, c.as_str())?;
+    decisions_may_have_changed();
+    Ok(removed)
+}
+
+/// `update_admin { action: rollout_start }`: `version` must be a release the
+/// verified channel lists, permits for the component, and has a manifest for.
+pub fn rollout_start(
+    store: &Mutex<Store>,
+    component: &str,
+    version: &str,
+    waves: Option<Vec<u8>>,
+    halt_failure_ratio: Option<f64>,
+    keys: &TrustedKeys,
+    now: i64,
+) -> Result<UpdateRolloutRow, IpcError> {
+    let c = parse_component(component)?;
+    let v = Version::parse(version)
+        .map_err(|e| IpcError::new(codes::E_INVALID, format!("version {version:?}: {e}")))?;
+    let listed = {
+        let s = lock(store)?;
+        load_cached(&s, track(&s), keys, now).is_some_and(|cached| {
+            cached.channel.doc.permits(c, &v) && cached.manifests.verified.contains_key(&v)
+        })
+    };
+    rollout::start(store, c, &v, listed, waves, halt_failure_ratio, now)
+}
+
+pub fn rollout_pause(
+    store: &Mutex<Store>,
+    component: &str,
+    reason: Option<&str>,
+    now: i64,
+) -> Result<UpdateRolloutRow, IpcError> {
+    rollout::pause(store, parse_component(component)?, reason, now)
+}
+
+pub fn rollout_resume(
+    store: &Mutex<Store>,
+    component: &str,
+    now: i64,
+) -> Result<UpdateRolloutRow, IpcError> {
+    rollout::resume(store, parse_component(component)?, now)
+}
+
+pub fn rollout_abort(
+    store: &Mutex<Store>,
+    component: &str,
+    now: i64,
+) -> Result<UpdateRolloutRow, IpcError> {
+    rollout::abort(store, parse_component(component)?, now)
 }
 
 // ── Git mode: a standalone check ──
@@ -1010,7 +1340,7 @@ impl GitCheck {
         let track = track_override.unwrap_or_else(|| store.map_or(Track::Stable, track));
         let (policy, seen) = match store {
             Some(s) => (
-                policy(s, component, target)?,
+                policy(s, component, target, crate::store::now_unix())?,
                 s.update_doc("channel", track.as_str())?
                     .and_then(|d| d.sequence)
                     .map_or(0, |q| q.max(0) as u64),
@@ -1123,6 +1453,11 @@ pub async fn refresh(
             .collect();
         (track, seen, pinned, cached_sha)
     };
+    let cached_amendments: BTreeMap<String, String> = lock(store)?
+        .update_docs("amendment")?
+        .into_iter()
+        .map(|d| (d.key, fleet_update::verify::sha256_hex(d.body.as_bytes())))
+        .collect();
     let result = async {
         let (channel, raw) = fetch_channel(fetch, base_url, track, keys, seen, now)
             .await
@@ -1150,11 +1485,33 @@ pub async fn refresh(
             .cloned()
             .collect();
         let fetched = fetch_manifests(fetch, &channel, to_fetch, keys).await;
-        Ok::<_, IpcError>((channel, raw, wanted, fetched))
+        // Amendments arrive after their release (the phone's APK, design §4),
+        // so they are fetched on their own: whatever the channel now lists
+        // for a kept release that the cache does not hold byte for byte.
+        let mut amendments: Vec<(String, RawDoc)> = Vec::new();
+        for v in &wanted {
+            let Some(listed) = channel.doc.release(v) else {
+                continue;
+            };
+            let stale = listed.amendments.iter().any(|a| {
+                cached_amendments
+                    .get(&amendment_key(v, &a.component))
+                    .map(|s| s.eq_ignore_ascii_case(&a.manifest_sha256))
+                    != Some(true)
+            });
+            if stale {
+                for (a, raw, _) in
+                    fleet_update::channel::fetch_amendments(fetch, &channel, v, keys).await
+                {
+                    amendments.push((amendment_key(v, &a.component), raw));
+                }
+            }
+        }
+        Ok::<_, IpcError>((channel, raw, wanted, fetched, amendments))
     }
     .await;
     let s = lock(store)?;
-    let (channel, raw, wanted, fetched) = match result {
+    let (channel, raw, wanted, fetched, amendments) = match result {
         Ok(r) => r,
         Err(e) => {
             let _ = s.set_setting(
@@ -1183,10 +1540,32 @@ pub async fn refresh(
             fetched_at: now,
         })?;
     }
+    for (key, a) in &amendments {
+        s.put_update_doc(&UpdateDocRow {
+            kind: "amendment".into(),
+            key: key.clone(),
+            body: a.body.clone(),
+            sig: a.sig.clone(),
+            sequence: None,
+            fetched_at: now,
+        })?;
+    }
     let keep: Vec<String> = wanted.iter().map(|v| v.to_string()).collect();
     let pruned = s.prune_update_manifests(&keep)?;
-    if channel.doc.sequence != seen || !fetched.raw.is_empty() || pruned > 0 {
+    let dropped = mirror::prune(&s, keys, now);
+    if dropped > 0 {
+        tracing::info!(
+            files = dropped,
+            "[update] dropped mirrored artifacts no release lists"
+        );
+    }
+    if channel.doc.sequence != seen
+        || !fetched.raw.is_empty()
+        || !amendments.is_empty()
+        || pruned > 0
+    {
         s.emit_update_changed("channel", None);
+        decisions_may_have_changed();
     }
     let manifests = s.update_docs("manifest")?.len();
     let outcome = RefreshOutcome {
@@ -1269,6 +1648,37 @@ pub fn spawn_refresh_tick(
             }
         }
         let keys = trusted_keys();
+        // The decision pusher: woken by a pin, a setting or a new channel,
+        // and every few minutes for the rollouts' waves and the maintenance
+        // window's edges, which move decisions with nothing else changing.
+        {
+            let (store, keys, cancel) = (store.clone(), keys.clone(), cancel.clone());
+            crate::rt::spawn(async move {
+                let _ = push_decisions(&store, &keys, crate::store::now_unix());
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => break,
+                        _ = DECIDE_WAKE.notified() => {}
+                        _ = tokio::time::sleep(DECIDE_BEAT) => {}
+                    }
+                    match rollout::advance(&store, crate::store::now_unix()) {
+                        Ok(moved) => {
+                            for m in moved {
+                                tracing::info!(component = %m.component, version = %m.version, what = m.what, wave = m.wave + 1, "update rollout moved");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e.message, "could not advance the update rollouts")
+                        }
+                    }
+                    let pushed = push_decisions(&store, &keys, crate::store::now_unix());
+                    if !pushed.is_empty() {
+                        tracing::info!(targets = ?pushed, "update decisions changed");
+                    }
+                }
+            });
+        }
         // The last failure's code: a failure warns once, and again only when
         // the reason changes, so a hub offline for a week does not warn every
         // tick.

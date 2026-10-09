@@ -312,8 +312,8 @@ describe('the panels that do not apply to a hub client', () => {
     // Updates are a generated page since declarative pages P3/P6, not a
     // hand-written panel here: the note that this desktop installs nothing
     // yet is `crates/fleet-core/pages/settings.updates.json`'s notice, and
-    // that `nightly` is not offered (S2b) is pinned in the settings
-    // registry (`nightly_is_not_offered_until_it_is_published`).
+    // the tracks offered are pinned in the settings registry
+    // (`nightly_is_a_track_once_it_is_published`).
     expect(screen.queryByTestId('update-section')).toBeNull();
     expect(screen.queryByTestId('update-remote')).toBeNull();
   });

@@ -182,6 +182,7 @@ pub fn decide(i: &DecideInput) -> Decision {
                 sequence: doc.sequence,
             },
             url: artifact.url(&m.release.assets_base),
+            mirror: None,
             artifact,
             evidence: None,
         })

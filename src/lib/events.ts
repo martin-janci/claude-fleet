@@ -83,6 +83,9 @@ export type RowEventHandlers = {
   /** One call per flush with every `update:changed` (update design §11: ids
    *  only), in order: re-read `update_status`. */
   onUpdateChanged?: (changes: UpdateChanged[]) => void;
+  /** One call per flush with every `update:decision` (update design §6.4):
+   *  what the hub would tell a target moved; the target checks again. */
+  onUpdateDecision?: (decisions: UpdateDecision[]) => void;
   /** One call per flush with the id of every `download:changed` (file
    *  downloads: ids only), in order: re-read `list_downloads`. */
   onDownloadsChanged?: (ids: number[]) => void;
@@ -120,6 +123,8 @@ export const HANDOFF_CHANGED_EVENT = 'handoff:changed';
 /** The payload of `update:changed`: what moved, never the row itself. */
 /** `what` is observed | pin | channel today; a newer hub may add others. */
 export type UpdateChanged = { what: string; target?: string };
+/** The payload of `update:decision`: a target, its new status and version. */
+export type UpdateDecision = { target: string; status: string; version?: string };
 
 type Queued =
   | { name: 'session:created' | 'session:updated'; payload: SessionRow }
@@ -155,6 +160,7 @@ type Queued =
   | { name: 'work:changed'; payload: unknown }
   | { name: 'settings:changed'; payload: { key: string } }
   | { name: 'update:changed'; payload: UpdateChanged }
+  | { name: 'update:decision'; payload: UpdateDecision }
   | { name: 'download:changed'; payload: { id: number } }
   | { name: 'local_workspace:changed'; payload: { id: number } }
   | { name: 'grant:changed'; payload: unknown };
@@ -209,6 +215,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     const workChanges: WorkChanged[] = [];
     const settingsKeys: string[] = [];
     const updateChanges: UpdateChanged[] = [];
+    const updateDecisions: UpdateDecision[] = [];
     const downloadIds: number[] = [];
     const localWorkspaceIds: number[] = [];
     const grantChanges: GrantChanged[] = [];
@@ -315,6 +322,17 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
           }
           break;
         }
+        case 'update:decision': {
+          const p = ev.payload as Partial<UpdateDecision> | null;
+          if (p && typeof p.target === 'string' && typeof p.status === 'string') {
+            updateDecisions.push(
+              typeof p.version === 'string'
+                ? { target: p.target, status: p.status, version: p.version }
+                : { target: p.target, status: p.status },
+            );
+          }
+          break;
+        }
         case 'download:changed':
           if (typeof ev.payload?.id === 'number') downloadIds.push(ev.payload.id);
           break;
@@ -340,6 +358,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     if (workChanges.length > 0) deliver(() => handlers.onWorkChanged?.(workChanges));
     if (settingsKeys.length > 0) deliver(() => handlers.onSettingsChanged?.(settingsKeys));
     if (updateChanges.length > 0) deliver(() => handlers.onUpdateChanged?.(updateChanges));
+    if (updateDecisions.length > 0) deliver(() => handlers.onUpdateDecision?.(updateDecisions));
     if (downloadIds.length > 0) deliver(() => handlers.onDownloadsChanged?.(downloadIds));
     if (localWorkspaceIds.length > 0) deliver(() => handlers.onLocalWorkspacesChanged?.(localWorkspaceIds));
     if (grantChanges.length > 0) deliver(() => handlers.onGrantChanged?.(grantChanges));
@@ -383,6 +402,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     workChanged: !!handlers.onWorkChanged,
     settingsChanged: !!handlers.onSettingsChanged,
     updateChanged: !!handlers.onUpdateChanged,
+    updateDecision: !!handlers.onUpdateDecision,
     downloadsChanged: !!handlers.onDownloadsChanged,
     localWorkspacesChanged: !!handlers.onLocalWorkspacesChanged,
     grantChanged: !!handlers.onGrantChanged,
@@ -428,6 +448,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('work:changed', wanted.workChanged),
     sub('settings:changed', wanted.settingsChanged),
     sub('update:changed', wanted.updateChanged),
+    sub('update:decision', wanted.updateDecision),
     sub('download:changed', wanted.downloadsChanged),
     sub('local_workspace:changed', wanted.localWorkspacesChanged),
     sub('grant:changed', wanted.grantChanged),
