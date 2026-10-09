@@ -526,6 +526,9 @@
     leave('board');
     leave('accounts');
     leave('control');
+    // Automation is a fleet page like Control: an opened session replaces
+    // it (review r07).
+    leave('automation');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
