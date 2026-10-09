@@ -47,6 +47,7 @@ import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { resetAccessForTests, setMyGrants } from './access';
 import { session } from './hosts_fixture';
+import { expectAccessible } from './a11y_check';
 
 const mockedShare = shareSession as unknown as ReturnType<typeof vi.fn>;
 const mockedUnshare = unshareSession as unknown as ReturnType<typeof vi.fn>;
@@ -117,7 +118,7 @@ describe('ShareSheet', () => {
       screen.getByTestId('share-level').querySelectorAll('option'),
       (o) => (o as HTMLOptionElement).value,
     );
-    expect(levels).toEqual(['watch', 'drive']);
+    expect(levels).toEqual(['watch', 'answer', 'drive']);
   });
 
   it('shares with an ORG by name, and revokes an org grant by its name', async () => {
@@ -188,6 +189,17 @@ describe('ShareSheet', () => {
     mockedNarrow.mockResolvedValue({ ok: true, value: null });
     render(ShareSheet);
     await settle();
+    await fireEvent.click(screen.getByTestId('share-narrow'));
+    await settle();
+    expect(mockedNarrow).toHaveBeenCalledWith(42, 'bea');
+  });
+
+  it('narrows an answer grant to watch too (Orbit Fleet 11.7)', async () => {
+    mockedList.mockResolvedValue({ ok: true, value: [grant({ level: 'answer' })] });
+    mockedNarrow.mockResolvedValue({ ok: true, value: null });
+    render(ShareSheet);
+    await settle();
+    expect(screen.getByTestId('share-grant-level').textContent).toBe('answer');
     await fireEvent.click(screen.getByTestId('share-narrow'));
     await settle();
     expect(mockedNarrow).toHaveBeenCalledWith(42, 'bea');
@@ -355,5 +367,17 @@ describe('ShareSheet', () => {
     await settle();
     expect(screen.queryByTestId('share-sheet')).toBeNull();
     expect(mockedList).not.toHaveBeenCalled();
+  });
+});
+
+describe('ShareSheet: accessibility', () => {
+  it('the Share sheet with grants is accessible', async () => {
+    mockedList.mockResolvedValue({
+      ok: true,
+      value: [grant(), grant({ person_id: 3, person_name: 'cy', person_display_name: 'Cy', level: 'drive' })],
+    });
+    render(ShareSheet);
+    await settle();
+    await expectAccessible(screen.getByTestId('share-sheet'));
   });
 });

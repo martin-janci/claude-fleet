@@ -25,7 +25,12 @@ vi.mock('@tauri-apps/api/webview', () => ({
 }));
 vi.mock('./sessions', async () => {
   const actual = await vi.importActual<typeof import('./sessions')>('./sessions');
-  return { ...actual, sendPrompt: vi.fn() };
+  const sendPrompt = vi.fn();
+  // `answerDialog` is `send_prompt` with a key and no prompt (Orbit Fleet
+  // 11.7); routed through the one mock so the tests below keep asserting the
+  // keystroke as the pane receives it.
+  const answerDialog = vi.fn((host: string, tmux: string, key: string) => sendPrompt(host, tmux, '', { keys: key }));
+  return { ...actual, sendPrompt, answerDialog };
 });
 vi.mock('./forms/forms', async () => ({
   ...(await vi.importActual<typeof import('./forms/forms')>('./forms/forms')),
@@ -214,6 +219,23 @@ describe('ConversationPanel', () => {
     await tick();
     expect(screen.getByText('No Claude session id yet')).toBeTruthy();
     expect(mockedConv).not.toHaveBeenCalled();
+  });
+
+  it('a Codex row with no conversation yet says Codex starts one on its first prompt', async () => {
+    render(ConversationPanel, { session: session({ claude_session_id: null, agent: 'codex' }), visible: true });
+    await tick();
+    expect(screen.getByText('No conversation yet')).toBeTruthy();
+    expect(screen.getByText(/Codex starts a conversation on its first prompt/)).toBeTruthy();
+    expect(mockedConv).not.toHaveBeenCalled();
+  });
+
+  it('an Agy row says its conversations cannot be shown yet instead of waiting on one', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session({ agent: 'agy' }), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByText('Agy conversations can’t be shown yet')).toBeTruthy();
   });
 
   it('other errors show the message plus a retry button that refetches, keeping earlier good turns visible', async () => {
@@ -1814,7 +1836,7 @@ describe('ConversationPanel live indicator', () => {
     await settle();
     await settle();
     expect(screen.getByTestId('conv-indicator').getAttribute('data-kind')).toBe('sent');
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Waiting for Claude…');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Waiting for Claude Code…');
 
     // transcript carries the prompt: the message gives way, the session is still working
     const caughtUp = conv();

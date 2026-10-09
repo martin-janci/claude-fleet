@@ -1791,6 +1791,10 @@ pub struct StartPreview {
     /// pre-tick only; the person still starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suggested_sibling: Option<crate::service::decide::sibling_repos::SuggestedSibling>,
+    /// The brief above was drafted by a model (redesign 6.10, `draft_brief`):
+    /// by which, on which host, from how many notes. `None` for the template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brief_draft: Option<crate::service::work::brief_draft::BriefDraft>,
 }
 
 /// The projects `key` ran in before, other than `chosen`: ended links'
@@ -2113,6 +2117,7 @@ pub async fn preview_start(
         suggested_project: None,
         proposal: None,
         suggested_sibling: None,
+        brief_draft: None,
     };
     let plan = match plan_resolved(store, &planned, view, &ticket) {
         Ok(p) => p,

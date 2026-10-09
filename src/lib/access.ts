@@ -40,9 +40,11 @@ import { invokeCmd, type Result } from './result';
 import { hubStatus, unavailableReason, type HubStatus } from './hub';
 import type { SessionRow } from './sessions';
 
-/** The two levels a grant may carry. `own` is deliberately NOT here: it is a
- *  tier, not a level anyone can be given (spec §4.3 invariant 5). */
-export const GRANT_LEVELS = ['watch', 'drive'] as const;
+/** The levels a grant may carry, narrowest first. `answer` (Orbit Fleet
+ *  11.7) is watch plus answering the dialog on the pane. `own` is deliberately
+ *  NOT here: it is a tier, not a level anyone can be given (spec §4.3
+ *  invariant 5). */
+export const GRANT_LEVELS = ['watch', 'answer', 'drive'] as const;
 export type GrantLevel = (typeof GRANT_LEVELS)[number];
 
 /** What this client may do with a row: own it, drive it, watch it — or
@@ -177,6 +179,9 @@ export function noAttachReason(
   // and not a failure: the terminal attaches by this machine's own
   // `ssh … tmux attach`, which the hub is not in the path of and therefore
   // cannot revoke. A share that handed one over could never be taken back.
+  if (access === 'answer') {
+    return 'Shared with you to answer. You can answer the questions the session asks; a terminal would be a direct SSH session into the owner’s pane that no revoke could reach, so sharing never gives one. The pane below is a read-only snapshot.';
+  }
   return access === 'drive'
     ? 'Shared with you to drive. Driving sends prompts through fleet, which the hub can stop at any moment; a terminal would be a direct SSH session into the owner’s pane that no revoke could reach, so sharing never gives one. The pane below is a read-only snapshot.'
     : 'Shared with you to watch. A terminal would be a direct SSH session into the owner’s pane that no revoke could reach, so sharing never gives one. The pane below is a read-only snapshot.';

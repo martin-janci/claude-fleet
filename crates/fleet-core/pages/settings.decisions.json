@@ -64,6 +64,16 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.adopt_target",
+          "hint": "Prefills the project when you adopt a pane fleet did not start; you still press Adopt."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.restore_target",
+          "hint": "Prefills the project when you restore a conversation found on a host; you still press Restore."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.duplicate",
           "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both."
         },
@@ -76,6 +86,11 @@
           "type": "field",
           "key": "decide.jev.related_session",
           "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.control_route",
+          "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead."
         },
         {
           "type": "field",

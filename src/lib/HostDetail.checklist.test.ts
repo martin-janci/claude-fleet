@@ -12,6 +12,7 @@ import { hubStatus, STANDALONE } from './hub';
 import { hubConnection } from './hub_connection';
 import { NOW, host } from './hosts_fixture';
 import { uiLayout } from './prefs';
+import { expectAccessible } from './a11y_check';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 let guardInstalled = false;
@@ -149,5 +150,19 @@ describe('HostDetail: health checklist', () => {
     await waitFor(() => expect(screen.getByTestId('detail-run-checks').textContent).toBe('checking…'));
     expect(screen.queryByTestId('detail-check-live')).toBeNull();
     release();
+  });
+});
+
+describe('HostDetail: accessibility', () => {
+  it('the host detail, checked, is accessible in New', async () => {
+    uiLayout.set('new');
+    try {
+      mount();
+      await fireEvent.click(screen.getByTestId('detail-run-checks'));
+      await waitFor(() => expect(checkRow('guard').dataset.state).toBe('fail'));
+      await expectAccessible(document.body);
+    } finally {
+      uiLayout.set('classic');
+    }
   });
 });

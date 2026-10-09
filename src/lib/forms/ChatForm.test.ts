@@ -1,6 +1,7 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, vi } from 'vitest';
 import ChatForm, { type ChatFormOutcome } from './ChatForm.svelte';
+import { expectAccessible } from '../a11y_check';
 import type { FormSpec } from './forms';
 
 const SPEC: FormSpec = {
@@ -99,5 +100,12 @@ describe('ChatForm: a wizard in the chat (redesign step 10.12)', () => {
     expect(ondecline).toHaveBeenCalledWith('Not today');
     expect(onsubmit).not.toHaveBeenCalled();
     expect(screen.getByTestId('chat-form-outcome').textContent).toContain('“Not today”');
+  });
+
+  it('is accessible', async () => {
+    const { container } = render(ChatForm, { props: { spec: SPEC, from: 'Control', onsubmit: vi.fn() } });
+    await expectAccessible(container);
+    await fill();
+    await expectAccessible(container);
   });
 });

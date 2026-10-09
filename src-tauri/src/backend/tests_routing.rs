@@ -609,6 +609,56 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::downloads::routed::remove_download(b, 7, s)).map(|_| ())
             }),
         ),
+        // Control's Library: one hub tool, by action.
+        (
+            "list_library",
+            "library",
+            json!({ "action": "list", "host_alias": "trn", "limit": 5 }),
+            r#"{"items":[{"id":3,"at":1,"kind":"upload","host_alias":"trn","session_id":4,"path":"/w/a.pdf","name":"a.pdf","size":3}]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::list_library(
+                    b,
+                    fleet_core::service::library::ListArgs {
+                        session_id: None,
+                        host_alias: Some("trn".into()),
+                        limit: Some(5),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_library_items",
+            "library",
+            json!({ "action": "add", "kind": "upload", "session_id": 4, "files": [{ "path": "/w/a.pdf", "name": "a.pdf", "size": 3 }] }),
+            r#"{"items":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::add_library_items(
+                    b,
+                    fleet_core::service::library::AddArgs {
+                        kind: "upload".into(),
+                        session_id: 4,
+                        files: vec![fleet_core::service::library::LibraryFile {
+                            path: "/w/a.pdf".into(),
+                            name: Some("a.pdf".into()),
+                            size: Some(3),
+                        }],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_library_item",
+            "library",
+            json!({ "action": "remove", "id": 3 }),
+            r#"{"removed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::remove_library_item(b, 3, s)).map(|_| ())
+            }),
+        ),
         (
             "list_tasks",
             "list_tasks",
@@ -829,6 +879,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         since: Some(5),
                         kind: Some("jev".into()),
                         limit: Some(20),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "routines",
+            "routines",
+            json!({ "action": "failing" }),
+            r#"[]"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::routines::routed::routines(
+                    b,
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                    commands::routines::RoutinesArgs {
+                        action: "failing".into(),
                         ..Default::default()
                     },
                 ))
@@ -2208,9 +2277,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
     use fleet_core::service::safe_kill::SafeKillSessionArgs;
     use fleet_core::service::sessions::{
         AdoptSessionArgs, DiscoverLostSessionsArgs, DismissGhostSessionArgs, KillSessionArgs,
-        NewSessionArgs, RecreateSessionArgs, RenameSessionArgs, RestartSessionArgs,
-        RestoreHostSessionsArgs, SendPromptArgs, SetFriendlyNameArgs, SpawnReviewArgs,
-        TouchSessionViewedArgs,
+        LostTargetArgs, NewSessionArgs, PlaceTranscriptArgs, RecreateSessionArgs,
+        RenameSessionArgs, RestartSessionArgs, RestoreHostSessionsArgs, SendPromptArgs,
+        SetFriendlyNameArgs, SpawnReviewArgs, TouchSessionViewedArgs,
     };
 
     vec![
@@ -2464,6 +2533,35 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "control_route_propose",
+            "control_route",
+            json!({ "action": "propose", "text": "how is the federation handshake doing" }),
+            r#"{"outcome":"none","targets":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_route_propose(
+                    b,
+                    s,
+                    "how is the federation handshake doing".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "control_route_follow",
+            "control_route",
+            json!({ "action": "follow", "run_id": 7, "chosen": "m3" }),
+            "true",
+            Box::new(|b, s, _| {
+                block_on(commands::operator::routed::control_route_follow(
+                    b,
+                    s,
+                    7,
+                    "m3".into(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "mcp_confirm",
             "answer_mcp_confirm",
             json!({ "nonce": "n", "approved": true }),
@@ -2694,6 +2792,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         ..Default::default()
                     },
                     s,
+                    &ssh(),
                 ))
                 .map(|_| ())
             }),
@@ -3199,6 +3298,47 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "lost_target",
+            "lost_target",
+            json!({ "session_id": 7 }),
+            "{}",
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::lost_target(
+                    b,
+                    LostTargetArgs {
+                        session_id: Some(7),
+                        ..Default::default()
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "place_transcript",
+            "place_transcript",
+            json!({
+                "host_alias": "trn",
+                "claude_session_id": "44366faf-ae97-426a-91cd-beaf3c74f1d7",
+                "project_id": 3,
+            }),
+            r#"{"project_id":3,"tmux_name":"dev-o-r","copied":true}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::place_transcript(
+                    b,
+                    PlaceTranscriptArgs {
+                        host_alias: "trn".into(),
+                        claude_session_id: "44366faf-ae97-426a-91cd-beaf3c74f1d7".into(),
+                        project_id: 3,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "dismiss_ghost_session",
             "dismiss_ghost_session",
             json!({ "session_id": 7 }),
@@ -3222,7 +3362,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     b,
                     AdoptSessionArgs {
                         session_id: 7,
+                        project_id: None,
                         owner_person_id: Some(1),
+                        decider: Default::default(),
                     },
                     s,
                 ))
@@ -4162,6 +4304,42 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                     b,
                     commands::missions::PauseAllMissionsArgs {},
                     s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "mission_release_note",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_release_note", "item_id": null, "mission_id": 1 }),
+            r#"{"text":"t","model":"haiku","host_alias":"h","from":"1 task","at":1}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::mission_release_note(
+                    b,
+                    commands::missions::MissionIdArgs { mission_id: 1 },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "today_brief",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "today_brief", "item_id": null, "refresh": true, "since": 100 }),
+            "{}",
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::today_brief(
+                    b,
+                    commands::missions::TodayBriefArgs {
+                        refresh: true,
+                        since: Some(100),
+                        org_id: None,
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
                 ))
                 .map(|_| ())
             }),
@@ -6169,6 +6347,10 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/downloads.rs",
         include_str!("../commands/downloads.rs"),
     ),
+    (
+        "commands/library.rs",
+        include_str!("../commands/library.rs"),
+    ),
     ("commands/editor.rs", include_str!("../commands/editor.rs")),
     ("commands/files.rs", include_str!("../commands/files.rs")),
     ("commands/health.rs", include_str!("../commands/health.rs")),
@@ -6211,6 +6393,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/updates.rs"),
     ),
     ("commands/runs.rs", include_str!("../commands/runs.rs")),
+    (
+        "commands/routines.rs",
+        include_str!("../commands/routines.rs"),
+    ),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",

@@ -40,4 +40,4 @@ CREATE INDEX IF NOT EXISTS routine_runs_started ON routine_runs(started_at);
 CREATE INDEX IF NOT EXISTS routine_runs_session
   ON routine_runs(session_id) WHERE session_id IS NOT NULL;
 
-INSERT OR IGNORE INTO schema_version (version) VALUES (137);
+INSERT OR IGNORE INTO schema_version (version) VALUES (141);

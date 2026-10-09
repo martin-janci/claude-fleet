@@ -60,12 +60,18 @@ if grep -q '^<<<<<<< ' "$SCHEMA"; then
       local $/; my $t = <>; my $bad = 0;
       my $entry = qr#^\s*(?://.*|Migration(?:::plain)?\s*[({].*|\d+,|version:\s*\d+,|sql:\s*include_str!.*|already_applied:.*|include_str!.*|\),|\},)?$#;
       my $fix = sub {
-        my ($ours, $theirs) = @_;
+        my ($ours, $theirs, $after) = @_;
         for my $l (split /\n/, $ours . $theirs) { $bad = 1 unless $l =~ $entry; }
+        # When both sides end in the same `),` or `},`, git leaves that line
+        # after the conflict, and the base side needs its own copy of it.
+        my $open = () = $theirs =~ /[({]/g;
+        my $shut = () = $theirs =~ /[)}]/g;
+        $theirs .= $after if $open > $shut;
         return $theirs . $ours;
       };
-      $t =~ s/^<<<<<<< [^\n]*\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]*\n/$fix->($1, $2)/gsme;
+      $t =~ s/^<<<<<<< [^\n]*\n(.*?)^=======\n(.*?)^>>>>>>> [^\n]*\n(?=((?:[^\n]*\n)?))/$fix->($1, $2, $3)/gsme;
       die "a conflict in schema.rs is not only MIGRATIONS entries; resolve it by hand\n" if $bad;
+      die "schema.rs still has conflict markers; resolve it by hand\n" if $t =~ /^(?:<{7}|>{7}) /m;
       print $t;
     ' "$SCHEMA" > "$SCHEMA.renumber" && mv "$SCHEMA.renumber" "$SCHEMA" \
       || { rm -f "$SCHEMA.renumber"; echo "renumber-migrations: $SCHEMA left as it was" >&2; exit 1; }

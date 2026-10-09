@@ -1846,6 +1846,86 @@
         "level": "none"
       },
       "default": "off",
+      "help": "Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests.",
+      "key": "decide.jev.adopt_target",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: adopt into",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests.",
+      "key": "decide.jev.restore_target",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: restore into",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
       "help": "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
       "key": "decide.jev.duplicate",
       "kind": {
@@ -1937,6 +2017,46 @@
         "type": "choice"
       },
       "label": "Jev: related session",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
+      "key": "decide.jev.control_route",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: Control routing",
       "modified": false,
       "option_labels": [
         [
@@ -2436,7 +2556,7 @@
       "danger": {
         "level": "none"
       },
-      "default": "needs_you,failed,routine_failed",
+      "default": "needs_you,failed,blocked,routine_failed",
       "help": "The session states the phone shows a notification for.",
       "key": "notify.phone",
       "kind": {
@@ -2476,7 +2596,7 @@
       "restart": "none",
       "tags": [],
       "unit": "none",
-      "value": "needs_you,failed,routine_failed"
+      "value": "needs_you,failed,blocked,routine_failed"
     },
     {
       "ai": "suggest",
@@ -3309,6 +3429,16 @@
               "type": "field"
             },
             {
+              "hint": "Prefills the project when you adopt a pane fleet did not start; you still press Adopt.",
+              "key": "decide.jev.adopt_target",
+              "type": "field"
+            },
+            {
+              "hint": "Prefills the project when you restore a conversation found on a host; you still press Restore.",
+              "key": "decide.jev.restore_target",
+              "type": "field"
+            },
+            {
               "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
               "key": "decide.jev.duplicate",
               "type": "field"
@@ -3321,6 +3451,11 @@
             {
               "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged.",
               "key": "decide.jev.related_session",
+              "type": "field"
+            },
+            {
+              "hint": "Says which mission or session a message in Control is about; you can change it. A short message gets a question instead.",
+              "key": "decide.jev.control_route",
               "type": "field"
             },
             {

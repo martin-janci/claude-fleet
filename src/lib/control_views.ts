@@ -26,7 +26,7 @@ export const CONTROL_VIEWS: readonly ControlViewDef[] = [
   { id: 'needs-you', label: 'Needs you', glyph: '▤', step: '9.4', landed: true },
   { id: 'session', label: 'Session in focus', glyph: '▢', step: '9.4', landed: true },
   { id: 'prs', label: 'Pull requests', glyph: '⑂', step: '9.4', landed: true },
-  { id: 'library', label: 'Library', glyph: '◧', step: '9.7', landed: false },
+  { id: 'library', label: 'Library', glyph: '◧', step: '9.7', landed: true },
   { id: 'today', label: 'Today briefing', glyph: '☀', step: '9.4', landed: true },
 ];
 

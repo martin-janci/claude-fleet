@@ -185,8 +185,8 @@ fn agy_drops_what_it_does_not_take() {
         .all(|m| crate::validate::claude_model(m.value).is_ok()));
     assert!(a.launch_switch("/model gemini-3.8-flash").is_none());
     assert!(a.slash_commands().iter().any(|c| c.name == "resume"));
-    let minted = a.mint_conversation_id().expect("a placeholder id");
-    assert!(a.valid_conversation_id(&minted));
+    assert_eq!(a.mint_conversation_id(), None, "agy allocates its own ids");
+    assert!(a.valid_conversation_id("0b6f1f9e-3c2a-4b1e-9a8d-1c2b3d4e5f60"));
     assert!(!a.valid_conversation_id("x'; rm -rf ~"));
 }
 

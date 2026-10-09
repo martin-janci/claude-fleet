@@ -861,6 +861,49 @@ impl HubBackend {
         self.route("send_file", &v).await
     }
 
+    /// `commands::library::list_library`.
+    pub async fn list_library(
+        &self,
+        args: &fleet_core::service::library::ListArgs,
+    ) -> Result<fleet_core::service::library::LibraryList, IpcError> {
+        let mut v = json!({ "action": "list" });
+        if let Some(id) = args.session_id {
+            v["session_id"] = json!(id);
+        }
+        if let Some(h) = &args.host_alias {
+            v["host_alias"] = json!(h);
+        }
+        if let Some(n) = args.limit {
+            v["limit"] = json!(n);
+        }
+        self.route("list_library", &v).await
+    }
+
+    /// `commands::library::add_library_items`.
+    pub async fn add_library_items(
+        &self,
+        args: &fleet_core::service::library::AddArgs,
+    ) -> Result<fleet_core::service::library::LibraryList, IpcError> {
+        let v = json!({
+            "action": "add",
+            "kind": args.kind,
+            "session_id": args.session_id,
+            "files": args.files,
+        });
+        self.route("add_library_items", &v).await
+    }
+
+    /// `commands::library::remove_library_item`.
+    pub async fn remove_library_item(&self, id: i64) -> Result<bool, IpcError> {
+        let v: Value = self
+            .route(
+                "remove_library_item",
+                &json!({ "action": "remove", "id": id }),
+            )
+            .await?;
+        Ok(v.get("removed").and_then(Value::as_bool).unwrap_or(false))
+    }
+
     /// `commands::downloads::remove_download`.
     pub async fn remove_download(&self, id: i64) -> Result<bool, IpcError> {
         let v: Value = self.route("remove_download", &json!({ "id": id })).await?;

@@ -29,6 +29,9 @@ export interface Toast {
   /** How many times the same code+message was pushed while visible. */
   count: number;
   action: ToastAction | null;
+  /** A long job's progress, 0–1 (step 10.10): drawn as a 28 px Progress
+   *  ring. Absent on every other toast. */
+  progress?: number;
 }
 
 export interface PushOptions {
@@ -41,6 +44,8 @@ export interface PushOptions {
   timeoutMs?: number;
   /** An inline button; a toast with one stays up for `ACTION_TIMEOUT_MS` by default. */
   action?: ToastAction;
+  /** 0–1 for a long job of known size; move it with `setToastProgress`. */
+  progress?: number;
 }
 
 export const INFO_TIMEOUT_MS = 4000;
@@ -147,10 +152,24 @@ export function push(opts: PushOptions): number {
     return existing.id;
   }
   const id = nextId++;
-  toasts.update((arr) => capped([...arr, { id, kind, code, message: opts.message, sticky, count: 1, action }]));
+  const toast: Toast = { id, kind, code, message: opts.message, sticky, count: 1, action };
+  if (opts.progress !== undefined) toast.progress = clamp01(opts.progress);
+  toasts.update((arr) => capped([...arr, toast]));
   if (!sticky) arm(id, timeout);
   recordNotice(id, true, { kind, code, message: opts.message });
   return id;
+}
+
+function clamp01(n: number): number {
+  return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+}
+
+/** Move a long job's ring. False when the toast is gone (dismissed). */
+export function setToastProgress(id: number, progress: number): boolean {
+  if (!get(toasts).some((t) => t.id === id)) return false;
+  const p = clamp01(progress);
+  toasts.update((arr) => arr.map((t) => (t.id === id && t.progress !== p ? { ...t, progress: p } : t)));
+  return true;
 }
 
 function arm(id: number, ms: number): void {

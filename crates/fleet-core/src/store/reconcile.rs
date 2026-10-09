@@ -519,7 +519,11 @@ impl Store {
                      NULL,
                      'unclaimed')
              ON CONFLICT(host_alias, tmux_name) DO UPDATE SET
-               project_id=excluded.project_id,
+               -- A pane whose directory is in no project keeps the project
+               -- a fleet-run row already has: a person adopted it into one
+               -- (Lost and found, step 4.12), or it cd'd out of its checkout.
+               project_id=CASE WHEN excluded.project_id IS NULL AND started_at IS NOT NULL
+                               THEN project_id ELSE excluded.project_id END,
                last_activity_at=excluded.last_activity_at,
                account_uuid=COALESCE(excluded.account_uuid, account_uuid),
                worktree_key=COALESCE(excluded.worktree_key, worktree_key),
@@ -2593,6 +2597,27 @@ mod tests {
         // A pass that started after the submit is authoritative.
         let row = pass(&mut s, hook_at + 3);
         assert_eq!(row.claude_status.as_deref(), Some("idle"));
+    }
+
+    /// Adopt into (step 4.12): a fleet-run row keeps the project a person
+    /// put it in while its pane's directory is in no project; a row fleet
+    /// does not run follows the observation as before.
+    #[test]
+    fn a_fleet_run_row_keeps_its_project_when_the_pane_is_in_none() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.upsert_host("local").unwrap();
+        let pid = s
+            .upsert_project("acme", "papaya-pos", "/p/acme/papaya-pos")
+            .unwrap();
+        let r = reconcile_one(&mut s, "scratch", None, None, None);
+        s.set_session_project(r.id, pid).unwrap();
+        let r = reconcile_one(&mut s, "scratch", None, None, None);
+        assert_eq!(r.project_id, None, "not fleet's: the observation wins");
+
+        s.set_session_project(r.id, pid).unwrap();
+        s.set_started_at(r.id, 5).unwrap();
+        let r = reconcile_one(&mut s, "scratch", None, None, None);
+        assert_eq!(r.project_id, Some(pid), "adopted into it: kept");
     }
 
     #[test]
