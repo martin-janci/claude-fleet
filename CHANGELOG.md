@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Releases are cut with `scripts/release.sh` — see [docs/RELEASING.md](docs/RELEASING.md).
 Entries before 0.2.4 were plain version bumps and were not recorded individually.
 
+## [Unreleased]
+
+The Orbit Fleet layout is now the default: the rail, the left list with
+filters and grouping, and the inspector. To go back to the 0.5.x layout,
+open Settings → Appearance and set Layout to Classic. Classic stays for
+this release only and is removed in the next one.
+
 ## [0.5.4] - 2026-10-08
 
 ### Added

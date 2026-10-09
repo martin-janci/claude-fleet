@@ -85,13 +85,17 @@ export type UiLayout = 'classic' | 'new';
 const isUiLayout = (v: unknown): v is UiLayout => v === 'classic' || v === 'new';
 
 /**
- * Which shell the app shows: Classic (0.5.x) or New (the Orbit Fleet
- * redesign, growing behind this switch until the parity sign-off in 7.5).
- * Classic stays the default until then. Nothing reads it yet besides the
- * Appearance section; the destination store in 3.1 is the first consumer.
+ * Which shell the app shows: New (the Orbit Fleet redesign) or Classic
+ * (0.5.x). Step 7.6 made New the default; Classic stays one switch away in
+ * Settings → Appearance for one release, then 13.1 deletes it.
+ *
+ * The choice lives under `ui.layout.v2`. The old `ui.layout` key was written
+ * on every start, so a stored "classic" there is the old default rather than
+ * a choice; reading it would keep everyone on Classic. It is dropped.
  */
-export const uiLayout = writable<UiLayout>(readPref<UiLayout>('ui.layout', 'classic', isUiLayout));
-uiLayout.subscribe((v) => writePref('ui.layout', v));
+export const uiLayout = writable<UiLayout>(readPref<UiLayout>('ui.layout.v2', 'new', isUiLayout));
+uiLayout.subscribe((v) => writePref('ui.layout.v2', v));
+clearPref('ui.layout');
 
 // ─── Row density (redesign step 3.6) ─────────────────────────────────────
 
