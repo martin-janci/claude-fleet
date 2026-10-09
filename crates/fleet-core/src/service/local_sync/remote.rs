@@ -68,7 +68,9 @@ pub(super) fn pull_script(root: &str) -> String {
 }
 
 /// The guarded upload. Stdin: a tar holding `.m` — NUL-terminated records
-/// `op \t expected \t path` (`W` write, `D` delete; `expected` is the sha256
+/// `op \t expected \t path` (`W` write, `K` write keeping the host file's
+/// executable bit, for a desktop that cannot read modes (Windows, r18-W3),
+/// `D` delete; `expected` is the sha256
 /// the remote file must still have, `-` for "must be absent") — and the
 /// files to write under `f/`. Extracts into a temp directory inside the
 /// root (so the final `mv` is a rename on one filesystem), then for each
@@ -100,9 +102,11 @@ while IFS= read -r -d '' rec; do
   op=${{rec%%$'\t'*}}; rec=${{rec#*$'\t'}}; exp=${{rec%%$'\t'*}}; p=${{rec#*$'\t'}}
   if pl "$p"; then cur=L; elif [ -L "$p" ]; then cur=$(lh "$p"); elif [ -f "$p" ]; then cur=$(h "$p"); elif [ -e "$p" ]; then cur=D; else cur=-; fi
   if [ "$cur" != "$exp" ]; then printf 'C\t\t\t%s\0' "$p"; continue; fi
-  if [ "$op" = W ]; then
+  if [ "$op" = W ] || [ "$op" = K ]; then
+    x=; if [ "$op" = K ] && [ -f "$p" ] && [ -x "$p" ] && [ ! -L "$p" ]; then x=1; fi
     if [ -L "$p" ]; then rm -f -- "$p"; fi
     if mkdir -p -- "$(dirname -- "$p")" 2>/dev/null && mv -f -- "$t/f/$p" "$p" 2>/dev/null; then
+      if [ -n "$x" ]; then chmod +x -- "$p" 2>/dev/null; fi
       printf 'O\t%s\t%s\0' "$(st "$p")" "$p"
     else printf 'X\t\t\t%s\0' "$p"; fi
   else
@@ -371,11 +375,19 @@ pub(super) enum PushResult {
 
 /// Build the upload's tar: `.m` first, then the files under `f/`.
 pub(super) fn push_tar(ops: &[PushOp]) -> Result<Vec<u8>, IpcError> {
+    push_tar_with(ops, cfg!(unix))
+}
+
+/// [`push_tar`]; `mode_known` is false where the desktop cannot read an
+/// executable bit (not unix), so a write keeps the host file's instead of
+/// dropping it (r18-W3).
+fn push_tar_with(ops: &[PushOp], mode_known: bool) -> Result<Vec<u8>, IpcError> {
+    let write = if mode_known { "W" } else { "K" };
     let tar_err = |e: std::io::Error| IpcError::new(codes::E_IO, format!("build tar: {e}"));
     let mut manifest = Vec::new();
     for op in ops {
         let (code, expect) = match op {
-            PushOp::Write { expect, .. } => ("W", expect.as_deref().unwrap_or("-")),
+            PushOp::Write { expect, .. } => (write, expect.as_deref().unwrap_or("-")),
             PushOp::Delete { expect, .. } => ("D", expect.as_str()),
         };
         manifest.extend_from_slice(format!("{code}\t{expect}\t{}", op.path()).as_bytes());
@@ -493,6 +505,55 @@ mod tests {
         let s = parse_scan(bsd).unwrap();
         assert_eq!(s.entries["src/a.rs"].0, Kind::File);
         assert_eq!(s.entries["ln"].0, Kind::Symlink);
+    }
+
+    /// r18-W3: a write from a desktop that cannot read modes keeps the
+    /// host file's executable bit; one that can still sets it as told.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_with_no_known_mode_keeps_the_hosts_executable_bit() {
+        use sha2::{Digest, Sha256};
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        for (mode_known, want) in [(false, 0o755), (true, 0o644)] {
+            let d = tempfile::tempdir().unwrap();
+            let p = d.path().join("verify.sh");
+            std::fs::write(&p, b"old").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let sha: String = Sha256::digest(b"old")
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let tar = push_tar_with(
+                &[PushOp::Write {
+                    path: "verify.sh".into(),
+                    bytes: b"new".to_vec(),
+                    executable: false,
+                    mtime_secs: 1,
+                    expect: Some(sha),
+                }],
+                mode_known,
+            )
+            .unwrap();
+            let mut child = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(push_script(&d.path().to_string_lossy()))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(&tar).unwrap();
+            let out = child.wait_with_output().unwrap();
+            let body = String::from_utf8_lossy(&out.stdout);
+            assert!(body.contains("O\t"), "{body}");
+            assert_eq!(std::fs::read(&p).unwrap(), b"new");
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode & 0o111 != 0,
+                want & 0o111 != 0,
+                "mode_known={mode_known}: {mode:o}"
+            );
+        }
     }
 
     #[test]
