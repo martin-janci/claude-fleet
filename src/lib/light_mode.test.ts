@@ -14,6 +14,9 @@ import { describe, it, expect } from 'vitest';
 // reads app.css).
 const FILES = readdirSync('src', { recursive: true })
   .filter((p) => p.endsWith('.svelte'))
+  // Forward slashes on every OS: Windows lists `lib\Foo.svelte`, and EXEMPT
+  // and PENDING are keyed `lib/Foo.svelte`.
+  .map((p) => p.replace(/\\/g, '/'))
   .map((path) => ({ path, source: readFileSync(`src/${path}`, 'utf8') }));
 
 const stylesOf = (src: string) =>

@@ -50,7 +50,9 @@ const WAITING: { file: string; text: string; why: string }[] = [
 function sources() {
   const svelte: Record<string, string> = {};
   const ts: Record<string, string> = {};
-  for (const f of readdirSync('src', { recursive: true })) {
+  // Forward slashes on every OS: Windows lists `lib\Foo.svelte`, and the
+  // checks below look files up as `src/lib/Foo.svelte`.
+  for (const f of readdirSync('src', { recursive: true }).map((p) => p.replace(/\\/g, '/'))) {
     if (f.includes('.test.') || f.endsWith('.d.ts') || f.includes('copy_lint')) continue;
     if (f.endsWith('.svelte')) svelte[`src/${f}`] = readFileSync(`src/${f}`, 'utf8');
     else if (f.endsWith('.ts')) ts[`src/${f}`] = readFileSync(`src/${f}`, 'utf8');
