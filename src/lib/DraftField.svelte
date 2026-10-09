@@ -3,12 +3,14 @@
   · from 3 changed files · Regenerate · Clear". The draft is always the
   person's to edit; it keeps the ai-pre ring (controls.css) until they
   touch it. While the
-  LLM writes, the field says so (the Atom loader joins it with step 0.8's
-  Loader kit).
+  LLM writes, the field says so beside a small Atom (the Loader kit's
+  agent-thinking loader), which waits the manual's 400 ms so a quick
+  draft never flashes it.
 -->
 <script lang="ts">
   import { draftedBy } from './ai_proposal';
   import DraftedLabel from './DraftedLabel.svelte';
+  import Loader from './Loader.svelte';
 
   let {
     value = $bindable(''),
@@ -69,6 +71,7 @@
   <div class="why" data-testid="{testid}-meta">
     <DraftedLabel testid="{testid}-drafted" />
     {#if busy}
+      <Loader name="atom" size={20} stage={false} testid="{testid}-atom" />
       <span data-testid="{testid}-busy">Drafting…</span>
     {:else if source}
       <span>{source}</span>
