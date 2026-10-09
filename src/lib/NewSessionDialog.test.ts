@@ -2060,15 +2060,49 @@ describe('NewSessionDialog in the New layout', () => {
   });
   afterEach(() => uiLayout.set('classic'));
 
-  it('offers Claude Code and Shell, with Codex and Agy shown as coming', async () => {
+  it('offers Claude Code and Shell; Codex only where it is on the PATH, Agy as coming', async () => {
     const { container } = render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
     await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
     await fireEvent.click(screen.getByTestId('run-background'));
     await expectAccessible(container);
     expect(screen.getByRole('group', { name: 'Agent' })).toBeTruthy();
     expect(screen.getByTestId('kind-work').textContent).toContain('Claude Code');
+    // The fixture's hosts were never sampled for agents.
     expect((screen.getByTestId('agent-codex') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('agent-codex').textContent).toContain('not on local');
     expect((screen.getByTestId('agent-agy') as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId('agent-agy').textContent).toContain('coming');
+  });
+
+  // Orbit Fleet 12.4: Codex is offered on a host that has it on its PATH,
+  // and a Codex session takes none of Claude Code's launch options.
+  it('starts a Codex session on a host that has it, without Claude options', async () => {
+    hosts.update((hs) => hs.map((h) => (h.alias === 'local' ? { ...h, agents_on_path: ['claude', 'codex'] } : h)));
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    const codex = screen.getByTestId('agent-codex') as HTMLButtonElement;
+    expect(codex.disabled).toBe(false);
+    await fireEvent.click(codex);
+    expect(codex.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('kind-work').getAttribute('aria-pressed')).toBe('false');
+    expect(screen.queryByTestId('launch-model')).toBeNull();
+    expect(screen.queryByTestId('launch-account')).toBeNull();
+    expect(screen.queryByTestId('run-background')).toBeNull();
+    const checks = calls('check_account_headroom').length;
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    const args = (calls('new_session')[0][1] as any).args;
+    expect(args).toMatchObject({ kind: 'work', agent: 'codex', model: null, effort: null, profile: null });
+    // No Claude account limit check stands between Create and a Codex start.
+    expect(calls('check_account_headroom')).toHaveLength(checks);
+  });
+
+  it('a Claude Code session sends no agent', async () => {
+    render(NewSessionDialog, { props: { project, onCreate: () => {}, onCancel: () => {} } });
+    await vi.waitFor(() => expect(screen.getByTestId('launch-account')).toBeTruthy());
+    await fireEvent.click(screen.getByText('Create'));
+    await vi.waitFor(() => expect(calls('new_session')).toHaveLength(1));
+    expect((calls('new_session')[0][1] as any).args.agent).toBeNull();
   });
 
   it('defaults the account to the login with the most headroom and starts on it', async () => {

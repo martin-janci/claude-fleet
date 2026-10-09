@@ -17,8 +17,11 @@ pub(super) fn repo_diff_resource_key(session_id: i64, path: &str) -> String {
 /// hub log — and `<invalid>` when it does not parse.
 pub(super) fn add_project_audit_target(source: &add_project::AddProjectSource) -> String {
     match source {
-        add_project::AddProjectSource::Clone { url } => {
+        add_project::AddProjectSource::Clone { url, existing } => {
             match crate::repo_url::parse_repo_url(url) {
+                Some((owner, repo)) if *existing => {
+                    format!("kind=clone repo={owner}/{repo} existing=true")
+                }
                 Some((owner, repo)) => format!("kind=clone repo={owner}/{repo}"),
                 None => "kind=clone repo=<invalid>".to_string(),
             }

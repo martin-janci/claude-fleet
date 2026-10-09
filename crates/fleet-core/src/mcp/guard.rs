@@ -454,6 +454,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Redesign step 9.3: the receipts of what Control's agent handed on,
+    // for the owner's device to draw Control's chips and cards from. They
+    // quote the agent's prompts, so the person's own device only.
+    ToolPolicy {
+        name: "control_handoffs",
+        access: Access::PersonDevice,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The page specs, for a phone that renders them (P6). Compiled into the
     // hub like the desktop: the same answer for everyone who may see pages.
     ToolPolicy {
@@ -528,6 +538,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     // reads it back; touches no row. A person's tool, not a host token's.
     ToolPolicy {
         name: "session_presence",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Runs (Orbit Fleet 8.3): the Automation screen's list of every run on
+    // the fleet's behalf, cut to the caller's view scope
+    // (`service::runs::reach`). A read, served to a readonly device too.
+    ToolPolicy {
+        name: "runs",
         access: Access::Client,
         readonly: true,
         confirm: false,
@@ -1492,6 +1512,10 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "session_access",
     "my_grants",
     "session_presence",
+    // The Automation screen's Runs list is a person's: a host's Claude has
+    // `list_tasks` for the tasks it dispatched, and proves no person, so
+    // its scope would show it next to nothing here anyway.
+    "runs",
 ];
 
 // --- legacy name lists -------------------------------------------------------

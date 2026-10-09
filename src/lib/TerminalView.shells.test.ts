@@ -16,7 +16,8 @@ import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { selectSession, clearSelection } from './selection';
 import { clearToasts } from './toasts';
 import { uiLayout } from './prefs';
-import { nextTerminalTab, shellTerminalName, terminalPtyId } from './terminals';
+import { get } from 'svelte/store';
+import { nextTerminalTab, requestTerminalTab, shellTerminalName, terminalPane, terminalPtyId } from './terminals';
 
 const row = {
   id: 1, tmux_name: 'api', host_alias: 'alpha', project_id: null, worktree_id: null, created_at: 1,
@@ -166,6 +167,57 @@ describe('shell terminals strip (step 5.3)', () => {
   });
 });
 
+describe('the session bar\'s Terminals tab (step 5.3)', () => {
+  it('with no terminal open it opens one; Agent goes back; the pane publishes what it shows', async () => {
+    uiLayout.set('new');
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    expect(get(terminalPane)).toEqual({ sessionId: 1, shells: [], active: null });
+
+    requestTerminalTab('shells');
+    await settle();
+    expect(args(calls('shell_terminals').at(-1)!)).toMatchObject({ action: 'open' });
+    expect(calls('pty_open').map((c) => args(c)).at(-1)).toMatchObject({ id: 'sh1', session_name: 'api--sh1' });
+    expect(get(terminalPane)).toEqual({ sessionId: 1, shells: [1], active: 1 });
+
+    requestTerminalTab('agent');
+    await settle();
+    expect(calls('pty_open').map((c) => args(c)).at(-1)).toMatchObject({ id: 'agent' });
+    expect(get(terminalPane).active).toBeNull();
+  });
+
+  it('goes back to the terminal last picked rather than opening another', async () => {
+    uiLayout.set('new');
+    open = [1, 3];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-3'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-agent'));
+    await settle();
+    requestTerminalTab('shells');
+    await settle();
+    expect(screen.getByTestId('terminal-tab-3').getAttribute('aria-selected')).toBe('true');
+    // The pane's own re-open before each attach names its terminal; no
+    // open asked for a new one.
+    const opens = calls('shell_terminals').filter((c) => args(c).action === 'open');
+    expect(opens.map((c) => args(c).n)).toEqual(opens.map(() => 3));
+  });
+
+  it('the classic layout ignores it', async () => {
+    uiLayout.set('classic');
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    requestTerminalTab('shells');
+    await settle();
+    expect(calls('shell_terminals')).toHaveLength(0);
+    expect(get(terminalPane).sessionId).toBeNull();
+  });
+});
+
 describe('terminals helpers', () => {
   it('names terminals and their ptys like the backend', () => {
     expect(shellTerminalName('api', 3)).toBe('api--sh3');
@@ -178,5 +230,27 @@ describe('terminals helpers', () => {
     expect(nextTerminalTab(1, [1, 2])).toBe(2);
     expect(nextTerminalTab(2, [1, 2])).toBeNull();
     expect(nextTerminalTab(null, [])).toBeNull();
+  });
+});
+
+describe('pop out (step 5.4)', () => {
+  it('Pop out opens a window for the picked tab, and the tab stays here', async () => {
+    uiLayout.set('new');
+    open = [1];
+    render(TerminalView);
+    selectSession(row);
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-tab-1'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-popout'));
+    await settle();
+    expect(args(calls('open_terminal_window')[0])).toEqual({ session_id: 1, shell: 1, title: 'api · Shell 1' });
+    expect(screen.getByTestId('terminal-tab-1').getAttribute('aria-selected')).toBe('true');
+
+    await fireEvent.click(screen.getByTestId('terminal-tab-agent'));
+    await settle();
+    await fireEvent.click(screen.getByTestId('terminal-popout'));
+    await settle();
+    expect(args(calls('open_terminal_window')[1])).toEqual({ session_id: 1, shell: null, title: 'api' });
   });
 });
