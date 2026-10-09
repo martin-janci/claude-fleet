@@ -408,7 +408,7 @@ Chat forms, part 1 (spec 2026-10-07-chat-forms-design.md): the ask tool, fleet.f
 
 PR shepherd, steps 1 and 3 of 5, are built and do nothing until a person
 grants a rule (spec `docs/superpowers/specs/2026-10-08-pr-shepherd-design.md`):
-migrations 136 (`pr_shepherd_rules`, `pr_shepherd_episodes`) and 143
+migrations 136 (`pr_shepherd_rules`, `pr_shepherd_episodes`) and 144
 (`pr_shepherd_merges`),
 `service/pr_shepherd/` on the reconcile tick (loop `pr_shepherd`, stopped by
 `automation.paused`). For a project with a rule it

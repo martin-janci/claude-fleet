@@ -58,10 +58,10 @@ pub struct NewSessionArgs {
     #[serde(default)]
     pub profile: Option<String>,
     /// Which agent runs in the pane (`sessions.agent`, migration 121):
-    /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI) or
-    /// `"shell"`, which is the same as `kind: "shell"`. `"agy"` is known and
-    /// refused with `E_UNSUPPORTED` until fleet can launch it. `None` /
-    /// empty = Claude Code, or a shell for `kind: "shell"`.
+    /// `"claude"` (the default), `"codex"` (OpenAI's Codex CLI), `"agy"`
+    /// (Google's Antigravity CLI) or `"shell"`, which is the same as
+    /// `kind: "shell"`. `None` / empty = Claude Code, or a shell for
+    /// `kind: "shell"`.
     #[serde(default)]
     pub agent: Option<String>,
     /// Who or what is starting the session (migration 124): set by the
@@ -697,11 +697,20 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
         ));
     }
     if let Some(p) = args.profile.as_deref() {
-        if args.agent.as_deref() == Some(crate::store::AGENT_CODEX) {
-            return Err(IpcError::new(
-                codes::E_INVALID,
-                "a credential profile applies to Claude Code sessions; Codex has none",
-            ));
+        match args.agent.as_deref() {
+            Some(crate::store::AGENT_CODEX) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "a credential profile applies to Claude Code sessions; Codex has none",
+                ))
+            }
+            Some(crate::store::AGENT_AGY) => {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "a credential profile applies to Claude Code sessions; agy keeps its own login",
+                ))
+            }
+            _ => {}
         }
         crate::validate::claude_profile(p)?;
     }
@@ -718,10 +727,10 @@ pub(crate) fn normalize_launch(args: &mut NewSessionArgs) -> Result<(), IpcError
 /// (and conflicts with any other kind), `kind: "shell"` with no agent is a
 /// shell, and no agent can run in a shell session. A shell row's `agent`
 /// follows from `kind` (`Store::set_session_kind`), so an absent agent
-/// stays absent here; a Codex row is written `codex` by `new_session`.
-/// `agy` is refused until its adapter exists; an unknown name is invalid.
+/// stays absent here; a Codex or agy row is written by `new_session`.
+/// An unknown name is invalid.
 fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
-    use crate::store::{AGENTS, AGENT_CLAUDE, AGENT_CODEX, AGENT_SHELL};
+    use crate::store::{AGENTS, AGENT_AGY, AGENT_CLAUDE, AGENT_CODEX, AGENT_SHELL};
     let shell_kind = args.kind.as_deref() == Some("shell");
     match args.agent.as_deref() {
         None => {}
@@ -734,19 +743,13 @@ fn normalize_agent(args: &mut NewSessionArgs) -> Result<(), IpcError> {
                 ))
             }
         },
-        Some(AGENT_CLAUDE | AGENT_CODEX) if shell_kind => {
+        Some(AGENT_CLAUDE | AGENT_CODEX | AGENT_AGY) if shell_kind => {
             return Err(IpcError::new(
                 codes::E_INVALID,
                 "a shell session runs no agent; drop agent or kind",
             ))
         }
-        Some(AGENT_CLAUDE | AGENT_CODEX) => {}
-        Some(a) if AGENTS.contains(&a) => {
-            return Err(IpcError::new(
-                codes::E_UNSUPPORTED,
-                format!("fleet cannot start {a} sessions yet; only claude, codex and shell"),
-            ))
-        }
+        Some(AGENT_CLAUDE | AGENT_CODEX | AGENT_AGY) => {}
         Some(_) => {
             return Err(IpcError::new(
                 codes::E_INVALID,
@@ -1141,7 +1144,7 @@ pub(super) async fn new_session_inner(
             tracing::warn!(session = %args.name, error = %e, "[new_session] storing the launch options failed");
         }
     }
-    // Not soft: a Codex pane on a row that says Claude would be resumed,
+    // Not soft: a Codex or agy pane on a row that says Claude would be resumed,
     // read and answered as Claude's.
     if let Some(agent) = args
         .agent

@@ -609,6 +609,56 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                 block_on(commands::downloads::routed::remove_download(b, 7, s)).map(|_| ())
             }),
         ),
+        // Control's Library: one hub tool, by action.
+        (
+            "list_library",
+            "library",
+            json!({ "action": "list", "host_alias": "trn", "limit": 5 }),
+            r#"{"items":[{"id":3,"at":1,"kind":"upload","host_alias":"trn","session_id":4,"path":"/w/a.pdf","name":"a.pdf","size":3}]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::list_library(
+                    b,
+                    fleet_core::service::library::ListArgs {
+                        session_id: None,
+                        host_alias: Some("trn".into()),
+                        limit: Some(5),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "add_library_items",
+            "library",
+            json!({ "action": "add", "kind": "upload", "session_id": 4, "files": [{ "path": "/w/a.pdf", "name": "a.pdf", "size": 3 }] }),
+            r#"{"items":[]}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::add_library_items(
+                    b,
+                    fleet_core::service::library::AddArgs {
+                        kind: "upload".into(),
+                        session_id: 4,
+                        files: vec![fleet_core::service::library::LibraryFile {
+                            path: "/w/a.pdf".into(),
+                            name: Some("a.pdf".into()),
+                            size: Some(3),
+                        }],
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "remove_library_item",
+            "library",
+            json!({ "action": "remove", "id": 3 }),
+            r#"{"removed":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::library::routed::remove_library_item(b, 3, s)).map(|_| ())
+            }),
+        ),
         (
             "list_tasks",
             "list_tasks",
@@ -4229,6 +4279,42 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 .map(|_| ())
             }),
         ),
+        (
+            "mission_release_note",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "mission_release_note", "item_id": null, "mission_id": 1 }),
+            r#"{"text":"t","model":"haiku","host_alias":"h","from":"1 task","at":1}"#,
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::mission_release_note(
+                    b,
+                    commands::missions::MissionIdArgs { mission_id: 1 },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
+            "today_brief",
+            "work_link",
+            json!({ "session_id": null, "key": null, "link_id": null, "source": null, "action": "today_brief", "item_id": null, "refresh": true, "since": 100 }),
+            "{}",
+            Box::new(|b, s, ssh| {
+                block_on(commands::missions::routed::today_brief(
+                    b,
+                    commands::missions::TodayBriefArgs {
+                        refresh: true,
+                        since: Some(100),
+                        org_id: None,
+                    },
+                    s,
+                    ssh,
+                    &fleet_core::cancel::CancellationRegistry::new(),
+                ))
+                .map(|_| ())
+            }),
+        ),
         // ── multi-user M1 (T13): the three sharing mutations ─────────────
         //
         // `level` crosses as the string the user chose and is validated by
@@ -6231,6 +6317,10 @@ const SOURCES: &[(&str, &str)] = &[
     (
         "commands/downloads.rs",
         include_str!("../commands/downloads.rs"),
+    ),
+    (
+        "commands/library.rs",
+        include_str!("../commands/library.rs"),
     ),
     ("commands/editor.rs", include_str!("../commands/editor.rs")),
     ("commands/files.rs", include_str!("../commands/files.rs")),

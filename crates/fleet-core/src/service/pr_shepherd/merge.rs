@@ -17,7 +17,7 @@
 //! chance to fix the ones that now conflict, instead of a second merge
 //! landing on top. Among ready PRs the lowest PR number goes first.
 //!
-//! A head is merged or fails once (`pr_shepherd_merges`, migration 143): a
+//! A head is merged or fails once (`pr_shepherd_merges`, migration 144): a
 //! failure is not retried until the next push. A refusal (the live answer
 //! said not yet) is retried after [`REFUSAL_RETRY_SECS`], one probe period,
 //! and does not count as the project's last merge.
