@@ -10,7 +10,8 @@
 //! * **What is sent.** Fleet's own stuck reason, the mission's goal and
 //!   done-when lines, the counts of done, failed and blocked items, and the
 //!   start of the last failure ([`FAILURE_CHARS`]), through the envelope's
-//!   redaction. Two closed questions: the outcome ([`OUTCOMES`]) and the
+//!   redaction. When that failure is the worker's own summary (Claude's
+//!   text) it is sent only with the org's reply-text consent (D48). Two closed questions: the outcome ([`OUTCOMES`]) and the
 //!   next step ([`NEXT_STEPS`]), each with `unsure`.
 //! * **Shadow** records the answers. **Assist** returns a usable answer (at
 //!   or above [`MIN_CONFIDENCE`], not `unsure`) as a proposal the card
@@ -94,6 +95,10 @@ pub struct Stuck {
     /// The start of the newest failed attempt's error or summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_failure: Option<String>,
+    /// `last_failure` is the worker's own summary, which is Claude's text:
+    /// it reaches Jev only with the org's reply-text consent (D48).
+    #[serde(skip)]
+    pub last_failure_is_reply: bool,
 }
 
 /// What a person sees: the outcome and the next step Jev proposes, each
@@ -121,13 +126,15 @@ pub fn stuck(detail: &MissionDetail) -> Option<Stuck> {
     }
     let count = |s: &str| detail.graph.nodes.iter().filter(|n| n.state == s).count();
     let (done, failed, blocked) = (count("done"), count("failed"), count("blocked"));
-    let last_failure = detail
+    let newest = detail
         .graph
         .nodes
         .iter()
         .filter(|n| n.state == "failed")
         .filter_map(|n| n.attempt.as_ref())
-        .max_by_key(|a| a.task_id)
+        .max_by_key(|a| a.task_id);
+    let last_failure_is_reply = newest.is_some_and(|a| a.error.is_none() && a.summary.is_some());
+    let last_failure = newest
         .and_then(|a| a.error.clone().or_else(|| a.summary.clone()))
         .map(|t| t.chars().take(FAILURE_CHARS).collect());
     // Events come newest first; a brake still holds while nothing changed
@@ -167,6 +174,7 @@ pub fn stuck(detail: &MissionDetail) -> Option<Stuck> {
         blocked,
         total: detail.graph.nodes.len(),
         last_failure,
+        last_failure_is_reply,
     })
 }
 
@@ -336,6 +344,21 @@ async fn one(
 /// decision runs; changes nothing else. Holds the store lock only for
 /// reads, never across a call.
 pub async fn ask(ctx: &DecideCtx, m: &MissionRow, s: &Stuck) -> Proposals {
+    // The worker's summary is Claude's text: without the org's reply-text
+    // consent (D48, off by default) Jev is asked without it.
+    let reply_ok = !s.last_failure_is_reply
+        || lock(&ctx.store).is_ok_and(|st| super::reply_text_allowed(&st, m.org_id));
+    let held;
+    let s = if reply_ok {
+        s
+    } else {
+        held = Stuck {
+            last_failure: None,
+            last_failure_is_reply: false,
+            ..s.clone()
+        };
+        &held
+    };
     let outcome = one(
         ctx,
         m,

@@ -316,7 +316,7 @@
   .answer-new .sent,
   .answer-new .stale,
   .answer-new .err {
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   .multi {
     display: flex;

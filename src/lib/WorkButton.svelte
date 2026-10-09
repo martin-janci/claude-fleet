@@ -192,7 +192,15 @@
     busy = true;
     error = null;
     existing = null;
+    const forTask = task.task_id;
     const p = await previewStartWork(base);
+    // Another task was opened meanwhile (the task page keeps this button):
+    // this preview is not its (review r07), so neither its popover nor a
+    // start from it.
+    if (task.task_id !== forTask) {
+      busy = false;
+      return;
+    }
     if (!p.ok && previewUnsupported(p.error)) {
       // An older hub: start as before, its refusals shown as they come.
       const r = await startWork(base);
@@ -415,7 +423,7 @@
     border: 1px solid var(--control-border);
     border-radius: var(--radius-md);
     background: var(--bg);
-    box-shadow: 0 6px 18px color-mix(in srgb, #000 16%, transparent);
+    box-shadow: var(--shadow-pop);
   }
   .menu button {
     background: none;
@@ -424,9 +432,9 @@
     text-align: left;
     color: var(--fg);
     font: inherit;
-    font-size: 12px;
+    font-size: var(--text-xs);
     cursor: pointer;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -442,7 +450,7 @@
   .err {
     max-width: 260px;
     color: var(--usage-crit);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-align: right;
   }
   .undo {
@@ -450,7 +458,7 @@
     gap: 4px;
     align-items: baseline;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .pop-anchor {
     position: fixed;

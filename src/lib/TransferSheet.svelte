@@ -744,12 +744,12 @@
 {/if}
 
 <style>
-  .field { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; font-size: 0.85rem; }
+  .field { display: flex; align-items: center; gap: 0.5rem; margin: 0.35rem 0; font-size: var(--text-xs); }
   .key { width: 3rem; color: var(--fg-muted); }
   .field select { flex: 1; }
-  .note, .muted { color: var(--fg-muted); font-size: 0.8rem; }
-  .what { font-size: 0.9rem; margin: 0 0 0.35rem; }
-  .steps, .summary { list-style: none; margin: 0.5rem 0; padding: 0; font-size: 0.85rem; }
+  .note, .muted { color: var(--fg-muted); font-size: var(--text-2xs); }
+  .what { font-size: var(--text-sm); margin: 0 0 0.35rem; }
+  .steps, .summary { list-style: none; margin: 0.5rem 0; padding: 0; font-size: var(--text-xs); }
   .steps li { display: flex; align-items: baseline; gap: 0.5rem; padding: 0.15rem 0; }
   .steps li[data-state='pending'] { color: var(--fg-muted); }
   .steps li[data-state='failed'] .label { color: var(--danger); }
@@ -760,16 +760,16 @@
   .steps li[data-state='done'] .mark::before { content: '✓'; }
   .steps li[data-state='warned'] .mark::before { content: '!'; }
   .steps li[data-state='failed'] .mark::before { content: '✕'; }
-  .detail { margin-left: auto; color: var(--fg-muted); font-size: 11px; }
+  .detail { margin-left: auto; color: var(--fg-muted); font-size: var(--text-2xs); }
   .summary li { padding: 0.15rem 0; }
   .warnings { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.4rem; }
-  .warn-head { color: var(--status-waiting); font-size: 0.85rem; margin: 0; }
-  .warn, .details p { font-size: 0.8rem; color: var(--fg-muted); margin: 0.15rem 0; }
+  .warn-head { color: var(--status-waiting); font-size: var(--text-xs); margin: 0; }
+  .warn, .details p { font-size: var(--text-2xs); color: var(--fg-muted); margin: 0.15rem 0; }
   .details { border-top: 1px solid var(--border); margin-top: 0.5rem; padding-top: 0.4rem; }
-  pre { white-space: pre-wrap; font-size: 11px; }
-  .clean-paths { list-style: none; margin: 0.4rem 0; padding: 0; font-size: 0.8rem; max-height: 8rem; overflow-y: auto; }
+  pre { white-space: pre-wrap; font-size: var(--text-2xs); }
+  .clean-paths { list-style: none; margin: 0.4rem 0; padding: 0; font-size: var(--text-2xs); max-height: 8rem; overflow-y: auto; }
   .clean-paths li { padding: 0.1rem 0; }
-  .clean-paths code { font-size: 11px; }
+  .clean-paths code { font-size: var(--text-2xs); }
   .buttons { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.75rem; }
   .buttons .danger { color: var(--danger); }
 </style>

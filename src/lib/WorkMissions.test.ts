@@ -134,6 +134,35 @@ describe('WorkMissions', () => {
     expect(screen.getByTestId('mission-move-paused').textContent).toBe('Pause');
   });
 
+  it('a detail that answers after another mission opened is dropped (review r07)', async () => {
+    const a = mission({ id: 4, name: 'Payments v2', goal: 'Cards and refunds' });
+    const b = mission({ id: 5, name: 'Search', goal: 'Faster search' });
+    handlers.work_missions = () => [a, b];
+    let releaseA: (() => void) | null = null;
+    vi.mocked(invoke).mockImplementation(async (cmd: string, raw?: unknown) => {
+      const args = (raw as { args: Record<string, unknown> } | undefined)?.args ?? {};
+      if (cmd === 'work_mission') {
+        const m = args.mission_id === 4 ? a : b;
+        const v = { mission: m, items: [item(10, m.name)], events: [], may_change: true };
+        if (m === a) return new Promise((res) => (releaseA = () => res(v)));
+        return v;
+      }
+      const h = handlers[cmd];
+      return h ? h(args) : null;
+    });
+    render(WorkMissions);
+    await flush();
+    const rows = screen.getAllByTestId('mission-row');
+    await fireEvent.click(rows[0]);
+    await fireEvent.click(rows[1]);
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Faster search');
+    releaseA!();
+    await flush();
+    expect(screen.getByTestId('mission-detail').textContent).toContain('Faster search');
+    expect(screen.getByTestId('mission-detail').textContent).not.toContain('Cards and refunds');
+  });
+
   describe('the ⋯ menu for the moves that end a mission (parity P19)', () => {
     async function openActive() {
       current = mission({ state: 'active' });

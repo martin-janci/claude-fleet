@@ -113,7 +113,7 @@
     background: transparent;
     color: var(--fg-muted);
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 14px;
     cursor: pointer;
   }

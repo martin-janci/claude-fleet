@@ -93,9 +93,10 @@ pub fn rule_outcome(
         }
     }
     // J2's answer, when it has one (step 5.11): a turn that ended asking,
-    // or wedged, waits on a person whatever the hooks missed.
+    // or wedged, waits on a person whatever the hooks missed. Only Jev
+    // writes `turn_outcome`, so the run says Jev, not a rule (review r15).
     if matches!(row.turn_outcome.as_deref(), Some("asked" | "stuck")) {
-        return Some((RunOutcome::NeedsPerson, OutcomeSource::Rule));
+        return Some((RunOutcome::NeedsPerson, OutcomeSource::Jev));
     }
     // A routine's session is its own (one per run), so a pull request on it
     // is this run's work.

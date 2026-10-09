@@ -474,7 +474,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
   }
   header {
     display: flex;
@@ -484,7 +484,7 @@
   }
   h2 {
     margin: 0;
-    font-size: 1rem;
+    font-size: var(--text-md);
     display: flex;
     gap: 0.4rem;
     flex-wrap: wrap;
@@ -492,14 +492,14 @@
   }
   h3 {
     margin: 0.6rem 0 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
   }
   h4 {
     margin: 0.3rem 0 0.1rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .head-actions,
@@ -521,9 +521,9 @@
     text-decoration: line-through;
   }
   .badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     padding: 0 0.3rem;
     color: var(--fg-muted);
   }
@@ -547,7 +547,7 @@
     align-items: center;
     gap: 6px;
     margin-top: 4px;
-    font-size: 12px;
+    font-size: var(--text-xs);
   }
   .prov {
     margin: 0.2rem 0;
@@ -557,7 +557,7 @@
   }
   .prov dt {
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .prov dd {
     margin: 0;
@@ -591,13 +591,13 @@
     font-weight: 600;
   }
   .state {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .why,
   .evidence {
     margin: 0 0 0 1.1rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .link-btn {
@@ -609,7 +609,7 @@
     cursor: pointer;
   }
   .small {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     margin: 0;
   }
   .muted {
@@ -631,7 +631,7 @@
   .more > summary {
     cursor: pointer;
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .more[open] > summary {
     margin-bottom: 0.2rem;

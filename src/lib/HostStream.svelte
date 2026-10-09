@@ -31,7 +31,7 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-2);
   }
   .host {

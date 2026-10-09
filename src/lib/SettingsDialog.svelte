@@ -687,7 +687,7 @@
       {/if}
       {#if hubRestartNeeded}
         <p class="hook-desc" data-testid="hub-restart">
-          Saved. <strong>Restart claude-fleet to apply it</strong> — which
+          Saved. <strong>Restart Orbit Fleet to apply it</strong> — which
           fleet this app is a window onto is decided once, at startup, so that
           half the app can never be talking to a hub while the other half
           talks to the local database.
@@ -820,7 +820,9 @@
       <p class="mcp-blurb">
         When a session becomes stuck (auth menu, trust prompt, reconnect,
         out of memory, press Enter) fleet announces it for screen readers and,
-        optionally, shows a toast and an OS notification.
+        optionally, shows a toast and an OS notification. With OS notifications
+        on, the hub's Notifications page decides which other states reach this
+        desktop (and which make a sound) while the window is in the background.
       </p>
       <label class="toggle">
         <input type="checkbox" bind:checked={$notifyStuckToast} data-testid="notify-toast" />
@@ -837,7 +839,7 @@
               if ($notifyStuckOs) notifyStuckOs.set(false);
               else void enableOsNotifications();
             }} />
-          OS notification on stuck transitions
+          OS notifications
         </label>
         <span class="status status-{permission === 'granted' ? 'on' : permission === 'denied' ? 'off' : 'neutral'}" data-testid="notify-permission">
           {permission}
@@ -846,7 +848,7 @@
       {#if permission === 'unsupported'}
         <p class="hook-desc">This webview does not expose the Notification API; toasts and the live region still work.</p>
       {:else if permission === 'denied'}
-        <p class="hook-desc">Notifications were denied at the OS level; allow them for claude-fleet in your system settings.</p>
+        <p class="hook-desc">Notifications were denied at the OS level; allow them for Orbit Fleet (listed as claude-fleet) in your system settings.</p>
       {/if}
       <div class="mcp-field">
         <span class="lbl">Idle</span>
@@ -1097,12 +1099,12 @@
       grid-template-columns: minmax(0, 1fr);
     }
   }
-  header h3 { margin: 0; font-size: 1rem; }
+  header h3 { margin: 0; font-size: var(--text-md); }
   .close {
     border: none;
     background: transparent;
     color: var(--fg-muted);
-    font-size: 1.2rem;
+    font-size: var(--text-lg);
     cursor: pointer;
     padding: 0 0.4rem;
   }
@@ -1117,19 +1119,19 @@
   }
   .hosts-line h4 {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
   }
-  .hosts-summary { flex: 1; font-size: 0.8rem; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+  .hosts-summary { flex: 1; font-size: var(--text-2xs); color: var(--fg-muted); font-variant-numeric: tabular-nums; }
   .hosts-line kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 
-  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
 
   .project-base-row { margin-bottom: 0.3rem; }
   .project-base-row .mcp-field { margin-bottom: 0.1rem; }
@@ -1145,7 +1147,7 @@
     flex: 1;
     min-width: 0;
     width: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   /* Qualified with .hook-desc: the preview span carries both classes, and the
      later `.hook-desc { margin: 0 }` used to win the equal-specificity tie and
@@ -1153,7 +1155,7 @@
   .hook-desc.project-preview {
     display: block;
     margin-left: 6.4rem;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     word-break: break-all;
   }
   /* Same tie, for the invalid-path message: .hook-desc's muted colour used to
@@ -1163,13 +1165,13 @@
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.2rem 0.4rem;
   }
 
   .hook-desc {
     margin: 0;
-    font-size: 12px;
+    font-size: var(--text-xs);
     color: var(--fg-muted);
   }
 

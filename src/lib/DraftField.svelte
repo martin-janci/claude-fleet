@@ -97,12 +97,12 @@
     gap: 4px;
   }
   .label {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   textarea {
     font: inherit;
-    font-size: 12px;
+    font-size: var(--text-xs);
     padding: 6px 8px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
@@ -111,7 +111,7 @@
     resize: vertical;
   }
   .why {
-    font-size: 12px;
+    font-size: var(--text-xs);
     line-height: 16px;
     color: var(--fg-muted);
     display: flex;
@@ -123,7 +123,7 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 16px;
     font-weight: 500;
     color: var(--fg-2);
@@ -134,7 +134,7 @@
   }
   .pill::before {
     content: '\270E';
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .link {
     font: inherit;

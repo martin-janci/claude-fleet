@@ -319,6 +319,21 @@ impl Store {
                 format!("card kind {:?}; one of {}", c.kind, CARD_KINDS.join(", ")),
             ));
         }
+        // Already carded: the same answer whether or not the mission is at
+        // its open-card cap (a repeated ask must not fail the tick).
+        let carded = self
+            .conn
+            .query_row(
+                "SELECT 1 FROM orchestration_cards \
+                 WHERE orchestration_project_id = ?1 AND decision_id = ?2",
+                rusqlite::params![mission_id, c.decision_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if carded {
+            return Ok(None);
+        }
         let open: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM orchestration_cards \
              WHERE orchestration_project_id = ?1 AND state = 'open'",

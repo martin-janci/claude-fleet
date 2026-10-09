@@ -394,3 +394,22 @@ async fn shadow_records_and_proposes_nothing() {
         "nobody saw it"
     );
 }
+
+/// Review r15: a host past the disk rule is the numbers' answer, never a
+/// host Jev weighs.
+#[test]
+fn a_host_past_the_disk_rule_is_not_jevs_to_weigh() {
+    let c = |free| Candidate {
+        alias: "h".into(),
+        recent_starts: 0,
+        checked_out: false,
+        live_sessions: 0,
+        disk_free_pct: free,
+        latency_ms: None,
+        account_used_pct: None,
+    };
+    assert!(past_disk_rule(&c(Some(5)), 90));
+    assert!(past_disk_rule(&c(Some(10)), 90));
+    assert!(!past_disk_rule(&c(Some(11)), 90));
+    assert!(!past_disk_rule(&c(None), 90));
+}

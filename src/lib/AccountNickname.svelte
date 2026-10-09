@@ -123,7 +123,7 @@
     max-width: 100%;
     padding: 0 0.25rem;
     border: 1px solid var(--accent);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     background: var(--bg-pane);
     color: var(--fg);
   }

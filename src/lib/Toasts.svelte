@@ -102,15 +102,15 @@
     gap: 0.4rem;
   }
   .dropped {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .dismiss-all {
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.45rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-pane);
     color: var(--fg-muted);
     cursor: pointer;
@@ -139,12 +139,12 @@
     padding: 0.5rem 0.6rem;
     border: 1px solid var(--border);
     border-left-width: 3px;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
     color: var(--fg);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     line-height: 1.35;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+    box-shadow: var(--shadow-pop);
   }
   .toast.error { border-left-color: var(--danger); }
   .toast.success { border-left-color: var(--status-done); }
@@ -152,15 +152,15 @@
   .toast.info { border-left-color: var(--accent); }
   .code {
     flex: 0 0 auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     background: var(--bg-pane);
     color: var(--fg-muted);
   }
   .msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-  .count { color: var(--fg-muted); font-size: 11px; }
+  .count { color: var(--fg-muted); font-size: var(--text-2xs); }
   .job {
     display: inline-flex;
     flex: none;
@@ -169,10 +169,10 @@
     flex: 0 0 auto;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--accent);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.4rem;
   }
   .action:hover { border-color: var(--accent); }
@@ -182,7 +182,7 @@
     border: none;
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 1rem;
+    font-size: var(--text-md);
     line-height: 1;
     padding: 0 0.1rem;
   }

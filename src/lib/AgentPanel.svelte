@@ -134,8 +134,9 @@
   <!-- Steps 9.3 and 9.6: what the agent handed on, as chips and cards
        that follow their target's state. -->
   <HandoffCards />
-  <!-- Step 9.9 (Jev K2): where each message just sent here goes. -->
-  {#if session}<ControlRouteReceipts sessionId={session.id} />{/if}
+  <!-- Step 9.9 (Jev K2): where each message just sent here goes. Keyed, so
+       another Control session primes afresh instead of routing its history. -->
+  {#if session}{#key session.id}<ControlRouteReceipts sessionId={session.id} />{/key}{/if}
   {#if ctx}
     <button
       class="chip"
@@ -221,15 +222,15 @@
   .error {
     margin: 0;
     color: var(--usage-crit);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .chip {
     align-self: flex-start;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg);
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.15rem 0.6rem;
     cursor: pointer;
   }

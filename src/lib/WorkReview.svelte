@@ -647,7 +647,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .items {
     list-style: none;
@@ -661,7 +661,7 @@
   .item {
     padding: 0.35rem 0.3rem;
     border-bottom: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .item.focused {
     background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -677,9 +677,9 @@
     flex-wrap: wrap;
   }
   .kind {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     padding: 0 0.35rem;
     color: var(--fg-muted);
   }
@@ -704,12 +704,12 @@
   .why {
     margin: 0.1rem 0 0 1.4rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .fail {
     margin: 0.1rem 0 0 1.4rem;
     color: var(--usage-crit);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .actions {
     margin: 0.25rem 0 0 1.4rem;
@@ -724,7 +724,7 @@
     font: inherit;
     padding: 0.15rem 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     color: var(--fg);
   }
@@ -734,7 +734,7 @@
   .bulk {
     padding: 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-pane);
   }
   .muted {

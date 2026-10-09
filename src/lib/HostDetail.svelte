@@ -964,13 +964,13 @@
     height: 100%;
     box-sizing: border-box;
     outline: none;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .title-row { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
-  h2 { margin: 0; font-size: 1.1rem; }
+  h2 { margin: 0; font-size: var(--text-lg); }
   h3 {
     margin: 0 0 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -978,8 +978,8 @@
   }
   .status.off { color: var(--usage-warn); }
   .muted { color: var(--fg-muted); }
-  .health { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem; font-size: 0.8rem; }
-  .meter { width: 6rem; height: 0.4rem; background: var(--track); border-radius: 0.2rem; overflow: hidden; flex-shrink: 0; }
+  .health { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.25rem; font-size: var(--text-2xs); }
+  .meter { width: 6rem; height: 0.4rem; background: var(--track); border-radius: var(--radius-xs); overflow: hidden; flex-shrink: 0; }
   .fill { height: 100%; background: var(--status-done); }
   .meter[data-level='warn'] .fill { background: var(--status-waiting); }
   .meter[data-level='crit'] .fill { background: var(--danger); }
@@ -1012,15 +1012,15 @@
     gap: 0.5rem;
     padding: 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .d-main { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; flex: 1; min-width: 0; }
   .d-cwd { font-variant-numeric: tabular-nums; }
   .badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.35rem;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     color: var(--fg-muted);
   }
   .sessions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
@@ -1030,7 +1030,7 @@
     width: 100%;
     padding: 0.2rem 0.3rem;
     border: 1px solid transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--fg);
     font: inherit;
@@ -1038,23 +1038,24 @@
     cursor: pointer;
   }
   .session:hover,
-  .session:focus-visible { border-color: var(--border); outline: none; background: color-mix(in srgb, var(--fg) 5%, transparent); }
+  .session:focus-visible { border-color: var(--border); background: color-mix(in srgb, var(--fg) 5%, transparent); }
+  .session:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: calc(-1 * var(--ring-w)); }
   .s-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .kv { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.3rem; }
   select {
     background: transparent;
     border: 1px solid var(--border);
     color: var(--fg);
-    border-radius: 4px;
-    font-size: 11px;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-2xs);
   }
   .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .action,
   .small {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.6rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--fg);
     cursor: pointer;
@@ -1063,18 +1064,18 @@
   .small:disabled { opacity: 0.55; cursor: default; }
   .action.danger { color: var(--usage-crit); border-color: var(--usage-crit); }
   kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     padding: 0 0.2rem;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
   }
   .check-head { display: flex; align-items: baseline; gap: 0.5rem; }
   .check-head h3 { margin: 0; }
   .grow { flex: 1; }
   .check-live { display: flex; align-items: center; gap: 0.75rem; margin: 0.4rem 0; }
-  .check-live-step { font-size: 0.8rem; color: var(--fg-muted); }
-  .checklist { list-style: none; margin: 0.4rem 0; padding: 0; font-size: 0.8rem; }
+  .check-live-step { font-size: var(--text-2xs); color: var(--fg-muted); }
+  .checklist { list-style: none; margin: 0.4rem 0; padding: 0; font-size: var(--text-2xs); }
   .checklist li { display: grid; grid-template-columns: 1.2rem 9rem 1fr; gap: 0.4rem; padding: 0.15rem 0; }
   .checklist li[data-state='ok'] .check-glyph { color: var(--usage-ok); }
   .checklist li[data-state='warn'] .check-glyph,

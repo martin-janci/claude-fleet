@@ -177,18 +177,18 @@
     overflow-y: auto;
     min-height: 0;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-pane);
   }
   .empty {
     margin: 0;
     padding: 0.5rem 0.6rem;
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .group {
     padding: 0.35rem 0.6rem 0.1rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -211,7 +211,7 @@
     gap: 0.5rem;
     padding: 0.35rem 0.6rem;
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     border-left: 2px solid transparent;
   }
   .row.active {
@@ -230,7 +230,7 @@
     text-overflow: ellipsis;
   }
   .desc {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -238,16 +238,16 @@
   }
   .meta {
     flex-shrink: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
   }
   .row.dim .label {
     color: var(--fg-muted);
   }
   .chip {
     flex-shrink: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.45rem;
     border-radius: var(--radius-pill);
     background: var(--accent-soft);
@@ -256,10 +256,10 @@
   .kbd {
     margin-left: 0.4rem;
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.25rem;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
   }
   .acts {
     display: none;
@@ -280,12 +280,12 @@
     visibility: hidden;
   }
   .badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     padding: 0 0.25rem;
     margin-right: 0.35rem;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     opacity: 0.8;
   }
 </style>

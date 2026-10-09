@@ -236,7 +236,7 @@ pub fn plan_steps(input: &StepInput<'_>) -> Vec<Step> {
                     n,
                     title,
                     p.require_review,
-                    &impls,
+                    tries,
                     &open_role,
                     p.max_retries,
                     &mut || take(&mut slots, &mut spent),
@@ -280,15 +280,55 @@ fn verify_steps(
     n: &GraphNode,
     title: &str,
     require_review: bool,
-    impls: &[&TaskRow],
+    tries: &[TaskRow],
     open_role: &dyn Fn(&str) -> bool,
     max_retries: u32,
     take: &mut dyn FnMut() -> bool,
 ) -> Vec<Step> {
     let mut out = Vec::new();
+    let impls: Vec<&TaskRow> = tries.iter().filter(|t| is_impl(t)).collect();
     let Some(v) = &n.verification else {
         // No lines: done means done, after a review when the policy asks.
-        if require_review && !open_role("review") {
+        // The review that counts is one newer than the latest
+        // implementation (`tries` is newest first).
+        let latest_impl = impls.first().map(|t| t.id);
+        let review = tries
+            .iter()
+            .find(|t| t.role.as_deref() == Some("review") && latest_impl.is_none_or(|i| t.id > i));
+        if let Some(r) = review.filter(|r| {
+            require_review && matches!(r.state.as_str(), "done" | "failed" | "cancelled")
+        }) {
+            if !attempt_failed(r) && r.report.is_some() {
+                out.push(Step::new(
+                    "close",
+                    Some(n.item_id),
+                    None,
+                    format!("{title} is implemented and reviewed"),
+                ));
+            } else if attempt_failed(r) && (impls.len() as u32) <= max_retries {
+                if take() {
+                    out.push(
+                        Step::new(
+                            "retry",
+                            Some(n.item_id),
+                            Some("implement"),
+                            format!("{title} did not pass its review"),
+                        )
+                        .with_context(failure_text(r)),
+                    );
+                }
+            } else {
+                out.push(
+                    Step::new(
+                        "ask",
+                        Some(n.item_id),
+                        None,
+                        format!("{title} did not pass its review"),
+                    )
+                    .with_context(failure_text(r)),
+                );
+            }
+        } else if require_review && review.is_none() && !open_role("review") {
             if take() {
                 out.push(Step::new(
                     "review",

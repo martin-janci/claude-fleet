@@ -297,6 +297,20 @@ describe('TidyReview', () => {
     );
   });
 
+  it('closing the sheet hands focus back to the pill (review r11)', async () => {
+    candidates = [cand(1)];
+    await mount();
+    const pill = await screen.findByTestId('tidy-pill');
+    pill.focus();
+    await fireEvent.click(pill);
+    await tick();
+    expect(document.activeElement).toBe(screen.getByTestId('tidy-sheet'));
+    await fireEvent.keyDown(screen.getByTestId('tidy-sheet'), { key: 'Escape' });
+    await tick();
+    expect(screen.queryByTestId('tidy-sheet')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByTestId('tidy-pill'));
+  });
+
   it('Cancel closes the sheet without applying', async () => {
     candidates = [cand(1)];
     await mount();

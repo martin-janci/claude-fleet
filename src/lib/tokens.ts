@@ -78,7 +78,7 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'loader-accent': '#60a5fa',
     'comet-head': '#2563eb',
     'agent-claude': '#d97757',
-    // App tokens the manual does not name (aliases resolved).
+    // App tokens the manual adopted in review r10 (aliases resolved).
     'usage-ok': '#17723e',
     'usage-warn': '#8f520b',
     'usage-crit': '#c62828',
@@ -89,6 +89,9 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'control-border-strong': '#8e8e8e',
     'control-fg': '#1a1a1a',
     'control-fg-quiet': '#5a5a5a',
+    'ai-pre': '#2563eb',
+    'scrim': 'rgba(24,24,27,0.4)',
+    'scrim-strong': 'rgba(24,24,27,0.62)',
   },
   dark: {
     'bg': '#0f0f0f',
@@ -137,7 +140,7 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'loader-accent': '#60a5fa',
     'comet-head': '#f2f4f7',
     'agent-claude': '#d97757',
-    // App tokens the manual does not name (aliases resolved).
+    // App tokens the manual adopted in review r10 (aliases resolved).
     'usage-ok': '#5dd17a',
     'usage-warn': '#d29b4a',
     'usage-crit': '#ef5350',
@@ -148,6 +151,9 @@ export const THEME: Record<'light' | 'dark', Record<string, string>> = {
     'control-border-strong': '#6e6e6e',
     'control-fg': '#ededed',
     'control-fg-quiet': '#a8a8a8',
+    'ai-pre': '#60a5fa',
+    'scrim': 'rgba(0,0,0,0.4)',
+    'scrim-strong': 'rgba(0,0,0,0.62)',
   },
 };
 

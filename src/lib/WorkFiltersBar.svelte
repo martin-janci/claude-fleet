@@ -266,6 +266,12 @@
     offF();
     offChanged();
     clearTimeout(searchTimer);
+    // Typed but not yet applied when the bar goes (a layout switch, the
+    // view closed): apply it rather than lose it (review r07).
+    if (searchPending) {
+      searchPending = false;
+      set({ query: search });
+    }
   });
 </script>
 

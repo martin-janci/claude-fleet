@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // The Work tab's List layout (design 2026-09-29): every task the current
   // filters match — tickets, native tasks, bare keys — in To do / Doing /
   // Done, from ONE `work_tree` read (archived on, so Done has its rows).
@@ -279,7 +280,7 @@
                     aria-label="Edit {displayTitle(t)}"
                     disabled={editBlocked !== null}
                     data-testid="task-edit"
-                    onclick={() => (editing = t.task_id)}>✎</button
+                    onclick={() => (editing = t.task_id)}><Icon name="edit" size={12} /></button
                   >
                 {/if}
                 <WorkButton task={t} />
@@ -308,7 +309,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .add {
     display: flex;
@@ -337,7 +338,7 @@
     gap: 6px;
     align-items: center;
     margin: 10px 4px 4px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
@@ -371,15 +372,15 @@
     gap: 8px;
     align-items: start;
     padding: 4px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .row:hover {
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
   .tb {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     padding: 0 0.2rem;
     text-align: center;
     color: var(--fg-muted);
@@ -423,14 +424,14 @@
   }
   .needs {
     color: var(--usage-crit);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .meta {
     display: flex;
     flex-wrap: wrap;
     gap: 0 8px;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   /* Each fact wraps as a whole in a narrow sidebar, never mid-phrase. */
   .meta > span {
@@ -447,7 +448,7 @@
     padding: 0 3px;
     color: var(--fg-muted);
     font: inherit;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
     opacity: 0;
   }
@@ -462,8 +463,8 @@
     cursor: not-allowed;
   }
   .chip {
-    font-size: 11px;
-    border-radius: 999px;
+    font-size: var(--text-2xs);
+    border-radius: var(--radius-pill);
     padding: 0 6px;
     white-space: nowrap;
   }
@@ -485,7 +486,7 @@
     grid-template-columns: 10px minmax(0, 1fr) auto;
     gap: 6px;
     align-items: center;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .child .txt {
     background: none;

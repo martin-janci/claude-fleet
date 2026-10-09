@@ -79,11 +79,11 @@
 <style>
   .detail { display: grid; gap: 12px; }
   .grp header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .sec-t { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
+  .sec-t { font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
   ul { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 2px; }
-  li { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12.5px; min-height: 22px; }
+  li { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: var(--text-xs); min-height: 22px; }
   .nm { font-weight: 560; }
-  .why { color: var(--fg-muted); font-size: 12px; }
+  .why { color: var(--fg-muted); font-size: var(--text-xs); }
   .x { margin-left: auto; }
   .commits { display: flex; gap: 4px; margin: 0; }
 </style>

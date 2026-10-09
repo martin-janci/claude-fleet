@@ -132,6 +132,6 @@
     position: absolute; top: calc(100% + 4px); left: 0; z-index: 5; min-width: 220px; margin: 0; padding: 4px 0;
     list-style: none; border: 1px solid var(--control-border); border-radius: var(--radius-md); background: var(--bg);
   }
-  .list li { padding: 3px 10px; font-family: var(--mono); font-size: 11.5px; cursor: pointer; }
+  .list li { padding: 3px 10px; font-family: var(--mono); font-size: var(--text-2xs); cursor: pointer; }
   .list li.active { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
 </style>

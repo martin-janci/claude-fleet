@@ -55,6 +55,8 @@ fn setup(mode: &str, answers: Vec<Result<JevResponse, BackendError>>) -> (Decide
         settings::set(&s, settings::DECIDE_JEV_ENABLED, "true").unwrap();
         settings::set(&s, settings::DECIDE_JEV_SUMMARY_CHECK, mode).unwrap();
         settings::set(&s, settings::DECIDE_JEV_UNASSIGNED, "true").unwrap();
+        // The check sends the transcript's agent turns: reply text (D48).
+        settings::set(&s, settings::DECIDE_JEV_UNASSIGNED_REPLY, "true").unwrap();
         s.set_decision_credential(Some(&Secret::new(KEY)), None)
             .unwrap();
     }
@@ -156,4 +158,29 @@ fn the_transcript_sent_is_its_newest_part() {
         TRANSCRIPT_MAX_BYTES
     );
     assert!(r.question.check().is_ok());
+}
+
+/// Review r15: the transcript a summary is checked against carries the
+/// agent's replies, so D31 alone is not enough: without the reply-text
+/// consent (D48) nothing is sent and the summary is unchecked.
+#[tokio::test]
+async fn the_transcript_needs_the_reply_text_consent_too() {
+    let (ctx, fake) = setup("assist", vec![noul(1.0)]);
+    {
+        let s = ctx.store.lock().unwrap();
+        settings::set(&s, settings::DECIDE_JEV_UNASSIGNED_REPLY, "false").unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        s.set_org_jev_allowed(org, true).unwrap();
+        assert!(Feature::SummaryCheck.sends_reply_text());
+        assert_eq!(
+            gate(&s, Feature::SummaryCheck, Some(org)),
+            Err(Fallback::OrgOff)
+        );
+        s.set_org_jev_reply_allowed(org, true).unwrap();
+        assert_eq!(gate(&s, Feature::SummaryCheck, Some(org)), Ok(Mode::Assist));
+    }
+    let c = check(&ctx, 7, None, "Fixed the test.", "Agent: I fixed it").await;
+    assert_eq!(c, Check::Unchecked);
+    assert!(!c.shows());
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
 }

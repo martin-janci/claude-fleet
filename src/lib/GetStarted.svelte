@@ -177,8 +177,8 @@
     width: 300px;
     background: var(--bg-raise);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    box-shadow: 0 16px 50px rgba(0, 0, 0, 0.6);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-pop);
     overflow: hidden;
     color: var(--fg);
     font-size: var(--text-sm);
@@ -199,7 +199,7 @@
   .bar {
     margin: 0 14px;
     height: 4px;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     background: var(--border);
     overflow: hidden;
   }
@@ -223,7 +223,7 @@
     width: 100%;
     padding: 5px 8px;
     border: none;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: none;
     color: var(--fg);
     font: inherit;

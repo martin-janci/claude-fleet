@@ -475,7 +475,7 @@ pub fn install_fleet_hook(
         if !rt.is_running() {
             return Err(IpcError::new(
                 codes::E_NOT_RUNNING,
-                "MCP server is not running — enable it in Settings > MCP first",
+                "MCP server is not running — enable it in Settings → Control API first",
             ));
         }
     }

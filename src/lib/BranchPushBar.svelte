@@ -75,10 +75,10 @@
   .push {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg);
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.6rem;
   }
   .push:hover:not(:disabled) {
@@ -94,13 +94,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .err {
     flex-basis: 100%;
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--danger);
   }
 </style>

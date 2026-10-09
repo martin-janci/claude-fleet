@@ -18,7 +18,7 @@ On first launch the app walks you through setup — see the **[Getting Started g
 
 Grab the bundle for your platform from the
 [Releases page](https://github.com/martin-janci/claude-fleet/releases) —
-`.dmg` for macOS (`aarch64` for Apple Silicon, `x86_64` for Intel),
+`.dmg` for macOS (`aarch64` for Apple Silicon, `x64` for Intel),
 `.AppImage` or `.deb` for Linux, `_x64-setup.exe` for Windows (from 0.3.4).
 Every filename carries the version, so a download is always traceable to the
 release it came from.
@@ -119,6 +119,24 @@ not, and why hub-client mode is the recommended setup:
   fetch/pull/push) run directly in the session's worktree.
 - **Event-driven UI** — backend mutations emit row events; the frontend patches
   its stores in place rather than re-fetching.
+- **Conversation view** — the Session tab's default view: the transcript as
+  turns, with a prompt box ([guide](docs/conversation-view.md)).
+- **Work** — tickets and workstreams per session, trackers, Today and tidy-up
+  ([work guide](docs/work-graph.md)).
+- **Assets catalog** — skills, subagents, hooks and MCP servers kept in a git
+  repo and synced to every host ([concepts](docs/concepts.md#asset-catalog)).
+- **Routines and runs** — saved prompts that start a session on a schedule,
+  on a session event or on demand, and the history of their runs (the
+  `routines` and `runs` tools, [control API](docs/control-api.md)).
+- **Hub and phone** — `fleet-hub` runs the fleet headless, and the desktop and
+  the [fleet-mobile](https://github.com/martin-janci/fleet-mobile) phone app
+  pair with it as clients ([hub guide](docs/hub.md)).
+- **Voice relay** — Claude Code's `/voice` on a remote host records from the
+  app's microphone ([guide](docs/voice.md)).
+- **Updates** — signed release channels the hub reads and serves
+  ([guide](docs/updates.md)).
+- **Two layouts** — Classic (the default) and New, switched in Settings →
+  Appearance → Layout ([getting started](docs/getting-started.md#guided-setup--the-get-started-checklist)).
 
 ## Documentation
 
@@ -127,6 +145,10 @@ not, and why hub-client mode is the recommended setup:
 - [Work guide](docs/work-graph.md) — work items, trackers, detection, resume, Today, tidy-up
 - [Troubleshooting](docs/troubleshooting.md)
 - [Windows](docs/windows.md) — the desktop client on Windows
+- [Conversation view](docs/conversation-view.md)
+- [fleet-hub](docs/hub.md) — the headless daemon, paired desktops and phones
+- [Updates](docs/updates.md)
+- [Voice relay](docs/voice.md)
 - [Control API](docs/control-api.md)
 - [Docs index](docs/README.md)
 
@@ -135,9 +157,12 @@ not, and why hub-client mode is the recommended setup:
 ### Requirements
 
 - macOS 13+ (primary) or Linux — CI runs on both (`macos-latest`,
-  `ubuntu-24.04`) and tagged releases ship signed (not notarized) macOS `.dmg` (arm64 and
-  x86_64) plus Linux `.AppImage`/`.deb` bundles (see `docs/RELEASING.md`)
-- Rust 1.83+ (`rustup install stable`)
+  `ubuntu-24.04`), plus a Windows client build on `windows-latest`. Tagged
+  releases ship signed (not notarized) macOS `.dmg` (arm64 and x64), Linux
+  `.AppImage`/`.deb` and an unsigned Windows `_x64-setup.exe` (see
+  `docs/RELEASING.md` and `docs/windows.md`)
+- Rust 1.88+; with rustup, the toolchain pinned in `rust-toolchain.toml`
+  installs itself
 - Node 20 (`.node-version`) and pnpm 10 via `corepack enable` (or
   `npm i -g pnpm@10`). The workspace file uses the pnpm 10 `allowBuilds` key;
   if a local pnpm 9 prints `packages field missing or empty`, run
@@ -165,8 +190,10 @@ cargo fmt --all --check
 cargo deny check                # licenses + advisories
 ```
 
-Run `scripts/ci-local.sh` (or `--rust-only` / `--frontend-only`) before
-pushing; it mirrors CI. Opt in to the hooks with
+While you work, `cargo fleet-fast-check` checks a Rust edit in seconds. Run
+`scripts/verify.sh` before committing and `scripts/verify.sh full` (the
+narrowed `scripts/ci-local.sh`, which mirrors CI) before pushing; CLAUDE.md
+explains the ladder. Opt in to the hooks with
 `git config core.hooksPath .githooks`: a fast pre-commit check, and a
 pre-push check that the migrations you add are numbered above `origin/main`'s.
 
@@ -175,6 +202,11 @@ pre-push check that the migrations you add are numbered above `origin/main`'s.
 ```
 src/lib/                       # Svelte 5 components + TS stores (hosts, sessions, projects, accounts, events)
 crates/fleet-core/src/         # Rust backend: service/store/SSH/MCP, Tauri-free
+crates/fleet-hub/              # headless hub daemon and its CLI
+crates/fleet-agent/            # agent for hosts the hub cannot dial (needs fleet-proto only)
+crates/fleet-proto/            # hub/agent frame types
+crates/fleet-update/           # update manifests, signatures and channels
+crates/fleet-agent-e2e/        # tests only: the hub against the real agent
 src-tauri/src/commands/        # thin Tauri IPC handlers wrapping crates/fleet-core/src/service/
 crates/fleet-core/migrations/  # SQLite migrations (registered in the MIGRATIONS table in crates/fleet-core/src/store/schema.rs)
 docs/specs/         # per-iteration design specs
@@ -190,8 +222,7 @@ outbound instead — see [docs/hub.md](docs/hub.md) for both.
 
 A hardening review (2026-05-21, see
 [docs/specs/2026-05-21-hardening-review.md](docs/specs/2026-05-21-hardening-review.md))
-catalogues open issues. Highest priority: SSH host-alias validation, migration
-atomicity, and the single-global-PTY races in `TerminalView`. Handoff
+catalogues open issues; see it for which are still open. Handoff
 (original spec §8.3) is replaced by Move to host… / `move_session`, and Freeze
 (§8.4) is descoped; see
 [ADR 0001](docs/adr/0001-descope-freeze-ship-move.md).

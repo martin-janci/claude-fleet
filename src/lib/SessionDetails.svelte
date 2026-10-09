@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import {
     sessions,
     hasNoPane,
@@ -153,16 +153,13 @@
   const hostRow = $derived($hostByAlias.get(session.host_alias) ?? null);
   // A session under a login profile bills that profile's account, not the
   // host's (docs/accounts.md); it has none until the host reports the
-  // profile logged in.
-  const accountRow = $derived(
-    session.claude_profile
-      ? session.account_uuid
-        ? ($accountByUuid.get(session.account_uuid) ?? null)
-        : null
-      : hostRow?.account_uuid
-        ? ($accountByUuid.get(hostRow.account_uuid) ?? null)
-        : null,
+  // profile logged in. Any other session shows the account it runs on (the
+  // host's login when reconcile saw it; reconcile keeps it when the host's
+  // login changes later), and the host's only before it has one.
+  const accountUuid = $derived(
+    session.claude_profile ? session.account_uuid : (session.account_uuid ?? hostRow?.account_uuid ?? null),
   );
+  const accountRow = $derived(accountUuid ? ($accountByUuid.get(accountUuid) ?? null) : null);
 
   // Switch the session to another login: a restart that resumes the same
   // conversation under it ('' = the host's own login).
@@ -177,6 +174,19 @@
   let loginPick = $state<string | null>(null);
   const loginTarget = $derived(loginPick ?? session.claude_profile ?? '');
   let confirmingSwitch = $state(false);
+  // The pane is not keyed by session: a login picked (or a switch being
+  // confirmed) on one session must not carry over to the next one selected,
+  // where Switch would restart it under that pick (review r07).
+  let pickFor = untrack(() => session.id);
+  $effect.pre(() => {
+    const id = session.id;
+    untrack(() => {
+      if (id === pickFor) return;
+      pickFor = id;
+      loginPick = null;
+      confirmingSwitch = false;
+    });
+  });
   async function onSwitchLogin() {
     confirmingSwitch = false;
     if (restartBlocked !== null) return;
@@ -261,8 +271,11 @@
     });
     if (!ok) return;
     copied = true;
-    setTimeout(() => (copied = false), 1500);
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => (copied = false), 1500);
   }
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(copiedTimer));
 
   let renameInput: HTMLInputElement | undefined = $state();
 
@@ -879,7 +892,7 @@
         title={reviewBlocked ?? ''}
         data-testid="open-review"
   >
-        🔍 Review…
+        Review…
       </button>
       <button
         class="btn btn--quiet is-bounded"
@@ -888,7 +901,7 @@
         title={shareBlocked ?? 'Share this session with one person — watch or drive, revocable, and never a terminal'}
         data-testid="share-from-details"
   >
-        👥 Share…
+        Share…
       </button>
       {#if moveBackOrigin}
         <button
@@ -943,7 +956,7 @@
           title={setFriendlyNameBlocked ?? ''}
           data-testid="label-from-details"
     >
-          🏷 Edit label
+          Rename
         </button>
         <!-- An external row runs outside fleet: the label (local fleet
              metadata) is the only thing fleet can change about it. -->
@@ -955,7 +968,7 @@
             title={renameBlocked ?? ''}
             data-testid="rename-from-details"
       >
-            ✎ Rename tmux session
+            Rename tmux session
           </button>
           <button
             class="menu-item"
@@ -974,7 +987,7 @@
               title={repairBlocked ?? 'Recreate a deleted worktree directory, re-register it with git, and respawn the pane in it'}
               data-testid="repair-from-details"
         >
-              🩹 Repair workspace…
+              Repair workspace…
             </button>
           {/if}
           <button
@@ -984,7 +997,7 @@
             title={recreateBlocked ?? ''}
             data-testid="recreate-from-details"
       >
-            ♻ Recreate…
+            Recreate…
           </button>
           {#if canMove}
             <button
@@ -1021,7 +1034,7 @@
                 title={inspectSafeKillBlocked ?? ''}
                 data-testid="safe-kill-from-details"
           >
-                ⏏ Safe remove…
+                Safe remove…
               </button>
             {/if}
             <button
@@ -1258,55 +1271,56 @@
   .header { display: flex; flex-direction: column; gap: 0.3rem; }
   .title {
     margin: 0;
-    font-size: 1.1rem;
+    font-size: var(--text-lg);
     font-weight: 600;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     cursor: text;
     padding: 0.05rem 0;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
   }
   .title:hover { background: var(--bg-pane); }
   .title-input {
-    font-size: 1.1rem;
+    font-size: var(--text-lg);
     font-weight: 600;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     padding: 0.1rem 0.3rem;
     border: 1px solid var(--accent);
     background: var(--bg);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     outline: none;
   }
-  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: 11px; flex-wrap: wrap; }
-  .friendly { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
+  .title-input:focus-visible { outline: var(--ring-w) solid var(--ring); outline-offset: var(--ring-offset); }
+  .sub { display: flex; gap: 0.5rem; align-items: center; font-size: var(--text-2xs); flex-wrap: wrap; }
+  .friendly { margin: 0; font-size: var(--text-xs); color: var(--fg-muted); }
   .chip {
     padding: 0.1rem 0.4rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     border: 1px solid;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     white-space: nowrap;
   }
   .last-prompt {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     max-height: 6rem;
     overflow: auto;
   }
-  .pr-link { color: var(--accent); font-size: 0.85rem; overflow-wrap: anywhere; }
+  .pr-link { color: var(--accent); font-size: var(--text-xs); overflow-wrap: anywhere; }
   .host {
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.1rem 0.4rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
   }
   .status {
     padding: 0.1rem 0.4rem;
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .status-running { background: var(--done-soft); color: var(--status-done); }
   .status-frozen { background: var(--accent-soft); color: var(--status-working); }
@@ -1320,16 +1334,16 @@
   }
   .meta dt {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
-  .meta dd { margin: 0; font-size: 0.9rem; }
+  .meta dd { margin: 0; font-size: var(--text-sm); }
   .muted { color: var(--fg-muted); font-style: italic; }
 
   .block h3 {
     margin: 0 0 0.4rem 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1342,23 +1356,23 @@
   }
   .cmd {
     flex: 1;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.85rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
     padding: 0.4rem 0.6rem;
     background: var(--bg-pane);
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     color: var(--fg);
     overflow-x: auto;
     white-space: nowrap;
   }
   .copy {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     padding: 0.4rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     min-width: 4rem;
   }
@@ -1377,17 +1391,17 @@
     padding: 4px;
     min-width: 13rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-raise);
   }
   .menu-item {
     text-align: left;
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.6rem;
     min-height: 24px;
     border: none;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--fg);
     cursor: pointer;
@@ -1401,23 +1415,23 @@
   .menu-item:disabled { opacity: 0.55; cursor: default; }
   .more-sep { width: 100%; border: none; border-top: 1px solid var(--border); margin: 3px 0; }
   .danger {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.35rem 0.8rem;
     border: 1px solid var(--danger);
     background: transparent;
     color: var(--danger);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
 
-  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
 
   .safe-kill-pill {
     margin: 0;
     padding: 0.4rem 0.6rem;
-    border-radius: 6px;
-    font-size: 0.8rem;
+    border-radius: var(--radius-md);
+    font-size: var(--text-2xs);
     line-height: 1.35;
   }
   .safe-kill-pill.pending {
@@ -1441,8 +1455,8 @@
     border: none;
     padding: 0;
     color: var(--accent);
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.9rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
     cursor: pointer;
     text-decoration: underline;
     text-underline-offset: 2px;
@@ -1455,23 +1469,23 @@
     flex-direction: column;
     gap: 0.6rem;
   }
-  .confirm h3 { margin: 0; font-size: 0.95rem; }
-  .confirm p { margin: 0; font-size: 0.85rem; color: var(--fg-muted); line-height: 1.4; }
+  .confirm h3 { margin: 0; font-size: var(--text-sm); }
+  .confirm p { margin: 0; font-size: var(--text-xs); color: var(--fg-muted); line-height: 1.4; }
   .confirm code {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-family: var(--font-mono);
     background: var(--bg-pane);
     padding: 0.1rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     color: var(--fg);
   }
   .confirm-actions { display: flex; gap: 0.4rem; justify-content: flex-end; flex-wrap: wrap; }
   .confirm .primary {
     background: var(--accent);
-    color: white;
+    color: var(--accent-fg);
     border: 1px solid var(--accent);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.3rem 0.7rem;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     cursor: pointer;
   }
   .confirm .primary:disabled { opacity: 0.6; cursor: not-allowed; }
@@ -1479,13 +1493,13 @@
   .inspect-box {
     background: var(--bg-pane);
     border: 1px solid var(--border);
-    border-radius: 5px;
+    border-radius: var(--radius-sm);
     padding: 0.5rem 0.7rem;
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
   }
-  .inspect-line { margin: 0; font-size: 0.8rem; color: var(--fg); }
+  .inspect-line { margin: 0; font-size: var(--text-2xs); color: var(--fg); }
   .inspect-line.warn { color: var(--status-waiting); }
   .dirty-list {
     margin: 0.2rem 0 0 0;
@@ -1493,8 +1507,8 @@
     list-style: none;
     max-height: 9rem;
     overflow-y: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
   }
   .dirty-list li {
     display: flex;
@@ -1508,14 +1522,14 @@
     flex: 0 0 auto;
     white-space: pre;
   }
-  .small { font-size: 11px; }
+  .small { font-size: var(--text-2xs); }
   .confirm-actions button {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .confirm-actions button.danger {
@@ -1530,7 +1544,7 @@
     margin-top: 0.6rem;
   }
   .related h3 {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -1549,30 +1563,30 @@
     text-align: left;
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.35rem 0.5rem;
     color: var(--fg);
     cursor: pointer;
     display: flex;
     align-items: center;
     gap: 0.4rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .related-row:hover {
     border-color: var(--accent);
     background: var(--bg-pane);
   }
   .related .host-badge {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
   }
   .related .account {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     flex: 1;
     min-width: 0;
     overflow: hidden;
@@ -1580,17 +1594,17 @@
     white-space: nowrap;
   }
   .related .sess-name {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
   }
   .related .age {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   /* The status as a word (7.2): the bare dot it replaces had no style, so
      it showed nothing and said nothing. */
   .related .status-word {
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
 </style>

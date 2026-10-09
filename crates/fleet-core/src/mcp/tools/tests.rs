@@ -493,6 +493,40 @@ async fn the_owners_trusted_phone_administers_hosts_and_trackers_only() {
         .unwrap_err();
     assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
     assert!(call(Caller::master(), "list_orgs").await.is_ok());
+
+    // Review r04 S1: the phone sends the secret itself; a reference that
+    // makes the hub read its own file or environment, a private network
+    // and an extra CA stay the master's.
+    let with = |c: Caller, extra: serde_json::Value| {
+        let t = t.clone();
+        let mut v = serde_json::json!({ "action": "set_credential", "tracker_id": 1 });
+        v.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let args = serde_json::from_value(v).unwrap();
+        async move { t.work_admin(Extension(c), Parameters(args)).await }
+    };
+    for extra in [
+        serde_json::json!({ "auth_kind": "token", "credential_ref": "env:PATH" }),
+        serde_json::json!({ "auth_kind": "basic", "username": "x",
+                            "credential_ref": "file:/root/.ssh/id_ed25519" }),
+        serde_json::json!({ "settings": { "allow_private_network": true } }),
+        serde_json::json!({ "settings": { "extra_ca": "-----BEGIN CERTIFICATE-----" } }),
+    ] {
+        let e = with(phone.clone(), extra.clone()).await.unwrap_err();
+        assert!(
+            e.message.starts_with("E_FORBIDDEN"),
+            "{extra}: {}",
+            e.message
+        );
+        let master = with(Caller::master(), extra.clone()).await;
+        assert!(
+            master
+                .as_ref()
+                .map_or_else(|e| !e.message.starts_with("E_FORBIDDEN"), |_| true),
+            "{extra}: the master keeps it"
+        );
+    }
 }
 
 #[test]
@@ -1146,6 +1180,46 @@ fn peer_exchange_bodies_never_reach_the_persisted_audit_trail() {
     );
 }
 
+/// Review r04 S2/S3: a catalog secret nested in `catalog_admin`'s `args`
+/// and `link_peer`'s one-time code never reach the persisted audit row.
+#[test]
+fn nested_secrets_and_peer_codes_never_reach_the_persisted_audit_trail() {
+    let store = Arc::new(Mutex::new(Store::open_in_memory().unwrap()));
+    let id = {
+        let s = store.lock().unwrap();
+        s.upsert_host("local").unwrap();
+        let id = s
+            .upsert_session("ctl", "local", None, None, 0, 0, "running", None)
+            .unwrap();
+        s.set_controller("local", "ctl").unwrap();
+        id
+    };
+    for (tool, args) in [
+        (
+            "catalog_admin",
+            serde_json::json!({ "action": "set_secret",
+                                "args": { "name": "FOO", "value": "sk-unique-r04" } }),
+        ),
+        (
+            "link_peer",
+            serde_json::json!({ "url": "https://b.example", "code": "ABCD2345R04" }),
+        ),
+    ] {
+        persist_audit(&store, tool, args.as_object(), &Caller::master());
+    }
+    let s = store.lock().unwrap();
+    let events = s.list_session_events(id, 10).unwrap();
+    let rows: Vec<_> = events.iter().filter(|e| e.kind == "mcp_call").collect();
+    assert_eq!(rows.len(), 2, "{events:?}");
+    for e in rows {
+        let d = format!("{e:?}");
+        assert!(
+            !d.contains("sk-unique-r04") && !d.contains("ABCD2345R04"),
+            "{d}"
+        );
+    }
+}
+
 /// G1 (review): `persist_audit` runs BEFORE `enforce_mode` in `call_tool`
 /// ("audit first so refused calls are on the timeline too"), so a peer
 /// token's call to any tool OTHER than `peer_exchange` — refused a moment
@@ -1459,7 +1533,23 @@ fn the_control_api_guide_names_every_attention_reason_and_status() {
 
 // ---- handler-level gates (review of #50) ----
 
+/// The tools over `store`, with the real SSH client: so unless the test
+/// itself says otherwise, `hub.local_host` is off. A fresh store defaults it
+/// on, and then the first listing in the process (`reconcile_gate()` is
+/// process-global) reconciles the REAL machine's tmux and background agents
+/// into the store: a test run alone saw a `local` row of whatever Claude was
+/// running on the box, and passed in the full suite only because another
+/// test had taken the gate first.
 fn test_tools(store: Store) -> FleetTools {
+    if store
+        .get_setting(crate::service::hub::SETTING_LOCAL_HOST)
+        .unwrap()
+        .is_none()
+    {
+        store
+            .set_setting(crate::service::hub::SETTING_LOCAL_HOST, "false")
+            .unwrap();
+    }
     FleetTools::new(
         Arc::new(Mutex::new(store)),
         Arc::new(SshClient::new()),
@@ -5071,6 +5161,9 @@ fn one_full_row() -> serde_json::Value {
     // With an org, for the same reason: `org_id` is skipped when no org
     // claims the session.
     row.org_id = Some(3);
+    // With live links, for the same reason: `work_rev` is skipped at 0, and a
+    // first cut of review round 3 read that as "no such key" (R3-4).
+    row.work_rev = 42;
     // Through the constructor, so the derived `needs_attention` is stamped
     // the same way `list_sessions` stamps it — the view is pinned against
     // what the wire actually carries, not against a hand-built row.
@@ -5090,6 +5183,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "ci_status",
             "claude_status",
             "context_pct",
+            "created_at",
             "current_activity",
             "friendly_name",
             "host_alias",
@@ -5100,8 +5194,10 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "last_prompt",
             "last_stop_at",
             "last_turn_at",
+            "lost_at",
             "needs_attention",
             "org_id",
+            "owner_person_id",
             "pending_form",
             "pending_input",
             "project_id",
@@ -5115,6 +5211,7 @@ fn the_phone_view_is_exactly_the_columns_a_pager_reads() {
             "usage_cost_micros",
             "usage_model",
             "work",
+            "work_rev",
             "work_suggested",
         ]
     );
@@ -6967,6 +7064,24 @@ fn the_phone_view_drops_the_columns_no_screen_reads() {
     for kept in PHONE_SESSION_FIELDS {
         assert!(obj.contains_key(*kept), "{kept} fell out of the phone view");
     }
+}
+
+/// Review round 3 (R3-1): the phone's Share button asks whether this person
+/// owns the row (`MyAccess.owns` reads `owner_person_id`), and every re-list
+/// replaces the rows with this view. Projected away, the owner lost Share on
+/// each pull-to-refresh or reconnect.
+#[test]
+fn the_phone_view_keeps_the_owner_so_share_survives_a_relist() {
+    let mut rows = one_full_row();
+    rows[0]["owner_person_id"] = serde_json::json!(7);
+    rows[0]["lost_at"] = serde_json::json!(5);
+    project_rows(&mut rows, PHONE_SESSION_FIELDS);
+    assert_eq!(rows[0]["owner_person_id"], serde_json::json!(7));
+    assert_eq!(rows[0]["lost_at"], serde_json::json!(5));
+    // R3-4: the work view's signature carries `work_rev`, which every frame
+    // sends; a re-list without it read as a work change on the next frame and
+    // hid a secondary link's change until then.
+    assert_eq!(rows[0]["work_rev"], serde_json::json!(42));
 }
 
 /// The phone's tags editor starts from the row's `tags` and
@@ -9790,6 +9905,12 @@ fn one_chip(text: &str) -> Vec<crate::service::quick_replies::QuickReply> {
 async fn quick_replies_set_is_refused_to_agent_tokens_and_reads_stay_open() {
     let (tools, store) = quick_replies_tools();
     for caller in [
+        // Review r04 F4: a second person's device and an org-bound one.
+        another_person(client_caller("colleague", TokenMode::Full)),
+        org_bound(another_person(client_caller(
+            "acme-laptop",
+            TokenMode::Full,
+        ))),
         host_caller("mefistos", TokenMode::Full),
         client_caller(
             crate::service::operator::OPERATOR_CLIENT_NAME,
@@ -18106,6 +18227,73 @@ async fn org_admin_refuses_a_device_that_administers_nothing() {
         call(admin, pair).await.is_err(),
         "whose device must be named"
     );
+}
+
+/// Review r04 F1/F2: an org admin invites new people and pairs their first
+/// device; a person who already has a device, or another company, is the
+/// hub owner's. Otherwise the admin could mint a token that IS that person.
+#[tokio::test]
+async fn org_admin_never_takes_over_a_person_who_already_exists() {
+    let (tools, _guards, store) = client_tools();
+    let (acme, jane) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        let bob = s.create_person("bob", None).unwrap().id;
+        let eve = s.create_person("eve", None).unwrap().id;
+        let carl = s.create_person("carl", None).unwrap().id;
+        s.set_org_member(acme, jane, "admin", None).unwrap();
+        s.set_org_member(acme, bob, "member", None).unwrap();
+        s.set_org_member(beta, eve, "member", None).unwrap();
+        for (device, person) in [("bob-phone", bob), ("carl-phone", carl)] {
+            s.insert_client_token(device, &format!("digest-{device}"), "full")
+                .unwrap();
+            s.set_client_person(device, Some(person)).unwrap();
+        }
+        (acme, jane)
+    };
+    let call = |c: Caller, a: crate::service::org_admin::OrgAdminArgs| {
+        tools.org_admin(Extension(c), Parameters(a))
+    };
+    let mut admin = trusted(client_caller("jane-phone", TokenMode::Full));
+    if let Some(c) = admin.client.as_mut() {
+        c.person_id = Some(jane);
+        c.org_id = Some(acme);
+    }
+    admin.is_personal_owner = false;
+    let forbidden = |r: Result<CallToolResult, McpError>, what: &str| {
+        let e = r.expect_err(what);
+        assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{what}: {e:?}");
+    };
+    for who in ["eve", "carl"] {
+        let mut add = org_admin_args("set_member");
+        add.org_id = Some(acme);
+        add.person = Some(who.into());
+        add.role = Some("member".into());
+        forbidden(call(admin.clone(), add).await, who);
+    }
+    // A new colleague is invited and paired; bob, who has a phone, is not.
+    let mut add = org_admin_args("set_member");
+    add.org_id = Some(acme);
+    add.person = Some("dana".into());
+    add.role = Some("member".into());
+    call(admin.clone(), add).await.expect("a new person");
+    let mut pair = org_admin_args("pair_device");
+    pair.device = Some("dana-phone".into());
+    pair.person = Some("dana".into());
+    call(admin.clone(), pair.clone())
+        .await
+        .expect("their first device");
+    pair.device = Some("bob-laptop".into());
+    pair.person = Some("bob".into());
+    forbidden(call(admin.clone(), pair).await, "bob already has a device");
+    // A role change for a member of the org stays the admin's.
+    let mut role = org_admin_args("set_member");
+    role.org_id = Some(acme);
+    role.person = Some("bob".into());
+    role.role = Some("viewer".into());
+    call(admin, role).await.expect("a member's role");
 }
 
 fn org_admin_args(action: &str) -> crate::service::org_admin::OrgAdminArgs {

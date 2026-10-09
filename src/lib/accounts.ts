@@ -44,8 +44,9 @@ export function accountEmailTier(a: AccountRow | null): string {
 export const accountByUuid = derived(accounts, ($a) => new Map($a.map((a) => [a.uuid, a])));
 
 export async function loadAccounts(): Promise<Result<AccountRow[]>> {
+  const token = rows.beginList();
   const r = await invokeCmd<AccountRow[]>('list_accounts');
-  if (r.ok) accounts.set(r.value);
+  if (r.ok) rows.applyList(r.value, token);
   return r;
 }
 

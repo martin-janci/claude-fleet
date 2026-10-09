@@ -128,7 +128,10 @@
   // Tickets (work graph M3): the cached My work / Current sprint / Recent,
   // loaded when the switcher opens and there is a tracker.
   let tickets = $state<SwitcherTicket[]>([]);
+  // Only the newest load lands (review r07).
+  let ticketsSeq = 0;
   async function loadTickets() {
+    const mine = ++ticketsSeq;
     if ($trackers.length === 0) {
       tickets = [];
       return;
@@ -139,6 +142,7 @@
       ['recent', 'Recent'],
     ];
     const answers = await Promise.all(views.map(([view]) => workTickets({ view, limit: 20 })));
+    if (mine !== ticketsSeq) return;
     const out: SwitcherTicket[] = [];
     answers.forEach((r, i) => {
       if (r.ok && Array.isArray(r.value)) {
@@ -642,7 +646,7 @@
     if (!e) return;
     if (e.kind === 'session' && e.session) {
       if (e.session.status === 'ghost') {
-        push({ kind: 'info', message: 'That session is a ghost — recreate it from the sidebar.' });
+        push({ kind: 'info', message: 'That session is lost. Recreate it from the sidebar.' });
         return;
       }
       selectSessionExplicitly(e.session);
@@ -734,7 +738,7 @@
     if (r.error.code === 'E_NOTFOUND' && site) {
       push({
         kind: 'info',
-        message: `${site} is not connected — connect it in Settings → Work to look up its tickets.`,
+        message: `${site} is not connected — connect it in Settings → Trackers to look up its tickets.`,
         action: { label: 'Settings', run: () => settingsOpen.set(true) },
       });
       return;
@@ -1038,18 +1042,22 @@
 <style>
   .query {
     font: inherit;
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     padding: 0.45rem 0.6rem;
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     width: 100%;
     box-sizing: border-box;
   }
   .query:focus {
     outline: none;
     border-color: var(--accent);
+  }
+  .query:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: var(--ring-offset);
   }
   .qrow {
     display: flex;
@@ -1058,7 +1066,7 @@
   }
   .mode-chip {
     flex: 0 0 auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     padding: 0.15rem 0.5rem;
     border-radius: var(--radius-sm);
@@ -1091,7 +1099,7 @@
     justify-content: center;
     border: none;
     background: transparent;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     color: var(--fg-muted);
     cursor: pointer;
   }
@@ -1108,13 +1116,13 @@
     gap: var(--space-2);
     padding: var(--space-1) var(--space-3);
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .hint {
     display: flex;
     flex-wrap: wrap;
     gap: 0.8rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
 </style>

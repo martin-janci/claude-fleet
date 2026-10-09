@@ -164,7 +164,7 @@
     padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
     border-left: 3px solid var(--tone);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
   }
   .card.accent { --tone: var(--accent); }
@@ -183,7 +183,7 @@
   .muted,
   .note {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .note { margin: 0; }
   .intro { margin: 0; font-size: 0.85em; }
@@ -218,7 +218,7 @@
     height: 1.3rem;
     border-radius: 50%;
     border: 1px solid var(--control-border, var(--border));
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .step-title { font-weight: 600; }
@@ -258,16 +258,16 @@
     gap: 0.1rem;
     padding: 0.35rem 0.65rem;
     border: 1px solid var(--control-border, var(--border));
-    border-radius: var(--radius-md, 6px);
+    border-radius: var(--radius-md, var(--radius-md));
     background: var(--control-bg, var(--bg));
     color: var(--control-fg, var(--fg));
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     cursor: pointer;
     text-align: left;
   }
   .option:hover:not(:disabled) { background: var(--control-bg-hover, var(--bg)); border-color: var(--accent); }
   .option:disabled { opacity: 0.6; cursor: default; }
   .option-label { font-weight: 600; }
-  .hint { font-size: 11px; color: var(--fg-muted); }
+  .hint { font-size: var(--text-2xs); color: var(--fg-muted); }
 </style>

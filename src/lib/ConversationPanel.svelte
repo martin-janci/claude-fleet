@@ -2674,10 +2674,16 @@
   .scroller:focus {
     outline: none;
   }
+  /* A mouse click focuses the transcript with no ring; the keyboard gets
+     one (review r11). Drawn inward, as the scroller clips an outset ring. */
+  .scroller:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: calc(-1 * var(--ring-w));
+  }
   [data-match] {
     outline: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
     outline-offset: 3px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   [data-current-match] {
     outline: 2px solid var(--accent);
@@ -2762,7 +2768,7 @@
   .attach-img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .attach-ext {
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--control-fg-quiet);
@@ -2781,7 +2787,7 @@
     padding: 0;
     background: color-mix(in srgb, var(--bg) 78%, transparent);
     color: var(--fg);
-    font-size: 13px;
+    font-size: var(--text-sm);
     opacity: 0;
   }
   .attach:hover .attach-x,
@@ -2827,7 +2833,7 @@
     background: none;
     color: var(--fg);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--text-sm);
     line-height: 1.45;
   }
   .composer-input:focus {
@@ -2852,7 +2858,7 @@
     height: var(--control-h);
     padding: 0 0.3rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
     color: var(--control-fg-quiet);
     font-size: var(--control-font-sm);
@@ -2880,9 +2886,9 @@
     margin: 0 0 0.4rem;
     padding: 0.25rem 0;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .slash-menu li.active,
   .slash-menu li:hover {
@@ -2910,9 +2916,9 @@
     flex: none;
     margin-left: auto;
     padding: 0 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--chip-bg, color-mix(in srgb, currentColor 10%, transparent));
-    font-size: 11px;
+    font-size: var(--text-2xs);
     opacity: 0.85;
   }
   .new-divider {
@@ -2921,7 +2927,7 @@
     gap: 8px;
     margin: 4px 0 8px;
     color: var(--accent);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 500;
   }
   .new-divider::before,
@@ -2941,12 +2947,12 @@
   .composer-error {
     margin: 0 0 0.35rem;
     color: var(--usage-crit);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .composer-status {
     margin: 0.35rem 0 0;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     transition: opacity var(--dur-base) ease;
   }
   .composer-status.is-idle {
@@ -2958,7 +2964,7 @@
     gap: 0.5rem;
     padding: 0.35rem 0 0.6rem;
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     transition: opacity var(--dur-base) ease;
   }
   .indicator.is-idle {
@@ -2972,7 +2978,7 @@
     margin: 0;
     padding: 0.35rem 0 0.6rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .probe-off code {
     font-size: inherit;
@@ -3006,9 +3012,9 @@
     padding: 0.5rem 0.75rem;
     border: 1px solid var(--usage-warn);
     border-left-width: 3px;
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--usage-warn) 10%, var(--bg-pane));
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .blocked-text {
     flex: 1 1 auto;
@@ -3018,7 +3024,7 @@
     margin-top: 0.2rem;
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
@@ -3026,10 +3032,10 @@
     flex: 0 0 auto;
     padding: 0.3rem 0.7rem;
     border: 1px solid var(--usage-warn);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: transparent;
     color: var(--fg);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .blocked-btn:hover {
@@ -3044,7 +3050,7 @@
        recipe. */
     padding: 1rem var(--chat-inset) 2.5rem;
   }
-  .muted { color: var(--fg-muted); font-style: italic; font-size: 0.8rem; margin: 0.6rem; }
+  .muted { color: var(--fg-muted); font-style: italic; font-size: var(--text-2xs); margin: 0.6rem; }
   .empty-state {
     flex: 1 1 auto;
     display: flex;
@@ -3058,13 +3064,13 @@
   .empty-title {
     margin: 0;
     color: var(--fg);
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
   }
   .empty-hint {
     margin: 0;
     max-width: 44ch;
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     line-height: 1.5;
   }
   .truncated { text-align: center; margin: 0 0 1rem; }
@@ -3074,7 +3080,7 @@
     gap: 0.5rem;
     margin-bottom: 0.75rem;
   }
-  .err { color: var(--usage-crit); font-size: 0.8rem; }
+  .err { color: var(--usage-crit); font-size: var(--text-2xs); }
   .turn {
     padding: 0.2rem 0 1.1rem;
   }
@@ -3087,7 +3093,7 @@
     padding: 0.5rem 0.75rem 0.55rem;
     border: 1px solid var(--border);
     border-left: 3px solid var(--accent);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: color-mix(in srgb, var(--accent) 6%, var(--bg-pane));
   }
   .prompt-head {
@@ -3098,7 +3104,7 @@
     margin-bottom: 0.2rem;
   }
   .who {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 600;
     letter-spacing: 0.02em;
     text-transform: uppercase;
@@ -3107,13 +3113,13 @@
   time {
     flex: 0 0 auto;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     white-space: nowrap;
   }
   .prompt-text {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     line-height: 1.5;
     color: var(--fg);
   }
@@ -3136,7 +3142,7 @@
   .outgoing-files {
     margin-top: 0.25rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .receipt {
     display: flex;
@@ -3145,7 +3151,7 @@
     gap: 0.35rem;
     padding-left: 0.2rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .receipt[data-tone='ok'] {
     color: var(--usage-ok);
@@ -3184,11 +3190,11 @@
     background: none;
     border: none;
     color: var(--accent);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
   }
   .reply {
-    font-size: 0.875rem;
+    font-size: var(--text-xs);
     line-height: 1.6;
     color: var(--fg);
     overflow-wrap: break-word;
@@ -3208,21 +3214,21 @@
   }
   .duration {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .failed-count .pill {
     color: var(--usage-crit);
     background: color-mix(in srgb, var(--usage-crit) 14%, transparent);
-    border-radius: 9px;
+    border-radius: var(--radius-lg);
     padding: 0 6px;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .tools {
     margin: 0.3rem 0 0.5rem;
   }
   .tools summary {
     cursor: pointer;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     list-style: none;
     user-select: none;
@@ -3236,7 +3242,7 @@
     width: 0.7rem;
     margin-right: 0.4rem;
     text-align: center;
-    font-size: 1rem;
+    font-size: var(--text-md);
     line-height: 1;
     transition: transform var(--dur-fast) ease;
   }
@@ -3269,7 +3275,7 @@
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--accent) 8%, var(--bg-pane));
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .viewing .linkish,
   .switch-notice .linkish {
@@ -3281,7 +3287,7 @@
     border: none;
     background: none;
     color: var(--fg-muted);
-    font-size: 0.95rem;
+    font-size: var(--text-sm);
     line-height: 1;
     cursor: pointer;
   }
@@ -3296,7 +3302,7 @@
     gap: 0.45rem;
     margin: 0.2rem 0 0.9rem;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-align: center;
   }
   .event .detail {
@@ -3312,12 +3318,12 @@
     margin: 0.4rem 0 0.6rem;
     padding: 0.3rem 0.6rem;
     border: 1px dashed var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
   }
   .compact summary {
     cursor: pointer;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     user-select: none;
   }
   .command {
@@ -3325,18 +3331,18 @@
   }
   .command code {
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--accent);
   }
   .command-out {
     margin: 0.25rem 0 0;
     padding: 0.35rem 0.55rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.45;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
@@ -3360,7 +3366,7 @@
   .reminders,
   .harness {
     margin: 0.25rem 0 0.4rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .reminders > summary,
   .harness > summary {
@@ -3368,7 +3374,7 @@
     display: inline-block;
     padding: 0.05rem 0.4rem;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     color: var(--fg-muted);
     background: var(--bg-pane);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
@@ -3378,7 +3384,7 @@
     margin: 0.3rem 0 0;
     padding: 0.35rem 0.55rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
     color: var(--fg-muted);
     font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
@@ -3389,7 +3395,7 @@
   .interrupt {
     margin: 0.3rem 0 0.5rem;
     color: var(--usage-warn);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-style: italic;
   }
   .notification {
@@ -3399,8 +3405,8 @@
     margin: 0.3rem 0;
     padding: 0.2rem 0.5rem;
     border-left: 3px solid var(--border);
-    border-radius: 4px;
-    font-size: 0.82rem;
+    border-radius: var(--radius-sm);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     background: var(--bg-pane);
   }
@@ -3430,7 +3436,7 @@
     flex: 0 0 auto;
     margin-left: auto;
     padding-left: 0.4rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .scroll-actions {
     position: absolute;
@@ -3448,10 +3454,10 @@
   .latest {
     padding: 0.3rem 0.7rem;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--radius-pill);
     background: var(--bg-pane);
     color: var(--fg);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     cursor: pointer;
     box-shadow: 0 2px 8px color-mix(in srgb, var(--fg) 15%, transparent);
   }

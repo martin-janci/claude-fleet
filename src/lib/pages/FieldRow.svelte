@@ -485,7 +485,7 @@
     flex-wrap: wrap;
   }
   .label {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     font-weight: 500;
   }
   .reset,
@@ -496,7 +496,7 @@
     margin-left: 0;
   }
   .history-btn {
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .control {
     display: flex;
@@ -528,7 +528,7 @@
     display: flex;
     align-items: center;
     gap: 0.3rem;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .kv {
     display: flex;
@@ -552,7 +552,7 @@
     display: flex;
     gap: 0.5rem;
     align-items: center;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .readonly {
     font-family: var(--mono);
@@ -560,7 +560,7 @@
   }
   .help {
     margin: 0.2rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     line-height: 1.4;
   }
@@ -571,7 +571,7 @@
   }
   .err {
     margin: 0.2rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
   }
   .suggestion {
@@ -583,7 +583,7 @@
     padding: 0.3rem 0.5rem;
     border: 1px dashed var(--accent);
     border-radius: var(--radius-sm);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .suggestion .chip {
     color: var(--accent);
@@ -598,7 +598,7 @@
     color: var(--fg-muted);
   }
   .history {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin-top: 0.25rem;
   }

@@ -3,6 +3,7 @@
 </script>
 
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   // The session header and its one tab bar (Orbit Fleet
   // redesign step 3.5, Main board): the session's name, state and where it
   // runs, then Conversation · the agent tab · Files · Details. The agent tab
@@ -151,7 +152,7 @@
     </div>
   {/if}
   <div class="bar">
-    <div class="tab-strip" role="tablist" aria-label="Session" data-testid="session-tabs">
+    <div class="tab-strip" role="tablist" aria-label="Session" data-testid="session-tabs" use:tablistKeys>
       {#each tabs as t (t.id)}
         <button
           type="button"
@@ -241,7 +242,7 @@
     font-size: var(--text-xs);
     font-weight: 500;
     padding: 0 5px;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-sunk);
     color: var(--fg-2);
   }

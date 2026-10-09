@@ -131,14 +131,15 @@ fn unix_now() -> i64 {
 /// exit — it never starts another pass afterward. `biased` makes an
 /// already-cancelled token win over an already-elapsed tick, so cancelling
 /// before the loop ever runs means `on_tick` is never called at all. Shared
-/// by [`spawn_reconcile_tick`] and [`spawn_account_usage_tick`] so this
+/// by [`spawn_reconcile_tick`], [`spawn_account_usage_tick`] and the mission
+/// and routine loops (review r06 F7) so this
 /// behaviour — and its test coverage below — lives in one place.
 ///
 /// A pass that panics is caught and logged, and the loop goes on to the next
 /// tick: uncaught, the panic ended the spawned task, whose `JoinHandle` is
 /// read only at shutdown, so reconcile stopped for good while the process
 /// (and its readiness heartbeat) stayed up.
-async fn run_cancellable_tick<F, Fut>(
+pub(crate) async fn run_cancellable_tick<F, Fut>(
     mut ticker: tokio::time::Interval,
     token: CancellationToken,
     mut on_tick: F,
@@ -265,12 +266,9 @@ pub fn spawn_reconcile_tick(
                 // sessions' conflicting or red PRs recorded, and nudged at
                 // `nudge`. No rule, no work: one indexed read and out. Stops
                 // while `automation.paused` is on.
+                // Detached and single-flight: its `gh` calls must not hold the tick.
                 if service::loops::gate("pr_shepherd", store, Some(period)) {
-                    let n = service::pr_shepherd::run(store, ssh).await;
-                    if n > 0 {
-                        tracing::info!("reconcile tick: recorded {n} PR shepherd episode(s)");
-                    }
-                    service::loops::report("pr_shepherd", Ok::<_, String>(()), Some(period));
+                    service::pr_shepherd::spawn_run(store, ssh, period);
                 }
                 // Step 5.10: a prompt queued for a busy session goes in once the
                 // session is idle; the Stop hook delivers it first, this catches

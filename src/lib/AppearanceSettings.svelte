@@ -84,10 +84,10 @@
     padding: 6px 0;
   }
   .pref-text { flex: 1; min-width: 0; }
-  .lbl { font-size: 0.85rem; font-weight: 600; }
+  .lbl { font-size: var(--text-xs); font-weight: 600; }
   .hook-desc {
     margin: 2px 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .pref :global(.seg-group) { flex: 0 0 auto; min-width: 180px; }

@@ -367,15 +367,26 @@
         if (alias) onNewSession(alias);
         break;
       case 'e':
+        // Review r08: on the New table the legend's `e` and `/` open the
+        // list and detail first, then do what they do there.
         if (showTable) {
-          handled = false;
+          if (!alias) {
+            handled = false;
+            break;
+          }
+          const uuid = selectedHost?.account_uuid;
+          detailOpen = true;
+          void tick().then(() => startEdit('detail', uuid));
           break;
         }
         startEdit(inDetail ? 'detail' : 'list', selectedHost?.account_uuid);
         break;
       case '/':
-        if (inDetail || showTable) handled = false;
-        else filterEl?.focus();
+        if (inDetail) handled = false;
+        else if (showTable) {
+          detailOpen = true;
+          void tick().then(() => filterEl?.focus());
+        } else filterEl?.focus();
         break;
       case '?':
         legendOpen = !legendOpen;
@@ -582,15 +593,15 @@
     padding: 0.6rem 1rem;
     border-bottom: 1px solid var(--border);
   }
-  h1 { margin: 0; font-size: 1rem; }
+  h1 { margin: 0; font-size: var(--text-md); }
   .summary { font-variant-numeric: tabular-nums; }
-  .cadence { color: var(--fg-muted); font-size: 11px; }
+  .cadence { color: var(--fg-muted); font-size: var(--text-2xs); }
   .grow { flex: 1; }
   .head-btn {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.2rem 0.55rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--fg);
     cursor: pointer;
@@ -604,13 +615,13 @@
     padding: 0.45rem 1rem;
     border-bottom: 1px solid var(--border);
     background: color-mix(in srgb, var(--usage-warn) 12%, transparent);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .banner-text { flex: 1; }
   .legend {
     padding: 0.5rem 1rem;
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .legend dl {
     display: grid;
@@ -621,14 +632,14 @@
   }
   .legend dd { margin: 0; color: var(--fg-muted); }
   kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     white-space: pre;
   }
   .notice {
     margin: 0;
     padding: 0.3rem 1rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border-bottom: 1px solid var(--border);
   }
@@ -640,5 +651,5 @@
     min-height: 0;
   }
   .detail-pane { flex: 1; min-width: 0; min-height: 0; }
-  .empty { margin: 1rem; color: var(--fg-muted); font-size: 0.85rem; }
+  .empty { margin: 1rem; color: var(--fg-muted); font-size: var(--text-xs); }
 </style>

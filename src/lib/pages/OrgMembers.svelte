@@ -252,13 +252,13 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   th {
     text-align: left;
     font-weight: 500;
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     padding: 0.25rem 0.4rem;
     border-bottom: 1px solid var(--border);
   }
@@ -274,7 +274,7 @@
   .dim,
   .none {
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .acts {
     text-align: right;

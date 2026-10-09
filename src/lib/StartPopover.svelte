@@ -4,7 +4,7 @@
   // each conflict with its choice, before anything is made. Every change of
   // a choice re-reads the preview, so what Start does is what is shown.
   // Ticket text (the brief) renders as text.
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { get } from 'svelte/store';
   import { sessions, type SessionRow } from './sessions';
   import { selectSessionExplicitly } from './selection';
@@ -101,6 +101,11 @@
     clearTimeout(timer);
     timer = setTimeout(() => void readNow(), debounceMs);
   }
+  // Closed mid-debounce: no preview read for a popover that is gone.
+  onDestroy(() => {
+    clearTimeout(timer);
+    seq++;
+  });
   async function readNow() {
     const mine = ++seq;
     reading = true;
@@ -429,15 +434,15 @@
     border-radius: var(--radius-md);
     background: var(--bg);
     color: var(--fg);
-    box-shadow: 0 6px 24px color-mix(in srgb, #000 18%, transparent);
-    font-size: 12px;
+    box-shadow: var(--shadow-pop);
+    font-size: var(--text-xs);
   }
   .start-pop:focus-visible {
     outline: var(--ring-w) solid var(--ring);
   }
   .head {
     margin: 0;
-    font-size: 12.5px;
+    font-size: var(--text-xs);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -463,7 +468,7 @@
   }
   .hint {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .check {
     display: flex;
@@ -479,9 +484,9 @@
     margin: 0;
     padding: 6px 8px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     user-select: text;
@@ -509,7 +514,7 @@
     align-items: center;
     padding: 6px 8px;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .err {
     margin: 0;
@@ -525,6 +530,6 @@
   .why {
     margin-right: auto;
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
 </style>

@@ -326,6 +326,8 @@ fn jev_outcomes_follow_the_fallback_answer_and_followup() {
         (ins(None, Some("unsure"), "assist", None), "nothing_to_do"),
         (ins(None, Some("7"), "assist", Some("confirmed")), "ok"),
         (ins(None, Some("7"), "shadow", None), "ok"),
+        // A proposal of nothing: no person is asked about it.
+        (ins(None, Some("none"), "assist", None), "nothing_to_do"),
     ];
     // A run that never called the provider ran nothing: not listed.
     let not_asked = ins(Some("flag_off"), None, "off", None);
@@ -382,6 +384,8 @@ fn filters_narrow_and_paging_counts_the_whole() {
     assert_eq!(ids(&rows), ["orchestration:4", "orchestration:3", "task:3"]);
     let (rows, _) = list(&fx, f(|f| f.kind = Some("planner".into())));
     assert_eq!(ids(&rows), ["aux:1"]);
+    let (rows, _) = list(&fx, f(|f| f.kind = Some("summary".into())));
+    assert_eq!(ids(&rows), ["aux:2"]);
     let (rows, _) = list(&fx, f(|f| f.outcome = Some("failed".into())));
     assert_eq!(ids(&rows), ["task:2"]);
     let (rows, _) = list(&fx, f(|f| f.outcome = Some("needs_person".into())));
@@ -724,4 +728,30 @@ fn a_routines_fires_are_runs_linked_to_their_sessions() {
     };
     assert_eq!(list(&fx, scoped(vec![])).1, 0);
     assert_eq!(list(&fx, scoped(vec![routine])).1, 3);
+}
+
+#[test]
+fn every_aux_origin_is_a_kind_a_filter_finds() {
+    let fx = fixture();
+    fx.s.insert_aux_usage(&NewAuxUsage {
+        origin: crate::store::AUX_ORIGIN_TRIAGE,
+        host_alias: "a".into(),
+        model: "haiku".into(),
+        cost_micros: 5,
+        at: 700,
+        ..Default::default()
+    })
+    .unwrap();
+    let (rows, total) = list(
+        &fx,
+        RunsFilter {
+            kind: Some("triage".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(total, 1, "{rows:?}");
+    assert_eq!(rows[0].kind, "triage");
+    for origin in crate::store::AUX_ORIGINS {
+        assert!(RUN_KINDS.contains(origin), "{origin} is not a run kind");
+    }
 }

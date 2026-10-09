@@ -248,7 +248,7 @@
     min-width: 0;
     padding: 4px 8px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm, var(--radius-md));
     background: var(--bg-raise);
     color: var(--fg);
     font: inherit;

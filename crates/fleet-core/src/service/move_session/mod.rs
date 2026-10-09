@@ -1905,7 +1905,10 @@ fn snapshot(s: &Store, args: &MoveSessionArgs) -> Result<Snapshot, IpcError> {
         project_id,
         worktree_id,
         worktree_name: wt.name,
-        worktree_path: s.worktree_path(worktree_id)?,
+        // Only a `local` row's path is a local path: a remote row holds the
+        // path its host's EnterWorktree hook reported (migration 024), which
+        // a move to `local` must not reuse as its cwd (r18-M2).
+        worktree_path: (wt.host_alias == LOCAL).then(|| wt.path.clone()),
         owner,
         repo,
         project_base: s.project_base_path(project_id)?,
@@ -3998,6 +4001,44 @@ mod tests {
             confirm_timeout: Duration::from_millis(150),
             poll: Duration::from_millis(10),
         }
+    }
+
+    /// r18-M2: a move to `local` must not reuse a remote worktree row's
+    /// path (the source host's own path) as the local cwd.
+    #[test]
+    fn only_a_local_worktree_rows_path_is_a_local_path() {
+        let f = fixture();
+        let s = f.store.lock().unwrap();
+        let snap = snapshot(&s, &args(&f, false)).unwrap();
+        assert_eq!(
+            snap.worktree_path.as_deref(),
+            Some("/local/o/r/.claude/worktrees/feat")
+        );
+        let remote = s
+            .upsert_worktree_on(
+                "alpha",
+                f.project_id,
+                "feat",
+                "/home/alpha/p/o/r/.claude/worktrees/feat",
+                Some("feat"),
+            )
+            .unwrap();
+        let id = s
+            .upsert_session(
+                "dev-o-r--feat",
+                "alpha",
+                Some(f.project_id),
+                Some(remote),
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        assert_eq!(id, f.source_id);
+        let snap = snapshot(&s, &args(&f, false)).unwrap();
+        assert_eq!(snap.worktree_id, remote);
+        assert_eq!(snap.worktree_path, None, "the layout path is used instead");
     }
 
     fn args(f: &Fixture, keep_source: bool) -> MoveSessionArgs {

@@ -293,11 +293,20 @@ export interface KeyEventLike {
   /** The physical key. On macOS Option rewrites `key` (⌥B types `∫`), so an
    *  Alt chord on a letter also matches by `code`. */
   code?: string;
+  /** AltGr reports as Ctrl+Alt on Windows; the browser names it here. */
+  getModifierState?: (key: string) => boolean;
 }
 
-export function bindingMatches(b: Binding, e: KeyEventLike): boolean {
+/**
+ * Whether `e` presses `b`. The by-`code` match is for macOS Option only:
+ * on Windows AltGr arrives as Ctrl+Alt with `key` the typed character
+ * (AltGr+B is `{` on a Slovak keyboard), and that text must never fire a
+ * Ctrl+Alt chord (r18-W1).
+ */
+export function bindingMatches(b: Binding, e: KeyEventLike, isMac = true): boolean {
+  if (e.getModifierState?.('AltGraph')) return false;
   const letterByCode =
-    e.altKey && /^[a-z]$/i.test(b.key) && e.code === `Key${b.key.toUpperCase()}`;
+    isMac && e.altKey && /^[a-z]$/i.test(b.key) && e.code === `Key${b.key.toUpperCase()}`;
   if (b.key.toLowerCase() !== e.key.toLowerCase() && !letterByCode) return false;
   const has = (m: Mod) => b.mods.includes(m);
   if (has('meta') !== e.metaKey || has('ctrl') !== e.ctrlKey || has('alt') !== e.altKey) return false;
@@ -312,7 +321,7 @@ export function bindingsFor(s: Shortcut, isMac: boolean): readonly Binding[] {
 export function matchShortcut(scope: Scope, e: KeyEventLike, isMac: boolean): string | null {
   for (const s of SHORTCUTS) {
     if (s.scope !== scope || s.status !== 'live') continue;
-    if (bindingsFor(s, isMac).some((b) => bindingMatches(b, e))) return s.id;
+    if (bindingsFor(s, isMac).some((b) => bindingMatches(b, e, isMac))) return s.id;
   }
   return null;
 }

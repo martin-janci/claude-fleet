@@ -194,20 +194,20 @@ impl Store {
     }
 
     /// Every pull request, the most recently changed first. `states` narrows
-    /// to those states (OPEN, CLOSED, MERGED); empty is all of them.
+    /// to those states (OPEN, CLOSED, MERGED); empty is all of them. The
+    /// filter is SQL, so one state walks `idx_pull_requests_state_updated`
+    /// instead of reading every PR ever seen.
     pub fn list_pull_requests(&self, states: &[&str]) -> Result<Vec<PullRequestRow>> {
+        let filter = if states.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE state IN ({}) ", vec!["?"; states.len()].join(", "))
+        };
         let mut stmt = self.conn.prepare_cached(&format!(
-            "SELECT {COLS} FROM pull_requests ORDER BY updated_at DESC, id DESC"
+            "SELECT {COLS} FROM pull_requests {filter}ORDER BY updated_at DESC, id DESC"
         ))?;
-        let rows = stmt.query_map([], row)?;
-        let mut out = Vec::new();
-        for r in rows {
-            let r = r?;
-            if states.is_empty() || states.contains(&r.state.as_str()) {
-                out.push(r);
-            }
-        }
-        Ok(out)
+        let rows = stmt.query_map(rusqlite::params_from_iter(states), row)?;
+        rows.collect()
     }
 }
 
@@ -336,6 +336,31 @@ mod tests {
         assert_eq!(
             all.iter().map(|r| r.number).collect::<Vec<_>>(),
             vec![Some(43), Some(42)]
+        );
+        let both = s.list_pull_requests(&["OPEN", "MERGED"]).unwrap();
+        assert_eq!(both, all);
+        assert!(s.list_pull_requests(&["CLOSED"]).unwrap().is_empty());
+    }
+
+    /// One state reads its rows through the (state, updated_at) index.
+    #[test]
+    fn one_state_walks_the_state_index() {
+        let s = Store::open_in_memory().unwrap();
+        let plan: Vec<String> = s
+            .conn
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT {COLS} FROM pull_requests WHERE state IN (?) \
+                 ORDER BY updated_at DESC, id DESC"
+            ))
+            .unwrap()
+            .query_map(["OPEN"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert!(
+            plan.iter()
+                .any(|d| d.contains("idx_pull_requests_state_updated")),
+            "{plan:?}"
         );
     }
 }

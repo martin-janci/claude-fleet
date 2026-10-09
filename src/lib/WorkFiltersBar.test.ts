@@ -131,6 +131,14 @@ describe('WorkFiltersBar', () => {
     expect(input.value).toBe('log');
   });
 
+  it('a search typed but not yet applied when the bar goes is applied, not lost (review r07)', async () => {
+    const { unmount } = render(WorkFiltersBar, { orgs, trackers, searchDebounceMs: 10_000 });
+    await flush();
+    await fireEvent.input(screen.getByTestId('work-search'), { target: { value: 'login' } });
+    unmount();
+    expect(get(workViewFilters)).toEqual({ query: 'login' });
+  });
+
   it('applies a view; Update is offered once the filters differ, with the view’s version', async () => {
     handlers.save_work_view = (a) => ({ ...(a.view as object), version: 2 });
     render(WorkFiltersBar, { orgs, trackers });

@@ -342,6 +342,24 @@ async fn apply_step_inner(
                 let s = lock(&deps.store)?;
                 let a = autonomy(&s, m, now_unix())?;
                 if *actor == Actor::Loop {
+                    // The pass planned its steps once and each start is SSH:
+                    // Pause all, a paused mission, the loop switched off or a
+                    // lowered level stops the rest of the pass, not the next
+                    // one (review r06 F5).
+                    let current = s.get_mission(m.id)?;
+                    let live = match &current {
+                        Some(cur) => autonomy(&s, cur, now_unix())?.effective >= AUTO_LEVEL,
+                        None => false,
+                    };
+                    if crate::service::loops::paused(&s)
+                        || current.is_none_or(|cur| cur.state != "active")
+                        || !live
+                    {
+                        return Err(IpcError::new(
+                            codes::E_INVALID_STATE,
+                            "the mission loop stood down during its pass",
+                        ));
+                    }
                     if let Some(budget) = a.grant.as_ref().and_then(|g| g.budget_micros) {
                         if s.mission_cost_micros(m.id)? >= budget {
                             return Err(IpcError::new(
@@ -1325,10 +1343,11 @@ fn planner_wanted(
 const RUN_STEPS: &[&str] = &["run", "retry", "review", "test", "integrate"];
 
 /// The account a loop run of `step` would bill, when it is at or past
-/// `accounts.pause_at` (redesign 8.7): on the grant's first host, else the
-/// host the project last ran on (where the start would land), under the
-/// grant's login. `None` when the run's host cannot be told yet: the start
-/// then decides, as before.
+/// `accounts.pause_at` (redesign 8.7): on the grant's first host, else where
+/// the start would land (`tickets::seen_place` / `seen_host`, the start's
+/// own choice: a start rule, the key's history, the project's last host),
+/// under the grant's login. `None` when the run's host cannot be told yet:
+/// the start then decides, as before.
 fn run_over_limit(
     s: &Store,
     m: &MissionRow,
@@ -1344,10 +1363,19 @@ fn run_over_limit(
     };
     let host = match start.host_alias {
         Some(h) => Some(h),
-        None => match start.project_id {
-            Some(p) => s.last_host_for_project(p)?,
-            None => None,
-        },
+        None => {
+            // A work item with no key cannot be started: nothing to hold.
+            let Some(key) = s.get_work_item(item_id)?.and_then(|i| i.key) else {
+                return Ok(None);
+            };
+            let item_org = s.item_org(item_id)?;
+            let (_, seen, _) =
+                crate::service::trackers::tickets::seen_place(s, &key, item_org, start.project_id)?;
+            match start.project_id.or(seen.as_ref().map(|p| p.0)) {
+                Some(p) => crate::service::trackers::tickets::seen_host(s, seen, p)?,
+                None => None,
+            }
+        }
     };
     let Some(host) = host else {
         return Ok(None);
@@ -1543,12 +1571,9 @@ pub fn spawn_mission_tick(
     crate::rt::spawn(async move {
         let mut every = tokio::time::interval(TICK_EVERY);
         every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = token.cancelled() => return,
-                _ = every.tick() => tick_once(&deps, now_unix()).await,
-            }
-        }
+        // A pass that panics is logged and the next tick runs (review r06 F7).
+        crate::service::tick::run_cancellable_tick(every, token, || tick_once(&deps, now_unix()))
+            .await;
     })
 }
 

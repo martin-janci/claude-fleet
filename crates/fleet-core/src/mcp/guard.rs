@@ -264,6 +264,15 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Contract 14: which login on a host has headroom, from the same answers
+    // `account_usage` serves. Same reach as it and `list_hosts`.
+    ToolPolicy {
+        name: "check_account_headroom",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // The composer's shared chip row. One tool both reads and replaces the
     // list, so it is classified as a write and a `readonly` client cannot
     // call it at all — not even to read. That is deliberate: a readonly
@@ -2241,12 +2250,15 @@ const REDACT_KEYS: &[&str] = &[
 /// a one-time credential and must not land in the timeline, and `value` is
 /// `set_secret`'s secret value — not even its length may be persisted (a
 /// length still leaks information about a secret). `secret` is `work_admin`'s
-/// tracker credential, for the same reason.
-const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret"];
+/// tracker credential, for the same reason. `code` is `link_peer`'s one-time
+/// pairing code, still valid when the link fails (review r04 S3).
+const SKIP_KEYS: &[&str] = &["confirm_nonce", "value", "secret", "code"];
 /// Argument keys whose value is an object of person-typed answers (`ask`'s
 /// `values` may carry a form's secret fields): only the field count is kept,
-/// as `<N fields>`, never a name or a value.
-const COUNT_KEYS: &[&str] = &["values"];
+/// as `<N fields>`, never a name or a value. `args` is a nested payload
+/// (`catalog_admin`'s `set_secret` carries its value there, review r04 S2),
+/// which the top-level keys above cannot see into.
+const COUNT_KEYS: &[&str] = &["values", "args"];
 const SUMMARY_MAX_CHARS: usize = 240;
 
 /// Replace every character that could end a line downstream — see

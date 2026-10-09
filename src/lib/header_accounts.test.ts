@@ -21,6 +21,16 @@ describe('header account pills (3.17)', () => {
     expect(a.meta).toBe('weekly limit · Thu 09:00');
   });
 
+  it('is not stopped at 99.6% used, though it rounds to 0% left', () => {
+    const snap = snapshot(WORK.uuid, {
+      usage: { five_hour: { utilization: 30, resets_at: null }, seven_day: { utilization: 99.6, resets_at: RESET_WEEK }, seven_day_opus: null, seven_day_sonnet: null },
+    });
+    const a = headerAccount(WORK, snap, NOW, 'en-GB', 'UTC');
+    expect(a.limited).toBe(false);
+    expect(a.health).toBe('caution');
+    expect(a.meta).toBe('5h 70% · wk 0%');
+  });
+
   it('shows no number for a reading too old to hold', () => {
     const a = headerAccount(GMAIL, snapshot(GMAIL.uuid, { fetched_at: NOW - 5 * HOUR }), NOW);
     expect(a.meta).toBe('');

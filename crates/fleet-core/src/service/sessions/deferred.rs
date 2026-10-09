@@ -249,12 +249,12 @@ pub fn spawn_deliver_all_due(store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>) {
     let store = Arc::clone(store);
     let ssh = Arc::clone(ssh);
     crate::rt::spawn(async move {
+        let _flight = crate::rt::ClearOnDrop::of_static(&RUNNING);
         for id in ids {
             if let Err(e) = deliver_due(&store, &ssh, id).await {
                 tracing::debug!(session_id = id, error = %e.message, "[deferred] delivery failed");
             }
         }
-        RUNNING.store(false, Ordering::Release);
     });
 }
 

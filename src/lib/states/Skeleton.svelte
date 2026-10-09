@@ -5,6 +5,7 @@
   // ("mercury is slow (2.4 s)").
   import { onMount } from 'svelte';
   import { LOADING_DELAY_MS } from './states';
+  import { effectiveMotion } from '../motion';
 
   let {
     rows = 3,
@@ -25,7 +26,7 @@
 </script>
 
 {#if shown}
-  <div class="skeleton" role="status" aria-busy="true" aria-label={label} data-testid="skeleton">
+  <div class="skeleton" class:still={$effectiveMotion !== 'full'} role="status" aria-busy="true" aria-label={label} data-testid="skeleton">
     {#each { length: rows } as _, i (i)}
       <div class="bar" style:width="{WIDTHS[i % WIDTHS.length]}%"></div>
     {/each}
@@ -42,19 +43,19 @@
   }
   .bar {
     height: 0.7rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg-hover, var(--border));
     animation: pulse 1.6s ease-in-out infinite;
   }
   .slow {
     margin: 0.2rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   @keyframes pulse {
     50% { opacity: 0.55; }
   }
-  @media (prefers-reduced-motion: reduce) {
-    .bar { animation: none; }
-  }
+  /* The app's Motion setting (Reduced or Off), which already folds in the
+     OS preference (motion.ts): the bars rest instead of pulsing. */
+  .still .bar { animation: none; }
 </style>

@@ -145,7 +145,9 @@ case "$GOT" in
   *) echo "upgrade: running '$GOT', expected 'fleet-hub $NEW' (the pin did not take?)" >&2; exit 1 ;;
 esac
 # 9. Over the network, with a READONLY client token when one is kept beside
-#    the compose file (`fleet-hub pair --mode readonly upgrade-check`) —
+#    the compose file (mint a code with `fleet-hub pair --mode readonly
+#    --name upgrade-check`, redeem it with `POST /pair {"code":…}` and
+#    keep the answer's `token`) —
 #    never the master token. Absent file: skipped, not failed. The header
 #    reaches curl on stdin (`-H @-`, curl >= 7.55), never on its command
 #    line where `ps` would show the token; printf is a builtin.

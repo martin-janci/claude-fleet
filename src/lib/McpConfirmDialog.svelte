@@ -61,16 +61,16 @@
 
 <style>
   .body { display: flex; flex-direction: column; gap: 0.6rem; }
-  h3 { margin: 0; font-size: 1rem; }
-  .who { margin: 0; font-size: 0.85rem; }
-  .muted { margin: 0; font-size: 11px; color: var(--fg-muted); }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h3 { margin: 0; font-size: var(--text-md); }
+  .who { margin: 0; font-size: var(--text-xs); }
+  .muted { margin: 0; font-size: var(--text-2xs); color: var(--fg-muted); }
+  code { font-family: var(--font-mono); }
   .summary {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     background: var(--bg-sunk);
     padding: 0.4rem 0.5rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     white-space: pre-wrap;
     word-break: break-all;
   }
@@ -79,10 +79,10 @@
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.3rem 0.8rem;
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .actions button:disabled { opacity: 0.5; cursor: default; }
   .approve:hover:not(:disabled) { border-color: var(--accent); }

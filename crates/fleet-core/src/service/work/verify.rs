@@ -11,6 +11,9 @@
 //! | `review`          | the latest `review` run finished with outcome `done`   |
 //! | `test:<command>`  | the latest `test` run finished `done` and reported     |
 //! |                   | running the command                                    |
+//!
+//! A review or test run started before the item's latest `implement` run
+//! judged older work, so it leaves its line pending until a fresh one runs.
 //! | `person`, or any  | a person checked it                                    |
 //! | other text        |                                                        |
 //!
@@ -153,6 +156,13 @@ pub fn check_line(
         c.at = Some(r.at);
         return Ok(c);
     }
+    // A review or test run older than the latest implementation judged
+    // work that has since changed.
+    let latest_work = match cond {
+        Cond::Review | Cond::Test(_) => s.latest_item_task(item.id, "implement")?.map(|t| t.id),
+        _ => None,
+    };
+    let stale = |t: &TaskRow| latest_work.is_some_and(|w| t.id < w);
     Ok(match cond {
         Cond::Person => check(line, kind, "pending", "waits for a person to check it"),
         Cond::Ci(name) => ci_check(s, item.id, line, name.as_deref(), now)?,
@@ -160,6 +170,16 @@ pub fn check_line(
             let Some(t) = s.latest_item_task(item.id, "review")? else {
                 return Ok(check(line, kind, "pending", "no review run yet"));
             };
+            if stale(&t) {
+                // No `by`: the loop reads a pending line without one as
+                // "start a run".
+                return Ok(check(
+                    line,
+                    kind,
+                    "pending",
+                    "the work changed since the review",
+                ));
+            }
             let c = match (t.state.as_str(), t.report.as_ref()) {
                 ("queued" | "running", _) => check(line, kind, "pending", "the review is running"),
                 ("done", Some(r)) if r.outcome == "done" => check(
@@ -187,6 +207,16 @@ pub fn check_line(
             let Some(t) = s.latest_item_task(item.id, "test")? else {
                 return Ok(check(line, kind, "pending", "no test run yet"));
             };
+            if stale(&t) {
+                // No `by`: the loop reads a pending line without one as
+                // "start a run".
+                return Ok(check(
+                    line,
+                    kind,
+                    "pending",
+                    "the work changed since the test run",
+                ));
+            }
             let c = match (t.state.as_str(), t.report.as_ref()) {
                 ("queued" | "running", _) => {
                     check(line, kind, "pending", "the test run is running")

@@ -251,6 +251,28 @@ describe('WorkTaskDetail', () => {
     expect(get(selectedSession)?.id).toBe(12);
   });
 
+  it('a start preview that answers after another task opened is dropped (review r07)', async () => {
+    let release: (v: unknown) => void = () => {};
+    handlers.preview_start_work = () => new Promise((r) => (release = r));
+    handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
+    const { rerender } = render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(within(bar()).getByTestId('work-button-primary'));
+    await rerender({ taskId: 'item:77' });
+    await flush();
+    release({
+      key: 'ABC-12', title: 'Login', item_id: 12, missing: null,
+      plan: { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'abc-12-login', name: 'ABC-12 Login' },
+      projects: [{ id: 3, owner: 'acme', repo: 'api' }],
+      hosts: [{ alias: 'mefistos', reachable: true }],
+      conflicts: [{ kind: 'done', message: 'This task is done.' }],
+      brief: null, checkout: { exists: false },
+    });
+    await flush();
+    expect(screen.queryByTestId('start-popover')).toBeNull();
+    expect(calls('start_work')).toHaveLength(0);
+  });
+
   it('Start new opens the start popover when something must be chosen, and sends the choice', async () => {
     handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
     const preview = (over: Record<string, unknown> = {}) => ({

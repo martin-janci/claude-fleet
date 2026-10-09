@@ -17,6 +17,7 @@ import { accountsPageRequest } from './account_pill';
 import { destination } from './destination';
 import { hosts } from './hosts';
 import { sessions, type SessionRow } from './sessions';
+import { uiDensity } from './prefs';
 import { recentSessions } from './quick_switcher';
 import { clearSelection } from './selection';
 import { hubStatus, STANDALONE } from './hub';
@@ -66,6 +67,35 @@ describe('AccountPill', () => {
     expect(get(accountsPageRequest)).toBe(ADMIN.uuid);
   });
 
+  it('drops LIMIT once its window resets, without a new reading', async () => {
+    vi.useFakeTimers();
+    try {
+      const reset = NOW + 60;
+      accountUsage.set({
+        [ADMIN.uuid]: snapshot(ADMIN.uuid, {
+          usage: {
+            five_hour: { utilization: 100, resets_at: reset },
+            seven_day: { utilization: 10, resets_at: NOW + 3 * 86400 },
+            seven_day_opus: null,
+            seven_day_sonnet: null,
+          },
+          fetched_at: NOW - 60,
+        }),
+      });
+      let now = NOW;
+      render(AccountPill, { uuid: ADMIN.uuid, clock: () => now });
+      const pill = screen.getByTestId('account-pill');
+      expect(pill.getAttribute('data-level')).toBe('limit');
+      now = reset + 30;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await tick();
+      expect(pill.getAttribute('data-level')).not.toBe('limit');
+      expect(pill.textContent).not.toContain('LIMIT');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('is amber at 85% used', () => {
     render(AccountPill, { uuid: WORK.uuid, clock });
     const pill = screen.getByTestId('account-pill');
@@ -110,6 +140,15 @@ describe('the session row', () => {
     await fireEvent.click(pill);
     expect(props.onSelectSession).not.toHaveBeenCalled();
     expect(get(destination)).toBe('accounts');
+  });
+
+  it('a limit-paused row says why and offers Switch and Wait in Comfortable too', () => {
+    uiDensity.set('comfortable');
+    render(SessionRowItem, { props: rowProps({ ...row, claude_status: 'idle' }) });
+    expect(screen.getByTestId('sess-row').getAttribute('data-bucket')).toBe('account_limit');
+    expect(screen.getByTestId('row-blocked-reason').textContent).toContain('Paused · weekly limit on');
+    expect(screen.getByTestId('limit-switch')).toBeTruthy();
+    expect(screen.getByTestId('limit-wait')).toBeTruthy();
   });
 
   it('a row with no account has none', () => {

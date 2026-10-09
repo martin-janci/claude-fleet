@@ -10,7 +10,6 @@
   // has been gone SIGNAL_LOST_AFTER_MS. A strip above the layout, never an
   // overlay: the list under it stays usable. The wire-contract states keep
   // their sentence and take no loader; nothing is being waited for there.
-  import { onDestroy } from 'svelte';
   import {
     hubConnection,
     connectionBanner,
@@ -40,8 +39,14 @@
       pressed = false;
     }
   });
-  const timer = setInterval(() => (now = Date.now()), 1000);
-  onDestroy(() => clearInterval(timer));
+  // Ticks only while there is a countdown or a lost link to time: a
+  // connected hub keeps this banner mounted with nothing to count (review r16).
+  $effect(() => {
+    if (!retrying && lost === null) return;
+    now = Date.now();
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
   const left = $derived(Math.max(0, Math.ceil((deadline - now) / 1000)));
   // The ticking `now` above turns the well into Signal lost on time.
   const signalLost = $derived(lost !== null && $lostSince !== null && now - $lostSince >= SIGNAL_LOST_AFTER_MS);
@@ -84,7 +89,7 @@
     padding: 0.35rem 0.8rem;
     background: var(--waiting-faint);
     color: var(--fg);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     border-bottom: 1px solid var(--waiting-line);
   }
   .text {
@@ -107,7 +112,7 @@
     background: transparent;
     color: inherit;
     border: 1px solid currentColor;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0.1rem 0.5rem;
     font: inherit;
     cursor: pointer;

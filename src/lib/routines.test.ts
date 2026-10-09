@@ -14,6 +14,7 @@ import {
   morningPrSweep,
   pauseRoutine,
   retryRoutine,
+  routineAccountLabel,
   routineStateWords,
   routinesRequest,
   runSourceHint,
@@ -78,6 +79,14 @@ describe('words', () => {
     expect(runSourceHint({ outcome_source: 'jev' })).toBeUndefined();
     expect(routineStateWords({ enabled: false, paused_reason: 'over its budget' })).toBe('Paused by fleet');
     expect(routineStateWords({ enabled: false })).toBe('Paused');
+  });
+
+  it('names the account a routine runs as from the flat LoginAccount (review r05 F4)', () => {
+    const a = { host_alias: 'mac', account_uuid: 'abcdef1234567', email: 'me@x.com', over: false };
+    expect(routineAccountLabel({ ...a, profile: 'work' })).toBe('work');
+    expect(routineAccountLabel({ ...a, profile: null }, { nickname: 'Silvester', email: null })).toBe('Silvester');
+    expect(routineAccountLabel({ ...a, profile: null })).toBe('me@x.com');
+    expect(routineAccountLabel({ ...a, email: undefined })).toBe('abcdef12');
   });
 
   it('reads dollars a person types, and nothing as no limit', () => {

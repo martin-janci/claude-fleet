@@ -464,6 +464,9 @@
     leave('board');
     leave('accounts');
     leave('control');
+    // Automation is a fleet page like Control: an opened session replaces
+    // it (review r07).
+    leave('automation');
   });
   // "View sessions" (host_actions.ts, called from anywhere: the `s` key,
   // HostDetail's header button) can't reach `closeHosts` directly — it asks
@@ -749,8 +752,11 @@
   const detailsMain = $derived(
     !wideMode && !boardShown && ($destination === 'details' || taskShowing || !$selectedSession),
   );
-  const inspectorRoom = $derived(!!$selectedSession && !wideMode && !boardShown && !detailsMain);
-  const inspectorShown = $derived(inspectorRoom && inspectorOpen);
+  // Review r08: a board card's task opens in the inspector column beside the
+  // board, whatever the inspector pref.
+  const boardTask = $derived(boardShown && taskShowing);
+  const inspectorRoom = $derived(boardTask || (!!$selectedSession && !wideMode && !boardShown && !detailsMain));
+  const inspectorShown = $derived(boardTask || (inspectorRoom && inspectorOpen));
   // Step 5.3: the pane's shells, for the Terminals tab. It is current while
   // the pane shows one of them (alone or split beside the agent).
   const selTerminals = $derived(
@@ -840,6 +846,12 @@
   // back, and the mounted Sidebar then consumes the request.
   $effect(() => {
     if ($addProjectRequest) sidebarCollapsed = false;
+  });
+
+  // Review r08: Settings (and Get started) are mounted by the Sidebar too, and
+  // the rail's Settings and ⌘, must open them while it is collapsed.
+  $effect(() => {
+    if ($settingsOpen) sidebarCollapsed = false;
   });
 
   // "Insert into composer" (work graph M9.2) shows where the text went: the
@@ -1272,7 +1284,7 @@
     padding: 0 0.75rem;
     background: var(--bg-pane);
     border-top: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     display: flex;
     align-items: center;
@@ -1281,11 +1293,11 @@
   .footer-end {
     margin-left: auto;
   }
-  .status .err { color: #e64a4a; }
+  .status .err { color: var(--danger); }
   .hub-badge {
     background: transparent;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     padding: 0 0.4rem;
     font: inherit;
     color: var(--fg-muted);
@@ -1310,7 +1322,7 @@
     border-right: 1px solid var(--border);
     color: var(--fg-muted);
     cursor: pointer;
-    font-size: 1rem;
+    font-size: var(--text-md);
     line-height: 1;
     padding: 0;
     writing-mode: vertical-rl;
