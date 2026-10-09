@@ -213,7 +213,9 @@ worktree (a new one with its branch and base, or one the opener offers),
 then the label and, for Claude Code, model, effort and login profile (a
 shell asks what to run instead). Its run (`new_session_wizard.ts`) makes
 the same `new_session` call the dialog makes, so the answered card carries
-the Pulse while the agent comes up. The dialog keeps what a form cannot
+the Pulse while the agent comes up. In the New layout, Get started's
+*Create first session* opens it as a dialog and selects the session it
+started; ⌘N keeps its dialog, which holds what a form cannot
 hold: the duplicate check, the account headroom ask, a ticket start and
 Cancel creation.
 

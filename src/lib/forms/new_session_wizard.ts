@@ -5,7 +5,7 @@
 // the account headroom ask, a ticket start and Cancel creation.
 import { finalizeBranchSlug } from '../branch-slug';
 import type { ProjectRow, WorktreeRow } from '../projects';
-import { newSessionAbortable, type NewSessionArgs } from '../sessions';
+import { newSessionAbortable, type NewSessionArgs, type SessionRow } from '../sessions';
 import type { ChatFormOutcome } from './ChatForm.svelte';
 import type { FieldProblem, Values } from './forms';
 import { WIZARDS, withChoices, type Wizard } from './wizards';
@@ -77,10 +77,18 @@ export function newSessionArgs(v: Values): { args: NewSessionArgs } | { problems
 /** Start it. The card's answered line names the session; the Pulse beside
  *  it says it is starting, and the session's own view follows the agent. */
 export async function runNewSession(v: Values): Promise<ChatFormOutcome> {
+  const r = await startNewSession(v);
+  if (!r.ok) return r;
+  const name = r.row.friendly_name ?? r.row.tmux_name;
+  return { ok: true, summary: `${name} on ${r.row.host_alias}`, starting: `Starting ${name} on ${r.row.host_alias}` };
+}
+
+/** The same start for a dialog, which goes on to the row it made. */
+export async function startNewSession(
+  v: Values,
+): Promise<{ ok: true; row: SessionRow } | { ok: false; problems?: FieldProblem[]; error?: string }> {
   const a = newSessionArgs(v);
   if ('problems' in a) return { ok: false, problems: a.problems };
   const r = await newSessionAbortable(a.args);
-  if (!r.ok) return { ok: false, error: r.error.message };
-  const name = r.value.friendly_name ?? r.value.tmux_name;
-  return { ok: true, summary: `${name} on ${r.value.host_alias}`, starting: `Starting ${name} on ${r.value.host_alias}` };
+  return r.ok ? { ok: true, row: r.value } : { ok: false, error: r.error.message };
 }
