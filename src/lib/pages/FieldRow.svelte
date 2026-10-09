@@ -72,6 +72,9 @@
   const LABELLED_INPUTS = new Set<Widget>(['switch', 'number', 'duration', 'select', 'text', 'textarea']);
 
   const readonly = $derived(forceReadonly || d.owned_by !== undefined);
+  // UX audit S2: a row is name and help on the left, the control on the
+  // right (Settings board); these widgets need the row's width instead.
+  const WIDE = new Set<Widget>(['text', 'textarea', 'key_value_table', 'multiselect']);
   const w = $derived<Widget>(readonly ? 'readonly' : (widget ?? DEFAULT_WIDGET[d.kind.type]));
   const modified = $derived(value !== d.default);
   const id = $derived(`setting-${d.key.replace(/[^a-z0-9]+/gi, '-')}`);
@@ -199,6 +202,7 @@
 
 <div
   class="field"
+  class:wide={WIDE.has(w)}
   class:modified
   class:highlighted
   data-testid={`setting-row-${d.key}`}
@@ -468,9 +472,23 @@
 
 <style>
   .field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: var(--space-4);
+    align-items: center;
     border-left: 2px solid transparent;
-    padding: 0.35rem 0 0.35rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    padding: var(--space-3) 0 var(--space-3) 0.6rem;
     margin-left: -0.6rem;
+  }
+  .field > * { grid-column: 1 / -1; }
+  .field:not(.wide) > .head { grid-column: 1; grid-row: 1; }
+  .field:not(.wide) > .help { grid-column: 1; grid-row: 2; }
+  .field:not(.wide) > .control {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    justify-self: end;
+    margin-top: 0;
   }
   .field.modified {
     border-left-color: var(--accent);
@@ -485,7 +503,7 @@
     flex-wrap: wrap;
   }
   .label {
-    font-size: var(--text-xs);
+    font-size: var(--text-sm);
     font-weight: 500;
   }
   .reset,
@@ -505,6 +523,18 @@
     margin-top: 0.25rem;
     flex-wrap: wrap;
   }
+  .control input:not([type='checkbox']):not([type='radio']),
+  .control select,
+  .control textarea {
+    min-height: var(--control-h);
+    padding: 0 var(--control-px);
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-sm);
+    background: var(--control-bg);
+    color: var(--control-fg);
+    font-size: var(--control-font);
+  }
+  .control textarea { padding: 4px var(--control-px); }
   .num {
     width: 7rem;
   }
@@ -559,7 +589,7 @@
     font-size: var(--control-font);
   }
   .help {
-    margin: 0.2rem 0 0;
+    margin: 0.15rem 0 0;
     font-size: var(--text-2xs);
     color: var(--fg-muted);
     line-height: 1.4;
