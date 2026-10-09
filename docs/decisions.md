@@ -844,7 +844,7 @@ redesign's transition plan.
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
-<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
+<!-- Generated from service/settings.rs: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `decide.jev.enabled` | `false` | on / off | The kill switch for TypeSafe's decision model. Off, nothing is ever sent. On, data goes only for organisations that opted in, redacted. Experimental. Asks to confirm. |

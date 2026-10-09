@@ -3255,11 +3255,11 @@ normally or run the same in both modes, which this table leaves out because
 they tell an operator nothing they came to docs to learn. Regenerate with:
 
 ```text
-REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen
+REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen
 ```
 
 <!-- BEGIN GENERATED: hub-client verdicts -->
-<!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo test -p claude-fleet --lib verdict_gen -->
+<!-- Regenerate with: REGEN_HUB_VERDICTS=1 cargo fleet-test -- verdict_gen -->
 
 Every command below refuses in hub client mode; the full table, with the commands that route to a hub tool, is `src-tauri/src/backend/verdicts.rs`.
 

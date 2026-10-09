@@ -1,5 +1,5 @@
 <!-- GENERATED FILE — do not edit by hand.
-     Regenerate with: REGEN_SETTINGS_DOCS=1 cargo test -p fleet-core settings_docs_are_current -->
+     Regenerate with: REGEN_SETTINGS_DOCS=1 cargo fleet-test -- settings_docs_are_current -->
 
 # Settings reference
 
