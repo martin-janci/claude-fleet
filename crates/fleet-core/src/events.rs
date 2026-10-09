@@ -871,7 +871,7 @@ impl AttentionInputs {
 /// at COMPILE time: the match there is exhaustive, so a new variant does not
 /// build until it has an arm, and the arm's literal is const-checked against
 /// this list and [`EVENT_KINDS`].
-pub const EVENT_NAMES: [&str; 32] = [
+pub const EVENT_NAMES: [&str; 33] = [
     "session:created",
     "session:updated",
     "session:killed",
