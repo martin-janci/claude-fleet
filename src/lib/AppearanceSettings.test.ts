@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
 import AppearanceSettings from './AppearanceSettings.svelte';
 import { uiDensity, uiLayout } from './prefs';
@@ -14,13 +14,32 @@ afterEach(() => {
 });
 
 describe('AppearanceSettings', () => {
-  it('starts on Classic and persists a switch to New', async () => {
+  it('starts on New (step 7.6) and persists a switch back to Classic', async () => {
+    uiLayout.set('new');
     render(AppearanceSettings);
-    expect(screen.getByTestId('appearance-layout-classic').getAttribute('aria-pressed')).toBe('true');
-    await fireEvent.click(screen.getByTestId('appearance-layout-new'));
-    expect(get(uiLayout)).toBe('new');
-    expect(localStorage.getItem('cf:pref:ui.layout')).toBe('"new"');
+    const buttons = screen.getAllByRole('button').map((b) => b.getAttribute('data-testid'));
+    expect(buttons.indexOf('appearance-layout-new')).toBeLessThan(buttons.indexOf('appearance-layout-classic'));
     expect(screen.getByTestId('appearance-layout-new').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('appearance-layout-classic'));
+    expect(get(uiLayout)).toBe('classic');
+    expect(localStorage.getItem('cf:pref:ui.layout.v2')).toBe('"classic"');
+    expect(screen.getByTestId('appearance-layout-classic').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('a fresh install starts on New, and the old auto-written "classic" does not hold anyone back', async () => {
+    const saved = localStorage.getItem('cf:pref:ui.layout.v2');
+    try {
+      localStorage.removeItem('cf:pref:ui.layout.v2');
+      localStorage.setItem('cf:pref:ui.layout', '"classic"');
+      vi.resetModules();
+      const prefs = await import('./prefs');
+      expect(get(prefs.uiLayout)).toBe('new');
+      expect(localStorage.getItem('cf:pref:ui.layout')).toBeNull();
+      expect(localStorage.getItem('cf:pref:ui.layout.v2')).toBe('"new"');
+    } finally {
+      if (saved !== null) localStorage.setItem('cf:pref:ui.layout.v2', saved);
+      vi.resetModules();
+    }
   });
 
   it('picks the theme (the one picker since the sidebar line went in 1.4)', async () => {
