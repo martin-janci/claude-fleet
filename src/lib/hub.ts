@@ -276,6 +276,30 @@ export function unavailableReason(status: HubStatus): string | null {
 }
 
 /**
+ * The backend's reason a configured hub is unusable this launch, in a
+ * person's words. The raw reason (`HubStatus.unavailable`) names setting keys
+ * such as `hub.client_plaintext_token`; it stays available for a details
+ * disclosure, but the sentence a person reads first must not need them. The
+ * patterns follow `Backend::resolve` in `src-tauri/src/backend/mod.rs`; an
+ * unrecognised reason gets a generic sentence rather than the raw text.
+ */
+export function plainUnavailableReason(reason: string): string {
+  if (reason.includes('no client token is stored')) {
+    return 'this machine has no saved pairing for that hub';
+  }
+  if (reason.includes('cannot read the client token')) {
+    return 'the saved pairing could not be read (the system keychain may be locked, or access to it was denied)';
+  }
+  if (reason.includes('not a usable hub address')) {
+    return 'the saved hub address is not a valid URL';
+  }
+  if (reason.includes('plain http')) {
+    return 'the address uses plain http to another machine, which would send this app\'s credential unencrypted — use https:// instead';
+  }
+  return 'its hub settings could not be used';
+}
+
+/**
  * Why `action` is unavailable from this window, or `null` when it is
  * available. `null` in standalone mode, always: nothing here may change what
  * a standalone app does.

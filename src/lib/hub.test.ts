@@ -15,6 +15,7 @@ import {
   hubActionBlocked,
   HUB_ACTIONS,
   ROUTED_ACTIONS,
+  plainUnavailableReason,
   type HubStatus,
 } from './hub';
 import type { HubConnection } from './hub_connection';
@@ -358,5 +359,26 @@ describe('hubActionBlocked', () => {
     for (const action of HUB_ACTIONS) {
       expect(hubActionBlocked(action, remote, CONNECTED), action).not.toBeNull();
     }
+  });
+});
+
+describe('plainUnavailableReason', () => {
+  // The raw reasons Backend::resolve produces (src-tauri/src/backend/mod.rs).
+  it.each([
+    ['https://h is configured but no client token is stored', 'no saved pairing'],
+    ['cannot read the client token for https://h (keychain locked)', 'could not be read'],
+    ['hub.remote_url is not a usable hub address (relative URL)', 'not a valid URL'],
+    [
+      'http://h is plain http to a host that is not loopback, so … Use https://, or set hub.client_plaintext_token=true if …',
+      'use https://',
+    ],
+  ])('says %j without setting keys', (raw, want) => {
+    const got = plainUnavailableReason(raw);
+    expect(got).toContain(want);
+    expect(got).not.toMatch(/hub\.[a-z_]+|client token/);
+  });
+
+  it('falls back to a generic sentence, never the raw text', () => {
+    expect(plainUnavailableReason('hub.weird_key broke')).not.toContain('hub.weird_key');
   });
 });

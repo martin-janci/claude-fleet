@@ -102,7 +102,7 @@
     <LoadError title="Couldn't load downloads" {error} onretry={load} {retrying} testid="downloads-error" />
   {:else if $downloads.length === 0}
     <p class="hint">
-      Nothing yet. A session's Claude sends a file here with <code>send_file</code>, or use
+      Nothing yet. Ask a session's Claude to send you a file and it lands here, or use
       <em>Send to downloads</em> on a file in the Files tab.
     </p>
   {:else}

@@ -753,7 +753,7 @@ pub fn ssh_key() -> Result<ExitCode, String> {
             ));
         }
         KeyAction::Derive => {
-            let o = std::process::Command::new("ssh-keygen")
+            let o = fleet_core::proc::std_command("ssh-keygen")
                 .arg("-y")
                 .arg("-f")
                 .arg(&key)
@@ -777,7 +777,7 @@ pub fn ssh_key() -> Result<ExitCode, String> {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700));
             }
-            let st = std::process::Command::new("ssh-keygen")
+            let st = fleet_core::proc::std_command("ssh-keygen")
                 .args(["-q", "-t", "ed25519", "-N", "", "-C", "fleet-hub", "-f"])
                 .arg(&key)
                 .status()

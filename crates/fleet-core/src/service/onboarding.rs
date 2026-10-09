@@ -94,8 +94,19 @@ pub fn map_tunnel_states(
 /// can't stall onboarding; a timeout, spawn error, or non-zero exit all yield
 /// `None`.
 async fn tool_version(bin: &str, arg: &str) -> Option<String> {
-    let fut = crate::proc::command(bin).arg(arg).output();
-    let out = tokio::time::timeout(std::time::Duration::from_secs(3), fut)
+    tool_version_within(bin, arg, std::time::Duration::from_secs(3)).await
+}
+
+/// [`tool_version`] with the timeout as a parameter. `kill_on_drop`: a
+/// timeout drops the `output()` future, and without it the hung child would
+/// live on after onboarding gave up on it (r18).
+async fn tool_version_within(bin: &str, arg: &str, wait: std::time::Duration) -> Option<String> {
+    let fut = crate::proc::command(bin)
+        .arg(arg)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = tokio::time::timeout(wait, fut)
         .await
         .ok()? // timed out
         .ok()?; // spawn / I/O error
@@ -158,6 +169,45 @@ pub async fn local_prereqs(store: &std::sync::Mutex<crate::store::Store>) -> Loc
 mod tests {
     use super::*;
     use crate::service::tunnel::TunnelHealth;
+
+    /// A `--version` that hangs past the timeout is killed, not left running.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_hung_tool_is_killed_when_its_version_check_times_out() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("hangs");
+        std::fs::write(&script, "#!/bin/sh\necho $$ > \"$1\"\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let pidfile = dir.path().join("pid");
+        let got = tool_version_within(
+            script.to_str().unwrap(),
+            pidfile.to_str().unwrap(),
+            std::time::Duration::from_millis(500),
+        )
+        .await;
+        assert_eq!(got, None);
+        let pid = std::fs::read_to_string(&pidfile).unwrap();
+        let stat = format!("/proc/{}/stat", pid.trim());
+        // Killed: gone, or a zombie until tokio's orphan reaper collects it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let alive = std::fs::read_to_string(&stat)
+                .ok()
+                .and_then(|s| s.rsplit(')').next().map(|t| t.trim_start().chars().next()))
+                .flatten()
+                .is_some_and(|state| state != 'Z' && state != 'X');
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the timed-out child {} still runs",
+                pid.trim()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
 
     fn host(alias: &str, hidden: bool) -> HostRow {
         HostRow {
