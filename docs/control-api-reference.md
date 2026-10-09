@@ -323,7 +323,7 @@ Who you are on this fleet and every live grant TO you: { person_id, grants: [{ s
 
 Launch a supervised headless (background) Claude session on a host with an initial prompt, which becomes its default friendly name. Returns the claude_session_id AND the fleet row (`session`; absent until reconcile matches it, on the next tick) for session_transcript { session_id }.
 
-Parameters: `confirm_nonce`, `host_alias`, `name`, `prompt`, `requester_session_id`
+Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `prompt`, `read_only`, `requester_session_id`, `stop_after_secs`, `stop_after_usd`
 
 ### `new_session`
 

@@ -722,10 +722,16 @@ pub(super) fn new_shell_session_summary(p: &NewShellSessionParams) -> String {
 /// prompt as a digest.
 pub(super) fn new_bg_session_summary(a: &crate::service::bg_sessions::NewBgSessionArgs) -> String {
     format!(
-        "host={} name={} requester_session_id={:?} prompt={}",
+        "host={} name={} requester_session_id={:?} project_id={:?} agent={} read_only={} \
+         stop_after_secs={:?} stop_after_usd={:?} prompt={}",
         bound_text(Some(&a.host_alias)),
         bound_text(Some(&a.name)),
         a.requester_session_id,
+        a.project_id,
+        bound_text(a.agent.as_deref()),
+        a.read_only,
+        a.stop_after_secs,
+        a.stop_after_usd,
         bound_body(Some(&a.prompt)),
     )
 }
