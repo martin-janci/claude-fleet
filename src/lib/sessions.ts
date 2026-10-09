@@ -388,6 +388,10 @@ const rows = createRowStore<SessionRow, number>({
   // otherwise re-insert the dead row ("ghost session").
   tombstoneMs: 5000,
   isStale: sessionIsStale,
+  // `sessions.id` is an INTEGER PRIMARY KEY without AUTOINCREMENT, so a killed
+  // highest id is handed to the next insert. A `session:created` whose row is
+  // not the killed one gets past that id's tombstone (`mergeCreatedInto`).
+  identity: (s) => `${s.host_alias}\u0000${s.tmux_name}\u0000${s.created_at}`,
 });
 export const sessions = rows.store;
 export const resetTombstonesForTests = rows.resetTombstonesForTests;
@@ -439,6 +443,10 @@ sidebarGroupBy.subscribe((v) => writePref('sidebar.group', v));
 // reconcile pass now; the default returns stored rows while the last pass is
 // within the configured interval, so window-focus reloads stay cheap.
 export async function loadSessions(opts: { force?: boolean } = {}): Promise<Result<SessionRow[]>> {
+  // Events applied while the call is in flight may describe rows the list was
+  // read too early to hold (a `session:created` that landed mid-call); the
+  // token lets the rebuild below keep them.
+  const token = rows.beginList();
   const r = await invokeCmd<SessionRow[]>('list_sessions', { force: opts.force ?? false });
   sessionsAnswered.set(true);
   if (r.ok) {
@@ -446,18 +454,14 @@ export async function loadSessions(opts: { force?: boolean } = {}): Promise<Resu
     // events own CONTENT. Rebuilding from the current store's position would
     // freeze every row at wherever it first landed — position has to be
     // taken from the list every time, and content still has to lose to a
-    // `session:updated` that raced this call and is strictly newer.
-    sessions.update((cur) => {
-      const byId = new Map(cur.map((s) => [s.id, s] as const));
-      const next: SessionRow[] = [];
-      for (const listed of r.value) {
-        if (rows.isTombstoned(listed.id)) continue;
-        const current = byId.get(listed.id);
-        next.push(current && sessionIsStale(listed, current) ? current : listed);
-      }
-      return next;
-    });
+    // `session:updated` that raced this call and is strictly newer
+    // (`sessionIsStale`). Tombstoned ids stay out; a row the list lacks but an
+    // event merged after the call began is kept, at the top (it is the
+    // newest activity).
+    sessions.update((cur) => rows.reconcileList(cur, r.value, token));
     sessionsLoaded.set(true);
+  } else {
+    rows.endList(token);
   }
   return r;
 }
@@ -965,7 +969,9 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
   sessions.update((arr) => {
     let next = arr;
     for (const ev of events) {
-      next = ev.type === 'killed' ? rows.removeFrom(next, ev.id) : rows.mergeInto(next, ev.row);
+      if (ev.type === 'killed') next = rows.removeFrom(next, ev.id);
+      else if (ev.type === 'created') next = rows.mergeCreatedInto(next, ev.row);
+      else next = rows.mergeInto(next, ev.row);
     }
     return next;
   });

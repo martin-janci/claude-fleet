@@ -166,8 +166,13 @@ export function effectiveHostOf(filter: string, list: readonly Pick<HostRow, 'al
 export const effectiveHostFilter = derived([hostFilter, hosts], ([f, list]) => effectiveHostOf(f, list));
 
 export async function loadHosts(): Promise<Result<HostRow[]>> {
+  // A `host:probed` / `host:removed` applied while the call is in flight is
+  // newer than the list: a removed host stays gone, a probed row keeps the
+  // event's content, and a host added mid-call is kept.
+  const token = rows.beginList();
   const r = await invokeCmd<HostRow[]>('list_hosts');
-  if (r.ok) hosts.set(r.value);
+  if (r.ok) hosts.update((cur) => rows.reconcileList(cur, r.value, token, { preferTouched: true }));
+  else rows.endList(token);
   return r;
 }
 

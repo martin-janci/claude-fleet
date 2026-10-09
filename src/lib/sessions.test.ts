@@ -437,6 +437,67 @@ describe('optimistic merge guard', () => {
     await loadSessions();
     expect(get(sessions).map((s) => s.id)).toEqual([2, 1]);
   });
+
+  // r06 D2: the list was read before the row existed, and its
+  // `session:created` landed while the call was in flight.
+  it('loadSessions keeps a row created by an event while the list was in flight', async () => {
+    sessions.set([{ ...base, id: 1, row_version: 1 }]);
+    let answer!: (rows: SessionRow[]) => void;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) =>
+      cmd === 'list_sessions' ? new Promise<SessionRow[]>((res) => (answer = res)) : Promise.resolve(null),
+    );
+    const p = loadSessions();
+    applySessionEvents([{ type: 'created', row: { ...base, id: 7, tmux_name: 'new', row_version: 1 } }]);
+    answer([{ ...base, id: 1, row_version: 1 }]);
+    await p;
+    expect(get(sessions).map((s) => s.id)).toEqual([7, 1]);
+  });
+
+  it('loadSessions still drops a row an event touched only before the call began', async () => {
+    applySessionEvents([{ type: 'created', row: { ...base, id: 7, tmux_name: 'old', row_version: 1 } }]);
+    let answer!: (rows: SessionRow[]) => void;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) =>
+      cmd === 'list_sessions' ? new Promise<SessionRow[]>((res) => (answer = res)) : Promise.resolve(null),
+    );
+    const p = loadSessions();
+    answer([{ ...base, id: 1, row_version: 1 }]);
+    await p;
+    expect(get(sessions).map((s) => s.id)).toEqual([1]);
+  });
+});
+
+// r06 D3: `sessions.id` is INTEGER PRIMARY KEY without AUTOINCREMENT, so the
+// next insert can reuse a just-killed highest id.
+describe('a reused session id', () => {
+  const killed = { ...base, id: 9, tmux_name: 'old', created_at: 100, row_version: 4 };
+  const reborn = { ...base, id: 9, tmux_name: 'fresh', created_at: 200, row_version: 1 };
+
+  it('a session:created for a different row passes the killed id tombstone', () => {
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'killed', id: 9 }]);
+    applySessionEvents([{ type: 'created', row: reborn }]);
+    expect(get(sessions).map((s) => s.tmux_name)).toEqual(['fresh']);
+  });
+
+  it('...and loadSessions then lists it', async () => {
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'killed', id: 9 }, { type: 'created', row: reborn }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'list_sessions' ? [reborn] : null,
+    );
+    await loadSessions();
+    expect(get(sessions).map((s) => s.tmux_name)).toEqual(['fresh']);
+  });
+
+  it('a late updated or created for the killed row itself is still dropped', () => {
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'killed', id: 9 }]);
+    applySessionEvents([
+      { type: 'updated', row: { ...killed, row_version: 5 } },
+      { type: 'created', row: killed },
+    ]);
+    expect(get(sessions)).toEqual([]);
+  });
 });
 
 describe('sessionAgent', () => {
