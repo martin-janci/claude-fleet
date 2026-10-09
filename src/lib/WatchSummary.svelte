@@ -22,9 +22,12 @@
 
   const since = $derived(defaultSince(session.last_viewed_at, Math.floor(Date.now() / 1000)));
 
-  // A different session starts from nothing.
+  // A different session starts from nothing. Keyed on the id, not the row:
+  // a row event hands the same session back as a new object, and that must
+  // not clear the summary (review r16, as #721 fixed at the source).
+  const sessionId = $derived(session.id);
   $effect(() => {
-    void session.id;
+    void sessionId;
     summary = null;
     error = null;
     refused = null;
