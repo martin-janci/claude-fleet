@@ -2399,7 +2399,9 @@ fn router_sum_serves_every_tool() {
         include_str!("devices.rs"),
         include_str!("prs.rs"),
         include_str!("routines.rs"),
+        include_str!("start_rules.rs"),
         include_str!("presence.rs"),
+        include_str!("library.rs"),
         include_str!("runs.rs"),
     ]
     .iter()
@@ -7875,6 +7877,42 @@ async fn a_paired_device_lists_and_answers_the_operators_waiting_start() {
     assert!(bus.names().is_empty());
 }
 
+/// Redesign step 9.9: `control_route` answers `none` while the feature is
+/// off, refuses the operator, and checks its action.
+#[tokio::test]
+async fn control_route_is_the_persons_and_quiet_by_default() {
+    let (s, _, _) = two_host_store();
+    let t = guarded_tools(s, true);
+    let phone = client_caller("phone", TokenMode::Full);
+    let p = |action: &str| ControlRouteParams {
+        action: action.into(),
+        text: Some("how is the federation handshake doing".into()),
+        run_id: None,
+        chosen: None,
+    };
+    let r = t
+        .control_route(Extension(phone.clone()), Parameters(p("propose")))
+        .await
+        .unwrap();
+    assert_eq!(result_json(&r)["outcome"], "none");
+    let op = client_caller(
+        crate::service::operator::OPERATOR_CLIENT_NAME,
+        TokenMode::Full,
+    );
+    let e = t
+        .control_route(Extension(op), Parameters(p("propose")))
+        .await
+        .unwrap_err();
+    assert!(e.message.starts_with("E_FORBIDDEN"), "{}", e.message);
+    for bad in ["follow", "route"] {
+        let e = t
+            .control_route(Extension(phone.clone()), Parameters(p(bad)))
+            .await
+            .unwrap_err();
+        assert!(e.message.starts_with("E_INVALID"), "{}", e.message);
+    }
+}
+
 #[tokio::test]
 async fn an_operator_new_session_or_kill_is_gated_before_anything_runs() {
     let (s, pid, on_b) = two_host_store();
@@ -10154,7 +10192,8 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     // `resolve_row_and_gate` with `Reach::Drive` — spelled as its own helper
     // because `to_addr` can name the same row by address.
     ("send_message", &["Drive"]),
-    ("send_prompt", &["Drive"]),
+    // A key alone is `answer` (Orbit Fleet 11.7); a prompt is `drive`.
+    ("send_prompt", &["Answer", "Drive"]),
     ("queue_prompt", &["Drive"]),
     ("queued_prompts", &["Drive"]),
     ("session_conversations", &["Read"]),
@@ -10209,6 +10248,9 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
     ("capture_session", &["Read"]),
     ("dismiss_ghost_session", &["Drive"]),
     ("adopt_session", &["Own"]),
+    // A pane's proposal is Adopt's own question, at Adopt's tier; a found
+    // conversation has no row (the person fence decides).
+    ("lost_target", &["Own"]),
     // Its `requester_session_id` is `dispatch_task`'s by another name: the
     // new row is stamped `parent_session_id`, so it shows in that session's
     // Conversations panel, and `inherit_worker_work` copies its work links.
@@ -10297,6 +10339,11 @@ pub(super) const SESSION_REACH: &[(&str, &[&str])] = &[
 /// each one has somewhere else the rule is applied.
 pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
     (
+        "place_transcript",
+        "a found conversation has no row to gate: `require_host` and the \
+         person fence on past conversations (`fence_lost_conversation`) decide",
+    ),
+    (
         "list_sessions",
         "choke point 1 (T6): it FILTERS a page through `sees_session_row` \
          rather than gating one row, and there is no row named to gate",
@@ -10341,6 +10388,17 @@ pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
          the session each row came out of — the same `own` tier `send_file` \
          gates one row with. A `session_id` this caller does not own matches \
          no row rather than refusing, so it is no existence oracle either",
+    ),
+    (
+        "library",
+        "`list` is a FILTER, the same shape as `list_downloads`: the page is \
+         cut by `service::library::visible`, which asks `ViewScope::may_own` \
+         on each row's session, so a `session_id` this caller does not own \
+         matches nothing. `add` names one row and its gate is in the service, \
+         not a threaded Reach: `service::library::add` takes the session only \
+         when `may_own` holds (the `own` tier `send_file` is at) and answers \
+         `E_NOTFOUND` otherwise; `only_the_owner_sees_or_adds_a_sessions_files` \
+         and the session matrix hold it",
     ),
     (
         "runs",
@@ -10608,7 +10666,7 @@ fn tool_blocks() -> std::collections::BTreeMap<String, String> {
 
 /// The reaches one span of handler source threads.
 fn reaches_in(code: &str) -> Vec<String> {
-    let mut found: Vec<String> = ["Read", "Drive", "Own"]
+    let mut found: Vec<String> = ["Read", "Answer", "Drive", "Own"]
         .iter()
         .filter(|r| code.contains(&format!("Reach::{r}")))
         .map(|r| (*r).to_string())
@@ -11257,6 +11315,18 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "pauses the missions the caller may change; answers their ids",
     ),
     (
+        "work_link",
+        "mission_release_note",
+        "drafts a completed mission's release note for whoever may change \
+         the mission; text comes back, nothing is written to a session",
+    ),
+    (
+        "work_link",
+        "today_brief",
+        "the caller's own morning brief over their scoped view of today; \
+         drafted only on refresh, written to no session",
+    ),
+    (
         "work",
         "purge_impact",
         "answers keys only (`PurgeImpact { keys }`), never a session row",
@@ -11866,7 +11936,7 @@ fn the_reaches_the_desktop_decided_are_the_ones_the_hub_enforces() {
     assert_eq!(reach_of("rewind_conversation"), vec!["Own"]);
     // `request_work_handover` types into the pane like
     // `send_message { deliver, submit }`: both `drive`.
-    assert_eq!(reach_of("send_prompt"), vec!["Drive"]);
+    assert_eq!(reach_of("send_prompt"), vec!["Answer", "Drive"]);
     // The per-session work-graph writes — `set_primary_work`,
     // `decide_work_batch`, `reconsider_work_link`, `ack_work_link` — all
     // ride `work_link`'s drive arm.

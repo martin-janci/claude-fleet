@@ -42,6 +42,7 @@ mod devices;
 mod downloads;
 mod fleet;
 mod forms;
+mod library;
 mod lifecycle;
 mod list_changed;
 mod messaging;
@@ -56,6 +57,7 @@ mod routines;
 mod runs;
 mod session_ops;
 mod sharing;
+mod start_rules;
 mod support;
 #[cfg(test)]
 mod tests;
@@ -376,7 +378,9 @@ impl FleetTools {
             + Self::devices_router()
             + Self::prs_router()
             + Self::routines_router()
+            + Self::start_rules_router()
             + Self::presence_router()
+            + Self::library_router()
             + Self::runs_router()
     }
 }

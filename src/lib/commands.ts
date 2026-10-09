@@ -24,7 +24,8 @@ import { hubActionBlocked, hubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { sessionActionBlocked } from './share';
 import { push, pushError } from './toasts';
-import { setFleetSetting, type SettingKey } from './fleet_settings';
+import { fleetSettings, setFleetSetting, SETTING_KEYS, settingBool, type SettingKey } from './fleet_settings';
+import { setAutomationPaused } from './automation';
 import { interpret } from './pages/settings_nl';
 import { valueInWords } from './pages/review';
 import type { Descriptor } from './pages/pages';
@@ -133,10 +134,18 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
       description: `Now ${get(theme)}`, synonyms: ['theme', 'dark', 'light', 'auto', 'appearance'] },
     { id: 'app.shortcuts', label: 'Keyboard shortcuts', section: 'Commands', description: 'Every chord',
       synonyms: ['keys', 'keyboard', 'shortcuts', 'help'], shortcut: 'shortcut-sheet' },
-    // Pause all lands as missions today; step 8.1 turns it into
-    // `automation.paused`, and the label follows.
+    // Pause all missions pauses each active mission, as before; Pause all
+    // automation (8.4, the header's Pause all) is `automation.paused`, every
+    // loop that acts on its own.
     { id: 'app.pause-all', label: 'Pause all missions', section: 'Commands', description: 'Automation',
       synonyms: ['pause', 'pause all', 'automation', 'stop', 'missions'] },
+    settingBool(get(fleetSettings), SETTING_KEYS.automationPaused)
+      ? { id: 'app.automation-pause', label: 'Resume automation', section: 'Commands', description: 'Automation',
+          synonyms: ['resume', 'automation', 'unpause', 'loops'] }
+      : { id: 'app.automation-pause', label: 'Pause all automation', section: 'Commands', description: 'Automation',
+          synonyms: ['pause', 'pause all', 'automation', 'stop', 'loops'] },
+    { id: 'app.automation', label: 'Open Automation', section: 'Commands', description: 'Routines, runs, agents',
+      synonyms: ['automation', 'routines', 'runs', 'agents', 'loops'] },
   );
   return out;
 }
@@ -191,7 +200,7 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
       if (!s || !v) return;
       // Asked here too (the sweep wants the gate where the write is), so a
       // refusal is a toast before the pane is read; sendAnswer asks again.
-      const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'send_prompt');
+      const why = hubActionBlocked('send_prompt', get(hubStatus), get(hubConnection)) ?? sessionActionBlocked(s, 'answer_dialog');
       if (why !== null) {
         push({ kind: 'info', message: why });
         return;
@@ -226,6 +235,16 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     case 'app.shortcuts':
       shortcutSheetOpen.set(true);
       return;
+    case 'app.automation':
+      goTo('automation');
+      return;
+    case 'app.automation-pause': {
+      const on = !settingBool(get(fleetSettings), SETTING_KEYS.automationPaused);
+      const r = await setAutomationPaused(on);
+      if (!r.ok) pushError(r.error, on ? 'Pause all failed' : 'Resume failed');
+      else push({ kind: 'success', message: on ? 'Automation paused' : 'Automation resumed' });
+      return;
+    }
     case 'app.pause-all': {
       const r = await pauseAllMissions();
       if (!r.ok) pushError(r.error, 'Pause all failed');

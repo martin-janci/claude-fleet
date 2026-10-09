@@ -255,7 +255,7 @@ reused under New. Examples are `SessionsViewModel` and `BulkViewModel` (14.3),
 | Org detail: sessions (opens Sessions filtered), spend, hosts, members, devices, trackers, budget meter | done | #133 |
 | This phone: notification kinds, Dark / Light / System theme | done | `ui/PhoneSettings.kt:14-16` |
 | New navigation switch at the foot of Settings | done | #117 |
-| Quiet hours | blocked | claude-fleet 11.9 (open, #633) |
+| Quiet hours | done | fleet-mobile #153 after claude-fleet 11.9 (#633). The phone follows the hub's Phone column and quiet hours. The Phone column's default includes Blocked, as before the matrix, so a stuck session, a host down or an account at its limit still reaches the phone unless someone unticks it |
 | Done notifications; fingerprint lock | gap | not built (#117) |
 | Organisation automation playbooks (MobileOrgsSettings) | blocked | claude-fleet 8.4 has not merged (#133) |
 | Member actions on Company | open PR | #146 (list, change role, remove with the three share choices); hub 11.2 merged in #606 |

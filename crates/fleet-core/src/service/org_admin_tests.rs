@@ -665,7 +665,7 @@ fn removing_a_member_takes_back_what_was_shared_with_them_in_the_org() {
     counts.person = Some("bob".into());
     assert_eq!(
         run(&counts, &c.st, me).unwrap(),
-        serde_json::json!({ "watch": 0, "drive": 1 })
+        serde_json::json!({ "watch": 0, "answer": 0, "drive": 1 })
     );
     let mut narrow = c.with_org("narrow_member_grants", c.acme);
     narrow.person = Some("bob".into());
@@ -727,7 +727,10 @@ fn list_members_carries_shares_since_and_member_grants_count_what_remove_asks_ab
         c.jane(),
     )
     .unwrap();
-    assert_eq!(grants, serde_json::json!({ "watch": 0, "drive": 0 }));
+    assert_eq!(
+        grants,
+        serde_json::json!({ "watch": 0, "answer": 0, "drive": 0 })
+    );
 }
 
 /// Redesign 11.7c: an admin sees that a member's private sessions exist —

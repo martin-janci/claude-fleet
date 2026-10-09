@@ -24,6 +24,8 @@ import { sessions, type SessionRow } from './sessions';
 import { sessionFocus } from './session_focus';
 import { missionOpenRequest } from './missions';
 import { get } from 'svelte/store';
+import { motionPref } from './motion';
+import { fliesIn } from './handoff_flight';
 
 // Redesign steps 9.3 and 9.6: what Control's agent handed on, drawn as chips
 // and cards that follow their target's live state.
@@ -161,5 +163,49 @@ describe('sessionState', () => {
     expect(sessionState({ ...session(1, 'working'), stuck_kind: 'oom' } as SessionRow)).toBe('failed');
     expect(sessionState(session(1, 'idle'))).toBe('idle');
     expect(sessionState(undefined)).toBe('idle');
+  });
+});
+
+// Step 9.13: a session receipt that arrives while the chat is open flies in.
+describe('the comet onto a "Sent to a session" chip', () => {
+  const fresh = (): ControlHandoff => ({ id: 7, at: now + 5, kind: 'session', tool: 'send_prompt', session_id: 3, preview: 'Fix CI' });
+
+  it('the flight ends on the chip', async () => {
+    motionPref.set('full');
+    sessions.set([session(3, 'working', 'fix-ci')]);
+    render(HandoffCards);
+    await waitFor(() => expect(calls('control_handoffs')).toHaveLength(1));
+    receipts = [fresh()];
+    await emit('handoff:changed', {});
+    const flight = await screen.findByTestId('handoff-flight');
+    expect(flight.querySelector('[data-loader="comet"]')).not.toBeNull();
+    expect(screen.getByTestId('handoff-session').getAttribute('data-flight')).toBe('flying');
+    await fireEvent.animationEnd(flight);
+    expect(screen.queryByTestId('handoff-flight')).toBeNull();
+    expect(screen.getByTestId('handoff-session').getAttribute('data-flight')).toBe('landed');
+  });
+
+  it('with reduced motion the chip appears without it', async () => {
+    motionPref.set('reduced');
+    try {
+      sessions.set([session(3, 'working', 'fix-ci')]);
+      render(HandoffCards);
+      await waitFor(() => expect(calls('control_handoffs')).toHaveLength(1));
+      receipts = [fresh()];
+      await emit('handoff:changed', {});
+      const chip = await screen.findByTestId('handoff-session');
+      expect(screen.queryByTestId('handoff-flight')).toBeNull();
+      expect(chip.hasAttribute('data-flight')).toBe(false);
+    } finally {
+      motionPref.set('system');
+    }
+  });
+
+  it('only a session receipt written since the chat opened flies, at full motion', () => {
+    const h = fresh();
+    expect(fliesIn(h, now, 'full')).toBe(true);
+    expect(fliesIn({ ...h, at: now - 60 }, now, 'full')).toBe(false);
+    expect(fliesIn({ ...h, kind: 'mission' }, now, 'full')).toBe(false);
+    expect(fliesIn(h, now, 'off')).toBe(false);
   });
 });

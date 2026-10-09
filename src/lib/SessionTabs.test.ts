@@ -5,6 +5,7 @@ import { render, screen } from '@testing-library/svelte';
 import { describe, it, expect } from 'vitest';
 import SessionTabs from './SessionTabs.svelte';
 import { session } from './hosts_fixture';
+import { expectAccessible } from './a11y_check';
 import type { SessionRow } from './sessions';
 
 function mount(row: SessionRow | null, isMac = true) {
@@ -68,6 +69,13 @@ describe('SessionTabs: Share from the header (step 5.8)', () => {
     expect(get(shareSheetFor)).toBe(row.id);
     shareSheetFor.set(null);
     unmount();
+  });
+});
+
+describe('SessionTabs: accessibility', () => {
+  it('the session tab bar is accessible', async () => {
+    const { container } = mount(session('mercury', 'dev-a'));
+    await expectAccessible(container);
   });
 });
 

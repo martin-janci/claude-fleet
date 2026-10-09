@@ -33,7 +33,8 @@
     refreshComposerPresetsIfIdle,
     presetsConflict,
   } from './composer_presets';
-  import { copyOnSelect } from './prefs';
+  import { copyOnSelect, uiLayout } from './prefs';
+  import { startTour } from './tour';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
   import Modal from './Modal.svelte';
@@ -43,7 +44,7 @@
   import McpSettings from './McpSettings.svelte';
   import AppearanceSettings from './AppearanceSettings.svelte';
   import { loadHostTokens } from './host_actions';
-  import { hostsChordLabel, requestHostsView, settingsKey, settingsSection } from './app_views';
+  import { hostsChordLabel, requestHostsView, settingsKey, settingsOpen, settingsSection } from './app_views';
   import { detectMac } from './terminal_keys';
   import { copyText } from './clipboard';
   import './settings_dialog.css';
@@ -764,7 +765,7 @@
         <h4>Setup guide</h4>
       </div>
       <div class="hook-section">
-        <p class="hook-desc">Re-show the "Get started" checklist in the sidebar.</p>
+        <p class="hook-desc">Re-show the "Get started" checklist.</p>
         <button
           class="hook-btn"
           onclick={() => {
@@ -775,6 +776,21 @@
           Replay setup guide
         </button>
       </div>
+      {#if $uiLayout === 'new'}
+        <div class="hook-section">
+          <p class="hook-desc">Walk through the main parts of the window again, six short steps.</p>
+          <button
+            class="hook-btn"
+            data-testid="settings-take-tour"
+            onclick={() => {
+              settingsOpen.set(false);
+              startTour();
+            }}
+          >
+            Take the tour
+          </button>
+        </div>
+      {/if}
       <div class="hook-section">
         <p class="hook-desc">Show inline tips the first time a feature is used.</p>
         <label class="toggle">

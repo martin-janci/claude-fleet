@@ -9,6 +9,7 @@ use fleet_core::cancel::CancellationRegistry;
 use fleet_core::ipc_error::IpcError;
 use fleet_core::service::work::graph::{self, GraphChange};
 use fleet_core::service::work::missions::{self, MissionDeleted, MissionDetail, MissionInput};
+use fleet_core::service::work::orchestrate::drafts::{Brief, Draft};
 use fleet_core::service::work::orchestrate::{self, Deps, PlanOutcome, StartOutcome, StepResult};
 use fleet_core::service::work::plan_import::{self, PlanImport, PlanRow};
 use fleet_core::service::work::verify::{self, VerifyOutcome};
@@ -177,6 +178,18 @@ pub struct GrantMissionArgs {
 /// `pause_all_missions`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PauseAllMissionsArgs {}
+
+/// `today_brief` (redesign 9.11): the brief drafted last, or a new one when
+/// `refresh`. `since` is the viewer's local midnight, as `work_today`'s.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TodayBriefArgs {
+    #[serde(default)]
+    pub refresh: bool,
+    #[serde(default)]
+    pub since: Option<i64>,
+    #[serde(default)]
+    pub org_id: Option<i64>,
+}
 
 /// The standalone desktop's reader: one person at the keyboard, as
 /// `commands::work_view`'s. A paired desktop routes to the hub, which
@@ -380,6 +393,28 @@ pub async fn pause_all_missions(
     store: State<'_, Arc<Mutex<Store>>>,
 ) -> Result<Vec<i64>, IpcError> {
     routed::pause_all_missions(&backend, args, &store).await
+}
+
+#[tauri::command]
+pub async fn mission_release_note(
+    args: MissionIdArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<Draft, IpcError> {
+    routed::mission_release_note(&backend, args, &store, &ssh, &reg).await
+}
+
+#[tauri::command]
+pub async fn today_brief(
+    args: TodayBriefArgs,
+    backend: State<'_, Arc<FleetBackend>>,
+    store: State<'_, Arc<Mutex<Store>>>,
+    ssh: State<'_, Arc<SshClient>>,
+    reg: State<'_, Arc<CancellationRegistry>>,
+) -> Result<Brief, IpcError> {
+    routed::today_brief(&backend, args, &store, &ssh, &reg).await
 }
 
 pub(crate) mod routed {
@@ -744,6 +779,44 @@ pub(crate) mod routed {
         match backend.hub() {
             Some(hub) => hub.route("pause_all_missions", &wire).await,
             None => orchestrate::pause_all(store, &internal_view()),
+        }
+    }
+
+    pub async fn mission_release_note(
+        backend: &FleetBackend,
+        args: MissionIdArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<Draft, IpcError> {
+        let wire = write("mission_release_note", Some(args.mission_id));
+        match backend.hub() {
+            Some(hub) => hub.route("mission_release_note", &wire).await,
+            None => {
+                orchestrate::drafts::release_note(&wire, &deps(store, ssh, reg), &internal_view())
+                    .await
+            }
+        }
+    }
+
+    pub async fn today_brief(
+        backend: &FleetBackend,
+        args: TodayBriefArgs,
+        store: &Arc<Mutex<Store>>,
+        ssh: &Arc<SshClient>,
+        reg: &Arc<CancellationRegistry>,
+    ) -> Result<Brief, IpcError> {
+        let wire = WorkLinkArgs {
+            refresh: Some(args.refresh),
+            since: args.since,
+            org_id: args.org_id,
+            ..write("today_brief", None)
+        };
+        match backend.hub() {
+            Some(hub) => hub.route("today_brief", &wire).await,
+            None => {
+                orchestrate::drafts::brief(&wire, &deps(store, ssh, reg), &internal_view()).await
+            }
         }
     }
 }

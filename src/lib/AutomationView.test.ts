@@ -1,0 +1,83 @@
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
+import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import AutomationView from './AutomationView.svelte';
+import { automationTab } from './automation';
+
+const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
+const now = Math.floor(Date.now() / 1000);
+
+let paused = false;
+const LOOPS = [
+  { name: 'reconcile', label: 'Reconcile', pausable: false, last_run_at: now - 30, next_run_at: now + 30, result: 'ok', runs: 9, failures: 0 },
+  { name: 'catalog_scan', label: 'Catalog sync', pausable: true, last_run_at: now - 120, result: 'error', last_error: 'git: auth', runs: 2, failures: 1 },
+];
+const RUNS = [
+  { id: 'aux:2', source: 'aux', kind: 'planner', owner: 'Morning PR sweep', started_at: now - 300, duration_ms: 340_000, outcome: 'ok', cost_micros: 380_000, session_ids: [7], summary: 'Reviewed 4 PRs' },
+  { id: 'jev:1', source: 'jev', kind: 'jev', owner: 'status_map', started_at: now - 60, outcome: 'failed', error: 'gh token expired', cost_micros: 10_000, session_ids: [] },
+];
+
+function route() {
+  invoke.mockImplementation(async (cmd: string, a?: { key?: string; value?: string }) => {
+    if (cmd === 'health_check') return { version: 'x', db_ready: true, schema_version: 1, loops: LOOPS, automation_paused: paused };
+    if (cmd === 'list_runs') return { runs: RUNS, total: RUNS.length };
+    if (cmd === 'get_fleet_settings') return { 'automation.paused': String(paused) };
+    if (cmd === 'set_fleet_setting') {
+      paused = a?.value === 'true';
+      return { 'automation.paused': String(paused) };
+    }
+    return null;
+  });
+}
+
+beforeEach(() => {
+  invoke.mockReset();
+  paused = false;
+  automationTab.set('routines');
+  route();
+});
+
+describe('Automation (redesign step 8.4)', () => {
+  it('lists the built-in routines with their last run, and a failure in words', async () => {
+    render(AutomationView);
+    const rows = await screen.findAllByTestId('automation-loop');
+    expect(rows.map((r) => r.dataset.loop)).toEqual(['reconcile', 'catalog_scan']);
+    expect(rows[0].textContent).toContain('observes');
+    expect(rows[1].textContent).toContain('failed 2m ago: git: auth');
+    expect(screen.getByTestId('automation-today').textContent).toBe('Today $0.39');
+  });
+
+  it('lists runs with outcome, cost and a link to the session', async () => {
+    render(AutomationView);
+    automationTab.set('runs');
+    const rows = await screen.findAllByTestId('automation-run');
+    expect(rows[0].textContent).toContain('Morning PR sweep');
+    expect(rows[0].textContent).toContain('5m 40s');
+    expect(rows[0].textContent).toContain('$0.38');
+    expect(rows[1].textContent).toContain('Failed: gh token expired');
+    expect(screen.getAllByTestId('automation-run-session')).toHaveLength(1);
+  });
+
+  it('names the three built-in agents', async () => {
+    render(AutomationView);
+    automationTab.set('agents');
+    expect(await screen.findByTestId('automation-agent-operator')).toBeInTheDocument();
+    expect(screen.getByTestId('automation-agent-orchestrator')).toBeInTheDocument();
+    expect(screen.getByTestId('automation-agent-jev').textContent).toContain('off');
+  });
+
+  it('Pause all sets automation.paused, says what stands still, and Resume clears it', async () => {
+    render(AutomationView);
+    await screen.findAllByTestId('automation-loop');
+    await fireEvent.click(screen.getByTestId('automation-pause'));
+    await waitFor(() => expect(screen.getByTestId('automation-paused')).toBeInTheDocument());
+    expect(invoke).toHaveBeenCalledWith('set_fleet_setting', { key: 'automation.paused', value: 'true' });
+    expect(screen.getByTestId('automation-pause').textContent).toContain('Resume');
+    await fireEvent.click(screen.getByTestId('automation-pause'));
+    await waitFor(() => expect(screen.queryByTestId('automation-paused')).toBeNull());
+    expect(invoke).toHaveBeenCalledWith('set_fleet_setting', { key: 'automation.paused', value: 'false' });
+  });
+});

@@ -401,6 +401,40 @@ empty. *Keep the order* (question) or *Change* (form) puts the options back.
 
 Code: `service/decide/quick_answer.rs` (`QuickAnswerTrigger` on the
 reconcile tick, `spawn_for_form` after `ask { form }`).
+## `adopt_target` and `restore_target` — the project of a Lost and found entry (N4, J10)
+
+Host detail's Lost and found offers *Adopt into* for a live tmux pane fleet
+did not start (N4) and *Restore into* for a conversation whose pane is gone
+(J10). Each form is prefilled with a project. A rule goes first: a working
+directory inside a fleet project is that project, and nobody is asked. Only
+when no rule places it, and `decide.jev.adopt_target` (a pane) or
+`decide.jev.restore_target` (a conversation) is on, Jev is asked one Choice:
+which ONE of the person's projects (most recently used first, at most 20)
+the conversation's work belongs to (`p<id>`), or `unsure`.
+
+- **What is sent.** The working directory, the git branch the transcript
+  names, the tmux session's name for a pane, and each candidate's
+  `owner/repo`, redacted. Nothing from the conversation.
+- **Shadow.** Asked off the form's path and only recorded, with `unsure`
+  (today's blank form) as the baseline.
+- **Assist.** The form waits for the one call (`decide.jev.timeout_ms`); an
+  answer of 50% or more prefills the project with *Proposed by Jev*. An
+  `unsure` or weaker answer leaves the form blank and says Jev was unsure.
+  You still press Adopt or Restore, and confirm.
+- **Asked once per input.** The same entry and candidates reuse the decided
+  run for 14 days.
+- **Follow-up.** Your Adopt or Restore marks the proposal you were shown
+  `confirmed` (same project), `corrected` (to yours) or `rejected` (no
+  project). An agent's call, and a shadow answer nobody saw, mark nothing.
+- **What is recorded.** Subject `lost_pane` `session:<id>`, or
+  `lost_transcript` `t:<HMAC of the transcript id>`.
+
+Restoring a conversation into a project it did not run in copies its
+transcript under the directory Claude Code keys that project's root by
+(`place_transcript`; never moved, never overwritten), then resumes it there.
+
+Code: `service/decide/lost_target.rs`, `service/sessions/lost_found.rs`;
+step 4.12 of the redesign's transition plan.
 
 ## `turn_outcome` — what a silent turn's end came to (J2)
 
@@ -560,7 +594,10 @@ Code: `service/decide/duplicate.rs`, `duplicate_hint` in
 | `decide.jev.sibling_repos` | `off` | `off` / `shadow` / `assist` | Pre-ticking the other repository a ticket start also needs. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.host_placement` | `off` | `off` / `shadow` / `assist` | Pre-selecting the host of a new session when no rule, limit or offline host decides. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.adopt_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.restore_target` | `off` | `off` / `shadow` / `assist` | Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.control_route` | `off` | `off` / `shadow` / `assist` | Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.turn_outcome` | `off` | `off` / `shadow` / `assist` | Reading what a turn came to (finished, a question, stuck) from the end of the screen when hooks say nothing. Shadow only records; assist sets the Inbox state, and any hook overrides it. Sends reply text only for organisations that allow it. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.unassigned_reply` | `false` | on / off | Also send the reply text of sessions that belong to no organisation (turn outcome), on top of sending unassigned sessions at all. Experimental. Asks to confirm. |

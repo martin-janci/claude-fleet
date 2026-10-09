@@ -12,15 +12,20 @@
   import { readErrorText } from './work_view';
   import { uiLayout } from './prefs';
   import ProposedBy from './ProposedBy.svelte';
+  import DraftField from './DraftField.svelte';
   import { startWork, type StartWorkArgs } from './trackers';
+  import { acceptStartRule, dismissStartRule, ruleLine } from './start_rules';
   import {
     argsWithChoice,
     choiceFromPreview,
+    draftBrief,
+    draftSource,
     previewStartWork,
     projectLabel,
     projectProposal,
     startBlockedBy,
     suggestedProjectId,
+    type BriefDraft,
     type StartChoice,
     type StartPreview,
   } from './start_preview';
@@ -59,6 +64,11 @@
   const suggestedPct = initial.suggested_project?.confidence_pct ?? null;
   // svelte-ignore state_referenced_locally
   const suggestedProposal = projectProposal(initial);
+  // Redesign 8.11: the rule fleet offers after five identical starts, from
+  // the first preview; gone once answered.
+  // svelte-ignore state_referenced_locally
+  let ruleOffer = $state.raw(initial.rule_offer ?? null);
+  let ruleAdded = $state<string | null>(null);
   let branch = $state('');
   let showBrief = $state(false);
   let busy = $state(false);
@@ -125,20 +135,51 @@
     reread();
   }
 
+  /** The arguments exactly where the preview on screen said: its resolved
+   *  repository and host, not a fresh resolution that could land elsewhere. */
+  const resolvedArgs = () =>
+    argsWithChoice(base, {
+      ...choice,
+      project_id: choice.project_id ?? planned?.project_id ?? null,
+      host_alias: choice.host_alias ?? planned?.host_alias ?? null,
+      worktree: branchEdited(),
+    });
+
+  // Redesign 6.10: a brief drafted on the start's host from the ticket and
+  // the task's earlier work. It is the person's to edit and goes only with
+  // Start; Clear goes back to the task's brief.
+  let draftMeta = $state<BriefDraft | null>(null);
+  let draftText = $state('');
+  let drafting = $state(false);
+  let draftSeq = 0;
+  async function draft() {
+    const mine = ++draftSeq;
+    draftText = draftMeta ? draftText : (preview.brief ?? '');
+    drafting = true;
+    error = null;
+    const r = await draftBrief(resolvedArgs());
+    if (mine !== draftSeq) return;
+    drafting = false;
+    if (!r.ok) {
+      error = readErrorText(r.error);
+      return;
+    }
+    draftText = r.value.brief;
+    draftMeta = r.value.draft;
+  }
+  function clearDraft() {
+    draftSeq++;
+    drafting = false;
+    draftMeta = null;
+    draftText = '';
+  }
+
   async function go() {
     if (busy || why) return;
     busy = true;
     error = null;
-    // Exactly where the preview on screen said: its resolved repository
-    // and host, not a fresh resolution that could land elsewhere.
-    const r = await startWork(
-      argsWithChoice(base, {
-        ...choice,
-        project_id: choice.project_id ?? planned?.project_id ?? null,
-        host_alias: choice.host_alias ?? planned?.host_alias ?? null,
-        worktree: branchEdited(),
-      }),
-    );
+    const drafted = choice.with_brief && draftMeta && draftText.trim() ? { brief: draftText } : {};
+    const r = await startWork({ ...resolvedArgs(), ...drafted });
     busy = false;
     if (!r.ok) {
       error = readErrorText(r.error);
@@ -160,6 +201,18 @@
     }
     await readNow();
     await go();
+  }
+
+  async function answerOffer(add: boolean) {
+    const offer = ruleOffer;
+    if (!offer) return;
+    const r = add ? await acceptStartRule(offer.id) : await dismissStartRule(offer.id);
+    if (!r.ok) {
+      error = readErrorText(r.error);
+      return;
+    }
+    ruleOffer = null;
+    ruleAdded = add ? ruleLine(r.value, preview.projects) : null;
   }
 
   function openSession(id: number | null | undefined) {
@@ -226,6 +279,10 @@
     {/if}
   {/if}
 
+  {#if $uiLayout === 'new' && planned?.rule_id != null && choice.project_id === planned.project_id}
+    <span class="hint" data-testid="start-popover-by-rule">Picked by a start rule: change the repository to start elsewhere.</span>
+  {/if}
+
   <label class="field">
     <span>Host</span>
     <select
@@ -272,14 +329,46 @@
       />
       Send the task's brief
     </label>
-    {#if preview.brief}
+    {#if preview.brief && !draftMeta && !drafting}
       <button class="btn btn--quiet link" type="button" aria-expanded={showBrief} data-testid="start-popover-brief-toggle" onclick={() => (showBrief = !showBrief)}
         >{showBrief ? 'Hide' : 'Preview'}</button
       >
     {/if}
+    {#if choice.with_brief && planned && !draftMeta && !drafting}
+      <button
+        class="btn btn--quiet link"
+        type="button"
+        data-testid="start-popover-brief-draft-ask"
+        title="Write the brief from the task and earlier sessions on it, with a model call on {planned.host_alias}"
+        onclick={() => void draft()}>Draft with Claude</button
+      >
+    {/if}
   </div>
-  {#if showBrief && preview.brief}
+  {#if choice.with_brief && (draftMeta || drafting)}
+    <DraftField
+      label="Brief"
+      bind:value={draftText}
+      model={draftMeta?.model}
+      host={draftMeta?.host_alias}
+      from={draftMeta ? draftSource(draftMeta) : null}
+      busy={drafting}
+      rows={6}
+      onregenerate={() => void draft()}
+      onclear={clearDraft}
+      testid="start-popover-brief-draft"
+    />
+  {:else if showBrief && preview.brief}
     <pre class="brief" data-testid="start-popover-brief-text">{preview.brief}</pre>
+  {/if}
+
+  {#if $uiLayout === 'new' && ruleOffer}
+    <div class="offer" data-testid="start-popover-rule-offer">
+      <span>Add rule <strong>{ruleLine(ruleOffer, preview.projects)}</strong>? Next time it starts there without asking.</span>
+      <button class="btn btn--quiet" type="button" data-testid="start-popover-rule-add" onclick={() => void answerOffer(true)}>Add rule</button>
+      <button class="btn btn--quiet" type="button" data-testid="start-popover-rule-dismiss" onclick={() => void answerOffer(false)}>Dismiss</button>
+    </div>
+  {:else if $uiLayout === 'new' && ruleAdded}
+    <span class="hint" role="status" data-testid="start-popover-rule-added">Rule added: {ruleAdded}. Edit it in Automation.</span>
   {/if}
 
   {#if conflicts.length > 0}
@@ -421,6 +510,15 @@
   }
   .warn {
     color: var(--usage-warn);
+  }
+  .offer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 6px;
+    align-items: center;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
   }
   .err {
     margin: 0;

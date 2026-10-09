@@ -447,6 +447,16 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Quick,
     },
+    // Redesign step 9.9 (Jev K2): the owner's device asks where a message
+    // sent in Control goes and records the pick. Not the master's budget;
+    // a run is recorded, so not readonly.
+    ToolPolicy {
+        name: "control_route",
+        access: Access::PersonDevice,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     ToolPolicy {
         name: "answer_mcp_confirm",
         access: Access::PersonDevice,
@@ -534,12 +544,31 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
         confirm: false,
         deadline: Deadline::Lifecycle,
     },
+    // Start rules (Orbit Fleet 8.11): which project a task key starts in,
+    // before history and Jev. A person's; a host's token is not served it.
+    ToolPolicy {
+        name: "start_rules",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
     // Presence (redesign 11.7b): reports into the hub's in-memory board and
     // reads it back; touches no row. A person's tool, not a host token's.
     ToolPolicy {
         name: "session_presence",
         access: Access::Client,
         readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    // Control's Library (Orbit Fleet 9.7): the files a person put on a
+    // host. A person's, like the downloads it sits beside, so a host's token
+    // is not served it (`NOT_FOR_HOST_TOKENS`).
+    ToolPolicy {
+        name: "library",
+        access: Access::Client,
+        readonly: false,
         confirm: false,
         deadline: Deadline::Quick,
     },
@@ -656,6 +685,20 @@ pub const TOOL_POLICIES: &[ToolPolicy] = &[
     },
     ToolPolicy {
         name: "adopt_session",
+        access: Access::Client,
+        readonly: false,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "lost_target",
+        access: Access::Client,
+        readonly: true,
+        confirm: false,
+        deadline: Deadline::Quick,
+    },
+    ToolPolicy {
+        name: "place_transcript",
         access: Access::Client,
         readonly: false,
         confirm: false,
@@ -1491,7 +1534,9 @@ pub fn is_client_tool(name: &str) -> bool {
 /// `list` included (R25 amended). `list_downloads` / `remove_download` are a
 /// person's: a host's Claude only sends files.
 /// `routines` (Orbit Fleet 8.5) is a person's too: a session does not
-/// schedule sessions.
+/// schedule sessions. `library` (9.7) is the index beside the downloads, a
+/// person's for the same reason. So is `start_rules` (8.11): a session does
+/// not decide where everyone's tasks start.
 ///
 /// The five sharing surfaces joined them in multi-user M1 (T12) for a
 /// different reason: a per-host token proves no PERSON
@@ -1503,9 +1548,11 @@ pub const NOT_FOR_HOST_TOKENS: &[&str] = &[
     "catalog_admin",
     "import_assets",
     "changesets",
+    "library",
     "list_downloads",
     "remove_download",
     "routines",
+    "start_rules",
     "session_share",
     "session_unshare",
     "session_narrow",

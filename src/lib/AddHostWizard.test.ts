@@ -8,6 +8,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke as mockedInvoke } from '@tauri-apps/api/core';
 import AddHostWizard from './AddHostWizard.svelte';
 import type { HostSetup, SetupCheck } from './add_host_wizard';
+import { expectAccessible } from './a11y_check';
 
 const inv = mockedInvoke as unknown as ReturnType<typeof vi.fn>;
 /** The backend's `host_setups` table. */
@@ -198,5 +199,20 @@ describe('AddHostWizard', () => {
     release();
     await screen.findByTestId('wizard-host');
     expect(screen.queryByTestId('wizard-live')).toBeNull();
+  });
+});
+
+describe('AddHostWizard: accessibility', () => {
+  it('step 1 and the Check step are accessible', async () => {
+    db.set('venus', { ssh_alias: 'venus', alias: 'venus', step: 3, checks: [], answers: {}, created_at: 1, updated_at: 1 });
+    const { container } = render(AddHostWizard, { props: { onClose: vi.fn() } });
+    await screen.findByTestId('wizard-host');
+    await screen.findByTestId('wizard-drafts');
+    await expectAccessible(container);
+    await fireEvent.click(screen.getByTestId('wizard-host'));
+    await fireEvent.click(screen.getByTestId('wizard-next'));
+    await waitFor(() => expect(checksRun).toHaveLength(6));
+    await waitFor(() => expect((screen.getByTestId('wizard-next') as HTMLButtonElement).disabled).toBe(false));
+    await expectAccessible(container);
   });
 });

@@ -544,9 +544,18 @@ pub const DECIDE_JEV_HOST_PLACEMENT: &str = "decide.jev.host_placement";
 /// `quick_answer`'s mode (J5: the likely option first in an agent's
 /// question or a chat form, redesign step 10.9).
 pub const DECIDE_JEV_QUICK_ANSWER: &str = "decide.jev.quick_answer";
+/// `adopt_target`'s mode (prefilling the project of a pane fleet did not
+/// start, N4).
+pub const DECIDE_JEV_ADOPT_TARGET: &str = "decide.jev.adopt_target";
+/// `restore_target`'s mode (prefilling the project of a found
+/// conversation, J10).
+pub const DECIDE_JEV_RESTORE_TARGET: &str = "decide.jev.restore_target";
 /// `duplicate`'s mode (flagging a proposed task that may duplicate an
 /// existing one, K4).
 pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
+/// `control_route`'s mode (K2: where a message typed in Control goes,
+/// redesign step 9.9).
+pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
 /// `turn_outcome`'s mode (J2: what a turn came to when hooks said nothing,
 /// read from the pane tail). Needs the reply-text consent (D48) on top.
 pub const DECIDE_JEV_TURN_OUTCOME: &str = "decide.jev.turn_outcome";
@@ -1338,11 +1347,38 @@ pub const SPECS: &[Spec] = &[
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
     Spec::new(
+        DECIDE_JEV_ADOPT_TARGET,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: adopt into",
+        "Prefilling the project when you adopt a pane fleet did not start. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RESTORE_TARGET,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: restore into",
+        "Prefilling the project when you restore a conversation found on a host. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
         DECIDE_JEV_DUPLICATE,
         "off",
         Kind::Choice(DECIDE_MODES),
         "Jev: duplicate task",
         "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_CONTROL_ROUTE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: Control routing",
+        "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
@@ -1565,7 +1601,10 @@ pub const SPECS: &[Spec] = &[
     .labels(NOTIFY_STATE_LABELS),
     Spec::new(
         NOTIFY_PHONE,
-        "needs_you,failed,routine_failed",
+        // Blocked too: before the matrix a phone announced a stuck session,
+        // a host down and an account at its limit, and still does unless
+        // someone unticks it (Martin, 2026-10-09).
+        "needs_you,failed,blocked,routine_failed",
         Kind::ChoiceSet(NOTIFY_STATES),
         "Phone",
         "The session states the phone shows a notification for.",
@@ -2605,6 +2644,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_TURN_OUTCOME, None), "off");
         assert_eq!(resolve(DECIDE_JEV_UNASSIGNED_REPLY, None), "false");
         assert!(validate(DECIDE_JEV_TURN_OUTCOME, "auto").is_err());
@@ -2612,6 +2652,9 @@ mod tests {
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_QUICK_ANSWER, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_ADOPT_TARGET, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RESTORE_TARGET, None), "off");
+        assert!(validate(DECIDE_JEV_RESTORE_TARGET, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_MODEL, None), "jev-1.13.0");
         assert_eq!(resolve(DECIDE_RETENTION_DAYS, None), "90");
         // `auto` is not offered yet (D36), nor is a free-text model.
