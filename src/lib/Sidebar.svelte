@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { tick, untrack, type Snippet } from 'svelte';
   import { get } from 'svelte/store';
   import { projects, refreshProjects, type ProjectTreeRow } from './projects';
@@ -1803,7 +1804,7 @@
                 onclick={(e) => { e.stopPropagation(); pendingPurge = row.project; }}
                 data-testid="purge-project"
                 aria-label="Purge project"
-              >🗑️</button>
+              ><Icon name="trash" size={12} /></button>
             </div>
 
             {#if !isCollapsed}
@@ -1980,10 +1981,11 @@
       <button
         class="icon-btn"
         title="Launch a supervised Claude background session"
+        aria-label="New background session"
         onclick={() => (showBgModal = true)}
         data-testid="new-bg-session-btn"
         use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
-      >⚡</button>
+      ><Icon name="bolt" size={14} /></button>
     </div>
   </footer>
 </div>
