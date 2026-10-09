@@ -427,6 +427,8 @@
     </div>
     <div class="settings-scroll">
     <div class="settings-content">
+    <!-- UX audit S2: the open leaf's name heads the page (Settings board). -->
+    <h2 class="page-title" data-testid="settings-page-title">{leaf?.label ?? 'Settings'}</h2>
     <!-- The hand-written panels stay mounted and are hidden when another
          leaf is open, so a draft (a hub URL, a projects root) survives a
          look at another section. -->
@@ -707,8 +709,13 @@
       <div class="section-header">
         <h4>Setup guide</h4>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">Re-show the "Get started" checklist.</p>
+      <!-- UX audit S2: one row per item, its name and help on the left and
+           its control on the right (Settings board). -->
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Get started checklist</span>
+          <p class="hook-desc">Re-show the "Get started" checklist.</p>
+        </div>
         <button
           class="hook-btn"
           onclick={() => {
@@ -719,8 +726,11 @@
           Replay setup guide
         </button>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">Walk through the main parts of the window again, six short steps.</p>
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Tour</span>
+          <p class="hook-desc">Walk through the main parts of the window again, six short steps.</p>
+        </div>
         <button
           class="hook-btn"
           data-testid="settings-take-tour"
@@ -732,21 +742,29 @@
           Take the tour
         </button>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">Show inline tips the first time a feature is used.</p>
-        <label class="toggle">
-          <input type="checkbox" bind:checked={$hintsEnabled} />
-          Show feature hints
-        </label>
-        <button class="hook-btn" onclick={resetHints} data-testid="reset-hints">
-          Reset hints
-        </button>
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Feature hints</span>
+          <p class="hook-desc">Show inline tips the first time a feature is used.</p>
+        </div>
+        <div class="pref-ctl">
+          <label class="toggle">
+            <input type="checkbox" bind:checked={$hintsEnabled} />
+            Show feature hints
+          </label>
+          <button class="hook-btn" onclick={resetHints} data-testid="reset-hints">
+            Reset hints
+          </button>
+        </div>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">
-          Copy a terminal drag-selection to the clipboard as soon as the mouse
-          is released. Off: use Cmd+C / Ctrl+Shift+C or the context menu.
-        </p>
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Copy on select</span>
+          <p class="hook-desc">
+            Copy a terminal drag-selection to the clipboard as soon as the mouse
+            is released. Off: use Cmd+C / Ctrl+Shift+C or the context menu.
+          </p>
+        </div>
         <label class="toggle">
           <input type="checkbox" bind:checked={$copyOnSelect} data-testid="copy-on-select" />
           Copy on select
@@ -758,7 +776,7 @@
     <div class="panel" hidden={panel !== 'notifications'} data-testid="settings-panel-notifications">
     <section class="block" data-testid="notifications-section">
       <div class="section-header">
-        <h4>Notifications</h4>
+        <h4>Stuck sessions</h4>
       </div>
       <p class="mcp-blurb">
         When a session becomes stuck (auth menu, trust prompt, reconnect,
@@ -980,6 +998,23 @@
   }
   .settings-title { margin: 0 0 var(--space-1) var(--space-1); font-size: var(--text-lg); font-weight: 600; }
   .settings-scroll { min-width: 0; min-height: 0; overflow: auto; }
+  .pref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .pref-text { flex: 1; min-width: 0; }
+  .pref-lbl { font-size: var(--text-sm); font-weight: 500; }
+  .pref-ctl { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; }
+  .pref-row .hook-btn { align-self: center; flex: 0 0 auto; }
+  .page-title {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-xl);
+    font-weight: 600;
+  }
   .settings-content {
     display: flex;
     flex-direction: column;
