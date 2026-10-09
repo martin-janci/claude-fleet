@@ -15,7 +15,7 @@ describe('SessionStatusChip: the J2 mark', () => {
         }),
       },
     });
-    expect(screen.getByTestId('jev-outcome-chip')).toHaveTextContent('Jev: asked you');
+    expect(screen.getByTestId('jev-outcome-chip')).toHaveTextContent('Proposed by Jev');
   });
 
   it('shows nothing extra once a hook set the state, or on the brief row', () => {
