@@ -1430,7 +1430,9 @@ pub struct RunsParams {
     /// Started before (unix s).
     #[serde(default)]
     pub until: Option<i64>,
-    /// operator | task | mission | jev | planner | summary | routine.
+    /// operator | task | mission | jev | routine, or a fleet `claude -p`
+    /// origin: planner | summary | commit_message | release_note |
+    /// morning_brief | brief | watch_summary | triage.
     #[serde(default)]
     pub kind: Option<String>,
     /// ok | failed | needs_person | nothing_to_do | running.

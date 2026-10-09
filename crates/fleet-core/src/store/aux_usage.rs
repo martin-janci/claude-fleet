@@ -27,6 +27,19 @@ pub const AUX_ORIGIN_WATCH_SUMMARY: &str = "watch_summary";
 /// 9.10).
 pub const AUX_ORIGIN_TRIAGE: &str = "triage";
 
+/// Every origin an `aux_usage` row can carry: each is a Runs kind too
+/// (`store::runs::RUN_KINDS`), so a filter on it reaches the aux branch.
+pub const AUX_ORIGINS: &[&str] = &[
+    AUX_ORIGIN_PLANNER,
+    AUX_ORIGIN_SUMMARY,
+    AUX_ORIGIN_COMMIT_MESSAGE,
+    AUX_ORIGIN_RELEASE_NOTE,
+    AUX_ORIGIN_MORNING_BRIEF,
+    AUX_ORIGIN_BRIEF,
+    AUX_ORIGIN_WATCH_SUMMARY,
+    AUX_ORIGIN_TRIAGE,
+];
+
 /// One run to book.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewAuxUsage {

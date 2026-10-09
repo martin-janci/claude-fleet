@@ -1,6 +1,6 @@
 // Runs (Orbit Fleet redesign 8.3): every run on the fleet's behalf —
 // dispatched tasks, a mission's actions and brakes, Jev's decisions and
-// fleet's own `claude -p` runs (planner, summary), routine fires — newest first, each
+// fleet's own `claude -p` runs (planner, summary, triage, …), routine fires — newest first, each
 // linked to the sessions it ran in. The Automation screen's Runs list (8.4)
 // reads it. `list_runs` routes to the hub's `runs { list }` on a paired
 // desktop. Mirrors `fleet_core::store::RunRow` / `service::runs`.
@@ -14,6 +14,12 @@ export type RunKind =
   | 'jev'
   | 'planner'
   | 'summary'
+  | 'commit_message'
+  | 'release_note'
+  | 'morning_brief'
+  | 'brief'
+  | 'watch_summary'
+  | 'triage'
   | 'routine';
 
 /** How it ended, in plain words (`RUN_OUTCOMES`). */

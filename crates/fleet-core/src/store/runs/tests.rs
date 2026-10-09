@@ -384,6 +384,8 @@ fn filters_narrow_and_paging_counts_the_whole() {
     assert_eq!(ids(&rows), ["orchestration:4", "orchestration:3", "task:3"]);
     let (rows, _) = list(&fx, f(|f| f.kind = Some("planner".into())));
     assert_eq!(ids(&rows), ["aux:1"]);
+    let (rows, _) = list(&fx, f(|f| f.kind = Some("summary".into())));
+    assert_eq!(ids(&rows), ["aux:2"]);
     let (rows, _) = list(&fx, f(|f| f.outcome = Some("failed".into())));
     assert_eq!(ids(&rows), ["task:2"]);
     let (rows, _) = list(&fx, f(|f| f.outcome = Some("needs_person".into())));
@@ -726,4 +728,33 @@ fn a_routines_fires_are_runs_linked_to_their_sessions() {
     };
     assert_eq!(list(&fx, scoped(vec![])).1, 0);
     assert_eq!(list(&fx, scoped(vec![routine])).1, 3);
+}
+
+/// Every aux origin is a Runs kind the filter accepts and the aux branch
+/// answers: a `triage` row is listed under `triage`, not dropped.
+#[test]
+fn every_aux_origin_is_a_run_kind_that_filters() {
+    for origin in crate::store::AUX_ORIGINS {
+        assert!(RUN_KINDS.contains(origin), "{origin} is not in RUN_KINDS");
+    }
+    let fx = fixture();
+    fx.s.insert_aux_usage(&NewAuxUsage {
+        origin: crate::store::AUX_ORIGIN_TRIAGE,
+        host_alias: "a".into(),
+        model: "haiku".into(),
+        org_id: Some(fx.org_a),
+        cost_micros: 5,
+        at: 700,
+        ..Default::default()
+    })
+    .unwrap();
+    let (rows, total) = list(
+        &fx,
+        RunsFilter {
+            kind: Some("triage".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!((ids(&rows), total), (vec!["aux:3"], 1));
+    assert_eq!(rows[0].kind, "triage");
 }
