@@ -271,18 +271,19 @@ impl Facts {
                 uncredentialed_accounts.insert(snap.account_uuid.clone());
             }
             let Some(u) = &snap.usage else { continue };
-            let at_limit = |w: &crate::service::account_usage::Window| {
-                w.utilization >= 100.0 && w.resets_at.is_none_or(|at| at > now)
+            use crate::service::account_usage::{FIVE_HOUR_SECS, WEEK_SECS};
+            let at_limit = |w: &crate::service::account_usage::Window, len: i64| {
+                w.utilization >= 100.0 && w.live_at(snap.fetched_at, len, now)
             };
             let limit = u
                 .seven_day
                 .as_ref()
-                .filter(|w| at_limit(w))
+                .filter(|w| at_limit(w, WEEK_SECS))
                 .map(|w| (LimitWindow::Weekly, w))
                 .or_else(|| {
                     u.five_hour
                         .as_ref()
-                        .filter(|w| at_limit(w))
+                        .filter(|w| at_limit(w, FIVE_HOUR_SECS))
                         .map(|w| (LimitWindow::FiveHour, w))
                 });
             if let Some((window, w)) = limit {
@@ -879,6 +880,36 @@ mod tests {
                 .reason,
             Reason::Waiting
         );
+    }
+
+    /// Review r05 F7: a full window with no reset time blocks only while the
+    /// reading is younger than the window; an 8-day-old weekly one does not.
+    #[test]
+    fn a_limit_with_no_reset_time_lapses_with_its_window() {
+        use crate::service::account_usage::{AccountUsage, Window};
+        let now = 1_000_000;
+        let snap = |fetched_at: i64| AccountUsageSnapshot {
+            account_uuid: "acc".into(),
+            usage: Some(AccountUsage {
+                five_hour: None,
+                seven_day: Some(Window {
+                    utilization: 100.0,
+                    resets_at: None,
+                }),
+                seven_day_opus: None,
+                seven_day_sonnet: None,
+            }),
+            subscription: None,
+            fetched_at: Some(fetched_at),
+            source_host: None,
+            status: UsageOutcomeKind::Ok,
+            detail: None,
+            next_try_at: 0,
+        };
+        let fresh = Facts::from_fleet(&[], &[snap(now - 86_400)], now);
+        assert_eq!(fresh.limited_accounts["acc"].window, LimitWindow::Weekly);
+        let old = Facts::from_fleet(&[], &[snap(now - 8 * 86_400)], now);
+        assert!(old.limited_accounts.is_empty(), "{old:?}");
     }
 
     #[test]

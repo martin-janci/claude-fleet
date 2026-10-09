@@ -15,6 +15,10 @@ import { accountUsage } from './account_usage_store';
 import type { AttentionFacts, AttentionLimit } from './attention';
 import { uiLayout } from './prefs';
 
+/** The usage windows' lengths, seconds. */
+const FIVE_HOUR_SECS = 5 * 3600;
+const WEEK_SECS = 7 * 86400;
+
 /** Login states that need a person to sign in again. An expired access
  *  token refreshes by itself, and `no_credentials` is the usage script
  *  finding no token file, which on a macOS host (the token lives in the
@@ -33,11 +37,15 @@ export function attentionFactsFrom(
     if (LOGIN_GONE.has(snap.status)) uncredentialed_accounts.push(snap.account_uuid);
     const u = snap.usage;
     if (!u) continue;
-    const atLimit = (w: { utilization: number; resets_at: number | null } | null) =>
-      !!w && w.utilization >= 100 && (w.resets_at == null || w.resets_at > now);
-    if (atLimit(u.seven_day)) {
+    // A window with no reset time counts only while the reading is younger
+    // than the window itself (`Window::live_at` in fleet-core).
+    const atLimit = (w: { utilization: number; resets_at: number | null } | null, len: number) =>
+      !!w &&
+      w.utilization >= 100 &&
+      (w.resets_at != null ? w.resets_at > now : snap.fetched_at != null && now - snap.fetched_at < len);
+    if (atLimit(u.seven_day, WEEK_SECS)) {
       limited_accounts[snap.account_uuid] = { window: 'weekly', resets_at: u.seven_day!.resets_at };
-    } else if (atLimit(u.five_hour)) {
+    } else if (atLimit(u.five_hour, FIVE_HOUR_SECS)) {
       limited_accounts[snap.account_uuid] = { window: 'five_hour', resets_at: u.five_hour!.resets_at };
     }
   }

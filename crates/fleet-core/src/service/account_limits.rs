@@ -62,19 +62,25 @@ pub struct Headroom {
 }
 
 /// Percent used of the account's tighter window at `now`: the larger of the
-/// 5-hour and weekly use, counting only a window that has not reset yet.
+/// 5-hour and weekly use, counting only a window that has not reset yet
+/// ([`Window::live_at`]).
 pub fn used_pct(snap: Option<&AccountUsageSnapshot>, now: i64) -> Option<f64> {
-    used_pct_of(snap?.usage.as_ref()?, now)
+    let snap = snap?;
+    used_pct_of(snap.usage.as_ref()?, snap.fetched_at, now)
 }
 
-/// [`used_pct`] of one reading.
-pub fn used_pct_of(usage: &AccountUsage, now: i64) -> Option<f64> {
-    let live = |w: &Option<Window>| {
+/// [`used_pct`] of one reading, fetched at `fetched_at`.
+pub fn used_pct_of(usage: &AccountUsage, fetched_at: Option<i64>, now: i64) -> Option<f64> {
+    let live = |w: &Option<Window>, len: i64| {
         w.as_ref()
-            .filter(|w| w.utilization.is_finite() && w.resets_at.is_none_or(|at| at > now))
+            .filter(|w| w.utilization.is_finite() && w.live_at(fetched_at, len, now))
             .map(|w| w.utilization.clamp(0.0, 100.0))
     };
-    match (live(&usage.five_hour), live(&usage.seven_day)) {
+    use crate::service::account_usage::{FIVE_HOUR_SECS, WEEK_SECS};
+    match (
+        live(&usage.five_hour, FIVE_HOUR_SECS),
+        live(&usage.seven_day, WEEK_SECS),
+    ) {
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     }
@@ -202,7 +208,7 @@ pub fn login_account(
         snaps
             .iter()
             .find(|r| r.account_uuid == uuid)
-            .and_then(|r| used_pct_of(&r.usage, now))
+            .and_then(|r| used_pct_of(&r.usage, Some(r.fetched_at), now))
     })
     .into_iter()
     .find(|l| l.profile.as_deref() == profile) else {
@@ -442,6 +448,32 @@ mod tests {
         let h = headroom(&mac(), Some("twin"), &usage, 90.0, NOW);
         assert!(h.over);
         assert_eq!(h.suggestion, None, "work is over too; spare has no reading");
+    }
+
+    /// Review r05 F7: a window with no reset time is live only while the
+    /// reading is younger than the window: an 8-day-old weekly reading (and
+    /// a 6-hour-old 5-hour one) says nothing about now.
+    #[test]
+    fn a_window_with_no_reset_time_lapses_with_its_length() {
+        let mut s = snap("own", 95.0, 97.0);
+        let u = s.usage.as_mut().unwrap();
+        u.five_hour.as_mut().unwrap().resets_at = None;
+        u.seven_day.as_mut().unwrap().resets_at = None;
+        assert_eq!(used_pct(Some(&s), NOW), Some(97.0), "a fresh reading");
+        s.fetched_at = Some(NOW - 6 * 3_600);
+        assert_eq!(used_pct(Some(&s), NOW), Some(97.0), "the week still runs");
+        s.usage
+            .as_mut()
+            .unwrap()
+            .seven_day
+            .as_mut()
+            .unwrap()
+            .utilization = 10.0;
+        assert_eq!(used_pct(Some(&s), NOW), Some(10.0), "the 5 hours lapsed");
+        s.fetched_at = Some(NOW - 8 * 86_400);
+        assert_eq!(used_pct(Some(&s), NOW), None, "8 days old");
+        s.fetched_at = None;
+        assert_eq!(used_pct(Some(&s), NOW), None, "no time, no claim");
     }
 
     #[test]

@@ -57,6 +57,19 @@ describe('attentionFactsFrom (mirrors attention::Facts::from_fleet)', () => {
     expect(classify(idle('gone'), { idleSecs: 0, now: 1000, facts: f })).toBe('no_credentials');
   });
 
+  it('counts a full window with no reset time only while the reading is younger than it (review r05 F7)', () => {
+    const now = 1_000_000;
+    const full = (fetched_at: number) =>
+      snapshot('acc', {
+        fetched_at,
+        usage: { five_hour: null, seven_day: { utilization: 100, resets_at: null }, seven_day_opus: null, seven_day_sonnet: null },
+      });
+    expect(attentionFactsFrom([], { acc: full(now - 86_400) }, now).limited_accounts).toEqual({
+      acc: { window: 'weekly', resets_at: null },
+    });
+    expect(attentionFactsFrom([], { acc: full(now - 8 * 86_400) }, now).limited_accounts).toEqual({});
+  });
+
   it('is the New layout only', () => {
     hosts.set([host('down', { reachable: false, last_pinged_at: 1 })]);
     expect(get(attentionFacts)).toBeUndefined();
