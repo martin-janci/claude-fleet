@@ -13,7 +13,7 @@ a board without leaving the repository.
 | [`transition-plan.md`](transition-plan.md) | The plan from 0.5.4 to the redesign, A to Z. It has 15 milestones (M0 to M14, where M14 is the phone app in fleet-mobile), about 165 PR-sized steps, migrations 121 to 142, hub contract revisions 11 to 15, a task graph with 13 lanes over 9 waves, risks and decisions | [Claude Doc](https://claude.ai/artifact/FakUr921wZQNr3MVeK7vnu) |
 | [`images/`](images) | The plan's two diagrams (roadmap and task graph) as static SVG | drawn in the doc |
 | [`design-system/`](design-system) | The Orbit Fleet design manual: [`README.md`](design-system/README.md) (content, colour, type, layout, icons), [`tokens.json`](design-system/tokens.json), [`motion.md`](design-system/motion.md), [`ai.md`](design-system/ai.md), [`keyboard.md`](design-system/keyboard.md), its "On the phone" section, and 20 components (plus the cover card; BottomBar, PhoneRow and BottomSheet are the phone's) with their `of-` classes in [`components/bundle.css`](design-system/components/bundle.css) | [Design System](https://claude.ai/artifact/RecYyvBJYdXVpLC1oD4bpb) |
-| [`canvas/`](canvas) | All 81 boards of the redesign canvas, including the 24 of the "Mobile app" row (`Mobile*.dc.html`), (`*.dc.html`) and the board layout (`canvas.json`). Each file is the board's source. The boards need the canvas runtime (`support.js`, which is not copied), so open the live canvas to see them drawn | [Design canvas](https://claude.ai/artifact/B2sVtJEZodahNG4cvRu7Pu) |
+| [`canvas/`](canvas) | All 90 boards of the redesign canvas (`*.dc.html`), including the 26 of the "Mobile app" row (`Mobile*.dc.html`) and the 9 Forms boards added on 2026-10-09 (`Forms*.dc.html`, `MobileForms*.dc.html`), and the board layout (`canvas.json`). Each file is the board's source. The boards need the canvas runtime (`support.js`, which is not copied), so open the live canvas to see them drawn | [Design canvas](https://claude.ai/artifact/B2sVtJEZodahNG4cvRu7Pu) |
 
 Step 0.5 of the plan landed with a copy of `design-system/tokens.json` at
 [`docs/design/tokens.json`](../../design/tokens.json): that copy is what `src/app.css`
@@ -22,6 +22,7 @@ Nothing in the build reads this folder itself.
 
 ## Other references
 
+- [Orbit Fleet gap plan](https://claude.ai/code/artifact/c4caae1a-3fea-404d-8241-56d6e97771bb): milestone M15, 57 steps (G0.1 to G6.2) in 7 iterations and 8 lanes that close what the canvas shows and the apps lack. Its evidence is the board-by-board audit in [`docs/redesign/canvas-gaps-2026-10-09.md`](../../redesign/canvas-gaps-2026-10-09.md).
 - [Screen inventory and UX plan](https://claude.ai/code/artifact/2c086832-200f-4f52-a69b-fedd67921530): about 60 screens, the "nothing removed, only moved" parity table, motion rules, and the 47-step UX plan that the transition plan builds on.
 - [AI map](https://claude.ai/artifact/JZsDwLPdMJdh97jPb6g92Y): every AI idea for each screen. All of them are in the transition plan's AI section, and the top 10 are steps.
 - [Earlier UX review](https://claude.ai/code/artifact/11727098-ce9d-41d5-a4d8-83512feaaf1f) and the [Fleet design system for 0.5.3](https://claude.ai/artifact/KvZWoiomzJDRFetDxcb81x), which shows what shipped before the redesign.

@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Automation forms</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#0f0f0f}
+a{color:var(--accent,#60a5fa);text-decoration:none}a:hover{color:#93c5fd}
+.app{--bg:#0f0f0f;--pane:#161616;--raise:#1c1c1c;--hover:#232323;--fg:#ededed;--fg2:#b4b4b4;--muted:#8f8f8f;--line:#2a2a2a;--line2:#3a3a3a;--accent:#60a5fa;--accent-soft:#1c2735;--working:#7fa3ff;--waiting:#d29b4a;--failed:#ef5350;--done:#5dd17a;--idle:#a09fa8;--waiting-soft:color-mix(in srgb,var(--waiting) 13%,transparent);--waiting-faint:color-mix(in srgb,var(--waiting) 7%,transparent);--waiting-line:color-mix(in srgb,var(--waiting) 45%,transparent);--failed-soft:color-mix(in srgb,var(--failed) 12%,transparent);--failed-line:color-mix(in srgb,var(--failed) 35%,transparent);--done-soft:color-mix(in srgb,var(--done) 12%,transparent);--danger-fill:#c62828;--on-danger:#ffffff;--on-waiting:#1a1205;--on-accent:#0b1220;--code:#56b6c2;--syn-str:#98c379;--syn-kw:#c678dd;--chip-bg:#232323;--count-bg:#262626;--track:#2a2a2a;--sunk:#202020;--org-1:#60a5fa;--org-2:#5dd17a;--org-3:#c084fc;--org-4:#a09fa8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:500}
+.btn.danger{background:transparent;border-color:transparent;color:var(--failed)}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.sec{font-size:11px;font-weight:500;color:var(--muted);display:flex;align-items:center;gap:6px;padding:12px 12px 4px}
+.count{font-size:11px;font-weight:500;padding:0 5px;border-radius:4px;background:var(--count-bg);color:var(--fg2);line-height:16px}
+.row{display:flex;gap:10px;padding:7px 12px;border-radius:6px;margin:0 6px;align-items:flex-start}
+.row:hover{background:var(--hover)}
+.rtitle{font-size:13px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rline{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border-radius:6px;color:var(--muted);font-size:11px;line-height:14px;position:relative}
+.rail a:hover{background:var(--hover);color:var(--fg)}
+.tab{font-size:13px;color:var(--muted);padding:10px 0;border-bottom:2px solid transparent}
+.tab.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:500}
+.kv{display:grid;grid-template-columns:84px minmax(0,1fr);gap:6px 10px;font-size:12px;line-height:16px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;color:var(--fg);min-width:0}
+.bar{height:4px;border-radius:2px;background:var(--track);overflow:hidden}
+.bar span{display:block;height:100%;border-radius:2px}
+
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.btn.sm{height:22px;padding:0 6px}.btn.lg{height:28px;padding:0 10px}
+.btn.danger-fill{background:var(--danger-fill);border-color:var(--danger-fill);color:var(--on-danger);font-weight:500}
+.chip.waiting{background:var(--waiting-soft);color:var(--waiting)}.chip.done{background:var(--done-soft);color:var(--done)}
+.chip.failed{background:var(--failed-soft);color:var(--failed)}.chip.accent{background:var(--accent-soft);color:var(--fg)}
+.banner{border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:flex;gap:10px;align-items:center}
+.banner.failed{background:var(--failed-soft);border-color:var(--failed-line)}.banner.waiting{background:var(--waiting-faint);border-color:var(--waiting-line)}
+.row[aria-selected="true"]{box-shadow:inset 2px 0 0 var(--accent)}
+.swatch{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block}
+.st{display:inline-flex;width:8px;height:8px;flex:none}
+.ai{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:16px;font-weight:500;color:var(--accent);padding:0 6px;border-radius:4px;background:var(--accent-soft);white-space:nowrap}
+.ai::before{content:"✦";font-size:10px}
+.ai.draft{color:var(--fg2);background:var(--chip-bg)}.ai.draft::before{content:"✎"}
+.why{font-size:12px;line-height:16px;color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.why a{color:var(--accent)}
+.ai-pre{box-shadow:inset 0 0 0 1px var(--accent);border-radius:4px}
+
+.fx .dlg{background:var(--raise);border:1px solid var(--line2);border-radius:10px;box-shadow:0 16px 50px rgba(0,0,0,.55);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.fx .dlg.inl{box-shadow:none;background:var(--pane);border-color:var(--line)}
+.fx .dh{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.fx .dh strong{font-size:13px;font-weight:600}
+.fx .db{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.fx .df{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);align-items:center;flex-wrap:wrap}
+.fx .df .sp{flex:1 1 auto}
+.fx .cell{display:flex;flex-direction:column;gap:6px;min-width:0}
+.fx .caph{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.fx .caph b{font-size:13px;font-weight:600}
+.fx .where{font-size:11px;line-height:16px;padding:0 6px;border-radius:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.fx .where.new{background:var(--accent-soft);color:var(--accent)}
+.fx .capn{font-size:12px;line-height:16px;color:var(--muted)}
+.fx label.f,.fx .f{display:flex;flex-direction:column;gap:4px;font-size:12px;line-height:16px;color:var(--fg2);min-width:0}
+.fx .f .fl{display:flex;align-items:baseline;gap:6px}
+.fx .f .opt-l{color:var(--muted);font-size:11px}
+.fx .inp{height:28px;border:1px solid var(--line2);border-radius:4px;background:var(--pane);color:var(--fg);font:inherit;font-size:13px;padding:0 8px;width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px}
+.fx textarea.inp{height:auto;padding:6px 8px;resize:none;line-height:18px;display:block}
+.fx .inp.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.fx .inp.ph{color:var(--muted)}
+.fx .inp.err{border-color:var(--failed)}
+.fx .inp.focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.fx .inp[disabled]{opacity:.55}
+.fx .help{font-size:12px;line-height:16px;color:var(--muted)}
+.fx .errt{font-size:12px;line-height:16px;color:var(--failed)}
+.fx .okt{font-size:12px;line-height:16px;color:var(--done)}
+.fx .sel{width:100%;justify-content:space-between;height:28px;font-size:13px;background:var(--pane)}
+.fx .seg{display:flex;gap:6px;flex-wrap:wrap}
+.fx .opt{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;color:var(--fg2);background:transparent;cursor:pointer}
+.fx .opt.on{border-color:var(--accent);background:var(--accent-soft);color:var(--fg)}
+.fx .tgr{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--fg)}
+.fx .tgr .tl{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.fx .tg{width:28px;height:16px;border-radius:8px;background:var(--accent);position:relative;flex:none;border:0;padding:0;cursor:pointer}
+.fx .tg::after{content:"";position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--on-accent)}
+.fx .tg.off{background:var(--track)}.fx .tg.off::after{right:auto;left:2px;background:var(--muted)}
+.fx .ck{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--fg);line-height:18px}
+.fx .ck input{accent-color:var(--accent);margin:2px 0 0;flex:none}
+.fx .ck .meta{display:block}
+.fx .two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.fx .three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.fx .stp{display:flex;gap:4px}.fx .stp i{height:3px;flex:1 1 0;border-radius:2px;background:var(--track)}.fx .stp i.on{background:var(--accent)}.fx .stp i.ok{background:var(--done)}
+.fx .note{font-size:12px;line-height:16px;color:var(--fg2);background:var(--sunk);border-radius:6px;padding:8px 10px}
+.fx .bnr{border-radius:6px;padding:8px 10px;font-size:12px;line-height:16px;display:flex;gap:8px;align-items:flex-start}
+.fx .bnr.f{background:var(--failed-soft);border:1px solid var(--failed-line);color:var(--fg)}
+.fx .bnr.w{background:var(--waiting-faint);border:1px solid var(--waiting-line);color:var(--fg)}
+.fx .bnr.ok{background:var(--done-soft);border:1px solid color-mix(in srgb,var(--done) 35%,transparent);color:var(--fg)}
+.fx .bnr.i{background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);color:var(--fg)}
+.fx .lst{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.fx .lst>div{display:flex;gap:8px;align-items:center;padding:6px 8px;font-size:12px;border-top:1px solid var(--line)}
+.fx .lst>div:first-child{border-top:0}
+.fx .lst>div.on{background:var(--accent-soft)}
+.fx .cm{display:inline-block;width:12px;height:12px;border-radius:50%;background:conic-gradient(from 0deg,transparent 0deg,transparent 40deg,currentColor 300deg);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));animation:fxspin .9s linear infinite;flex:none}
+@keyframes fxspin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.fx .cm{animation-duration:2.4s}}
+.fx .grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px 16px;align-items:start}
+.fx .span2{grid-column:span 2}
+.fx .pill{font-size:11px;line-height:16px;padding:0 6px;border-radius:8px;background:var(--chip-bg);color:var(--fg2)}
+.fx kbd{font:inherit;font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid currentColor;opacity:.75}
+</style>
+</helmet>
+<div class="app fx" style="width: 100%; min-height: 1500px; display: flex; flex-direction: column; background: var(--bg);">
+<div style="padding: 20px 28px 10px; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;"><svg width="28" height="28" viewBox="0 0 108 108" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2430"/><circle cx="54" cy="54" r="24" fill="none" stroke="#F2F4F7" stroke-opacity="0.5" stroke-width="5"/><circle cx="54" cy="54" r="10" fill="#F2F4F7"/><circle cx="54" cy="30" r="7.5" fill="#F2F4F7"/><circle cx="74.78" cy="66" r="7.5" fill="#D29B4A"/><circle cx="33.22" cy="66" r="7.5" fill="#F2F4F7"/></svg><h1 style="margin: 0; font-size: 18px; line-height: 24px; font-weight: 600;">Forms · Automation and missions</h1><span class="meta">routines, missions, grants and plans; nothing runs until its verb is pressed</span></div>
+<div class="grid4" style="padding: 6px 28px 28px; "><div class="cell span2"><div class="caph"><b>New routine</b><span class="where">Automation › + New</span></div><span class="capn">RoutinesPanel editor · the same form edits a routine</span><div class="dlg"><div class="dh"><strong>New routine</strong><div class="meta">Starts a session on a schedule or an event. Its runs land in Runs and in Inbox.</div></div><div class="db"><div class="two"><div class="f"><span class="fl">Name</span><input class="inp" type="text" value="Morning PR sweep" placeholder="" aria-label="Name"></div><div class="f"><span class="fl">Starts</span><div class="seg" role="group" aria-label="Trigger"><button class="opt on" aria-pressed="true">On a schedule</button><button class="opt">On an event</button></div></div></div><div class="two"><div class="f"><span class="fl">Schedule</span><input class="inp mono" type="text" value="30 8 * * 1-5" placeholder="" aria-label="Cron"><span class="help">Weekdays at 08:30 · next run Mon 12 Oct, 08:30</span></div><div class="f"><span class="fl">Time zone</span><button class="btn sel" aria-label="Europe/Bratislava"><span>Europe/Bratislava</span><span aria-hidden="true">▾</span></button></div></div><div class="three"><div class="f"><span class="fl">Host</span><button class="btn sel" aria-label="mercury"><span>mercury</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Project</span><button class="btn sel" aria-label="claude-fleet"><span>claude-fleet</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Account</span><button class="btn sel" aria-label="m.janci@32bit.sk"><span>m.janci@32bit.sk</span><span aria-hidden="true">▾</span></button></div></div><div class="f"><span class="fl">Prompt</span><textarea class="inp" style="height: 68px;" placeholder="" aria-label="Prompt">Go through my open PRs. For each: is CI green, are there review comments I have not answered? Fix small things; list the rest.</textarea></div><div class="three"><div class="f"><span class="fl">Budget per run</span><input class="inp" type="text" value="$2.00" placeholder="" aria-label="Budget per run"></div><div class="f"><span class="fl">Budget per day</span><input class="inp" type="text" value="$6.00" placeholder="" aria-label="Budget per day"></div><div class="f"><span class="fl">If the last run is still going</span><button class="btn sel" aria-label="Skip this run"><span>Skip this run</span><span aria-hidden="true">▾</span></button></div></div><div class="f"><span class="fl">Profile<span class="opt-l">optional</span></span><input class="inp mono" type="text" value="" placeholder="default" aria-label="Profile"><span class="help">A claude profile on the host, for routines that need their own settings.</span></div><div class="bnr i"><span>Dry run: on mercury, in claude-fleet at main, as m.janci@32bit.sk, at most $2.00. <a href="#">Run once now</a></span></div></div><div class="df"><button class="btn quiet">Use a template…</button><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Create routine</button></div></div></div><div class="cell"><div class="caph"><b>Starts on an event</b><span class="where">routine › trigger</span></div><span class="capn">The middle of the routine form when "On an event" is picked</span><div class="dlg inl"><div class="dh"><strong>Starts on an event</strong><div class="meta">The same routine form with "On an event" picked.</div></div><div class="db"><div class="f"><span class="fl">Event</span><button class="btn sel" aria-label="A pull request gets a review comment"><span>A pull request gets a review comment</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Only when</span><div class="two"><button class="btn sel" aria-label="repo: claude-fleet"><span>repo: claude-fleet</span><span aria-hidden="true">▾</span></button><button class="btn sel" aria-label="author: me"><span>author: me</span><span aria-hidden="true">▾</span></button></div></div><div class="f"><span class="fl">Not more often than</span><button class="btn sel" aria-label="once per PR per hour"><span>once per PR per hour</span><span aria-hidden="true">▾</span></button></div></div><div class="df"><span class="sp"></span></div></div></div><div class="cell"><div class="caph"><b>New mission</b><span class="where">Missions › + New</span></div><span class="capn">WorkMissions · New mission</span><div class="dlg"><div class="dh"><strong>New mission</strong><div class="meta">A mission is a goal split into tasks that sessions work on in waves.</div></div><div class="db"><div class="f"><span class="fl">Name</span><input class="inp" type="text" value="Hub federation v2" placeholder="" aria-label="Name"></div><div class="f"><span class="fl">Goal</span><textarea class="inp" style="height: 68px;" placeholder="" aria-label="Goal">Two hubs can share sessions both ways, with grants that expire.</textarea></div><label class="ck"><input type="checkbox" checked><span>Let the planner draft the first tasks<span class="meta"> · it proposes, you accept each one</span></span></label></div><div class="df"><button class="btn quiet">Import a plan…</button><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Create mission</button></div></div></div><div class="cell"><div class="caph"><b>Mission brief</b><span class="where">mission › Edit</span></div><span class="capn">Goal, not in scope, done when</span><div class="dlg"><div class="dh"><strong>Edit mission brief</strong><div class="meta">The planner and every session read this.</div></div><div class="db"><div class="f"><span class="fl">Goal</span><textarea class="inp" style="height: 50px;" placeholder="" aria-label="Goal">Two hubs can share sessions both ways, with grants that expire.</textarea></div><div class="f"><span class="fl">Not in scope</span><textarea class="inp" style="height: 50px;" placeholder="" aria-label="Not in scope">Federating more than two hubs. Billing across hubs.</textarea></div><div class="f"><span class="fl">Done when</span><textarea class="inp" style="height: 50px;" placeholder="" aria-label="Done when">hub-e2e passes with two hubs; a grant expires on time; docs/hub.md updated.</textarea></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Save brief</button></div></div></div><div class="cell"><div class="caph"><b>Mission autonomy</b><span class="where">mission › Autonomy</span></div><span class="capn">Level, mode, parallel, wake</span><div class="dlg"><div class="dh"><strong>Mission autonomy</strong><div class="meta">How far sessions go before they ask. Signing a grant is separate.</div></div><div class="db"><div class="two"><div class="f"><span class="fl">Level</span><button class="btn sel" aria-label="2 · open PRs, never merge"><span>2 · open PRs, never merge</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Mode</span><button class="btn sel" aria-label="Waves"><span>Waves</span><span aria-hidden="true">▾</span></button></div></div><div class="two"><div class="f"><span class="fl">Sessions at once</span><input class="inp" type="text" value="3" placeholder="" aria-label="Sessions at once"></div><div class="f"><span class="fl">Wake the planner every</span><div style="display: flex; gap: 6px; align-items: center;"><input class="inp" type="text" value="30" placeholder="" aria-label="minutes"><span class="meta">min</span></div></div></div><div class="bnr w"><span>Level 3 and up need a signed grant with a time limit and a budget.</span></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Save</button></div></div></div><div class="cell"><div class="caph"><b>Sign a grant</b><span class="where">mission › Sign grant</span></div><span class="capn">Level, hours, budget, hosts</span><div class="dlg"><div class="dh"><strong>Sign a grant for Hub federation v2</strong><div class="meta">Lets the mission run at level 3 until the grant ends.</div></div><div class="db"><div class="two"><div class="f"><span class="fl">Level</span><button class="btn sel" aria-label="3 · merge to a branch"><span>3 · merge to a branch</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">For</span><div style="display: flex; gap: 6px; align-items: center;"><input class="inp" type="text" value="8" placeholder="" aria-label="hours"><span class="meta">h</span></div></div></div><div class="f"><span class="fl">Budget</span><input class="inp" type="text" value="$20.00" placeholder="" aria-label="Budget"></div><div class="f"><span class="fl">Hosts</span><div class="seg" role="group" aria-label="Hosts"><button class="opt on" aria-pressed="true">✓ mercury</button><button class="opt on" aria-pressed="true">✓ mac</button><button class="opt">claude-fleet-trn</button></div></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Sign grant</button></div></div></div><div class="cell"><div class="caph"><b>Import a plan</b><span class="where">mission › Import</span></div><span class="capn">Markdown table, checked before anything is added</span><div class="dlg"><div class="dh"><strong>Import a plan</strong><div class="meta">Paste a Markdown table: one row per task.</div></div><div class="db"><div class="f"><span class="fl">Plan</span><textarea class="inp mono" style="height: 104px;" placeholder="" aria-label="Plan">| Task | Depends on | Repo |
+|---|---|---|
+| Grant model | | claude-fleet |
+| Peer code redemption | Grant model | claude-fleet |
+| Phone pairing | Grant model | fleet-mobile |</textarea></div><div class="bnr ok"><span style="color: var(--done);">✓</span><span>3 tasks, 2 dependencies, 2 repos found. Row 4 has no repo: <a href="#">pick one</a></span></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Add 3 tasks</button></div></div></div><div class="cell"><div class="caph"><b>Add a repository</b><span class="where">mission › Repos</span></div><span class="capn">Repo and its role</span><div class="dlg"><div class="dh"><strong>Add a repository</strong><div class="meta">Sessions of this mission may work in it.</div></div><div class="db"><div class="f"><span class="fl">Repository</span><button class="btn sel" aria-label="fleet-mobile"><span>fleet-mobile</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Role<span class="opt-l">optional</span></span><input class="inp" type="text" value="phone client" placeholder="" aria-label="Role"><span class="help">One phrase the planner reads, e.g. "server", "docs".</span></div></div><div class="df"><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Add</button></div></div></div><div class="cell"><div class="caph"><b>Answer a mission card</b><span class="where">mission card</span></div><span class="capn">Phone: MissionsSheet CardRow</span><div class="dlg inl"><div class="dh"><strong>Peer code redemption · needs you</strong><div class="meta">The session asks before it changes the protocol.</div></div><div class="db"><div style="color: var(--fg2);">Should a redeemed code be single-use, or valid for 10 minutes?</div><div class="seg" role="group" aria-label="Answer"><button class="opt on" aria-pressed="true">Single-use</button><button class="opt">Valid 10 min</button></div><div class="f"><span class="fl">Or answer in your own words<span class="opt-l">optional</span></span><textarea class="inp" style="height: 50px;" placeholder="Your answer" aria-label="Answer"></textarea></div></div><div class="df"><button class="btn quiet">Skip</button><span class="sp"></span><button class="btn primary">Send answer</button></div></div></div></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1500}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

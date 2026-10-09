@@ -657,6 +657,78 @@
    "h": 900,
    "title": "Mobile · Tutorial modes, lessons, guides",
    "expand": "fill"
+  },
+  "FormsAnatomy.dc.html": {
+   "x": 0,
+   "y": 21700,
+   "w": 1440,
+   "h": 1300,
+   "title": "Forms · field kinds, states, saving and rules",
+   "expand": "fill"
+  },
+  "FormsWork.dc.html": {
+   "x": 1520,
+   "y": 21700,
+   "w": 1440,
+   "h": 1240,
+   "title": "Forms · Work: tasks, rules, placing work",
+   "expand": "fill"
+  },
+  "FormsAutomation.dc.html": {
+   "x": 3040,
+   "y": 21700,
+   "w": 1440,
+   "h": 1500,
+   "title": "Forms · Automation and missions",
+   "expand": "fill"
+  },
+  "FormsToolkit.dc.html": {
+   "x": 4560,
+   "y": 21700,
+   "w": 1440,
+   "h": 1420,
+   "title": "Forms · Toolkit: assets, secrets, snippets",
+   "expand": "fill"
+  },
+  "FormsAccounts.dc.html": {
+   "x": 6080,
+   "y": 21700,
+   "w": 1440,
+   "h": 1300,
+   "title": "Forms · Accounts, tokens, hosts, projects",
+   "expand": "fill"
+  },
+  "FormsOrg.dc.html": {
+   "x": 0,
+   "y": 23320,
+   "w": 1440,
+   "h": 1300,
+   "title": "Forms · Organisations, people, devices",
+   "expand": "fill"
+  },
+  "FormsSession.dc.html": {
+   "x": 1520,
+   "y": 23320,
+   "w": 1440,
+   "h": 1240,
+   "title": "Forms · Session, files and git",
+   "expand": "fill"
+  },
+  "MobileFormsSession.dc.html": {
+   "x": 3040,
+   "y": 23320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Forms in a session",
+   "expand": "fill"
+  },
+  "MobileFormsWork.dc.html": {
+   "x": 4560,
+   "y": 23320,
+   "w": 1440,
+   "h": 900,
+   "title": "Mobile · Forms for work, sharing, settings",
+   "expand": "fill"
   }
  },
  "order": [
@@ -740,7 +812,16 @@
   "MobileChatForms.dc.html",
   "MobileFullscreen.dc.html",
   "MobileTutorials.dc.html",
-  "MobileTutorialModes.dc.html"
+  "MobileTutorialModes.dc.html",
+  "FormsAnatomy.dc.html",
+  "FormsWork.dc.html",
+  "FormsAutomation.dc.html",
+  "FormsToolkit.dc.html",
+  "FormsAccounts.dc.html",
+  "FormsOrg.dc.html",
+  "FormsSession.dc.html",
+  "MobileFormsSession.dc.html",
+  "MobileFormsWork.dc.html"
  ],
  "notes": {
   "title": {
@@ -805,6 +886,13 @@
    "text": "Mobile app (fleet-mobile): Inbox · Sessions · Control · Work · More",
    "kind": "title1",
    "maxW": 4500
+  },
+  "p7": {
+   "x": 0,
+   "y": 21400,
+   "text": "Forms: every create, edit and settings form, one field set for dialogs, sheets and chat",
+   "kind": "title1",
+   "maxW": 7500
   }
  },
  "designSystems": [

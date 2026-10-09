@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Form anatomy</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;background:#0f0f0f}
+a{color:var(--accent,#60a5fa);text-decoration:none}a:hover{color:#93c5fd}
+.app{--bg:#0f0f0f;--pane:#161616;--raise:#1c1c1c;--hover:#232323;--fg:#ededed;--fg2:#b4b4b4;--muted:#8f8f8f;--line:#2a2a2a;--line2:#3a3a3a;--accent:#60a5fa;--accent-soft:#1c2735;--working:#7fa3ff;--waiting:#d29b4a;--failed:#ef5350;--done:#5dd17a;--idle:#a09fa8;--waiting-soft:color-mix(in srgb,var(--waiting) 13%,transparent);--waiting-faint:color-mix(in srgb,var(--waiting) 7%,transparent);--waiting-line:color-mix(in srgb,var(--waiting) 45%,transparent);--failed-soft:color-mix(in srgb,var(--failed) 12%,transparent);--failed-line:color-mix(in srgb,var(--failed) 35%,transparent);--done-soft:color-mix(in srgb,var(--done) 12%,transparent);--danger-fill:#c62828;--on-danger:#ffffff;--on-waiting:#1a1205;--on-accent:#0b1220;--code:#56b6c2;--syn-str:#98c379;--syn-kw:#c678dd;--chip-bg:#232323;--count-bg:#262626;--track:#2a2a2a;--sunk:#202020;--org-1:#60a5fa;--org-2:#5dd17a;--org-3:#c084fc;--org-4:#a09fa8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--fg);background:var(--bg);font-size:13px;line-height:18px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.meta{font-size:12px;line-height:16px;color:var(--muted)}
+.tnum{font-variant-numeric:tabular-nums}
+.btn{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);background:var(--raise);color:var(--fg);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.btn.quiet{background:transparent;border-color:transparent;color:var(--fg2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:500}
+.btn.danger{background:transparent;border-color:transparent;color:var(--failed)}
+.kbd{font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid var(--line2);color:var(--muted)}
+.chip{height:20px;padding:0 6px;border-radius:4px;font-size:11px;font-weight:500;display:inline-flex;align-items:center;gap:4px;background:var(--chip-bg);color:var(--fg2)}
+.dot{width:8px;height:8px;border-radius:50%;flex:none}
+.sec{font-size:11px;font-weight:500;color:var(--muted);display:flex;align-items:center;gap:6px;padding:12px 12px 4px}
+.count{font-size:11px;font-weight:500;padding:0 5px;border-radius:4px;background:var(--count-bg);color:var(--fg2);line-height:16px}
+.row{display:flex;gap:10px;padding:7px 12px;border-radius:6px;margin:0 6px;align-items:flex-start}
+.row:hover{background:var(--hover)}
+.rtitle{font-size:13px;line-height:18px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rline{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rail a{display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px 0;border-radius:6px;color:var(--muted);font-size:11px;line-height:14px;position:relative}
+.rail a:hover{background:var(--hover);color:var(--fg)}
+.tab{font-size:13px;color:var(--muted);padding:10px 0;border-bottom:2px solid transparent}
+.tab.on{color:var(--fg);border-bottom-color:var(--accent);font-weight:500}
+.kv{display:grid;grid-template-columns:84px minmax(0,1fr);gap:6px 10px;font-size:12px;line-height:16px}
+.kv dt{color:var(--muted)}.kv dd{margin:0;color:var(--fg);min-width:0}
+.bar{height:4px;border-radius:2px;background:var(--track);overflow:hidden}
+.bar span{display:block;height:100%;border-radius:2px}
+
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+.btn.sm{height:22px;padding:0 6px}.btn.lg{height:28px;padding:0 10px}
+.btn.danger-fill{background:var(--danger-fill);border-color:var(--danger-fill);color:var(--on-danger);font-weight:500}
+.chip.waiting{background:var(--waiting-soft);color:var(--waiting)}.chip.done{background:var(--done-soft);color:var(--done)}
+.chip.failed{background:var(--failed-soft);color:var(--failed)}.chip.accent{background:var(--accent-soft);color:var(--fg)}
+.banner{border:1px solid var(--line);border-radius:6px;padding:10px 12px;display:flex;gap:10px;align-items:center}
+.banner.failed{background:var(--failed-soft);border-color:var(--failed-line)}.banner.waiting{background:var(--waiting-faint);border-color:var(--waiting-line)}
+.row[aria-selected="true"]{box-shadow:inset 2px 0 0 var(--accent)}
+.swatch{width:8px;height:8px;border-radius:50%;flex:none;display:inline-block}
+.st{display:inline-flex;width:8px;height:8px;flex:none}
+.ai{display:inline-flex;align-items:center;gap:4px;font-size:11px;line-height:16px;font-weight:500;color:var(--accent);padding:0 6px;border-radius:4px;background:var(--accent-soft);white-space:nowrap}
+.ai::before{content:"✦";font-size:10px}
+.ai.draft{color:var(--fg2);background:var(--chip-bg)}.ai.draft::before{content:"✎"}
+.why{font-size:12px;line-height:16px;color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.why a{color:var(--accent)}
+.ai-pre{box-shadow:inset 0 0 0 1px var(--accent);border-radius:4px}
+
+.fx .dlg{background:var(--raise);border:1px solid var(--line2);border-radius:10px;box-shadow:0 16px 50px rgba(0,0,0,.55);overflow:hidden;display:flex;flex-direction:column;min-width:0}
+.fx .dlg.inl{box-shadow:none;background:var(--pane);border-color:var(--line)}
+.fx .dh{padding:12px 14px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:4px}
+.fx .dh strong{font-size:13px;font-weight:600}
+.fx .db{padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.fx .df{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);align-items:center;flex-wrap:wrap}
+.fx .df .sp{flex:1 1 auto}
+.fx .cell{display:flex;flex-direction:column;gap:6px;min-width:0}
+.fx .caph{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.fx .caph b{font-size:13px;font-weight:600}
+.fx .where{font-size:11px;line-height:16px;padding:0 6px;border-radius:4px;background:var(--chip-bg);color:var(--fg2);white-space:nowrap}
+.fx .where.new{background:var(--accent-soft);color:var(--accent)}
+.fx .capn{font-size:12px;line-height:16px;color:var(--muted)}
+.fx label.f,.fx .f{display:flex;flex-direction:column;gap:4px;font-size:12px;line-height:16px;color:var(--fg2);min-width:0}
+.fx .f .fl{display:flex;align-items:baseline;gap:6px}
+.fx .f .opt-l{color:var(--muted);font-size:11px}
+.fx .inp{height:28px;border:1px solid var(--line2);border-radius:4px;background:var(--pane);color:var(--fg);font:inherit;font-size:13px;padding:0 8px;width:100%;box-sizing:border-box;display:flex;align-items:center;gap:6px}
+.fx textarea.inp{height:auto;padding:6px 8px;resize:none;line-height:18px;display:block}
+.fx .inp.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.fx .inp.ph{color:var(--muted)}
+.fx .inp.err{border-color:var(--failed)}
+.fx .inp.focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.fx .inp[disabled]{opacity:.55}
+.fx .help{font-size:12px;line-height:16px;color:var(--muted)}
+.fx .errt{font-size:12px;line-height:16px;color:var(--failed)}
+.fx .okt{font-size:12px;line-height:16px;color:var(--done)}
+.fx .sel{width:100%;justify-content:space-between;height:28px;font-size:13px;background:var(--pane)}
+.fx .seg{display:flex;gap:6px;flex-wrap:wrap}
+.fx .opt{height:24px;padding:0 8px;border-radius:4px;border:1px solid var(--line2);font:inherit;font-size:12px;display:inline-flex;align-items:center;gap:6px;color:var(--fg2);background:transparent;cursor:pointer}
+.fx .opt.on{border-color:var(--accent);background:var(--accent-soft);color:var(--fg)}
+.fx .tgr{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--fg)}
+.fx .tgr .tl{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px}
+.fx .tg{width:28px;height:16px;border-radius:8px;background:var(--accent);position:relative;flex:none;border:0;padding:0;cursor:pointer}
+.fx .tg::after{content:"";position:absolute;right:2px;top:2px;width:12px;height:12px;border-radius:50%;background:var(--on-accent)}
+.fx .tg.off{background:var(--track)}.fx .tg.off::after{right:auto;left:2px;background:var(--muted)}
+.fx .ck{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--fg);line-height:18px}
+.fx .ck input{accent-color:var(--accent);margin:2px 0 0;flex:none}
+.fx .ck .meta{display:block}
+.fx .two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.fx .three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.fx .stp{display:flex;gap:4px}.fx .stp i{height:3px;flex:1 1 0;border-radius:2px;background:var(--track)}.fx .stp i.on{background:var(--accent)}.fx .stp i.ok{background:var(--done)}
+.fx .note{font-size:12px;line-height:16px;color:var(--fg2);background:var(--sunk);border-radius:6px;padding:8px 10px}
+.fx .bnr{border-radius:6px;padding:8px 10px;font-size:12px;line-height:16px;display:flex;gap:8px;align-items:flex-start}
+.fx .bnr.f{background:var(--failed-soft);border:1px solid var(--failed-line);color:var(--fg)}
+.fx .bnr.w{background:var(--waiting-faint);border:1px solid var(--waiting-line);color:var(--fg)}
+.fx .bnr.ok{background:var(--done-soft);border:1px solid color-mix(in srgb,var(--done) 35%,transparent);color:var(--fg)}
+.fx .bnr.i{background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);color:var(--fg)}
+.fx .lst{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.fx .lst>div{display:flex;gap:8px;align-items:center;padding:6px 8px;font-size:12px;border-top:1px solid var(--line)}
+.fx .lst>div:first-child{border-top:0}
+.fx .lst>div.on{background:var(--accent-soft)}
+.fx .cm{display:inline-block;width:12px;height:12px;border-radius:50%;background:conic-gradient(from 0deg,transparent 0deg,transparent 40deg,currentColor 300deg);-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 1px));animation:fxspin .9s linear infinite;flex:none}
+@keyframes fxspin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.fx .cm{animation-duration:2.4s}}
+.fx .grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px 16px;align-items:start}
+.fx .span2{grid-column:span 2}
+.fx .pill{font-size:11px;line-height:16px;padding:0 6px;border-radius:8px;background:var(--chip-bg);color:var(--fg2)}
+.fx kbd{font:inherit;font-size:11px;line-height:14px;padding:0 4px;border-radius:3px;border:1px solid currentColor;opacity:.75}
+</style>
+</helmet>
+<div class="app fx" style="width: 100%; min-height: 1300px; display: flex; flex-direction: column; background: var(--bg);">
+<div style="padding: 20px 28px 10px; display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;"><svg width="28" height="28" viewBox="0 0 108 108" aria-hidden="true"><rect width="108" height="108" rx="24" fill="#1B2430"/><circle cx="54" cy="54" r="24" fill="none" stroke="#F2F4F7" stroke-opacity="0.5" stroke-width="5"/><circle cx="54" cy="54" r="10" fill="#F2F4F7"/><circle cx="54" cy="30" r="7.5" fill="#F2F4F7"/><circle cx="74.78" cy="66" r="7.5" fill="#D29B4A"/><circle cx="33.22" cy="66" r="7.5" fill="#F2F4F7"/></svg><h1 style="margin: 0; font-size: 18px; line-height: 24px; font-weight: 600;">Forms · one field set for every dialog, sheet and chat form</h1><span class="meta">the controls, states and rules every form on the boards below is built from</span></div>
+<div class="grid4" style="padding: 6px 28px 28px; "><div class="cell"><div class="caph"><b>Field kinds</b><span class="where">fleet.form/1</span></div><span class="capn">text, textarea, number, bool, select, multiselect, secret</span><div class="dlg"><div class="dh"><strong>Field kinds</strong><div class="meta">The seven fleet.form/1 types. A dialog and a chat card draw the same controls.</div></div><div class="db"><div class="f"><span class="fl">text</span><input class="inp" type="text" value="papaya-receipts-v2" placeholder="" aria-label="text"></div><div class="f"><span class="fl">textarea</span><textarea class="inp" style="height: 50px;" placeholder="" aria-label="textarea">Find every caller of Store::revert_rebind.</textarea></div><div class="f"><span class="fl">number</span><div style="display: flex; gap: 6px; align-items: center;"><input class="inp" type="text" value="3" placeholder="" aria-label="number"><span class="meta" style="white-space: nowrap;">sessions at once</span></div></div><div class="f"><span class="fl">bool</span><div class="tgr"><span class="tl"><span>Open a draft PR when done</span></span><button class="tg" role="switch" aria-checked="true" aria-label="Open a draft PR when done"></button></div></div><div class="f"><span class="fl">select</span><button class="btn sel" aria-label="select"><span>mercury</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">multiselect</span><div class="seg" role="group" aria-label="multiselect"><button class="opt on" aria-pressed="true">✓ papaya-pos</button><button class="opt on" aria-pressed="true">✓ papaya-receipts</button><button class="opt">papaya-admin</button></div></div><div class="f"><span class="fl">secret</span><div class="inp" style="justify-content: space-between;"><span style="color: var(--muted); letter-spacing: 2px;">••••••••••••</span><span class="meta">written to mercury, never shown</span></div></div></div><div class="df"><span class="sp"></span></div></div></div><div class="cell"><div class="caph"><b>Field states</b><span class="where">every form</span></div><span class="capn">help, error, disabled with a reason, proposed, drafted</span><div class="dlg"><div class="dh"><strong>Field states</strong><div class="meta">One look per state, in every form.</div></div><div class="db"><div class="f"><span class="fl">Default</span><input class="inp" type="text" value="mercury" placeholder="" aria-label="default"></div><div class="f"><span class="fl">Focused</span><input class="inp focus" type="text" value="merc" placeholder="" aria-label="focused"></div><div class="f"><span class="fl">With help</span><input class="inp mono" type="text" value="~/projects" placeholder="" aria-label="with help"><span class="help">Where new clones go on this host.</span></div><div class="f"><span class="fl">Invalid</span><input class="inp mono err" type="text" value="feature/ receipts" placeholder="" aria-label="invalid"><span class="errt">A branch name cannot contain a space.</span></div><div class="f"><span class="fl">Disabled, with the reason</span><input class="inp dis" type="text" value="claude-fleet-trn" placeholder="" aria-label="disabled" disabled><span class="help">Account at its weekly limit until Fri 11:00.</span></div><div class="f"><span class="fl">Proposed by Jev</span><div class="ai-pre"><button class="btn sel" aria-label="proposed host"><span>mercury</span><span aria-hidden="true">▾</span></button></div><div class="why"><span class="ai">Proposed by Jev</span>same repo, 2 idle slots · <a href="#">Change</a></div></div><div class="f"><span class="fl">Drafted<span class="ai draft">Drafted</span></span><textarea class="inp" style="height: 50px;" placeholder="" aria-label="drafted">Rebase the receipts branch on main and rerun the totals tests.</textarea></div></div><div class="df"><span class="sp"></span></div></div></div><div class="cell"><div class="caph"><b>Dialog anatomy</b><span class="where">every dialog</span></div><span class="capn"><div class="note" style="display: flex; flex-direction: column; gap: 4px;"><span>1 · Title names the thing, never "Dialog".</span><span>2 · One sentence under it, no paragraph.</span><span>3 · Labels sit above fields; only optional ones are marked.</span><span>4 · Footer: a quiet extra on the left, Cancel and the verb on the right. The verb names the action and the count ("Create task", "Send to 3").</span><span>5 · Enter submits a one-field form, ⌘↵ any form; Esc cancels.</span></div></span><div class="dlg"><div class="dh"><div style="display: flex; align-items: baseline; gap: 8px;"><strong>New task</strong><span class="meta" style="margin-left: auto;">Step 1 of 1</span></div><div class="meta">One plain sentence: what this makes and where it goes.</div></div><div class="db"><div class="f"><span class="fl">Title</span><input class="inp" type="text" value="Receipt totals round twice" placeholder="" aria-label="Title"></div><div class="two"><div class="f"><span class="fl">Project</span><button class="btn sel" aria-label="papaya-pos"><span>papaya-pos</span><span aria-hidden="true">▾</span></button></div><div class="f"><span class="fl">Status</span><button class="btn sel" aria-label="To do"><span>To do</span><span aria-hidden="true">▾</span></button></div></div><div class="f"><span class="fl">Notes<span class="opt-l">optional</span></span><textarea class="inp" style="height: 50px;" placeholder="What done looks like" aria-label="Notes"></textarea></div></div><div class="df"><button class="btn quiet">Open in tracker ↗</button><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn primary">Create task</button></div></div></div><div class="cell"><div class="caph"><b>Saving</b><span class="where">every form</span></div><span class="capn">The verb carries the state; the form never blanks out.</span><div class="dlg"><div class="dh"><strong>Saving</strong><div class="meta">What the verb does from untouched to saved.</div></div><div class="db"><div class="f"><span class="fl">Untouched</span><div style="display: flex; gap: 8px; justify-content: flex-end;"><button class="btn quiet">Cancel</button><button class="btn primary" disabled style="opacity:.45">Save</button></div><span class="help" style="text-align: right;">Nothing changed yet.</span></div><div class="f"><span class="fl">Changed</span><div style="display: flex; gap: 8px; justify-content: flex-end;"><button class="btn quiet">Discard</button><button class="btn primary">Save</button></div></div><div class="f"><span class="fl">Saving · Comet in the button after 400 ms</span><div style="display: flex; gap: 8px; justify-content: flex-end;"><button class="btn quiet">Cancel</button><button class="btn primary" disabled style="opacity:.85"><span class="cm" aria-hidden="true"></span>Saving</button></div></div><div class="f"><span class="fl">Refused by the hub</span><div class="bnr f"><span style="color: var(--failed);">!</span><span style="flex: 1 1 auto;">The hub refused this: you are a Viewer in 32bit. Your changes are kept. <a href="#">Ask an admin</a></span></div></div><div class="f"><span class="fl">Saved</span><div class="bnr ok"><span style="color: var(--done);">✓</span><span style="flex: 1 1 auto;">Saved. The dialog closes and a toast offers Undo.</span></div></div></div><div class="df"><span class="sp"></span></div></div></div><div class="cell"><div class="caph"><b>Inline edit</b><span class="where">rows and headers</span></div><span class="capn">SessionRowItem, AccountNickname, SessionDetails label</span><div class="dlg inl"><div class="dh"><strong>Inline edit</strong><div class="meta">Rename, nickname, label: edit in place, no dialog.</div></div><div class="db"><div class="f"><span class="fl">At rest</span><div class="lst"><div><span style="flex: 1 1 auto;">Fix hub-e2e flake</span><button class="btn quiet sm" aria-label="Rename">✎</button></div></div></div><div class="f"><span class="fl">Editing · Enter saves, Esc puts it back</span><div style="display: flex; gap: 6px; align-items: center;"><input class="inp focus" type="text" value="Fix hub-e2e flake on Windows" placeholder="" aria-label="Session name"><button class="btn sm" aria-label="Save">✓</button><button class="btn quiet sm" aria-label="Cancel">✕</button></div></div><div class="f"><span class="fl">Empty clears it</span><div style="display: flex; gap: 6px; align-items: center;"><input class="inp focus" type="text" value="" placeholder="Nickname (empty uses the email)" aria-label="Account nickname"></div><span class="help">An empty nickname shows m.janci@32bit.sk again.</span></div></div><div class="df"><span class="sp"></span></div></div></div><div class="cell"><div class="caph"><b>Settings field row</b><span class="where">Settings pages</span></div><span class="capn">PageView, FieldRow; scope pill says where the value lives</span><div class="dlg inl"><div class="dh"><strong>Settings field row</strong><div class="meta">Hub settings pages draw every key this way.</div></div><div class="db"><div style="display: flex; gap: 12px; align-items: flex-start;"><div style="flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px;"><span>Idle shell sessions close after</span><span class="meta">Shells with no input for this long are closed. Agents are never closed.</span><span class="meta"><span class="pill">hub</span> changed from 4 h · <a href="#">Reset</a></span></div><div style="display: flex; gap: 6px; align-items: center; width: 110px; flex: none;"><input class="inp" type="text" value="6" placeholder="" aria-label="hours"><span class="meta">h</span></div></div><div style="display: flex; gap: 12px; align-items: flex-start;"><div style="flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px;"><span>Notify on this Mac</span><span class="meta"><span class="pill">this device</span> default</span></div><button class="tg" role="switch" aria-checked="true" aria-label="Notify on this Mac"></button></div><div style="display: flex; gap: 12px; align-items: flex-start;"><div style="flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px;"><span>Jev model</span><span class="meta"><span class="pill">org 32bit</span> overrides the hub</span></div><div style="width: 130px; flex: none;"><button class="btn sel" aria-label="haiku 4.5"><span>haiku 4.5</span><span aria-hidden="true">▾</span></button></div></div><div style="display: flex; gap: 12px; align-items: center; justify-content: flex-end; border-top: 1px solid var(--line); padding-top: 10px;"><span class="meta" style="flex: 1 1 auto;">2 changes</span><button class="btn quiet">Discard</button><button class="btn primary">Save</button></div></div><div class="df"><span class="sp"></span></div></div></div><div class="cell"><div class="caph"><b>Destructive confirm</b><span class="where">delete, remove</span></div><span class="capn">Red verb, a safer way out on the left, typed name only when the loss is large</span><div class="dlg"><div class="dh"><strong>Delete routine &quot;Morning PR sweep&quot;?</strong></div><div class="db"><div style="color: var(--fg2);">Its 41 past runs stay in Runs. Sessions it started keep running. This can't be undone.</div><div class="f"><span class="fl">Type the routine name to confirm</span><input class="inp" type="text" value="Morning PR sweep" placeholder="" aria-label="Routine name"></div></div><div class="df"><button class="btn quiet">Pause it instead</button><span class="sp"></span><button class="btn quiet">Cancel</button><button class="btn danger-fill">Delete routine</button></div></div></div><div class="cell"><div class="caph"><b>Rules</b><span class="where">all forms</span></div><span class="capn">What every board below follows</span><div class="dlg inl"><div class="dh"><strong>Rules for every form</strong></div><div class="db"><div style="display: flex; flex-direction: column; gap: 6px; font-size: 12px; line-height: 16px; color: var(--fg2);"><span>· Check on blur and on submit, never on each key.</span><span>· A disabled verb always says why under it.</span><span>· Server errors go in a banner at the top of the body; the person's input is kept.</span><span>· Secrets are write-only: they show where they are stored, never their value, and never reach an agent.</span><span>· Jev and AI only propose: the outline and the chip say so, the person confirms.</span><span>· No full-screen overlay. No spinner while waiting on a person; say what we wait for.</span><span>· A form with more than one decision becomes steps; each step can go Back.</span><span>· Every wizard is one fleet.form/1 spec, drawn as a dialog here or as a ChatForm in a chat.</span><span>· Closing a changed form asks once: "Discard changes?" inline in the footer.</span></div></div><div class="df"><span class="sp"></span></div></div></div></div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1300}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>
