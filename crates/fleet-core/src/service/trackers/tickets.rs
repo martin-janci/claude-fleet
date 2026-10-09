@@ -1924,15 +1924,20 @@ pub async fn preview_start_decided(
             item_id: preview.item_id,
             org_id,
             description,
-            candidates: preview
-                .projects
-                .iter()
-                .map(|p| start_project::Candidate {
-                    project_id: p.id,
-                    owner: p.owner.clone(),
-                    repo: p.repo.clone(),
-                })
-                .collect(),
+            candidates: start_project::fenced(
+                &s,
+                crate::service::decide::Feature::StartProject,
+                org_id,
+                &preview
+                    .projects
+                    .iter()
+                    .map(|p| start_project::Candidate {
+                        project_id: p.id,
+                        owner: p.owner.clone(),
+                        repo: p.repo.clone(),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
         }
     };
     match start_project::mode_for(ctx, &input) {

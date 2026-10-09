@@ -163,6 +163,8 @@ async fn a_failed_check_hides_the_summary() {
         let s = lock(&store).unwrap();
         settings::set(&s, settings::DECIDE_JEV_ENABLED, "true").unwrap();
         settings::set(&s, settings::DECIDE_JEV_SUMMARY_CHECK, "assist").unwrap();
+        // The check reads the agent's replies: reply text (D48, review r15).
+        settings::set(&s, settings::DECIDE_JEV_UNASSIGNED_REPLY, "true").unwrap();
         s.set_decision_credential(
             Some(&Secret::new("tsk_test_0123456789abcdefghijklmnopqrstuv")),
             None,
