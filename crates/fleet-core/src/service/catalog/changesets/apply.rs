@@ -67,7 +67,7 @@ pub struct ApplyArgs {
 /// Apply card `args.id` and answer it as it now stands.
 pub async fn apply(
     args: ApplyArgs,
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<ChangesetView, IpcError> {
     let busy = APPLY_LOCK.lock().await;
@@ -78,7 +78,7 @@ pub async fn apply(
 pub async fn apply_held(
     _busy: &ApplyGuard,
     args: ApplyArgs,
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<ChangesetView, IpcError> {
     let (card, items) = super::card(args.id, store)?;
@@ -325,7 +325,7 @@ async fn apply_catalog(
     card: &ChangesetRow,
     items: &[ChangesetItemRow],
     selected: &[&ChangesetItemRow],
-    store: &Mutex<Store>,
+    store: &Arc<Mutex<Store>>,
     ssh: &Arc<SshClient>,
 ) -> Result<(), IpcError> {
     let touched: BTreeSet<i64> = selected
@@ -398,14 +398,22 @@ async fn apply_catalog(
         steps.and_then(|()| record(card, items, selected, &progress.commits, &snapshot, store));
     match outcome {
         Ok(()) => {
-            after_commits(
-                card,
-                selected,
-                &rows,
-                &progress.commits,
-                &progress.ignored,
-                store,
+            // Reloads, pushes and a reconcile pass: sync git and directory
+            // walks, off the async workers (review r06).
+            let (card, selected): (ChangesetRow, Vec<ChangesetItemRow>) = (
+                card.clone(),
+                selected.iter().map(|i| (*i).clone()).collect(),
             );
+            let (commits, ignored) = (progress.commits.clone(), progress.ignored.clone());
+            let store = Arc::clone(store);
+            let done = tokio::task::spawn_blocking(move || {
+                let selected: Vec<&ChangesetItemRow> = selected.iter().collect();
+                after_commits(&card, &selected, &rows, &commits, &ignored, &store);
+            })
+            .await;
+            if let Err(e) = done {
+                tracing::warn!(error = %e, "an applied card's follow-through did not finish");
+            }
             Ok(())
         }
         Err(failure) => Err(fail_card(
@@ -2917,7 +2925,7 @@ mod tests {
     #[test]
     fn the_apply_future_is_send() {
         fn is_send<T: Send>(_: &T) {}
-        let check = |store: &Mutex<Store>, ssh: &Arc<SshClient>| {
+        let check = |store: &Arc<Mutex<Store>>, ssh: &Arc<SshClient>| {
             let fut = apply(ApplyArgs::default(), store, ssh);
             is_send(&fut);
         };
