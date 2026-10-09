@@ -44,6 +44,7 @@
   import { insertIntoComposer } from './conversation';
   import ConfirmCards from './ConfirmCards.svelte';
   import HandoffCards from './HandoffCards.svelte';
+  import { controlThinking } from './control_loaders';
   import { uiLayout } from './prefs';
   import {
     agentPanelSize,
@@ -330,6 +331,7 @@
         promptPrefix={ctx?.prefix ?? null}
         blockWhileBusy={true}
         composerAbove={chip}
+        thinkingAs={embedded ? controlThinking : undefined}
       />
     {/if}
   </div>
