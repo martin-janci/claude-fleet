@@ -1784,7 +1784,7 @@ fn restart_session_asks_its_guard_and_creates_a_gone_session() {
 /// reads a shell session from `kind` alone and the row stores what it runs.
 #[test]
 fn the_agent_settles_against_the_kind() {
-    use crate::ipc_error::codes::{E_INVALID, E_UNSUPPORTED};
+    use crate::ipc_error::codes::E_INVALID;
     let settle = |agent: Option<&str>, kind: Option<&str>| {
         let mut args = args_named("dev-z", None);
         args.agent = agent.map(str::to_string);
@@ -1814,12 +1814,14 @@ fn the_agent_settles_against_the_kind() {
     );
     // Codex (12.2) starts; its row is written `codex` by `new_session`.
     assert_eq!(settle(Some("codex"), None), ok(Some("codex"), None));
-    // Contradictions are invalid, reserved agents unsupported, others invalid.
+    // So does agy (12.3).
+    assert_eq!(settle(Some("agy"), None), ok(Some("agy"), None));
+    // Contradictions and unknown names are invalid.
     for (agent, kind, code) in [
         ("shell", Some("work"), E_INVALID),
         ("claude", Some("shell"), E_INVALID),
         ("codex", Some("shell"), E_INVALID),
-        ("agy", Some("work"), E_UNSUPPORTED),
+        ("agy", Some("shell"), E_INVALID),
         ("gemini", None, E_INVALID),
         ("Claude", None, E_INVALID),
     ] {
@@ -1843,6 +1845,11 @@ fn the_agent_settles_against_the_kind() {
     args.model = Some("gpt-6.1-sol".into());
     args.effort = Some("xhigh".into());
     assert!(normalize_launch(&mut args).is_ok());
+    args.profile = Some("work".into());
+    assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
+    // Nor has agy: it keeps its own login.
+    let mut args = args_named("dev-z", None);
+    args.agent = Some("agy".into());
     args.profile = Some("work".into());
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, E_INVALID);
 }
@@ -1870,6 +1877,28 @@ fn a_codex_session_launches_codex() {
     // A Claude row is unchanged.
     let pane = recreate_pane_command("work", "claude", Some(id), "dev-cx", &Default::default());
     assert!(pane.contains(&format!("cl --resume '{id}'")), "{pane}");
+}
+
+/// A new agy session starts a fresh conversation with no id to record (agy
+/// allocates its own), and a relaunch continues the cwd's newest one.
+#[test]
+fn an_agy_session_launches_agy() {
+    use super::lifecycle::claude_id_and_pane_cmd;
+    let mut args = args_named("dev-ag", None);
+    args.agent = Some("agy".into());
+    args.model = Some("gemini-3.8-flash".into());
+    let (id, pane) = claude_id_and_pane_cmd(&args);
+    assert_eq!(id, None);
+    assert!(
+        pane.contains("agy --model 'gemini-3.8-flash'; exec"),
+        "{pane}"
+    );
+    assert!(
+        !pane.contains("--continue"),
+        "a new session starts fresh: {pane}"
+    );
+    let pane = recreate_pane_command("work", "agy", None, "dev-ag", &Default::default());
+    assert!(pane.contains("agy --continue; exec"), "{pane}");
 }
 
 /// Recreate on a remote host whose checkout was deleted clones it back into

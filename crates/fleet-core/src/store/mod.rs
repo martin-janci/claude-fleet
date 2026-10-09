@@ -82,8 +82,8 @@ mod work_view;
 
 pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use aux_usage::{
-    AuxUsageRow, NewAuxUsage, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE, AUX_ORIGIN_PLANNER,
-    AUX_ORIGIN_SUMMARY,
+    AuxUsageRow, NewAuxUsage, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
+    AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY,
 };
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
