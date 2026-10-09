@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   import Loader from './Loader.svelte';
   import { untrack } from 'svelte';
   import { getAsset, deleteAsset, lintAsset, type AssetDetail, type LintReport, type WriteResult } from './assets';
@@ -268,7 +269,7 @@
       </div>
     {:else if show('source')}
       <h4>Preview</h4>
-      <div class="tabs" role="tablist">
+      <div class="tabs" role="tablist" aria-label="Harness preview" use:tablistKeys>
         {#each harnesses as h}
           <button role="tab" class:active={harnessTab === h} aria-selected={harnessTab === h} onclick={() => (harnessTab = h)} data-testid={`preview-tab-${h}`}>{h}</button>
         {/each}

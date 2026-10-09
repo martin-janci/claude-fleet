@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
   // tab. A mission is a goal over a root task: its member tasks, the repos
   // it may run in, its lifecycle and its log, and its loop (O4–O8): the
@@ -906,7 +907,7 @@
         </div>
       {/if}
       {#if $uiLayout === 'new'}
-        <div class="view-switch" role="tablist" aria-label="Show tasks as">
+        <div class="view-switch" role="tablist" aria-label="Show tasks as" use:tablistKeys>
           <button
             type="button"
             role="tab"
