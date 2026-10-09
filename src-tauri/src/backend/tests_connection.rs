@@ -63,6 +63,7 @@ fn a_reason_never_carries_the_token_and_stays_one_capped_line() {
     let long = "x".repeat(5 * MAX_REASON);
     s.report(HubConnection::Offline {
         attempt: 1,
+        refused: 1,
         retry_in_secs: 1,
         reason: format!("401 from proxy:\nAuthorization: Bearer cl_s3cret\r\n{long}"),
     });
@@ -130,6 +131,7 @@ fn the_contract_verdict_outlives_the_state_and_only_a_hello_moves_it() {
     for state in [
         HubConnection::Offline {
             attempt: 1,
+            refused: 1,
             retry_in_secs: 1,
             reason: "connection refused".into(),
         },
@@ -162,6 +164,7 @@ fn only_an_in_range_hello_confirms_the_contract() {
         HubConnection::Connecting,
         HubConnection::Offline {
             attempt: 1,
+            refused: 1,
             retry_in_secs: 1,
             reason: "connection refused".into(),
         },
@@ -205,6 +208,7 @@ fn every_transition_away_from_connected_withdraws_the_confirmation() {
         },
         HubConnection::Offline {
             attempt: 2,
+            refused: 2,
             retry_in_secs: 2,
             reason: "connection refused".into(),
         },

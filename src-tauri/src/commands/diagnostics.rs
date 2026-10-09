@@ -69,6 +69,7 @@ fn connection_line(c: &HubConnection) -> String {
             attempt,
             retry_in_secs,
             reason,
+            ..
         } => format!("offline attempt={attempt} retry_in={retry_in_secs}s reason={reason}"),
         HubConnection::HubTooOld {
             hub_contract,
@@ -305,6 +306,7 @@ mod tests {
             &backend,
             &HubConnection::Offline {
                 attempt: 4,
+                refused: 4,
                 retry_in_secs: 16,
                 reason: "connection refused".into(),
             },
