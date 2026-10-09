@@ -641,7 +641,8 @@ Index by area (names only; see the reference for details):
   Lifecycle (roadmap M7): `work { action: "tidy" }` returns the tidy-up
   candidates — each with `session_id`, `link_id`, a primary `reason`
   (`done_idle` | `pr_merged_idle` | `not_planned` | `duplicate_worktree` |
-  `ghost_expiring`), `secondary` reasons, the preselected `action`
+  `same_work` | `ghost_expiring` | `idle_unlinked`; `same_work` carries
+  `same_as`, the session kept), `secondary` reasons, the preselected `action`
   (`safe_kill` | `kill` | `archive` | `resume_or_expire`), a preview (host,
   branch, key, item status, PR, idle time) and `auto` (auto-tidy would act
   on it) — plus the policy (`auto_tidy`, `auto_reasons`, `done_days`,

@@ -55,6 +55,12 @@ pub enum TidyReason {
     /// Another live session works in the same worktree and this one is the
     /// idler of the two (idle ≥ `tidy_idle_hours`).
     DuplicateWorktree,
+    /// Jev proposed (N1 `related_session`, redesign step 6.9) that this
+    /// session and another live one of the same person work on the same
+    /// thing, and this one is the idler of the two (idle ≥
+    /// `tidy_idle_hours`). Never preticked in the sheet and never automatic:
+    /// it rests on a model's answer, so only a person acts on it.
+    SameWork,
     /// A resumable ghost within a day of its `lost_ttl` reap.
     GhostExpiring,
     /// A work session with no live or suggested link, idle and unprompted
@@ -73,14 +79,19 @@ impl TidyReason {
         TidyReason::PrMergedIdle,
         TidyReason::NotPlanned,
         TidyReason::DuplicateWorktree,
+        TidyReason::SameWork,
         TidyReason::GhostExpiring,
         TidyReason::IdleUnlinked,
     ];
 
     /// Whether auto-tidy may ever act on this reason. `IdleUnlinked` never
-    /// (D19): no setting, org override or reason list reaches past this.
+    /// (D19), nor `SameWork` (a model's answer): no setting, org override or
+    /// reason list reaches past this.
     pub fn auto_allowed(self) -> bool {
-        !matches!(self, TidyReason::IdleUnlinked | TidyReason::Unknown)
+        !matches!(
+            self,
+            TidyReason::IdleUnlinked | TidyReason::SameWork | TidyReason::Unknown
+        )
     }
 
     pub fn as_str(self) -> &'static str {
@@ -89,6 +100,7 @@ impl TidyReason {
             TidyReason::PrMergedIdle => "pr_merged_idle",
             TidyReason::NotPlanned => "not_planned",
             TidyReason::DuplicateWorktree => "duplicate_worktree",
+            TidyReason::SameWork => "same_work",
             TidyReason::GhostExpiring => "ghost_expiring",
             TidyReason::IdleUnlinked => "idle_unlinked",
             TidyReason::Unknown => "unknown",
@@ -115,6 +127,7 @@ impl TidyReason {
             TidyReason::DoneIdle
             | TidyReason::PrMergedIdle
             | TidyReason::NotPlanned
+            | TidyReason::SameWork
             | TidyReason::IdleUnlinked => TidyAction::SafeKill,
             TidyReason::DuplicateWorktree => TidyAction::Kill,
             TidyReason::GhostExpiring => TidyAction::ResumeOrExpire,
@@ -322,6 +335,10 @@ pub struct TidyCandidate {
     /// Auto-tidy (when on) would act on it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto: bool,
+    /// [`TidyReason::SameWork`]: the other session Jev says does the same
+    /// work (the one kept).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub same_as: Option<i64>,
     /// The linked item's org, for scoping the link's details (never sent).
     #[serde(skip)]
     pub link_org_id: Option<i64>,
@@ -440,6 +457,16 @@ fn recency(s: &TidySession, now: i64) -> i64 {
     .unwrap_or(0)
 }
 
+/// The other session N1's live proposal on `r` names (`related_session`,
+/// assist only: shadow runs never reach a row's proposals).
+fn same_work_as(r: &SessionRow) -> Option<i64> {
+    use crate::service::decide::{related_session, Feature};
+    r.proposals
+        .iter()
+        .find(|p| p.feature == Feature::RelatedSession.as_str())
+        .and_then(|p| related_session::session_of(&p.value))
+}
+
 /// Pure: the tidy-up candidates, ordered by reason rank then session id.
 pub fn plan_tidy(
     sessions: &[TidySession],
@@ -475,6 +502,26 @@ pub fn plan_tidy(
             .max_by_key(|&i| (recency(&sessions[i], now), sessions[i].row.id))
             .unwrap_or(work[0]);
         duplicate.extend(work.iter().copied().filter(|&i| i != keep));
+    }
+
+    // Jev's same-work pairs: of two running sessions one names the other,
+    // the less recent one is suggested and the other is kept.
+    let by_id: HashMap<i64, usize> = sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.row.id, i))
+        .collect();
+    let mut same_work: HashMap<usize, i64> = HashMap::new();
+    for (i, s) in sessions.iter().enumerate() {
+        let Some(&j) = same_work_as(&s.row).and_then(|o| by_id.get(&o)) else {
+            continue;
+        };
+        if i == j || s.row.status != "running" || sessions[j].row.status != "running" {
+            continue;
+        }
+        let key = |k: usize| (recency(&sessions[k], now), sessions[k].row.id);
+        let (idler, kept) = if key(i) < key(j) { (i, j) } else { (j, i) };
+        same_work.entry(idler).or_insert(sessions[kept].row.id);
     }
 
     let mut out = Vec::new();
@@ -549,6 +596,9 @@ pub fn plan_tidy(
                     if duplicate.contains(&i) {
                         reasons.push((TidyReason::DuplicateWorktree, since));
                     }
+                    if same_work.contains_key(&i) {
+                        reasons.push((TidyReason::SameWork, since));
+                    }
                 }
                 if !shared.contains(&i) {
                     if let Some(since) = idle_unlinked_since(s, cfg, now) {
@@ -619,6 +669,9 @@ pub fn plan_tidy(
             expires_at,
             archived: s.link.as_ref().is_some_and(|l| l.archived_at.is_some()),
             auto,
+            same_as: (reason == TidyReason::SameWork)
+                .then(|| same_work.get(&i).copied())
+                .flatten(),
             link_org_id: s.link.as_ref().and_then(|l| l.org_id),
         });
     }

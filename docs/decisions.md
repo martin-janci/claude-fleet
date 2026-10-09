@@ -658,10 +658,17 @@ is asked.
   its `related_session` proposal: in the New layout, its Details list the
   other session under Related sessions as *Same work? · Proposed by Jev ·
   N%*. Nothing is stopped, merged or moved.
+- **Tidy › Duplicates** (New layout). Of a running pair the proposal ties
+  together, the less recently used session, once idle for
+  `work.tidy_idle_hours`, is a Tidy-up candidate with the reason
+  `same_work`: *Same work as another session*, naming the one kept, marked
+  *Proposed by Jev*. It is never ticked for the person and auto-tidy never
+  acts on it, whatever `work.auto_tidy_reasons` says; with no work linked,
+  its kill is held to the clean-and-pushed rule of `idle_unlinked`.
 - **Asked once per input.** A new candidate (another session starts) is a
   new input; the same input reuses the decided run.
-- **Follow-up.** None yet: no person's act answers it until Tidy-up's
-  Duplicates offers one. A shadow answer is never marked.
+- **Follow-up.** None yet: tidying a `same_work` candidate is not recorded
+  against the run. A shadow answer is never marked.
 
 Code: `service/decide/related_session.rs`, called beside `work_link` in the
 prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
