@@ -83,7 +83,10 @@ pub fn visible(s: &Store, scope: &ViewScope, row: &LibraryItemRow) -> bool {
     {
         Some(sess) => scope.may_own(&sess),
         // The session is gone: the org answer is the whole of the fence, as
-        // for a download whose session was reaped.
+        // for a download whose session was reaped. The person half is
+        // `may_own` in the arm above; a reaped session leaves nobody to ask,
+        // and `add` took only rows the owner could `may_own`, so no grantee
+        // ever recorded a row that lands here.
         None => scope.org.sees_session_org_only(&row.host_alias, row.org_id),
     }
 }
