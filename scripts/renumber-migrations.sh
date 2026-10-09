@@ -133,14 +133,20 @@ for f in "${added[@]}"; do
     OLD=$old NEW=$new BASEF="$t.renumber-base" perl -i -ne '
       BEGIN { open my $b, "<", $ENV{BASEF}; %seen = map { $_ => 1 } <$b>; }
       unless ($seen{$_}) {
-        s/\bmigration $ENV{OLD}\b/migration $ENV{NEW}/g;
-        s/\bmigration_$ENV{OLD}_/migration_$ENV{NEW}_/g;
+        s/\bmigration $ENV{OLD}\b/migration {{renum:$ENV{NEW}}}/g;
+        s/\bmigration_$ENV{OLD}_/migration_{{renum:$ENV{NEW}}}_/g;
       }
       print;
     ' "$t"
     rm -f "$t.renumber-base"
     if [[ "$(git hash-object "$t")" != "$before" ]]; then changed+=("$t"); fi
   done
+done
+# The doc comments went through a placeholder: with two moves, 135 -> 136
+# then 136 -> 137, a direct rewrite would carry the first one's new
+# "migration 136" on to 137.
+for t in ${changed[@]+"${changed[@]}"}; do
+  perl -i -pe 's/\{\{renum:(\d+)\}\}/$1/g' "$t"
 done
 
 [[ $dry == 1 ]] && exit 0

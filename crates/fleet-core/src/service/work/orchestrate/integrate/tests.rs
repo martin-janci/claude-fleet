@@ -26,7 +26,7 @@ fn a_conflict_names_its_paths_and_old_git_says_nothing() {
 
 #[test]
 fn the_script_quotes_every_value() {
-    let s = merge_tree_script("/w/it's", &["a;b".into(), "c".into()]);
+    let s = merge_tree_script(&["/w/it's"], &["a;b".into(), "c".into()]);
     assert!(s.contains(&shq("/w/it's")));
     assert!(s.contains(&shq("a;b")));
     assert!(s.contains("__FLEET_MT 0 1"));
@@ -84,7 +84,8 @@ fn real_git_tells_a_conflict_from_a_clean_merge() {
         git(p, &["commit", "-qm", name]);
         heads.push(git(p, &["rev-parse", "HEAD"]));
     }
-    let script = merge_tree_script(p.to_str().unwrap(), &heads);
+    // The first worktree is gone: the next one still answers.
+    let script = merge_tree_script(&["/nonexistent/fleet-wt", p.to_str().unwrap()], &heads);
     let out = crate::proc::std_command("bash")
         .args(["-c", &script])
         .output()

@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import type { Page } from './pages/pages';
+import { DECIDE_SECTION } from './decide_health';
 import {
   SETTINGS_TREE,
   leafById,
@@ -93,6 +94,7 @@ describe('the Settings tree', () => {
   it('resolves the old section names, page ids and leaf ids', () => {
     expect(resolveSection('diagnostics', pages)).toBe('error-reports');
     expect(resolveSection('general', pages)).toBe('appearance');
+    expect(resolveSection(DECIDE_SECTION, pages)).toBe('decisions');
     expect(resolveSection('settings.trackers', pages)).toBe('trackers');
     expect(resolveSection('settings', pages)).toBe('advanced');
     expect(resolveSection('hub', pages)).toBe('hub');

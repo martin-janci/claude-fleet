@@ -457,6 +457,38 @@ async fn a_summary_run_is_booked_with_its_cost() {
     );
 }
 
+/// An envelope the output cap cut is refused, not stored as the summary.
+#[tokio::test]
+async fn a_cut_envelope_is_not_stored_as_the_summary() {
+    let (st, link) = past_session("sum-cut");
+    let fake = FakeSsh::new();
+    fake.on_host(
+        "sum-cut",
+        Match::script_contains(SUMMARY_TAG),
+        Reply::ok("fleet-summary=run\n{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Goal: a very long"),
+    );
+    let e = summarize(
+        &st,
+        &fake,
+        "ABC-1",
+        link,
+        &crate::service::view_scope::org_only_view(&OrgScope::All),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(e.code, codes::E_CLAUDE_CLI, "{e:?}");
+    let s = st.lock().unwrap();
+    let n: i64 = s
+        .conn_ref()
+        .query_row(
+            "SELECT COUNT(*) FROM work_journal WHERE kind = 'summary' AND claude_session_id = ?1",
+            [CID],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
 #[tokio::test]
 async fn each_host_answer_maps_to_its_code_and_stores_nothing() {
     let cases: [(&str, Reply, &str); 6] = [

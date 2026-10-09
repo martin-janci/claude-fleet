@@ -403,13 +403,23 @@ fn command_array(answer: &str) -> Result<serde_json::Value, String> {
         v.as_array()
             .is_some_and(|a| a.iter().all(serde_json::Value::is_object))
     };
+    // A `[]` in the prose ("nothing changed ([]) since...") must not hide
+    // the commands that follow it: an empty array answers only when no
+    // array with commands in it does.
+    let mut empty = None;
     for (i, _) in t.match_indices('[') {
         let mut values = serde_json::Deserializer::from_str(&t[i..]).into_iter();
         if let Some(Ok(v)) = values.next() {
             if is_commands(&v) {
-                return Ok(v);
+                if v.as_array().is_some_and(|a| !a.is_empty()) {
+                    return Ok(v);
+                }
+                empty.get_or_insert(v);
             }
         }
+    }
+    if let Some(v) = empty {
+        return Ok(v);
     }
     match whole {
         // Valid JSON but not an array (one bare command object, say).
