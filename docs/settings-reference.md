@@ -238,7 +238,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | Setting | Default | Range | What it does |
 |---|---|---|---|
 | `notify.desktop` | `needs_you,failed,blocked,routine_failed` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The session states the desktop shows a notification for. |
-| `notify.phone` | `needs_you,failed,routine_failed` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The session states the phone shows a notification for. |
+| `notify.phone` | `needs_you,failed,blocked,routine_failed` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The session states the phone shows a notification for. |
 | `notify.sound` | `needs_you` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The session states whose notification also plays a sound. |
 | `notify.quiet_hours` | `` | a daily time range `HH:MM-HH:MM`, or empty for none | A daily range, like 22:00-07:30, in which no notification is shown or sounded, on each device's own clock. Empty: none. |
 | `notify.quiet_except` | `failed` | any of `needs_you`, `failed`, `blocked`, `done`, `routine_failed` | The states that still notify during quiet hours. |

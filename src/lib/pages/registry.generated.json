@@ -2436,7 +2436,7 @@
       "danger": {
         "level": "none"
       },
-      "default": "needs_you,failed,routine_failed",
+      "default": "needs_you,failed,blocked,routine_failed",
       "help": "The session states the phone shows a notification for.",
       "key": "notify.phone",
       "kind": {
@@ -2476,7 +2476,7 @@
       "restart": "none",
       "tags": [],
       "unit": "none",
-      "value": "needs_you,failed,routine_failed"
+      "value": "needs_you,failed,blocked,routine_failed"
     },
     {
       "ai": "suggest",
