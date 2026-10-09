@@ -1381,3 +1381,41 @@ pub struct DebugDevicesParams {
     #[serde(default)]
     pub shared: Option<bool>,
 }
+
+/// `runs`: one tool, by `action` (only `list` today), so the Automation
+/// screen's later actions stay one entry.
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RunsParams {
+    /// list.
+    pub action: String,
+    /// Started at or after (unix s).
+    #[serde(default)]
+    pub since: Option<i64>,
+    /// Started before (unix s).
+    #[serde(default)]
+    pub until: Option<i64>,
+    /// operator | task | mission | jev | planner | summary | routine.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// ok | failed | needs_person | nothing_to_do | running.
+    #[serde(default)]
+    pub outcome: Option<String>,
+    /// Only this org's.
+    #[serde(default)]
+    pub org_id: Option<i64>,
+    /// Only this mission's.
+    #[serde(default)]
+    pub mission_id: Option<i64>,
+    /// Runs that ran in or acted on it.
+    #[serde(default)]
+    pub session_id: Option<i64>,
+    /// One routine's fires.
+    #[serde(default)]
+    pub routine_id: Option<i64>,
+    /// ≤ 200 (50).
+    #[serde(default)]
+    pub limit: Option<i64>,
+    /// Rows to skip.
+    #[serde(default)]
+    pub offset: Option<i64>,
+}

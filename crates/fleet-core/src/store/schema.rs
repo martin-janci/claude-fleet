@@ -1621,9 +1621,13 @@ const MIGRATIONS: &[Migration] = &[
         140,
         include_str!("../../migrations/140_control_handoffs.sql"),
     ),
+    // Orbit Fleet 8.3: the indexes behind `runs { list }` (one list over
+    // tasks, mission actions, Jev, `claude -p` and routine runs). Indexes only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(141, include_str!("../../migrations/141_runs_indexes.sql")),
     // Orbit Fleet 8.11, from AI to rule: `start_rules`, the key patterns
     // that pick a start's project before history and Jev. New objects only.
-    Migration::plain(141, include_str!("../../migrations/141_start_rules.sql")),
+    Migration::plain(142, include_str!("../../migrations/142_start_rules.sql")),
 ];
 
 /// One schema migration. `already_applied`, when set, reports whether the

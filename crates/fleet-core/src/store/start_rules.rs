@@ -1,4 +1,4 @@
-//! Start rules (migration 141, redesign step 8.11). Who may see and change
+//! Start rules (migration 142, redesign step 8.11). Who may see and change
 //! a rule, the pattern grammar, the tally that offers one and where a rule
 //! decides a start are in `service::start_rules`; this is the rows.
 
