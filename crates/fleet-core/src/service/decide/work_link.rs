@@ -30,7 +30,9 @@
 //!   answer nobody saw is never marked (D34, D37).
 
 use super::Question;
-use super::{decide, fingerprint, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, Mode};
+use super::{
+    consents, decide, fingerprint, gate_at, DecideCtx, DecideRequest, Feature, JevRequest, Mode,
+};
 use crate::ipc_error::{lock, IpcError};
 use crate::service::work::nudge::{candidate_items, rejected_keys, NUDGE_AFTER_TURNS};
 use crate::store::{DecisionRunRow, SessionRow, Store, WorkItemRow, DECISION_NO_BASELINE};
@@ -219,7 +221,15 @@ fn plan(s: &Store, session_id: i64, now: i64) -> Result<Option<Planned>, IpcErro
         return Ok(None);
     };
     let rejected = rejected_keys(s, &links)?;
-    let candidates = candidate_items(s, &row, &rejected, MAX_CANDIDATES, now)?;
+    let mut candidates = candidate_items(s, &row, &rejected, MAX_CANDIDATES, now)?;
+    // Review r15: an item outside the session's org (an org-less tracker
+    // item, a local item) is named to the model only with its own consent
+    // (`decide.jev.unassigned` for no org).
+    candidates.retain(|i| {
+        // An org that cannot be read keeps the item home.
+        s.item_org(i.id)
+            .is_ok_and(|org| org == row.org_id || consents(s, Feature::WorkLink, org))
+    });
     if candidates.is_empty() {
         return Ok(None);
     }

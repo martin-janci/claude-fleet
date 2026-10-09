@@ -912,7 +912,8 @@ async fn the_rules_read_an_open_question_and_a_pull_request() {
     assert_eq!(rule_outcome(&done, Some(&asked)), Some((NeedsPerson, Rule)));
     let mut j2 = row.clone();
     j2.turn_outcome = Some("asked".into());
-    assert_eq!(rule_outcome(&done, Some(&j2)), Some((NeedsPerson, Rule)));
+    // J2 is Jev's answer: the run is never labelled as a rule's.
+    assert_eq!(rule_outcome(&done, Some(&j2)), Some((NeedsPerson, Jev)));
     j2.turn_outcome = Some("finished".into());
     assert_eq!(
         rule_outcome(&done, Some(&j2)),

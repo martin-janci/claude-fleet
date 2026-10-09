@@ -286,3 +286,64 @@ fn the_rule_reads_words_not_characters() {
     assert!(is_command(" /clear"));
     assert!(!is_command("clear the queue"));
 }
+
+/// Review r15: a mission of an org that did not consent (D31) is offered to
+/// the person but never named to the model; its goal stays home.
+#[tokio::test]
+async fn an_unconsenting_orgs_mission_is_never_sent() {
+    let w = world();
+    w.on("assist");
+    let secret = {
+        let s = w.store.lock().unwrap();
+        let org = s.add_org("Acme", None, false).unwrap().id;
+        let m = s
+            .create_mission(
+                &NewMission {
+                    org_id: Some(org),
+                    owner_person_id: None,
+                    root_item_id: None,
+                    name: "Acme payroll export",
+                    goal: "Ship the payroll CSV for the Q3 audit.",
+                    non_goals: None,
+                    done_when: &[],
+                    mode: None,
+                    level: None,
+                },
+                "test",
+            )
+            .unwrap();
+        s.set_mission_state(m.id, None, "active", "test").unwrap();
+        format!("m{}", m.id)
+    };
+    let fake = Fake::answering(vec![says(&w.s(), 0.9)]);
+    let r = propose(&w.ctx(&fake), &scope(), MESSAGE).await;
+    // The person still sees all three targets.
+    assert!(r.targets.iter().any(|t| t.option() == secret));
+    let seen = fake.seen.lock().unwrap();
+    let sent = serde_json::to_string(&seen[0]).unwrap();
+    assert!(!sent.contains("payroll"), "{sent}");
+    assert!(!sent.contains(&format!("\"{secret}\"")), "{sent}");
+    assert!(sent.contains(&w.m()));
+}
+
+/// Review r15: only targets whose org consented are asked about; a target
+/// with no org rides the message's own `unassigned` gate.
+#[test]
+fn only_consenting_orgs_targets_are_asked_about() {
+    let w = world();
+    w.on("assist");
+    let s = w.store.lock().unwrap();
+    let yes = s.add_org("Yes", None, false).unwrap().id;
+    let no = s.add_org("No", None, false).unwrap().id;
+    s.set_org_jev_allowed(yes, true).unwrap();
+    let t = |id, org_id| Target {
+        kind: TargetKind::Mission,
+        id,
+        name: "n".into(),
+        detail: "d".into(),
+        org_id,
+    };
+    let asked = consenting(&s, &[t(1, Some(yes)), t(2, Some(no)), t(3, None)]);
+    let ids: Vec<i64> = asked.iter().map(|t| t.id).collect();
+    assert_eq!(ids, vec![1, 3]);
+}
