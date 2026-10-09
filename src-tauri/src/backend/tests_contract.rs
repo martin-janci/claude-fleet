@@ -881,6 +881,58 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
         wire_keys(&terms.terminals[0]),
     );
     put("ShellTerminalsResult", wire_keys(&terms));
+    let run = fleet_core::store::RunRow {
+        id: "task:1".into(),
+        source: "task".into(),
+        kind: "task".into(),
+        owner: "dev".into(),
+        started_at: 1,
+        ended_at: Some(2),
+        duration_ms: Some(1000),
+        outcome: "ok".into(),
+        error: Some("e".into()),
+        cost_micros: Some(5),
+        model: Some("m".into()),
+        host: Some("trn".into()),
+        org_id: Some(1),
+        mission_id: Some(1),
+        session_ids: vec![1],
+        summary: Some("s".into()),
+        routine_id: Some(1),
+    };
+    put("RunRow", wire_keys(&run));
+    put(
+        "RunsPage",
+        wire_keys(&fleet_core::service::runs::RunsPage {
+            runs: vec![run],
+            total: 1,
+        }),
+    );
+    let item = fleet_core::store::HandoffItem {
+        id: 1,
+        title: "t".into(),
+        status: "todo".into(),
+        proposal_state: Some("accepted".into()),
+        accepted_at: Some(1),
+    };
+    put("HandoffItem", wire_keys(&item));
+    put(
+        "ControlHandoffRow",
+        wire_keys(&fleet_core::store::ControlHandoffRow {
+            id: 1,
+            at: 1,
+            kind: "tree".into(),
+            tool: "propose_tree".into(),
+            session_id: Some(1),
+            task_id: Some(1),
+            mission_id: Some(1),
+            mission_name: Some("m".into()),
+            mission_state: Some("running".into()),
+            item: Some(item.clone()),
+            items: vec![item],
+            preview: Some("p".into()),
+        }),
+    );
     let mut usage = fleet_core::service::account_usage::AccountUsageSnapshot::never_fetched("a");
     usage.usage = Some(Default::default());
     usage.subscription = Some("max".into());

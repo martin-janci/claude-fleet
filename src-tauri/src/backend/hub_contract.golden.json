@@ -82,6 +82,20 @@
       "summary",
       "tool"
     ],
+    "ControlHandoffRow": [
+      "at",
+      "id",
+      "item",
+      "items",
+      "kind",
+      "mission_id",
+      "mission_name",
+      "mission_state",
+      "preview",
+      "session_id",
+      "task_id",
+      "tool"
+    ],
     "ConvItem::Bash": [
       "command",
       "kind",
@@ -300,6 +314,13 @@
       "language",
       "name_with_owner",
       "updated_at"
+    ],
+    "HandoffItem": [
+      "accepted_at",
+      "id",
+      "proposal_state",
+      "status",
+      "title"
     ],
     "Health": [
       "by_status",
@@ -547,6 +568,29 @@
       "mode",
       "ok",
       "reason"
+    ],
+    "RunRow": [
+      "cost_micros",
+      "duration_ms",
+      "ended_at",
+      "error",
+      "host",
+      "id",
+      "kind",
+      "mission_id",
+      "model",
+      "org_id",
+      "outcome",
+      "owner",
+      "routine_id",
+      "session_ids",
+      "source",
+      "started_at",
+      "summary"
+    ],
+    "RunsPage": [
+      "runs",
+      "total"
     ],
     "SessionEvent": [
       "at",

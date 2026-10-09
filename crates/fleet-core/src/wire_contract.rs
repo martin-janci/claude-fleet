@@ -171,10 +171,12 @@
 //!   (11.7b) to its tool, `link_peer_hub` / `unlink_peer_hub` to
 //!   `link_peer` / `unlink_peer` (11.5), and `mcp_pending_confirms` /
 //!   `mcp_confirm` to `mcp_confirms` / `answer_mcp_confirm` (9.2; those two
-//!   fall back on an older hub), and `shell_terminals` to its tool. A revision-11 hub serves none of them. The
+//!   fall back on an older hub), `shell_terminals` to its tool,
+//!   `list_runs` to `runs` (8.3) and `control_handoffs` to its tool (9.3). A revision-11 hub serves none of them. The
 //!   hub also serves `routines` (8.5), `install_agent` and `agent_installs`
 //!   to the phone. The golden file now pins `PullRequestRow`, `PrList`,
 //!   `PresenceView`, `ConfirmRequest`, `PeerLinkSummary`,
 //!   `QueuePromptResult`, `DeferredPromptRow`, `BranchDiff`,
-//!   `ShellTerminalsResult` and `AccountUsageSnapshot`.
+//!   `ShellTerminalsResult`, `RunsPage`, `RunRow`, `ControlHandoffRow`,
+//!   `HandoffItem` and `AccountUsageSnapshot`.
 pub const CONTRACT_REVISION: u32 = 12;
