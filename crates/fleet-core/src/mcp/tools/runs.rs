@@ -45,7 +45,10 @@ impl FleetTools {
                     limit: p.limit,
                     offset: p.offset,
                 };
-                let s = lock(&self.store).map_err(to_mcp_err)?;
+                // The read pool on a hub: a page sorts the whole run union,
+                // which must not hold the writer a reconcile pass or a hook
+                // is waiting on (review r16).
+                let s = lock(self.reader()).map_err(to_mcp_err)?;
                 let scope = caller.view_scope(&s).map_err(to_mcp_err)?;
                 let page = runs::list_in(&s, &scope, &args).map_err(to_mcp_err)?;
                 ok_json_compact(&page)

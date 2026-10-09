@@ -319,17 +319,17 @@
   }
   h4 {
     margin: 0;
-    font-size: 1rem;
+    font-size: var(--text-md);
   }
   h5 {
     margin: 0 0 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--fg-muted);
   }
   .intro {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin: 0.25rem 0 0.75rem;
     line-height: 1.4;
@@ -364,14 +364,14 @@
     display: flex;
     align-items: center;
     gap: 0.35rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .filters select {
     font: inherit;
   }
   .notice {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     margin: 0.2rem 0;
     padding: 0.4rem 0.6rem;
     border-radius: var(--radius-sm);
@@ -393,7 +393,7 @@
     padding: 0.2rem 0;
     color: var(--accent);
     font: inherit;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     cursor: pointer;
     text-align: left;
   }
@@ -408,7 +408,7 @@
     counter-reset: step;
     margin: 0 0 0.5rem;
     padding: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .steps li {
     counter-increment: step;

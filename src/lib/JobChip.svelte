@@ -2,7 +2,11 @@
   /** Background work in the footer (spec: "`JobChip` for scans and
    *  syncs"): non-modal, with a bar when it counts. Visual only: the
    *  footer's persistent `role=status` region announces the job, so a chip
-   *  that appears and disappears is never announced twice. */
+   *  that appears and disappears is never announced twice. Its mark is
+   *  the kit's 16 px Orbit (review r12): it waits 400 ms, so a quick scan
+   *  never flashes, and follows the app's Motion setting. */
+  import Loader from './Loader.svelte';
+
   let {
     label,
     done = null,
@@ -15,7 +19,7 @@
 </script>
 
 <span class="job" data-testid={testid}>
-  <span class="spin" aria-hidden="true">⟳</span>
+  <Loader size={16} testid="assets-job-mark" />
   <span>{label}{#if counted}{' '}{done}/{total}{/if}</span>
   {#if counted}
     <span class="bar" role="progressbar" aria-label={label} aria-valuemin="0" aria-valuemax={total} aria-valuenow={done}
@@ -26,9 +30,6 @@
 
 <style>
   .job { display: inline-flex; align-items: center; gap: 6px; color: var(--fg); }
-  .spin { display: inline-block; animation: spin 1.2s linear infinite; }
-  .bar { width: 60px; height: 4px; overflow: hidden; border-radius: 2px; background: var(--control-bg-active); }
+  .bar { width: 60px; height: 4px; overflow: hidden; border-radius: var(--radius-xs); background: var(--control-bg-active); }
   .bar i { display: block; height: 100%; background: var(--accent); }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 </style>

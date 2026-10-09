@@ -181,11 +181,11 @@
     gap: 0.4rem;
     align-items: baseline;
     color: var(--fg-muted);
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   h4 {
     margin: 0.5rem 0 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .criteria {
@@ -202,7 +202,7 @@
   }
   .handover {
     margin: 0.3rem 0 0;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .handover.missing,
   .handover.failed {

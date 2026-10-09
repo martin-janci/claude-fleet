@@ -261,7 +261,7 @@ The settings page specs, data source shapes, resources and page actions a device
 
 ### `list_peer_links`
 
-List this hub's links to other fleets' hubs: fleet, role, state, pending count, last exchange and error. Never a token. Read-only, master token only.
+List this hub's links to other fleets' hubs: fleet, role, state, pending count, last exchange and error. Never a token. Read-only; the master or the hub owner's own device.
 
 ### `list_projects`
 

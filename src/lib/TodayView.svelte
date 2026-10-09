@@ -59,9 +59,14 @@
   // code, never by message text.
   const HUB_HAS_NO_TODAY = ['E_INVALID', 'E_FORBIDDEN', 'E_HUB_PROTOCOL'];
 
+  // Only the newest refresh lands: an older, slower answer would put
+  // stale counts back over the newer ones (review r07).
+  let refreshSeq = 0;
   async function refresh() {
+    const mine = ++refreshSeq;
     loading = true;
     const r = await loadToday(localMidnight(now()));
+    if (mine !== refreshSeq) return;
     loading = false;
     if (r.ok) {
       today = r.value;
@@ -253,7 +258,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 0.9rem;
+    font-size: var(--text-sm);
   }
   header {
     display: flex;
@@ -263,11 +268,11 @@
   }
   h2 {
     margin: 0;
-    font-size: 1rem;
+    font-size: var(--text-md);
   }
   h3 {
     margin: 0.6rem 0 0.2rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.04em;
     color: var(--fg-muted);
@@ -309,7 +314,7 @@
   .status,
   .meta {
     color: var(--fg-muted);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .status {
     display: inline-flex;

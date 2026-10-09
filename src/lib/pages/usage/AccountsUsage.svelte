@@ -66,7 +66,7 @@
     padding-top: 0.7rem;
   }
   .empty {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin: 0;
   }

@@ -22,8 +22,9 @@ use crate::service::decide::lost_target::{
     self as decide_lost, pane_subject, transcript_subject, LostInput, LostKind, LostTarget,
     MAX_CANDIDATES,
 };
-use crate::service::decide::start_project::Candidate;
+use crate::service::decide::start_project::{fenced, Candidate};
 use crate::service::decide::DecideCtx;
+use crate::service::decide::Feature;
 use paths::{find_project_id_for_path, HostPaths};
 use reconcile::HostShell;
 
@@ -179,7 +180,7 @@ async fn pane_input(
         cwd,
         git_branch: None,
         name: Some(row.tmux_name.clone()),
-        candidates: candidates(&projects),
+        candidates: fenced(&s, Feature::AdoptTarget, row.org_id, &candidates(&projects)),
     }))
 }
 
@@ -214,14 +215,26 @@ fn transcript_input(
         return Ok(Err(LostTarget::rule(pid)));
     }
     let fp_key = s.decision_fp_key()?;
+    // The org a session started there would have (its path and host), so
+    // the question asks THAT org's consent, not `decide.jev.unassigned`.
+    let org_id = crate::store::org_of_session(
+        &crate::store::SessionOrgFacts {
+            host_alias: host,
+            owner: None,
+            repo: None,
+            path: Some(cwd),
+        },
+        &s.list_org_rules()?,
+        s.host_org(host)?,
+    );
     Ok(Ok(LostInput {
         kind: LostKind::Transcript,
         subject: transcript_subject(&fp_key, id),
-        org_id: None,
+        org_id,
         cwd: cwd.to_string(),
         git_branch: args.git_branch.clone().filter(|b| !b.trim().is_empty()),
         name: None,
-        candidates: candidates(&projects),
+        candidates: fenced(&s, Feature::RestoreTarget, org_id, &candidates(&projects)),
     }))
 }
 
@@ -309,9 +322,24 @@ pub(crate) async fn place_transcript(
             );
         }
     }
+    // The name `new_session` will take: the project's own name, unless a
+    // row on the host already holds it (then a fresh pair, as
+    // `fill_session_name` mints).
+    let tmux_name = {
+        let s = lock(store)?;
+        let own = discover::derive_tmux_name(&owner, &repo, "main");
+        let on_host = s.list_sessions_for_host(&args.host_alias)?;
+        if on_host.iter().any(|r| r.tmux_name == own) {
+            let taken = lifecycle::project_taken_slugs(&s, args.project_id, &owner, &repo)?;
+            let pair = crate::service::names::generate_name_default(&taken);
+            crate::service::names::tmux_safe(&format!("{own}--{pair}"))
+        } else {
+            own
+        }
+    };
     Ok(PlacedTranscript {
         project_id: args.project_id,
-        tmux_name: discover::derive_tmux_name(&owner, &repo, "main"),
+        tmux_name,
         copied,
     })
 }
@@ -400,6 +428,27 @@ mod tests {
             project,
             pane,
         }
+    }
+
+    /// Review r15: a found conversation on an org's host is that org's,
+    /// so its question needs the org's consent, not `unassigned`.
+    #[test]
+    fn a_found_conversation_on_an_orgs_host_carries_that_org() {
+        let w = world();
+        let org = {
+            let s = w.store.lock().unwrap();
+            let org = s.add_org("Acme", None, false).unwrap().id;
+            s.set_host_org("local", Some(org)).unwrap();
+            org
+        };
+        let args = LostTargetArgs {
+            host_alias: Some("local".into()),
+            claude_session_id: Some(ID.into()),
+            cwd: Some("/home/me/elsewhere".into()),
+            ..Default::default()
+        };
+        let input = transcript_input(&args, &w.store).unwrap().unwrap();
+        assert_eq!(input.org_id, Some(org));
     }
 
     impl World {
@@ -594,6 +643,46 @@ mod tests {
         .await
         .unwrap();
         assert!(!kept.copied);
+
+        // The project's own name is taken on the host: a free one instead.
+        w.store
+            .lock()
+            .unwrap()
+            .upsert_session(
+                "dev-acme-papaya-pos",
+                "local",
+                Some(w.project),
+                None,
+                1,
+                1,
+                "running",
+                None,
+            )
+            .unwrap();
+        let again = place_transcript(
+            PlaceTranscriptArgs {
+                host_alias: "local".into(),
+                claude_session_id: ID.into(),
+                project_id: w.project,
+            },
+            &w.store,
+            &Shell::answering("cf-place:kept\n"),
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(
+            again.tmux_name.starts_with("dev-acme-papaya-pos--"),
+            "{}",
+            again.tmux_name
+        );
+        assert!(w
+            .store
+            .lock()
+            .unwrap()
+            .get_session(&again.tmux_name, "local")
+            .unwrap()
+            .is_none());
 
         let err = place_transcript(
             PlaceTranscriptArgs {

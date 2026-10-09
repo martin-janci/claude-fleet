@@ -58,8 +58,8 @@
 
 <style>
   .dialog { max-height: 70vh; overflow: auto; }
-  h4 { margin: 10px 0 4px; font-size: 12px; }
-  .muted { color: var(--fg-muted); font-size: 12px; } .error { color: var(--usage-crit); }
-  .list { margin: 0; padding-left: 18px; font-size: 12px; max-height: 200px; overflow: auto; }
+  h4 { margin: 10px 0 4px; font-size: var(--text-xs); }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); } .error { color: var(--usage-crit); }
+  .list { margin: 0; padding-left: 18px; font-size: var(--text-xs); max-height: 200px; overflow: auto; }
   .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 </style>

@@ -334,7 +334,7 @@
     border-radius: var(--radius-sm);
     padding: 0.35rem 0.45rem;
     font: inherit;
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
     color: var(--fg);
     cursor: pointer;
   }
@@ -351,11 +351,11 @@
   .swatch {
     width: 0.7rem;
     height: 0.7rem;
-    border-radius: 2px;
+    border-radius: var(--radius-xs);
     border: 1px solid var(--border);
   }
   .badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.35rem;
     border-radius: var(--radius-sm);
     border: 1px solid var(--border);
@@ -363,7 +363,7 @@
   }
   .empty,
   .reason {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     margin: 0;
   }
@@ -371,11 +371,11 @@
     margin-bottom: 0.6rem;
   }
   .err {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--usage-crit);
   }
   .notice {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     margin: 0 0 0.5rem;
     padding: 0.4rem 0.6rem;
     border-radius: var(--radius-sm);

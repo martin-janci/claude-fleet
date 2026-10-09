@@ -68,7 +68,7 @@
   .layers { display: grid; align-content: start; }
   .head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; }
   .sentence { flex: 1; font-weight: 600; }
-  .grp { margin: 0; padding: 8px 12px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
+  .grp { margin: 0; padding: 8px 12px 4px; font-size: var(--text-2xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--fg-muted); }
   .n { font-variant-numeric: tabular-nums; }
   .row { display: grid; grid-template-columns: minmax(0, 1fr) auto 44px auto; gap: 8px; align-items: center; width: 100%; padding: 4px 12px; border: 0; background: none; text-align: left; font: inherit; }
   .row.selected { background: var(--accent-soft); }

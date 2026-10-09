@@ -52,6 +52,9 @@ mod lost_target_tests;
 pub mod mission_triage;
 #[cfg(test)]
 mod mission_triage_tests;
+pub mod pr_triage;
+#[cfg(test)]
+mod pr_triage_tests;
 pub mod quick_answer;
 #[cfg(test)]
 mod quick_answer_tests;
@@ -149,6 +152,8 @@ pub enum Feature {
     /// What a finished routine run came to when its exit and the rules say
     /// nothing, from the pane tail (N6, redesign step 8.10).
     RoutineRunOutcome,
+    /// What a PR shepherd episode most likely needs (PR shepherd step 4).
+    PrTriage,
 }
 
 impl Feature {
@@ -169,6 +174,7 @@ impl Feature {
         Feature::TurnOutcome,
         Feature::MissionTriage,
         Feature::RoutineRunOutcome,
+        Feature::PrTriage,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -189,6 +195,7 @@ impl Feature {
             Feature::TurnOutcome => "turn_outcome",
             Feature::MissionTriage => "mission_triage",
             Feature::RoutineRunOutcome => "routine_run_outcome",
+            Feature::PrTriage => "pr_triage",
         }
     }
 
@@ -215,15 +222,20 @@ impl Feature {
             Feature::TurnOutcome => settings::DECIDE_JEV_TURN_OUTCOME,
             Feature::MissionTriage => settings::DECIDE_JEV_MISSION_TRIAGE,
             Feature::RoutineRunOutcome => settings::DECIDE_JEV_ROUTINE_RUN_OUTCOME,
+            Feature::PrTriage => settings::DECIDE_JEV_PR_TRIAGE,
         }
     }
 
     /// Whether this feature sends Claude's reply text (a pane tail): then
     /// the org's SECOND consent (D48, the org's `decide.jev.reply_consent` row, or
     /// `decide.jev.unassigned_reply` for no org) is required on top of
-    /// D31's. J2 and N6, which read the same screen.
+    /// D31's. J2 and N6, which read the same screen, and J9, which sends
+    /// the transcript's agent turns a summary is checked against.
     pub fn sends_reply_text(self) -> bool {
-        matches!(self, Feature::TurnOutcome | Feature::RoutineRunOutcome)
+        matches!(
+            self,
+            Feature::TurnOutcome | Feature::RoutineRunOutcome | Feature::SummaryCheck
+        )
     }
 }
 

@@ -29,6 +29,7 @@
   import { hubStatus } from './hub';
   import { uiLayout } from './prefs';
   import WatchSummary from './WatchSummary.svelte';
+  import { windowHidden } from './window_hidden';
 
   let {
     session,
@@ -134,7 +135,10 @@
     error = null;
     lastAt = null;
     void refresh(id, true);
-    const t = setInterval(() => void refresh(id, false), POLL_MS);
+    // A hidden window skips the tick: each is a capture over SSH (review r16).
+    const t = setInterval(() => {
+      if (!windowHidden()) void refresh(id, false);
+    }, POLL_MS);
     return () => clearInterval(t);
   });
 
@@ -210,17 +214,17 @@
     gap: 0.5rem;
     padding: 0.3rem 0.5rem;
     border-bottom: 1px solid var(--border);
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     flex: none;
   }
   .badge {
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.35rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .label {
     font-weight: 600;
@@ -229,12 +233,12 @@
     margin-left: auto;
   }
   .refresh {
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   .why {
     margin: 0;
     padding: 0.45rem 0.6rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     line-height: 1.45;
     color: var(--fg-muted);
     border-bottom: 1px solid var(--border);
@@ -243,7 +247,7 @@
   .err {
     margin: 0;
     padding: 0.4rem 0.6rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--status-failed);
     flex: none;
   }
@@ -253,7 +257,7 @@
     align-items: center;
     justify-content: center;
     color: var(--fg-muted);
-    font-size: 0.82rem;
+    font-size: var(--text-2xs);
   }
   .pane {
     flex: 1;
@@ -261,8 +265,8 @@
     padding: 0.5rem 0.6rem;
     overflow: auto;
     white-space: pre;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.8rem;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     line-height: 1.25;
     min-height: 0;
   }

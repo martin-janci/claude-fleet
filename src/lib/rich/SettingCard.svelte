@@ -168,7 +168,7 @@
     margin: 0.4em 0 0.7em;
     padding: 0.65rem 0.8rem;
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-md);
     background: var(--bg-pane);
   }
   header {
@@ -176,11 +176,11 @@
     justify-content: space-between;
     align-items: baseline;
     gap: 0.5rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .tag {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     text-transform: uppercase;
     letter-spacing: 0.06em;
   }
@@ -189,10 +189,10 @@
     flex-direction: column;
     gap: 0.1rem;
     padding: 0.4rem 0.55rem;
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: var(--bg);
     font-family: var(--font-mono, monospace);
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .label {
     font-family: inherit;
@@ -203,17 +203,17 @@
   .plus { color: var(--usage-ok); }
   .note, .why, .receipt {
     margin: 0;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
   }
   .why { color: var(--fg-muted); font-style: italic; }
   .warn {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--usage-warn, var(--usage-crit));
   }
   .meta {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .actions {

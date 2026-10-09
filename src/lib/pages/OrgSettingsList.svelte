@@ -81,13 +81,13 @@
     flex-wrap: wrap;
   }
   .label {
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     font-weight: 500;
   }
   .value,
   .inherit span,
   .none {
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .inherit {
@@ -98,7 +98,7 @@
   }
   .help {
     margin: 0.2rem 0 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     line-height: 1.4;
   }

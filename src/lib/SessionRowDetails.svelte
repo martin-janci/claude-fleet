@@ -112,7 +112,7 @@
     row-gap: 0.15rem;
     min-width: 0;
     padding-left: 0.85rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   /* The line wraps instead of clipping — hiding the prompt preview (or any
@@ -124,23 +124,23 @@
   .sess-details > .sess-meta { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .sess-details .sep { color: var(--fg-muted); opacity: 0.6; }
   .host-badge {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     border: 1px solid var(--border);
     padding: 0.05rem 0.3rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     flex-shrink: 0;
   }
   .sess-secondary,
   .sess-meta {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .sess-secondary { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .sess-secondary { font-family: var(--font-mono); }
   .ctx-badge {
     position: relative;
     display: inline-flex;
@@ -148,9 +148,9 @@
     justify-content: center;
     min-width: 2.6rem;
     height: 0.95rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     border: 1px solid;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     overflow: hidden;
     flex-shrink: 0;
     font-variant-numeric: tabular-nums;
@@ -164,7 +164,7 @@
   }
   .ctx-pct { position: relative; }
   .cost-badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     flex-shrink: 0;
     white-space: nowrap;
     opacity: 0.75;
@@ -174,14 +174,14 @@
     opacity: 0.45;
   }
   .ci-badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     flex-shrink: 0;
     white-space: nowrap;
   }
   .effort-badge {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.05rem 0.25rem;
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
     background: color-mix(in srgb, var(--fg) 10%, transparent);
     color: var(--fg-muted);
     flex-shrink: 0;
@@ -189,7 +189,7 @@
     text-transform: uppercase;
   }
   .pr-link {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--accent);
     text-decoration: none;
     flex-shrink: 0;

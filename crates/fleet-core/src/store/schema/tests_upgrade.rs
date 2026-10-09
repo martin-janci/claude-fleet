@@ -731,3 +731,147 @@ fn the_downgrade_guard_admits_fresh_current_and_older_databases() {
     older.migrate().unwrap();
     assert_eq!(older.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
 }
+
+/// The last migration v0.5.4 shipped: the redesign's schema starts at 121.
+const V0_5_4_VERSION: i64 = 120;
+
+/// Review r02: a v0.5.4 database, built from the historical files and
+/// holding a row in every table a later migration alters or rebuilds,
+/// upgrades to the latest schema without losing or changing a row, and
+/// ends with the schema a fresh install has.
+#[test]
+fn a_v0_5_4_database_upgrades_without_losing_rows_and_matches_a_fresh_schema() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+    for (version, sql) in migrations_through(V0_5_4_VERSION) {
+        conn.execute_batch(sql)
+            .unwrap_or_else(|e| panic!("historical migration {version}: {e}"));
+    }
+    conn.execute_batch(
+        "INSERT INTO hosts (alias) VALUES ('h1');
+         INSERT INTO people (name, created_at) VALUES ('ada', 1);
+         INSERT INTO sessions (tmux_name, host_alias, created_at, last_activity_at, status, kind)
+           VALUES ('dev-a', 'h1', 1, 1, 'running', 'work'),
+                  ('dev-sh', 'h1', 1, 1, 'running', 'shell');
+         INSERT INTO host_tokens (host_alias, token, created_at) VALUES ('h1', 'tok', 1);
+         INSERT INTO peer_links (role, created_at) VALUES ('dialer', 1);
+         INSERT INTO orchestration_projects (name, goal, mode, state, created_at, updated_at)
+           VALUES ('m', 'g', 'plan', 'draft', 1, 1);
+         INSERT INTO orchestration_grants
+           (orchestration_project_id, plan_version, level, granted_by, created_at, expires_at)
+           VALUES (1, 1, 2, 'ada', 1, 2);
+         INSERT INTO session_grants (session_id, person_id, level, granted_by, granted_at)
+           VALUES (1, 1, 'drive', 1, 1);
+         INSERT INTO session_grants (session_id, person_id, level, granted_by, granted_at, revoked_at)
+           VALUES (2, 1, 'watch', 1, 1, 5);",
+    )
+    .unwrap();
+    let tables = [
+        "sessions",
+        "hosts",
+        "host_tokens",
+        "peer_links",
+        "orchestration_grants",
+        "session_grants",
+    ];
+    let counts: Vec<i64> = tables
+        .iter()
+        .map(|t| {
+            conn.query_row(&format!("SELECT COUNT(*) FROM {t}"), [], |r| r.get(0))
+                .unwrap()
+        })
+        .collect();
+    let row_versions: i64 = conn
+        .query_row("SELECT SUM(row_version) FROM sessions", [], |r| r.get(0))
+        .unwrap();
+    let store = store_over(conn);
+    assert_eq!(store.schema_version().unwrap(), V0_5_4_VERSION);
+
+    store.migrate().expect("migrate the v0.5.4 database");
+
+    assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+    integrity_ok(&store);
+    for (t, n) in tables.iter().zip(&counts) {
+        assert_eq!(
+            count(&store, &format!("SELECT COUNT(*) FROM {t}")),
+            *n,
+            "{t} row count changed"
+        );
+    }
+    assert_eq!(
+        count(&store, "SELECT SUM(row_version) FROM sessions"),
+        row_versions,
+        "no migration bumps a session's row_version"
+    );
+    // 121: a shell row runs no agent, every other row runs Claude Code.
+    let agents: Vec<(String, String)> = {
+        let mut stmt = store
+            .conn
+            .prepare("SELECT tmux_name, agent FROM sessions ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows
+    };
+    assert_eq!(
+        agents,
+        [
+            ("dev-a".to_string(), "claude".to_string()),
+            ("dev-sh".to_string(), "shell".to_string())
+        ]
+    );
+    // 125: every existing row counts as viewed, so nothing reads as unseen.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM sessions WHERE last_viewed_at IS NULL"
+        ),
+        0
+    );
+    // 142: the grants come through under their ids, levels and revocations.
+    assert_eq!(
+        count(
+            &store,
+            "SELECT COUNT(*) FROM session_grants \
+              WHERE (id, level, revoked_at IS NULL) IN (VALUES (1, 'drive', 1), (2, 'watch', 0))"
+        ),
+        2
+    );
+    // The rows are readable through today's code.
+    assert_eq!(store.list_sessions_for_host("h1").unwrap().len(), 2);
+
+    // The upgraded schema is the schema a fresh install creates.
+    let schema = |s: &Store| -> Vec<(String, String, String)> {
+        let mut stmt = s
+            .conn
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master \
+                  WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY type, name",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                let sql: String = r.get(2)?;
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    sql.split_whitespace().collect::<Vec<_>>().join(" "),
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        rows
+    };
+    let fresh = Store::open_in_memory().unwrap();
+    let (upgraded, fresh) = (schema(&store), schema(&fresh));
+    let only_upgraded: Vec<_> = upgraded.iter().filter(|o| !fresh.contains(o)).collect();
+    let only_fresh: Vec<_> = fresh.iter().filter(|o| !upgraded.contains(o)).collect();
+    assert!(
+        only_upgraded.is_empty() && only_fresh.is_empty(),
+        "upgraded and fresh schemas differ:\nupgraded only: {only_upgraded:#?}\nfresh only: {only_fresh:#?}"
+    );
+}

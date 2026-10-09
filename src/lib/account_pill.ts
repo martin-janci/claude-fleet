@@ -58,7 +58,7 @@ export function accountPill(
 ): AccountPillView {
   const label = account ? accountLabel(account) : uuid.slice(0, 8);
   const usage = snap?.usage ?? null;
-  const kind = bindingWindow(usage);
+  const kind = bindingWindow(usage, now);
   const w = kind ? windowOf(usage, kind) : null;
   const shown =
     kind !== null && w !== null && freshness(kind, snap?.fetched_at ?? null, w.resets_at, now) !== 'expired';
@@ -66,7 +66,9 @@ export function accountPill(
     return { uuid, label, left: null, window: null, level: 'ok', text: label, title: `Account ${label}` };
   }
   const left = leftPct(w);
-  const level = pillLevel(usedPct(w));
+  // LIMIT on the raw figure, as the Blocked classifier (`attention_facts.ts`)
+  // decides it: 99.6% used rounds to 0% left but does not stop the account.
+  const level = w.utilization >= 100 ? 'limit' : pillLevel(Math.min(usedPct(w), 99));
   const reset = formatResetShort(kind, w.resets_at, now, locale, timeZone);
   const text = level === 'limit' ? `${label} ${limitWording(account?.has_extra_usage ?? false)}` : `${label} ${left}%`;
   return {

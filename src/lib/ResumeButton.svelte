@@ -103,7 +103,7 @@
     flex: none;
   }
   button {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0 0.35rem;
     line-height: 1.5;
     border: 1px solid var(--border);
@@ -112,11 +112,11 @@
     cursor: pointer;
   }
   .main {
-    border-radius: 3px 0 0 3px;
+    border-radius: var(--radius-xs) 0 0 var(--radius-xs);
   }
   .more {
     border-left: none;
-    border-radius: 0 3px 3px 0;
+    border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
   }
   button:disabled {
     opacity: 0.6;

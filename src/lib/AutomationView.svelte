@@ -33,6 +33,7 @@
     type AutomationState,
     type AutomationTab,
   } from './automation';
+  import { windowHidden } from './window_hidden';
 
   let auto = $state<AutomationState | null>(null);
   let error = $state<string | null>(null);
@@ -64,6 +65,7 @@
     // The loops' "next in" and "ago" move; the data itself is re-read on the
     // same beat, as a loop's last run changes without an event.
     const t = setInterval(() => {
+      if (windowHidden()) return;
       nowSec = Math.floor(Date.now() / 1000);
       void load();
     }, 30_000);

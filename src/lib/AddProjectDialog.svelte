@@ -667,13 +667,13 @@
     padding-right: 0.2rem;
   }
   .fields > :global(*) { flex-shrink: 0; }
-  label, .label { font-size: 11px; color: var(--fg-muted); text-transform: uppercase; }
+  label, .label { font-size: var(--text-2xs); color: var(--fg-muted); text-transform: uppercase; }
   label.check {
     display: flex;
     gap: 0.4rem;
     align-items: center;
     text-transform: none;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
     color: var(--fg);
   }
   input:not([type='checkbox']) {
@@ -682,7 +682,7 @@
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     min-width: 0;
   }
   .also-row { display: flex; flex-wrap: wrap; gap: 0.3rem; }
@@ -692,27 +692,27 @@
     border: 1px solid var(--border);
     background: var(--bg-pane);
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
   }
   .pick-folder {
     align-self: flex-start;
-    font-size: 0.85rem;
+    font-size: var(--text-xs);
     padding: 0.3rem 0.8rem;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--fg);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
   }
   .preview {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .preview .k { text-transform: uppercase; font-size: 11px; margin-right: 0.3rem; }
-  .preview code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .err { color: var(--danger); font-size: 0.8rem; margin: 0; }
+  .preview .k { text-transform: uppercase; font-size: var(--text-2xs); margin-right: 0.3rem; }
+  .preview code { font-family: var(--font-mono); }
+  .err { color: var(--danger); font-size: var(--text-2xs); margin: 0; }
 </style>

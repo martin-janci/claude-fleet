@@ -80,6 +80,17 @@ describe('LimitActions', () => {
     expect(screen.queryByTestId('limit-switch')).toBeNull();
   });
 
+  it('a wait for a reset that has passed does not hide a later limit', () => {
+    const sess = session('mac', 'a');
+    const real = Math.floor(Date.now() / 1000);
+    // Waited out an earlier limit; the row paused again on a later one.
+    waitingOut.set(new Map([[sess.id, real - 3600]]));
+    render(LimitActions, { props: { sess, resetsAt: real + 3600, accountName: name } });
+    expect(screen.queryByTestId('limit-waiting')).toBeNull();
+    expect(screen.getByTestId('limit-switch')).toBeTruthy();
+    expect(screen.getByTestId('limit-wait').textContent).toBe(`Wait until ${resetText(real + 3600)}`);
+  });
+
   it('without a reset time there is no Wait to offer', () => {
     render(LimitActions, { props: { sess: session('mac', 'a'), resetsAt: null, accountName: name } });
     expect(screen.getByTestId('limit-switch')).toBeTruthy();

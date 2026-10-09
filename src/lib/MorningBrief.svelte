@@ -21,10 +21,15 @@
     text = d?.text ?? '';
   }
 
+  // Only the newest load lands: the opening read answering after a
+  // Regenerate would put the old draft back (review r07).
+  let loadSeq = 0;
   async function load(refresh: boolean) {
+    const mine = ++loadSeq;
     if (refresh) busy = true;
     error = null;
     const r = await todayBrief(refresh);
+    if (mine !== loadSeq) return;
     busy = false;
     if (r.ok) {
       show(r.value?.draft);
@@ -84,13 +89,13 @@
     margin: 0;
   }
   .when {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     font-weight: 400;
     color: var(--fg-muted);
   }
   .error {
     color: var(--danger);
-    font-size: 12px;
+    font-size: var(--text-xs);
     margin: 0;
   }
 </style>

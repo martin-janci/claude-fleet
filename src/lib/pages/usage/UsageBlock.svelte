@@ -191,7 +191,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
   header {
     display: flex;
@@ -200,7 +200,7 @@
     gap: 0.35rem;
   }
   .title {
-    font-size: 11px;
+    font-size: var(--text-2xs);
     letter-spacing: 0.04em;
     color: var(--fg-muted);
   }
@@ -208,10 +208,10 @@
   .meta { color: var(--fg-muted); }
   .refresh {
     margin-left: auto;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     padding: 0.1rem 0.45rem;
     border: 1px solid var(--border);
-    border-radius: 4px;
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--fg);
     cursor: pointer;
@@ -219,11 +219,11 @@
   }
   .refresh:disabled { color: var(--fg-muted); cursor: default; }
   kbd {
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 11px;
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
     padding: 0 0.2rem;
     border: 1px solid var(--border);
-    border-radius: 3px;
+    border-radius: var(--radius-xs);
   }
   .messages {
     list-style: none;
@@ -248,10 +248,10 @@
     border: none;
     background: none;
     padding: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--accent);
     cursor: pointer;
   }
   .disclosure { color: var(--fg-muted); }
-  footer { color: var(--fg-muted); font-size: 11px; }
+  footer { color: var(--fg-muted); font-size: var(--text-2xs); }
 </style>

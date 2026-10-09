@@ -14,6 +14,12 @@ export type RunKind =
   | 'jev'
   | 'planner'
   | 'summary'
+  | 'commit_message'
+  | 'release_note'
+  | 'morning_brief'
+  | 'brief'
+  | 'watch_summary'
+  | 'triage'
   | 'routine';
 
 /** How it ended, in plain words (`RUN_OUTCOMES`). */
@@ -89,11 +95,11 @@ export async function listRuns(filter: RunsFilter = {}): Promise<Result<RunsPage
 }
 
 const OUTCOME_WORDS: Record<RunOutcome, string> = {
-  ok: 'OK',
+  ok: 'Done',
   failed: 'Failed',
-  needs_person: 'Needs person',
+  needs_person: 'Needs you',
   nothing_to_do: 'Nothing to do',
-  running: 'Running',
+  running: 'Working',
 };
 
 /** A run's outcome in plain words; a failure carries its error. */

@@ -621,6 +621,52 @@ fn a_late_or_replayed_report_never_overwrites_a_newer_attempt() {
     assert_eq!(observed().0, "a3");
 }
 
+/// r18-U6: within one attempt, a delayed earlier phase is logged, not state.
+#[test]
+fn a_late_earlier_phase_of_the_same_attempt_does_not_move_it_back() {
+    let store = Mutex::new(Store::open_in_memory().unwrap());
+    let c = client(1, TokenMode::Full, None);
+    let phase = || {
+        lock(&store)
+            .unwrap()
+            .update_observed("client:1")
+            .unwrap()
+            .unwrap()
+            .phase
+    };
+    for (i, p) in [UpdatePhase::Downloading, UpdatePhase::Installing]
+        .into_iter()
+        .enumerate()
+    {
+        assert!(report(
+            &store,
+            &c,
+            &desktop_report("a1", p, "0.3.3"),
+            NOW + i as i64
+        )
+        .unwrap());
+    }
+    assert_eq!(phase(), "installing");
+    // The retried `verifying` lands after `installing`: recorded, not state.
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a1", UpdatePhase::Verifying, "0.3.3"),
+        NOW + 5
+    )
+    .unwrap());
+    assert_eq!(phase(), "installing");
+    // A later phase of the same attempt still moves it on.
+    assert!(report(
+        &store,
+        &c,
+        &desktop_report("a1", UpdatePhase::Failed, "0.3.3"),
+        NOW + 6
+    )
+    .unwrap());
+    assert_eq!(phase(), "failed");
+}
+
 #[test]
 fn a_report_without_an_attempt_is_always_the_observed_state() {
     let store = Mutex::new(Store::open_in_memory().unwrap());

@@ -182,11 +182,11 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    font-size: 0.8rem;
+    font-size: var(--text-2xs);
   }
   .hint {
     margin: 0;
-    font-size: 11px;
+    font-size: var(--text-2xs);
     color: var(--fg-muted);
   }
   .err {
@@ -206,6 +206,6 @@
   .conf,
   .why {
     color: var(--fg-muted);
-    font-size: 11px;
+    font-size: var(--text-2xs);
   }
 </style>
