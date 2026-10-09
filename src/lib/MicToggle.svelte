@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import type { SessionRow } from './sessions';
   import { voiceState, claimVoice, releaseVoice, voiceSupported } from './voice';
   import { uiLayout } from './prefs';
@@ -22,7 +23,7 @@
 </script>
 
 <button class="mic" class:on data-testid="mic-toggle" disabled={!voiceSupported(transport)} {title} onclick={toggle}>
-  🎤{#if mine && $voiceState.state === 'capturing'}<span class="live" data-testid="mic-live"></span>{/if}
+  <Icon name="mic" size={14} />{#if mine && $voiceState.state === 'capturing'}<span class="live" data-testid="mic-live"></span>{/if}
 </button>
 {#if $uiLayout === 'new' && mine && $voiceState.state === 'capturing'}
   <!-- Redesign 5.14 (LoadersInFlows, Chat · Voice input): the Sonar

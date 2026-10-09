@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // The Work tab's List layout (design 2026-09-29): every task the current
   // filters match — tickets, native tasks, bare keys — in To do / Doing /
   // Done, from ONE `work_tree` read (archived on, so Done has its rows).
@@ -279,7 +280,7 @@
                     aria-label="Edit {displayTitle(t)}"
                     disabled={editBlocked !== null}
                     data-testid="task-edit"
-                    onclick={() => (editing = t.task_id)}>✎</button
+                    onclick={() => (editing = t.task_id)}><Icon name="edit" size={12} /></button
                   >
                 {/if}
                 <WorkButton task={t} />

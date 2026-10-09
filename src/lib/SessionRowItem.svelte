@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import { tick, type Snippet } from 'svelte';
   import {
     recreateSession,
@@ -807,7 +808,7 @@
               disabled={labelBlocked !== null}
               title={labelBlocked ?? 'Rename (double-click the row)'}
               aria-label="Rename"
-            >🏷</button>
+            ><Icon name="tag" size={12} /></button>
             <button
               class="icon-btn small"
               data-testid="rename-tmux"
@@ -815,7 +816,7 @@
               disabled={tmuxRenameBlocked !== null}
               title={tmuxRenameBlocked ?? 'Rename tmux session'}
               aria-label="Rename tmux session"
-            >✎</button>
+            ><Icon name="edit" size={12} /></button>
             <button
               class="icon-btn small"
               data-testid="recreate-live"
@@ -825,7 +826,7 @@
                 ? 'Recreate: kill the tmux session and start it fresh in the same worktree'
                 : 'Host is offline')}
               aria-label="Recreate"
-            >♻</button>
+            ><Icon name="recreate" size={12} /></button>
             {#if !isInactiveAgent(sess)}
               <!-- An inactive agent's daemon is gone: Remove from list is its
                    only removal action. -->
