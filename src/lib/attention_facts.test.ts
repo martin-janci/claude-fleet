@@ -39,6 +39,9 @@ describe('attentionFactsFrom (mirrors attention::Facts::from_fleet)', () => {
         reset: usage('reset', 'ok', 100, 10, 500),
         fine: usage('fine', 'ok', 80, 99, 2000),
         gone: usage('gone', 'login_expired', 0, 0, 2000),
+        rejected: usage('rejected', 'token_rejected', 0, 0, 2000),
+        // Review r05 F3: no token file (a macOS Keychain host) is not a lost login.
+        keychain: usage('keychain', 'no_credentials', 0, 0, 2000),
         refresh: usage('refresh', 'access_token_expired', 0, 0, 2000),
       },
       1000,
@@ -48,7 +51,10 @@ describe('attentionFactsFrom (mirrors attention::Facts::from_fleet)', () => {
       five: { window: 'five_hour', resets_at: 2000 },
       both: { window: 'weekly', resets_at: 2100 },
     });
-    expect(f.uncredentialed_accounts).toEqual(['gone']);
+    expect(f.uncredentialed_accounts).toEqual(['gone', 'rejected']);
+    const idle = (account: string) => session('mefistos', 'a', { claude_status: 'idle', account_uuid: account });
+    expect(classify(idle('keychain'), { idleSecs: 0, now: 1000, facts: f })).toBe('idle');
+    expect(classify(idle('gone'), { idleSecs: 0, now: 1000, facts: f })).toBe('no_credentials');
   });
 
   it('is the New layout only', () => {

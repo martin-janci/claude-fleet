@@ -15,9 +15,11 @@ import { accountUsage } from './account_usage_store';
 import type { AttentionFacts, AttentionLimit } from './attention';
 import { uiLayout } from './prefs';
 
-/** Login states that need a person to sign in again; an expired access
- *  token refreshes by itself. */
-const LOGIN_GONE: ReadonlySet<UsageStatus> = new Set(['no_credentials', 'login_expired', 'token_rejected']);
+/** Login states that need a person to sign in again. An expired access
+ *  token refreshes by itself, and `no_credentials` is the usage script
+ *  finding no token file, which on a macOS host (the token lives in the
+ *  Keychain) says nothing about the login. */
+const LOGIN_GONE: ReadonlySet<UsageStatus> = new Set(['login_expired', 'token_rejected']);
 
 export function attentionFactsFrom(
   hostRows: readonly HostRow[],

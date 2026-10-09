@@ -251,8 +251,10 @@ impl Facts {
     /// `last_pinged_at`); one never pinged is unknown, not down. An account
     /// is at its limit when its 5-hour or weekly window is fully used and
     /// has not reset yet (the weekly one wins: it is the longer wait). A
-    /// login counts as gone on `no_credentials`, `login_expired` and
-    /// `token_rejected`; an expired access token refreshes by itself.
+    /// login counts as gone on `login_expired` and `token_rejected` only: an
+    /// expired access token refreshes by itself, and `no_credentials` is the
+    /// usage script finding no token file, which on a macOS host (the token
+    /// lives in the Keychain) says nothing about the login.
     pub fn from_fleet(hosts: &[HostRow], usage: &[AccountUsageSnapshot], now: i64) -> Facts {
         let down_hosts = hosts
             .iter()
@@ -264,9 +266,7 @@ impl Facts {
         for snap in usage {
             if matches!(
                 snap.status,
-                UsageOutcomeKind::NoCredentials
-                    | UsageOutcomeKind::LoginExpired
-                    | UsageOutcomeKind::TokenRejected
+                UsageOutcomeKind::LoginExpired | UsageOutcomeKind::TokenRejected
             ) {
                 uncredentialed_accounts.insert(snap.account_uuid.clone());
             }
@@ -956,6 +956,10 @@ mod tests {
                 snap("reset", UsageOutcomeKind::Ok, 100.0, 10.0, 500),
                 snap("fine", UsageOutcomeKind::Ok, 80.0, 99.0, 2_000),
                 snap("gone", UsageOutcomeKind::LoginExpired, 0.0, 0.0, 2_000),
+                snap("rejected", UsageOutcomeKind::TokenRejected, 0.0, 0.0, 2_000),
+                // Review r05 F3: no token file to read (a macOS host keeps
+                // it in the Keychain) is not a lost login.
+                snap("keychain", UsageOutcomeKind::NoCredentials, 0.0, 0.0, 2_000),
                 snap(
                     "refresh",
                     UsageOutcomeKind::AccessTokenExpired,
@@ -982,7 +986,19 @@ mod tests {
         assert!(!f.limited_accounts.contains_key("fine"));
         assert_eq!(
             f.uncredentialed_accounts.iter().collect::<Vec<_>>(),
-            ["gone"]
+            ["gone", "rejected"]
+        );
+        // So an idle session on the Keychain host's account needs no one.
+        let mut r = row();
+        r.account_uuid = Some("keychain".into());
+        r.claude_status = Some("idle".into());
+        assert_eq!(needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &f), None);
+        r.account_uuid = Some("gone".into());
+        assert_eq!(
+            needs_attention_in(&r, DEFAULT_CONTEXT_RED_PCT, &f)
+                .unwrap()
+                .reason,
+            Reason::NoCredentials
         );
     }
 }
