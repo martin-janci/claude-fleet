@@ -56,6 +56,7 @@ mod schema;
 mod session_grants;
 mod sessions;
 mod setting_review;
+mod start_rules;
 mod task_report;
 mod tasks;
 #[cfg(test)]
@@ -85,6 +86,7 @@ pub use account_usage_snapshots::{UsageSnapshotRow, USAGE_HISTORY_KEEP_SECS};
 pub use aux_usage::{
     AuxUsageRow, NewAuxUsage, AUX_ORIGIN_BRIEF, AUX_ORIGIN_COMMIT_MESSAGE,
     AUX_ORIGIN_MORNING_BRIEF, AUX_ORIGIN_PLANNER, AUX_ORIGIN_RELEASE_NOTE, AUX_ORIGIN_SUMMARY,
+    AUX_ORIGIN_WATCH_SUMMARY,
 };
 pub use bench_work_link::{BenchHostLink, BenchItemRow, BenchLinkRow, BenchUnlinkedRow};
 pub use changesets::{
@@ -154,7 +156,8 @@ pub use people::{
     machine_token_kind, validate_person_name, PersonRow, MAX_PERSON_NAME_LEN, PERSONAL_OWNER_NAME,
 };
 pub use pr_shepherd::{
-    ShepherdEpisodeRow, ShepherdRuleRow, SHEPHERD_LEVELS, SHEPHERD_RECIPES_MAX_CHARS,
+    ShepherdEpisodeRow, ShepherdMergeRow, ShepherdRuleRow, SHEPHERD_LEVELS,
+    SHEPHERD_RECIPES_MAX_CHARS,
 };
 pub use project_picks::{ProjectPickRow, PROJECT_GROUP_MAX_CHARS, PROJECT_VIS};
 pub use pull_requests::{repo_and_number, PrSeenBy, PullRequestRow};
@@ -183,6 +186,7 @@ pub use setting_review::{
     NewSettingProposal, SettingAuditRow, SettingProposalRow, DECIDED_PROPOSAL_KEEP_SECS,
     SETTING_AUDIT_KEEP,
 };
+pub use start_rules::{StartRuleRow, START_RULE_STATES};
 pub use task_report::{
     EvidenceCommit, EvidenceFile, TaskEvidence, TaskReport, EVIDENCE_COMMITS_MAX,
     EVIDENCE_FILES_MAX, REPORT_ENTRY_MAX_CHARS, REPORT_LIST_MAX, REPORT_OUTCOMES,

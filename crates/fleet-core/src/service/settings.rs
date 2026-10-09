@@ -556,6 +556,9 @@ pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
 /// `control_route`'s mode (K2: where a message typed in Control goes,
 /// redesign step 9.9).
 pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
+/// `summary_check`'s mode (checking a watcher's summary against the
+/// transcript before it shows, J9).
+pub const DECIDE_JEV_SUMMARY_CHECK: &str = "decide.jev.summary_check";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1376,6 +1379,15 @@ pub const SPECS: &[Spec] = &[
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_SUMMARY_CHECK,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: summary check",
+        "Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: check first")]),
     Spec::new(
         DECIDE_JEV_UNASSIGNED,
         "false",
@@ -2621,6 +2633,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_SUMMARY_CHECK, None), "off");
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");

@@ -8,6 +8,7 @@ import type { DecisionProposal } from './proposals';
 import type { SessionRow } from './sessions';
 import type { WorkTask } from './work_view';
 import { preselect, type ProposalLike } from './ai_proposal';
+import type { StartRule } from './start_rules';
 
 /** What would stop or change a start. */
 export interface StartConflict {
@@ -28,6 +29,8 @@ export interface StartPlanView {
   worktree_id?: number | null;
   name: string;
   parallel?: boolean;
+  /** The start rule that picked the repository (redesign 8.11). */
+  rule_id?: number | null;
 }
 
 export interface StartPreview {
@@ -52,6 +55,9 @@ export interface StartPreview {
    *  before) Jev proposes the task also needs (N3, assist). A pre-tick
    *  only; the person still presses Start. */
   suggested_sibling?: { project_id: number; confidence_pct?: number | null; run_id?: number | null } | null;
+  /** The rule fleet offers after five identical starts of the key's
+   *  prefix in one repository (redesign 8.11): "Add rule PD-* → acme/pos?". */
+  rule_offer?: StartRule | null;
   /** The brief was drafted by a model (redesign 6.10); absent for the
    *  template. */
   brief_draft?: BriefDraft | null;

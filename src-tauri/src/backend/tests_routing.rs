@@ -818,6 +818,24 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "start_rules",
+            "start_rules",
+            json!({ "action": "accept", "rule_id": 3 }),
+            r#"{"id":3,"pattern":"PD-*","project_id":2,"state":"active","confirmations":5,"hits":0,"created_at":1,"updated_at":2,"may_change":true}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::start_rules::routed::start_rules(
+                    b,
+                    s,
+                    fleet_core::service::start_rules::StartRulesArgs {
+                        action: "accept".into(),
+                        rule_id: Some(3),
+                        rule: None,
+                    },
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "control_handoffs",
             "control_handoffs",
             json!({ "limit": 5 }),
@@ -1756,6 +1774,26 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
                         session_id: 42,
                         scrollback_lines: Some(400),
                         max_lines: Some(120),
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        // Redesign 11.11: the watcher's "Since 13:20" summary; `since`
+        // crosses as given.
+        (
+            "session_summary_since",
+            "session_summary_since",
+            json!({ "session_id": 42, "since": 1_791_465_600 }),
+            r#"{"text":"Fixed it.","check":"passed","since":1791465600,"turns":2,"model":"haiku","host_alias":"h","at":1791466000}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::sessions::routed::session_summary_since(
+                    b,
+                    commands::sessions::SessionSummarySinceArgs {
+                        session_id: 42,
+                        since: 1_791_465_600,
                     },
                     s,
                     h,
@@ -6384,6 +6422,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../commands/federation.rs"),
     ),
     ("commands/prs.rs", include_str!("../commands/prs.rs")),
+    (
+        "commands/start_rules.rs",
+        include_str!("../commands/start_rules.rs"),
+    ),
     (
         "commands/presence.rs",
         include_str!("../commands/presence.rs"),

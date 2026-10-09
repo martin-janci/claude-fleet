@@ -1,7 +1,9 @@
 <!-- The new layout's 44 px header (redesign step 3.17, Main board): the
      Orbit mark and name, the ⌘K command field, the account pills (health
      dot, name, both windows), and Automation with Pause all. Classic has no
-     header; this renders only under ui.layout = new. -->
+     header; this renders only under ui.layout = new. Automation (step 8.4)
+     says the active missions and today's spend and opens the Automation
+     screen; Pause all is `automation.paused`, and Resume clears it. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import AppHeader from './kit/AppHeader.svelte';
@@ -11,18 +13,22 @@
   import { openAccount } from './account_pill';
   import { goTo } from './destination';
   import { HEADER_ACCOUNTS_MAX, headerAccounts } from './header_accounts';
-  import { listMissions, pauseAllMissions } from './missions';
+  import { listMissions } from './missions';
+  import { loadFleetSettings } from './fleet_settings';
+  import { automationPaused, money, runsToday, setAutomationPaused, spendMicros } from './automation';
   import { workChanged } from './work';
   import { openSwitcher } from './switcher_request';
-  import { push, pushError } from './toasts';
+  import { pushError } from './toasts';
 
   let { mac }: { mac?: boolean } = $props();
 
   let nowSec = $state(Math.floor(Date.now() / 1000));
   let active = $state<number | null>(null);
+  let spend = $state<number | null>(null);
   let pausing = $state(false);
 
   onMount(() => {
+    void loadFleetSettings();
     // Usage readings age out; the pills re-read them on the same cadence as
     // the status bar's mark.
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 30_000);
@@ -32,6 +38,8 @@
   async function loadActive() {
     const r = await listMissions();
     active = r.ok && Array.isArray(r.value) ? r.value.filter((m) => m.state === 'active').length : null;
+    const today = await runsToday();
+    spend = today.ok ? spendMicros(today.value) : null;
   }
   $effect(() => {
     void $workChanged;
@@ -42,12 +50,11 @@
   const shown = $derived(pills.slice(0, HEADER_ACCOUNTS_MAX));
   const more = $derived(pills.length - shown.length);
 
-  async function pauseAll() {
+  async function togglePause() {
     pausing = true;
-    const r = await pauseAllMissions();
+    const r = await setAutomationPaused(!$automationPaused);
     pausing = false;
-    if (!r.ok) pushError(r.error, 'Pause all failed');
-    else push({ kind: 'success', message: `Paused ${r.value.length} mission${r.value.length === 1 ? '' : 's'}` });
+    if (!r.ok) pushError(r.error, $automationPaused ? 'Resume failed' : 'Pause all failed');
   }
 </script>
 
@@ -76,17 +83,26 @@
     >
   {/if}
   {#if shown.length > 0}<span class="sep" aria-hidden="true"></span>{/if}
-  <span class="automation" data-testid="header-automation">
+  <button
+    type="button"
+    class="of-btn quiet automation"
+    data-testid="header-automation"
+    title="Open Automation"
+    onclick={() => goTo('automation')}
+  >
     <Icon name="clock" />
-    <span>Automation{#if active !== null}&nbsp;{active} active{/if}</span>
-  </span>
+    <span
+      >Automation{#if $automationPaused}&nbsp;paused{:else if active !== null}&nbsp;{active} active{/if}</span
+    >
+    {#if spend !== null}<span class="meta tnum" data-testid="header-spend">{money(spend)} today</span>{/if}
+  </button>
   <button
     type="button"
     class="of-btn quiet sm"
     data-testid="header-pause-all"
-    aria-label="Pause all automation"
-    disabled={pausing || active === 0}
-    onclick={pauseAll}>Pause all</button
+    aria-label={$automationPaused ? 'Resume automation' : 'Pause all automation'}
+    disabled={pausing}
+    onclick={togglePause}>{$automationPaused ? 'Resume' : 'Pause all'}</button
   >
 </AppHeader>
 

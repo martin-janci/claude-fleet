@@ -519,6 +519,12 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
     ("rename_person", Verdict::Routed { tool: "org_admin" }),
     ("disable_person", Verdict::Routed { tool: "org_admin" }),
     (
+        "session_summary_since",
+        Verdict::Routed {
+            tool: "session_summary_since",
+        },
+    ),
+    (
         "session_conversation",
         Verdict::Routed {
             tool: "session_conversation",
@@ -850,6 +856,14 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
         },
     ),
     ("list_pull_requests", Verdict::Routed { tool: "prs" }),
+    // Start rules (Orbit Fleet 8.11): the hub decides and tallies its own
+    // starts, so its rules are the ones that count.
+    (
+        "start_rules",
+        Verdict::Routed {
+            tool: "start_rules",
+        },
+    ),
     (
         "session_presence",
         Verdict::Routed {

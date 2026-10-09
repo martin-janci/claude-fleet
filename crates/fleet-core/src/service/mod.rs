@@ -85,6 +85,7 @@ pub mod settings;
 #[cfg(test)]
 mod settings_doc_gen;
 pub mod settings_review;
+pub mod start_rules;
 pub mod tasks;
 pub mod tick;
 pub mod trackers;
@@ -94,6 +95,7 @@ pub mod update;
 pub mod usage;
 pub mod view_scope;
 pub mod voice;
+pub mod watch_summary;
 pub mod work;
 pub mod worktree_prune;
 pub mod worktrees;

@@ -82,8 +82,8 @@ export async function listRuns(filter: RunsFilter = {}): Promise<Result<RunsPage
   return {
     ok: true,
     value: {
-      runs: (r.value.runs ?? []).map((row) => ({ ...row, session_ids: row.session_ids ?? [] })),
-      total: r.value.total ?? 0,
+      runs: (r.value?.runs ?? []).map((row) => ({ ...row, session_ids: row.session_ids ?? [] })),
+      total: r.value?.total ?? 0,
     },
   };
 }

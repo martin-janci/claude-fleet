@@ -84,6 +84,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.summary_check",
+          "hint": "Checks a watcher's summary of a session against its transcript; in assist a summary it cannot confirm is not shown."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         }
       ]
