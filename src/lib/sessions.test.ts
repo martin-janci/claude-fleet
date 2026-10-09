@@ -499,6 +499,29 @@ describe('a reused session id', () => {
     ]);
     expect(get(sessions)).toEqual([]);
   });
+
+  it('review r06: a command row for the killed row that resolves after the kill does not resurrect it', async () => {
+    sessions.set([killed]);
+    let answer!: (r: SessionRow) => void;
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation((cmd: string) =>
+      cmd === 'rename_session' ? new Promise<SessionRow>((res) => (answer = res)) : Promise.resolve(null),
+    );
+    const p = renameSession(killed.host_alias, 'old', 'late');
+    applySessionEvents([{ type: 'killed', id: 9 }]);
+    answer({ ...killed, tmux_name: killed.tmux_name, row_version: 5 });
+    await p;
+    expect(get(sessions)).toEqual([]);
+  });
+
+  it('...but a command row for a new session reusing the id is shown', async () => {
+    sessions.set([killed]);
+    applySessionEvents([{ type: 'killed', id: 9 }]);
+    (mockedInvoke as ReturnType<typeof vi.fn>).mockImplementation(async (cmd: string) =>
+      cmd === 'rename_session' ? reborn : null,
+    );
+    await renameSession(reborn.host_alias, 'x', 'fresh');
+    expect(get(sessions).map((s) => s.tmux_name)).toEqual(['fresh']);
+  });
 });
 
 describe('sessionAgent', () => {

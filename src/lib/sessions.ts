@@ -972,7 +972,10 @@ export function applySessionEvents(events: readonly SessionEvent[]): void {
 
 /** Apply a row returned by a mutation command (rename/restart/new). Unlike an
  *  event, a command result is the authoritative response to a request the
- *  user just made, so it clears any tombstone for that id before merging. */
+ *  user just made, so it clears any tombstone for that id before merging —
+ *  except a live tombstone for this same row (same host, tmux name and
+ *  created_at): a command that resolved after `session:killed` does not
+ *  resurrect the killed row (review r06). A new row reusing the id passes. */
 export function acceptCommandRow(row: SessionRow | null | undefined): void {
   rows.accept(row);
 }

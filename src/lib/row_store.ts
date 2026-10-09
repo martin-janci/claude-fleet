@@ -113,7 +113,9 @@ export interface RowStore<T, K> {
   merge(row: T | null | undefined): void;
   remove(key: K): void;
   /** A command result is the authoritative answer to a request the user just
-   *  made: clear the key's tombstone, then merge. */
+   *  made: clear the key's tombstone, then merge — unless the tombstone is
+   *  live and names this very row (same `identity`): a command that resolved
+   *  after the row was removed does not resurrect it. */
   accept(row: T | null | undefined): void;
   isTombstoned(key: K): boolean;
   /** Call before asking for the full list; hand the token to `applyList`. */
@@ -209,7 +211,23 @@ export function createRowStore<T, K>(
     },
     accept(row) {
       if (!row) return;
-      tombstones.delete(opts.key(row));
+      const key = opts.key(row);
+      const t = tombstones.get(key);
+      // A command answer that resolves after the row's removal (a rename
+      // racing a `session:killed`) is the removed row itself: it must not
+      // bring it back (review r06). Only a row whose identity differs from
+      // the removed one's (the key was reused) gets past a live tombstone.
+      // Without an identity, or when the removed row was never held, the
+      // command result is the authoritative answer and wins as before.
+      if (
+        opts.identity &&
+        t?.ident !== undefined &&
+        t.ident === opts.identity(row) &&
+        isTombstoned(key)
+      ) {
+        return;
+      }
+      tombstones.delete(key);
       store.update((arr) => mergeInto(arr, row));
     },
     isTombstoned,
