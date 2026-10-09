@@ -1621,11 +1621,15 @@ const MIGRATIONS: &[Migration] = &[
         140,
         include_str!("../../migrations/140_control_handoffs.sql"),
     ),
+    // Orbit Fleet 8.3: the indexes behind `runs { list }` (one list over
+    // tasks, mission actions, Jev, `claude -p` and routine runs). Indexes only,
+    // `IF NOT EXISTS`, safe to re-run.
+    Migration::plain(141, include_str!("../../migrations/141_runs_indexes.sql")),
     // PR shepherd, step 3: the merge queue's record (a new table and an
     // index, `IF NOT EXISTS`, safe to re-run).
     Migration::plain(
-        141,
-        include_str!("../../migrations/141_pr_shepherd_merges.sql"),
+        142,
+        include_str!("../../migrations/142_pr_shepherd_merges.sql"),
     ),
 ];
 

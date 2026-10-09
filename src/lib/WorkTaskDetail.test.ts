@@ -292,6 +292,45 @@ describe('WorkTaskDetail', () => {
     expect(screen.queryByTestId('start-popover')).toBeNull();
   });
 
+  it('the start popover drafts the brief on the planned host and Start sends the draft (redesign 6.10)', async () => {
+    handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
+    const plan = { key: 'ABC-12', title: 'Login', item_id: 12, project_id: 3, host_alias: 'mefistos', branch: 'abc-12-login', name: 'ABC-12 Login' };
+    handlers.preview_start_work = (a) => ({
+      key: 'ABC-12',
+      title: 'Login',
+      item_id: 12,
+      plan,
+      missing: null,
+      projects: [{ id: 3, owner: 'acme', repo: 'api' }],
+      hosts: [{ alias: 'mefistos', reachable: true }],
+      // A conflict keeps the popover open instead of starting at once.
+      conflicts: [{ kind: 'done', message: 'This task is done.' }],
+      brief: a.draft_brief ? 'Goal: fix the login.' : 'Steps: log in',
+      ...(a.draft_brief ? { brief_draft: { model: 'haiku', host_alias: 'mefistos', notes: 3 } } : {}),
+      checkout: { exists: false },
+    });
+    render(WorkTaskDetail, { taskId: 'item:12' });
+    await flush();
+    await fireEvent.click(screen.getByTestId('work-task-start'));
+    await flush();
+    await fireEvent.click(screen.getByTestId('start-popover-brief-draft-ask'));
+    await flush();
+    expect(calls('preview_start_work').at(-1)).toEqual({
+      item_id: 12, with_brief: true, brief: undefined, draft_brief: true, project_id: 3, host_alias: 'mefistos',
+    });
+    const field = screen.getByTestId('start-popover-brief-draft-input') as HTMLTextAreaElement;
+    expect(field.value).toBe('Goal: fix the login.');
+    expect(screen.getByTestId('start-popover-brief-draft-meta').textContent).toContain(
+      'by haiku on mefistos · from the ticket and 3 earlier notes',
+    );
+    expect(calls('start_work')).toHaveLength(0);
+    await fireEvent.click(screen.getByTestId('start-popover-go'));
+    await flush();
+    expect(calls('start_work')[0]).toEqual({
+      item_id: 12, with_brief: true, project_id: 3, host_alias: 'mefistos', brief: 'Goal: fix the login.',
+    });
+  });
+
   it("pre-selects Jev's proposed repository, resolves it, and still waits for Start", async () => {
     handlers.start_work = () => session('mefistos', 'fresh', { id: 12 });
     const base = {

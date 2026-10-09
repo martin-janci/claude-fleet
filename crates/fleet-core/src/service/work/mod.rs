@@ -5,6 +5,7 @@
 
 pub mod abandon;
 pub mod agent_handover;
+pub mod brief_draft;
 pub mod buckets;
 pub mod card;
 pub mod confidence;
@@ -178,6 +179,9 @@ pub struct WorkLinkArgs {
     /// Start: brief Claude with the ticket.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub with_brief: Option<bool>,
+    /// preview_start: have a model draft the brief (one call on the host).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_brief: Option<bool>,
     /// Start: session name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

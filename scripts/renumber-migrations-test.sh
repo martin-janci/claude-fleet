@@ -96,5 +96,36 @@ before="$(cat "$T/r/$SCHEMA")"
 out="$(cd "$T/r" && bash "$S" --base other 2>&1)"; code=$?
 if [[ $code != 0 && "$(cat "$T/r/$SCHEMA")" == "$before" ]]; then ok "a non-MIGRATIONS conflict stops it, file untouched"; else bad "non-MIGRATIONS conflict" "exit $code: $out"; fi
 
+# Both sides add a multi-line plain entry: git keeps their shared `),` after
+# the conflict, and main's entry must not lose it.
+rm -rf "$T/r"; mkdir -p "$T/r/$D" "$T/r/$(dirname "$SCHEMA")"
+g init -q -b work
+sql 1 init > "$T/r/$D/001_init.sql"
+schema > "$T/r/$SCHEMA"
+g add -A && g commit -qm main
+g update-ref refs/remotes/origin/main HEAD
+sql 2 tasks > "$T/r/$D/002_tasks.sql"
+schema '    // tasks
+    Migration::plain(
+        2,
+        include_str!("../../migrations/002_tasks.sql"),
+    ),' > "$T/r/$SCHEMA"
+g add -A && g commit -qm "branch: 002_tasks"
+g checkout -q --detach origin/main
+sql 2 assets > "$T/r/$D/002_assets.sql"
+schema '    // assets
+    Migration::plain(
+        2,
+        include_str!("../../migrations/002_assets.sql"),
+    ),' > "$T/r/$SCHEMA"
+g add -A && g commit -qm "main: 002_assets"
+g update-ref refs/remotes/origin/main HEAD
+g checkout -q work
+g merge -q --no-edit origin/main >/dev/null 2>&1
+out="$(cd "$T/r" && bash "$S" 2>&1)"; code=$?
+if [[ $code == 0 ]]; then ok "multi-line entries: exits 0"; else bad "multi-line entries: exit $code" "$out"; fi
+if [[ "$(grep -c '^    ),$' "$T/r/$SCHEMA")" == 2 ]]; then ok "each multi-line entry keeps its closing line"; else bad "closing lines" "$(cat "$T/r/$SCHEMA")"; fi
+has "multi-line branch entry renumbered" '003_tasks.sql' "$SCHEMA"
+
 echo "renumber-migrations-test: $PASS passed, $FAIL failed"
 [[ $FAIL == 0 ]]
