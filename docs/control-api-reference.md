@@ -983,6 +983,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::sessions::session_tool_detail`
 - `commands::sessions::session_activity`
 - `commands::sessions::capture_session`
+- `commands::sessions::session_summary_since`
 - `commands::sessions::session_share`
 - `commands::sessions::session_unshare`
 - `commands::sessions::session_narrow`

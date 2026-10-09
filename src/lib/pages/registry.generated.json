@@ -1961,6 +1961,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Checking a watcher's summary of a session against its transcript. Shadow only records; assist hides a summary the transcript does not support.",
+      "key": "decide.jev.summary_check",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: summary check",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: check first"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3321,6 +3361,11 @@
             {
               "hint": "Marks a proposed task that may repeat an existing one; you still merge or keep both.",
               "key": "decide.jev.duplicate",
+              "type": "field"
+            },
+            {
+              "hint": "Checks a watcher's summary of a session against its transcript; in assist a summary it cannot confirm is not shown.",
+              "key": "decide.jev.summary_check",
               "type": "field"
             },
             {

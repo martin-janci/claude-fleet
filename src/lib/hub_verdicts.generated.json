@@ -255,6 +255,7 @@
     "session_narrow",
     "session_presence",
     "session_share",
+    "session_summary_since",
     "session_tool_detail",
     "session_unshare",
     "session_work_links",
