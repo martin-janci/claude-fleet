@@ -1338,10 +1338,13 @@ impl FleetTools {
         // Shared work context (design 2026-09-29): native tasks, subtasks
         // and agent proposals. The scope gates are inside.
         if args.action == "create" {
-            return ok_json(
-                &crate::service::work::local::create_task(&args, &self.store, &scope)
-                    .map_err(to_mcp_err)?,
-            );
+            let made = crate::service::work::local::create_task(&args, &self.store, &scope)
+                .map_err(to_mcp_err)?;
+            // K5: which group a standalone task belongs in (off by default).
+            if made.parent_id.is_none() {
+                crate::service::decide::work_placement::spawn_ask(&self.store, made.id);
+            }
+            return ok_json(&made);
         }
         if args.action == "propose" {
             // The proposer is the caller's own session when it names one
