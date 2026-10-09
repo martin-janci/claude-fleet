@@ -77,20 +77,27 @@ pub const SHELL_TERMINAL_NO_SESSION: i32 = 3;
 
 /// Open terminal `n` of `session` unless it is already open: a tmux session
 /// of its own, started in the agent pane's current directory (`$HOME` when
-/// that is gone), running the same respawning login shell a shell session
+/// that is gone, or when `home` asks for it — the strip's "New terminal opens
+/// on" picker), running the same respawning login shell a shell session
 /// does, so `exit` in it gives a fresh prompt rather than closing it.
-pub fn open_shell_terminal_script(session: &str, n: u32) -> String {
+pub fn open_shell_terminal_script(session: &str, n: u32, home: bool) -> String {
     let sh = shell_terminal_name(session, n);
+    let cwd = if home {
+        "cwd=\"$HOME\"; ".to_string()
+    } else {
+        format!(
+            "cwd=$(tmux display-message -p -t {pane} '#{{pane_current_path}}' 2>/dev/null); \
+             [ -d \"$cwd\" ] || cwd=\"$HOME\"; ",
+            pane = quote(&exact_pane(session)),
+        )
+    };
     format!(
-        "tmux has-session -t {agent} 2>/dev/null || exit {gone}; \
-         cwd=$(tmux display-message -p -t {pane} '#{{pane_current_path}}' 2>/dev/null); \
-         [ -d \"$cwd\" ] || cwd=\"$HOME\"; \
+        "tmux has-session -t {agent} 2>/dev/null || exit {gone}; {cwd}\
          tmux has-session -t {exact} 2>/dev/null || tmux new-session -d -s {name} -c \"$cwd\" \
          -e COLORTERM=truecolor -e TERM=xterm-256color -e \"LANG=${{LANG:-en_US.UTF-8}}\" \
          -e \"PATH=$PATH\" {cmd}",
         agent = quote(&exact_session(session)),
         gone = SHELL_TERMINAL_NO_SESSION,
-        pane = quote(&exact_pane(session)),
         exact = quote(&exact_session(&sh)),
         name = quote(&sh),
         cmd = quote(&shell_pane_command(None)),

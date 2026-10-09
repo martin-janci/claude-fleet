@@ -31,6 +31,7 @@ mod restore;
 mod review;
 pub mod seed;
 mod sharing;
+mod start_progress;
 mod targeting;
 pub mod terminals;
 
@@ -55,6 +56,8 @@ pub use self::lost_found::*;
 pub(crate) use self::paths::*;
 pub use self::prompt::*;
 pub use self::reconcile::*;
+pub(crate) use self::start_progress::StartReporter;
+pub use self::start_progress::{validate_start_token, START_TOKEN_MAX};
 // The two probe timeouts by name: a `pub` glob does not carry
 // `pub(crate)` items, and `store::reconcile` derives its kill-memory
 // window from them.

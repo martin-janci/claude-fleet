@@ -202,6 +202,7 @@ async fn an_unknown_project_id_is_not_found_not_a_raw_sqlite_error() {
         agent: None,
         origin: None,
         owner_person_id: None,
+        start_token: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -233,6 +234,7 @@ async fn an_unknown_project_id_is_not_found_for_a_new_worktree_too() {
         agent: None,
         origin: None,
         owner_person_id: None,
+        start_token: None,
     };
     let err = new_session(args, &store, &ssh, &reg).await.unwrap_err();
     assert_eq!(err.code, crate::ipc_error::codes::E_NOTFOUND);
@@ -852,6 +854,7 @@ fn args_named(name: &str, resume: Option<&str>) -> NewSessionArgs {
         agent: None,
         origin: None,
         owner_person_id: None,
+        start_token: None,
     }
 }
 
@@ -1351,6 +1354,7 @@ fn a_new_session_is_linked_to_the_worktree_it_was_started_in() {
         agent: None,
         origin: None,
         owner_person_id: None,
+        start_token: None,
     };
 
     // A new worktree on local: its row is created and linked.

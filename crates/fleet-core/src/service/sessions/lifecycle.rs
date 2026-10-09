@@ -91,6 +91,14 @@ pub struct NewSessionArgs {
     /// `store::reconcile` for why that shape cannot be made sound.
     #[serde(skip_deserializing)]
     pub owner_person_id: Option<i64>,
+    /// An opaque id the caller minted (redesign step 5.13): when set, the
+    /// start reports its worktree, tmux and agent steps as `start:progress`
+    /// frames carrying this token and nothing else, so the client that
+    /// started the session can drive its Pulse sequence from them. Unlike
+    /// `call_id` it crosses to a hub: the frames reach a paired desktop on
+    /// the hub's `/events` stream. 1–64 of `[A-Za-z0-9_-]`.
+    #[serde(default)]
+    pub start_token: Option<String>,
 }
 
 /// An existing worktree to make sure is present on a remote host, ahead of
@@ -454,6 +462,9 @@ pub async fn new_session(
     if let Some(name) = args.new_worktree.as_deref() {
         validate_new_worktree_name(name)?;
     }
+    if let Some(t) = args.start_token.as_deref() {
+        validate_start_token(t)?;
+    }
 
     // Mint / bind a cancellation token for the duration of this command.
     // If a call_id was provided by the frontend, bind under that id so the
@@ -471,7 +482,15 @@ pub async fn new_session(
     // panic inside new_session_inner, which a manual unregister would miss.
     let _guard = CancelGuard::new(Arc::clone(reg), cancel_id);
 
-    new_session_inner(args, store, ssh, token).await
+    // The steps are reported from inside; the outcome closes the last one
+    // (or marks the one in flight failed) here, on every exit path.
+    let progress = StartReporter::new(store, args.start_token.clone());
+    let out = new_session_inner(args, store, ssh, token, &progress).await;
+    match &out {
+        Ok(_) => progress.finish(),
+        Err(_) => progress.fail(),
+    }
+    out
 }
 
 /// Refuse a name that belongs to a lost session with a resumable
@@ -917,7 +936,10 @@ pub(super) async fn new_session_inner(
     store: &Mutex<Store>,
     ssh: &Arc<SshClient>,
     token: CancellationToken,
+    progress: &StartReporter<'_>,
 ) -> Result<SessionRow, IpcError> {
+    use crate::events::StartStep;
+    progress.advance(StartStep::Worktree);
     // Resolve the cwd that tmux will spawn the pane in. For LOCAL the path
     // comes straight from the DB (it was discovered by scanning ~/projects).
     // For REMOTE we can't use the local path — it doesn't exist on the other
@@ -1089,6 +1111,7 @@ pub(super) async fn new_session_inner(
         (path, None)
     };
 
+    progress.advance(StartStep::Tmux);
     let tmux = exec_for(&args.host_alias, ssh);
     tmux.new_session(&args.name, &path, &pane_cmd).await?;
 
@@ -1103,6 +1126,7 @@ pub(super) async fn new_session_inner(
     record_tmux_created(store, &args.host_alias, &args.name);
 
     reconcile_one_host(store, ssh, &args.host_alias).await?;
+    progress.advance(StartStep::Agent);
     if let Some(rep) = &repaired {
         // Same detail as every other workspace_repaired event (branch_source
         // included), attached now that reconcile created the row.

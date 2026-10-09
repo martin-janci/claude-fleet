@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   // The Review tab of the Work view (work graph M14): link suggestions and
   // conflicts (a cross-org link, an unavailable ticket, a session with work
   // but no primary), each with its why. One at a time — Confirm / Reject /
@@ -454,31 +455,31 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The keys are the registry's `work-review` rows (step 0.1).
+    const act = viewKey('work-review', e);
+    if (!act) return;
     const target = e.target as HTMLElement | null;
     if (target && target !== e.currentTarget && !target.classList.contains('item')) {
-      if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
+      if (act !== 'work-review.down' && act !== 'work-review.up') return;
       if (target.tagName === 'INPUT' || target.tagName === 'SELECT') return;
     }
     const it = items[focusIdx];
-    switch (e.key) {
-      case 'j':
-      case 'ArrowDown':
+    switch (act) {
+      case 'work-review.down':
         focusIdx = Math.min(items.length - 1, focusIdx + 1);
         break;
-      case 'k':
-      case 'ArrowUp':
+      case 'work-review.up':
         focusIdx = Math.max(0, focusIdx - 1);
         break;
-      case 'y':
+      case 'work-review.yes':
         if (it?.kind === 'suggestion') void confirm(it);
         else if (it && it.kind !== 'no_primary') void keep(it);
         else if (it) void makePrimary(it);
         break;
-      case 'n':
+      case 'work-review.no':
         if (it?.kind === 'suggestion') void reject(it);
         break;
-      case 'x':
+      case 'work-review.pick':
         if (it) togglePick(it);
         break;
       default:

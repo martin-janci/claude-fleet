@@ -211,7 +211,7 @@ the next heartbeat.
 - Each frame is `event: <name>` + `data: <json>` where `<name>` is the event
   (`session:created`, `session:updated`, `session:killed`, `host:probed`,
   `task:updated`, `account_usage:updated`, `asset_inventory:updated`,
-  `catalog:loaded`, `sync:progress`, `move:progress`, …) and the payload is
+  `catalog:loaded`, `sync:progress`, `move:progress`, `start:progress`, …) and the payload is
   the same JSON the desktop frontend receives.
 - The first frame is `ready`, carrying `{ version, now, kinds }` — the kinds
   this stream will actually deliver.

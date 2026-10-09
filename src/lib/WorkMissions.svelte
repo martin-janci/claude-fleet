@@ -648,7 +648,7 @@
         {#if wakeBad}<p class="muted small" role="alert" data-testid="mission-edit-wake-bad">A continuous mission wakes at most every {minWakeMins} minutes.</p>{/if}
         {#if parallelBad}<p class="muted small" role="alert">Parallel runs is 1 to {POLICY_MAX_PARALLEL}.</p>{/if}
         <div class="row">
-          <button class="btn" type="button" disabled={busy || saveBlocked || wakeBad || parallelBad} data-testid="mission-edit-save" onclick={() => void saveEdit()}
+          <button class="btn btn--primary" type="button" disabled={busy || saveBlocked || wakeBad || parallelBad} data-testid="mission-edit-save" onclick={() => void saveEdit()}
             >Save</button
           >
           <button class="btn btn--quiet" type="button" onclick={() => (editing = false)}>Cancel</button>
@@ -706,13 +706,18 @@
                 </span>
               {/if}
             {:else}
+              <!-- Classic keeps the flat buttons; redesign 1.5 puts the two
+                   that end a mission badly (Mark failed, Cancel) behind the
+                   same confirm the ⋯ menu asks, and they are last. -->
               {#each moves as to (to)}
+                {@const destructive = to === 'failed' || to === 'cancelled'}
                 <button
                   class="btn btn--chip"
+                  class:danger={destructive}
                   type="button"
                   disabled={busy || changeBlocked}
                   data-testid="mission-move-{to}"
-                  onclick={() => void move(to)}>{moveLabel(mission.state, to)}</button
+                  onclick={() => (destructive ? pickFinal(to) : void move(to))}>{moveLabel(mission.state, to)}{destructive ? '…' : ''}</button
                 >
               {/each}
             {/if}
@@ -744,7 +749,9 @@
           {#if mayChange}
             <div class="row">
               {#if mission.state === 'active' && pressable.length > 0}
-                <button class="btn" type="button" disabled={busy || changeBlocked} data-testid="mission-start-wave" onclick={() => void startWave()}
+                <!-- Redesign 1.5: the mission's one primary (the edit form's
+                     Save takes over while it is open). -->
+                <button class="btn" class:btn--primary={!editing} type="button" disabled={busy || changeBlocked} data-testid="mission-start-wave" onclick={() => void startWave()}
                   >Start wave ({pressable.length})</button
                 >
               {/if}
@@ -1160,12 +1167,12 @@
           <textarea rows="3" placeholder="Goal: what is true when it is done" bind:value={newGoal} data-testid="mission-new-goal"
           ></textarea>
           <div class="row">
-            <button class="btn" type="submit" disabled={busy || saveBlocked} data-testid="mission-create">Create</button>
+            <button class="btn btn--primary" type="submit" disabled={busy || saveBlocked} data-testid="mission-create">Create</button>
             <button class="btn btn--quiet" type="button" onclick={() => (creating = false)}>Cancel</button>
           </div>
         </form>
       {:else}
-        <button class="btn" type="button" disabled={saveBlocked} data-testid="mission-new" onclick={() => (creating = true)}>New mission</button>
+        <button class="btn btn--primary" type="button" disabled={saveBlocked} data-testid="mission-new" onclick={() => (creating = true)}>New mission</button>
         {#if missions.some((m) => m.state === 'active')}
           <button class="btn btn--quiet" type="button" disabled={busy || changeBlocked} data-testid="missions-pause-all" onclick={() => void pauseAll()}
             >Pause all</button
@@ -1218,6 +1225,7 @@
   }
   .mi:hover, .mi:focus-visible { background: var(--bg-hover); }
   .mi.danger { color: var(--danger); }
+  .btn--chip.danger { color: var(--danger); }
   .confirm-move { margin-top: 0.3rem; font-size: var(--text-xs); }
   .bar, .row { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
   .create { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; }

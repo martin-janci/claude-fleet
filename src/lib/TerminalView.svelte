@@ -37,6 +37,7 @@
     nextTerminalTab,
     terminalPane,
     terminalRequest,
+    terminalOpensOn,
     type ShellTerminalsResult,
   } from './terminals';
   import TerminalStrip from './TerminalStrip.svelte';
@@ -208,7 +209,7 @@
     if (id == null || stripBusy || stripBlocked !== null) return;
     stripBusy = true;
     try {
-      const r = await shellTerminals(id, 'open');
+      const r = await shellTerminals(id, 'open', undefined, get(terminalOpensOn));
       if (!r.ok) {
         pushError(r.error, 'New terminal failed');
         return;
@@ -1154,12 +1155,12 @@
       return;
     }
     if (e.key === 'Escape' && ctxMenu) { ctxMenu = null; return; }
-    const k = e.key.toLowerCase();
-    const cmdChord = e.metaKey && !e.altKey && !e.ctrlKey;
-    const ctrlShiftChord = !isMac && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey;
+    // The chords are the registry's `terminal` rows (step 0.1): ⌘ on every
+    // platform, Ctrl+Shift off the Mac.
+    const chord = matchShortcut('terminal', e, isMac);
     // Paste from the native clipboard (bracketed-paste framing in sendPaste).
     // Plain Ctrl+V is intentionally NOT intercepted so ^V reaches the app.
-    if ((cmdChord || ctrlShiftChord) && k === 'v') {
+    if (chord === 'terminal.paste') {
       e.preventDefault();
       void paste();
       return;
@@ -1167,17 +1168,17 @@
     // Copy the selection. Cmd+C with no selection falls through to the
     // browser; Ctrl+Shift+C with no selection is swallowed (it is the copy
     // chord, not SIGINT — plain Ctrl+C still sends ^C via keyToBytes).
-    if ((cmdChord || ctrlShiftChord) && k === 'c') {
+    if (chord === 'terminal.copy') {
       if (selAnchor && selFocus) {
         e.preventDefault();
         void copySelection();
-      } else if (ctrlShiftChord) {
+      } else if (e.ctrlKey) {
         e.preventDefault();
       }
       return;
     }
     // Cmd+A (Ctrl+Shift+A elsewhere) → select the whole viewport.
-    if ((cmdChord || ctrlShiftChord) && k === 'a') {
+    if (chord === 'terminal.select-all') {
       e.preventDefault();
       selAnchor = { row: 0, col: 0 };
       selFocus = { row: lastRows - 1, col: lastCols - 1 };
@@ -1466,6 +1467,9 @@
       onsplit={() => (split = !split)}
       onclear={clearTerminal}
       onpopout={() => void popOutTerminal()}
+      host={$selectedSession.host_alias}
+      opensOn={$terminalOpensOn}
+      onopenson={(at) => terminalOpensOn.set(at)}
     />
   {/if}
   <div class="term-panes">

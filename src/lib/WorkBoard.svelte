@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   import Icon from './kit/Icon.svelte';
   // The task board (sprints design 2026-09-28 §6c): every task the Work
   // view's filters match, from one `work_tree` read (archived on, so Done
@@ -217,14 +218,15 @@
   }
 
   function oncardkey(e: KeyboardEvent, t: WorkTask, lane: BoardLane) {
-    if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
-    if ((e.key === 'e' || e.key === 'E') && !boardMoveRefusal(t) && !editBlocked) {
+    // The keys are the registry's `work-board` rows (step 0.1).
+    const act = viewKey('work-board', e);
+    if (act === 'work-board.edit' && !boardMoveRefusal(t) && !editBlocked) {
       e.preventDefault();
       editing = t.task_id;
       return;
     }
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-    const to = boardStep(columns.lanes, lane, e.key === 'ArrowRight' ? 1 : -1);
+    if (act !== 'work-board.left' && act !== 'work-board.right') return;
+    const to = boardStep(columns.lanes, lane, act === 'work-board.right' ? 1 : -1);
     if (!to) return;
     e.preventDefault();
     void move(t, to).then(() => {
@@ -233,7 +235,7 @@
   }
 
   function onwindowkey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && dragging) {
+    if (dragging && viewKey('work-board', e) === 'work-board.cancel-drag') {
       e.preventDefault();
       e.stopPropagation();
       endDrag();

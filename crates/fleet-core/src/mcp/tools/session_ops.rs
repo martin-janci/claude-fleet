@@ -441,6 +441,7 @@ impl FleetTools {
                 let s = lock(self.reader()).map_err(to_mcp_err)?;
                 super::fleet::owner_for(&caller, &s)
             },
+            start_token: p.start_token,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -507,6 +508,7 @@ impl FleetTools {
                 let s = lock(self.reader()).map_err(to_mcp_err)?;
                 super::fleet::owner_for(&caller, &s)
             },
+            start_token: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await

@@ -13,6 +13,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { openExternal } from './open_external';
 import WorkTaskDetail from './WorkTaskDetail.svelte';
 import { expectAccessible } from './a11y_check';
+import { expectOnePrimary } from './action_hierarchy_check';
 import { uiLayout } from './prefs';
 import { sessions } from './sessions';
 import { selectedSession, clearSelection } from './selection';
@@ -780,6 +781,25 @@ describe('WorkTaskDetail', () => {
       expect(screen.queryByTestId('work-task-group-proposal')).toBeNull();
       uiLayout.set('classic');
     });
+  });
+
+  // Redesign 1.5: one primary per view. A task has nothing destructive to
+  // put last: its edits (Place, Assign org, Make a rule) each preview first.
+  it('has one primary in each layout: Open in Classic, the Work button in New', async () => {
+    for (const layout of ['classic', 'new'] as const) {
+      uiLayout.set(layout);
+      try {
+        const r = render(WorkTaskDetail, { props: { taskId: 'ABC-12' } });
+        await flush();
+        const root = screen.getByTestId('work-task-detail');
+        const primary = expectOnePrimary(root);
+        if (layout === 'classic') expect(primary.getAttribute('data-testid')).toBe('work-task-open');
+        else expect(primary.closest('[data-testid="work-button"]')).not.toBeNull();
+        r.unmount();
+      } finally {
+        uiLayout.set('classic');
+      }
+    }
   });
 
   it('is accessible', async () => {

@@ -1891,6 +1891,7 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             agent: None,
             origin: None,
             owner_person_id: Some(42),
+            start_token: None,
         },
         &st,
         &ssh(),
@@ -2693,7 +2694,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "shell_terminals",
             "shell_terminals",
-            json!({ "session_id": 7, "action": "open", "n": 2 }),
+            json!({ "session_id": 7, "action": "open", "n": 2, "at": "home" }),
             r#"{"session_id":7,"host_alias":"trn","terminals":[{"n":2,"tmux_name":"demo--sh2"}],"opened":2}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::shell_terminals(
@@ -2702,6 +2703,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         session_id: 7,
                         action: fleet_core::service::sessions::ShellTerminalAction::Open,
                         n: Some(2),
+                        at: fleet_core::service::sessions::ShellTerminalStart::Home,
                     },
                     s,
                     h,
@@ -3682,6 +3684,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 "effort": "high",
                 "profile": "work",
                 "agent": "claude",
+                "start_token": "st-demo-1",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -3712,6 +3715,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         // T5). `new_session_never_sends_an_owner_over_the_wire`
                         // says it in one assertion as well.
                         owner_person_id: Some(42),
+                        start_token: Some("st-demo-1".into()),
                     },
                     s,
                     h,

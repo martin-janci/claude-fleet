@@ -864,6 +864,7 @@ async fn rewind_conversation_with(
                     // expressible one. Forking a session you do not own is
                     // refused at the gate: it is an `own` operation.
                     owner_person_id: sess.owner_person_id,
+                    start_token: None,
                 })
                 .await;
             // A failed start leaves nothing a new-worktree fork made: the

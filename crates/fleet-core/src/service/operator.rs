@@ -647,6 +647,7 @@ impl OperatorHost for LiveHost {
                 // person it works for. See
                 // `crate::service::sessions::hub_personal_owner`.
                 owner_person_id: crate::service::sessions::hub_personal_owner(&self.store),
+                start_token: None,
             },
             &self.store,
             &self.ssh,

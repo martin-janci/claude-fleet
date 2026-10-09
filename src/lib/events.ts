@@ -8,6 +8,7 @@ import type { TaskRow, TaskEvent } from './tasks';
 import type { AccountUsageSnapshot } from './account_usage_store';
 import type { AssetInventoryRow, CatalogSummary, SyncProgress } from './assets';
 import type { MoveProgress } from './moveProgress';
+import type { StartProgressFrame } from './start_steps';
 import type { TrackerRow, WorkEvent, WorkItemRow } from './trackers';
 import { parseWorkChanged, type WorkChanged } from './work_view';
 import { parseGrantChanged, type GrantChanged } from './access';
@@ -53,6 +54,8 @@ export type RowEventHandlers = {
   onCatalogLoaded?: (summary: CatalogSummary) => void;
   onSyncProgress?: (p: SyncProgress) => void;
   onMoveProgress?: (p: MoveProgress) => void;
+  /** `start:progress` (step 5.13): one step of a `new_session` in flight. */
+  onStartProgress?: (p: StartProgressFrame) => void;
   // ── batched handlers (one call per flush per store, events in order) ──
   // Prefer these for store wiring: the backend's reconcile tick emits one
   // `session:updated` per session, and delivering each one straight into
@@ -149,6 +152,7 @@ type Queued =
   | { name: 'catalog:loaded'; payload: CatalogSummary }
   | { name: 'sync:progress'; payload: SyncProgress }
   | { name: 'move:progress'; payload: MoveProgress }
+  | { name: 'start:progress'; payload: StartProgressFrame }
   | { name: 'work:item'; payload: WorkItemRow }
   | { name: 'work:tracker'; payload: TrackerRow }
   | { name: 'work:tracker_removed'; payload: { id: number } }
@@ -287,6 +291,9 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
         case 'move:progress':
           deliver(() => handlers.onMoveProgress?.(ev.payload));
           break;
+        case 'start:progress':
+          deliver(() => handlers.onStartProgress?.(ev.payload));
+          break;
         case 'work:item':
           workEvents.push({ type: 'item', row: ev.payload });
           break;
@@ -379,6 +386,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     catalogLoaded: !!handlers.onCatalogLoaded,
     syncProgress: !!handlers.onSyncProgress,
     moveProgress: !!handlers.onMoveProgress,
+    startProgress: !!handlers.onStartProgress,
     work: !!handlers.onWorkEvents,
     workChanged: !!handlers.onWorkChanged,
     settingsChanged: !!handlers.onSettingsChanged,
@@ -422,6 +430,7 @@ export async function subscribeToRowEvents(handlers: RowEventHandlers): Promise<
     sub('catalog:loaded', wanted.catalogLoaded),
     sub('sync:progress', wanted.syncProgress),
     sub('move:progress', wanted.moveProgress),
+    sub('start:progress', wanted.startProgress),
     sub('work:item', wanted.work),
     sub('work:tracker', wanted.work),
     sub('work:tracker_removed', wanted.work),

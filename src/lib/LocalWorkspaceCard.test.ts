@@ -152,4 +152,22 @@ describe('LocalWorkspaceCard', () => {
       args: { id: 9, path: 'src/foo.rs' },
     });
   });
+
+  it('runs the Liquid orbit while it combines both sides of a conflict, and only then', async () => {
+    localWorkspaces.set([
+      link({
+        state: 'conflict',
+        conflicts: [{ path: 'src/foo.rs', kind: 'both_modified', detected_at: 1 }],
+      }),
+    ]);
+    let finish!: (v: unknown) => void;
+    invoke.mockImplementation(() => new Promise((r) => (finish = r)));
+    render(LocalWorkspaceCard, { session: row() });
+    expect(screen.queryByTestId('lw-combining')).toBeNull();
+    await fireEvent.click(screen.getByTestId('lw-ask-resolve'));
+    expect(screen.getByTestId('lw-combining')).toBeInTheDocument();
+    expect(await screen.findByTestId('lw-liquid', {}, { timeout: 2000 })).toHaveAttribute('data-loader', 'liquid-orbit');
+    finish(null);
+    await vi.waitFor(() => expect(screen.queryByTestId('lw-combining')).toBeNull());
+  });
 });

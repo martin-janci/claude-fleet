@@ -1774,6 +1774,7 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 effort: None,
                 profile: None,
                 agent: None,
+                start_token: None,
                 confirm_nonce: None,
             }),
         )
@@ -2011,6 +2012,7 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 effort: None,
                 profile: None,
                 agent: None,
+                start_token: None,
                 confirm_nonce: None,
             }),
         )

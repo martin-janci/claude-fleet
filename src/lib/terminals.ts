@@ -7,6 +7,7 @@
  */
 import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
+import { readPref, writePref } from './prefs';
 
 /** The most terminals one session keeps (`tmux::MAX_SHELL_TERMINALS`). */
 export const MAX_SHELL_TERMINALS = 9;
@@ -27,14 +28,34 @@ export interface ShellTerminalsResult {
 
 export type ShellTerminalAction = 'list' | 'open' | 'close';
 
+/** Where `open` starts a terminal (`ShellTerminalStart`): the strip's "New
+ *  terminal opens on" picker. Both are on the session's own host. */
+export type TerminalStart = 'worktree' | 'home';
+
+export const TERMINAL_STARTS: readonly TerminalStart[] = ['worktree', 'home'];
+
+/** The picker's words: "This worktree · mercury". */
+export function terminalStartLabel(at: TerminalStart, host: string): string {
+  return `${at === 'home' ? 'Home folder' : 'This worktree'} · ${host}`;
+}
+
+/** The picked start, kept per viewer (`terminal.opensOn`). */
+export const terminalOpensOn = writable<TerminalStart>(
+  readPref<TerminalStart>('terminal.opensOn', 'worktree', (v): v is TerminalStart => v === 'worktree' || v === 'home'),
+);
+terminalOpensOn.subscribe((v) => writePref('terminal.opensOn', v));
+
 export function shellTerminals(
   sessionId: number,
   action: ShellTerminalAction = 'list',
   n?: number,
+  at: TerminalStart = 'worktree',
 ): Promise<Result<ShellTerminalsResult>> {
-  return invokeCmd<ShellTerminalsResult>('shell_terminals', {
-    args: { session_id: sessionId, action, n: n ?? null },
-  });
+  // `at` only rides an open that asked for somewhere other than the default,
+  // so every other call says exactly what it said before the picker.
+  const args: Record<string, unknown> = { session_id: sessionId, action, n: n ?? null };
+  if (action === 'open' && at !== 'worktree') args.at = at;
+  return invokeCmd<ShellTerminalsResult>('shell_terminals', { args });
 }
 
 /** `tmux::shell_terminal_name`. */

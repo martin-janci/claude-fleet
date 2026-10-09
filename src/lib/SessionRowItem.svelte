@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   import Icon from './kit/Icon.svelte';
   import { tick, type Snippet } from 'svelte';
   import {
@@ -53,7 +54,7 @@
   import SessionRowDetails from './SessionRowDetails.svelte';
   import SessionRowMeta from './SessionRowMeta.svelte';
   import LimitActions from './LimitActions.svelte';
-  import { COMPACT_ROW_PX, uiDensity } from './prefs';
+  import { uiDensity } from './prefs';
   import { localWorkspaces, linkFor, badgeFor } from './local_workspaces';
   import { projectById } from './projects';
   import { uiLayout } from './prefs';
@@ -558,18 +559,20 @@
       rowMenu = { x: r.left + 24, y: r.bottom };
       return;
     }
-    if (e.target === e.currentTarget && !e.metaKey && !e.ctrlKey && !e.altKey && workBlocked === null) {
-      if (e.key === 'y' && suggestion) {
+    // The keys are the registry's `session-row` rows (step 0.1).
+    const act = e.target === e.currentTarget && workBlocked === null ? viewKey('session-row', e) : null;
+    if (act) {
+      if (act === 'session-row.yes' && suggestion) {
         e.preventDefault();
         confirmLink(suggestion.link_id);
         return;
       }
-      if (e.key === 'n' && suggestion) {
+      if (act === 'session-row.no' && suggestion) {
         e.preventDefault();
         rejectLink(suggestion.link_id);
         return;
       }
-      if (e.key === 'l') {
+      if (act === 'session-row.link') {
         e.preventDefault();
         openWorkMenu();
         void tick().then(() => workInput?.focus());
@@ -621,7 +624,6 @@
   data-session-id={sess.id}
   data-org-color={orgColor ?? undefined}
   style:--org-color={orgColor ?? undefined}
-  style:min-height={compact ? `${COMPACT_ROW_PX}px` : undefined}
   aria-current={sessSelected ? 'true' : undefined}
   data-stuck={sess.stuck_kind ?? undefined}
   data-bucket={triage.bucket}
@@ -1329,7 +1331,9 @@
 
   /* Redesign step 3.6: the chip strip and the Compact row. */
   .chips { display: contents; }
-  .sess-row.compact { box-sizing: border-box; }
+  /* Two lines of 2xs text and the row's padding: 40px (COMPACT_ROW_PX), so
+     20 rows fit a 1080p window (SessionRowDensity.test.ts measures it). */
+  .sess-row.compact { box-sizing: border-box; min-height: calc(2 * var(--text-2xs-lh) + var(--space-3)); }
   .sess-row.compact .chips { display: none; }
   .sess-row.compact:hover .chips,
   .sess-row.compact:focus-within .chips,

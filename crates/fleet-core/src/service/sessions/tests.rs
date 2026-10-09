@@ -7792,6 +7792,7 @@ fn a_new_shell_session_refuses_a_profile() {
         agent: None,
         origin: None,
         owner_person_id: None,
+        start_token: None,
     };
     assert_eq!(normalize_launch(&mut args).unwrap_err().code, "E_INVALID");
     args.kind = None;

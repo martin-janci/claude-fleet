@@ -3,6 +3,7 @@ import { createRowStore } from './row_store';
 import { invokeCmd, invokeCmdAbortable, type Result } from './result';
 import { readPref, writePref } from './prefs';
 import type { DecisionProposal } from './proposals';
+import { foldStartProgress, newStartToken, NO_START_STEPS, type StartProgressFrame, type StartSteps } from './start_steps';
 
 /** The `claude_status` vocabulary (pane_intel `ClaudeStatus`). Anything the
  *  backend has not classified arrives as `null`. */
@@ -865,6 +866,9 @@ export interface NewSessionArgs {
    *  (the same as `kind: 'shell'`). `agy` is refused until fleet can launch
    *  it. A Codex session takes no `profile`. */
   agent?: SessionAgent | null;
+  /** Opaque id the start reports its steps under (`start:progress`, step
+   *  5.13); `newSessionAbortable` mints it. */
+  start_token?: string | null;
 }
 
 /** A ⌘N start whose create command is in flight (redesign step 5.13): the
@@ -874,9 +878,20 @@ export interface CreatingStart {
   /** Empty when the backend mints the name. */
   name: string;
   kind: 'work' | 'shell';
+  /** The `start_token` the command carries. */
+  token: string;
+  /** What the backend has reported so far (`start:progress`). */
+  steps: StartSteps;
 }
 
 export const creatingStart = writable<CreatingStart | null>(null);
+
+/** `start:progress` (step 5.13): move the in-flight start's step, if the
+ *  frame is this window's own start. Frames of other starts — another
+ *  window's, another device's on the same hub — are ignored. */
+export function applyStartProgress(f: StartProgressFrame): void {
+  creatingStart.update((c) => (c && c.token === f.token ? { ...c, steps: foldStartProgress(c.steps, f) } : c));
+}
 
 /** Rows a create returned before their agent was up; `session_starting.ts`
  *  follows them until it is. */
@@ -893,14 +908,17 @@ export async function newSessionAbortable(
 ): Promise<Result<SessionRow>> {
   // The Pulse sequence (5.13) follows the start: the command in flight is
   // its worktree and tmux steps, the row it returns waits on the agent.
+  const token = args.start_token || newStartToken();
   creatingStart.set({
     host_alias: args.host_alias,
     name: args.name ?? '',
     kind: args.kind === 'shell' || args.agent === 'shell' ? 'shell' : 'work',
+    token,
+    steps: NO_START_STEPS,
   });
   let r: Result<SessionRow>;
   try {
-    r = await invokeCmdAbortable<SessionRow>('new_session', { args }, signal);
+    r = await invokeCmdAbortable<SessionRow>('new_session', { args: { ...args, start_token: token } }, signal);
   } finally {
     creatingStart.set(null);
   }

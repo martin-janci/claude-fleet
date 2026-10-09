@@ -2387,8 +2387,9 @@ moved, and `session:killed` by the facts it carries — that frame fires after
 the row is deleted, so it brings its own `host_alias`, `visibility` and
 `owner_person_id` along, as additional keys next to the `id` every client has
 always read. Every other kind (`host:*`, `project:*`, `worktree:*`,
-`account*`, `asset_inventory:*`, `catalog:*`, `sync:*`) carries no session
-content and is not narrowed per person; `work:*`, `settings:*`, `update:*` and
+`account*`, `asset_inventory:*`, `catalog:*`, `sync:*`, and `start:progress`,
+which carries only the opaque `start_token` the starting client minted and a
+step name) carries no session content and is not narrowed per person; `work:*`, `settings:*`, `update:*` and
 `grant:changed` never reach a per-host token or a client bound to an org at
 all.
 

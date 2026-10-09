@@ -932,6 +932,7 @@ pub fn resume_session_args(
         agent: None,
         origin: None,
         owner_person_id,
+        start_token: None,
     })
 }
 

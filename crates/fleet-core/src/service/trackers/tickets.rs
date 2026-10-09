@@ -1471,6 +1471,7 @@ where
         owner_person_id: plan
             .owner
             .or_else(|| crate::service::sessions::hub_personal_owner(store)),
+        start_token: None,
     };
     let row = spawn(args).await?;
     let outcome = match link_started(store, plan, brief, view, &row) {

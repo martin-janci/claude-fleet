@@ -150,7 +150,8 @@ describe('NewSessionDialog', () => {
     uiLayout.set('new');
     let finish!: () => void;
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockImplementation(async (args) => {
-      sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work' });
+      // The backend's first frame: the worktree step started (start:progress).
+      sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work', token: 't1', steps: { worktree: 'started', tmux: 'pending', agent: 'pending' } });
       await new Promise<void>((r) => (finish = r));
       sessionsModule.creatingStart.set(null);
       return { ok: false, error: { code: 'E_INVALID', message: 'stop here' } } as never;

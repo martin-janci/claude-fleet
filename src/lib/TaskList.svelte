@@ -9,6 +9,7 @@
   // agent text renders as text.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
+  import { viewKey } from './shortcuts';
   import { createWorkTask, onWorkChangedDebounced } from './work';
   import {
     openTask,
@@ -140,22 +141,24 @@
    *  selection, `s` runs the selected task's Work button, ⇧S opens its
    *  start popover. Never inside a field, a menu or a dialog. */
   function onkey(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The keys are the registry's `task-list` rows (step 0.1).
+    const act = viewKey('task-list', e);
+    if (!act) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest('input, textarea, select, [role="dialog"], [role="menu"]')) return;
     const at = visibleRows.indexOf(get(selectedTaskId) ?? '');
-    if (e.key === 'j' || e.key === 'k') {
+    if (act === 'task-list.down' || act === 'task-list.up') {
       if (visibleRows.length === 0) return;
       e.preventDefault();
-      const next = e.key === 'j' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
+      const next = act === 'task-list.down' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
       const id = visibleRows[at < 0 ? 0 : next];
       openTask(id, nodeOf(id)?.task.sessions);
       document.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"] .main`)?.focus();
-    } else if ((e.key === 's' || e.key === 'S') && at >= 0) {
+    } else if (at >= 0) {
       const b = workButtonFor(visibleRows[at]);
       if (!b) return;
       e.preventDefault();
-      if (e.shiftKey) b.ask();
+      if (act === 'task-list.work-ask') b.ask();
       else b.primary();
     }
   }

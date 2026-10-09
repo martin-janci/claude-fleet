@@ -329,7 +329,7 @@ Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `promp
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
+Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -767,9 +767,9 @@ Settings proposals waiting for review, each with the key's value now, and can_wr
 
 ### `shell_terminals`
 
-A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (or at=home: the home directory) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
 
-Parameters: `action`, `n`, `session_id`
+Parameters: `action`, `at`, `n`, `session_id`
 
 ### `spawn_review`
 

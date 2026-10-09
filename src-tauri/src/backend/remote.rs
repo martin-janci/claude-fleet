@@ -1195,6 +1195,11 @@ impl HubBackend {
                 "effort": args.effort,
                 "profile": args.profile,
                 "agent": args.agent,
+                // Unlike `call_id`, the start token has a hub counterpart:
+                // the hub reports the start's steps under it as
+                // `start:progress`, and this desktop's `/events` stream
+                // carries them to the dialog that minted it (step 5.13).
+                "start_token": args.start_token,
             }),
         )
         .await

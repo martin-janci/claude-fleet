@@ -262,6 +262,7 @@ pub async fn spawn_author_session(
             // no source row to inherit from. See
             // `crate::service::sessions::hub_personal_owner`.
             owner_person_id: crate::service::sessions::hub_personal_owner(store),
+            start_token: None,
         },
         store,
         ssh,

@@ -31,6 +31,20 @@ add-host wizard's state (135). The hub contract is revision 14
 revisions 11 to 14 add tools a revision-10 hub does not serve, so the
 desktop and its hub are upgraded together.
 
+A session start reports its three real steps (worktree, tmux, agent) as
+`start:progress` frames (redesign 5.13, `service/sessions/start_progress.rs`):
+`new_session` takes an optional `start_token` the client mints, and the frames
+carry that token and nothing else (event kind `start`, content-free on a
+person's `/events` stream), so the New session dialog's Pulse sequence and its
+Hex field move on the backend's events, and a desktop paired with a hub gets
+them over the hub's stream. Shell terminals (5.3) can open in the home folder
+as well as the worktree (`shell_terminals { at: "home" }`, the strip's "New
+terminal opens on" picker), and a terminal's ⋯ menu has Kill terminal…, which
+asks first. 13 of the 16 shortcut scopes match keys through the registry
+(`shortcuts.ts` `MATCHED_SCOPES`, `viewKey`); the Quick switcher's two and
+the New session dialog still read `e.key`, since they take some keys under any
+mix of ⌘ and Ctrl.
+
 Sessions can run OpenAI's Codex CLI as well as Claude Code (redesign 12.2,
 `agent_adapter::CodexCli`, `sessions.agent` from migration 121):
 `new_session { agent: "codex" }` refuses a login profile, restart,

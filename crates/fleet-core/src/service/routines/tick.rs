@@ -98,6 +98,7 @@ fn session_args(r: &RoutineRow, owner: Option<i64>) -> NewSessionArgs {
         agent: None,
         origin: Some(SessionOrigin::routine(r.id)),
         owner_person_id: owner,
+        start_token: None,
     }
 }
 

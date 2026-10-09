@@ -44,7 +44,7 @@
   import { toggleControl, toggleToday } from './lib/control';
   import type { RailId } from './lib/rail';
   import { loadProjects, applyProjectEvents } from './lib/projects';
-  import { loadSessions, applySessionEvents, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
+  import { loadSessions, applySessionEvents, applyStartProgress, sessions, sessionsAnswered, hasNoPane, showFriendlyNames, sidebarGroupBy } from './lib/sessions';
   import { bootstrapError as bootstrapFailure } from './lib/bootstrap_state';
   import { errorText } from './lib/error_copy';
   import { loadHosts, applyHostEvents, hosts } from './lib/hosts';
@@ -365,6 +365,7 @@
       onCatalogLoaded: () => { void loadAssets(); void repoStatus(); },
       onSyncProgress: (p) => syncProgress.set(p),
       onMoveProgress: applyMoveProgress,
+      onStartProgress: applyStartProgress,
       onWorkEvents: onWorkEvents,
       // `work:changed` (M14): the Work view re-reads.
       onWorkChanged: noteWorkChanged,

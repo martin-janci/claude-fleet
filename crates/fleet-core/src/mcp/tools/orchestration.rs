@@ -619,6 +619,7 @@ impl FleetTools {
                                 .ok()
                                 .and_then(|s| super::fleet::owner_for(&caller, &s))
                         }),
+                        start_token: None,
                     },
                     &self.store,
                     &self.ssh,

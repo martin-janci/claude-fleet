@@ -109,6 +109,10 @@ pub struct NewSessionParams {
     /// claude (default) or shell.
     #[serde(default)]
     pub agent: Option<String>,
+    /// Opaque id (1–64 of A-Z a-z 0-9 _ -): the start's worktree, tmux and
+    /// agent steps arrive as `start:progress` events carrying it.
+    #[serde(default)]
+    pub start_token: Option<String>,
     /// Approved confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_nonce: Option<String>,
@@ -151,6 +155,9 @@ pub struct ShellTerminalsParams {
     /// takes the lowest free one.
     #[serde(default)]
     pub n: Option<u32>,
+    /// open only: worktree (default, the agent's directory) or home.
+    #[serde(default)]
+    pub at: crate::service::sessions::ShellTerminalStart,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
