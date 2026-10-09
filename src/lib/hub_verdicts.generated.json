@@ -235,6 +235,7 @@
     "revoke_device",
     "revoke_mission_grant",
     "rewind_conversation",
+    "routines",
     "safe_kill_session",
     "save_download",
     "save_mission",
