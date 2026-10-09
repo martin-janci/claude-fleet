@@ -133,10 +133,11 @@ describe('WorkTree', () => {
     await flush();
     const first = treeCalls()[0];
     expect(first).toEqual({ filters: { archived: false }, limit: 50, with_review_total: true });
-    const orgs = screen.getAllByTestId('work-org');
-    expect(orgs.map((o) => within(o).getByTestId('work-org-head').textContent?.replace(/\s+/g, ' ').trim())).toEqual([
-      '▸ Acme 5',
-      '▸ Unassigned 1',
+    // One flat list of sections, each named by its org and its group.
+    expect(screen.getAllByTestId('work-group-head').map((h) => h.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      '▸ Acme · ABC 2',
+      '▸ Acme · Payments 3',
+      '▸ Unassigned · No group 1',
     ]);
     const counts = screen.getAllByTestId('work-group-count').map((c) => c.textContent);
     expect(counts).toEqual(['2', '3', '1']);
@@ -146,15 +147,16 @@ describe('WorkTree', () => {
     // Badges: needs you, review, unavailable struck through, tracker down.
     expect(within(tasks[0]).getByTestId('work-task-needs-you')).toBeTruthy();
     expect(within(tasks[1]).getByTestId('work-task-review').textContent).toBe('?');
-    expect(tasks[1].querySelector('.tlabel.unavailable')).toBeTruthy();
+    expect(tasks[1].querySelector('.title.unavailable')).toBeTruthy();
     expect(within(tasks[1]).getByTestId('work-task-tracker-down')).toBeTruthy();
-    expect(within(tasks[0]).getByTestId('work-task-counts').textContent).toBe('1 active · 2 past');
+    // Where it stands and why, in one line.
+    expect(within(tasks[0]).getByTestId('work-task-line').textContent).toBe('In progress · session needs you');
     // Tracker text is text, never markup.
     expect(screen.getByText('Logout <b>broken</b>')).toBeTruthy();
-    // Occurrence kinds: primary ★, suggested (dashed, "?"), past (ended).
+    // Its live session is a chip; suggested and past links are the task
+    // detail's.
     const occ = within(tasks[0]).getAllByTestId('work-occurrence');
-    expect(occ.map((o) => o.getAttribute('data-kind'))).toEqual(['primary', 'suggested', 'past']);
-    expect(occ[2].textContent).toContain('ended');
+    expect(occ.map((o) => o.getAttribute('data-kind'))).toEqual(['primary']);
     // Review is a count beside Tasks.
     expect(screen.getByTestId('work-review-count').textContent).toBe('4');
   });
@@ -238,17 +240,14 @@ describe('WorkTree', () => {
     expect(screen.getAllByTestId('work-task').filter((t) => t.classList.contains('lit'))).toHaveLength(2);
   });
 
-  it('an occurrence opens the same session; a past one opens the task', async () => {
+  it('a session chip opens the same session from every task it is under', async () => {
     render(WorkTree);
     await flush();
     const occ = screen.getAllByTestId('work-occurrence');
-    await fireEvent.click(occ[3]); // ABC-13's secondary link of session 7
+    await fireEvent.click(occ[1]); // ABC-13's secondary link of session 7
     expect(get(selectedSession)?.id).toBe(7);
     expect(get(selectedTaskId)).toBe('item:13');
     expect(get(taskDetailOpen)).toBe(false);
-    await fireEvent.click(occ[2]); // ended
-    expect(get(selectedTaskId)).toBe('item:12');
-    expect(get(taskDetailOpen)).toBe(true);
   });
 
   it('a task row selects it and opens its detail', async () => {
@@ -702,7 +701,7 @@ describe('WorkTree', () => {
     await fireEvent.change(group, { target: { value: 'group' } });
     await flush();
     expect(screen.queryByTestId('task-list')).toBeNull();
-    expect(screen.getAllByTestId('work-org').length).toBeGreaterThan(0);
+    expect(screen.getAllByTestId('work-group').length).toBeGreaterThan(0);
     expect(get(workLayout)).toBe('grouped');
   });
 

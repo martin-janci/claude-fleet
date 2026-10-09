@@ -37,7 +37,6 @@ const WAITING: { file: string; text: string; why: string }[] = [
   // NewSessionDialog.svelte and Sidebar.svelte are serial files held by
   // another open PR (4.4); these get their "…" when it lands.
   { file: 'src/lib/NewSessionDialog.svelte', text: 'Resume', why: 'serial file held by 4.4' },
-  { file: 'src/lib/Sidebar.svelte', text: '+ New session', why: 'serial file held by 4.4' },
   // The live transfer chip is the move's state ("⇄ moving to x · 2/5"); it
   // opens the Transfer sheet the way a status badge opens its detail.
   { file: 'src/lib/TransferChip.svelte', text: '⇄ move failed', why: 'a live status chip, not a label' },

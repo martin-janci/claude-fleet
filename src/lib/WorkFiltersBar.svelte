@@ -7,17 +7,20 @@
   // share them; a write that lost a race answers `E_CONFLICT`, which reloads
   // the list and says so.
   //
-  // Laid out like the Sessions list's chrome (SidebarFilters): search and a
-  // Filters button, the two quick toggles, the strip of active filters with
-  // Clear all, and one panel of labelled chip groups.
+  // Laid out as the board "Work · tasks with filters open": search, then
+  // Filters and Group; the open panel holds organisation and status chips
+  // (several at once: `orgs`, `stages`), tracker and assignee pickers, the
+  // live-session switch and Clear, with saved views folded under it. A
+  // filter the panel no longer offers (a saved view's column or review
+  // toggle) still shows in the strip, where it can be cleared.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import ActiveFilters from './ActiveFilters.svelte';
-  import FiltersSection from './FiltersSection.svelte';
-  import { WORK_GROUPS, type WorkGroupChoice } from './filter_schema';
+  import Icon from './kit/Icon.svelte';
   import FilterChipGroup from './FilterChipGroup.svelte';
+  import { WORK_GROUPS, type WorkGroupChoice } from './filter_schema';
   import { withoutWorkFacet, workFacets, type WorkFacetId } from './filter_facets';
   import {
     activeFilterCount,
@@ -29,14 +32,15 @@
     normalizeFilters,
     sameFilters,
     saveWorkView,
-    STATUS_FILTER_LABELS,
-    STATUS_FILTERS,
+    WORK_STAGE_LABELS,
+    WORK_STAGES,
     workLayout,
     workViewFilters,
     workViews,
     type ConflictNotice,
     type WorkTreeFilters,
     type WorkTreeOrg,
+    type WorkStage,
     type WorkTreeTracker,
     type WorkView,
   } from './work_view';
@@ -51,7 +55,7 @@
      *  tasks, so the Archived switch does nothing there. */
     listLayout = false,
     /** The assignees and tracker columns of the tasks loaded (step 6.2):
-     *  the chips a named-person and a column filter offer. */
+     *  what the Assignee picker and the column chips offer. */
     people = [],
     columns = [],
   }: {
@@ -116,11 +120,33 @@
     });
   }
 
-  function orgValue(v: WorkTreeFilters['org']): string {
-    return v === undefined ? '' : String(v);
+  // Organisation chips, several at once (`orgs`); a saved view's single
+  // `org` reads as one of them and folds into `orgs` on the first change.
+  type OrgPick = number | 'none';
+  const orgChoices = $derived([
+    ...orgs.map((o) => ({ id: o.id as OrgPick, label: o.name })),
+    ...(f.org === 'none' || (f.orgs ?? []).includes('none') ? [{ id: 'none' as OrgPick, label: 'Unassigned' }] : []),
+  ]);
+  const pickedOrgs = $derived<OrgPick[]>([...(f.orgs ?? []), ...(f.org !== undefined && !(f.orgs ?? []).includes(f.org) ? [f.org] : [])]);
+  function orgOn(id: OrgPick): boolean {
+    return pickedOrgs.includes(id);
   }
-  function onOrg(v: string) {
-    set({ org: v === '' ? undefined : v === 'none' ? 'none' : Number(v) });
+  function toggleOrg(id: OrgPick) {
+    const next = orgOn(id) ? pickedOrgs.filter((o) => o !== id) : [...pickedOrgs, id];
+    set({ org: undefined, orgs: next.length > 0 ? next : undefined });
+  }
+  function toggleStage(st: WorkStage) {
+    const cur = f.stages ?? [];
+    const next = cur.includes(st) ? cur.filter((x) => x !== st) : [...cur, st];
+    set({ stages: next.length > 0 ? next : undefined });
+  }
+  // Assignee: anyone, me (`mine`), or one person by name.
+  const ME = 'me';
+  const assigneeValue = $derived(f.assignee ? '@' + f.assignee.toLowerCase() : f.mine ? ME : '');
+  function onAssignee(v: string) {
+    if (v === ME) set({ mine: true, assignee: undefined });
+    else if (v.startsWith('@')) set({ mine: undefined, assignee: peopleChips.find((p) => p.toLowerCase() === v.slice(1)) });
+    else set({ mine: undefined, assignee: undefined });
   }
   function onTracker(v: string) {
     set({ tracker: v === '' ? undefined : v === 'local' || v === 'ref' ? v : Number(v) });
@@ -141,6 +167,13 @@
   );
   const panelCount = $derived(stripFacets.length);
   let panelOpen = $state(false);
+  // "More" opens by itself when it holds a filter that is on.
+  let moreOpen = $state(false);
+  const moreCount = $derived(
+    [f.review, f.status_name, f.has !== undefined && f.has !== 'active' ? f.has : undefined, $activeWorkViewId ?? undefined].filter(
+      (x) => x !== undefined && x !== false,
+    ).length,
+  );
   let filtersBtn: HTMLButtonElement | undefined = $state();
   function clearFacet(id: string) {
     if (id === 'query') cancelSearch();
@@ -335,166 +368,220 @@
   {/if}
 {/snippet}
 
-{#snippet toggleChips()}
-    <button
-      class="btn btn--chip btn--toggle"
-      type="button"
-      aria-pressed={!!f.mine}
-      data-testid="work-filter-mine"
-      title="Assigned to me in its tracker"
-      onclick={() => set({ mine: !f.mine })}>Assigned to me</button
-    >
-    <button
-      class="btn btn--chip btn--toggle"
-      type="button"
-      aria-pressed={!!f.review}
-      data-testid="work-filter-review"
-      title="Only tasks with something to review"
-      onclick={() => set({ review: !f.review })}>To review</button
-    >
-{/snippet}
-
 {#snippet orgChips()}
-        <FilterChipGroup
-          label="Organisation"
-          value={orgValue(f.org)}
-          options={[
-            { id: '', label: 'Any' },
-            ...orgs.map((o) => ({ id: String(o.id), label: o.name })),
-            { id: 'none', label: 'Unassigned' },
-          ]}
-          testidFor={(id) => `work-filter-org-${id === '' ? 'any' : id}`}
-          onchange={onOrg}
-        />
-{/snippet}
-
-{#snippet trackerChips()}
-        <FilterChipGroup
-          label="Tracker"
-          value={f.tracker === undefined ? '' : String(f.tracker)}
-          options={[
-            { id: '', label: 'Any' },
-            ...trackers.map((t) => ({ id: String(t.id), label: t.name })),
-            { id: 'local', label: 'Local work', title: 'Work named in fleet, with no tracker' },
-            { id: 'ref', label: 'Bare keys', title: 'A key (ABC-123) no tracker claims' },
-          ]}
-          testidFor={(id) => `work-filter-tracker-${id === '' ? 'any' : id}`}
-          onchange={onTracker}
-        />
-{/snippet}
-
-{#snippet columnChipGroup()}
-  {#if columnChips.length > 0}
-    <FilterChipGroup
-      label="Tracker column"
-      value={f.status_name?.toLowerCase() ?? ''}
-      options={[{ id: '', label: 'Any' }, ...columnChips.map((c) => ({ id: c.toLowerCase(), label: c }))]}
-      testidFor={(id) => (id === '' ? 'work-filter-column-any' : `work-filter-column-${id}`)}
-      onchange={(id) => set({ status_name: id === '' ? undefined : columnChips.find((c) => c.toLowerCase() === id) })}
-    />
-  {/if}
-{/snippet}
-
-{#snippet assigneeChipGroup()}
-  {#if peopleChips.length > 0}
-    <FilterChipGroup
-      label="Assignee"
-      value={f.assignee?.toLowerCase() ?? ''}
-      options={[{ id: '', label: 'Anyone' }, ...peopleChips.map((p) => ({ id: p.toLowerCase(), label: p }))]}
-      testidFor={(id) => (id === '' ? 'work-filter-assignee-any' : `work-filter-assignee-${id}`)}
-      onchange={(id) => set({ assignee: id === '' ? undefined : peopleChips.find((p) => p.toLowerCase() === id) })}
-    />
-  {/if}
-{/snippet}
-
-{#snippet statusChips()}
-        <FilterChipGroup
-          label="Status"
-          value={f.status ?? 'any'}
-          options={STATUS_FILTERS.map((s) => ({ id: s, label: STATUS_FILTER_LABELS[s] }))}
-          testidFor={(id) => `work-filter-status-${id}`}
-          onchange={(id) => set({ status: id })}
-        />
-{/snippet}
-
-{#snippet hasChips()}
-        <FilterChipGroup
-          label="Sessions"
-          value={f.has ?? 'any'}
-          options={HAS_FILTERS.map((h) => ({ id: h, label: HAS_FILTER_LABELS[h] }))}
-          testidFor={(id) => `work-filter-has-${id}`}
-          onchange={(id) => set({ has: id })}
-        />
-{/snippet}
-
-{#snippet archivedSwitch()}
+  <section class="group">
+    <h3 class="label">Organisation</h3>
+    <div class="chips" role="group" aria-label="Organisation" data-testid="work-filter-org">
+      {#each orgChoices as o (o.id)}
+        {@const on = orgOn(o.id)}
         <button
+          class="of-chip pick"
+          class:on
           type="button"
-          class="switch-row"
-          role="switch"
-          aria-checked={!!f.archived}
-          data-testid="work-filter-archived"
-          disabled={listLayout}
-          title={listLayout ? 'In List view, Done shows them' : 'Done tasks, and tasks whose sessions are all archived, with nothing running'}
-          onclick={() => set({ archived: !f.archived })}
+          aria-pressed={on}
+          data-testid="work-filter-org-{o.id}"
+          onclick={() => toggleOrg(o.id)}>{o.label}{#if on}<span aria-hidden="true"> ✓</span>{/if}</button
         >
-          <span>Archived tasks</span><span class="switch" aria-hidden="true"></span>
-        </button>
-{/snippet}
-
-{#snippet newPanel()}
-  <section>
-    <h3>Saved view</h3>
-    {@render viewsBlock()}
-  </section>
-  <section>
-    <h3>Quick</h3>
-    <div class="row toggles">{@render toggleChips()}</div>
-  </section>
-  <section data-testid="work-filter-org">
-    <h3>Scope</h3>
-    {@render orgChips()}
-  </section>
-  <section>
-    <h3>Work</h3>
-    <div data-testid="work-filter-tracker">{@render trackerChips()}</div>
-    <div data-testid="work-filter-status">{@render statusChips()}</div>
-    <div data-testid="work-filter-column">{@render columnChipGroup()}</div>
-    <div data-testid="work-filter-assignee">{@render assigneeChipGroup()}</div>
-    <div data-testid="work-filter-has">{@render hasChips()}</div>
-  </section>
-  <section>
-    <h3>Include</h3>
-    {@render archivedSwitch()}
+      {/each}
+    </div>
   </section>
 {/snippet}
 
-<div class="work-filters" data-testid="work-filters">
-    <!-- Step 3.7: the Sessions list's Filters section, one row while
-         closed; saved views and the two toggles join the panel. -->
-    <FiltersSection
-      {search}
-      onsearch={onSearch}
-      searchLabel="Search tasks"
-      placeholder="Search key or title…"
-      searchTestid="work-search"
-      count={panelCount}
-      filtersTitle="Filter by saved view, organisation, tracker, status and sessions"
-      filtersTestid="work-filters-open"
-      panelId="work-filter-panel"
-      panelLabel="Work filters"
-      panelTestid="work-filter-panel"
-      clearTestid="work-filter-panel-clear"
-      doneTestid="work-filters-done"
-      groupValue={groupChoice}
-      groupOptions={WORK_GROUPS}
-      ongroup={onGroup}
-      groupTestid="work-group-select"
-      onclearall={clearAll}
-      bind:open={panelOpen}
-      bind:filtersBtn
-      panel={newPanel}
+{#snippet stageChips()}
+  <section class="group">
+    <h3 class="label">Status</h3>
+    <div class="chips" role="group" aria-label="Status" data-testid="work-filter-status">
+      {#each WORK_STAGES as st (st)}
+        {@const on = (f.stages ?? []).includes(st)}
+        <button
+          class="of-chip pick"
+          class:on
+          type="button"
+          aria-pressed={on}
+          data-testid="work-filter-stage-{st}"
+          onclick={() => toggleStage(st)}>{WORK_STAGE_LABELS[st]}{#if on}<span aria-hidden="true"> ✓</span>{/if}</button
+        >
+      {/each}
+    </div>
+  </section>
+{/snippet}
+
+{#snippet pickers()}
+  <div class="pair">
+    <section class="group">
+      <h3 class="label"><label for="work-filter-tracker">Tracker</label></h3>
+      <select
+        id="work-filter-tracker"
+        class="of-btn pick-select"
+        data-testid="work-filter-tracker"
+        value={f.tracker === undefined ? '' : String(f.tracker)}
+        onchange={(e) => onTracker((e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="">Any</option>
+        {#each trackers as t (t.id)}<option value={String(t.id)}>{t.name}</option>{/each}
+        <option value="local" title="Work named in fleet, with no tracker">Local work</option>
+        <option value="ref" title="A key (ABC-123) no tracker claims">Bare keys</option>
+      </select>
+    </section>
+    <section class="group">
+      <h3 class="label"><label for="work-filter-assignee">Assignee</label></h3>
+      <select
+        id="work-filter-assignee"
+        class="of-btn pick-select"
+        data-testid="work-filter-assignee"
+        value={assigneeValue}
+        onchange={(e) => onAssignee((e.currentTarget as HTMLSelectElement).value)}
+      >
+        <option value="">Anyone</option>
+        <option value={ME} title="Assigned to you in its tracker">Me</option>
+        {#each peopleChips as p (p.toLowerCase())}<option value={'@' + p.toLowerCase()}>{p}</option>{/each}
+      </select>
+    </section>
+  </div>
+{/snippet}
+
+{#snippet panelFoot()}
+  <section class="foot">
+    <h3 class="sr-only">Sessions</h3>
+    <label class="live">
+      <input
+        type="checkbox"
+        data-testid="work-filter-live"
+        checked={f.has === 'active'}
+        onchange={(e) => set({ has: (e.currentTarget as HTMLInputElement).checked ? 'active' : undefined })}
+      />
+      Only tasks with a live session
+    </label>
+    <button class="of-btn quiet" type="button" data-testid="work-filter-panel-clear" disabled={count === 0} onclick={clearAll}
+      >Clear</button
+    >
+  </section>
+{/snippet}
+
+{#snippet moreFilters()}
+  <!-- Off the board, folded: what 0.5.x offered beyond its panel. -->
+  <section class="more">
+    <details data-testid="work-filter-more" bind:open={moreOpen}>
+      <summary><h3 class="label">More</h3>{#if moreCount > 0}<span class="of-count">{moreCount}</span>{/if}</summary>
+      <div class="more-body">
+        {@render viewsBlock()}
+        <div class="row toggles">
+          <button
+            class="of-chip pick"
+            class:on={!!f.review}
+            type="button"
+            aria-pressed={!!f.review}
+            data-testid="work-filter-review"
+            title="Only tasks with something to review"
+            onclick={() => set({ review: !f.review })}>To review</button
+          >
+        </div>
+        <div data-testid="work-filter-has">
+          <FilterChipGroup
+            label="Sessions"
+            value={f.has ?? 'any'}
+            options={HAS_FILTERS.map((h) => ({ id: h, label: HAS_FILTER_LABELS[h] }))}
+            testidFor={(id) => `work-filter-has-${id}`}
+            onchange={(id) => set({ has: id === 'any' ? undefined : id })}
+          />
+        </div>
+        {#if columnChips.length > 0}
+          <div data-testid="work-filter-column">
+            <FilterChipGroup
+              label="Tracker column"
+              value={f.status_name?.toLowerCase() ?? ''}
+              options={[{ id: '', label: 'Any' }, ...columnChips.map((c) => ({ id: c.toLowerCase(), label: c }))]}
+              testidFor={(id) => (id === '' ? 'work-filter-column-any' : `work-filter-column-${id}`)}
+              onchange={(id) => set({ status_name: id === '' ? undefined : columnChips.find((c) => c.toLowerCase() === id) })}
+            />
+          </div>
+        {/if}
+        <label class="live">
+          <input
+            type="checkbox"
+            data-testid="work-filter-archived"
+            checked={!!f.archived}
+            disabled={listLayout}
+            title={listLayout ? 'In List view, Done shows them' : 'Done tasks, and tasks whose sessions are all archived, with nothing running'}
+            onchange={() => set({ archived: !f.archived })}
+          />
+          Show archived tasks
+        </label>
+      </div>
+    </details>
+  </section>
+{/snippet}
+
+<div class="work-filters of" data-testid="work-filters">
+  <!-- Board "Work · tasks with filters open": search across the pane,
+       then Filters with its count and the grouping; the panel under them
+       holds organisation and status chips (several at once), tracker and
+       assignee, and the live-session switch. -->
+  <label class="of-search">
+    <Icon name="search" size={14} />
+    <input
+      type="search"
+      aria-label="Search tasks"
+      placeholder="Search tasks or keys"
+      data-testid="work-search"
+      value={search}
+      oninput={(e) => onSearch((e.currentTarget as HTMLInputElement).value)}
     />
+  </label>
+  <div class="of-filters">
+    <button
+      bind:this={filtersBtn}
+      class="of-btn filters-btn"
+      class:open={panelOpen}
+      type="button"
+      data-testid="work-filters-open"
+      aria-expanded={panelOpen}
+      aria-controls="work-filter-panel"
+      aria-label={panelCount > 0 ? `Filters, ${panelCount} active` : 'Filters'}
+      title="Filter by organisation, status, tracker, assignee and sessions"
+      onclick={() => (panelOpen = !panelOpen)}
+      ><Icon name="filter" size={12} />Filters{#if panelCount > 0}<span class="of-count">{panelCount}</span>{/if}<span
+        aria-hidden="true">{panelOpen ? '▴' : '▾'}</span
+      ></button
+    >
+    <span class="grow"></span>
+    <label class="of-btn quiet group-by" title="Group by">
+      <span>Group:</span>
+      <select
+        aria-label="Group by"
+        data-testid="work-group-select"
+        value={groupChoice}
+        onchange={(e) => onGroup((e.currentTarget as HTMLSelectElement).value as WorkGroupChoice)}
+      >
+        {#each WORK_GROUPS as o (o.id)}
+          <option value={o.id} title={o.title}>{o.label.toLowerCase()}</option>
+        {/each}
+      </select>
+      <span aria-hidden="true">▾</span>
+    </label>
+  </div>
+  {#if panelOpen}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <section
+      class="panel"
+      id="work-filter-panel"
+      aria-label="Filters"
+      data-testid="work-filter-panel"
+      onkeydown={(e) => {
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          panelOpen = false;
+          filtersBtn?.focus();
+        }
+      }}
+    >
+      {@render orgChips()}
+      {@render stageChips()}
+      {@render pickers()}
+      {@render panelFoot()}
+      {@render moreFilters()}
+    </section>
+  {/if}
   {#if notice}
     <p class="notice" role="status" data-testid="work-view-notice">
       {#if typeof notice === 'string'}{notice}{:else}<WorkConflictNotice notice={notice} onreload={() => void loadViews()} />{/if}
@@ -503,29 +590,151 @@
     <p class="notice muted" data-testid="work-views-error">Saved views: {viewsError}</p>
   {/if}
 
-
-  <ActiveFilters
-    facets={stripFacets}
-    onclear={clearFacet}
-    onclearall={clearAll}
-    testid="work-active-filters"
-    clearAllTestid="work-filter-clear"
-    emptyFocus={() => filtersBtn}
-  />
-
+  {#if !panelOpen}
+    <ActiveFilters
+      facets={stripFacets}
+      onclear={clearFacet}
+      onclearall={clearAll}
+      testid="work-active-filters"
+      clearAllTestid="work-filter-clear"
+      emptyFocus={() => filtersBtn}
+    />
+  {/if}
 </div>
 
 <style>
-  .switch-row:disabled {
-    opacity: 0.5;
-    cursor: default;
-    background: transparent;
-  }
   .work-filters {
     display: flex;
     flex-direction: column;
     gap: 6px;
     font-size: var(--control-font);
+  }
+  .of-search input::-webkit-search-cancel-button {
+    filter: grayscale(1);
+  }
+  .grow {
+    flex: 1 1 auto;
+  }
+  .filters-btn {
+    padding: 0 6px;
+  }
+  .filters-btn.open {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--control-border));
+  }
+  .group-by {
+    position: relative;
+    padding: 0 4px;
+    gap: 4px;
+  }
+  .group-by select {
+    field-sizing: content;
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    padding: 0;
+    cursor: pointer;
+  }
+  .group-by select:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: 2px;
+  }
+  .panel {
+    margin-top: 2px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-raise);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .group {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .label {
+    margin: 0 0 4px;
+    font-size: var(--text-xs);
+    line-height: 16px;
+    font-weight: normal;
+    color: var(--fg-muted);
+  }
+  .chips {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .pick {
+    border: 0;
+    font: inherit;
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .pick:hover {
+    color: var(--fg);
+  }
+  .pick.on {
+    background: var(--accent-soft);
+    color: var(--fg);
+  }
+  .pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .pick-select {
+    width: 100%;
+    min-width: 0;
+  }
+  .foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+  }
+  .live {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    font-size: var(--text-xs);
+    line-height: 16px;
+    color: var(--fg-muted);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    margin: 0;
+  }
+  .more {
+    border-top: 1px solid var(--border);
+    padding-top: 8px;
+  }
+  .more summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    color: var(--fg-muted);
+  }
+  .more summary h3 {
+    margin: 0;
+  }
+  .more-body {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .toggles {
+    flex-wrap: wrap;
   }
   .row {
     display: flex;
@@ -533,15 +742,12 @@
     align-items: center;
     min-width: 0;
   }
-  .toggles {
-    flex-wrap: wrap;
-  }
   .view-select {
     flex: 1 1 8rem;
     min-width: 0;
   }
-  select,
-  input {
+  .views select,
+  .name-row input {
     font: inherit;
     height: var(--control-h-lg);
     padding: 0 6px;

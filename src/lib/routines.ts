@@ -12,6 +12,8 @@ import { sessions } from './sessions';
 import { selectSessionExplicitly } from './selection';
 import { goTo } from './destination';
 import { automationTab } from './automation';
+import type { RunRow } from './runs';
+import type { OfState } from './kit/status';
 
 export type RoutineTrigger = 'cron' | 'event' | 'manual';
 export type RoutineOverlap = 'skip' | 'parallel';
@@ -345,4 +347,101 @@ export function trackFailingRoutines(
     stopped = true;
     if (timer !== null) clearTimeout(timer);
   };
+}
+
+// ---- the Automation list and detail (board Automation) ---------------------
+
+/** A cron line's days and time apart: `30 7 * * 1-5` → Weekdays, 07:30.
+ *  `at` is absent for a line without one fixed time. */
+export function cronParts(cron: string | undefined): { days: string; at?: string } {
+  const words = cronWords(cron);
+  const m = /^(.*) (\d\d:\d\d)$/.exec(words);
+  return m ? { days: m[1], at: m[2] } : { days: words };
+}
+
+/** The newest run of each routine, from `list_runs` rows newest first. */
+export function lastRunByRoutine(runs: readonly RunRow[]): Map<number, RunRow> {
+  const out = new Map<number, RunRow>();
+  for (const r of runs) {
+    if (r.routine_id === undefined) continue;
+    const had = out.get(r.routine_id);
+    if (!had || r.started_at > had.started_at) out.set(r.routine_id, r);
+  }
+  return out;
+}
+
+const LAST_WORDS: Record<string, string> = {
+  ok: 'last run OK',
+  failed: 'last run failed',
+  needs_person: 'last run needs you',
+  nothing_to_do: 'last run had nothing to do',
+};
+
+function inWords(secs: number): string {
+  if (secs < 60) return `${Math.max(0, Math.round(secs))}s`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m`;
+  if (secs < 86400) return `${Math.round(secs / 3600)}h`;
+  return `${Math.round(secs / 86400)}d`;
+}
+
+/** A routine's state as the list's dot says it: running now, its newest run
+ *  failed, paused, or on. */
+export function routineDot(r: Pick<RoutineRow, 'enabled'>, last?: Pick<RunRow, 'outcome'>): OfState {
+  if (last?.outcome === 'running') return 'working';
+  if (last?.outcome === 'failed') return 'failed';
+  if (last?.outcome === 'needs_person') return 'waiting';
+  return r.enabled ? 'done' : 'idle';
+}
+
+/** The list row's second line: "Weekdays · last run OK · next in 18h",
+ *  "Daily · running now on mercury", "Fridays 16:00 · paused by you". */
+export function routineLine(
+  r: Pick<RoutineRow, 'enabled' | 'paused_reason' | 'trigger' | 'cron' | 'event' | 'next_run_at' | 'skip_next' | 'host_alias'>,
+  last: Pick<RunRow, 'outcome'> | undefined,
+  nowSec: number,
+): string {
+  const when = r.trigger === 'cron' ? cronParts(r.cron) : null;
+  if (!r.enabled) {
+    const head = when ? cronWords(r.cron) : triggerWords(r);
+    return `${head} · ${r.paused_reason ? 'paused by fleet' : 'paused by you'}`;
+  }
+  const parts = [when ? when.days : triggerWords(r)];
+  if (last?.outcome === 'running') return `${parts[0]} · running now on ${r.host_alias}`;
+  parts.push(last ? (LAST_WORDS[last.outcome] ?? 'last run done') : 'not run yet');
+  if (r.skip_next) parts.push('next one skipped');
+  else if (r.next_run_at) parts.push(r.next_run_at > nowSec ? `next in ${inWords(r.next_run_at - nowSec)}` : 'due now');
+  return parts.join(' · ');
+}
+
+/** A run's state for its dot in the Runs list. */
+export function runDot(run: Pick<RoutineRunRow, 'state' | 'outcome'>): OfState {
+  if (run.state === 'running') return 'working';
+  if (run.state === 'skipped') return 'idle';
+  if (run.state === 'failed' || run.outcome === 'failed') return 'failed';
+  if (run.outcome === 'needs_person') return 'waiting';
+  return 'done';
+}
+
+/** "$0.42 · 6 min": what the finished runs cost and took on average. */
+export function averageRun(runs: readonly RoutineRunRow[]): string | null {
+  const done = runs.filter((r) => r.finished_at !== undefined && r.state !== 'skipped');
+  if (done.length === 0) return null;
+  const cost = done.reduce((s, r) => s + r.cost_micros, 0) / done.length;
+  const secs = done.reduce((s, r) => s + (r.finished_at! - r.started_at), 0) / done.length;
+  return `${dollars(Math.round(cost))} · ${secs < 60 ? `${Math.round(secs)}s` : `${Math.round(secs / 60)} min`}`;
+}
+
+/** When it runs next, in words: "in 18h", "Next one skipped", "Paused". */
+export function nextRunWords(r: Pick<RoutineRow, 'enabled' | 'trigger' | 'next_run_at' | 'skip_next'>, nowSec: number): string {
+  if (!r.enabled) return 'Paused';
+  if (r.trigger === 'manual') return 'Only with Run now';
+  if (r.trigger === 'event') return 'On its event';
+  if (r.skip_next) return 'Next one skipped';
+  if (!r.next_run_at) return 'Not scheduled';
+  return r.next_run_at > nowSec ? `in ${inWords(r.next_run_at - nowSec)}` : 'Due now';
+}
+
+/** What the routine's runs spent since `since` (unix seconds). */
+export function spentSince(runs: readonly RoutineRunRow[], since: number): number {
+  return runs.filter((r) => r.started_at >= since).reduce((s, r) => s + r.cost_micros, 0);
 }
