@@ -391,14 +391,14 @@ describe('App: the Hosts view', () => {
     await mountApp();
     await fireEvent.keyDown(window, { key: ',', ctrlKey: true });
     await tick();
-    expect(await screen.findByRole('dialog', { name: 'Settings' })).toBeTruthy();
+    expect(await screen.findByRole('region', { name: 'Settings' })).toBeTruthy();
   });
 
   it('⌘, opens Settings, which no longer holds the hosts table', async () => {
     await mountApp();
     await fireEvent.keyDown(window, { key: ',', metaKey: true });
     await tick();
-    const dialog = await screen.findByRole('dialog', { name: 'Settings' });
+    const dialog = await screen.findByRole('region', { name: 'Settings' });
     expect(within(dialog).queryByTestId('hosts-table')).toBeNull();
     expect(within(dialog).getByTestId('settings-hosts-summary').textContent).toBe('5 configured · 1 offline');
   });
@@ -413,7 +413,7 @@ describe('App: the Hosts view', () => {
     await fireEvent.keyDown(window, { key: 'e', metaKey: true });
     await tick();
     expect(get(settingsOpen)).toBe(false);
-    expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Settings' })).toBeNull();
   });
 
   it('⌘E toggles Control\'s agent chat, so it never stays pinned over a view', async () => {
@@ -455,10 +455,10 @@ describe('App: the Hosts view', () => {
   it('Settings → Open Hosts closes Settings and opens the view', async () => {
     await mountApp();
     settingsOpen.set(true);
-    const dialog = await screen.findByRole('dialog', { name: 'Settings' });
+    const dialog = await screen.findByRole('region', { name: 'Settings' });
     await fireEvent.click(within(dialog).getByTestId('settings-open-hosts'));
     await waitFor(() => expect(hostsView()).not.toBeNull());
-    expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Settings' })).toBeNull();
   });
 
   it('a quick-switcher host entry opens Hosts with that host preselected', async () => {
