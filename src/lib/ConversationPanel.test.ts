@@ -221,6 +221,23 @@ describe('ConversationPanel', () => {
     expect(mockedConv).not.toHaveBeenCalled();
   });
 
+  it('a Codex row with no conversation yet says Codex starts one on its first prompt', async () => {
+    render(ConversationPanel, { session: session({ claude_session_id: null, agent: 'codex' }), visible: true });
+    await tick();
+    expect(screen.getByText('No conversation yet')).toBeTruthy();
+    expect(screen.getByText(/Codex starts a conversation on its first prompt/)).toBeTruthy();
+    expect(mockedConv).not.toHaveBeenCalled();
+  });
+
+  it('an Agy row says its conversations cannot be shown yet instead of waiting on one', async () => {
+    mockedConv.mockReturnValue(err('E_NO_TRANSCRIPT'));
+    render(ConversationPanel, { session: session({ agent: 'agy' }), visible: true });
+    await tick();
+    await Promise.resolve();
+    await tick();
+    expect(screen.getByText('Agy conversations can’t be shown yet')).toBeTruthy();
+  });
+
   it('other errors show the message plus a retry button that refetches, keeping earlier good turns visible', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     mockedConv.mockReturnValueOnce(ok(conv()));
@@ -1819,7 +1836,7 @@ describe('ConversationPanel live indicator', () => {
     await settle();
     await settle();
     expect(screen.getByTestId('conv-indicator').getAttribute('data-kind')).toBe('sent');
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Waiting for Claude…');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('Waiting for Claude Code…');
 
     // transcript carries the prompt: the message gives way, the session is still working
     const caughtUp = conv();
