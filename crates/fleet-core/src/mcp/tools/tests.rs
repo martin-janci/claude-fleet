@@ -11257,6 +11257,18 @@ const WORK_ACTION_NO_GATE: &[(&str, &str, &str)] = &[
         "pauses the missions the caller may change; answers their ids",
     ),
     (
+        "work_link",
+        "mission_release_note",
+        "drafts a completed mission's release note for whoever may change \
+         the mission; text comes back, nothing is written to a session",
+    ),
+    (
+        "work_link",
+        "today_brief",
+        "the caller's own morning brief over their scoped view of today; \
+         drafted only on refresh, written to no session",
+    ),
+    (
         "work",
         "purge_impact",
         "answers keys only (`PurgeImpact { keys }`), never a session row",
