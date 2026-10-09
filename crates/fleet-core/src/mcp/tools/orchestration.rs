@@ -336,6 +336,45 @@ impl FleetTools {
         ok_json_compact(&detail)
     }
 
+    #[tool(description = "A short Claude-written summary of what a session \
+        did since a time (unix seconds), for whoever may read it: { text | \
+        null, check: off | shadow | passed | failed | unchecked, since, turns, \
+        model, host_alias, at }. Runs one claude -p on the session's host \
+        under its account (booked as watch_summary); only with the session \
+        org's consent; text is null when nothing happened since or when the \
+        Jev check hid it. Errors: E_FORBIDDEN (no consent), E_CLAUDE_CLI, \
+        E_TIMEOUT, as session_conversation.")]
+    pub(super) async fn session_summary_since(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(p): Parameters<SessionSummarySinceParams>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "session_summary_since",
+            &format!("session_id={} since={}", p.session_id, p.since),
+        );
+        // `watch`: a retelling of the same transcript (redesign 11.11).
+        let row = self.resolve_target_row(
+            &caller,
+            Some(p.session_id),
+            None,
+            None,
+            Reach::Read,
+            "the session",
+        )?;
+        let decide = crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store));
+        let summary = crate::service::watch_summary::summarize_since(
+            &self.store,
+            &self.ssh,
+            &decide,
+            &row,
+            p.since,
+        )
+        .await
+        .map_err(to_mcp_err)?;
+        ok_json_compact(&summary)
+    }
+
     #[tool(description = "send_prompt + wait_for_session(turn_gt) + \
         session_transcript in one call. Returns { turn_seq, status: \
         satisfied | timeout, transcript } (the reply as plain text; null \
