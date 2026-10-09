@@ -1,0 +1,165 @@
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+
+vi.mock('@tauri-apps/api/event', () => {
+  const handlers = new Map<string, (e: { payload: unknown }) => void>();
+  return {
+    listen: vi.fn(async (name: string, cb: (e: { payload: unknown }) => void) => {
+      handlers.set(name, cb);
+      return () => handlers.delete(name);
+    }),
+    emit: vi.fn(async (name: string, payload: unknown) => {
+      handlers.get(name)?.({ payload });
+    }),
+  };
+});
+
+import { invoke as mockedInvoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
+import HandoffCards from './HandoffCards.svelte';
+import { resetHandoffsForTests, sessionState, undoable, type ControlHandoff } from './handoffs';
+import { sessions, type SessionRow } from './sessions';
+import { sessionFocus } from './session_focus';
+import { missionOpenRequest } from './missions';
+import { get } from 'svelte/store';
+
+// Redesign steps 9.3 and 9.6: what Control's agent handed on, drawn as chips
+// and cards that follow their target's live state.
+
+const inv = mockedInvoke as ReturnType<typeof vi.fn>;
+const now = Math.floor(Date.now() / 1000);
+
+function session(id: number, status: SessionRow['claude_status'], name = `w${id}`): SessionRow {
+  return { id, tmux_name: name, friendly_name: null, claude_status: status, stuck_kind: null } as SessionRow;
+}
+
+let receipts: ControlHandoff[] = [];
+
+beforeEach(() => {
+  resetHandoffsForTests();
+  sessionFocus.set(null);
+  missionOpenRequest.set(null);
+  receipts = [];
+  inv.mockReset();
+  inv.mockImplementation(async (cmd: string) => {
+    if (cmd === 'control_handoffs') return receipts;
+    if (cmd === 'accept_work_proposals' || cmd === 'undo_work_accept') return [];
+    if (cmd === 'reject_work_proposal') return {};
+    if (cmd === 'save_mission') return { id: 77 };
+    if (cmd === 'set_mission_item') return { id: 77 };
+    return null;
+  });
+});
+
+const calls = (cmd: string) => inv.mock.calls.filter((c) => c[0] === cmd).map((c) => c[1]);
+
+describe('handoff chips', () => {
+  it("a session chip follows the session's live state and opens it", async () => {
+    sessions.set([session(3, 'working', 'fix-ci')]);
+    receipts = [{ id: 1, at: now, kind: 'session', tool: 'send_prompt', session_id: 3, preview: 'Fix CI' }];
+    render(HandoffCards);
+    const chip = await screen.findByTestId('handoff-session');
+    expect(chip.textContent).toContain('Sent to a session');
+    expect(chip.textContent).toContain('fix-ci');
+    expect(chip.textContent).toContain('Working');
+    sessions.set([session(3, 'completed', 'fix-ci')]);
+    await waitFor(() => expect(screen.getByTestId('handoff-session').textContent).toContain('Done'));
+    await fireEvent.click(screen.getByTestId('handoff-session'));
+    expect(get(sessionFocus)?.id).toBe(3);
+  });
+
+  it('a session that is gone says it ended', async () => {
+    sessions.set([]);
+    receipts = [{ id: 1, at: now, kind: 'session', tool: 'dispatch_task', session_id: 9, preview: 'Review #12' }];
+    render(HandoffCards);
+    expect((await screen.findByTestId('handoff-session')).textContent).toContain('ended');
+  });
+
+  it('a mission chip shows its state and opens the mission', async () => {
+    receipts = [
+      { id: 2, at: now, kind: 'mission', tool: 'work_link', mission_id: 5, mission_name: 'Ship 9.x', mission_state: 'active' },
+    ];
+    render(HandoffCards);
+    const chip = await screen.findByTestId('handoff-mission');
+    expect(chip.textContent).toContain('Sent to a mission');
+    expect(chip.textContent).toContain('Ship 9.x');
+    expect(chip.textContent).toContain('Working');
+    await fireEvent.click(chip);
+    expect(get(missionOpenRequest)).toEqual({ id: 5 });
+  });
+
+  it('a new receipt shows up on handoff:changed', async () => {
+    render(HandoffCards);
+    await waitFor(() => expect(calls('control_handoffs')).toHaveLength(1));
+    expect(screen.queryByTestId('handoffs')).toBeNull();
+    receipts = [{ id: 3, at: now, kind: 'task', tool: 'work_link', item: { id: 20, title: 'Write docs', status: 'todo' } }];
+    await emit('handoff:changed', {});
+    const card = await screen.findByTestId('handoff-task');
+    expect(card.textContent).toContain('Write docs');
+  });
+});
+
+describe('the proposed tree', () => {
+  const tree: ControlHandoff = {
+    id: 4,
+    at: now,
+    kind: 'tree',
+    tool: 'work_link',
+    item: { id: 10, title: 'Ship 9.6', status: 'todo' },
+    items: [
+      { id: 11, title: 'Card', status: 'todo', proposal_state: 'proposed' },
+      { id: 12, title: 'Commands', status: 'todo', proposal_state: 'proposed' },
+      { id: 13, title: 'Docs', status: 'todo', proposal_state: 'proposed' },
+    ],
+  };
+
+  it('creates the ticked tasks and rejects the unticked ones', async () => {
+    receipts = [tree];
+    render(HandoffCards);
+    const boxes = await screen.findAllByTestId('handoff-tree-item');
+    expect(boxes).toHaveLength(3);
+    await fireEvent.click(boxes[2]);
+    await fireEvent.click(screen.getByTestId('handoff-tree-create'));
+    await waitFor(() => expect(calls('accept_work_proposals')).toEqual([{ args: { item_ids: [11, 12] } }]));
+    expect(calls('reject_work_proposal')).toEqual([{ args: { item_id: 13 } }]);
+    expect(calls('save_mission')).toEqual([]);
+  });
+
+  it('creates them as a mission rooted at the parent', async () => {
+    receipts = [tree];
+    render(HandoffCards);
+    await fireEvent.click(await screen.findByTestId('handoff-tree-mission'));
+    await waitFor(() => expect(calls('set_mission_item')).toHaveLength(3));
+    expect(calls('save_mission')[0]).toEqual({ args: { mission: { name: 'Ship 9.6', goal: 'Ship 9.6' }, item_id: 10 } });
+    expect(calls('reject_work_proposal')).toEqual([]);
+  });
+
+  it('offers Undo for ten minutes once created, and Undo takes them back', async () => {
+    const accepted = (at: number): ControlHandoff => ({
+      ...tree,
+      items: tree.items!.map((i) => ({ ...i, proposal_state: 'accepted', accepted_at: at })),
+    });
+    expect(undoable(accepted(now - 60), now)).toHaveLength(3);
+    expect(undoable(accepted(now - 601), now)).toHaveLength(0);
+    receipts = [accepted(now - 60)];
+    render(HandoffCards);
+    const undo = await screen.findByTestId('handoff-tree-undo');
+    expect(undo.textContent).toContain('9 min');
+    await fireEvent.click(undo);
+    await waitFor(() => expect(calls('undo_work_accept')).toEqual([{ args: { item_ids: [11, 12, 13] } }]));
+  });
+});
+
+describe('sessionState', () => {
+  it("maps a row onto the manual's five states", () => {
+    expect(sessionState(session(1, 'working'))).toBe('working');
+    expect(sessionState(session(1, 'blocked'))).toBe('waiting');
+    expect(sessionState(session(1, 'completed'))).toBe('done');
+    expect(sessionState(session(1, 'failed'))).toBe('failed');
+    expect(sessionState({ ...session(1, 'working'), stuck_kind: 'oom' } as SessionRow)).toBe('failed');
+    expect(sessionState(session(1, 'idle'))).toBe('idle');
+    expect(sessionState(undefined)).toBe('idle');
+  });
+});

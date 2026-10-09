@@ -10,6 +10,9 @@ use rusqlite::params;
 pub const AUX_ORIGIN_PLANNER: &str = "planner";
 /// [`NewAuxUsage::origin`] of a past conversation's summary.
 pub const AUX_ORIGIN_SUMMARY: &str = "summary";
+/// [`NewAuxUsage::origin`] of a commit message drafted from a session's
+/// staged diff (Orbit Fleet 5.12).
+pub const AUX_ORIGIN_COMMIT_MESSAGE: &str = "commit_message";
 
 /// One run to book.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -66,12 +69,25 @@ impl Store {
 
     /// A mission's booked runs, newest first.
     pub fn mission_aux_usage(&self, mission_id: i64) -> Result<Vec<AuxUsageRow>, IpcError> {
-        let mut st = self.conn.prepare(
+        self.aux_usage_where("mission_id = ?1", mission_id)
+    }
+
+    /// The runs booked with `origin`, newest first.
+    pub fn aux_usage_of_origin(&self, origin: &str) -> Result<Vec<AuxUsageRow>, IpcError> {
+        self.aux_usage_where("origin = ?1", origin)
+    }
+
+    fn aux_usage_where(
+        &self,
+        filter: &str,
+        arg: impl rusqlite::ToSql,
+    ) -> Result<Vec<AuxUsageRow>, IpcError> {
+        let mut st = self.conn.prepare(&format!(
             "SELECT id, origin, host_alias, model, mission_id, org_id, claude_session_id, \
              input_tokens, output_tokens, cost_micros, at FROM aux_usage \
-             WHERE mission_id = ?1 ORDER BY id DESC",
-        )?;
-        let rows = st.query_map([mission_id], |r| {
+             WHERE {filter} ORDER BY id DESC"
+        ))?;
+        let rows = st.query_map([arg], |r| {
             Ok(AuxUsageRow {
                 id: r.get(0)?,
                 origin: r.get(1)?,

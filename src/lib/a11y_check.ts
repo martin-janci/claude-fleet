@@ -29,21 +29,12 @@ const OFF = [
 ];
 
 /**
- * Known and left for a follow-up: a row that is itself a `role="button"`
- * (or `option`) holding real controls. ARIA makes a button's children
- * presentational, so a screen reader reads the row as one button and its
- * actions only by Tab. The fix is the list as a tree (rows as treeitems, a
- * named action group inside), which moves Sidebar's and SessionRowItem's
- * keyboard handling; it is its own change. Every other row must pass.
+ * Violations known and left for a follow-up, as `{ rule, testid }`. Empty
+ * since the session lists became trees (redesign step 7.2): a row is a
+ * `treeitem`, which may hold its own controls, where a `role="button"` row
+ * hid them as presentational children.
  */
-export const KNOWN: readonly { rule: string; testid: string }[] = [
-  { rule: 'nested-interactive', testid: 'sess-row' },
-  { rule: 'nested-interactive', testid: 'proj-row' },
-  { rule: 'nested-interactive', testid: 'tidy-row' },
-  // The tidy sheet's listbox holds its group headings and hints beside the
-  // options; the same tree change gives them a group.
-  { rule: 'aria-required-children', testid: 'tidy-sheet' },
-];
+export const KNOWN: readonly { rule: string; testid: string }[] = [];
 
 function known(line: string): boolean {
   return KNOWN.some((k) => line.startsWith(`${k.rule}: `) && line.includes(`data-testid="${k.testid}"`));

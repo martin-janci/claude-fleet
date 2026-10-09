@@ -16,7 +16,7 @@
  * whatever the hub answered.
  */
 
-import type { ProposalLike } from './ai_proposal';
+import type { ProposalLike, ProposalSource } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
 import { readPref, writePref } from './prefs';
@@ -341,6 +341,21 @@ export interface ProposalView {
   notes?: string | null;
   proposed_by?: string | null;
   at: number;
+  /** Jev's "may duplicate" (redesign 6.9, K4): an open task this proposal
+   *  may repeat. Only a live assist answer; absent from an older hub. */
+  duplicate?: DuplicateHint | null;
+}
+
+/** The existing task a proposal may duplicate, as Jev proposed it. */
+export interface DuplicateHint {
+  item_id: number;
+  /** `item:<id>`, the task page to open. */
+  task_id: string;
+  key?: string | null;
+  title: string;
+  source: ProposalSource;
+  confidence_pct?: number | null;
+  run_id?: number | null;
 }
 
 /** A delegated job under a task. `result` is agent text: render as text. */
@@ -452,6 +467,19 @@ export function reviewProposal(it: Pick<ReviewItem, 'proposed_by' | 'task'>): Pr
     source: p.source,
     reason: p.reason,
     confidence_pct: p.confidence_pct ?? null,
+  };
+}
+
+/** The proposal `ProposedBy` shows beside a proposal's "May duplicate", or
+ *  null when Jev flagged nothing. */
+export function duplicateProposal(p: Pick<ProposalView, 'duplicate'>): ProposalLike | null {
+  const d = p.duplicate;
+  if (!d) return null;
+  return {
+    value: d.key ?? d.task_id,
+    source: d.source,
+    reason: 'alike title',
+    confidence_pct: d.confidence_pct ?? null,
   };
 }
 

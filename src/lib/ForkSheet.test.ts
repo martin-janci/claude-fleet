@@ -17,6 +17,7 @@ import { session } from './hosts_fixture';
 import { hubStatus, STANDALONE, type HubStatus } from './hub';
 import { hubConnection } from './hub_connection';
 import { resetAccessForTests, setMyGrants } from './access';
+import { uiLayout } from './prefs';
 
 const mockedRewind = rewindConversation as unknown as ReturnType<typeof vi.fn>;
 
@@ -41,6 +42,26 @@ describe('ForkSheet', () => {
     expect((screen.getByTestId('fork-worktree-name') as HTMLInputElement).value).toBe('fork-of-canopus');
     // Uncommitted changes are not carried, and the sheet says so.
     expect(screen.getByTestId('fork-new-note').textContent).toMatch(/uncommitted changes stay here/i);
+  });
+
+  // Step 5.13: forking is merging work, so the new layout shows the Liquid
+  // orbit while it runs, and nothing once it is done.
+  it('new layout: the Liquid orbit runs while the fork does', async () => {
+    uiLayout.set('new');
+    try {
+      let resolve!: (v: unknown) => void;
+      mockedRewind.mockReturnValue(new Promise((r) => (resolve = r)));
+      render(ForkSheet, { props: { sessionId: 1, anchor: null, suggestedName: 'f', onclose: () => {} } });
+      expect(screen.queryByTestId('fork-merging')).toBeNull();
+      await fireEvent.click(screen.getByTestId('fork-confirm'));
+      await settle();
+      expect(screen.getByTestId('fork-merging').textContent).toContain('Copying the conversation');
+      resolve({ ok: true, value: { id: 2 } });
+      await settle();
+      expect(screen.queryByTestId('fork-merging')).toBeNull();
+    } finally {
+      uiLayout.set('classic');
+    }
   });
 
   it('warns in the same-worktree option rather than only in a tooltip', () => {

@@ -19,6 +19,7 @@
   import WorkPrs from './WorkPrs.svelte';
   import TodayView from './TodayView.svelte';
   import ConversationPanel from './ConversationPanel.svelte';
+  import ControlMissions from './ControlMissions.svelte';
   import {
     CONTROL_VIEWS,
     ELSEWHERE,
@@ -216,6 +217,7 @@
       <TodayView />
     {/if}
   </div>
+  <ControlMissions />
 </aside>
 
 <style>

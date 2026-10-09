@@ -35,6 +35,9 @@
 
 #[cfg(feature = "nl-detect")]
 pub mod bench;
+pub mod duplicate;
+#[cfg(test)]
+mod duplicate_tests;
 pub mod haiku;
 pub mod host_placement;
 #[cfg(test)]
@@ -99,16 +102,19 @@ pub enum Feature {
     HostPlacement,
     /// The likely option first in an agent's question or a form (J5).
     QuickAnswer,
+    /// Flagging a proposed task that may duplicate an existing one (K4).
+    Duplicate,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 6] = [
+    pub const ALL: [Feature; 7] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
         Feature::SiblingRepos,
         Feature::HostPlacement,
         Feature::QuickAnswer,
+        Feature::Duplicate,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -119,6 +125,7 @@ impl Feature {
             Feature::SiblingRepos => "sibling_repos",
             Feature::HostPlacement => "host_placement",
             Feature::QuickAnswer => "quick_answer",
+            Feature::Duplicate => "duplicate",
         }
     }
 
@@ -135,6 +142,7 @@ impl Feature {
             Feature::SiblingRepos => settings::DECIDE_JEV_SIBLING_REPOS,
             Feature::HostPlacement => settings::DECIDE_JEV_HOST_PLACEMENT,
             Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
+            Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
         }
     }
 }

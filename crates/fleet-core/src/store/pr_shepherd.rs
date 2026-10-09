@@ -30,7 +30,7 @@ impl ShepherdRuleRow {
     }
 }
 
-/// One merge the queue tried (migration 140).
+/// One merge the queue tried (migration 141).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ShepherdMergeRow {
     pub session_id: i64,

@@ -1297,8 +1297,9 @@ mod tests {
         for f in org.fields {
             if let FieldKind::Items { remove, add, .. } = &f.kind {
                 // The org's catalogs are shown, never changed here: they are
-                // added and removed on Settings → Catalogs.
-                if ["catalogs", "needs_admin"].contains(&f.id) {
+                // added and removed on Settings → Catalogs. Spend by person
+                // and what needs an admin are read-only reports.
+                if ["catalogs", "needs_admin", "spend_by_person"].contains(&f.id) {
                     assert!(remove.is_none() && add.is_empty(), "{}", f.id);
                     continue;
                 }
