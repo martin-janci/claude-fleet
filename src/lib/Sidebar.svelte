@@ -25,13 +25,11 @@
   import { sessionFocus } from './session_focus';
   import { type ProjectRow } from './projects';
   import { selectedSession, selectSession, selectSessionExplicitly, revealSeq } from './selection';
-  import { forgetSessionUi } from './session_ui';
   import { applySessionRename, renameKeyHandler } from './session_rename';
-  import { readPref, writePref, uiLayout } from './prefs';
+  import { readPref, writePref } from './prefs';
   import { accessOf } from './access';
   import AddProjectDialog from './AddProjectDialog.svelte';
   import SettingsDialog from './SettingsDialog.svelte';
-  import OnboardingCard from './OnboardingCard.svelte';
   import FirstRun from './FirstRun.svelte';
   import { hostFilter, effectiveHostFilter, hosts, hostByAlias } from './hosts';
   import { bootstrapError } from './bootstrap_state';
@@ -56,7 +54,6 @@
     UNASSIGNED,
   } from './orgs';
   import { facetSentence, sessionFacets } from './filter_facets';
-  import { onboardingDismissed } from './onboarding';
   import {
     hostsViewOpen,
     addProjectRequest,
@@ -322,11 +319,10 @@
     return bothPredicates(unfolded, triagePredicate(workPredicate));
   });
   // ── Shared with me (redesign step 5.8) ──
-  // The New layout lifts the sessions someone shared with this person (watch
-  // or drive) out of the tree and the groups into one group of their own;
-  // Classic keeps them where they were. An unknown access (null) is not a
-  // share and stays put.
-  const splitShared = $derived($uiLayout === 'new' && !focus);
+  // The sessions someone shared with this person (watch or drive) leave the
+  // tree and the groups for one group of their own, except in focus. An
+  // unknown access (null) is not a share and stays put.
+  const splitShared = $derived(!focus);
   function isSharedWithMe(s: SessionRow): boolean {
     const a = $accessOf(s);
     return a === 'watch' || a === 'drive';
@@ -521,11 +517,10 @@
   const bulkPromptTargets = $derived(bulkTargets(selectedRows, 'send_prompt', $sessionBlocked));
 
   /** Clean up was accepted. A direct remove already dropped the row, so
-   *  its layout is forgotten and the pane stops attaching to it; a Safe
-   *  remove finishes later through the agent and keeps both until then. */
+   *  the pane stops attaching to it; a Safe remove finishes later through
+   *  the agent and keeps it until then. */
   function cleanedUp(removed: SessionRow[]) {
     pendingKill = null;
-    for (const r of removed) forgetSessionUi(r.host_alias, r.tmux_name);
     const cur = $selectedSession;
     if (cur && removed.some((r) => sameSession(cur, r))) selectSession(null);
   }
@@ -593,7 +588,6 @@
           pushError(r.error, `Kill ${sess.tmux_name} failed`);
           return;
         }
-        forgetSessionUi(sess.host_alias, sess.tmux_name);
         const cur = $selectedSession;
         if (cur && sameSession(cur, sess)) selectSession(null);
       }),
@@ -1033,8 +1027,8 @@
       : null,
   );
 
-  // Onboarding card actions — open the same flows as existing UI. Hosts are
-  // managed in the Hosts view, not Settings.
+  // The empty list's actions (review r13): the Hosts view to add one, and
+  // New session.
   const openAddHost = () => requestHostsView();
   const openNewSession = () => openNewSessionPicker();
 
@@ -1254,10 +1248,6 @@
       pushError(r.error, 'Kill failed');
       return;
     }
-    // Drop persisted layout for the now-dead session — otherwise localStorage
-    // grows unbounded over time. (User can still get a fresh layout if they
-    // make a session with the same name later; that's intentional.)
-    forgetSessionUi(sess.host_alias, sess.tmux_name);
     // If we just killed the selected session, drop the selection so the
     // terminal pane shows the empty state instead of trying to attach.
     const cur = $selectedSession;
@@ -1411,7 +1401,7 @@
         retrying={loading}
         testid="{where}-load-error"
       />
-    {:else if where === 'inbox' && $uiLayout === 'new'}
+    {:else if where === 'inbox'}
       <EmptyState
         kind="calm"
         testid="inbox-calm"
@@ -1510,7 +1500,7 @@
     <!-- Redesign 8.6: routines whose newest run failed, with Fix, Retry, Pause. -->
     <RoutineFailures />
     <div class="inbox-rest" data-testid="inbox-rest">
-      {#if inboxRestText && !(inboxNeeding === 0 && $uiLayout === 'new' && !listUnavailable)}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
+      {#if inboxRestText && !(inboxNeeding === 0 && !listUnavailable)}<span class="muted">Not waiting · {inboxRestText}</span>{/if}
       <button
         type="button"
         class="btn btn--quiet"
@@ -1521,10 +1511,6 @@
   </div>
   {:else}
   <div class="scroller">
-    <!-- The New layout shows Get started in the corner instead (10.5). -->
-    {#if !$onboardingDismissed && $uiLayout !== 'new'}
-      <OnboardingCard onaddhost={openAddHost} onnewsession={openNewSession} />
-    {/if}
     {#snippet pastRow(key: string, l: WorkLink)}
       <div
         class="past-row"
@@ -1822,10 +1808,10 @@
     {:else if !loadError && orphanSessions.length === 0 && sharedWithMe.length === 0 && workGroups.length === 0 && pastOnlyGroups.length === 0}
       {#if !hubSkewEmptyMessage && listFacets.length > 0 && $projects.length > 0}
         <!-- Filters hide every row: say which, and offer the way back,
-             instead of "no sessions" over a fleet that has some. The New
-             layout uses the states kit's no-results (review r13, States
-             board "Search with no results"). -->
-        {#if $uiLayout === 'new'}
+             instead of "no sessions" over a fleet that has some, as the states
+             kit's no-results (review r13, States board "Search with no
+             results"). -->
+        
           <EmptyState
             kind="none"
             testid="sidebar-empty"
@@ -1838,15 +1824,8 @@
               { label: 'Start a new session', onclick: openNewSession, testid: 'sidebar-empty-new' },
             ]}
           />
-        {:else}
-        <div class="empty filtered-empty" data-testid="sidebar-empty">
-          <p>No sessions match <strong>{facetSentence(listFacets)}</strong>.</p>
-          <button type="button" class="btn btn--quiet is-bounded" data-testid="sidebar-empty-clear" onclick={clearListFilters}
-            >Clear filters</button
-          >
-        </div>
-        {/if}
-      {:else if $uiLayout === 'new' && !hubSkewEmptyMessage && $hosts.length === 0}
+        
+      {:else if !hubSkewEmptyMessage && $hosts.length === 0}
         <!-- Review r13, States board "First run": one host to start with. -->
         <EmptyState
           kind="first"
@@ -2078,11 +2057,9 @@
   </ConfirmDialog>
 {/if}
 
-{#if $uiLayout === 'new'}
-  <!-- Redesign 10.5: the first-run tour and Get started, where the
-       onboarding card was mounted; both float above the layout. -->
-  <FirstRun mac={isMac} />
-{/if}
+<!-- Redesign 10.5: the first-run tour and Get started; both float above
+     the layout. -->
+<FirstRun mac={isMac} />
 {#if $settingsOpen}
   <SettingsDialog onClose={() => settingsOpen.set(false)} />
 {/if}
@@ -2334,9 +2311,6 @@
     font-size: var(--control-font);
   }
   .archived-row span { flex: 1; }
-  .filtered-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
-  .filtered-empty p { margin: 0; }
-  .filtered-empty strong { color: var(--fg); font-weight: 500; }
 
   .orphan-section {
     border-top: 1px solid var(--border);

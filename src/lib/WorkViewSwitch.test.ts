@@ -10,7 +10,6 @@ import Details from './Details.svelte';
 import { sessions } from './sessions';
 import { clearSelection, selectSessionExplicitly } from './selection';
 import { session } from './hosts_fixture';
-import { todayOpen } from './today';
 import { openTask, selectedTaskId, sidebarView, taskDetailOpen } from './work_view';
 import { onboardingDismissed } from './onboarding';
 import { clearSessionFocus, focusSession } from './session_focus';
@@ -68,7 +67,10 @@ describe('Sessions | Work switch', () => {
     await fireEvent.click(screen.getByTestId('sidebar-view-sessions'));
     await flush();
     expect(screen.queryByTestId('sessions-tab-needs-you')).toBeNull();
-    expect(screen.getByTestId('needs-you-filter').textContent).toContain('Needs you 1');
+    // The Needs you pill lives in the filter panel (step 3.7).
+    await fireEvent.click(screen.getByTestId('filters-open'));
+    await flush();
+    expect(screen.getByTestId('needs-you-filter').textContent).toMatch(/Needs you\s1/);
   });
 
   it('a focused session brings the Sessions list back', async () => {
@@ -87,7 +89,6 @@ describe('Sessions | Work switch', () => {
 describe('Details with the Work view', () => {
   beforeEach(() => {
     clearSelection();
-    todayOpen.set(false);
     sidebarView.set('work');
     selectedTaskId.set(null);
     taskDetailOpen.set(false);

@@ -1,8 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { get } from 'svelte/store';
 import { approvable, commandRows, keepsKind, paletteCommands, runCommand, settingRow, splitPrefix } from './commands';
 import { applyTheme, theme } from './theme';
-import { uiLayout } from './prefs';
 import { allDescriptors } from './pages/testing';
 import { session } from './hosts_fixture';
 import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
@@ -82,9 +81,7 @@ describe('palette commands', () => {
 
 // Parity P11: the ⌘K theme command is shared by both layouts.
 describe('palette commands in the New layout', () => {
-  beforeEach(() => uiLayout.set('new'));
   afterEach(() => {
-    uiLayout.set('classic');
     applyTheme('auto');
   });
 

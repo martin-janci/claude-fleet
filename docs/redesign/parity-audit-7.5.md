@@ -1,7 +1,7 @@
 # Parity gap audit for 7.5
 
 Step 7.5 (parity sign-off) is done when every row of
-[parity.md](parity.md) reads *Both* with a proof in the New layout, the
+[parity.md](archive/parity.md) reads *Both* with a proof in the New layout, the
 shortcut freeze test is green, and Martin has used New for a week. This
 audit, taken on 2026-10-08 against `origin/main` at `6b2d3e89`, lists what
 stands between the checklist and that bar. Every step the rows cite

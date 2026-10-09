@@ -1,7 +1,7 @@
-// Toolkit (Orbit Fleet redesign step 3.16, board Toolkit): the New layout's
-// home for today's Assets workspace. Two tabs: Skills, the catalog's skills
-// as a host matrix with drift per host, and Assets, the full workspace
-// (layers and changesets) unchanged. Classic keeps the Assets overlay.
+// Toolkit (Orbit Fleet redesign step 3.16, board Toolkit): the home for
+// today's Assets workspace. Two tabs: Skills, the catalog's skills as a host
+// matrix with drift per host, and Assets, the full workspace (layers and
+// changesets) unchanged.
 import { writable } from 'svelte/store';
 import { hostOrderOf, catalogOf, type AssetListing, type AssetSummary, type HostState } from './assets';
 import { AGENT_LABELS } from './row_groups';

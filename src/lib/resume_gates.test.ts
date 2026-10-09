@@ -102,12 +102,21 @@ beforeEach(() => {
 
 // ── 2. WorkTaskDetail's Continue ──────────────────────────────────────────
 
+/** The task page's ▾ Continue item (WorkButton, redesign 6.6). */
+async function continueItem(): Promise<HTMLButtonElement> {
+  if (!screen.queryByTestId('work-button-menu-list')) {
+    await fireEvent.click(screen.getAllByTestId('work-button-menu')[0]);
+    await flush();
+  }
+  return screen.getAllByTestId('work-button-continue')[0] as HTMLButtonElement;
+}
+
 describe('Work view → task → Continue', () => {
   it('a standalone desktop continues its own past work', async () => {
     // The positive control. Rule 1: this process IS the fleet.
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    const btn = screen.getByTestId('work-task-continue') as HTMLButtonElement;
+    const btn = await continueItem();
     expect(btn.disabled).toBe(false);
     await fireEvent.click(btn);
     await flush();
@@ -124,8 +133,8 @@ describe('Work view → task → Continue', () => {
     setMyGrants(7, []);
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    expect((screen.getByTestId('work-task-continue') as HTMLButtonElement).disabled).toBe(false);
-    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    expect((await continueItem()).disabled).toBe(false);
+    await fireEvent.click(await continueItem());
     await flush();
     expect(calls('resume_work')).toHaveLength(1);
   });
@@ -137,17 +146,15 @@ describe('Work view → task → Continue', () => {
     setMyGrants(7, [{ session_id: 11, level: 'drive' }]);
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    const btn = screen.getByTestId('work-task-continue') as HTMLButtonElement;
+    const btn = await continueItem();
     expect(btn.disabled).toBe(true);
     expect(btn.title).toContain('owner');
   });
 
-  it('re-asks at the click: the panel outlives the revoke', async () => {
-    // The case a control-only gate passes. Open it under a grant that allows
-    // the write, narrow the grant while the panel is on screen, then act — the
-    // Continue handler must refuse for itself, not trust the button it came in
-    // through. A `grant:changed` moves no field of this task, so nothing else
-    // in the panel re-reads.
+  it('a revoke while the page is open refuses Continue', async () => {
+    // Open it under a grant that allows the write, narrow the grant while the
+    // page is on screen, then act. A `grant:changed` moves no field of this
+    // task, so nothing in the page re-reads: the ▾ item must ask for itself.
     sessions.set([
       session('mefistos', 'api', { id: 7, owner_person_id: 7 }),
       session('mefistos', 'old-1', { id: 11, owner_person_id: 7, claude_session_id: PAST_CONV }),
@@ -157,7 +164,7 @@ describe('Work view → task → Continue', () => {
     setMyGrants(7, []);
     render(WorkTaskDetail, { taskId: 'item:12' });
     await flush();
-    expect((screen.getByTestId('work-task-continue') as HTMLButtonElement).disabled).toBe(false);
+    expect((await continueItem()).disabled).toBe(false);
 
     // The past session changes hands.
     sessions.set([
@@ -166,12 +173,14 @@ describe('Work view → task → Continue', () => {
     ]);
     await flush();
 
-    await fireEvent.click(screen.getByTestId('work-task-continue'));
+    // The ▾ item reads the access live: it is refused before the click, and
+    // a click sends nothing.
+    const item = await continueItem();
+    expect(item.disabled).toBe(true);
+    expect(item.title).toContain('not shared with you');
+    await fireEvent.click(item);
     await flush();
     expect(calls('resume_work')).toHaveLength(0);
-    expect(screen.getByTestId('work-task-action-error').textContent).toContain(
-      'not shared with you',
-    );
   });
 });
 

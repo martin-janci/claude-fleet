@@ -1,8 +1,8 @@
 /**
  * Tiny localStorage-backed key/value store for global UI prefs.
  *
- * Kept separate from session_ui because these are per-app prefs (sidebar
- * width, last-used filter) not tied to any specific tmux session.
+ * Per-app prefs (sidebar width, last-used filter), not tied to any specific
+ * tmux session.
  */
 
 import { writable } from 'svelte/store';
@@ -78,24 +78,22 @@ export const sessionView = writable<SessionView>(
 );
 sessionView.subscribe((v) => writePref('ui.sessionView', v));
 
-// ─── Layout pref (redesign step 0.3) ─────────────────────────────────────
+// ─── Retired layout pref ─────────────────────────────────────────────────
 
-export type UiLayout = 'classic' | 'new';
-
-const isUiLayout = (v: unknown): v is UiLayout => v === 'classic' || v === 'new';
-
-/**
- * Which shell the app shows: New (the Orbit Fleet redesign) or Classic
- * (0.5.x). Step 7.6 made New the default; Classic stays one switch away in
- * Settings → Appearance for one release, then 13.1 deletes it.
- *
- * The choice lives under `ui.layout.v2`. The old `ui.layout` key was written
- * on every start, so a stored "classic" there is the old default rather than
- * a choice; reading it would keep everyone on Classic. It is dropped.
- */
-export const uiLayout = writable<UiLayout>(readPref<UiLayout>('ui.layout.v2', 'new', isUiLayout));
-uiLayout.subscribe((v) => writePref('ui.layout.v2', v));
+// Step 13.1 removed the Classic layout, and with it the Classic/New switch
+// and the center Details pane. Their keys (`ui.layout`, then `ui.layout.v2`;
+// the pane's collapsed state, and its per-session widths under
+// `cf:session-ui`; the Inbox Classic stood in for) are forgotten once at
+// load.
 clearPref('ui.layout');
+clearPref('ui.layout.v2');
+clearPref('layout.center-collapsed');
+clearPref('sidebar.inbox-before-classic');
+try {
+  if (typeof localStorage !== 'undefined') localStorage.removeItem('cf:session-ui');
+} catch {
+  /* ignore */
+}
 
 // ─── Row density (redesign step 3.6) ─────────────────────────────────────
 

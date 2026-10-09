@@ -71,7 +71,9 @@ export const MAX_RECEIPTS = 3;
 /** Ask where `text` (outbox message `key`) goes; keeps a receipt to show. */
 export async function routeSent(key: string, text: string): Promise<void> {
   const r = await proposeRoute(text);
-  if (!r.ok || r.value.outcome === 'none') return;
+  // `!r.value`: a command answering nothing (an older hub, a test's bare
+  // mock) keeps no receipt rather than throwing out of the send.
+  if (!r.ok || !r.value || r.value.outcome === 'none') return;
   const route = r.value;
   receipts.update((rs) => [...rs.filter((x) => x.key !== key), { key, route, chosen: null, followed: false }].slice(-MAX_RECEIPTS));
 }

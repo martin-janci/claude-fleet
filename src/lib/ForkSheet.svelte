@@ -19,7 +19,6 @@
   import { untrack } from 'svelte';
   import DialogSheet from './DialogSheet.svelte';
   import Loader from './Loader.svelte';
-  import { uiLayout } from './prefs';
   import { rewindConversation, sessions } from './sessions';
   import { moveSession } from './moveSession';
   import { hosts } from './hosts';
@@ -235,7 +234,7 @@
     {/if}
   </label>
 
-  {#if busy && $uiLayout === 'new'}
+  {#if busy}
     <!-- Redesign step 5.13: forking is merging work, so the manual's Liquid
          orbit, inline where the new session will appear. -->
     <div class="merging" data-testid="fork-merging">

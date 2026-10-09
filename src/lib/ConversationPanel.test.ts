@@ -59,7 +59,6 @@ import { hubConnection } from './hub_connection';
 import { invoke } from '@tauri-apps/api/core';
 import type { PickedFile } from './attachments';
 import { outbox } from './outbox';
-import { uiLayout } from './prefs';
 import { toasts, clearToasts } from './toasts';
 
 const REMOTE: HubStatus = {
@@ -135,6 +134,13 @@ function ok(value: Conversation) {
 }
 function err(code: string, message = code) {
   return Promise.resolve({ ok: false as const, error: { code, message } });
+}
+
+/** What the live indicator says: its label, and the pane's own spinner line,
+ *  which "Thinking" carries as its tooltip when nothing runs (5.13). */
+function live(ind: HTMLElement): string {
+  const tip = ind.querySelector('.indicator-label')?.getAttribute('title') ?? '';
+  return `${ind.textContent ?? ''} ${tip}`;
 }
 
 function setVisibility(state: 'visible' | 'hidden') {
@@ -1296,66 +1302,19 @@ describe('ConversationPanel quick actions', () => {
     expect(chip!.className).toContain('btn--warn');
   });
 
-  it('collapses overflowing chips behind More and expands them', async () => {
-    await mount();
-    const row = screen.getByTestId('conv-chips');
-    // jsdom lays nothing out, so state the overflow the way the observer would.
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await tick();
-
-    const more = screen.getByTestId('conv-chips-more');
-    expect(more.getAttribute('aria-expanded')).toBe('false');
-    expect(row.getAttribute('data-expanded')).toBe('false');
-    await fireEvent.click(more);
-    expect(more.getAttribute('aria-expanded')).toBe('true');
-    expect(row.getAttribute('data-expanded')).toBe('true');
-  });
-
-  it('stays expanded on a re-measure while the wrapped chips span two lines', async () => {
-    await mount();
-    const row = screen.getByTestId('conv-chips');
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await tick();
-    await fireEvent.click(screen.getByTestId('conv-chips-more'));
-
-    // Wrapped, nothing clips: scrollWidth equals clientWidth. The old
-    // measurement read that as "fits" and collapsed the row it had just
-    // opened, so More showed nothing.
-    Object.defineProperty(row, 'scrollWidth', { value: 300, configurable: true });
-    const chips = Array.from(row.children) as HTMLElement[];
-    chips.forEach((c, i) => Object.defineProperty(c, 'offsetTop', { value: i === chips.length - 1 ? 30 : 0, configurable: true }));
-    window.dispatchEvent(new Event('resize'));
-    await tick();
-    expect(row.getAttribute('data-expanded')).toBe('true');
-    expect(screen.getByTestId('conv-chips-more').getAttribute('aria-expanded')).toBe('true');
-
-    // Widened until every chip is back on one line: nothing more to show.
-    chips.forEach((c) => Object.defineProperty(c, 'offsetTop', { value: 0, configurable: true }));
-    window.dispatchEvent(new Event('resize'));
-    await tick();
-    expect(screen.queryByTestId('conv-chips-more')).toBeNull();
-    expect(row.getAttribute('data-expanded')).toBe('false');
-  });
-
   it('preserveThread keeps the viewport on the same content when the composer grows', async () => {
+    // Five presets: three chips, the rest under ⋯ (5.9).
+    composerPresets.set(['A', 'B', 'C', 'D', 'E'].map((l) => ({ label: l, text: `do ${l}` })));
     await mount();
-    const row = screen.getByTestId('conv-chips');
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await tick();
+    const expanded = () => screen.queryByTestId('conv-chips-more')?.getAttribute('aria-expanded') === 'true';
 
     const scroller = screen.getByTestId('conv-scroller');
-    // Expanding the chips row (More) is the composer growing: model that by
-    // tying the scroller's measured height to the row's own expanded state,
-    // the way real layout would shrink the scroller underneath it.
+    // Expanding the chips (⋯) is the composer growing: model that by tying
+    // the scroller's measured height to the expanded state, the way real
+    // layout would shrink the scroller underneath it.
     Object.defineProperty(scroller, 'clientHeight', {
       configurable: true,
-      get: () => (row.getAttribute('data-expanded') === 'true' ? 350 : 400),
+      get: () => (expanded() ? 350 : 400),
     });
     Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
     scroller.scrollTop = 500;
@@ -1369,17 +1328,15 @@ describe('ConversationPanel quick actions', () => {
   });
 
   it('preserveThread re-pins the transcript when the reader was already at the bottom', async () => {
+    // Five presets: three chips, the rest under ⋯ (5.9).
+    composerPresets.set(['A', 'B', 'C', 'D', 'E'].map((l) => ({ label: l, text: `do ${l}` })));
     await mount();
-    const row = screen.getByTestId('conv-chips');
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    window.dispatchEvent(new Event('resize'));
-    await tick();
+    const expanded = () => screen.queryByTestId('conv-chips-more')?.getAttribute('aria-expanded') === 'true';
 
     const scroller = screen.getByTestId('conv-scroller');
     Object.defineProperty(scroller, 'clientHeight', {
       configurable: true,
-      get: () => (row.getAttribute('data-expanded') === 'true' ? 350 : 400),
+      get: () => (expanded() ? 350 : 400),
     });
     Object.defineProperty(scroller, 'scrollHeight', { value: 2000, configurable: true });
     // Pinned: composing at the bottom, which is where an attachment strip
@@ -1395,21 +1352,6 @@ describe('ConversationPanel quick actions', () => {
     expect(scroller.scrollTop).toBe(2000);
   });
 
-  it('re-measures when the preset list changes, not just on resize', async () => {
-    await mount();
-    const row = screen.getByTestId('conv-chips');
-    // The row's own border-box need not change when the preset count does,
-    // so a plain ResizeObserver on it can miss this — state the overflow
-    // the way real layout would, then change the list with no resize event.
-    Object.defineProperty(row, 'scrollWidth', { value: 500, configurable: true });
-    Object.defineProperty(row, 'clientWidth', { value: 300, configurable: true });
-    expect(screen.queryByTestId('conv-chips-more')).toBeNull();
-
-    composerPresets.set([{ label: 'Clear', text: '/clear' }, { label: 'Tests', text: 'run the tests' }]);
-    await tick();
-
-    expect(screen.getByTestId('conv-chips-more')).toBeTruthy();
-  });
 });
 
 describe('ConversationPanel live indicator', () => {
@@ -1437,7 +1379,7 @@ describe('ConversationPanel live indicator', () => {
     expect(ind.getAttribute('data-kind')).toBe('working');
     expect(mockedAct).toHaveBeenCalledTimes(1);
     expect(mockedAct).toHaveBeenCalledWith(1);
-    expect(ind.textContent).toContain('Cooking… 3s');
+    expect(live(ind)).toContain('Cooking… 3s');
     vi.advanceTimersByTime(ACTIVITY_POLL_MS);
     await settle();
     expect(mockedAct).toHaveBeenCalledTimes(2);
@@ -1447,46 +1389,35 @@ describe('ConversationPanel live indicator', () => {
   // what the agent is doing, in words.
   it('new layout: a running Read shows the Atom and "Thinking · reading <path>"', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    uiLayout.set('new');
-    try {
-      const running = conv();
-      running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
-      mockedConv.mockReturnValue(ok(running));
-      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
-      render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
-      await settle();
-      const ind = screen.getByTestId('conv-indicator');
-      expect(ind.textContent).toMatch(/^\s*Thinking · reading hub\/pair\.rs/);
-      expect(ind.querySelector('[data-testid="conv-atom"], [data-testid="conv-atom-pending"]')).not.toBeNull();
-    } finally {
-      uiLayout.set('classic');
-    }
+    const running = conv();
+    running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
+    mockedConv.mockReturnValue(ok(running));
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
+    await settle();
+    const ind = screen.getByTestId('conv-indicator');
+    expect(ind.textContent).toMatch(/^\s*Thinking · reading hub\/pair\.rs/);
+    expect(ind.querySelector('[data-testid="conv-atom"], [data-testid="conv-atom-pending"]')).not.toBeNull();
   });
 
   // Step 9.13: Control's chat answers its own loader and line.
-  it('new layout: thinkingAs replaces the Atom line with the host’s loader and words', async () => {
+  it('thinkingAs replaces the Atom line with the host’s loader and words', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-    uiLayout.set('new');
-    try {
-      const running = conv();
-      running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
-      mockedConv.mockReturnValue(ok(running));
-      mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
-      const thinkingAs = vi.fn(() => ({ loader: 'constellation' as const, label: 'Planning · sent work to 2 sessions' }));
-      render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true, thinkingAs });
-      await settle();
-      const ind = screen.getByTestId('conv-indicator');
-      expect(ind.textContent?.trim()).toBe('Planning · sent work to 2 sessions');
-      expect(ind.querySelector('[data-testid^="conv-constellation"]')).not.toBeNull();
-      expect(ind.querySelector('[data-testid^="conv-atom"]')).toBeNull();
-      expect(thinkingAs).toHaveBeenCalledWith(expect.objectContaining({ turns: expect.any(Array) }));
-    } finally {
-      uiLayout.set('classic');
-    }
+    const running = conv();
+    running.turns[0].items.push(tool('Read(hub/pair.rs)', { name: 'Read', target: 'hub/pair.rs', done: false }));
+    mockedConv.mockReturnValue(ok(running));
+    mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'working' }) });
+    const thinkingAs = vi.fn(() => ({ loader: 'constellation' as const, label: 'Planning · sent work to 2 sessions' }));
+    render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true, thinkingAs });
+    await settle();
+    const ind = screen.getByTestId('conv-indicator');
+    expect(ind.textContent?.trim()).toBe('Planning · sent work to 2 sessions');
+    expect(ind.querySelector('[data-testid^="conv-constellation"]')).not.toBeNull();
+    expect(ind.querySelector('[data-testid^="conv-atom"]')).toBeNull();
+    expect(thinkingAs).toHaveBeenCalledWith(expect.objectContaining({ turns: expect.any(Array) }));
   });
 
   it('new layout: a session this window just started shows the Pulse until its agent is up', async () => {
-    uiLayout.set('new');
     try {
       const row = session({ id: 41, tmux_name: 'pd-3011', host_alias: 'mercury', claude_session_id: null, claude_status: null });
       sessions.set([row]);
@@ -1502,7 +1433,6 @@ describe('ConversationPanel live indicator', () => {
       await settle();
       expect(screen.queryByTestId('conv-starting')).toBeNull();
     } finally {
-      uiLayout.set('classic');
       startedIds.set(new Set());
     }
   });
@@ -1667,14 +1597,12 @@ describe('ConversationPanel live indicator', () => {
   describe('the one approval card (redesign 5.9, New layout)', () => {
     const PUSH = { ...DIALOG, detail: 'Bash(git push -u origin main)' };
     afterEach(() => {
-      uiLayout.set('classic');
       sessions.set([]);
       clearToasts();
     });
 
     it('card and agent tab stay in step: the card shows what the pane shows, whichever side answers', async () => {
       vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-      uiLayout.set('new');
       mockedConv.mockReturnValue(ok(conv()));
       const blocked = { ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) };
       mockedAct.mockResolvedValue(blocked);
@@ -1712,7 +1640,6 @@ describe('ConversationPanel live indicator', () => {
     });
 
     it('after Approve, focus moves to the next session that needs you, with Undo back', async () => {
-      uiLayout.set('new');
       const here = session({ claude_status: 'blocked', pending_input: PUSH });
       const next = session({ id: 2, tmux_name: 'other', friendly_name: 'Fix the flake', claude_status: 'blocked', pending_input: DIALOG });
       sessions.set([here, next]);
@@ -1732,23 +1659,20 @@ describe('ConversationPanel live indicator', () => {
       expect(selectSessionExplicitlySpy).toHaveBeenLastCalledWith(expect.objectContaining({ id: 1 }));
     });
 
-    it('stays put when nothing else needs you, and in Classic', async () => {
+    it('stays put when nothing else needs you', async () => {
       const here = session({ claude_status: 'blocked', pending_input: PUSH });
-      sessions.set([here, session({ id: 2, tmux_name: 'other', claude_status: 'blocked', pending_input: DIALOG })]);
+      sessions.set([here]);
       mockedConv.mockReturnValue(ok(conv()));
       mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
       mockedSend.mockResolvedValue({ ok: true, value: undefined });
-      // Classic: the old card, and no move.
       render(ConversationPanel, { session: here, visible: true });
       await settle();
-      expect(screen.getByTestId('answer-card').getAttribute('data-layout')).toBeNull();
       await fireEvent.click(screen.getAllByTestId('answer-option')[0]);
       await settle();
       expect(selectSessionExplicitlySpy).not.toHaveBeenCalled();
     });
 
     it('"Answer in your own words…" dismisses the dialog, then hands the composer the keyboard', async () => {
-      uiLayout.set('new');
       mockedConv.mockReturnValue(ok(conv()));
       mockedAct.mockResolvedValue({ ok: true, value: probe({ claude_status: 'blocked', waiting_for: 'permission', pending_input: PUSH }) });
       mockedSend.mockResolvedValue({ ok: true, value: undefined });
@@ -1763,10 +1687,7 @@ describe('ConversationPanel live indicator', () => {
   });
 
   describe('quick prompts in the New layout (redesign 5.9)', () => {
-    afterEach(() => uiLayout.set('classic'));
-
     it('shows three chips and puts the rest under ⋯, every one still reachable', async () => {
-      uiLayout.set('new');
       composerPresets.set(['A', 'B', 'C', 'D', 'E'].map((l) => ({ label: l, text: `do ${l}` })));
       mockedConv.mockReturnValue(ok(conv()));
       render(ConversationPanel, { session: session(), visible: true });
@@ -1785,10 +1706,8 @@ describe('ConversationPanel live indicator', () => {
       { prompt: 'new', at: '2026-09-13T11:00:00.000Z', ended_at: '2026-09-13T11:01:00.000Z', items: [] },
     ];
     const seen = Date.parse('2026-09-13T10:30:00.000Z') / 1000;
-    afterEach(() => uiLayout.set('classic'));
 
     it('sits above the first turn after the person last looked, and stays put for the visit', async () => {
-      uiLayout.set('new');
       mockedConv.mockReturnValue(ok(conv({ turns })));
       const { rerender } = render(ConversationPanel, { session: session({ last_viewed_at: seen }), visible: true });
       await settle();
@@ -1801,13 +1720,6 @@ describe('ConversationPanel live indicator', () => {
       expect(screen.getAllByTestId('conv-new-divider')).toHaveLength(1);
     });
 
-    it('is absent in Classic', async () => {
-      mockedConv.mockReturnValue(ok(conv({ turns })));
-      render(ConversationPanel, { session: session({ last_viewed_at: seen }), visible: true });
-      await settle();
-      await settle();
-      expect(screen.queryByTestId('conv-new-divider')).toBeNull();
-    });
   });
 
   it('a stuck row shows no indicator (the composer note covers it)', async () => {
@@ -1946,7 +1858,7 @@ describe('ConversationPanel activity probe against a hub that lacks the tool', (
     vi.advanceTimersByTime(ACTIVITY_POLL_MS);
     await settle();
     expect(mockedAct).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
   });
 
   it('re-learns on a session switch, so an upgraded hub needs no app restart', async () => {
@@ -2296,10 +2208,10 @@ describe('ConversationPanel review-round fixes', () => {
     mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (3s)' } });
     const { rerender } = render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
     await rerender({ session: session({ claude_status: 'working', turn_seq: 1, context_pct: 55 }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
     await rerender({ session: session({ claude_status: 'idle', turn_seq: 1, context_pct: 55 }), visible: true });
     await settle();
     expect(screen.queryByTestId('conv-indicator')).toBeNull();
@@ -2347,7 +2259,7 @@ describe('ConversationPanel second review-round fixes', () => {
     mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (9s)' } });
     vi.advanceTimersByTime(PROBE_TTL_MS);
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 9s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 9s');
     expect(mockedAct.mock.calls.length).toBeGreaterThan(calls);
   });
 
@@ -2952,7 +2864,7 @@ describe('ConversationPanel final phase-2 review fixes', () => {
     mockedAct.mockResolvedValue({ ok: true, value: { claude_status: 'working', current_activity: null, stuck_kind: null, waiting_for: null, spinner: 'Cooking… (3s)' } });
     render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
     await fireEvent.click(screen.getByTestId('conv-switcher'));
     await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
     await settle();
@@ -2960,7 +2872,7 @@ describe('ConversationPanel final phase-2 review fixes', () => {
     mockedAct.mockReturnValue(new Promise(() => {}));
     await fireEvent.click(screen.getByTestId('conv-back-current'));
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).not.toContain('Cooking');
+    expect(live(screen.getByTestId('conv-indicator'))).not.toContain('Cooking');
   });
 
   it('an inline event carries a machine-readable time', async () => {
@@ -3082,8 +2994,8 @@ describe('ConversationPanel detail UX', () => {
     render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
     await settle();
     const ind = screen.getByTestId('conv-indicator');
-    expect(ind.textContent).toContain('Run cargo test');
-    expect(ind.textContent).toMatch(/Run cargo test · \d+s/);
+    expect(ind.textContent).toContain('Thinking · running cargo test');
+    expect(ind.textContent).toMatch(/running cargo test · \d+s/);
   });
 
   it('the running timer ticks every second while something runs', async () => {
@@ -3102,10 +3014,10 @@ describe('ConversationPanel detail UX', () => {
     mockedConv.mockReturnValue(ok(running));
     render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test · 5s');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('running cargo test · 5s');
     vi.advanceTimersByTime(1_000);
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test · 6s');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('running cargo test · 6s');
     expect(screen.getByTestId('conv-tool').textContent).toContain('running 6s');
   });
 
@@ -3117,7 +3029,7 @@ describe('ConversationPanel detail UX', () => {
     render(ConversationPanel, { session: session({ claude_status: 'working', turn_seq: 1 }), visible: true });
     await settle();
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Cooking… 3s');
+    expect(live(screen.getByTestId('conv-indicator'))).toContain('Cooking… 3s');
   });
 });
 
@@ -3844,13 +3756,13 @@ describe('ConversationPanel detail UX fixes', () => {
     mockedList.mockReturnValue(listOk([summary({ id: 2, claude_session_id: 'sess-abc', current: true }), summary({ id: 1, claude_session_id: 'aaa' })]));
     render(ConversationPanel, { session: session({ claude_status: 'working' }), visible: true });
     await settle();
-    expect(screen.getByTestId('conv-indicator').textContent).toContain('Run cargo test');
+    expect(screen.getByTestId('conv-indicator').textContent).toContain('running cargo test');
     // The earlier conversation also ends in an unfinished call.
     await fireEvent.click(screen.getByTestId('conv-switcher'));
     await fireEvent.click(screen.getAllByTestId('conv-switcher-item').find((li) => li.getAttribute('data-current') === 'false')!);
     await settle();
     expect(screen.queryByTestId('conv-indicator')).toBeNull();
-    expect(document.body.textContent).not.toMatch(/Run cargo test ·/);
+    expect(document.body.textContent).not.toMatch(/running cargo test ·/);
     expect(screen.getByTestId('conv-tool').textContent).toContain('no result');
   });
 

@@ -17,7 +17,6 @@
   import ActiveFilters from './ActiveFilters.svelte';
   import FiltersSection from './FiltersSection.svelte';
   import { WORK_GROUPS, type WorkGroupChoice } from './filter_schema';
-  import { uiLayout } from './prefs';
   import FilterChipGroup from './FilterChipGroup.svelte';
   import { withoutWorkFacet, workFacets, type WorkFacetId } from './filter_facets';
   import {
@@ -135,11 +134,10 @@
     }),
   );
   // The strip and the badge carry what the panel holds; search and the two
-  // toggles show their state on screen already. In the New layout (step
+  // toggles show their state on screen already. (step
   // 3.7) the toggles are in the panel, so they join the strip.
-  const newLayout = $derived($uiLayout === 'new');
   const stripFacets = $derived(
-    facets.filter((x) => x.id !== 'query' && (newLayout || (x.id !== 'mine' && x.id !== 'review'))),
+    facets.filter((x) => x.id !== 'query'),
   );
   const panelCount = $derived(stripFacets.length);
   let panelOpen = $state(false);
@@ -472,9 +470,8 @@
 {/snippet}
 
 <div class="work-filters" data-testid="work-filters">
-  {#if newLayout}
-    <!-- The New layout (step 3.7): the Sessions list's Filters section, one
-         row while closed; saved views and the two toggles join the panel. -->
+    <!-- Step 3.7: the Sessions list's Filters section, one row while
+         closed; saved views and the two toggles join the panel. -->
     <FiltersSection
       {search}
       onsearch={onSearch}
@@ -498,9 +495,6 @@
       bind:filtersBtn
       panel={newPanel}
     />
-  {:else}
-  {@render viewsBlock()}
-  {/if}
   {#if notice}
     <p class="notice" role="status" data-testid="work-view-notice">
       {#if typeof notice === 'string'}{notice}{:else}<WorkConflictNotice notice={notice} onreload={() => void loadViews()} />{/if}
@@ -509,34 +503,6 @@
     <p class="notice muted" data-testid="work-views-error">Saved views: {viewsError}</p>
   {/if}
 
-  {#if !newLayout}
-  <div class="row">
-    <input
-      class="search"
-      type="search"
-      placeholder="Search key or title…"
-      aria-label="Search tasks"
-      data-testid="work-search"
-      value={search}
-      oninput={(e) => onSearch((e.currentTarget as HTMLInputElement).value)}
-    />
-    <button
-      class="btn btn--quiet is-bounded filters-btn"
-      class:has-active={panelCount > 0}
-      type="button"
-      data-testid="work-filters-open"
-      bind:this={filtersBtn}
-      aria-expanded={panelOpen}
-      aria-controls="work-filter-panel"
-      aria-label={panelCount > 0 ? `Filters, ${panelCount} active` : 'Filters'}
-      title="Filter by organisation, tracker, status and sessions"
-      onclick={() => (panelOpen = !panelOpen)}
-    >
-      <span aria-hidden="true">⏷</span> Filters{#if panelCount > 0}<span class="badge">{panelCount}</span>{/if}
-    </button>
-  </div>
-  <div class="row toggles">{@render toggleChips()}</div>
-  {/if}
 
   <ActiveFilters
     facets={stripFacets}
@@ -547,26 +513,6 @@
     emptyFocus={() => filtersBtn}
   />
 
-  {#if panelOpen && !newLayout}
-    <div class="panel" id="work-filter-panel" role="group" aria-label="Work filters" data-testid="work-filter-panel">
-      <section data-testid="work-filter-org">{@render orgChips()}</section>
-      <section data-testid="work-filter-tracker">{@render trackerChips()}</section>
-      <section data-testid="work-filter-status">{@render statusChips()}</section>
-      {#if columnChips.length > 0}<section data-testid="work-filter-column">{@render columnChipGroup()}</section>{/if}
-      {#if peopleChips.length > 0}<section data-testid="work-filter-assignee">{@render assigneeChipGroup()}</section>{/if}
-      <section data-testid="work-filter-has">{@render hasChips()}</section>
-      <section>{@render archivedSwitch()}</section>
-      <div class="panel-foot">
-        {#if panelCount > 0}
-          <button type="button" class="btn btn--quiet" data-testid="work-filter-panel-clear" onclick={clearAll}>Clear all</button>
-        {/if}
-        <span class="spacer"></span>
-        <button type="button" class="btn btn--quiet is-bounded" data-testid="work-filters-done" onclick={() => (panelOpen = false)}
-          >Done</button
-        >
-      </div>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -590,9 +536,6 @@
   .toggles {
     flex-wrap: wrap;
   }
-  .spacer {
-    flex: 1;
-  }
   .view-select {
     flex: 1 1 8rem;
     min-width: 0;
@@ -607,54 +550,9 @@
     background: var(--bg);
     color: var(--fg);
   }
-  .search,
   .name-row input {
     flex: 1 1 auto;
     min-width: 0;
-  }
-  .search::placeholder {
-    color: var(--fg-muted);
-  }
-  .filters-btn {
-    height: var(--control-h-lg);
-    gap: 4px;
-  }
-  .filters-btn.has-active {
-    border-color: var(--accent);
-    color: var(--control-fg);
-  }
-  .badge {
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
-    border-radius: var(--radius-pill);
-    background: var(--accent);
-    color: var(--accent-fg);
-    font-size: var(--control-font-sm);
-    line-height: 16px;
-    font-weight: 600;
-  }
-  .panel {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-height: 50vh;
-    overflow-y: auto;
-    padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--bg);
-  }
-  .panel section + section {
-    border-top: 1px solid var(--border);
-    padding-top: 8px;
-  }
-  .panel-foot {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    border-top: 1px solid var(--border);
-    padding-top: 6px;
   }
   .notice {
     margin: 0;

@@ -17,7 +17,6 @@ import TerminalPopout from './TerminalPopout.svelte';
 import { sessions, resetTombstonesForTests, type SessionRow } from './sessions';
 import { clearSelection } from './selection';
 import { readPref } from './prefs';
-import { uiLayout } from './prefs';
 
 const row = {
   id: 1, tmux_name: 'api', host_alias: 'alpha', project_id: null, worktree_id: null, created_at: 1,
@@ -71,12 +70,10 @@ beforeEach(() => {
 
 afterEach(() => {
   clearSelection();
-  uiLayout.set('classic');
 });
 
 describe('pop-out terminal window (step 5.4)', () => {
   it('attaches its shell under the window label, with no strip and no microphone', async () => {
-    uiLayout.set('new');
     render(TerminalPopout, { popout: { label: 'term-1-sh2', sessionId: 1, shell: 2 } });
     await settle();
     const opens = calls('pty_open').map((c) => args(c));

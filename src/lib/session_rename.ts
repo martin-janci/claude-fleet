@@ -1,6 +1,5 @@
 import { get } from 'svelte/store';
 import { renameSession, setFriendlyName, type SessionRow } from './sessions';
-import { migrateSessionUi } from './session_ui';
 import { pushError } from './toasts';
 import type { IpcError } from './result';
 import { hubStatus, hubActionBlocked } from './hub';
@@ -18,7 +17,7 @@ export type RenameOutcome =
  * The backend half of an inline rename, shared by the sidebar row and the
  * details header. `label` sets (or, when empty, clears) the display name;
  * `tmux` renames the tmux session, which gives the row a new identity on
- * the backend — persisted UI state keyed by the old name is migrated along.
+ * the backend.
  * The value is compared against `target` so an unchanged submit is a no-op,
  * and a failure is already toasted when this returns.
  */
@@ -104,7 +103,6 @@ export async function applySessionRename(
     pushError(r.error, 'Rename failed');
     return { kind: 'error', error: r.error };
   }
-  migrateSessionUi(r.value.host_alias, target.tmux_name, r.value.tmux_name);
   return { kind: 'ok', row: r.value };
 }
 

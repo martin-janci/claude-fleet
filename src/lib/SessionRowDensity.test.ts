@@ -7,7 +7,7 @@ import { session } from './hosts_fixture';
 import { hubStatus, STANDALONE } from './hub';
 import { resetAccessForTests } from './access';
 import { showRowDetails, type SessionRow } from './sessions';
-import { COMPACT_ROW_PX, uiDensity, uiLayout } from './prefs';
+import { COMPACT_ROW_PX, uiDensity } from './prefs';
 import { accounts } from './accounts';
 import { ADMIN, fleetAccounts } from './hosts_fixture';
 
@@ -139,11 +139,9 @@ describe('row density (redesign step 3.6)', () => {
 // badge on a Comfortable row and adds the account pill (redesign step 4.3).
 describe('row density in the New layout', () => {
   beforeEach(() => {
-    uiLayout.set('new');
     accounts.set(fleetAccounts());
   });
   afterEach(() => {
-    uiLayout.set('classic');
     accounts.set([]);
   });
 

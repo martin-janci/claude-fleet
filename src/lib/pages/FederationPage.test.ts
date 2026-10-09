@@ -15,7 +15,6 @@ import { bundle } from './testing';
 import type { Page } from './pages';
 import { SETTINGS_TREE } from '../settings_tree';
 import { expectAccessible } from '../a11y_check';
-import { uiLayout } from '../prefs';
 
 const invoke = mockedInvoke as ReturnType<typeof vi.fn>;
 const page = bundle.pages.find((p) => p.id === 'settings.federation') as Page;
@@ -172,14 +171,9 @@ describe('Settings → Federation: loaders (11.12)', () => {
 
 describe('Settings → Federation: accessibility', () => {
   it('the list and a linked hub’s detail, in the New layout, is accessible', async () => {
-    uiLayout.set('new');
-    try {
-      const { container } = render(ResourcePage, { props: { page, resource } });
-      await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
-      await screen.findByTestId('value-latency');
-      await expectAccessible(container);
-    } finally {
-      uiLayout.set('classic');
-    }
+    const { container } = render(ResourcePage, { props: { page, resource } });
+    await fireEvent.click((await screen.findAllByTestId('resource-row'))[0]);
+    await screen.findByTestId('value-latency');
+    await expectAccessible(container);
   });
 });

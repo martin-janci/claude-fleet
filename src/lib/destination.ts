@@ -9,14 +9,12 @@
 // TerminalView underneath stays mounted whatever the destination, so a PTY
 // survives any round trip.
 //
-// Classic reads this store with no visible change; the New layout's rail
-// (step 3.2, `AppRail.svelte`) writes the same store. `accounts` (step 4.1)
-// is reachable only from the rail, so only in the New layout. `details`
-// (step 3.5) is the New layout's Details tab: the session's details in the
-// right column, in place of the inspector beside it. `control` (step 9.1)
-// is the New layout's Control: the fleet agent and Today (`control.ts`).
-// `automation` (step 8.4) is the New layout's Automation: routines, runs
-// and the built-in agents (`automation.ts`).
+// The rail (step 3.2, `AppRail.svelte`) writes this store. `accounts` (step
+// 4.1) is reachable from the rail. `details` (step 3.5) is the Details tab:
+// the session's details in the right column, in place of the inspector
+// beside it. `control` (step 9.1) is Control: the fleet agent and Today
+// (`control.ts`). `automation` (step 8.4) is Automation: routines, runs and
+// the built-in agents (`automation.ts`).
 import { derived, writable, type Readable } from 'svelte/store';
 
 export type Destination =

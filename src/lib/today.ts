@@ -9,7 +9,6 @@
  * screen (a scope chosen with ⌘⇧O applies to both).
  */
 
-import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { SessionRow } from './sessions';
 import { ALL_SCOPES, type ScopeId } from './orgs';
@@ -80,9 +79,6 @@ export function localMidnight(nowMs: number = Date.now()): number {
 export function loadToday(since: number = localMidnight()): Promise<Result<Today>> {
   return invokeCmd<Today>('work_today', { args: { since } });
 }
-
-/** Whether the Today view covers Details (⌘⇧T); it is also the empty state. */
-export const todayOpen = writable(false);
 
 /** The hub's rule (`today.rs`), re-applied after scoping drops sessions. */
 export function bucketOf(sessions: readonly TodaySession[]): TodayBucket {

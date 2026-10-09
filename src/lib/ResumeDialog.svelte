@@ -14,7 +14,6 @@
   import { spliceSummary } from './resume_brief';
   import { hubActionBlocked, hubStatus } from './hub';
   import { hubConnection } from './hub_connection';
-  import { uiLayout } from './prefs';
   import { sessions } from './sessions';
   import { sessionIdBlocked } from './share';
   import { selectSessionExplicitly } from './selection';
@@ -60,7 +59,7 @@
   let briefLoading = $state(false);
   let busy = $state(false);
 
-  // "What changed" (redesign step 5.12, new layout): the past session's
+  // "What changed" (redesign step 5.12): the past session's
   // summary, written on its own host by `summarize_past_work`, shown as a
   // draft. The next brief includes it, so a brief already built is rebuilt.
   let changed = $state('');
@@ -310,7 +309,7 @@
       {/if}
     {/if}
 
-    {#if $uiLayout === 'new' && live.length === 0 && (plan.link_id ?? linkId) != null}
+    {#if live.length === 0 && (plan.link_id ?? linkId) != null}
       <div class="changed" data-testid="resume-changed">
         {#if changed.trim() !== '' || changedBusy}
           <DraftField

@@ -4,7 +4,6 @@ import { attentionFacts, attentionFactsFrom, blockedLine } from './attention_fac
 import { classify } from './attention';
 import { hosts } from './hosts';
 import { accountUsage } from './account_usage_store';
-import { uiLayout } from './prefs';
 import { host, session, snapshot } from './hosts_fixture';
 import type { UsageStatus } from './account_usage_store';
 
@@ -20,7 +19,6 @@ const usage = (uuid: string, status: UsageStatus, five: number, week: number, re
   });
 
 afterEach(() => {
-  uiLayout.set('classic');
   hosts.set([]);
   accountUsage.set({});
 });
@@ -77,11 +75,9 @@ describe('attentionFactsFrom (mirrors attention::Facts::from_fleet)', () => {
     expect(f.limited_accounts).toEqual({ late: { window: 'five_hour', resets_at: 3000 } });
   });
 
-  it('is the New layout only', () => {
+  it('follows the hosts store', () => {
     hosts.set([host('down', { reachable: false, last_pinged_at: 1 })]);
-    expect(get(attentionFacts)).toBeUndefined();
-    uiLayout.set('new');
-    expect(get(attentionFacts)?.down_hosts).toEqual(['down']);
+    expect(get(attentionFacts).down_hosts).toEqual(['down']);
   });
 });
 

@@ -339,8 +339,6 @@ describe('ResumeDialog', () => {
 // on its own host and shown as a draft; the brief is rebuilt to include it.
 describe('ResumeDialog: What changed (new layout)', () => {
   it('drafts the summary, says where it came from, and Clear empties it', async () => {
-    const { uiLayout } = await import('./prefs');
-    uiLayout.set('new');
     let briefs = 0;
     vi.mocked(invoke).mockImplementation(async (cmd: string, a?: unknown) => {
       const args = (a as { args: { with_brief?: boolean } }).args;
@@ -361,33 +359,27 @@ describe('ResumeDialog: What changed (new layout)', () => {
         };
       return null;
     });
-    try {
-      render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
-      await settle();
-      expect(briefs).toBe(1);
-      await fireEvent.click(screen.getByTestId('resume-changed-run'));
-      await settle();
-      expect(invoke).toHaveBeenCalledWith('summarize_past_work', { args: { key: 'ABC-1', link_id: 5 } });
-      const input = screen.getByTestId('resume-changed-draft-input') as HTMLTextAreaElement;
-      expect(input.value).toBe('Fixed the login redirect; tests still red.');
-      expect(screen.getByTestId('resume-changed-draft-meta')).toHaveTextContent(
-        'by haiku on h · from its last conversation',
-      );
-      expect(briefs).toBe(2);
-      expect((screen.getByTestId('resume-brief') as HTMLTextAreaElement).value).toBe('brief 2');
-      await fireEvent.click(screen.getByTestId('resume-changed-draft-clear'));
-      await settle();
-      expect(screen.getByTestId('resume-changed-run')).toBeInTheDocument();
-    } finally {
-      uiLayout.set('classic');
-    }
+    render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
+    await settle();
+    expect(briefs).toBe(1);
+    await fireEvent.click(screen.getByTestId('resume-changed-run'));
+    await settle();
+    expect(invoke).toHaveBeenCalledWith('summarize_past_work', { args: { key: 'ABC-1', link_id: 5 } });
+    const input = screen.getByTestId('resume-changed-draft-input') as HTMLTextAreaElement;
+    expect(input.value).toBe('Fixed the login redirect; tests still red.');
+    expect(screen.getByTestId('resume-changed-draft-meta')).toHaveTextContent(
+      'by haiku on h · from its last conversation',
+    );
+    expect(briefs).toBe(2);
+    expect((screen.getByTestId('resume-brief') as HTMLTextAreaElement).value).toBe('brief 2');
+    await fireEvent.click(screen.getByTestId('resume-changed-draft-clear'));
+    await settle();
+    expect(screen.getByTestId('resume-changed-run')).toBeInTheDocument();
   });
 
   // Review r15 F22: the field is the person's, and the brief follows it.
   it('an edit to What changed reaches the brief, and Clear takes it out', async () => {
-    const { uiLayout } = await import('./prefs');
     const { SUMMARY_HEADER } = await import('./resume_brief');
-    uiLayout.set('new');
     const summary = 'Fixed the login redirect; tests still red.';
     let summarized = false;
     const built = () =>
@@ -401,29 +393,19 @@ describe('ResumeDialog: What changed (new layout)', () => {
       }
       return null;
     });
-    try {
-      render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
-      await settle();
-      await fireEvent.click(screen.getByTestId('resume-changed-run'));
-      await settle();
-      const field = screen.getByTestId('resume-changed-draft-input') as HTMLTextAreaElement;
-      await fireEvent.input(field, { target: { value: 'Tests are green now.' } });
-      await settle();
-      const briefBox = () => (screen.getByTestId('resume-brief') as HTMLTextAreaElement).value;
-      expect(briefBox()).toBe(['# Handover', `${SUMMARY_HEADER} (now):`, 'Tests are green now.', 'Title: Fix login'].join('\n'));
-      await fireEvent.click(screen.getByTestId('resume-changed-draft-clear'));
-      await settle();
-      expect(briefBox()).toBe(['# Handover', 'Title: Fix login'].join('\n'));
-      expect(screen.queryByTestId('resume-changed-stale')).toBeNull();
-    } finally {
-      uiLayout.set('classic');
-    }
-  });
-
-  it('the classic layout has no What changed', async () => {
-    vi.mocked(invoke).mockImplementation(async (cmd: string) => (cmd === 'work_resume_plan' ? plan() : null));
     render(ResumeDialog, { props: { workKey: 'ABC-1', onclose: () => {} } });
     await settle();
-    expect(screen.queryByTestId('resume-changed')).toBeNull();
+    await fireEvent.click(screen.getByTestId('resume-changed-run'));
+    await settle();
+    const field = screen.getByTestId('resume-changed-draft-input') as HTMLTextAreaElement;
+    await fireEvent.input(field, { target: { value: 'Tests are green now.' } });
+    await settle();
+    const briefBox = () => (screen.getByTestId('resume-brief') as HTMLTextAreaElement).value;
+    expect(briefBox()).toBe(['# Handover', `${SUMMARY_HEADER} (now):`, 'Tests are green now.', 'Title: Fix login'].join('\n'));
+    await fireEvent.click(screen.getByTestId('resume-changed-draft-clear'));
+    await settle();
+    expect(briefBox()).toBe(['# Handover', 'Title: Fix login'].join('\n'));
+    expect(screen.queryByTestId('resume-changed-stale')).toBeNull();
   });
+
 });

@@ -1,8 +1,7 @@
 <!--
-  The New layout's first run (Orbit Fleet redesign step 10.5): the tour,
-  which starts once by itself after the welcome and the startup loads, and
-  the Get started checklist in the corner until it is hidden. App mounts it
-  under the New layout only; Classic keeps the sidebar's onboarding card.
+  The first run (Orbit Fleet redesign step 10.5): the tour, which starts
+  once by itself after the welcome and the startup loads, and the Get
+  started checklist in the corner until it is hidden. Sidebar mounts it.
 -->
 <script lang="ts">
   import Tour from './Tour.svelte';

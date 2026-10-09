@@ -3,7 +3,7 @@
 // page binds and unbinds devices. Every change runs a command that routes to
 // the hub's `org_admin`.
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 
@@ -14,7 +14,6 @@ import { orgs, type OrgDetail } from '../orgs';
 import { devices, qrRects, type DeviceSummary } from '../devices';
 import { catalogStatuses } from '../assets_workspace';
 import { toasts } from '../toasts';
-import { uiLayout } from '../prefs';
 import { bundle } from './testing';
 import type { Page } from './pages';
 
@@ -85,24 +84,6 @@ describe('Settings → Devices', () => {
     expect(within(other).getAllByTestId('resource-badge').map((b) => b.textContent)).toEqual(['Read-only']);
   });
 
-  it('pairs a device and shows the code, its link and the QR', async () => {
-    show();
-    await fireEvent.click(await screen.findByTestId('resource-add'));
-    await fireEvent.input(screen.getByTestId('param-device.pair-device'), { target: { value: 'new-phone' } });
-    await fireEvent.click(screen.getByTestId('run-device.pair'));
-    await waitFor(() => expect(screen.getByTestId('pairing-result')).toBeTruthy());
-    // The mode is preselected (Full); an empty org and person are sent as null.
-    expect(argsOf('pair_device')).toEqual({ device: 'new-phone', mode: 'full', org: null, person: null });
-    expect(screen.getByTestId('pairing-url').textContent).toBe(PAIRING.url);
-    expect(screen.getByTestId('pairing-code').textContent).toBe('abc123');
-    // 11.12: a Halo round the code while it waits for the device.
-    expect(screen.getByTestId('pairing-halo').querySelector('[data-loader="halo"]')).toBeTruthy();
-    expect(screen.getByTestId('pairing-left').textContent).toBe('10:00');
-    expect(screen.getByTestId('pairing-qr').querySelectorAll('rect').length).toBe(1 + qrRects(PAIRING.qr).length);
-    await fireEvent.click(screen.getByTestId('pairing-close'));
-    expect(screen.queryByTestId('pairing-result')).toBeNull();
-  });
-
   it('binds to an org picked from the orgs, and grants and takes back a catalog', async () => {
     show();
     await fireEvent.click((await screen.findAllByTestId('resource-row'))[1]);
@@ -160,16 +141,14 @@ describe('Settings → Devices: rename and mode (11.3)', () => {
   });
 });
 
-describe('Settings → Devices, New layout: Pair a device is a wizard (10.12)', () => {
+describe('Settings → Devices: Pair a device is a wizard (10.12)', () => {
   const show = () => render(ResourcePage, { props: { page: pageOf('settings.devices'), resource: resourceOf('device') } });
-  beforeEach(() => uiLayout.set('new'));
-  afterEach(() => uiLayout.set('classic'));
 
   it('opens the pair_device wizard, offers the orgs, and shows the code it mints', async () => {
     show();
     await fireEvent.click(screen.getByTestId('resource-add'));
     expect(screen.getByTestId('wizard-pair_device')).toBeInTheDocument();
-    // The inline create form is the Classic layout's.
+    // Not the inline create form.
     expect(screen.queryByTestId('resource-create')).toBeNull();
     expect(screen.getByTestId('form-field-org-1').textContent).toContain('Acme');
     await fireEvent.input(screen.getByTestId('form-field-device'), { target: { value: 'new-phone' } });
@@ -178,7 +157,13 @@ describe('Settings → Devices, New layout: Pair a device is a wizard (10.12)', 
     await waitFor(() => expect(argsOf('pair_device')).toEqual({ device: 'new-phone', mode: 'full', org_id: 1, person: null }));
     await waitFor(() => expect(screen.queryByTestId('wizard-pair_device')).toBeNull());
     expect(screen.getByTestId('pairing-code').textContent).toBe('abc123');
-    expect(screen.getByTestId('pairing-halo')).toBeInTheDocument();
+    expect(screen.getByTestId('pairing-url').textContent).toBe(PAIRING.url);
+    // 11.12: a Halo round the code while it waits for the device.
+    expect(screen.getByTestId('pairing-halo').querySelector('[data-loader="halo"]')).toBeTruthy();
+    expect(screen.getByTestId('pairing-left').textContent).toBe('10:00');
+    expect(screen.getByTestId('pairing-qr').querySelectorAll('rect').length).toBe(1 + qrRects(PAIRING.qr).length);
+    await fireEvent.click(screen.getByTestId('pairing-close'));
+    expect(screen.queryByTestId('pairing-result')).toBeNull();
   });
 
   it('keeps the wizard open with the refusal when pairing fails', async () => {

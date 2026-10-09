@@ -162,7 +162,7 @@ describe('TaskList', () => {
     expect(calls('create_work_task')[0][1]).toEqual({ args: { title: 'New' } });
     const row = screen.getByTestId('task-section-todo');
     const primary = row.querySelector('[data-testid="work-button-primary"]') as HTMLButtonElement;
-    expect(primary.textContent).toBe('Start');
+    expect(primary.textContent).toBe('Start new');
     await fireEvent.click(primary);
     await flush();
     expect(calls('preview_start_work')[0][1]).toEqual({ args: { item_id: 1, project_id: 3, with_brief: true } });
@@ -177,7 +177,7 @@ describe('TaskList', () => {
     await flush();
     const om110 = screen.getAllByTestId('task-row').find((r) => r.textContent?.includes('Qomora'));
     // OM-110 has an active count but no live link in the fixture: Start.
-    expect(om110?.querySelector('[data-testid="work-button-primary"]')?.textContent).toBe('Start');
+    expect(om110?.querySelector('[data-testid="work-button-primary"]')?.textContent).toBe('Start new');
     const list = screen.getByTestId('task-list');
     await fireEvent.keyDown(list, { key: 'j' });
     await flush();

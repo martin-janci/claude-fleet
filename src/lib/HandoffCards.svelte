@@ -1,6 +1,6 @@
 <!--
   What Control's agent handed on (Orbit Fleet redesign steps 9.3 and 9.6),
-  drawn in its transcript in the New layout: "Sent to a session" and "Sent
+  drawn in its transcript: "Sent to a session" and "Sent
   to a mission" chips that follow their target's live state and open it, a
   live card per task it created, and its proposed tree of subtasks as a card
   where the person unticks what they do not want, then creates the tasks or

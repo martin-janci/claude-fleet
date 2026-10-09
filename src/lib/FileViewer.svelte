@@ -18,7 +18,7 @@
   import DiffView from './DiffView.svelte';
   import { highlight, langForPath } from './highlight';
   import { sendFile } from './downloads';
-  import { uiLayout, sessionView } from './prefs';
+  import { sessionView } from './prefs';
   import { copyText } from './clipboard';
   import { insertIntoComposer } from './conversation';
   import { goTo } from './destination';
@@ -232,7 +232,7 @@
   );
   const gutter = $derived(showBlame && blame ? blameGutter(blame.hunks, hlLines.length) : []);
 
-  // The new layout's viewer actions (redesign step 5.6, Files board): the
+  // The viewer actions (redesign step 5.6, Files board): the
   // path to the clipboard, the path into this session's composer, and the
   // worktree in VS Code (the 5.5 command, with its reasons).
   let copied = $state(false);
@@ -256,6 +256,7 @@
   {#if !path}
     <p class="empty">Select a file to view it.</p>
   {:else}
+    {@const p = path}
     <header class="bar">
       <span class="path" title={path}>{path}</span>
       <div class="toggle">
@@ -289,8 +290,6 @@
           onclick={() => path && void sendFile(session.id, path)}>⤓ Send to downloads</button
         >
       {/if}
-      {#if $uiLayout === 'new'}
-        {@const p = path}
         <div class="actions" role="group" aria-label="File actions">
           <button type="button" class="act" data-testid="viewer-copy-path" onclick={() => void copyPath(p)}
             >{copied ? 'Copied' : 'Copy path'}</button
@@ -311,7 +310,6 @@
             onclick={() => void openSessionInEditor(session)}>Open in VS Code</button
           >
         </div>
-      {/if}
     </header>
 
     <div class="body">

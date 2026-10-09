@@ -15,8 +15,7 @@ import { preloadLazyViews } from './lib/lazy_views';
 beforeAll(() => preloadLazyViews());
 
 beforeEach(() => {
-  // Suppress the OnboardingCard so tests don't need stubs for its IPC calls
-  // (check_local_prereqs, tunnel_status, mcp_status).
+  // Keep Get started (FirstRun) out of the way of these tests.
   onboardingDismissed.set(true);
   clearToasts();
 });
@@ -89,52 +88,6 @@ describe('App bootstrap failure', () => {
   });
 });
 
-// Redesign step 0.3: the Classic/New switch in Settings → Appearance must
-// never cost the user their place. 3.1 makes the shell read `uiLayout`; this
-// test is the guard it has to keep green.
-describe('App layout switch', () => {
-  it('keeps the selected session when the layout changes', async () => {
-    const { invoke } = await import('@tauri-apps/api/core');
-    const inv = invoke as ReturnType<typeof vi.fn>;
-    const original = inv.getMockImplementation() as
-      | ((cmd: string, ...rest: unknown[]) => Promise<unknown>)
-      | undefined;
-    const row = {
-      id: 7, tmux_name: 'dev-layout', host_alias: 'mefistos', project_id: null, worktree_id: null,
-      created_at: 1, last_activity_at: 1, status: 'running', notes: null, account_uuid: null,
-      kind: 'work', reviews_session_id: null, worktree_key: null, lost_at: null,
-      claude_session_id: null, claude_status: null, effort_level: null, pr_url: null,
-      current_activity: null, friendly_name: null, safe_kill_state: null, safe_kill_nonce: null,
-      safe_kill_detail: null, safe_kill_requested_at: null, context_pct: null, stuck_kind: null, idle_since: null, stuck_since: null, last_playbook_at: null, last_prompt: null, started_at: null, last_turn_at: null, ci_status: null, turn_seq: 0, last_stop_at: null, parent_session_id: null, tags: [],
-    };
-    inv.mockImplementation(async (cmd: string, ...rest: unknown[]) => {
-      if (cmd === 'list_sessions') return [row];
-      return original ? original(cmd, ...rest) : null;
-    });
-    localStorage.setItem('cf:pref:session.last', JSON.stringify({ host_alias: 'mefistos', tmux_name: 'dev-layout' }));
-    const { selectedSession, clearSelection } = await import('./lib/selection');
-    const { settingsOpen } = await import('./lib/app_views');
-    const { uiLayout } = await import('./lib/prefs');
-    try {
-      render(App);
-      await waitFor(() => expect(get(selectedSession)?.id).toBe(7));
-      settingsOpen.set(true);
-      await fireEvent.click(await screen.findByTestId('appearance-layout-new'));
-      expect(get(uiLayout)).toBe('new');
-      expect(get(selectedSession)?.id).toBe(7);
-      await fireEvent.click(screen.getByTestId('appearance-layout-classic'));
-      expect(get(uiLayout)).toBe('classic');
-      expect(get(selectedSession)?.id).toBe(7);
-    } finally {
-      settingsOpen.set(false);
-      uiLayout.set('classic');
-      inv.mockImplementation(original!);
-      localStorage.removeItem('cf:pref:session.last');
-      clearSelection();
-    }
-  });
-});
-
 describe('App startup order', () => {
   it('subscribes to row events before the first list resolves', async () => {
     const { invoke } = await import('@tauri-apps/api/core');
@@ -171,19 +124,19 @@ describe('App startup order', () => {
 });
 
 describe('App layout', () => {
-  it('renders sidebar, center, and terminal panes', () => {
-    const { getByTestId } = render(App);
+  it('renders the sidebar and terminal panes, and no center pane (13.1)', () => {
+    const { getByTestId, queryByTestId } = render(App);
     expect(getByTestId('pane-sidebar')).toBeInTheDocument();
-    expect(getByTestId('pane-center')).toBeInTheDocument();
     expect(getByTestId('pane-terminal')).toBeInTheDocument();
+    expect(queryByTestId('pane-center')).toBeNull();
   });
 
-  it('contains all three panes inside the layout container', () => {
+  it('contains both panes inside the layout container', () => {
     const { container } = render(App);
     const layout = container.querySelector('.layout') as HTMLElement;
     expect(layout).not.toBeNull();
     const panes = layout.querySelectorAll('[data-testid^="pane-"]');
-    expect(panes).toHaveLength(3);
+    expect(panes).toHaveLength(2);
   });
 
   it('mounts the sidebar tree inside the sidebar pane', async () => {
@@ -226,13 +179,13 @@ describe('App layout', () => {
     }
   });
 
-  it('marks only the Assets tab active (not Session) when Assets is open', async () => {
+  it('marks only Assets active (no session tab) when Assets is open', async () => {
     const { getByTestId } = render(App);
-    await fireEvent.click(getByTestId('tab-assets'));
-    expect(getByTestId('tab-session').classList.contains('active')).toBe(false);
-    expect(getByTestId('tab-session').getAttribute('aria-selected')).toBe('false');
-    expect(getByTestId('tab-assets').classList.contains('active')).toBe(true);
-    expect(getByTestId('tab-assets').getAttribute('aria-selected')).toBe('true');
+    await fireEvent.click(getByTestId('stab-assets'));
+    expect(getByTestId('stab-assets').getAttribute('aria-pressed')).toBe('true');
+    for (const t of ['conversation', 'agent', 'files', 'details']) {
+      expect(getByTestId(`stab-${t}`).getAttribute('aria-selected')).toBe('false');
+    }
   });
 
   it('a quick-switcher request opens the Assets overlay, and the panel takes the request', async () => {
@@ -240,7 +193,7 @@ describe('App layout', () => {
     expect(queryByTestId('assets-overlay')).toBeNull();
     requestAssetsView({ select: 'asset:personal:skill/w' });
     await waitFor(() => expect(queryByTestId('assets-overlay')).not.toBeNull());
-    expect(getByTestId('tab-assets').classList.contains('active')).toBe(true);
+    expect(getByTestId('stab-assets').getAttribute('aria-pressed')).toBe('true');
     await waitFor(() => expect(get(assetsViewRequest)).toBeNull());
   });
 
@@ -321,19 +274,26 @@ describe('App: the Conversation tab', () => {
 
   const tab = (id: string) => screen.getByTestId(id) as HTMLButtonElement;
   const selected = (id: string) => tab(id).getAttribute('aria-selected');
-  const subtab = (id: string) => screen.getByTestId(id) as HTMLButtonElement;
-  const checked = (id: string) => subtab(id).getAttribute('aria-checked');
+  /** The session itself shows: its Conversation or its Agent (terminal) tab. */
+  const sessionTab = () =>
+    selected('stab-conversation') === 'true' || selected('stab-agent') === 'true' ? 'true' : 'false';
+  const hostsOpen = () => (screen.queryByTestId('hosts-overlay') ? 'true' : 'false');
+  // jsdom's userAgent isn't macOS: Hosts is Ctrl+Shift+H.
+  const toggleHosts = async () => {
+    await fireEvent.keyDown(window, { key: 'H', ctrlKey: true, shiftKey: true });
+    await tick();
+  };
   const NO_PANE_TITLE_TEXT = 'Runs outside tmux — no terminal';
 
   it('the Conversation sub-view is disabled without a claude_session_id and enabled with one', async () => {
     await mountAndSelect(noId);
-    expect(subtab('subtab-conversation').disabled).toBe(true);
-    expect(subtab('subtab-conversation').title).toBe('No Claude session id yet');
+    expect(tab('stab-conversation').disabled).toBe(true);
+    expect(tab('stab-conversation').title).toBe('No Claude session id yet');
     // With no transcript the row falls back to the terminal, without
     // touching the stored preference.
-    expect(checked('subtab-terminal')).toBe('true');
+    expect(selected('stab-agent')).toBe('true');
     await select(work);
-    expect(subtab('subtab-conversation').disabled).toBe(false);
+    expect(tab('stab-conversation').disabled).toBe(false);
   });
 
   it('defaults to Conversation, and the segment flips between the two views', async () => {
@@ -341,20 +301,18 @@ describe('App: the Conversation tab', () => {
     const grid = await screen.findByTestId('terminal-host');
     // Default pref is 'conversation'.
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
-    expect(checked('subtab-conversation')).toBe('true');
-    expect(selected('tab-session')).toBe('true');
+    expect(selected('stab-conversation')).toBe('true');
+    expect(sessionTab()).toBe('true');
     // The PTY stays mounted underneath.
     expect(grid.isConnected).toBe(true);
-    // The center (Details) pane stays visible, unlike Files/Hosts.
-    expect(screen.getByTestId('pane-center')).toBeInTheDocument();
 
-    await fireEvent.click(subtab('subtab-terminal'));
+    await fireEvent.click(tab('stab-agent'));
     await tick();
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(checked('subtab-terminal')).toBe('true');
-    expect(selected('tab-session')).toBe('true');
+    expect(selected('stab-agent')).toBe('true');
+    expect(sessionTab()).toBe('true');
 
-    await fireEvent.click(subtab('subtab-conversation'));
+    await fireEvent.click(tab('stab-conversation'));
     await tick();
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
   });
@@ -363,34 +321,33 @@ describe('App: the Conversation tab', () => {
     await mountAndSelect(work);
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
 
-    await fireEvent.click(tab('tab-files'));
+    await fireEvent.click(tab('stab-files'));
     await tick();
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(selected('tab-files')).toBe('true');
-    expect(selected('tab-session')).toBe('false');
-    // The segment belongs to the Session tab; it is gone while another view
-    // owns the panel. (A session *is* selected here, so this is not passing
-    // for the trivial reason.)
-    expect(screen.queryByTestId('subtab-conversation')).toBeNull();
-    expect(screen.queryByTestId('subtab-terminal')).toBeNull();
+    expect(selected('stab-files')).toBe('true');
+    expect(sessionTab()).toBe('false');
+    // Neither of the session's own views is the current tab while another
+    // view owns the panel. (A session *is* selected here, so this is not
+    // passing for the trivial reason.)
+    expect(selected('stab-conversation')).toBe('false');
+    expect(selected('stab-agent')).toBe('false');
 
-    await fireEvent.click(tab('tab-session'));
+    // Esc leaves Files: back to the remembered sub-view, not to the terminal.
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
     await tick();
-    // Back to the remembered sub-view, not to the terminal.
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
 
-    await fireEvent.click(tab('tab-hosts'));
-    await tick();
+    await toggleHosts();
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(selected('tab-hosts')).toBe('true');
-    expect(selected('tab-session')).toBe('false');
+    expect(hostsOpen()).toBe('true');
+    expect(sessionTab()).toBe('false');
   });
 
   it('a pane-less row shows Conversation without overwriting the stored preference', async () => {
     const { sessionView } = await import('./lib/prefs');
     const { get } = await import('svelte/store');
     await mountAndSelect(work);
-    await fireEvent.click(subtab('subtab-terminal'));
+    await fireEvent.click(tab('stab-agent'));
     await tick();
     expect(get(sessionView)).toBe('terminal');
 
@@ -398,18 +355,18 @@ describe('App: the Conversation tab', () => {
     await tick();
     // No PTY on this row, so Conversation regardless of the preference.
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
-    expect(subtab('subtab-terminal').disabled).toBe(true);
-    expect(subtab('subtab-terminal').title).toBe(NO_PANE_TITLE_TEXT);
+    expect(tab('stab-agent').disabled).toBe(true);
+    expect(tab('stab-agent').title).toBe(NO_PANE_TITLE_TEXT);
     expect(get(sessionView)).toBe('terminal');
 
     await select(work);
     await tick();
     // Back on a tmux row: the preference survived the detour.
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(checked('subtab-terminal')).toBe('true');
+    expect(selected('stab-agent')).toBe('true');
     // The terminal must actually be remounted and reachable after returning to the tmux row.
     expect(await screen.findByTestId('terminal-host')).toBeInTheDocument();
-    expect(subtab('subtab-terminal').disabled).toBe(false);
+    expect(tab('stab-agent').disabled).toBe(false);
   });
 
   it('clicking the already-forced Conversation pill on a pane-less row does not overwrite the stored preference', async () => {
@@ -419,8 +376,8 @@ describe('App: the Conversation tab', () => {
     await mountAndSelect(bg);
     // Forced to Conversation (no pane) and already checked; clicking it must
     // be a no-op on the stored preference, not a silent flip back to it.
-    expect(checked('subtab-conversation')).toBe('true');
-    await fireEvent.click(subtab('subtab-conversation'));
+    expect(selected('stab-conversation')).toBe('true');
+    await fireEvent.click(tab('stab-conversation'));
     await tick();
     expect(get(sessionView)).toBe('terminal');
   });
@@ -433,12 +390,12 @@ describe('App: the Conversation tab', () => {
     // Esc stops leaving the panel that covers the terminal.
     grid.focus();
     expect(grid.contains(document.activeElement)).toBe(true);
-    await fireEvent.click(tab('tab-files'));
+    await fireEvent.click(tab('stab-files'));
     await tick();
-    expect(selected('tab-files')).toBe('true');
+    expect(selected('stab-files')).toBe('true');
     await fireEvent.keyDown(document.activeElement!, { key: 'Escape' });
     await tick();
-    expect(selected('tab-files')).toBe('false');
+    expect(selected('stab-files')).toBe('false');
   });
 
   it.each([
@@ -447,12 +404,12 @@ describe('App: the Conversation tab', () => {
   ])('a %s row opens Conversation by default with Terminal and Files disabled', async (_k, row) => {
     await mountAndSelect(row);
     expect(await screen.findByTestId('conversation-panel')).toBeInTheDocument();
-    expect(selected('tab-session')).toBe('true');
-    expect(checked('subtab-conversation')).toBe('true');
-    expect(subtab('subtab-terminal').disabled).toBe(true);
-    expect(subtab('subtab-terminal').title).toBe(NO_PANE_TITLE_TEXT);
-    expect(tab('tab-files').disabled).toBe(true);
-    expect(tab('tab-files').title).toBe(NO_PANE_TITLE_TEXT);
+    expect(sessionTab()).toBe('true');
+    expect(selected('stab-conversation')).toBe('true');
+    expect(tab('stab-agent').disabled).toBe(true);
+    expect(tab('stab-agent').title).toBe(NO_PANE_TITLE_TEXT);
+    expect(tab('stab-files').disabled).toBe(true);
+    expect(tab('stab-files').title).toBe(NO_PANE_TITLE_TEXT);
     expect(screen.queryByTestId('terminal-host')).toBeNull();
     expect(screen.queryByTestId('bg-panel')).toBeNull();
     expect(inv.mock.calls).toContainEqual(['session_conversation', { args: { session_id: row.id, claude_session_id: row.claude_session_id } }]);
@@ -461,43 +418,41 @@ describe('App: the Conversation tab', () => {
   it('a bg row keeps Conversation as its view across a Hosts round trip', async () => {
     await mountAndSelect(bg);
     expect(await screen.findByTestId('conversation-panel')).toBeInTheDocument();
-    await fireEvent.click(tab('tab-hosts'));
-    await tick();
-    expect(selected('tab-hosts')).toBe('true');
-    expect(selected('tab-session')).toBe('false');
+    await toggleHosts();
+    expect(hostsOpen()).toBe('true');
+    expect(sessionTab()).toBe('false');
     expect(screen.getByTestId('hosts-overlay')).toBeInTheDocument();
-    await fireEvent.click(tab('tab-hosts'));
-    await tick();
+    await toggleHosts();
     expect(screen.queryByTestId('hosts-overlay')).toBeNull();
-    expect(selected('tab-session')).toBe('true');
-    expect(checked('subtab-conversation')).toBe('true');
+    expect(sessionTab()).toBe('true');
+    expect(selected('stab-conversation')).toBe('true');
   });
 
   it('selecting a row with no claude_session_id falls back to Terminal', async () => {
     await mountAndSelect(work);
-    await fireEvent.click(subtab('subtab-conversation'));
+    await fireEvent.click(tab('stab-conversation'));
     await tick();
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
     await select(noId);
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(checked('subtab-terminal')).toBe('true');
+    expect(selected('stab-agent')).toBe('true');
   });
 
   it('the chord returns to the view you left, and only a second press flips it', async () => {
     const { sessionView } = await import('./lib/prefs');
     const { get } = await import('svelte/store');
     await mountAndSelect(work);
-    await fireEvent.click(tab('tab-files'));
+    await fireEvent.click(tab('stab-files'));
     await tick();
-    expect(selected('tab-files')).toBe('true');
+    expect(selected('stab-files')).toBe('true');
 
     // jsdom's userAgent isn't macOS, so the chord is Ctrl+Shift+J.
     await fireEvent.keyDown(window, { key: 'J', ctrlKey: true, shiftKey: true });
     await tick();
     // Back to the Session tab, showing the view left behind (Conversation),
     // not the Terminal — and the pref is untouched.
-    expect(selected('tab-files')).toBe('false');
-    expect(selected('tab-session')).toBe('true');
+    expect(selected('stab-files')).toBe('false');
+    expect(sessionTab()).toBe('true');
     expect(screen.getByTestId('conversation-panel')).toBeInTheDocument();
     expect(get(sessionView)).toBe('conversation');
 
@@ -505,7 +460,7 @@ describe('App: the Conversation tab', () => {
     await fireEvent.keyDown(window, { key: 'J', ctrlKey: true, shiftKey: true });
     await tick();
     expect(screen.queryByTestId('conversation-panel')).toBeNull();
-    expect(checked('subtab-terminal')).toBe('true');
+    expect(selected('stab-agent')).toBe('true');
     expect(get(sessionView)).toBe('terminal');
   });
 });

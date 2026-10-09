@@ -3,7 +3,7 @@
   control-API calls the operator is waiting on — its starts and kills always
   need a person (M9.7) — shown where the conversation is, as the manual's
   QuestionCard, instead of a dialog over the whole window. Mounted inside an
-  agent transcript in the New layout only; while one is mounted the dialog
+  agent transcript; while one is mounted the dialog
   leaves the operator's requests to it (`confirms.ts`).
 -->
 <script lang="ts">

@@ -169,12 +169,6 @@ if (!localStorageUsable()) {
   });
 }
 
-// Step 7.6 made the New layout the default. The suites written before it
-// test Classic and set nothing, so they start on Classic here; every New
-// test sets `uiLayout` itself. Step 13.1 deletes Classic and this line.
-// `AppearanceSettings.test.ts` pins the real default.
-localStorage.setItem('cf:pref:ui.layout.v2', '"classic"');
-
 // ResizeObserver isn't implemented by jsdom. Our TerminalView attaches one
 // to re-fit the screen buffer on container resize; stub it as a no-op so
 // tests that mount the component don't blow up.

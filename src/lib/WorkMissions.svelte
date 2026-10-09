@@ -14,7 +14,7 @@
   import { hubStatus, hubActionBlocked } from './hub';
   import { hubConnection } from './hub_connection';
   import { projects } from './projects';
-  import { readPref, uiLayout, writePref } from './prefs';
+  import { readPref, writePref } from './prefs';
   import ReleaseNote from './ReleaseNote.svelte';
   import MissionTriage from './MissionTriage.svelte';
   import type { NextStep } from './mission_triage';
@@ -28,7 +28,6 @@
   import { NEWER_HUB, isOlderHub, readErrorText as rawErrorText } from './work_view';
   import type { IpcError } from './result';
   import {
-    MISSION_MOVES,
     finalMoveQuestion,
     splitMoves,
     createMission,
@@ -127,7 +126,7 @@
   let repoPick = $state<number | ''>('');
   let repoRole = $state('');
   let confirmDelete = $state(false);
-  // Parity row P19 (New layout): Complete, Mark failed and Cancel live in a
+  // Parity row P19: Complete, Mark failed and Cancel live in a
   // ⋯ menu beside Edit and Pause, and each asks before it ends the mission.
   let moreOpen = $state(false);
   let confirmMove = $state<string | null>(null);
@@ -138,14 +137,14 @@
 
   const mission = $derived(detail?.mission ?? null);
 
-  // The task graph (New layout only): List keeps every write, Graph draws
+  // The task graph: List keeps every write, Graph draws
   // lanes × waves with the critical path. The choice outlives the mission;
   // the lanes reset to the mission's own default when another one opens.
   type TasksView = 'list' | 'graph';
   const isTasksView = (v: unknown): v is TasksView => v === 'list' || v === 'graph';
   let tasksView = $state<TasksView>(readPref<TasksView>('work.missions.view', 'list', isTasksView));
   $effect(() => writePref('work.missions.view', tasksView));
-  const showGraph = $derived($uiLayout === 'new' && tasksView === 'graph');
+  const showGraph = $derived(tasksView === 'graph');
   let laneOverride = $state<{ mission: number; by: LaneBy } | null>(null);
   const laneBy = $derived(
     laneOverride && laneOverride.mission === mission?.id ? laneOverride.by : detail ? defaultLaneBy(detail) : 'none',
@@ -168,7 +167,7 @@
       importUnknown = out.unknown_needs ?? [];
       importText = '';
       importOpen = false;
-      if ($uiLayout === 'new') tasksView = 'graph';
+      tasksView = 'graph';
     }
   }
 
@@ -241,9 +240,9 @@
   const autonomy = $derived(plan ? autonomyWords(plan.autonomy) : null);
   const pressable = $derived((plan?.steps ?? []).filter((s) => s.kind !== 'ask'));
   const openCards = $derived((plan?.cards ?? []).filter((c) => c.state === 'open'));
-  // Comet trails beside the mission's current steps (redesign step 9.12,
-  // New layout): only while it runs, never while it waits on a person.
-  const trails = $derived($uiLayout === 'new' && detail ? trailNodes(detail) : new Set<number>());
+  // Comet trails beside the mission's current steps (redesign step 9.12):
+  // only while it runs, never while it waits on a person.
+  const trails = $derived(detail ? trailNodes(detail) : new Set<number>());
   let answers = $state<Record<number, string>>({});
   let granting = $state(false);
   let grantLevel = $state(2);
@@ -344,7 +343,6 @@
     if (out) notice = out.length ? `Paused ${out.length} mission${out.length === 1 ? '' : 's'}.` : 'No active mission to pause.';
   }
   const mayChange = $derived(!!detail?.may_change && !!mission && !isFinal(mission.state));
-  const moves = $derived(mission ? (MISSION_MOVES[mission.state] ?? []) : []);
   const split = $derived(mission ? splitMoves(mission.state) : { inline: [], menu: [] });
 
   function pickFinal(to: string) {
@@ -591,7 +589,7 @@
         · updated {timeAgo(mission.updated_at)}
       </p>
 
-      {#if $uiLayout === 'new' && !isFinal(mission.state) && mission.state !== 'draft'}
+      {#if !isFinal(mission.state) && mission.state !== 'draft'}
         <!-- Redesign 9.10: a stuck mission's card; Jev proposes, a person picks. -->
         <MissionTriage missionId={mission.id} reload={detail.events?.[0]?.id ?? 0} onstep={triageStep} />
       {/if}
@@ -667,7 +665,6 @@
             <button class="btn btn--quiet" type="button" disabled={busy || saveBlocked} data-testid="mission-edit" onclick={startEdit}
               >Edit</button
             >
-            {#if $uiLayout === 'new'}
               {#each split.inline as to (to)}
                 <button
                   class="btn btn--chip"
@@ -706,17 +703,6 @@
                   {/if}
                 </span>
               {/if}
-            {:else}
-              {#each moves as to (to)}
-                <button
-                  class="btn btn--chip"
-                  type="button"
-                  disabled={busy || changeBlocked}
-                  data-testid="mission-move-{to}"
-                  onclick={() => void move(to)}>{moveLabel(mission.state, to)}</button
-                >
-              {/each}
-            {/if}
           </div>
           {#if confirmMove}
             <div class="row confirm-move" role="alertdialog" aria-label="Confirm" data-testid="mission-move-confirm-row">
@@ -908,7 +894,6 @@
           >
         </div>
       {/if}
-      {#if $uiLayout === 'new'}
         <div class="view-switch" role="tablist" aria-label="Show tasks as" use:tablistKeys>
           <button
             type="button"
@@ -925,7 +910,6 @@
             onclick={() => (tasksView = 'graph')}>Graph</button
           >
         </div>
-      {/if}
       {#if showGraph && detail}
         <MissionGraph
           {detail}
@@ -1126,7 +1110,7 @@
         </div>
       {/if}
 
-      {#if $uiLayout === 'new' && detail.may_change && mission.state === 'completed'}
+      {#if detail.may_change && mission.state === 'completed'}
         <!-- Redesign 9.11: Finish's release note, drafted on demand. -->
         <h4>Release note</h4>
         <ReleaseNote missionId={mission.id} />

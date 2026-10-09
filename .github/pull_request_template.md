@@ -11,7 +11,8 @@ paragraph, then a short "How". -->
 
 <!-- Orbit Fleet redesign PRs only; delete this section otherwise.
 Name the plan step (e.g. 0.3), the canvas boards, and every row of
-docs/redesign/parity.md the PR touches. Update those rows in the same PR. -->
+docs/redesign/archive/parity.md the PR touches (archived in 13.1, when
+Classic went; its proofs must still exist). Update those rows in the same PR. -->
 
 Step: 
 Boards: 
@@ -20,6 +21,6 @@ Boards:
 |---|---|---|---|
 |  |  |  |  |
 
-- [ ] Every touched row in `docs/redesign/parity.md` is updated
+- [ ] Every touched row in `docs/redesign/archive/parity.md` is updated
 - [ ] No function lost: a deleted test has a replacement named above
 - [ ] The shortcut freeze test (`src/lib/shortcuts.test.ts`) is green

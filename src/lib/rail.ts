@@ -1,4 +1,4 @@
-// The New layout's rail (Orbit Fleet redesign step 3.2): the design manual's
+// The rail (Orbit Fleet redesign step 3.2): the design manual's
 // order, Control, Inbox, Sessions, Work, Automation, Accounts, Toolkit, then
 // Settings at the bottom. An item whose step has not landed stays hidden;
 // flipping `landed` (with its click handler in `AppRail.svelte`) is how that

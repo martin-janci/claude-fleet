@@ -11,7 +11,6 @@ import { allDescriptors, bundle } from './pages/testing';
 import { pendingInputFor, type PendingInput } from './pending_input';
 import type { SessionRow } from './sessions';
 import type { SettingProposal } from './pages/review';
-import { uiLayout } from './prefs';
 import {
   NEVER_DECIDES,
   draftedBy,
@@ -88,24 +87,16 @@ describe('the callers never pre-select what AI never decides', () => {
     }) as unknown as SessionRow;
   const view = pendingInputFor({ rowStatus: 'blocked', rowStuck: null, rowPending: PUSH, probe: null })!;
 
-  it.each(['classic', 'new'] as const)(
-    'AnswerPrompt (%s): a sure Jev pick on a push question moves nothing and draws nothing primary',
-    (layout) => {
-      uiLayout.set(layout);
-      try {
-        for (const value of ['o2', 'o3']) {
-          const { unmount } = render(AnswerPrompt, { session: row(value), view });
-          const opts = screen.getAllByTestId('answer-option');
-          expect(opts.map((b) => b.textContent?.replace(/\s+/g, ''))).toEqual(['1Notyet', '2Approveandpush', '3Yes,goahead']);
-          expect(opts.some((b) => b.classList.contains('primary'))).toBe(false);
-          expect(screen.queryByTestId('answer-proposed')).toBeNull();
-          unmount();
-        }
-      } finally {
-        uiLayout.set('classic');
-      }
-    },
-  );
+  it('AnswerPrompt: a sure Jev pick on a push question moves nothing and draws nothing primary', () => {
+    for (const value of ['o2', 'o3']) {
+      const { unmount } = render(AnswerPrompt, { session: row(value), view });
+      const opts = screen.getAllByTestId('answer-option');
+      expect(opts.map((b) => b.textContent?.replace(/\s+/g, ''))).toEqual(['1Notyet', '2Approveandpush', '3Yes,goahead']);
+      expect(opts.some((b) => b.classList.contains('primary'))).toBe(false);
+      expect(screen.queryByTestId('answer-proposed')).toBeNull();
+      unmount();
+    }
+  });
 
   it('ReviewApply: an agent-proposed orchestrator.max_level 1 → 3 is not ticked', () => {
     const p: SettingProposal = {

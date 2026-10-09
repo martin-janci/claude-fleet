@@ -20,20 +20,9 @@
   import { openExternal } from './open_external';
   import { shortAge, timeAgo } from './session_status';
   import { assessRow, hasReading, verdictColor, verdictLabel } from './evidence';
-  import { changedAny, describeEvidence, onWorkChangedDebounced, resumeWork } from './work';
-  import { providerInfo, startWork, unavailableLabel } from './trackers';
-  import StartPopover from './StartPopover.svelte';
-  import {
-    baseStartArgs,
-    previewIsClean,
-    previewStartWork,
-    previewUnsupported,
-    startFromPreview,
-    type StartPreview,
-  } from './start_preview';
-  import type { SessionRow } from './sessions';
+  import { changedAny, describeEvidence, onWorkChangedDebounced } from './work';
+  import { providerInfo, unavailableLabel } from './trackers';
   import { hubStatus, hubActionBlocked } from './hub';
-  import { sessionIdBlocked } from './share';
   import { hubConnection } from './hub_connection';
   import WorkPlaceDialog from './WorkPlaceDialog.svelte';
   import EditTaskDialog from './EditTaskDialog.svelte';
@@ -43,7 +32,6 @@
   import ProposedBy from './ProposedBy.svelte';
   import { proposalFor } from './proposals';
   import WorkButton from './WorkButton.svelte';
-  import { uiLayout } from './prefs';
   import {
     groupSessionLinks,
     groupSourceText,
@@ -76,7 +64,6 @@
     debounceMs = 500,
   }: { taskId: string; onclose?: () => void; closeLabel?: string; debounceMs?: number } = $props();
 
-  const startBlocked = $derived(hubActionBlocked('start_work', $hubStatus, $hubConnection));
   const editBlocked = $derived(hubActionBlocked('edit_work_item', $hubStatus, $hubConnection));
   const placeBlocked = $derived(hubActionBlocked('place_work', $hubStatus, $hubConnection));
   const orgBlocked = $derived(hubActionBlocked('assign_work_org', $hubStatus, $hubConnection));
@@ -89,16 +76,10 @@
   let refreshError = $state<IpcError | null>(null);
   let loading = $state(false);
   let rules = $state<WorkRule[]>([]);
-  let actionError = $state<string | null>(null);
-  let existingSession = $state<number | null>(null);
-  let acting = $state(false);
   let placing = $state(false);
   let editing = $state(false);
   let assigning = $state(false);
   let ruleDraft = $state<WorkRuleDraft | null>(null);
-  /** The start popover's preview while it is open (task → session §2.2). */
-  let startPreview = $state<StartPreview | null>(null);
-  let startBtn: HTMLButtonElement | undefined = $state();
 
   let loadSeq = 0;
   async function load(id: string) {
@@ -133,19 +114,22 @@
   // rule placed. A proposal only; a person's click places it.
   const groupProposal = $derived.by(() => {
     const t = detail?.task;
-    if (!t || $uiLayout !== 'new') return null;
+    if (!t) return null;
     if (t.group?.source === 'manual' || t.group?.source === 'rule') return null;
     return proposalFor(t, 'work_placement');
   });
   let placingProposed = $state(false);
+  /** Why the proposed placement failed, shown under the proposal. */
+  let proposalError = $state<string | null>(null);
   async function placeProposed(label: string) {
     const t = detail?.task;
     if (!t || placingProposed) return;
     placingProposed = true;
+    proposalError = null;
     const r = await placeWork(t.task_id, label, t.placement_version ?? 0);
     placingProposed = false;
     if (r.ok) placed(r.value, null);
-    else actionError = readErrorText(r.error);
+    else proposalError = readErrorText(r.error);
   }
 
   // A placement saved: show the task and its placement line as the hub
@@ -172,9 +156,6 @@
     detail = null;
     error = null;
     refreshError = null;
-    actionError = null;
-    existingSession = null;
-    startPreview = null;
     void load(id);
   });
 
@@ -200,26 +181,6 @@
     const t = setInterval(() => (nowSec = Math.floor(Date.now() / 1000)), 60_000);
     return () => clearInterval(t);
   });
-  const liveLink = $derived(grouped.active.find((l) => l.session_id != null && $sessions.some((r) => r.id === l.session_id)) ?? null);
-  const lastPast = $derived(grouped.past.find((l) => l.resumable !== false) ?? null);
-  /**
-   * Continue is `resume_work { mode: 'last' }`: it re-opens the PAST session's
-   * Claude conversation in a new session of this person's — a take-over of
-   * somebody's transcript, which is why `share.ts` gives `resume_work` the
-   * `own` tier beside `rewind_conversation`.
-   *
-   * Multi-user M1 (F2c). It was gated on `hubActionBlocked('start_work', …)`
-   * alone, which answers only "is the link up": nothing asked WHOSE
-   * conversation this is. The question is about the SOURCE session, not the
-   * task and not the session the resume would create, so it is asked by that
-   * link's `session_id` — and `$sessionIdBlocked` fails closed when the row
-   * cannot be resolved, because on a fleet this client does not own, a row it
-   * cannot see is one it may not act on.
-   */
-  const continueShareBlocked = $derived($sessionIdBlocked(lastPast?.session_id ?? null, 'resume_work'));
-  /** The hub half first (it ROUTES), then the access half — the precedence
-   *  `share.ts` documents. */
-  const continueBlocked = $derived(startBlocked ?? continueShareBlocked);
   const ruleName = $derived(task?.group?.rule_id != null ? (rules.find((r) => r.id === task.group.rule_id)?.name ?? null) : null);
   const matchingRules = $derived((detail?.rules ?? []).map((id) => rules.find((r) => r.id === id)?.name ?? `rule ${id}`));
 
@@ -247,90 +208,6 @@
 
   function openLink(l: WorkTaskLink) {
     const row = l.session_id != null ? get(sessions).find((r) => r.id === l.session_id) : undefined;
-    if (row) selectSessionExplicitly(row);
-  }
-
-  async function continueWork() {
-    const t = task;
-    const l = lastPast;
-    if (!t?.key || !l || acting) return;
-    // Re-asked at the write, not only on the button: the task panel stays open
-    // across a revoke, and `grant:changed` moves no field of this task.
-    if (continueBlocked !== null) {
-      actionError = continueBlocked;
-      return;
-    }
-    acting = true;
-    actionError = null;
-    existingSession = null;
-    const r = await resumeWork({ key: t.key, mode: 'last', linkId: l.link_id });
-    acting = false;
-    if (r.ok) {
-      selectSessionExplicitly(r.value);
-      return;
-    }
-    actionError = r.error.message;
-    if (r.error.code === 'E_EXISTS') existingSession = existingOf(r.error, t);
-  }
-
-  /** The live session an `E_EXISTS` points at: the one its details name,
-   *  else (a resume names none) the live session this task shows, else one
-   *  whose primary work is this key. */
-  function existingOf(e: IpcError, t: WorkTask): number | null {
-    const sid = (e.details as { session_id?: number } | undefined)?.session_id;
-    if (typeof sid === 'number') return sid;
-    if (liveLink?.session_id != null) return liveLink.session_id;
-    const key = t.key?.toUpperCase();
-    return key ? (get(sessions).find((r) => r.work?.key?.toUpperCase() === key)?.id ?? null) : null;
-  }
-
-  /** Start new: the start preview first (task → session spec P-1). A clean
-   *  one starts at once; a repository or host to pick, a live session, an
-   *  organisation to cross or a done task opens the start popover. */
-  async function startNew(ask = false) {
-    const t = task;
-    if (!t || acting) return;
-    acting = true;
-    actionError = null;
-    existingSession = null;
-    const base = baseStartArgs(t);
-    const forId = taskId;
-    const p = await previewStartWork(base);
-    // Another task was opened meanwhile: this preview is not its (review
-    // r07), so neither its popover nor a start from it.
-    if (forId !== taskId) {
-      acting = false;
-      return;
-    }
-    if (!p.ok && !previewUnsupported(p.error)) {
-      acting = false;
-      actionError = p.error.message;
-      return;
-    }
-    // A clean preview starts where it said; an older hub, with no preview,
-    // starts as before.
-    if (!p.ok || (!ask && previewIsClean(p.value))) {
-      const r = p.ok ? await startFromPreview(base, p.value) : await startWork(base);
-      acting = false;
-      if (r.ok) {
-        selectSessionExplicitly(r.value);
-        return;
-      }
-      actionError = r.error.message;
-      if (r.error.code === 'E_EXISTS') existingSession = existingOf(r.error, t);
-      return;
-    }
-    acting = false;
-    startPreview = p.value;
-  }
-
-  function startedFromPopover(row: SessionRow) {
-    startPreview = null;
-    selectSessionExplicitly(row);
-  }
-
-  function openExisting() {
-    const row = get(sessions).find((r) => r.id === existingSession);
     if (row) selectSessionExplicitly(row);
   }
 
@@ -439,6 +316,9 @@
                 onclick={() => groupProposal && void placeProposed(groupProposal.value)}>Place in {groupProposal.value}</button
               >
             </div>
+            {#if proposalError}
+              <p class="err" role="alert" data-testid="work-task-group-proposal-error">{proposalError}</p>
+            {/if}
           {/if}
           {#if detail?.placement}
             <div class="muted small" data-testid="work-task-placement">
@@ -480,60 +360,9 @@
       </div>
     </details>
 
-    {#if $uiLayout === 'new'}
-      <!-- Redesign 6.6: the one split button every task start uses, with
-           its progress ("Checkout", "Setting up…") under it. -->
-      <div class="actions"><WorkButton {task} variant="bar" /></div>
-    {:else}
-    <div class="actions">
-      <button
-        class="btn btn--primary"
-        type="button"
-        data-testid="work-task-open"
-        disabled={!liveLink}
-        title={liveLink ? `Open ${liveLink.name ?? 'the session'}` : 'No live session'}
-        onclick={() => liveLink && openLink(liveLink)}>Open</button
-      >
-      <button
-        class="btn"
-        type="button"
-        data-testid="work-task-continue"
-        disabled={!task.key || !lastPast || acting || continueBlocked !== null}
-        title={continueBlocked ?? (!task.key ? 'Only work with a key can be resumed' : lastPast ? `Resume the last conversation of ${lastPast.name ?? 'the last session'}` : 'No past session to continue')}
-        onclick={() => void continueWork()}>Continue</button
-      >
-      <button
-        class="btn"
-        type="button"
-        data-testid="work-task-start"
-        bind:this={startBtn}
-        disabled={(!task.item_id && !task.key) || acting || startBlocked !== null}
-        title={startBlocked ?? 'Start a new session for this task (Alt-click to choose where)'}
-        onclick={(e) => void startNew(e.altKey)}>Start new</button
-      >
-    </div>
-    {/if}
-    {#if startPreview}
-      <StartPopover
-        base={baseStartArgs(task)}
-        preview={startPreview}
-        heading={`Start ${task.key ?? ''}${task.title ? ` · ${task.title}` : ''}`.trim()}
-        blocked={startBlocked}
-        onclose={(refocus) => {
-          startPreview = null;
-          if (refocus) startBtn?.focus();
-        }}
-        onstarted={startedFromPopover}
-      />
-    {/if}
-    {#if actionError}
-      <p class="err" role="alert" data-testid="work-task-action-error">
-        {actionError}
-        {#if existingSession !== null}
-          <button class="btn btn--quiet" type="button" data-testid="work-task-open-existing" onclick={openExisting}>Open it</button>
-        {/if}
-      </p>
-    {/if}
+    <!-- Redesign 6.6: the one split button every task start uses, with
+         its progress ("Checkout", "Setting up…") under it. -->
+    <div class="actions"><WorkButton {task} variant="bar" /></div>
     {#if detail}<TaskWorkSections {detail} part="work" />{/if}
 
     <h3>Sessions</h3>

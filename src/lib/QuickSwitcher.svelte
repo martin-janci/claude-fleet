@@ -28,7 +28,6 @@
   import Modal from './Modal.svelte';
   import PickerList, { optionId } from './PickerList.svelte';
   import AccountPill from './AccountPill.svelte';
-  import { uiLayout } from './prefs';
   import type { PickerItem } from './PickerList.svelte';
   import { sessions, sessionsAnswered, type SessionRow } from './sessions';
   import Loader from './Loader.svelte';
@@ -703,14 +702,13 @@
     }
     const key = t.key ?? '';
     const place = placeForTicket(key, $sessions, $projects, (s) => workKeyFor(s, branchById)?.key ?? null);
-    const fresh = $uiLayout === 'new';
     // Redesign 3.12 (K1): a rule (earlier work on the key's family) beats
     // Jev; with neither, the dialog opens on the context project as before.
     let proposal: ProposalLike | null = null;
     let project = place?.project ?? null;
-    if (place && fresh) {
+    if (place) {
       proposal = { value: String(place.project.project.id), source: 'rule', reason: `${keyFamily(key)} work runs here` };
-    } else if (!place && fresh && t.id != null) {
+    } else if (t.id != null) {
       hide();
       const r = await previewStartWork({ item_id: t.id, with_brief: true });
       const jev = r.ok ? projectProposal(r.value) : null;
@@ -933,7 +931,7 @@
         ongroupclick={mode === 'new' ? onGroupClick : undefined}
         oncontext={mode === 'new' ? (k) => openMenu(k, 'main') : undefined}
         rowActions={mode === 'new' ? actions : undefined}
-        rowTrail={mode !== 'new' && $uiLayout === 'new' ? accountTrail : undefined}
+        rowTrail={mode !== 'new' ? accountTrail : undefined}
       />
       {#if menu && entryOf(menu.key)}
         {@const e = entryOf(menu.key)!}
@@ -991,7 +989,7 @@
   </Modal>
 {/if}
 
-<!-- Redesign 4.3, New layout only: a session row carries its account. -->
+<!-- Redesign 4.3: a session row carries its account. -->
 {#snippet accountTrail(item: PickerItem)}
   {@const uuid = ranked.find((e) => e.key === item.key)?.session?.account_uuid}
   {#if uuid}

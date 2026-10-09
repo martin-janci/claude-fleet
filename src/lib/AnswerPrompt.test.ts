@@ -1,6 +1,5 @@
 import { render, screen, fireEvent } from '@testing-library/svelte';
-import { uiLayout } from './prefs';
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('./conversation', async () => {
   const actual = await vi.importActual<typeof import('./conversation')>('./conversation');
@@ -61,6 +60,9 @@ function view(p: PendingInput = DIALOG): AnswerView {
   return v;
 }
 
+/** A multi-select box's state, as a screen reader hears it. */
+const ticked = (o: HTMLElement) => (o.textContent ?? '').includes('ticked: ') && !(o.textContent ?? '').includes('not ticked: ');
+
 /** Let the click's await chain (recheck → send) run to completion. */
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
@@ -73,17 +75,10 @@ beforeEach(() => {
 describe('AnswerPrompt', () => {
   it('shows the question and one button per option', () => {
     render(AnswerPrompt, { session: session(), view: view() });
-    expect(screen.getByTestId('answer-question').textContent).toContain('Do you want to proceed?');
+    expect(screen.getByTestId('answer-card').textContent).toContain('Do you want to proceed?');
     const opts = screen.getAllByTestId('answer-option');
-    expect(opts.map((o) => o.getAttribute('data-n'))).toEqual(['1', '2', '3']);
+    expect(opts.map((o) => o.textContent?.trim()[0])).toEqual(['1', '2', '3']);
     expect(opts[0].textContent).toContain('Yes');
-  });
-
-  it('marks the option the pane has highlighted', () => {
-    render(AnswerPrompt, { session: session(), view: view() });
-    const opts = screen.getAllByTestId('answer-option');
-    expect(opts[0].getAttribute('data-selected')).toBe('true');
-    expect(opts[1].getAttribute('data-selected')).toBeNull();
   });
 
   it('flags an option that stops Claude asking again', () => {
@@ -92,8 +87,8 @@ describe('AnswerPrompt', () => {
     // behaviour should not look like the two that do not.
     render(AnswerPrompt, { session: session(), view: view() });
     const opts = screen.getAllByTestId('answer-option');
-    expect(opts[1].getAttribute('data-sticky')).toBe('true');
-    expect(opts[0].getAttribute('data-sticky')).toBeNull();
+    expect(opts[1].title).toContain('this also stops Claude asking again');
+    expect(opts[0].title).not.toContain('stops Claude asking again');
   });
 
   it('re-reads the pane and sends that option key when the dialog is unchanged', async () => {
@@ -298,7 +293,7 @@ describe('AnswerPrompt, multi-select', () => {
   it('shows each box ticked as the pane has it', () => {
     render(AnswerPrompt, { session: session({ pending_input: MULTI }), view: view(MULTI) });
     const opts = screen.getAllByTestId('answer-option');
-    expect(opts.map((o) => o.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false', 'false']);
+    expect(opts.map((o) => ticked(o))).toEqual([false, true, false, false]);
   });
 
   it('toggles a box and keeps the choices up for the next one', async () => {
@@ -309,7 +304,7 @@ describe('AnswerPrompt, multi-select', () => {
     await settle();
     expect(mockedSend).toHaveBeenLastCalledWith('local', 'dev-foo', '1');
     expect(screen.queryByTestId('answer-sent')).toBeNull();
-    expect(screen.getAllByTestId('answer-option')[0].getAttribute('aria-checked')).toBe('true');
+    expect(ticked(screen.getAllByTestId('answer-option')[0])).toBe(true);
 
     await fireEvent.click(screen.getAllByTestId('answer-option')[2]);
     await settle();
@@ -445,18 +440,13 @@ describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
   });
 
   it('the New layout’s card shows the likely answer first as its primary, numbered as shown', async () => {
-    uiLayout.set('new');
-    try {
-      render(AnswerPrompt, { session: session({ pending_input: QUESTION, ...jev('o2') }), view: view(QUESTION) });
-      const opts = screen.getAllByTestId('answer-option');
-      expect(opts.map((b) => b.textContent?.replace(/\s+/g, ''))).toEqual(['1Vitest', '2Jest', '3Pushthebranchfirst']);
-      expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
-      await fireEvent.keyDown(document.body, { key: '1' });
-      await settle();
-      expect(mockedSend.mock.calls[0][2]).toBe('2');
-    } finally {
-      uiLayout.set('classic');
-    }
+    render(AnswerPrompt, { session: session({ pending_input: QUESTION, ...jev('o2') }), view: view(QUESTION) });
+    const opts = screen.getAllByTestId('answer-option');
+    expect(opts.map((b) => b.textContent?.replace(/\s+/g, ''))).toEqual(['1Vitest', '2Jest', '3Pushthebranchfirst']);
+    expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
+    await fireEvent.keyDown(document.body, { key: '1' });
+    await settle();
+    expect(mockedSend.mock.calls[0][2]).toBe('2');
   });
 
   // F10: a question that names a push (or a merge, a deploy…) is a risky
@@ -471,19 +461,11 @@ describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
   };
 
   it('never reorders a question that names a risky action, nor draws Jev’s pick primary', () => {
-    for (const layout of ['classic', 'new'] as const) {
-      uiLayout.set(layout);
-      try {
-        const { unmount } = render(AnswerPrompt, { session: session({ pending_input: PUSH, ...jev('o2', 95) }), view: view(PUSH) });
-        const opts = screen.getAllByTestId('answer-option');
-        expect(opts.map((b) => b.textContent?.replace(/\s+/g, '')), layout).toEqual(['1Notyet', '2Yes,goahead']);
-        expect(opts.some((b) => b.classList.contains('primary')), layout).toBe(false);
-        expect(screen.queryByTestId('answer-proposed'), layout).toBeNull();
-        unmount();
-      } finally {
-        uiLayout.set('classic');
-      }
-    }
+    render(AnswerPrompt, { session: session({ pending_input: PUSH, ...jev('o2', 95) }), view: view(PUSH) });
+    const opts = screen.getAllByTestId('answer-option');
+    expect(opts.map((b) => b.textContent?.replace(/\s+/g, ''))).toEqual(['1Notyet', '2Yes,goahead']);
+    expect(opts.some((b) => b.classList.contains('primary'))).toBe(false);
+    expect(screen.queryByTestId('answer-proposed')).toBeNull();
   });
 
   it('may move an affirmative option first on a safe question, but never draws it primary', () => {
@@ -495,36 +477,23 @@ describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
         { n: 2, label: 'Yes, go ahead', selected: false },
       ],
     };
-    uiLayout.set('new');
-    try {
-      render(AnswerPrompt, { session: session({ pending_input: SAFE, ...jev('o2') }), view: view(SAFE) });
-      const opts = screen.getAllByTestId('answer-option');
-      expect(opts[0].textContent).toContain('Yes, go ahead');
-      expect(opts.some((b) => b.classList.contains('primary'))).toBe(false);
-      expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
-    } finally {
-      uiLayout.set('classic');
-    }
+    render(AnswerPrompt, { session: session({ pending_input: SAFE, ...jev('o2') }), view: view(SAFE) });
+    const opts = screen.getAllByTestId('answer-option');
+    expect(opts[0].textContent).toContain('Yes, go ahead');
+    expect(opts.some((b) => b.classList.contains('primary'))).toBe(false);
+    expect(screen.getByTestId('answer-proposed')).toHaveTextContent('Proposed by Jev');
   });
 
   // F11: the sidebar's compact card has no room to say who moved what.
   it('never reorders in compact mode, where no "Proposed by Jev" or "Keep the order" shows', async () => {
-    for (const layout of ['classic', 'new'] as const) {
-      uiLayout.set(layout);
-      try {
-        const { unmount } = render(AnswerPrompt, {
-          session: session({ pending_input: QUESTION, ...jev('o2') }),
-          view: view(QUESTION),
-          compact: true,
-        });
-        const opts = screen.getAllByTestId('answer-option');
-        expect(opts.map((b) => b.textContent?.replace(/\s+/g, '')), layout).toEqual(['1Jest', '2Vitest', '3Pushthebranchfirst']);
-        expect(opts.some((b) => b.classList.contains('primary')), layout).toBe(false);
-        unmount();
-      } finally {
-        uiLayout.set('classic');
-      }
-    }
+    render(AnswerPrompt, {
+      session: session({ pending_input: QUESTION, ...jev('o2') }),
+      view: view(QUESTION),
+      compact: true,
+    });
+    const opts = screen.getAllByTestId('answer-option');
+    expect(opts.map((b) => b.textContent?.replace(/\s+/g, ''))).toEqual(['1Jest', '2Vitest', '3Pushthebranchfirst']);
+    expect(opts.some((b) => b.classList.contains('primary'))).toBe(false);
   });
 
   // F12: a proposal that arrives after the card is drawn must not change
@@ -551,10 +520,7 @@ describe('AnswerPrompt quick answer (redesign step 10.9)', () => {
 });
 
 describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
-  afterEach(() => uiLayout.set('classic'));
-
   it('the New layout draws the kit card, with the command, on a row as in the Conversation', async () => {
-    uiLayout.set('new');
     const v = { ...view({ ...DIALOG, detail: 'Bash(git push)' }) };
     const onAnswered = vi.fn();
     render(AnswerPrompt, { session: session(), view: v, compact: true, onAnswered });
@@ -571,7 +537,6 @@ describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
   });
 
   it('a refused send moves nobody on', async () => {
-    uiLayout.set('new');
     mockedAct.mockResolvedValue({ ok: true, value: probe(null) });
     const onAnswered = vi.fn();
     render(AnswerPrompt, { session: session(), view: view(), onAnswered });
@@ -582,7 +547,6 @@ describe('AnswerPrompt in the New layout (redesign 5.9)', () => {
   });
 
   it('is accessible', async () => {
-    uiLayout.set('new');
     const { container } = render(AnswerPrompt, { session: session(), view: view({ ...DIALOG, detail: 'Bash(git push)' }) });
     await expectAccessible(container);
   });
