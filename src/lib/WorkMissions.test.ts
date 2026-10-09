@@ -8,6 +8,7 @@ import { tick } from 'svelte';
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
+import { expectAccessible } from './a11y_check';
 import { hosts } from './hosts';
 import { uiLayout } from './prefs';
 import {
@@ -678,6 +679,42 @@ describe('WorkMissions', () => {
     expect(screen.queryByTestId('mission-edit')).toBeNull();
     expect(screen.queryByTestId('mission-move-active')).toBeNull();
     expect(screen.queryByTestId('mission-delete')).toBeNull();
+  });
+
+  it('is accessible', async () => {
+    uiLayout.set('new');
+    try {
+      current = mission({ state: 'active', total: 3, done: 1 });
+      handlers.work_mission = () => ({
+        mission: current,
+        items: [item(10, 'Payments v2'), { ...item(11, 'Schema'), status_category: 'done' }, item(12, 'API')],
+        graph: {
+          nodes: [
+            { item_id: 10, state: 'ready', wave: 1 },
+            { item_id: 11, state: 'done', wave: 1 },
+            { item_id: 12, state: 'waiting', wave: 2, depends_on: [11], waiting_for: [11] },
+          ],
+          waves: 2,
+        },
+        events: [{ id: 1, at: 1, kind: 'created', actor: 'person:1' }],
+        may_change: true,
+      });
+      const { container } = render(WorkMissions);
+      await flush();
+      await expectAccessible(container);
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-more'));
+      await expectAccessible(container);
+      await fireEvent.keyDown(screen.getByTestId('mission-more-menu'), { key: 'Escape' });
+      await fireEvent.click(screen.getByTestId('mission-view-graph'));
+      await flush();
+      await expectAccessible(container);
+      // The view choice is remembered: leave it on the list for later tests.
+      await fireEvent.click(screen.getByTestId('mission-view-list'));
+    } finally {
+      uiLayout.set('classic');
+    }
   });
 });
 

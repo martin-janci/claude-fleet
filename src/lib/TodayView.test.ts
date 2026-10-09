@@ -17,6 +17,7 @@ import { selectedSession, clearSelection } from './selection';
 import { session } from './hosts_fixture';
 import type { Today } from './today';
 import { tidyRequest, EMPTY_REPORT } from './tidy';
+import { expectAccessible } from './a11y_check';
 
 const digest: Today = {
   since: 0,
@@ -311,5 +312,12 @@ describe('TodayView', () => {
     await fireEvent.click(btn);
     expect(get(tidyRequest)?.sessionIds).toEqual([43]);
     expect(vi.mocked(invoke).mock.calls.map((c) => c[0])).not.toContain('tidy_apply');
+  });
+
+  it('the digest, with every section, is accessible', async () => {
+    const { container } = render(TodayView);
+    await flush();
+    expect(screen.getByTestId('today-waiting')).toBeTruthy();
+    await expectAccessible(container);
   });
 });

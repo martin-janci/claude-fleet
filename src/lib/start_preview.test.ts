@@ -1,9 +1,12 @@
 // The start preview's pure half (task → session spec P-1 / §2.2): what the
 // Work button's primary half does, when a preview may start without asking,
 // and what the popover sends.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import {
   argsWithChoice,
+  draftBrief,
+  draftSource,
   baseStartArgs,
   choiceFromPreview,
   previewIsClean,
@@ -145,5 +148,36 @@ describe('siblingProposal (3.12 N3)', () => {
     expect(siblingProposal(p)).toEqual({ value: '2', source: 'jev', confidence_pct: 70 });
     expect(siblingProposal({ ...p, missing: 'host' })).toBeNull();
     expect(siblingProposal({ ...p, suggested_sibling: null })).toBeNull();
+  });
+});
+
+describe('a drafted brief (redesign 6.10)', () => {
+  it('asks the preview for a draft, with the brief on and no edited brief', async () => {
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    inv.mockResolvedValueOnce(
+      preview({ brief: 'Goal: x.', brief_draft: { model: 'haiku', host_alias: 'h', notes: 1 } }),
+    );
+    const r = await draftBrief({ item_id: 1, with_brief: false, brief: 'old', host_alias: 'h' });
+    expect(r).toEqual({ ok: true, value: { brief: 'Goal: x.', draft: { model: 'haiku', host_alias: 'h', notes: 1 } } });
+    expect(inv).toHaveBeenLastCalledWith('preview_start_work', {
+      args: { item_id: 1, with_brief: true, brief: undefined, draft_brief: true, host_alias: 'h' },
+    });
+  });
+
+  it('a hub that answers the template is not shown a draft', async () => {
+    const inv = invoke as ReturnType<typeof vi.fn>;
+    inv.mockResolvedValueOnce(preview({ brief: 'template' }));
+    const r = await draftBrief({ item_id: 1 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe('E_UNSUPPORTED');
+    inv.mockResolvedValueOnce(preview({ plan: null, missing: 'host' }));
+    const m = await draftBrief({ item_id: 1 });
+    expect(!m.ok && m.error.message).toBe('Pick a host first.');
+  });
+
+  it('says what the draft read', () => {
+    expect(draftSource({ model: 'haiku', host_alias: 'h', notes: 0 })).toBe('from the ticket');
+    expect(draftSource({ model: 'haiku', host_alias: 'h', notes: 1 })).toBe('from the ticket and 1 earlier note');
+    expect(draftSource({ model: 'haiku', host_alias: 'h', notes: 4 })).toBe('from the ticket and 4 earlier notes');
   });
 });

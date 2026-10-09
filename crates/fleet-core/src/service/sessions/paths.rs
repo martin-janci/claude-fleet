@@ -82,6 +82,9 @@ pub(crate) struct HostPaths {
     pub(super) layout: crate::projects::Layout,
     pub(super) worktrees: Vec<(String, i64)>,
     pub(super) named: Vec<(String, String)>,
+    /// The tmux names of this host's Codex rows, whose conversation the
+    /// probe looks up (`codex::rollouts_script`).
+    pub(super) codex_panes: Vec<String>,
 }
 
 impl HostPaths {
@@ -108,6 +111,9 @@ impl HostPaths {
             layout: layout(s),
             worktrees,
             named,
+            codex_panes: s
+                .pane_names_running(alias, crate::store::AGENT_CODEX)
+                .unwrap_or_default(),
         }
     }
 

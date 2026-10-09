@@ -835,7 +835,8 @@ impl FleetTools {
     #[tool(description = "Adopt a live tmux session fleet did not start \
         (started_at null: someone ran tmux by hand on the host). Fleet runs \
         it from now on: started_at is set and the caller becomes its owner \
-        when it has none. The pane is untouched. Errors with \
+        when it has none. project_id puts it in that project (lost_target \
+        proposes one). The pane is untouched. Errors with \
         E_INVALID_STATE for a row fleet already runs, a lost one (use \
         restore_host_sessions) or one with no pane (bg, external).")]
     pub(super) async fn adopt_session(
@@ -861,8 +862,95 @@ impl FleetTools {
             let s = lock(self.reader()).map_err(to_mcp_err)?;
             super::fleet::owner_for(&caller, &s)
         };
+        args.decider = caller.work_decider();
         let row = sessions::adopt_session(args, &self.store).map_err(to_mcp_err)?;
         ok_json(&row)
+    }
+
+    #[tool(description = "Read-only: the project a Lost and found entry \
+        would go into, to prefill Adopt or Restore. Pass session_id (a pane \
+        fleet did not start) or host_alias, claude_session_id, cwd and \
+        git_branch (a conversation discover_lost_sessions found). A \
+        directory inside a fleet project answers source rule; otherwise, \
+        with decide.jev.adopt_target / restore_target at assist, Jev may \
+        answer source jev with a confidence, or unsure (leave the form \
+        blank). Never adopts or restores anything.")]
+    pub(super) async fn lost_target(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::LostTargetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "lost_target",
+            &format!(
+                "session_id={:?} host={:?}",
+                args.session_id, args.host_alias
+            ),
+        );
+        match (args.session_id, args.host_alias.as_deref()) {
+            (Some(id), _) => {
+                self.resolve_target(
+                    &caller,
+                    Some(id),
+                    None,
+                    None,
+                    Reach::Own,
+                    "the pane to adopt",
+                )?;
+            }
+            (None, Some(host)) => {
+                require_host(&caller, host, "the lost conversations")?;
+                self.fence_lost_conversation(&caller, args.claude_session_id.as_deref())?;
+            }
+            (None, None) => {}
+        }
+        let ctx = crate::service::decide::DecideCtx::jev(std::sync::Arc::clone(&self.store));
+        let target = sessions::lost_target_over_ssh(args, &self.store, &self.ssh, &ctx)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&target)
+    }
+
+    #[tool(description = "Restore into a project: copy a conversation \
+        discover_lost_sessions found (not resumable where it ran) under the \
+        directory Claude Code keys that project's root by, on the same \
+        host, so claude --resume finds it there. Never moves or overwrites \
+        a transcript. Then resume with new_session { host_alias, \
+        project_id, name: tmux_name, resume_claude_session_id }.")]
+    pub(super) async fn place_transcript(
+        &self,
+        Extension(caller): Extension<Caller>,
+        Parameters(args): Parameters<sessions::PlaceTranscriptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        audit(
+            "place_transcript",
+            &format!("host={} project_id={}", args.host_alias, args.project_id),
+        );
+        require_host(&caller, &args.host_alias, "the lost conversations")?;
+        self.fence_lost_conversation(&caller, Some(&args.claude_session_id))?;
+        let by_person = caller.work_decider() == crate::store::Decider::Person;
+        let placed = sessions::place_transcript_over_ssh(args, &self.store, &self.ssh, by_person)
+            .await
+            .map_err(to_mcp_err)?;
+        ok_json(&placed)
+    }
+
+    /// The person fence on one found conversation: the same answer
+    /// [`Self::fence_lost_candidates`] gives a conversation with no row, as
+    /// `E_NOTFOUND` (a refused one is indistinguishable from none).
+    fn fence_lost_conversation(&self, caller: &Caller, id: Option<&str>) -> Result<(), McpError> {
+        let Some(id) = id else {
+            return Ok(());
+        };
+        let s = lock(self.reader()).map_err(to_mcp_err)?;
+        let view = caller.view_scope(&s).map_err(to_mcp_err)?;
+        if view.is_internal() || view.sees_past_conversation(&s, id).map_err(to_mcp_err)? {
+            return Ok(());
+        }
+        Err(to_mcp_err(crate::ipc_error::IpcError::new(
+            crate::ipc_error::codes::E_NOTFOUND,
+            format!("no conversation {id} on this host"),
+        )))
     }
 
     #[tool(description = "Launch a supervised headless (background) Claude \

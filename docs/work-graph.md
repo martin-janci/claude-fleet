@@ -667,6 +667,21 @@ fenced as untrusted, rides the first hook's context, and a short start
 prompt is typed only once Claude's REPL is ready, never into a trust
 dialog. The brief is editable before you start.
 
+**Draft with Claude** (beside the brief in New session, and in the start
+popover) asks for a brief written from the ticket and from what earlier
+sessions on the same task left: commit subjects, first prompts, progress
+notes, summaries and hand-offs. Fleet scores each of those by the words it
+shares with the ticket and gives the model the best twelve that fit 3,000
+characters, most relevant first, fenced as untrusted (Jev J4). The run is
+one `claude -p` on the host the start would land on, only when the ticket's
+organisation may reach that host, with the model `work.summary_model` names,
+no tools, no MCP servers, no hooks and no transcript; its cost is booked as
+`brief`. The draft is the field's text: edit it, **Regenerate** it, or
+**Clear** it to go back to the ticket brief. Nothing is sent until you
+start the session. The wire is `work_link { action: preview_start,
+draft_brief: true }`; a hub older than this answers the ticket brief and
+the field says it cannot draft yet.
+
 If a live session is already on that key, the dialog says so ("ABC-123
 already running on X") and offers **Jump** instead of starting a second
 one. The Work tab's start popover offers a **parallel** start instead: a

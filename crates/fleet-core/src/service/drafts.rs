@@ -1,7 +1,8 @@
 //! LLM drafts in the workspace (Orbit Fleet 5.12): a commit message written
 //! from a session's staged diff, for Files › Changed. The other draft of the
 //! step, "What changed" on Resume, is the past-work summary
-//! (`work::summary`), shown there as a draft.
+//! (`work::summary`), shown there as a draft; a start's brief drafted from
+//! its ticket (6.10) is [`crate::service::work::brief_draft`].
 //!
 //! * **On the session's own host and account.** The run is one `claude -p`
 //!   on the session's host, under its credential profile when it has one

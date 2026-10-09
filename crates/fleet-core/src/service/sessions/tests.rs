@@ -3361,6 +3361,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         health: None,
         started_at: now_unix(),
         worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     // 2. `new_session` creates the tmux session and runs its own
     //    single-host reconcile, which upserts + stamps the row.
@@ -3413,6 +3414,7 @@ async fn stale_probe_write_does_not_ghost_session_created_after_probe_start() {
         health: None,
         started_at: now_unix() + 5,
         worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     let mut s = store.lock().unwrap();
     let projects = s.list_projects().unwrap();
@@ -3658,6 +3660,7 @@ fn host_paths(root: &str, layout: crate::projects::Layout) -> HostPaths {
         layout,
         worktrees: Vec::new(),
         named: Vec::new(),
+        codex_panes: Vec::new(),
     }
 }
 
@@ -3938,6 +3941,7 @@ fn reconcile_linking(
         health: None,
         started_at: now_unix(),
         worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     // Two ticks: the second must keep the link, not null it.
     reconcile_write_one_host(&mut s, &probe, &projects).unwrap();
@@ -6149,6 +6153,7 @@ async fn a_verdict_never_marks_a_row_a_newer_probe_already_saw_live() {
         health: None,
         started_at: 1000,
         worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     let mut s = store.lock().unwrap();
     let projects = s.list_projects().unwrap();
@@ -6628,6 +6633,7 @@ fn pair_pass(
         health: None,
         started_at: now_unix(),
         worktree_kb: None,
+        codex_rollouts: Default::default(),
     };
     let projects = s.list_projects().unwrap();
     reconcile_write_one_host(s, &probe, &projects).unwrap();
@@ -6802,6 +6808,7 @@ fn vps_probe(
         health: None,
         started_at: now_unix(),
         worktree_kb: None,
+        codex_rollouts: Default::default(),
     }
 }
 
@@ -7626,4 +7633,56 @@ fn reconcile_reads_a_codex_pane_with_the_codex_adapter() {
         "a Claude row keeps Claude's reading"
     );
     assert_ne!(a.pending_input, Some(card), "and the two readings differ");
+}
+
+/// Codex names its own conversation: reconcile takes the id and rollout the
+/// probe found for a Codex pane, opens that conversation and stores the
+/// rollout as its transcript. A Claude pane's entry in the map is ignored,
+/// and a later pass that finds nothing keeps what was learned.
+#[test]
+fn reconcile_learns_a_codex_panes_conversation_from_its_rollout() {
+    use crate::agent_adapter::codex::PaneRollout;
+    const ID: &str = "01a11dac-6e90-7da0-81c9-280b14a35226";
+    let path =
+        format!("/home/dev/.codex/sessions/2026/10/08/rollout-2026-10-08T22-40-02-{ID}.jsonl");
+    let mut s = Store::open_in_memory().unwrap();
+    s.upsert_host("vps").unwrap();
+    let live = || vec![tmux_session("dev-cx"), tmux_session("dev-a")];
+    let first = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &first, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    s.set_session_agent(cx.id, crate::store::AGENT_CODEX)
+        .unwrap();
+
+    let mut probe = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    for name in ["dev-cx", "dev-a"] {
+        probe.codex_rollouts.insert(
+            name.into(),
+            PaneRollout {
+                id: ID.into(),
+                path: path.clone(),
+            },
+        );
+    }
+    reconcile_write_one_host(&mut s, &probe, &[]).unwrap();
+
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    assert_eq!(cx.claude_session_id.as_deref(), Some(ID));
+    assert_eq!(
+        s.session_transcript_path(cx.id).unwrap().as_deref(),
+        Some(path.as_str())
+    );
+    let conv = s.get_conversation(cx.id, ID).unwrap().expect("opened");
+    assert_eq!(conv.transcript_path.as_deref(), Some(path.as_str()));
+    let a = s.get_session("dev-a", "vps").unwrap().unwrap();
+    assert_eq!(a.claude_session_id, None, "a Claude row is not Codex's");
+
+    let quiet = vps_probe(&s, live(), None, vec![], PrInfoMap::new());
+    reconcile_write_one_host(&mut s, &quiet, &[]).unwrap();
+    let cx = s.get_session("dev-cx", "vps").unwrap().unwrap();
+    assert_eq!(cx.claude_session_id.as_deref(), Some(ID));
+    assert_eq!(
+        s.session_transcript_path(cx.id).unwrap().as_deref(),
+        Some(path.as_str())
+    );
 }
