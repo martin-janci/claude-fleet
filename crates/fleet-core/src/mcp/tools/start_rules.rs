@@ -19,7 +19,7 @@ impl FleetTools {
     pub(super) async fn start_rules(
         &self,
         Extension(caller): Extension<Caller>,
-        Parameters(p): Parameters<StartRulesParams>,
+        Parameters(p): Parameters<start_rules::StartRulesArgs>,
     ) -> Result<CallToolResult, McpError> {
         audit(
             "start_rules",
@@ -29,42 +29,6 @@ impl FleetTools {
             let s = lock(&self.store).map_err(to_mcp_err)?;
             caller.view_scope(&s).map_err(to_mcp_err)?
         };
-        let id = || {
-            p.rule_id.ok_or_else(|| {
-                mcp_err(
-                    codes::E_INVALID,
-                    format!("{} needs rule_id", p.action),
-                    None,
-                )
-            })
-        };
-        let store = &*self.store;
-        match p.action.as_str() {
-            "list" => ok_json_compact(&start_rules::list(store, &scope).map_err(to_mcp_err)?),
-            "save" => {
-                let input = p
-                    .rule
-                    .as_ref()
-                    .ok_or_else(|| mcp_err(codes::E_INVALID, "save needs rule", None))?;
-                ok_json_compact(
-                    &start_rules::save(store, &scope, p.rule_id, input).map_err(to_mcp_err)?,
-                )
-            }
-            "accept" => {
-                ok_json_compact(&start_rules::accept(store, &scope, id()?).map_err(to_mcp_err)?)
-            }
-            "dismiss" => {
-                ok_json_compact(&start_rules::dismiss(store, &scope, id()?).map_err(to_mcp_err)?)
-            }
-            "delete" => {
-                let removed = start_rules::delete(store, &scope, id()?).map_err(to_mcp_err)?;
-                ok_json_compact(&serde_json::json!({ "removed": removed }))
-            }
-            other => Err(mcp_err(
-                codes::E_INVALID,
-                format!("action must be list | save | accept | dismiss | delete, got {other:?}"),
-                None,
-            )),
-        }
+        ok_json_compact(&start_rules::run(&self.store, &scope, &p).map_err(to_mcp_err)?)
     }
 }

@@ -29,6 +29,7 @@ pub mod quick_replies;
 pub mod resolve_move;
 pub mod runs;
 pub mod sessions;
+pub mod start_rules;
 pub mod tasks;
 pub mod trackers;
 pub mod tray;

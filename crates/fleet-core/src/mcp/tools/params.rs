@@ -1257,18 +1257,6 @@ pub struct RoutinesParams {
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
-pub struct StartRulesParams {
-    /// list | save | accept | dismiss | delete.
-    pub action: String,
-    /// Every action but list, and save of a change.
-    #[serde(default)]
-    pub rule_id: Option<i64>,
-    /// save: the whole rule.
-    #[serde(default)]
-    pub rule: Option<crate::service::start_rules::StartRuleInput>,
-}
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct RemoveDownloadParams {
     /// The download's id (`list_downloads`).
     pub id: i64,

@@ -587,6 +587,7 @@ pub fn run() {
             commands::debug_devices::debug_device_logs,
             commands::debug_devices::debug_device_screenshot,
             commands::prs::list_pull_requests,
+            commands::start_rules::start_rules,
             commands::presence::session_presence,
             commands::pages::setting_history,
             commands::pages::set_fleet_setting,

@@ -526,6 +526,54 @@ pub fn delete(store: &Mutex<Store>, scope: &ViewScope, id: i64) -> Result<bool, 
     s.delete_start_rule(id)
 }
 
+/// One `start_rules` call: the MCP tool's parameters and the desktop
+/// command's arguments alike.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct StartRulesArgs {
+    /// list | save | accept | dismiss | delete.
+    pub action: String,
+    /// Every action but list, and save of a change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_id: Option<i64>,
+    /// save: the whole rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<StartRuleInput>,
+}
+
+/// Run one `start_rules` call for `scope`: `list` answers the rules, every
+/// change answers the rule as it now stands, `delete` answers `{ removed }`.
+pub fn run(
+    store: &Mutex<Store>,
+    scope: &ViewScope,
+    args: &StartRulesArgs,
+) -> Result<serde_json::Value, IpcError> {
+    let id = || {
+        args.rule_id
+            .ok_or_else(|| invalid(format!("{} needs rule_id", args.action)))
+    };
+    match args.action.as_str() {
+        "list" => to_json(&list(store, scope)?),
+        "save" => {
+            let input = args
+                .rule
+                .as_ref()
+                .ok_or_else(|| invalid("save needs rule"))?;
+            to_json(&save(store, scope, args.rule_id, input)?)
+        }
+        "accept" => to_json(&accept(store, scope, id()?)?),
+        "dismiss" => to_json(&dismiss(store, scope, id()?)?),
+        "delete" => Ok(serde_json::json!({ "removed": delete(store, scope, id()?)? })),
+        other => Err(invalid(format!(
+            "action must be list | save | accept | dismiss | delete, got {other:?}"
+        ))),
+    }
+}
+
+fn to_json<T: Serialize>(v: &T) -> Result<serde_json::Value, IpcError> {
+    serde_json::to_value(v).map_err(|e| IpcError::new(codes::E_SERIALIZE, e.to_string()))
+}
+
 #[cfg(test)]
 #[path = "start_rules_tests.rs"]
 mod tests;
