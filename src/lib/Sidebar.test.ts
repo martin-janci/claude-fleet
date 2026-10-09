@@ -518,7 +518,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       const row = (await screen.findAllByTestId('sess-row'))[0];
       const e = keydown(row, 'Enter');
       await tick();
-      // The row IS a role="button": Space/Enter on it must scroll nothing.
+      // The row is a treeitem: Space/Enter on it must scroll nothing.
       expect(e.defaultPrevented).toBe(true);
       expect(get(selectedSession)?.id).toBe(sess.id);
     });
@@ -2396,6 +2396,11 @@ describe('Sidebar — group by work (roadmap M1)', () => {
     await tick();
     const archived = screen.getByTestId('archived-session');
     expect(archived).toHaveTextContent('dev-parked');
+    // Redesign step 7.2: the chip is a control of the archived row itself,
+    // and the whole group (header, Done, rows) passes as a tree.
+    const parkedRow = within(archived).getByRole('treeitem');
+    expect(within(parkedRow).getByRole('button', { name: 'archived · show' })).toBeTruthy();
+    await expectAccessible(group);
     await fireEvent.click(within(archived).getByTestId('archived-chip'));
     await waitFor(() =>
       expect(mockedInvoke).toHaveBeenCalledWith('unarchive_session_work', {
@@ -3310,6 +3315,21 @@ describe('Sidebar accessibility (7.2)', () => {
     const projRows = await screen.findAllByTestId('proj-row');
     for (const r of projRows) expect(r.getAttribute('aria-expanded')).toBe('true');
     await expectAccessible(container);
+  });
+
+  it('lists projects and sessions as a tree whose rows keep their own buttons', async () => {
+    mockBackend(fakeProjects, [sessionFor(1, 'dev-a'), sessionFor(2, 'dev-c')]);
+    render(Sidebar);
+    await tick(); await tick();
+    const tree = await screen.findByRole('tree', { name: 'Projects' });
+    const project = within(tree).getAllByTestId('proj-row')[0];
+    expect(project.getAttribute('role')).toBe('treeitem');
+    // A project's sessions are its group; a session row is a treeitem whose
+    // actions a screen reader reaches as buttons, not as hidden children.
+    const group = within(tree).getAllByRole('group')[0];
+    const row = within(group).getAllByRole('treeitem')[0];
+    expect(row.dataset.testid).toBe('sess-row');
+    expect(within(row).getAllByRole('button').length).toBeGreaterThan(0);
   });
 });
 

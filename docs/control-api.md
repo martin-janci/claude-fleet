@@ -870,6 +870,24 @@ Index by area (names only; see the reference for details):
   gone. A row is served to whoever may see the session that opened it; a PR
   whose session is gone only to the hub's own reader or the person of a
   one-person hub. A read: nothing here merges or closes a PR.
+- **Runs** — `runs`, by `action` (`list` today; Orbit Fleet 8.3). One
+  newest-first list of everything that ran on the fleet's behalf: dispatched
+  tasks, a mission's steps and brakes, Jev's decisions, fleet's own
+  `claude -p` runs (the planner, a summary) and routine fires. `list { since?, until?, kind?,
+  outcome?, org_id?, mission_id?, session_id?, routine_id?, limit? (≤ 200,
+  50), offset? }`
+  answers `{ runs, total }`; each run carries `id` (`<source>:<rowid>`),
+  `kind` (`operator` | `task` | `mission` | `jev` | `planner` | `summary` |
+  `routine`),
+  `owner`, `started_at`, `ended_at?`, `duration_ms?`, `outcome` (`ok` |
+  `failed` | `needs_person` | `nothing_to_do` | `running`), `error?`,
+  `cost_micros?`, `model?`, `host?`, `org_id?`, `mission_id?`,
+  `session_ids`, `summary?` and `routine_id?`. Jev rows are only the
+  decisions that called the provider. The list is cut to the caller's view scope
+  (`service::runs`): a task needs every session it names to be visible, a
+  mission's rows need the mission, a routine's fires the routine, and runs that belong to no session or
+  mission need whole-fleet spend. A person's, never served to a per-host
+  token.
 - **Chat forms** — `ask`. Chat forms: open a `fleet.form/1` form in your own session's chat and wait for a person's answers; the person's side lists, gets, answers and declines. See `docs/forms.md`.
 - **Operator settings** — `get_settings` (every registered key of the
   settings registry, `service/settings.rs`, with its effective value; a
@@ -1609,6 +1627,17 @@ automatically on app start.
   answered or expired). Both are the owner's own device only, never the
   operator; each change sends an empty `confirm:changed` event. Every
   other caller is unaffected: for them these tools are not gated.
+- **Handoff receipts.** Each successful call of the operator that hands
+  work on leaves a receipt (redesign 9.3): a prompt or task to a session
+  (`send_prompt`, `queue_prompt`, `run_prompt`, `dispatch_task`), a new
+  session, a new or started mission, a created task, a proposed tree of
+  subtasks (`work_link` `create` / `propose_tree` / `mission_*`). Control
+  draws them as chips and cards. `control_handoffs` (`limit?`, default 50)
+  lists them newest first, each with its target's state now (a mission's
+  name and state, a task's or the tree's items with their status and
+  proposal state); like `mcp_confirms` it answers the owner's own device
+  only, since a receipt quotes the operator's prompt. Each new receipt sends
+  an empty `handoff:changed` event. No other caller's calls leave one.
 - **File modes.** `~/.claude.json`, its backup and `~/.claude/settings.json`
   are written `0600` on every host; `state.db` is `0600` on the central
   machine.

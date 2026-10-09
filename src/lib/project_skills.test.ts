@@ -5,6 +5,8 @@ vi.mock('./files', () => ({ repoTree: vi.fn(), repoFile: vi.fn() }));
 import { repoFile, repoTree } from './files';
 import { clearProjectSkills, projectSkills, readSkillHead, skillPaths, PROJECT_SKILLS_TTL_MS } from './project_skills';
 import { matchSlashCommands } from './conversation';
+import { operatorSession } from './operator';
+import type { SessionRow } from './sessions';
 
 const tree = vi.mocked(repoTree);
 const file = vi.mocked(repoFile);
@@ -64,6 +66,20 @@ describe('project skills in the slash menu (redesign 5.9)', () => {
   it('a session with no worktree has no project commands, not an error', async () => {
     tree.mockResolvedValue({ ok: false, error: { code: 'E_NOT_FOUND', message: 'no worktree' } });
     expect(await projectSkills(8)).toEqual([]);
+  });
+
+  it("Control's agent gets Control's own commands, and no other session does", async () => {
+    operatorSession.set({ id: 42 } as SessionRow);
+    try {
+      const list = await projectSkills(42);
+      expect(list.map((c) => c.name)).toEqual(['task', 'plan', 'done', 'assign', 'start']);
+      expect(tree).not.toHaveBeenCalled();
+      expect(matchSlashCommands('/pl', list).map((c) => c.name)).toEqual(['plan']);
+      tree.mockResolvedValue({ ok: true, value: { entries: [], truncated: false } });
+      expect(await projectSkills(43)).toEqual([]);
+    } finally {
+      operatorSession.set(null);
+    }
   });
 
   it('the menu lists them after the built-ins, and never shadows one', () => {

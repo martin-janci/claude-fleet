@@ -87,6 +87,12 @@ Changeset cards that adopt, sync and fix assets: list (one in full with id), pro
 
 Parameters: `action`, `change`, `confirm_nonce`, `id`, `positions`
 
+### `control_handoffs`
+
+What the agent handed on, newest first: prompts and tasks sent to sessions, new sessions, missions, tasks and proposed trees, each with its target's state now.
+
+Parameters: `limit`
+
 ### `debug_devices`
 
 Phones, emulators and simulators on any fleet host, used from any session that may see them; commands run on the device's host. run: one adb / simctl / devicectl command. install copies the app from your host. screenshot answers an image. A claim keeps others off (E_CONFLICT); use extends it.
@@ -544,6 +550,12 @@ Parameters: `action`, `enabled`, `limit`, `routine`, `routine_id`, `skip`
 send_prompt + wait_for_session(turn_gt) + session_transcript in one call. Returns { turn_seq, status: satisfied | timeout, transcript } (the reply as plain text; null with transcript_error when unreadable). Marked untrusted unless raw=true (master token only).
 
 Parameters: `max_chars`, `prompt`, `raw`, `session_id`, `timeout_s`
+
+### `runs`
+
+Runs, newest first: tasks, mission steps, Jev decisions, planner and summary runs, routine fires. list: {runs, total}; each run has kind, owner, outcome (ok | failed | needs_person | nothing_to_do | running), duration_ms, cost_micros and session_ids.
+
+Parameters: `action`, `kind`, `limit`, `mission_id`, `offset`, `org_id`, `outcome`, `routine_id`, `session_id`, `since`, `until`
 
 ### `safe_kill_session`
 
@@ -1015,6 +1027,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::presence::session_presence`
 - `commands::pages::setting_history`
 - `commands::pages::set_fleet_setting`
+- `commands::runs::list_runs`
 - `commands::tasks::list_tasks`
 - `commands::tasks::cancel_task`
 - `commands::files::repo_changes`
@@ -1076,6 +1089,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::mcp::rotate_host_token`
 - `commands::mcp::mcp_confirm`
 - `commands::mcp::mcp_pending_confirms`
+- `commands::mcp::control_handoffs`
 - `commands::operator::ensure_operator`
 - `commands::operator::operator_status`
 - `commands::hub::hub_status`

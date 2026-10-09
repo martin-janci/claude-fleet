@@ -768,6 +768,15 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "control_handoffs",
+            "control_handoffs",
+            json!({ "limit": 5 }),
+            r#"[{"id":1,"at":1,"kind":"session","tool":"send_prompt","session_id":3}]"#,
+            Box::new(|b, s, _| {
+                block_on(commands::mcp::routed::control_handoffs(b, s, Some(5))).map(|_| ())
+            }),
+        ),
+        (
             "mcp_pending_confirms",
             "mcp_confirms",
             json!({}),
@@ -805,6 +814,25 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             r#"{"targets":[]}"#,
             Box::new(|b, s, _| {
                 block_on(commands::updates::routed::list_update_targets(b, s)).map(|_| ())
+            }),
+        ),
+        (
+            "list_runs",
+            "runs",
+            json!({ "action": "list", "since": 5, "kind": "jev", "limit": 20 }),
+            r#"{"runs":[{"id":"jev:1","source":"jev","kind":"jev","owner":"status_map","started_at":6,"outcome":"ok","session_ids":[]}],"total":1}"#,
+            Box::new(|b, s, _| {
+                block_on(commands::runs::routed::list_runs(
+                    b,
+                    s,
+                    fleet_core::service::runs::RunsArgs {
+                        since: Some(5),
+                        kind: Some("jev".into()),
+                        limit: Some(20),
+                        ..Default::default()
+                    },
+                ))
+                .map(|_| ())
             }),
         ),
         (
@@ -4426,7 +4454,13 @@ fn stop_waiting_on_a_hub_client_abandons_add_project() {
     use fleet_core::cancel::CancellationRegistry;
     use fleet_core::service::add_project::{AddProjectArgs, AddProjectSource};
     for (source, github) in [
-        (AddProjectSource::Clone { url: "o/r".into() }, false),
+        (
+            AddProjectSource::Clone {
+                url: "o/r".into(),
+                existing: false,
+            },
+            false,
+        ),
         (
             AddProjectSource::New {
                 owner: "o".into(),
@@ -6176,6 +6210,7 @@ const SOURCES: &[(&str, &str)] = &[
         "commands/updates.rs",
         include_str!("../commands/updates.rs"),
     ),
+    ("commands/runs.rs", include_str!("../commands/runs.rs")),
     ("commands/pages.rs", include_str!("../commands/pages.rs")),
     (
         "commands/onboarding.rs",

@@ -15,6 +15,7 @@ mod bench_work_link;
 mod catalog;
 mod changesets;
 mod clients;
+mod control_handoffs;
 mod conversations;
 mod debug_devices;
 mod decisions;
@@ -47,6 +48,7 @@ mod reconcile;
 mod reports;
 mod routines;
 mod rows;
+mod runs;
 #[cfg(test)]
 pub(crate) mod scale_fixture;
 mod schema;
@@ -89,6 +91,9 @@ pub use changesets::{
 pub use clients::{
     breaks_a_line, validate_client_mode, validate_client_name, ClientBinding, CLIENT_MODES,
     LINE_SEPARATORS,
+};
+pub use control_handoffs::{
+    handoff_preview, ControlHandoffRow, HandoffItem, NewHandoff, HANDOFFS_KEEP, HANDOFF_PREVIEW_MAX,
 };
 pub use conversations::{ConversationRow, StartSource, AWAITING_REBIND_TTL_SECS};
 pub use debug_devices::{DebugDeviceRow, DebugDeviceScan, SeenDevice};
@@ -158,6 +163,10 @@ pub use routines::{
     ROUTINE_RUN_OUTCOMES, ROUTINE_RUN_OUTCOME_SOURCES, ROUTINE_RUN_STATES, ROUTINE_TRIGGERS,
 };
 pub use rows::*;
+pub use runs::{
+    RunRow, RunsFilter, RunsReach, MISSION_RUN_EVENTS, RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT,
+    RUN_KINDS, RUN_OUTCOMES, RUN_SOURCES,
+};
 pub use schema::known_schema_version;
 #[cfg(test)]
 pub(crate) use schema::LATEST_SCHEMA_VERSION;
