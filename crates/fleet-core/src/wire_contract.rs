@@ -164,4 +164,17 @@
 //!   `account_usage` tool, and `update_device` to an `org_admin` action it
 //!   does not know. Session rows also carry `agent`,
 //!   `origin`, `last_viewed_at`, `turn_outcome` and `proposals` (additive).
-pub const CONTRACT_REVISION: u32 = 11;
+//! - **12** — *new tools*: the redesign's tools after M2. The desktop routes
+//!   `queue_prompt`, `queued_prompts` and `cancel_queued_prompt` to the new
+//!   `queue_prompt` / `queued_prompts` tools, `repo_branch_diff` and
+//!   `repo_range_diff` to tools of the same names, `session_presence`
+//!   (11.7b) to its tool, `link_peer_hub` / `unlink_peer_hub` to
+//!   `link_peer` / `unlink_peer` (11.5), and `mcp_pending_confirms` /
+//!   `mcp_confirm` to `mcp_confirms` / `answer_mcp_confirm` (9.2; those two
+//!   fall back on an older hub). A revision-11 hub serves none of them. The
+//!   hub also serves `routines` (8.5), `install_agent` and `agent_installs`
+//!   to the phone. The golden file now pins `PullRequestRow`, `PrList`,
+//!   `PresenceView`, `ConfirmRequest`, `PeerLinkSummary`,
+//!   `QueuePromptResult`, `DeferredPromptRow`, `BranchDiff` and
+//!   `AccountUsageSnapshot`.
+pub const CONTRACT_REVISION: u32 = 12;

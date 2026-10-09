@@ -759,6 +759,121 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
     let hub = sample_hub_health();
     put("Health.hub", wire_keys(&hub));
     put("Health.hub.reconcile", wire_keys(&hub.reconcile));
+    // Revision 12: the answers of the tools the desktop routes since 11.
+    let pr = fleet_core::store::PullRequestRow {
+        id: 1,
+        url: "https://github.com/o/r/pull/7".into(),
+        repo: Some("o/r".into()),
+        number: Some(7),
+        title: Some("t".into()),
+        head_ref: Some("feat".into()),
+        state: "OPEN".into(),
+        draft: false,
+        ci_status: Some("passing".into()),
+        review_decision: Some("APPROVED".into()),
+        merge_state: Some("CLEAN".into()),
+        merged_at: Some(1),
+        session_id: Some(1),
+        session_name: Some("dev".into()),
+        host_alias: Some("trn".into()),
+        project_id: Some(1),
+        first_seen_at: 1,
+        updated_at: 2,
+    };
+    put("PullRequestRow", wire_keys(&pr));
+    put(
+        "PrList",
+        wire_keys(&fleet_core::service::prs::PrList {
+            items: vec![pr],
+            total: 1,
+        }),
+    );
+    let viewer = fleet_core::service::presence::Viewer {
+        person_id: 1,
+        name: "jane".into(),
+        device: Some("phone".into()),
+        since: 1,
+        you: true,
+    };
+    put("PresenceView.viewers", wire_keys(&viewer));
+    put(
+        "PresenceView",
+        wire_keys(&fleet_core::service::presence::PresenceView {
+            session_id: 1,
+            viewers: vec![viewer],
+            heartbeat_secs: 30,
+        }),
+    );
+    put(
+        "ConfirmRequest",
+        wire_keys(&fleet_core::mcp::guard::ConfirmRequest {
+            nonce: "n".into(),
+            tool: "kill_session".into(),
+            summary: "s".into(),
+            caller: "master".into(),
+            operator: true,
+            asked_at: 1,
+        }),
+    );
+    put(
+        "PeerLinkSummary",
+        wire_keys(&fleet_core::store::PeerLinkSummary {
+            id: 1,
+            fleet_id: Some("f".into()),
+            role: "dialer".into(),
+            url: Some("https://peer".into()),
+            state: "linked".into(),
+            last_exchange_at: Some(1),
+            last_error: Some("e".into()),
+            pending: 0,
+            revoked_at: Some(1),
+            latency_ms: Some(5),
+            messages_today: 1,
+            messages_total: 2,
+        }),
+    );
+    put(
+        "QueuePromptResult",
+        wire_keys(&fleet_core::service::sessions::QueuePromptResult {
+            session_id: 1,
+            delivered: false,
+            queued_id: Some(1),
+        }),
+    );
+    put(
+        "DeferredPromptRow",
+        wire_keys(&fleet_core::store::DeferredPromptRow {
+            id: 1,
+            session_id: 1,
+            body: "b".into(),
+            created_at: 1,
+            delivered_at: Some(1),
+            attempts: 1,
+            failed_at: Some(1),
+            error: Some("e".into()),
+            cancelled_at: Some(1),
+        }),
+    );
+    put(
+        "BranchDiff",
+        wire_keys(&fleet_core::service::repo_read::BranchDiff {
+            branch: Some("feat".into()),
+            upstream: Some("origin/feat".into()),
+            unpushed: vec![],
+            unpushed_files: vec![],
+            truncated: false,
+            base: Some("origin/main".into()),
+            ahead_of_base: 1,
+            base_files: vec![],
+        }),
+    );
+    let mut usage = fleet_core::service::account_usage::AccountUsageSnapshot::never_fetched("a");
+    usage.usage = Some(Default::default());
+    usage.subscription = Some("max".into());
+    usage.fetched_at = Some(1);
+    usage.source_host = Some("trn".into());
+    usage.detail = Some("d".into());
+    put("AccountUsageSnapshot", wire_keys(&usage));
     put("UsageTotals", wire_keys(&sample_totals()));
     put(
         "DayUsage",
