@@ -133,6 +133,8 @@
     "claim_debug_device",
     "confirm_session_work",
     "control_handoffs",
+    "control_route_follow",
+    "control_route_propose",
     "create_work_task",
     "debug_device_logs",
     "debug_device_screenshot",

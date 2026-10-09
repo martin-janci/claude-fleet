@@ -663,6 +663,8 @@ pub fn run() {
             commands::mcp::control_handoffs,
             commands::operator::ensure_operator,
             commands::operator::operator_status,
+            commands::operator::control_route_propose,
+            commands::operator::control_route_follow,
             commands::hub::hub_status,
             commands::hub::hub_pair,
             commands::hub::hub_disconnect,

@@ -1323,6 +1323,20 @@ pub const VERDICTS: &[(&str, Verdict)] = &[
             tool: "operator_status",
         },
     ),
+    // Redesign step 9.9 (Jev K2): the hub decides where a Control message
+    // goes, since it owns the fleet and the decision envelope.
+    (
+        "control_route_propose",
+        Verdict::Routed {
+            tool: "control_route",
+        },
+    ),
+    (
+        "control_route_follow",
+        Verdict::Routed {
+            tool: "control_route",
+        },
+    ),
     // ── the pairing itself — about THIS process, either way ─────────────────
     (
         "hub_status",

@@ -553,6 +553,9 @@ pub const DECIDE_JEV_RESTORE_TARGET: &str = "decide.jev.restore_target";
 /// `duplicate`'s mode (flagging a proposed task that may duplicate an
 /// existing one, K4).
 pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
+/// `control_route`'s mode (K2: where a message typed in Control goes,
+/// redesign step 9.9).
+pub const DECIDE_JEV_CONTROL_ROUTE: &str = "decide.jev.control_route";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1361,6 +1364,15 @@ pub const SPECS: &[Spec] = &[
         Kind::Choice(DECIDE_MODES),
         "Jev: duplicate task",
         "Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_CONTROL_ROUTE,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: Control routing",
+        "Proposing which mission or session a message typed in Control is about. A short or unclear message gets a question instead. Shadow only records; assist suggests.",
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
@@ -2608,6 +2620,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_START_PROJECT, None), "off");
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_CONTROL_ROUTE, None), "off");
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");
