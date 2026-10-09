@@ -115,6 +115,7 @@
   import RichText from './RichText.svelte';
   import BackgroundDetail from './BackgroundDetail.svelte';
   import Loader from './Loader.svelte';
+  import type { LoaderName } from './loader-kit.generated';
   import PulseSteps from './PulseSteps.svelte';
   import { startingSessions } from './session_starting';
   import { sessionPulse, thinkingLabel } from './session_loaders';
@@ -170,6 +171,10 @@
     // (AgentPanel's removable context chip). Only shown when there IS a
     // composer to sit above.
     composerAbove,
+    // The new layout's working indicator in another voice (redesign step
+    // 9.13): Control's chat reads the running turn itself and answers the
+    // loader and the line to show instead of the Atom's "Thinking · …".
+    thinkingAs,
   }: {
     session: SessionRow;
     visible: boolean;
@@ -179,6 +184,7 @@
     promptPrefix?: string | null;
     blockWhileBusy?: boolean;
     composerAbove?: Snippet;
+    thinkingAs?: (conv: Conversation | null) => { loader: LoaderName; label: string } | null;
   } = $props();
 
   let conv = $state<Conversation | null>(null);
@@ -712,6 +718,7 @@
       ? thinkingLabel(doing ? { label: doing.label, since: doing.sinceMs !== null ? formatDuration(doing.sinceMs) : null } : null)
       : null,
   );
+  const thinkingOwn = $derived(thinking && thinkingAs ? thinkingAs(viewing === null ? conv : null) : null);
   // In the template, `turnLive` marks the last turn of the current
   // conversation while the indicator shows anything (working, blocked on a
   // prompt in the terminal, or just sent): an unfinished tool call there is
@@ -2365,13 +2372,15 @@
             role={indicator ? 'status' : undefined}
             aria-hidden={indicator ? undefined : 'true'}
           >
-            {#if thinking}
+            {#if thinkingOwn}
+              <Loader name={thinkingOwn.loader} size={20} stage={false} class="indicator-loader" testid="conv-{thinkingOwn.loader}" />
+            {:else if thinking}
               <Loader name="atom" size={20} stage={false} class="indicator-loader" testid="conv-atom" />
             {:else}
               <Loader size={16} paused={!indicator} class="indicator-loader" />
             {/if}
             <span class="indicator-label"
-              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Waiting for Claude…' : (thinking ?? indicatorLabel)}</span
+              >{!indicator ? '\u00a0' : indicator.kind === 'sent' ? 'Waiting for Claude…' : (thinkingOwn?.label ?? thinking ?? indicatorLabel)}</span
             >
           </div>
         {/if}

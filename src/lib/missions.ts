@@ -4,6 +4,7 @@
 // one, the lifecycle, the item cap) live in fleet-core's
 // `service::work::missions`, served by the hub on a paired desktop.
 
+import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { WorkItemRow } from './trackers';
 import { bumpWorkChanged } from './work';
@@ -428,6 +429,30 @@ export function trailNodes(detail: MissionDetail): Set<number> {
   return new Set((detail.graph?.nodes ?? []).filter((n) => WORKING.has(n.state)).map((n) => n.item_id));
 }
 
+/** A running mission at a glance, for Control (redesign step 9.12): the
+ *  title of its current step (the first task it is working on), whether it
+ *  waits on a person, and whether that step carries Comet trails. */
+export interface MissionNow {
+  id: number;
+  name: string;
+  step: string | null;
+  waiting: boolean;
+  trails: boolean;
+}
+
+export function missionNow(detail: MissionDetail): MissionNow {
+  const nodes = trailNodes(detail);
+  const working = (detail.graph?.nodes ?? []).find((n) => WORKING.has(n.state));
+  const item = working ? (detail.items ?? []).find((i) => i.id === working.item_id) : undefined;
+  return {
+    id: detail.mission.id,
+    name: detail.mission.name,
+    step: item ? item.title : null,
+    waiting: waitsOnPerson(detail),
+    trails: working !== undefined && nodes.has(working.item_id),
+  };
+}
+
 /** The graph's nodes by wave, W1 first; items the graph leaves out (an
  *  older hub) land in one wave of their own. */
 export function wavesOf(detail: MissionDetail): { wave: number; nodes: GraphNode[] }[] {
@@ -548,6 +573,15 @@ export function eventSentence(e: MissionEvent): string {
     default:
       return e.kind.replace(/_/g, ' ');
   }
+}
+
+/** A request to show one mission in the Work view's Missions tab (a
+ *  "Sent to a mission" chip in Control, redesign 9.3). WorkTree switches to
+ *  the tab; WorkMissions opens the mission and clears the request. */
+export const missionOpenRequest = writable<{ id: number } | null>(null);
+
+export function openMission(id: number): void {
+  missionOpenRequest.set({ id });
 }
 
 export function listMissions(): Promise<Result<Mission[]>> {

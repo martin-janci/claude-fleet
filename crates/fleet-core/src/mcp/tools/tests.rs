@@ -2400,6 +2400,7 @@ fn router_sum_serves_every_tool() {
         include_str!("prs.rs"),
         include_str!("routines.rs"),
         include_str!("presence.rs"),
+        include_str!("runs.rs"),
     ]
     .iter()
     .map(|src| src.matches("#[tool(").count())
@@ -8820,6 +8821,7 @@ async fn add_project_refuses_a_hostile_alias_before_any_ssh() {
                 "-oProxyCommand=x",
                 AddProjectSource::Clone {
                     url: "https://github.com/o/r".into(),
+                    existing: false,
                 },
             )),
         )
@@ -9186,6 +9188,7 @@ fn add_params(host: &str, source: AddProjectSource) -> AddProjectParams {
 fn clone_src() -> AddProjectSource {
     AddProjectSource::Clone {
         url: "https://github.com/acme/widget".into(),
+        existing: false,
     }
 }
 
@@ -9641,11 +9644,13 @@ async fn an_operator_fork_needs_a_person_too() {
 fn add_projects_audit_line_never_carries_a_raw_clone_url() {
     let line = super::repo::add_project_audit_target(&AddProjectSource::Clone {
         url: "https://user:ghp_SECRET@github.com/acme/widget".into(),
+        existing: false,
     });
     assert!(!line.contains("SECRET"), "{line}");
     assert_eq!(line, "kind=clone repo=<invalid>");
     let line = super::repo::add_project_audit_target(&AddProjectSource::Clone {
         url: "https://github.com/acme/widget.git".into(),
+        existing: false,
     });
     assert_eq!(line, "kind=clone repo=acme/widget");
 }
@@ -10336,6 +10341,18 @@ pub(super) const NO_PER_ROW_GATE: &[(&str, &str)] = &[
          the session each row came out of — the same `own` tier `send_file` \
          gates one row with. A `session_id` this caller does not own matches \
          no row rather than refusing, so it is no existence oracle either",
+    ),
+    (
+        "runs",
+        "a FILTER, not a gate on one named row: `session_id` narrows WHICH \
+         runs to list, and every branch of the union is then cut in SQL by \
+         `service::runs::reach` — a task only when the caller sees every \
+         session it names (`task_visible_in_scope_pure` less its pane-proof \
+         clause), a mission's rows only when `sees_mission`, a Jev or summary \
+         run only when it sees the session it was about, and rows that belong \
+         to no session or mission only with whole-fleet spend. A `session_id` \
+         this caller may not see matches no row rather than refusing, so it \
+         is no existence oracle",
     ),
     (
         "peer_exchange",

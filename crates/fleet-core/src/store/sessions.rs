@@ -2267,6 +2267,12 @@ impl Store {
     pub fn bus_confirm_changed(&self) {
         self.bus.confirm_changed();
     }
+
+    /// Emit `handoff:changed` (redesign step 9.3): Control's agent handed
+    /// work on and a receipt was written.
+    pub fn bus_handoff_changed(&self) {
+        self.bus.handoff_changed();
+    }
 }
 
 #[cfg(test)]
