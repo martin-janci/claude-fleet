@@ -11,7 +11,7 @@ import { clearToasts } from './lib/toasts';
 import { workBoardOpen, requestHostsView, settingsOpen, requestAssetsView, shortcutSheetOpen } from './lib/app_views';
 import { toolkitTab } from './lib/toolkit_skills';
 import { sidebarView } from './lib/work_view';
-import { destination } from './lib/destination';
+import { destination, leave } from './lib/destination';
 import { controlTab } from './lib/control';
 import { link, task } from './lib/work_view_fixture';
 import type { WorkTreePage } from './lib/work_view';
@@ -60,7 +60,7 @@ describe('App: the destination store', () => {
     const { container, getByTestId } = render(App);
     const term = terminalSlot(container);
 
-    await fireEvent.click(getByTestId('stab-assets'));
+    await fireEvent.click(getByTestId('rail-toolkit'));
     expect(openOverlays(container)).toEqual(['assets-overlay']);
 
     requestHostsView();
@@ -80,7 +80,7 @@ describe('App: the destination store', () => {
 
   it('a Hosts request from outside App replaces the open overlay', async () => {
     const { container, getByTestId } = render(App);
-    await fireEvent.click(getByTestId('stab-assets'));
+    await fireEvent.click(getByTestId('rail-toolkit'));
     requestHostsView();
     await waitFor(() => expect(openOverlays(container)).toEqual(['hosts-overlay']));
     expect(get(destination)).toBe('hosts');
@@ -234,7 +234,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
   });
 
   it('Accounts opens as one more overlay over a mounted terminal, and Esc leaves it', async () => {
-    const { container, getByTestId } = render(App);
+    const { container, getByTestId, queryByTestId } = render(App);
     const term = terminalSlot(container);
     // The tab bar has no Hosts tab (step 3.5): ⌘I and the rail.
     requestHostsView();
@@ -242,7 +242,9 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.click(getByTestId('rail-accounts'));
     expect(openOverlays(container)).toEqual(['accounts-overlay']);
     expect(getByTestId('rail-accounts').getAttribute('aria-current')).toBe('page');
-    expect(getByTestId('stab-agent').getAttribute('aria-selected')).toBe('false');
+    // Accounts takes the whole width: no session tabs, no list column (UX audit N1, N2).
+    expect(queryByTestId('session-tabs')).toBeNull();
+    expect(container.querySelector('main.layout')?.classList.contains('list-off')).toBe(true);
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(get(destination)).toBe('session');
     expect(terminalSlot(container)).toBe(term);
@@ -323,7 +325,7 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.click(getByTestId('inbox-all-sessions'));
     expect(get(sidebarView)).toBe('sessions');
     expect(queryByTestId('inbox')).toBeNull();
-    expect(getByTestId('sidebar-view-sessions').textContent).toContain('All sessions');
+    expect(getByTestId('list-title').textContent).toContain('All sessions');
   });
 
   it('Settings opens the Settings dialog', async () => {
@@ -338,8 +340,30 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.click(getByTestId('sidebar-collapse'));
     await waitFor(() => expect(queryByTestId('sidebar-expand')).not.toBeNull());
     await fireEvent.click(getByTestId('rail-settings'));
-    await waitFor(() => expect(document.querySelector('.settings-dialog')).not.toBeNull());
+    await waitFor(() => expect(queryByTestId('settings-page')).not.toBeNull());
     settingsOpen.set(false);
+  });
+
+  it('UX audit S1: Settings is a page in place of the list, and the rail or Esc leaves it', async () => {
+    const { getByTestId, queryByTestId } = render(App);
+    await fireEvent.click(getByTestId('rail-settings'));
+    await waitFor(() => expect(queryByTestId('settings-page')).not.toBeNull());
+    // A page, not a modal: no <dialog>, the list column hidden, the rail on Settings.
+    expect(getByTestId('settings-page').closest('dialog')).toBeNull();
+    expect(getByTestId('settings-view')).toBeTruthy();
+    expect(document.querySelector('main.layout')!.classList.contains('list-off')).toBe(true);
+    expect(getByTestId('rail-settings').getAttribute('aria-current')).toBe('page');
+    // Another rail item leaves it.
+    await fireEvent.click(getByTestId('rail-control'));
+    await waitFor(() => expect(queryByTestId('settings-page')).toBeNull());
+    expect(get(settingsOpen)).toBe(false);
+    // Esc leaves it too, back to what was open under it.
+    await fireEvent.click(getByTestId('rail-settings'));
+    await waitFor(() => expect(queryByTestId('settings-page')).not.toBeNull());
+    await fireEvent.keyDown(document.body, { key: 'Escape' });
+    await waitFor(() => expect(queryByTestId('settings-page')).toBeNull());
+    expect(get(destination)).toBe('control');
+    leave('control');
   });
 
 });

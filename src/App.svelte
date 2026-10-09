@@ -12,6 +12,8 @@
   import { setContextRedPct } from './lib/attention';
   import { trackersHealth, trackersSummary } from './lib/tracker_health';
   import Sidebar from './lib/Sidebar.svelte';
+  import FirstRun from './lib/FirstRun.svelte';
+  import SettingsDialog from './lib/SettingsDialog.svelte';
   import Lazy from './lib/Lazy.svelte';
   import { lazyViews, preloadLazyViews } from './lib/lazy_views';
   import { windowHidden } from './lib/window_hidden';
@@ -103,7 +105,7 @@
   import { markStartup, startCatchUp, takeUpdateReveal, trackActivity } from './lib/startup';
   import { loadProjectPicks } from './lib/project_picks';
   import HubConnectionBanner from './lib/HubConnectionBanner.svelte';
-  import { get } from 'svelte/store';
+  import { derived, get } from 'svelte/store';
   import { destination, goTo, leave } from './lib/destination';
   import { clampListWidth, listWidthDefault } from './lib/layout_tokens';
 
@@ -553,6 +555,16 @@
     else if (!detailsMain) goTo('details');
   });
   onDestroy(unsubRowAction);
+  // Settings is a page: going anywhere else (a chord, the switcher, a link)
+  // or opening another session leaves it, as the rail does.
+  let lastPlace = `${get(destination)}|${get(selectedSession)?.id ?? ''}`;
+  const unsubLeaveSettings = derived([destination, selectedSession], ([d, s]) => `${d}|${s?.id ?? ''}`).subscribe(
+    (place) => {
+      if (place !== lastPlace && get(settingsOpen)) settingsOpen.set(false);
+      lastPlace = place;
+    },
+  );
+  onDestroy(unsubLeaveSettings);
   // The Files tab shows the worktree file viewer over the terminal. It needs a selected session (the worktree to browse);
   // deselecting one drops back to the terminal automatically.
   // Primitive projections of the selection: `$selectedSession` changes
@@ -724,6 +736,7 @@
   // fleet page (Accounts, Hosts, Assets); over a session (Files, the board)
   // they leave the right column alone.
   function onRailSelect(id: RailId) {
+    if (id !== 'settings') settingsOpen.set(false);
     if (id === 'inbox' || id === 'sessions' || id === 'work') {
       sidebarCollapsed = false;
       sidebarView.set(id);
@@ -789,6 +802,18 @@
   });
   const taskShowing = $derived($sidebarView === 'work' && !!$selectedTaskId && $taskDetailOpen);
   const boardShown = $derived($destination === 'board');
+  // The list column and the session header belong to Inbox, Sessions and
+  // Work (the Main, Sessions and Work boards). Control and Accounts take the
+  // whole width; Automation and Toolkit bring their own navigation. The
+  // Sidebar stays mounted under a fleet page, hidden, so its chords and
+  // state survive the round trip.
+  // Settings is a page of its own too (UX audit 2026-10-09, S1): its nav
+  // takes the list column's place.
+  const listHidden = $derived(fleetPageShown || $settingsOpen);
+  // A task in the Work view is not a session: no session tabs over it.
+  const sessionChrome = $derived(
+    !!$selectedSession && !fleetPageShown && !$settingsOpen && !(taskShowing && !boardShown),
+  );
   const detailsMain = $derived(
     !wideMode && !boardShown && ($destination === 'details' || taskShowing || !$selectedSession),
   );
@@ -796,7 +821,7 @@
   // board, whatever the inspector pref.
   const boardTask = $derived(boardShown && taskShowing);
   const inspectorRoom = $derived(boardTask || (!!$selectedSession && !wideMode && !boardShown && !detailsMain));
-  const inspectorShown = $derived(boardTask || (inspectorRoom && inspectorOpen));
+  const inspectorShown = $derived(!$settingsOpen && (boardTask || (inspectorRoom && inspectorOpen)));
   // Step 5.3: the pane's shells, for the Terminals tab. It is current while
   // the pane shows one of them (alone or split beside the agent).
   const selTerminals = $derived(
@@ -876,23 +901,22 @@
   }
 
   // The Tidy-up sheet lives in the sidebar: a request for it (the Today
-  // view's Stale section) brings a collapsed sidebar back so it can open.
+  // view's Stale section) brings a collapsed sidebar back so it can open,
+  // and leaves a fleet page, which hides the list.
   $effect(() => {
-    if ($tidyRequest) sidebarCollapsed = false;
+    if ($tidyRequest) untrack(revealList);
   });
 
   // The Add project dialog is mounted by the Sidebar, which is unmounted while
   // the rail is collapsed: a request from the switcher's Add row brings it
   // back, and the mounted Sidebar then consumes the request.
   $effect(() => {
-    if ($addProjectRequest) sidebarCollapsed = false;
+    if ($addProjectRequest) untrack(revealList);
   });
-
-  // Review r08: Settings (and Get started) are mounted by the Sidebar too, and
-  // the rail's Settings and ⌘, must open them while it is collapsed.
-  $effect(() => {
-    if ($settingsOpen) sidebarCollapsed = false;
-  });
+  function revealList() {
+    sidebarCollapsed = false;
+    if (fleetPageShown) showSession();
+  }
 
   // "Insert into composer" (work graph M9.2) shows where the text went: the
   // selected session's conversation.
@@ -932,6 +956,13 @@
   function onKeydown(e: KeyboardEvent) {
     if (e.key !== 'Escape') return;
     const target = e.target as HTMLElement | null;
+    // Settings, the same rule as the fleet pages: Esc goes back to what was
+    // open under it, not while typing in a field or inside a dialog.
+    if ($settingsOpen) {
+      if (e.defaultPrevented || isEditable(target) || target?.closest?.('dialog')) return;
+      settingsOpen.set(false);
+      return;
+    }
     // Esc leaves files mode (the terminal is covered while it's open, so Esc
     // can't be meant for the terminal here) — but not while the user is
     // typing in a field such as the file filter, where Esc belongs to that
@@ -981,8 +1012,8 @@
   // the inspector (steps 3.2, 3.5). Setting a slot to `0px` hides it while
   // keeping each child's grid placement stable.
   const gridTemplate = $derived.by(() => {
-    const sb = sidebarCollapsed ? '20px' : `${sidebarPx}px`;
-    const sbResizer = sidebarCollapsed ? '0px' : '4px';
+    const sb = listHidden ? '0px' : sidebarCollapsed ? '20px' : `${sidebarPx}px`;
+    const sbResizer = listHidden || sidebarCollapsed ? '0px' : '4px';
     const insp = inspectorShown ? 'minmax(var(--inspector-min), var(--inspector-max))' : '0px';
     return `var(--rail-w) ${sb} ${sbResizer} 1fr ${insp}`;
   });
@@ -1038,6 +1069,10 @@
 
 <!-- Redesign 3.17: the Main board's header, above everything else. -->
 <ShellHeader mac={isMac} />
+<!-- Redesign 10.5: the first-run tour and Get started float above the
+     layout. Both used to be mounted by the Sidebar,
+     which a fleet page hides and a collapsed rail unmounts. -->
+<FirstRun mac={isMac} />
 <StartupSplash onhubsettings={() => settingsOpen.set(true)} />
 {#if revealVersion}
   <UpdateReveal version={revealVersion} onclose={() => (revealVersion = null)} />
@@ -1051,9 +1086,12 @@
     hubUrl={$hubStatus.configured_url}
     onsettings={() => settingsOpen.set(true)} />
 {/if}
-<main class="layout" style="grid-template-columns: {gridTemplate};">
+<main class="layout" class:list-off={listHidden} style="grid-template-columns: {gridTemplate};">
   <AppRail {isMac} onselect={onRailSelect} />
-  {#if sidebarCollapsed}
+  {#if sidebarCollapsed && listHidden}
+    <div></div>
+    <div></div>
+  {:else if sidebarCollapsed}
     <button
       class="strip-expand"
       onclick={toggleSidebar}
@@ -1073,20 +1111,20 @@
   {/if}
 
   <div class="right-col" data-testid="pane-terminal">
-    <SessionTabs
-      session={$selectedSession}
-      name={selName}
-      current={currentTab}
-      terminalCount={selTerminals?.shells.length ?? 0}
-      disabled={tabDisabled}
-      assetsActive={$destination === 'assets'}
-      {inspectorOpen}
-      inspectorAvailable={inspectorRoom}
-      {isMac}
-      onselect={onSessionTab}
-      onassets={showAssets}
-      oninspector={toggleInspector}
-    />
+    {#if sessionChrome}
+      <SessionTabs
+        session={$selectedSession}
+        name={selName}
+        current={currentTab}
+        terminalCount={selTerminals?.shells.length ?? 0}
+        disabled={tabDisabled}
+        {inspectorOpen}
+        inspectorAvailable={inspectorRoom}
+        {isMac}
+        onselect={onSessionTab}
+        oninspector={toggleInspector}
+      />
+    {/if}
     <div class="right-body">
       {#if $selectedSession && selNoPane}
         <!-- Rows with no pane (bg agents, external Claude sessions) have no
@@ -1197,12 +1235,18 @@
           <Details />
         </div>
       {/if}
+      {#if $settingsOpen}
+        <!-- Settings over whatever was open; leaving it shows that again. -->
+        <div class="view-slot overlay" data-testid="settings-view">
+          <SettingsDialog onClose={() => settingsOpen.set(false)} />
+        </div>
+      {/if}
     </div>
   </div>
   <!-- The inspector (step 3.5), or its 0-width slot. -->
   {#if inspectorShown}
     <aside class="inspector" data-testid="inspector" aria-label="Inspector">
-      <Details />
+      <Details variant="inspector" />
     </aside>
   {:else}
     <div></div>
@@ -1393,6 +1437,12 @@
     overflow: auto;
     border-left: 1px solid var(--border);
     background: var(--bg-pane);
+  }
+  /* A fleet page's 0px list column: the Sidebar stays mounted but neither
+     shows its border nor takes focus. */
+  .layout.list-off > :global([data-testid='pane-sidebar']),
+  .layout.list-off > :global([data-testid='resizer-sidebar']) {
+    visibility: hidden;
   }
   .right-col {
     display: flex;

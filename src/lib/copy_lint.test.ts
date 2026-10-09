@@ -45,10 +45,6 @@ const WAITING: { file: string; text: string; why: string }[] = [
   // another open PR (4.4); these get their "…" when it lands.
   { file: 'src/lib/NewSessionDialog.svelte', text: 'Resume', why: 'serial file held by 4.4' },
   { file: 'src/lib/Sidebar.svelte', text: '+ New session', why: 'serial file held by 4.4' },
-  // The status bar's hub badge is a state, not a label: clicking it opens
-  // Settings → Hub & sync, but it reads as where this window is connected.
-  { file: 'src/App.svelte', text: 'hub unavailable — managing no fleet', why: 'a status badge, not a label' },
-  { file: 'src/App.svelte', text: 'hub:', why: 'a status badge, not a label' },
   // The live transfer chip is the move's state ("⇄ moving to x · 2/5"); it
   // opens the Transfer sheet the way a status badge opens its detail.
   { file: 'src/lib/TransferChip.svelte', text: '⇄ move failed', why: 'a live status chip, not a label' },

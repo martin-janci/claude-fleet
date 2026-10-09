@@ -38,7 +38,6 @@
   import { startTour } from './tour';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
   import { pushError } from './toasts';
-  import Modal from './Modal.svelte';
   import WizardDialog from './forms/WizardDialog.svelte';
   import { WIZARDS } from './forms/wizards';
   import type { Values } from './forms/forms';
@@ -473,14 +472,14 @@
 
 </script>
 
-<!-- Escape + backdrop are handled by Modal (native <dialog>). -->
-<Modal label="Settings" onclose={onClose} width="min(1040px, 94vw)" maxWidth="94vw">
-  <div class="dialog settings-dialog">
-    <header>
-      <h3>Settings</h3>
-      <button class="close" onclick={onClose} aria-label="Close">×</button>
-    </header>
+<!-- Settings is a rail destination (UX audit 2026-10-09, S1): a page in
+     the list and right columns, its nav where the session list sits. The rail
+     or Esc (App.svelte) leaves it; no modal, no close button. -->
+<!-- `settings-dialog` scopes settings_dialog.css, shared with the panels. -->
+<section class="settings-page settings-dialog" aria-label="Settings" data-testid="settings-page">
     <div class="settings-body">
+    <div class="settings-side">
+    <h2 class="settings-title">Settings</h2>
     <SettingsNav
       pages={$allPages}
       descs={$descriptors}
@@ -489,6 +488,8 @@
       counts={pagesHere ? { 'settings.review': $settingProposals.length, guides: $guideProposals.length } : {}}
       canWrite={pagesHere && $settingsWritable}
       onselect={select} />
+    </div>
+    <div class="settings-scroll">
     <div class="settings-content">
     <!-- The hand-written panels stay mounted and are hidden when another
          leaf is open, so a draft (a hub URL, a projects root) survives a
@@ -1067,32 +1068,43 @@
     {/if}
     </div>
     </div>
-  </div>
-</Modal>
+    </div>
+</section>
 
 <style>
-  .dialog {
-    display: flex;
-    flex-direction: column;
-    gap: 0.8rem;
+  .settings-page {
+    height: 100%;
+    min-height: 0;
+    background: var(--bg);
+    color: var(--fg);
   }
-  header { display: flex; align-items: center; justify-content: space-between; }
   .settings-body {
     display: grid;
     grid-template-columns: var(--settings-nav-w) minmax(0, 1fr);
-    gap: 1.25rem;
-    align-items: start;
+    height: 100%;
+    min-height: 0;
   }
-  .settings-body > :global(.settings-nav) {
-    position: sticky;
-    top: 0;
+  /* The nav takes the list column's place: its own scroll, a border on the
+     right, the page title above it (Settings board). */
+  .settings-side {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-height: 0;
+    overflow: auto;
+    padding: var(--space-3) var(--space-2) var(--space-3) var(--space-3);
+    border-right: 1px solid var(--border);
+    background: var(--bg-pane);
   }
+  .settings-title { margin: 0 0 var(--space-1) var(--space-1); font-size: var(--text-lg); font-weight: 600; }
+  .settings-scroll { min-width: 0; min-height: 0; overflow: auto; }
   .settings-content {
     display: flex;
     flex-direction: column;
     gap: 0.8rem;
     min-width: 0;
     max-width: var(--prose-max);
+    padding: var(--space-4) var(--space-6);
   }
   .panel {
     display: contents;
@@ -1103,18 +1115,10 @@
   @media (max-width: 640px) {
     .settings-body {
       grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto minmax(0, 1fr);
     }
+    .settings-side { border-right: 0; border-bottom: 1px solid var(--border); max-height: 40vh; }
   }
-  header h3 { margin: 0; font-size: var(--text-md); }
-  .close {
-    border: none;
-    background: transparent;
-    color: var(--fg-muted);
-    font-size: var(--text-lg);
-    cursor: pointer;
-    padding: 0 0.4rem;
-  }
-  .close:hover { color: var(--fg); }
 
   .log-path code { word-break: break-all; }
 
