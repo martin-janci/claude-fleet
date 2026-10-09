@@ -102,7 +102,7 @@
 </form>
 
 <style>
-  .lf { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md, var(--radius-md)); background: var(--bg-pane); }
+  .lf { display: grid; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-pane); }
   .f { display: grid; gap: 3px; font-size: var(--text-xs); }
   .f > span { color: var(--fg-muted); }
   .what { margin: 0; font-size: var(--text-xs); overflow-wrap: anywhere; }

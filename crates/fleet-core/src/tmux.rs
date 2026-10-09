@@ -77,20 +77,27 @@ pub const SHELL_TERMINAL_NO_SESSION: i32 = 3;
 
 /// Open terminal `n` of `session` unless it is already open: a tmux session
 /// of its own, started in the agent pane's current directory (`$HOME` when
-/// that is gone), running the same respawning login shell a shell session
+/// that is gone, or when `home` asks for it — the strip's "New terminal opens
+/// on" picker), running the same respawning login shell a shell session
 /// does, so `exit` in it gives a fresh prompt rather than closing it.
-pub fn open_shell_terminal_script(session: &str, n: u32) -> String {
+pub fn open_shell_terminal_script(session: &str, n: u32, home: bool) -> String {
     let sh = shell_terminal_name(session, n);
+    let cwd = if home {
+        "cwd=\"$HOME\"; ".to_string()
+    } else {
+        format!(
+            "cwd=$(tmux display-message -p -t {pane} '#{{pane_current_path}}' 2>/dev/null); \
+             [ -d \"$cwd\" ] || cwd=\"$HOME\"; ",
+            pane = quote(&exact_pane(session)),
+        )
+    };
     format!(
-        "tmux has-session -t {agent} 2>/dev/null || exit {gone}; \
-         cwd=$(tmux display-message -p -t {pane} '#{{pane_current_path}}' 2>/dev/null); \
-         [ -d \"$cwd\" ] || cwd=\"$HOME\"; \
+        "tmux has-session -t {agent} 2>/dev/null || exit {gone}; {cwd}\
          tmux has-session -t {exact} 2>/dev/null || tmux new-session -d -s {name} -c \"$cwd\" \
          -e COLORTERM=truecolor -e TERM=xterm-256color -e \"LANG=${{LANG:-en_US.UTF-8}}\" \
          -e \"PATH=$PATH\" {cmd}",
         agent = quote(&exact_session(session)),
         gone = SHELL_TERMINAL_NO_SESSION,
-        pane = quote(&exact_pane(session)),
         exact = quote(&exact_session(&sh)),
         name = quote(&sh),
         cmd = quote(&shell_pane_command(None)),
@@ -1369,6 +1376,18 @@ pub enum NamedKey {
     /// nothing), so a client can reach Submit without knowing the cursor.
     Tab,
     CtrlC,
+    /// The four arrows: a select dialog's cursor, the REPL's history and
+    /// its line editing. The phone's key bar (redesign 14.14).
+    Up,
+    Down,
+    Left,
+    Right,
+    /// Shift-Tab (tmux `BTab`): Claude Code's mode switch.
+    BackTab,
+    /// Ctrl plus a letter from [`CtrlKey`]'s closed list: the REPL's own
+    /// shortcuts (C-r history, C-o transcript, C-l clear, C-u / C-k / C-w
+    /// line editing, …). `C-c` stays [`NamedKey::CtrlC`].
+    Ctrl(CtrlKey),
     /// One of `1`..`9` — the keystroke that answers a numbered permission /
     /// question dialog. Typing the ordinal as *text* would not do: the text
     /// path pastes through `paste-buffer -p`, and the REPL has bracketed
@@ -1390,6 +1409,34 @@ pub struct DigitKey(u8);
 
 const DIGIT_NAMES: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
+/// A Ctrl+letter a pane may be sent: every letter but the ones that are
+/// another key under a second name or that stop the pane rather than the
+/// REPL. Left out: `C-c` (it is [`NamedKey::CtrlC`]), `C-i` / `C-j` / `C-m`
+/// (Tab and Enter under other names, which would side-step the rules those
+/// keys carry), `C-s` / `C-q` (XON/XOFF: `C-s` can freeze a terminal until a
+/// `C-q` nobody knows to send) and `C-z` (suspends the foreground process,
+/// Claude Code with it, to a shell prompt). Private field, so
+/// [`new`](Self::new) is the only way in and every value is in the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CtrlKey(usize);
+
+/// The tmux names of the Ctrl keys [`CtrlKey`] admits, in alphabet order.
+pub const CTRL_NAMES: [&str; 19] = [
+    "C-a", "C-b", "C-d", "C-e", "C-f", "C-g", "C-h", "C-k", "C-l", "C-n", "C-o", "C-p", "C-r",
+    "C-t", "C-u", "C-v", "C-w", "C-x", "C-y",
+];
+
+impl CtrlKey {
+    /// `Some` for a name in [`CTRL_NAMES`], exactly as spelled there.
+    pub fn new(name: &str) -> Option<Self> {
+        CTRL_NAMES.iter().position(|n| *n == name).map(Self)
+    }
+
+    pub fn tmux_name(self) -> &'static str {
+        CTRL_NAMES[self.0]
+    }
+}
+
 impl DigitKey {
     /// `Some` for `1..=9`, `None` for anything else.
     pub fn new(n: u8) -> Option<Self> {
@@ -1406,7 +1453,20 @@ impl NamedKey {
     /// Every accepted value, in the words a refusal shows the caller. Both
     /// `send_prompt` paths (the service function and the MCP tool) print
     /// this, so the message can never fall behind [`parse`](Self::parse).
-    pub const VOCABULARY: &'static str = "Enter, Escape, Tab, C-c or a digit 1-9";
+    pub const VOCABULARY: &'static str = "Enter, Escape, Tab, BTab, Up, Down, Left, Right, C-c, \
+         C-a/b/d/e/f/g/h/k/l/n/o/p/r/t/u/v/w/x/y or a digit 1-9";
+
+    /// Every key name [`parse`](Self::parse) accepts, digits included: what
+    /// the `keys` argument's schema enumerates, so a client can tell a hub
+    /// that takes the arrows and Ctrl keys from one that does not.
+    pub fn all_names() -> Vec<&'static str> {
+        let mut v = vec![
+            "Enter", "Escape", "Tab", "BTab", "Up", "Down", "Left", "Right", "C-c",
+        ];
+        v.extend(CTRL_NAMES);
+        v.extend(DIGIT_NAMES);
+        v
+    }
 
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -1414,6 +1474,12 @@ impl NamedKey {
             "Escape" => Some(Self::Escape),
             "Tab" => Some(Self::Tab),
             "C-c" => Some(Self::CtrlC),
+            "Up" => Some(Self::Up),
+            "Down" => Some(Self::Down),
+            "Left" => Some(Self::Left),
+            "Right" => Some(Self::Right),
+            "BTab" => Some(Self::BackTab),
+            _ if s.starts_with("C-") => CtrlKey::new(s).map(Self::Ctrl),
             // Exactly one ASCII digit. `str::parse::<u8>` would accept
             // "+1", " 1" and "007"; a dialog answer must be the literal
             // keystroke or nothing.
@@ -1429,6 +1495,12 @@ impl NamedKey {
             Self::Escape => "Escape",
             Self::Tab => "Tab",
             Self::CtrlC => "C-c",
+            Self::Up => "Up",
+            Self::Down => "Down",
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::BackTab => "BTab",
+            Self::Ctrl(k) => k.tmux_name(),
             // Sound by construction: `DigitKey`'s field is private and
             // `DigitKey::new` admits only 1..=9.
             Self::Digit(d) => DIGIT_NAMES[(d.get() - 1) as usize],
@@ -3543,8 +3615,47 @@ mod tests {
         // The refusal message both `send_prompt` paths print comes from this
         // one constant, so a key the parser accepts can never go unnamed.
         let v = NamedKey::VOCABULARY;
-        for accepted in ["Enter", "Escape", "Tab", "C-c", "1-9"] {
+        for accepted in [
+            "Enter", "Escape", "Tab", "C-c", "1-9", "BTab", "Up", "Down", "Left", "Right",
+        ] {
             assert!(v.contains(accepted), "{v:?} must mention {accepted}");
+        }
+        for name in CTRL_NAMES {
+            let letter = name.strip_prefix("C-").expect("a Ctrl name");
+            assert!(v.contains(letter), "{v:?} must mention {name}");
+        }
+    }
+
+    #[test]
+    fn every_listed_key_parses_and_names_itself() {
+        // `all_names` is what the schema enumerates; each must round-trip,
+        // or a client would be told a key the hub then refuses.
+        for name in NamedKey::all_names() {
+            let key = NamedKey::parse(name).unwrap_or_else(|| panic!("{name} must parse"));
+            assert_eq!(key.tmux_name(), name);
+            assert_eq!(
+                send_named_key("s", key),
+                format!(
+                    "tmux send-keys -t {} {name}",
+                    crate::shell::quote(&exact_pane("s"))
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_keys_outside_the_list_are_refused() {
+        // Tab and Enter under other names, flow control, suspend; and
+        // anything that is not exactly a listed name.
+        for refused in [
+            "C-i", "C-j", "C-m", "C-s", "C-q", "C-z", "C-A", "C-", "C-ab", "C-1", "M-x", "C-\\",
+            "S-Up", "up", "Home", "C-a ", " C-a",
+        ] {
+            assert_eq!(
+                NamedKey::parse(refused),
+                None,
+                "{refused:?} must be refused"
+            );
         }
     }
 

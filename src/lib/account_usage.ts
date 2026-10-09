@@ -9,6 +9,7 @@
 // deterministic; the frontend's wall clock is for display only, the backend
 // owns scheduling. Formatters take an optional `locale` and `timeZone`
 // (defaults: the system's).
+import type { OfIconName } from './kit/icons';
 import type { AccountUsage, AccountUsageSnapshot, UsageStatus, UsageWindow } from './account_usage_store';
 import type { AccountRow } from './accounts';
 
@@ -340,9 +341,10 @@ export type MessageKind =
 export interface UsageMessageLine {
   kind: MessageKind;
   tone: MessageTone;
-  /** Leading glyph (`◷`, `⏸`, `⚠`, `🔑`, `○`), or `''`. */
-  glyph: string;
-  /** Plain text without the glyph. Never raw `detail`. */
+  /** Leading icon from the manual's set (kit/icons.ts: clock, pause,
+   *  warning, key, circle), or null. */
+  glyph: OfIconName | null;
+  /** Plain text without the icon. Never raw `detail`. */
   text: string;
   /** Set on a line about one window (`past_reset`). */
   window?: UsageWindowKind;
@@ -439,7 +441,7 @@ export function statusMessage(
   if (!account) {
     return {
       lines: [
-        { kind: 'no_account', tone: 'muted', glyph: '', text: 'Not logged in to Claude on this host — no usage to show.' },
+        { kind: 'no_account', tone: 'muted', glyph: null, text: 'Not logged in to Claude on this host — no usage to show.' },
       ],
       checking: false,
       copyDetail: null,
@@ -452,7 +454,7 @@ export function statusMessage(
         {
           kind: 'first_load',
           tone: 'muted',
-          glyph: '',
+          glyph: null,
           text: host ? `Asking ${host} for usage…` : "Asking this account's hosts for usage…",
         },
       ],
@@ -476,7 +478,7 @@ export function statusMessage(
     case 'rate_limited':
       reason = 'rate-limited';
       statusCarriesNextTry = true;
-      lines.push({ kind: 'rate_limited', tone: 'warn', glyph: '⏸', text: `Anthropic is rate-limiting usage checks.${nextTry}` });
+      lines.push({ kind: 'rate_limited', tone: 'warn', glyph: 'pause', text: `Anthropic is rate-limiting usage checks.${nextTry}` });
       break;
     case 'unavailable': {
       const hint = httpHint(snapshot.detail);
@@ -485,7 +487,7 @@ export function statusMessage(
       lines.push({
         kind: 'unavailable',
         tone: 'warn',
-        glyph: '⚠',
+        glyph: 'warning',
         text: `Usage unavailable. Anthropic's usage endpoint returned an unexpected response${hint ? ` (${hint})` : ''}. It's undocumented and may have changed. Sessions are unaffected.${nextTry}`,
       });
       break;
@@ -495,7 +497,7 @@ export function statusMessage(
       lines.push({
         kind: 'access_token_expired',
         tone: 'muted',
-        glyph: '🔑',
+        glyph: 'key',
         text: `Usage checks are paused until Claude Code refreshes its token on ${host}; it does so the next time it runs there.`,
       });
       break;
@@ -504,7 +506,7 @@ export function statusMessage(
       lines.push({
         kind: 'login_expired',
         tone: 'alarm',
-        glyph: '🔑',
+        glyph: 'key',
         text: `Claude login expired on ${host} — usage can't be checked from it. Run claude /login there.`,
       });
       break;
@@ -513,7 +515,7 @@ export function statusMessage(
       lines.push({
         kind: 'token_rejected',
         tone: 'alarm',
-        glyph: '🔑',
+        glyph: 'key',
         text: `Anthropic rejected the Claude token on ${host} — usage can't be checked from it.`,
       });
       break;
@@ -523,7 +525,7 @@ export function statusMessage(
       lines.push({
         kind: 'host_unsupported',
         tone: 'warn',
-        glyph: '⚠',
+        glyph: 'warning',
         text: `${missingToolText(note, host)} — usage can't be checked from it.`,
       });
       break;
@@ -534,7 +536,7 @@ export function statusMessage(
         lines.push({
           kind: 'no_credentials',
           tone: 'muted',
-          glyph: '○',
+          glyph: 'circle',
           text:
             'Usage is read through another host on this account.' +
             (sharedWith.length === 0
@@ -546,7 +548,7 @@ export function statusMessage(
         lines.push({
           kind: 'no_credentials',
           tone: 'warn',
-          glyph: '🔑',
+          glyph: 'key',
           text: `No Claude credentials on ${host} — usage can't be checked from it.`,
         });
       }
@@ -555,13 +557,13 @@ export function statusMessage(
       const unreachable = notes.filter((n) => n.problem === 'unreachable').map((n) => n.host);
       if (unreachable.length > 0) {
         reason = `couldn't reach ${unreachable.join(', ')}`;
-        lines.push({ kind: 'unreachable', tone: 'warn', glyph: '○', text: `Couldn't reach ${unreachable.join(', ')} to check usage.` });
+        lines.push({ kind: 'unreachable', tone: 'warn', glyph: 'circle', text: `Couldn't reach ${unreachable.join(', ')} to check usage.` });
       } else {
         reason = 'no online host';
         lines.push({
           kind: 'no_online_host',
           tone: 'warn',
-          glyph: '○',
+          glyph: 'circle',
           text: `No online host is logged in to this account${via ? ` (${via} offline)` : ''}.`,
         });
       }
@@ -591,7 +593,7 @@ export function statusMessage(
           default:
             text = `Couldn't reach ${n.host}${tail}`;
         }
-        if (text) lines.push({ kind: 'host_note', tone: 'muted', glyph: '', text });
+        if (text) lines.push({ kind: 'host_note', tone: 'muted', glyph: null, text });
       }
       break;
   }
@@ -607,7 +609,7 @@ export function statusMessage(
       lines.push({
         kind: 'past_reset',
         tone: 'muted',
-        glyph: '',
+        glyph: null,
         window: kind,
         text: `Window reset at ${at} after the last check. Last known: ${leftPct(w)}% left at ${clock(fetchedAt, locale, timeZone)}.`,
       });
@@ -617,7 +619,7 @@ export function statusMessage(
       const ageText = `${formatDuration(age)} old`;
       const tailNext = statusCarriesNextTry ? '' : nextTry;
       const text = failed ? `${ageText} — last check failed: ${reason}.${tailNext}` : `${ageText}.${tailNext}`;
-      lines.unshift({ kind: 'age', tone: 'muted', glyph: '◷', text });
+      lines.unshift({ kind: 'age', tone: 'muted', glyph: 'clock', text });
     }
   }
 

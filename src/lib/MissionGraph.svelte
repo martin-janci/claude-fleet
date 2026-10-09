@@ -9,7 +9,10 @@
   // so this view adds a picture, never a second way to change the mission.
   // Text a person or a tracker wrote is rendered as text, never as markup.
   import type { MissionDetail } from './missions';
-  import { attemptLine, nodeGlyph, nodeLabel, verificationLabel } from './missions';
+  import { attemptLine, nodeCountWord, nodeLabel, verificationLabel } from './missions';
+  import StatusChip from './kit/StatusChip.svelte';
+  import StatusDot from './kit/StatusDot.svelte';
+  import Meter from './kit/Meter.svelte';
   import {
     G,
     LANE_BY,
@@ -17,6 +20,7 @@
     chainOf,
     layoutMission,
     progressLine,
+    toneOf,
     type LaneBy,
     type NodeBox,
   } from './mission_graph';
@@ -67,20 +71,11 @@
   <div class="head">
     <div class="progress">
       <span class="line" data-testid="mission-graph-progress">{progressLine(layout.progress)}</span>
-      <div
-        class="meter"
-        role="meter"
-        aria-label="Tasks done"
-        aria-valuemin="0"
-        aria-valuemax={layout.progress.total}
-        aria-valuenow={layout.progress.done}
-      >
-        <span style:width="{Math.round(pct * 100)}%"></span>
-      </div>
+      <Meter value={pct} label="Tasks done" testid="mission-graph-meter" />
     </div>
     <div class="chips" data-testid="mission-graph-summary">
       {#each summary as s (s.state)}
-        <span class="chip t-{s.state}">{nodeGlyph(s.state)} {s.n} {nodeLabel(s.state).toLowerCase()}</span>
+        <span class="chip t-{s.state}"><StatusDot state={toneOf(s.state)} label={null} size={6} /> {s.n} {nodeCountWord(s.state)}</span>
       {/each}
       {#if layout.critical.length > 1}
         <span class="chip crit" data-testid="mission-graph-critical">Critical path · {layout.critical.length} tasks</span>
@@ -154,7 +149,7 @@
             onblur={() => (hover = null)}
             onclick={() => (selected = selected === n.item_id ? null : n.item_id)}
           >
-            <span class="glyph" aria-hidden="true">{nodeGlyph(n.state)}</span>
+            <StatusDot state={n.tone} label={null} />
             <span class="text">
               <span class="title">{n.title}</span>
               <span class="sub">{n.key ? `${n.key} · ` : ''}{nodeLabel(n.state)}</span>
@@ -167,7 +162,7 @@
 
   {#if chosen}
     <div class="chosen" role="status" data-testid="mission-graph-chosen">
-      <span class="chip t-{chosen.state}">{nodeGlyph(chosen.state)} {nodeLabel(chosen.state)}</span>
+      <StatusChip state={toneOf(chosen.state)} label={nodeLabel(chosen.state)} />
       <span class="title">{chosen.key ? `${chosen.key} · ` : ''}{chosen.title}</span>
       <span class="muted small">W{chosen.wave} · {chosen.lane}</span>
       {#if (chosen.node.waiting_for ?? []).length > 0}
@@ -188,8 +183,6 @@
   .progress { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
   .progress .line { font-size: var(--text-sm); font-weight: 500; color: var(--fg); }
   /* The design system's Meter (of-meter). */
-  .meter { height: 4px; border-radius: var(--radius-pill); background: var(--track); overflow: hidden; }
-  .meter span { display: block; height: 100%; border-radius: var(--radius-pill); background: var(--status-done); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1 1 auto; }
   /* The design system's StatusChip (of-chip). */
   .chip {
@@ -240,12 +233,6 @@
   .node.t-waiting { border-left: 3px solid var(--status-waiting); background: var(--waiting-faint); }
   .node.t-failed { border-left: 3px solid var(--status-failed); }
   .node.t-idle { border-left: 3px solid var(--status-idle); }
-  .glyph { font-size: var(--text-xs); width: 12px; text-align: center; flex: none; }
-  .node.t-done .glyph { color: var(--status-done); }
-  .node.t-working .glyph { color: var(--status-working); }
-  .node.t-waiting .glyph { color: var(--status-waiting); }
-  .node.t-failed .glyph { color: var(--status-failed); }
-  .node.t-idle .glyph { color: var(--status-idle); }
   .text { display: flex; flex-direction: column; min-width: 0; }
   .text .title { font-size: var(--text-xs); line-height: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .text .sub { font-size: var(--text-2xs); line-height: 14px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

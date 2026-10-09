@@ -1,5 +1,8 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { get } from 'svelte/store';
+
+const invoke = vi.fn();
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 import { approvable, commandRows, keepsKind, paletteCommands, runCommand, settingRow, splitPrefix } from './commands';
 import { applyTheme, theme } from './theme';
 import { allDescriptors } from './pages/testing';
@@ -8,6 +11,7 @@ import { fleetSettings, SETTING_DEFAULTS } from './fleet_settings';
 import { destination } from './destination';
 import type { PendingInput } from './pending_input';
 import type { SessionRow } from './sessions';
+import { toasts } from './toasts';
 
 // Redesign step 3.9: the ⌘K command registry.
 
@@ -125,5 +129,45 @@ describe('Automation commands (8.4)', () => {
     expect(label()).toBe('Resume automation');
     // Pause all missions stays as it was.
     expect(paletteCommands(ctx).find((c) => c.id === 'app.pause-all')?.label).toBe('Pause all missions');
+  });
+});
+
+describe('session commands: push and open in editor (3.9, 5.5)', () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    toasts.set([]);
+  });
+
+  it('both are offered for an open session, Open in VS Code with its chord', () => {
+    const ids = (sel: SessionRow | null) => paletteCommands({ selected: sel, sessionView: 'conversation' }).map((c) => c.id);
+    expect(ids(session('mac', 'a'))).toEqual(expect.arrayContaining(['session.push', 'session.open-in-editor']));
+    expect(ids(null)).not.toContain('session.push');
+    expect(ids(session('mac', 'a', { status: 'ghost' }))).not.toContain('session.open-in-editor');
+    const cmds = paletteCommands({ selected: session('mac', 'a'), sessionView: 'conversation' });
+    expect(commandRows(cmds, true).find((r) => r.action === 'session.open-in-editor')?.meta).toBe('⌘⇧E');
+  });
+
+  it('push runs repo_push on the session; a failure is a toast', async () => {
+    const s = session('mac', 'fix-flake');
+    invoke.mockResolvedValue(null);
+    await runCommand('session.push', { selected: s, sessionView: 'conversation' });
+    expect(invoke).toHaveBeenCalledWith('repo_push', { args: { session_id: s.id, set_upstream: false } });
+    expect(get(toasts).at(-1)?.message).toContain('Pushed');
+    invoke.mockRejectedValue({ code: 'E_GIT', message: 'no upstream' });
+    await runCommand('session.push', { selected: s, sessionView: 'conversation' });
+    expect(get(toasts).at(-1)?.message).toContain('no upstream');
+  });
+
+  it('open in editor asks the backend; a session without a pane says why instead', async () => {
+    const s = session('mac', 'fix-flake');
+    invoke.mockResolvedValue(null);
+    await runCommand('session.open-in-editor', { selected: s, sessionView: 'conversation' });
+    expect(invoke).toHaveBeenCalledWith('open_session_in_editor', {
+      args: { host_alias: 'mac', tmux_name: s.tmux_name },
+    });
+    invoke.mockReset();
+    await runCommand('session.open-in-editor', { selected: { ...s, kind: 'bg' }, sessionView: 'conversation' });
+    expect(invoke).not.toHaveBeenCalled();
+    expect(get(toasts).at(-1)?.message).toContain('outside tmux');
   });
 });

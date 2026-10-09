@@ -178,7 +178,7 @@ runs. Changing one after seeing results needs a new decision row.
 | Baselines | "ends with ?" heuristic; the Notification hook `idle_prompt`; haiku |
 | Acceptance | "asks a question" precision ≥ 0.9 and recall ≥ 0.8 (a false "finished" hides a waiting session) |
 | Safety | sends Claude's reply text: the most sensitive input of any card. It needs its own consent line (D31 covers prompts and titles, not replies) → **decided as D48** (owner, 2026-10-08): only where the org also consents to reply text, off by default |
-| Components | **[built]** (step 5.11) `service/decide/turn_outcome.rs`: setting `decide.jev.turn_outcome` (off / shadow / assist), question `turn_outcome.v1` over finished / asked / stuck / working / unsure, input the visible pane tail (ANSI stripped, chrome dropped, code blocks as placeholders, ≤ 40 lines / 2,000 chars, redacted), baseline the pane rules (`none` where they read nothing), floor 0.5, subject `session_turn` `<session>:<turn_seq>`; asked after a Stop that left the row idle (`spawn_after_stop`), shadow recorded, assist written to `sessions.turn_outcome` (attention: `asked` → waiting, `stuck` → stuck); every hook clears it and an answer lands only while no hook spoke since the Stop; follow-ups from a later Notification and a person's prompt; J8's `pane_unreadable` timeline entry; the bench `fleet-hub decide bench turn-outcome` (providers rule, qmark, jev; synthetic fixture `service/testdata/decide/turn_outcome_tails.jsonl`, LLM-written, D43). Not built: a trigger for hosts without hooks (no turn counter to key one decision per turn), the haiku baseline |
+| Components | **[built]** (step 5.11) `service/decide/turn_outcome.rs`: setting `decide.jev.turn_outcome` (off / shadow / assist), question `turn_outcome.v1` over finished / asked / stuck / working / unsure, input the visible pane tail (ANSI stripped, chrome dropped, code blocks as placeholders, ≤ 40 lines / 2,000 chars, redacted), baseline the pane rules (`none` where they read nothing), floor 0.5, subject `session_turn` `<session>:<turn_seq>`; asked after a Stop that left the row idle (`spawn_after_stop`), shadow recorded, assist written to `sessions.turn_outcome` (attention: `asked` → waiting, `stuck` → stuck); every hook clears it and an answer lands only while no hook spoke since the Stop; follow-ups from a later Notification and a person's prompt; J8's `pane_unreadable` timeline entry; the bench `fleet-hub decide bench turn-outcome` (providers rule, qmark, jev; synthetic fixture `service/testdata/decide/turn_outcome_tails.jsonl`, 72 tails of which 51 `asked`, LLM-written, D43, never judged); J8's warning in the agent tab. Not built: a trigger for hosts without hooks (no turn counter to key one decision per turn), the haiku baseline |
 | Status | **[built, off]**; phase 0 waits on hand labels |
 
 ### J4 — ranking context for the brief and the ticket card
@@ -203,12 +203,22 @@ runs. Changing one after seeing results needs a new decision row.
 
 - A Choice over the keys found.
 - Low volume. Run it only as an extension of J1's harness.
+- **[built]** (redesign 6.8, off) as `main_ticket`: rule first (one key, a
+  branch naming one, more than eight keys is a dump: unsure), then a Choice
+  over the suggested keys with the prompt's keys masked as `[K1]`…; Review
+  marks the proposed suggestion. Bench `fleet-hub decide bench main-ticket`
+  (synthetic, not judged).
 
 ### J7 — local item vs tracker item (duplicate identity)
 
 - A Score for "same work?" plus Nouls for the fields that disagree
   (TypeSafe's entity-alignment pattern).
 - Low volume. Hypothesis.
+- **[built]** (redesign 6.8, off) as `tracker_duplicate`, a Choice rather
+  than a Score: a new standalone local task against the org's open tracker
+  tickets (K4's ranking), the key rule first; Review shows *May duplicate
+  KEY* with a person's *Link KEY instead*. Bench `fleet-hub decide bench
+  tracker-duplicate` (synthetic, not judged).
 
 ### J8 — pane status when the rules say nothing
 

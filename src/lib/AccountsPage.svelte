@@ -5,6 +5,10 @@
   // and history, the hosts and login profiles signed in to it, and the
   // sessions running on it. Usage comes from the same snapshots the Hosts
   // view shows (`account_usage_store`); history from `account_usage_history`.
+  // Each card also says what runs on the account and what it cost today
+  // (`account_spend`, the `usage_daily_account` roll-up of step 4.2; local
+  // only, so a paired desktop shows no $), and how many sessions its limit
+  // paused, with Show and a one-click Switch to the account with headroom.
   import { accounts } from './accounts';
   import { hosts } from './hosts';
   import { sessions } from './sessions';
@@ -28,9 +32,23 @@
     loadUsageHistory,
     peakUsed,
     sparkPath,
+    countLine,
+    loadAccountSpend,
+    pausedSessions,
+    routinesOn,
+    spendByAccount,
     type AccountSummary,
     type UsageSnapshotRow,
   } from './accounts_page';
+  import { formatCostMicros, restartSession, type SessionRow } from './sessions';
+  import { listRoutines, type RoutineRow } from './routines';
+  import { attentionFacts } from './attention_facts';
+  import { accountByUuid, accountLabel as labelOf } from './accounts';
+  import { hubStatus, hubActionBlocked } from './hub';
+  import { hubConnection } from './hub_connection';
+  import { bulkTargets, sessionBlocked } from './share';
+  import { moveToHeadroom, switchTarget } from './account_limits';
+  import { push } from './toasts';
   import { displayName } from './attention';
   import { showFriendlyNames } from './sessions';
   import { selectSessionExplicitly } from './selection';
@@ -56,6 +74,91 @@
   });
 
   const list = $derived(accountSummaries($accounts, $hosts, $sessions, $accountUsage));
+
+  // Today's spend per account. Re-read with the usage snapshots (a usage
+  // pass books spend beside them) and every five minutes; a paired desktop
+  // has no roll-up of its own, so it shows none rather than asking.
+  let spend = $state<Map<string, number> | null>(null);
+  let spendTick = $state(0);
+  $effect(() => {
+    const t = setInterval(() => (spendTick += 1), 5 * 60_000);
+    return () => clearInterval(t);
+  });
+  $effect(() => {
+    void $accountUsage;
+    void spendTick;
+    if ($hubStatus.remote) {
+      spend = null;
+      return;
+    }
+    let live = true;
+    void loadAccountSpend(untrack(() => now)).then((r) => {
+      if (live) spend = r.ok ? spendByAccount(r.value) : null;
+    });
+    return () => {
+      live = false;
+    };
+  });
+  const spendText = (uuid: string): string | null => (spend ? formatCostMicros(spend.get(uuid) ?? 0) : null);
+
+  // Routines run as a login; the card counts the switched-on ones per account.
+  let routines = $state<RoutineRow[]>([]);
+  $effect(() => {
+    let live = true;
+    void listRoutines().then((r) => {
+      if (live && r.ok && Array.isArray(r.value)) routines = r.value;
+    });
+    return () => {
+      live = false;
+    };
+  });
+
+  const pausedOf = (a: AccountSummary): SessionRow[] =>
+    pausedSessions(a, $attentionFacts?.limited_accounts, now);
+
+  // "Show": the detail's Sessions list narrows to the paused ones.
+  let pausedOnly = $state<string | null>(null);
+  function showPaused(uuid: string) {
+    picked = uuid;
+    pausedOnly = uuid;
+  }
+
+  // "Switch to <account>": the login with the most headroom on the first
+  // paused session's host names the target before anyone presses; the press
+  // resumes each paused session this person may restart under the login
+  // with the most headroom on its own host (step 4.4's bulk move).
+  let switchTo = $state<Record<string, string | null>>({});
+  let switching = $state<string | null>(null);
+  const restartBlocked = $derived(hubActionBlocked('restart_session', $hubStatus, $hubConnection));
+  $effect(() => {
+    for (const a of list) {
+      const first = pausedOf(a)[0];
+      if (!first || a.uuid in untrack(() => switchTo)) continue;
+      switchTo = { ...untrack(() => switchTo), [a.uuid]: null };
+      void switchTarget(first).then((t) => {
+        switchTo = { ...switchTo, [a.uuid]: t ? t.account_uuid : null };
+      });
+    }
+  });
+  async function switchPaused(a: AccountSummary) {
+    const rows = bulkTargets(pausedOf(a), 'restart_session', $sessionBlocked);
+    if (rows.length === 0) {
+      push({ kind: 'info', message: 'None of the paused sessions is yours to restart' });
+      return;
+    }
+    switching = a.uuid;
+    const r = await moveToHeadroom(rows, restartSession);
+    switching = null;
+    const { [a.uuid]: _gone, ...rest } = switchTo;
+    void _gone;
+    switchTo = rest;
+    const parts = [
+      r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
+      r.nowhere > 0 ? `${r.nowhere} with no other login that has room` : '',
+      r.failed > 0 ? `${r.failed} failed` : '',
+    ].filter(Boolean);
+    push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
+  }
   let picked = $state<string | null>(null);
   // A pill elsewhere (step 4.3) asked for one account: show it, then clear
   // the request so a later visit keeps whatever was picked by hand.
@@ -183,6 +286,7 @@
         {#each list as a (a.uuid)}
           {@const five = windowView(a, '5h')}
           {@const week = windowView(a, 'weekly')}
+          {@const paused = pausedOf(a)}
           <li
             class="card"
             class:active={a.uuid === selected?.uuid}
@@ -211,16 +315,45 @@
                 </span>
               </div>
             {/each}
-            <div class="meta">
-              {a.sessions.length} {a.sessions.length === 1 ? 'session' : 'sessions'}
-              · {a.logins.length} {a.logins.length === 1 ? 'login' : 'logins'}
+            <div class="meta" data-testid="account-counts">
+              {countLine(a.sessions.length, routinesOn(a.uuid, routines, $hosts), spendText(a.uuid))}
             </div>
+            {#if paused.length > 0}
+              {@const target = switchTo[a.uuid]}
+              <div class="paused" data-testid="account-paused">
+                <button
+                  type="button"
+                  class="link"
+                  data-testid="account-paused-show"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    showPaused(a.uuid);
+                  }}>{paused.length} paused {paused.length === 1 ? 'session' : 'sessions'} → Show</button
+                >
+                {#if target}
+                  <button
+                    type="button"
+                    class="btn"
+                    data-testid="account-paused-switch"
+                    disabled={switching !== null || restartBlocked !== null}
+                    title={restartBlocked ?? 'Resume each paused session under the login with the most headroom on its host'}
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      void switchPaused(a);
+                    }}
+                    >{switching === a.uuid ? 'Switching…' : `Switch to ${$accountByUuid.get(target) ? labelOf($accountByUuid.get(target)) : target.slice(0, 8)}`}</button
+                  >
+                {/if}
+              </div>
+            {/if}
           </li>
         {/each}
       </ul>
 
       {#if selected}
         {@const a = selected}
+        {@const onlyPaused = pausedOnly === a.uuid}
+        {@const rows = onlyPaused ? pausedOf(a) : a.sessions}
         <div class="detail" data-testid="account-detail">
           <div class="d-head">
             <div>
@@ -242,6 +375,9 @@
             <div class="sub" data-testid="account-checked">
               {checkedAgo(a.usage.fetched_at, now)}{#if a.usage.source_host} via {a.usage.source_host}{/if}
             </div>
+          {/if}
+          {#if spend && (spend.get(a.uuid) ?? 0) > 0}
+            <div class="sub" data-testid="account-spend">{spendText(a.uuid)} today</div>
           {/if}
 
           {#each ['5h', 'weekly'] as const as kind (kind)}
@@ -312,12 +448,15 @@
             </ul>
           {/if}
 
-          <h4>Sessions on it</h4>
-          {#if a.sessions.length === 0}
+          <h4>
+            {onlyPaused ? 'Paused by its limit' : 'Sessions on it'}
+            {#if onlyPaused}<button type="button" class="link" data-testid="account-paused-all" onclick={() => (pausedOnly = null)}>Show all</button>{/if}
+          </h4>
+          {#if rows.length === 0}
             <p class="sub">No session runs on this account.</p>
           {:else}
             <ul class="rows" data-testid="account-sessions">
-              {#each a.sessions as s (s.id)}
+              {#each rows as s (s.id)}
                 <li>
                   <button class="link" onclick={() => selectSessionExplicitly(s)}>
                     {displayName(s, $showFriendlyNames)}
@@ -456,6 +595,14 @@
     margin-top: var(--space-1);
     font-size: var(--text-xs);
     color: var(--fg-muted);
+  }
+  .paused {
+    margin-top: var(--space-1);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-xs);
   }
   .detail {
     padding: var(--space-3) var(--space-4);

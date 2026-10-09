@@ -299,7 +299,7 @@
   }
   .group {
     padding: 0.25rem 0;
-    border-bottom: 1px solid var(--border, transparent);
+    border-bottom: 1px solid var(--border);
   }
   .head,
   .shipped {

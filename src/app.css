@@ -67,6 +67,8 @@
   --loader-accent: #60a5fa;
   --comet-head: var(--accent);
   --agent-claude: #d97757;
+  --term-bg: #0a0a0a;
+  --term-fg: #e8e8e8;
   --shadow-pop: 0 6px 18px rgba(24,24,27,0.12);
   --scrim: rgba(24,24,27,0.4);
   --scrim-strong: rgba(24,24,27,0.62);
@@ -166,8 +168,17 @@
   --loader-delay: 400ms;
   --loader-reduced: 2.4s;
   --hub-lost-after: 6s;
+  /* Loops that are not loaders (a pulsing step, a skeleton bar, a stream of
+     dots, the terminal caret). Reduced turns each into one --loader-reduced
+     `motion-fade`; Off holds it still (the Loader kit's rule). */
+  --loop-fast: 1.1s;
+  --loop-slow: 1.6s;
 
   /* ── app geometry the manual does not name ── */
+  /* The startup splash (step 3.15): the mark's loaders, and the particle
+     loaders' stage (the board's Assemble). */
+  --splash-mark: 96px;
+  --splash-stage: 160px;
   --control-px: 8px;
   --control-px-lg: 12px;
   --control-gap: 6px;
@@ -180,6 +191,7 @@
      off one source, so no layer covers the one below. */
   --fab-size: 48px;
   --layer-gap: 8px;
+  --command-w: 260px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -241,6 +253,8 @@
     --loader-accent: #60a5fa;
     --comet-head: var(--brand-light);
     --agent-claude: #d97757;
+    --term-bg: #0a0a0a;
+    --term-fg: #e8e8e8;
     --shadow-pop: 0 6px 18px rgba(0,0,0,0.35);
     --scrim: rgba(0,0,0,0.4);
     --scrim-strong: rgba(0,0,0,0.62);
@@ -322,6 +336,8 @@
   --loader-accent: #60a5fa;
   --comet-head: var(--accent);
   --agent-claude: #d97757;
+  --term-bg: #0a0a0a;
+  --term-fg: #e8e8e8;
   --shadow-pop: 0 6px 18px rgba(24,24,27,0.12);
   --scrim: rgba(24,24,27,0.4);
   --scrim-strong: rgba(24,24,27,0.62);
@@ -402,6 +418,8 @@
   --loader-accent: #60a5fa;
   --comet-head: var(--brand-light);
   --agent-claude: #d97757;
+  --term-bg: #0a0a0a;
+  --term-fg: #e8e8e8;
   --shadow-pop: 0 6px 18px rgba(0,0,0,0.35);
   --scrim: rgba(0,0,0,0.4);
   --scrim-strong: rgba(0,0,0,0.62);
@@ -435,6 +453,13 @@
   --dur-fast: 0ms;
   --dur-base: 0ms;
   --dur-slow: 0ms;
+}
+/* The one fade a loop becomes under Reduced motion (the Loader kit's rule,
+   loader-kit.css `ofl-fade`): global, so a component's scoped style can name it. */
+@keyframes motion-fade {
+  50% {
+    opacity: 0.55;
+  }
 }
 
 /* The 24 px target floor (WCAG 2.5.8, redesign step 7.2): every control a

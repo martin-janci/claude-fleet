@@ -442,6 +442,106 @@ impl Store {
             .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after update"))
     }
 
+    /// Redesign 6.9: a person's Merge on a proposal that duplicates
+    /// `into` (K4's "may duplicate"): what hangs on the proposal moves to
+    /// the task it duplicates, and the proposal is closed as rejected (its
+    /// archive). Its subtasks are re-parented under `into`, and its session
+    /// links (live and ended) point at `into` — a session already live on
+    /// `into` keeps that link and the proposal's one ends. One transaction.
+    /// Returns `into` as it is after the merge. `E_INVALID` for an item
+    /// that is not a proposal waiting for a decision, a merge into itself
+    /// or into one of its own subtasks, or subtasks that would land under a
+    /// subtask; `E_NOTFOUND` for an unknown id.
+    pub fn merge_proposal_into(
+        &self,
+        item_id: i64,
+        into: i64,
+    ) -> Result<(WorkItemRow, MergedProposal), IpcError> {
+        let now = now_unix();
+        let notfound =
+            |id: i64| IpcError::new(codes::E_NOTFOUND, format!("work item {id} not found"));
+        let proposal = self
+            .get_work_item(item_id)?
+            .ok_or_else(|| notfound(item_id))?;
+        if proposal.origin.as_deref() != Some("proposed")
+            || proposal.proposal_state.as_deref() != Some("proposed")
+        {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "that item is not a proposal waiting for a decision",
+            ));
+        }
+        let target = self.get_work_item(into)?.ok_or_else(|| notfound(into))?;
+        // Not into itself, nor into anything under it.
+        let mut up = Some(target.id);
+        while let Some(id) = up {
+            if id == item_id {
+                return Err(IpcError::new(
+                    codes::E_INVALID,
+                    "a proposal cannot be merged into itself or one of its own subtasks",
+                ));
+            }
+            up = self.get_work_item(id)?.and_then(|r| r.parent_id);
+        }
+        let children = self.native_children(item_id)?;
+        if !children.is_empty() && target.parent_id.is_some() {
+            return Err(IpcError::new(
+                codes::E_INVALID,
+                "its subtasks cannot move under a subtask; keep both instead",
+            ));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let moved_subtasks = self.conn.execute(
+            "UPDATE work_items SET parent_id = ?1, updated_at = ?2 WHERE parent_id = ?3",
+            rusqlite::params![into, now, item_id],
+        )?;
+        // A participant already live on `into` keeps that link; the
+        // proposal's own live one ends rather than doubling it.
+        let ended_links = self.conn.execute(
+            "UPDATE work_links SET ended_at = ?1 \
+              WHERE item_id = ?2 AND ended_at IS NULL AND participant_id IN \
+                (SELECT participant_id FROM work_links \
+                  WHERE item_id = ?3 AND ended_at IS NULL AND participant_id IS NOT NULL)",
+            rusqlite::params![now, item_id, into],
+        )?;
+        let moved_links = self.conn.execute(
+            "UPDATE work_links SET item_id = ?1 WHERE item_id = ?2",
+            rusqlite::params![into, item_id],
+        )?;
+        self.conn.execute(
+            "UPDATE work_items SET proposal_state = 'rejected', updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, item_id],
+        )?;
+        tx.commit()?;
+        self.emit_work_item(
+            item_id,
+            super::tracker_items::SessionChange {
+                primary: false,
+                suggested: false,
+                rejected: true,
+            },
+        )?;
+        self.emit_work_item(
+            into,
+            super::tracker_items::SessionChange {
+                primary: moved_links > 0,
+                suggested: false,
+                rejected: false,
+            },
+        )?;
+        let row = self
+            .get_work_item(into)?
+            .ok_or_else(|| IpcError::new(codes::E_INTERNAL, "work item vanished after merge"))?;
+        Ok((
+            row,
+            MergedProposal {
+                subtasks: moved_subtasks,
+                links: moved_links,
+                ended_links,
+            },
+        ))
+    }
+
     /// A person edits a LOCAL item's title, notes and assignees (task
     /// editing). `None` when `item_id` is not a local item: a tracker's
     /// ticket is its tracker's to edit. A job mirror's notes are its
@@ -527,6 +627,17 @@ impl Store {
 
 mod tree;
 pub use tree::{TreeEntry, TreeRef, ACCEPT_UNDO_SECS};
+
+/// What [`Store::merge_proposal_into`] moved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MergedProposal {
+    /// Subtasks re-parented under the task merged into.
+    pub subtasks: usize,
+    /// Session links (live and ended) now pointing at it.
+    pub links: usize,
+    /// The proposal's live links that ended, their session already live on it.
+    pub ended_links: usize,
+}
 
 #[cfg(test)]
 mod tests;

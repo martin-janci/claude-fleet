@@ -248,7 +248,7 @@
     min-width: 0;
     padding: 4px 8px;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, var(--radius-md));
+    border-radius: var(--radius-sm);
     background: var(--bg-raise);
     color: var(--fg);
     font: inherit;
@@ -334,7 +334,7 @@
   }
   .error {
     margin: 0;
-    color: var(--danger, var(--fg));
+    color: var(--danger);
     font-size: var(--text-xs);
   }
 </style>

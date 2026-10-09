@@ -2,7 +2,7 @@
 // first session list is still out it says which hosts it is still hearing
 // from, with the kit's Dot wave.
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
 import QuickSwitcher from './QuickSwitcher.svelte';
 import { sessions, sessionsAnswered } from './sessions';
@@ -53,5 +53,25 @@ describe('QuickSwitcher while the fleet arrives (redesign 3.13)', () => {
     render(QuickSwitcher);
     await openSwitcher();
     expect(screen.getByTestId('switcher-still-hearing')).toHaveTextContent('Sessions still arriving');
+  });
+
+  // Step 9.12: a big search is long work. Past LONG_SEARCH_MS the line beside
+  // its current step swaps the Dot wave for Comet trails, still one loader.
+  describe('a search that runs long', () => {
+    afterEach(() => vi.useRealTimers());
+
+    it('shows Comet trails beside its current step, in place of the Dot wave', async () => {
+      vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+      render(QuickSwitcher);
+      await openSwitcher();
+      const line = screen.getByTestId('switcher-still-hearing');
+      expect(line.dataset.long).toBe('false');
+      vi.advanceTimersByTime(3500);
+      await tick();
+      expect(line.dataset.long).toBe('true');
+      expect(line).toHaveTextContent('Still hearing from local');
+      await waitFor(() => expect(within(line).getByTestId('loader').dataset.loader).toBe('comet-trails'));
+      expect(within(line).getAllByTestId('loader')).toHaveLength(1);
+    });
   });
 });

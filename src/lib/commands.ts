@@ -20,7 +20,10 @@ import { openToday } from './control';
 import { toggleSidebarView } from './work_view';
 import { pendingInputFor, type AnswerView } from './pending_input';
 import { sendAnswer } from './answer_send';
-import { hubActionBlocked, hubStatus } from './hub';
+import { hubActionBlocked, hubBlock, hubStatus } from './hub';
+import { accessOf } from './access';
+import { editorBlockedReason, openSessionInEditor } from './editor';
+import { repoPush } from './history';
 import { hubConnection } from './hub_connection';
 import { sessionActionBlocked } from './share';
 import { push, pushError } from './toasts';
@@ -134,6 +137,21 @@ export function paletteCommands(ctx: CommandContext): PaletteCommand[] {
         synonyms: [...(a.synonyms ?? [])],
       });
     }
+    out.push({
+      id: 'session.push',
+      label: 'Push the branch',
+      section: 'This session',
+      description: `${name} · git push to its upstream`,
+      synonyms: ['push', 'git push', 'upload', 'remote'],
+    });
+    out.push({
+      id: 'session.open-in-editor',
+      label: 'Open in VS Code',
+      section: 'This session',
+      description: name,
+      synonyms: ['editor', 'vs code', 'vscode', 'code', 'open in editor'],
+      shortcut: 'open-in-editor',
+    });
   }
   out.push(
     { id: 'app.settings', label: 'Open Settings', section: 'Commands', description: 'Settings',
@@ -240,6 +258,30 @@ export async function runCommand(id: string, ctx: CommandContext): Promise<void>
     case 'session.files':
       goTo('files');
       return;
+    case 'session.push': {
+      if (!s) return;
+      // Git writes have no hub tool, and only the owner's own ssh reaches
+      // the worktree (FilesPanel's `repo_write` gate, the editor's rule).
+      const why = hubBlock('repo_write', get(hubStatus)) ?? editorBlockedReason(s, get(accessOf)(s));
+      if (why !== null) {
+        push({ kind: 'info', message: `Push: ${why}` });
+        return;
+      }
+      const r = await repoPush(s.id, false);
+      if (r.ok) push({ kind: 'success', message: `Pushed ${s.friendly_name || s.tmux_name}` });
+      else pushError(r.error, 'Push failed');
+      return;
+    }
+    case 'session.open-in-editor': {
+      if (!s) return;
+      const why = editorBlockedReason(s, get(accessOf)(s));
+      if (why !== null) {
+        push({ kind: 'info', message: `Open in VS Code: ${why}` });
+        return;
+      }
+      await openSessionInEditor(s);
+      return;
+    }
     case 'app.settings':
       settingsOpen.set(true);
       return;

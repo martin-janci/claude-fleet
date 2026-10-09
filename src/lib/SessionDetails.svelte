@@ -42,6 +42,7 @@
   import ProposedBy from './ProposedBy.svelte';
   import { proposalFor } from './proposals';
   import Timeline from './Timeline.svelte';
+  import TimelineWorkProposal from './TimelineWorkProposal.svelte';
   import { push, pushError } from './toasts';
   import { copyText } from './clipboard';
   import {
@@ -1066,7 +1067,9 @@
       sessionId={session.id}
       refreshKey={`${session.turn_seq}|${session.status}|${session.claude_status}|${session.stuck_kind}|${session.last_prompt}|${session.safe_kill_state}`}
       onEvents={(e) => (timelineEvents = e)}
-    />
+    >
+      {#snippet head()}<TimelineWorkProposal {session} />{/snippet}
+    </Timeline>
 
     {#if related.length > 0 || proposedRelated}
       <section class="block related" data-testid="related-sessions">
@@ -1578,19 +1581,9 @@
   .status-frozen { background: var(--accent-soft); color: var(--status-working); }
   .status-orphan { background: var(--failed-soft); color: var(--status-failed); }
 
-  .meta {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: 0.25rem 0.75rem;
-    margin: 0;
+  .last-prompt {
+    display: block;
   }
-  .meta dt {
-    color: var(--fg-muted);
-    font-size: var(--text-2xs);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .meta dd { margin: 0; font-size: var(--text-sm); }
   .muted { color: var(--fg-muted); font-style: italic; }
 
   .block h3 {

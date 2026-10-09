@@ -39,7 +39,7 @@
   import { openToday } from './control';
   import type { IpcError } from './result';
   import { bulkTargets, sessionBlocked } from './share';
-  import { moveToHeadroom } from './account_limits';
+  import { moveToAccount } from './account_limits';
   import {
     effectiveScope,
     scopeFilter,
@@ -543,13 +543,13 @@
     hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
       (selectedRows.length > 0 && bulkMoveTargets.length === 0 ? 'None of the selected sessions is yours to restart.' : null),
   );
-  async function bulkMoveAccount() {
-    const r = await moveToHeadroom(bulkMoveTargets, restartSession);
+  async function bulkMoveAccount(accountUuid: string | null) {
+    const r = await moveToAccount(bulkMoveTargets, accountUuid, restartSession);
     clearSelected();
     const parts = [
       r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
-      r.stayed > 0 ? `${r.stayed} still under the line` : '',
-      r.nowhere > 0 ? `${r.nowhere} with no other login that has room` : '',
+      r.stayed > 0 ? `${r.stayed} ${accountUuid === null ? 'still under the line' : 'already there'}` : '',
+      r.nowhere > 0 ? `${r.nowhere} with ${accountUuid === null ? 'no other login that has room' : 'no login on that account'}` : '',
       r.failed > 0 ? `${r.failed} failed` : '',
     ].filter(Boolean);
     push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
@@ -1476,7 +1476,7 @@
     onBulkKill={() => ((bulkKillMode = 'kill'), (bulkKillOpen = true))}
     onBulkCleanUp={() => ((bulkKillMode = 'cleanup'), (bulkKillOpen = true))}
     onBulkArchive={() => void bulkArchive()}
-    onBulkMoveAccount={() => void bulkMoveAccount()}
+    onBulkMoveAccount={(a) => void bulkMoveAccount(a)}
     {bulkMoveAccountBlocked}
     {bulkArchiveBlocked}
     {bulkCleanUpBlocked}

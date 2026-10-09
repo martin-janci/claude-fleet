@@ -19,6 +19,7 @@
   import { sendPrompt, hasNoPane, sessions, sessionAgent, type SessionRow } from './sessions';
   import AnswerPrompt from './AnswerPrompt.svelte';
   import FormCard from './forms/FormCard.svelte';
+  import ChatWizards from './forms/ChatWizards.svelte';
   import { pendingInputFor } from './pending_input';
   import { hintAnchor } from './hints';
   import { composerPresets, presetSendsNow, type ComposerPreset } from './composer_presets';
@@ -47,6 +48,7 @@
     adjacentTurn,
   } from './conversation_nav';
   import { detectMac, isEditable } from './terminal_keys';
+  import { matchShortcut } from './shortcuts';
   import {
     sessionConversation,
     listConversations,
@@ -916,20 +918,18 @@
       // `[` / `]` step the turn stepper — only away from any text entry
       // (the composer, the find box), same guard the terminal uses for its
       // own global shortcuts.
+      // The keys are the registry's `conversation` rows (step 0.1).
+      const act = matchShortcut('conversation', e, isMac);
       if (
-        (e.key === '[' || e.key === ']') &&
-        !e.metaKey &&
-        !e.ctrlKey &&
-        !e.altKey &&
+        (act === 'conversation.prev-turn' || act === 'conversation.next-turn') &&
         !isEditable(e.target as HTMLElement | null)
       ) {
         if (!threadShown) return;
         e.preventDefault();
-        stepTurn(e.key === '[' ? -1 : 1);
+        stepTurn(act === 'conversation.prev-turn' ? -1 : 1);
         return;
       }
-      const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-      if (!mod || e.altKey || e.shiftKey || e.key.toLowerCase() !== 'f') return;
+      if (act !== 'conversation.find') return;
       // Nothing to search while the thread is loading or empty.
       if (!threadShown) return;
       e.preventDefault();
@@ -2371,6 +2371,7 @@
         {#if closedForm && !pendingForm}
           <FormCard formId={closedForm} sessionName={session.friendly_name ?? session.tmux_name} blocked={null} closed ondismiss={() => (closedForm = null)} />
         {/if}
+        <ChatWizards {session} {agentName} live={viewing === null} />
       </div>
     </div>
     {#if turnEntries.length > 1 || !atBottom}

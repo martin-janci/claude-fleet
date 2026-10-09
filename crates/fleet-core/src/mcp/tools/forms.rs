@@ -19,8 +19,9 @@ impl FleetTools {
         description = "Chat forms: `form` (fleet.form/1) opens a form in YOUR \
         session's chat and waits ≤600 s for the person's answers (status \
         answered | pending | declined | cancelled | expired; on pending call \
-        `wait`). `cancel` withdraws. A person's side: list, get, answer, \
-        decline. Spec: docs/forms.md."
+        `wait`). `draft` shows it while written. \
+        `cancel` withdraws. A person's side: list, get, answer, decline. \
+        Spec: docs/forms.md."
     )]
     pub(super) async fn ask(
         &self,
@@ -29,6 +30,7 @@ impl FleetTools {
     ) -> Result<CallToolResult, McpError> {
         let actions = [
             p.form.is_some(),
+            p.draft.is_some(),
             p.wait.is_some(),
             p.cancel.is_some(),
             p.list.is_some(),
@@ -42,21 +44,13 @@ impl FleetTools {
         if actions != 1 {
             return Err(mcp_err(
                 codes::E_INVALID,
-                "say exactly one of form, wait, cancel, list, get, answer or decline",
+                "say exactly one of form, draft, wait, cancel, list, get, answer or decline",
                 None,
             ));
         }
         if let Some(spec) = &p.form {
             audit("ask", "action=form");
-            let scope = self.view_scope(&caller)?;
-            let Some(session_id) = scope.proven_session.filter(|_| caller.host_alias.is_some())
-            else {
-                return Err(mcp_err(
-                    codes::E_NOT_A_SESSION,
-                    "a form opens in the asking session's chat: call ask from inside a fleet session (its per-host token and X-Fleet-Pane)",
-                    None,
-                ));
-            };
+            let session_id = self.asking_session(&caller)?;
             let view =
                 forms::open(&self.store, session_id, spec, p.why.as_deref()).map_err(to_mcp_err)?;
             // J5: the likely option of its first choice, off the form's path.
@@ -74,6 +68,14 @@ impl FleetTools {
             return self
                 .wait_on(&caller, session_id, &view.form_id, p.timeout_s)
                 .await;
+        }
+        if let Some(text) = &p.draft {
+            audit("ask", "action=draft");
+            let session_id = self.asking_session(&caller)?;
+            return ok_json_compact(
+                &forms::draft(&self.store, session_id, text, p.why.as_deref())
+                    .map_err(to_mcp_err)?,
+            );
         }
         if let Some(id) = &p.wait {
             audit("ask", &format!("action=wait form_id={}", id.escape_debug()));
@@ -172,6 +174,22 @@ impl FleetTools {
 }
 
 impl FleetTools {
+    /// The session a form (or its draft) opens in: the caller's own, proven
+    /// by its per-host token and `X-Fleet-Pane`.
+    fn asking_session(&self, caller: &Caller) -> Result<i64, McpError> {
+        let scope = self.view_scope(caller)?;
+        scope
+            .proven_session
+            .filter(|_| caller.host_alias.is_some())
+            .ok_or_else(|| {
+                mcp_err(
+                    codes::E_NOT_A_SESSION,
+                    "a form opens in the asking session's chat: call ask from inside a fleet session (its per-host token and X-Fleet-Pane)",
+                    None,
+                )
+            })
+    }
+
     async fn wait_on(
         &self,
         caller: &Caller,

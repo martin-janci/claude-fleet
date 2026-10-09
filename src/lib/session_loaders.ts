@@ -5,6 +5,7 @@
 import { sessionAgent, type SessionRow } from './sessions';
 import { AGENT_LABELS } from './row_groups';
 import type { StartProgress } from './start_progress';
+import { START_STEPS, type StartStepId, type StartSteps } from './start_steps';
 
 export type PulseState = 'done' | 'active' | 'pending';
 
@@ -69,6 +70,41 @@ export function sessionPulse(
     { id: 'tmux', label: 'tmux', state: 'done', note: 'up' },
     { id: 'agent', label: name, state: agentUp ? 'done' : 'active', note: agentUp ? 'ready' : null },
   ]);
+}
+
+// ─── the start's own steps (`start:progress`) ────────────────────────────────
+
+export {
+  START_STEPS,
+  NO_START_STEPS,
+  foldStartProgress,
+  newStartToken,
+  type StartStepId,
+  type StartStepState,
+  type StartSteps,
+  type StartProgressFrame,
+} from './start_steps';
+
+const DONE_NOTE: Record<StartStepId, string> = { worktree: 'ready', tmux: 'up', agent: 'launched' };
+
+/**
+ * The Pulse for a start in flight, from the steps the backend reported
+ * (`start:progress`): a satellite lights when its step says `done`, pulses
+ * while it says `started`, and nothing moves until a frame arrives.
+ */
+export function startPulse(steps: StartSteps, kind: 'work' | 'shell' = 'work', agent = kind === 'shell' ? 'Shell' : 'Claude Code'): SessionPulse {
+  const label: Record<StartStepId, string> = { worktree: 'Worktree', tmux: 'tmux', agent };
+  return pulse(
+    START_STEPS.map((id) => {
+      const st = steps[id];
+      return {
+        id,
+        label: label[id],
+        state: st === 'done' ? 'done' : st === 'started' ? 'active' : 'pending',
+        note: st === 'done' ? DONE_NOTE[id] : st === 'failed' ? 'failed' : null,
+      } satisfies PulseStep;
+    }),
+  );
 }
 
 /**

@@ -529,6 +529,15 @@ pub(crate) const KIND_FENCES: &[(&str, KindFence)] = &[
     ),
     ("move", KindFence::PerFrame),
     (
+        "start",
+        KindFence::NoSessionContent(
+            "a `StartProgress`: the caller's own opaque `start_token` (validated to \
+            `[A-Za-z0-9_-]{1,64}`), one of three fixed step names, its index and a state. \
+            It names no host, no session, no person and no path; only the client that \
+            minted the token can tell whose start it is",
+        ),
+    ),
+    (
         "work",
         KindFence::NoSessionContent(
             "tracker items, trackers and Work-view structure. Org data, not session data, \

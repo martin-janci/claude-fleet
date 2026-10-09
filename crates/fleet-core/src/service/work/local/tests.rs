@@ -481,3 +481,78 @@ fn propose_needs_a_parent() {
     .unwrap_err();
     assert_eq!(e.code, codes::E_INVALID);
 }
+
+/// Redesign 6.9: a reject naming `task_id: item:<id>` is Merge — the
+/// proposal's session link moves onto that task and the proposal closes;
+/// a scoped caller (an agent) can merge nothing, and a malformed target is
+/// refused before anything changes.
+#[test]
+fn merge_moves_the_proposal_onto_the_task_it_duplicates() {
+    use crate::service::orgs::OrgScope;
+    let s = Store::open_in_memory().unwrap();
+    s.upsert_host("h").unwrap();
+    let ticket = s.create_local_work_item(Some("OM-1"), "Parent").unwrap();
+    let existing = s
+        .create_native_item(&crate::store::NativeItem {
+            title: "Receipt totals",
+            parent_id: None,
+            project_id: None,
+            notes: None,
+        })
+        .unwrap();
+    let p = s
+        .propose_subtask(&crate::store::Proposal {
+            parent_id: ticket.id,
+            title: "Fix receipt totals",
+            notes: None,
+            why: None,
+            proposed_by: "agent",
+        })
+        .unwrap();
+    let sid = s
+        .upsert_session("a", "h", None, None, 1, 1, "running", None)
+        .unwrap();
+    s.link_session_work(sid, WorkTarget::Item(p.id), "manual")
+        .unwrap();
+    let store = Mutex::new(s);
+    let merge = |task: &str| WorkLinkArgs {
+        action: "reject".into(),
+        item_id: Some(p.id),
+        task_id: Some(task.into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        decide(&merge("ref:X"), &store, &OrgScope::All, false)
+            .unwrap_err()
+            .code,
+        codes::E_INVALID
+    );
+    let scoped = OrgScope::Org {
+        org: 1,
+        sees_unassigned: true,
+    };
+    assert!(decide(
+        &merge(&format!("item:{}", existing.id)),
+        &store,
+        &scoped,
+        false
+    )
+    .is_err());
+    let row = decide(
+        &merge(&format!("item:{}", existing.id)),
+        &store,
+        &OrgScope::All,
+        false,
+    )
+    .unwrap();
+    assert_eq!(row.proposal_state.as_deref(), Some("rejected"));
+    let s = store.lock().unwrap();
+    let live: Vec<_> = s
+        .session_work_links(sid)
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.ended_at.is_none())
+        .map(|l| l.item_id)
+        .collect();
+    assert_eq!(live, vec![Some(existing.id)]);
+}

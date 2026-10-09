@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { viewKey } from './shortcuts';
   // Work graph M4.4: link suggestions, decided in bulk, and the Undo of an
   // automatic link.
   //
@@ -118,13 +119,15 @@
   }
 
   function onSheetKey(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The keys are the registry's `link-review` rows (step 0.1).
+    const act = viewKey('link-review', e);
+    if (!act) return;
     // The chords act only from the sheet itself or a row. A keydown that
     // bubbles up from a focused button (close, Confirm, Not this) keeps that
     // button's own meaning: Enter activates it, and never decides the cursor
     // row — which need not be the row whose button has focus.
     // Escape closes the sheet from anywhere inside it; it is never destructive.
-    if (e.key === 'Escape') {
+    if (act === 'link-review.close') {
       closeSheet();
       e.preventDefault();
       e.stopPropagation();
@@ -136,28 +139,21 @@
       // (Enter, Space, y/n/Backspace) but j/k and the arrows have no meaning
       // on a checkbox, link or button, so they still move the cursor.
       if (target?.tagName === 'SELECT') return;
-      if (!['j', 'k', 'ArrowDown', 'ArrowUp'].includes(e.key)) return;
+      if (act !== 'link-review.down' && act !== 'link-review.up') return;
     }
     const n = pending.length;
-    switch (e.key) {
-      case 'j':
-      case 'ArrowDown':
+    switch (act) {
+      case 'link-review.down':
         cursor = Math.min(n - 1, cursor + 1);
         break;
-      case 'k':
-      case 'ArrowUp':
+      case 'link-review.up':
         cursor = Math.max(0, cursor - 1);
         break;
-      case 'y':
-      case 'Enter':
+      case 'link-review.yes':
         void decideAt(cursor, true);
         break;
-      case 'n':
-      case 'Backspace':
+      case 'link-review.no':
         void decideAt(cursor, false);
-        break;
-      case 'Escape':
-        closeSheet();
         break;
       default:
         return;
@@ -330,7 +326,7 @@
     background: var(--bg-hover);
   }
   .key {
-    font-family: var(--font-mono, ui-monospace, monospace);
+    font-family: var(--font-mono);
   }
   .why {
     color: var(--fg-muted);
