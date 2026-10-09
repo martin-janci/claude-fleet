@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from '../tablist_keys';
   // The Automation screen's Routines tab (Orbit Fleet redesign 8.6, the
   // Automation board): the routines on the left, one routine on the right
   // with its switch, Run now, Skip next and Edit, then Runs, Definition and
@@ -381,7 +382,7 @@
         {#if r.paused_reason}<p class="err" data-testid="routine-paused-reason">{r.paused_reason}</p>{/if}
       </header>
 
-      <div class="tabs" role="tablist">
+      <div class="tabs" role="tablist" aria-label="Routine" use:tablistKeys>
         {#each [['runs', 'Runs'], ['definition', 'Definition'], ['limits', 'Limits']] as [id, label] (id)}
           <button
             type="button"

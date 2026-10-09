@@ -129,7 +129,10 @@
   // Tickets (work graph M3): the cached My work / Current sprint / Recent,
   // loaded when the switcher opens and there is a tracker.
   let tickets = $state<SwitcherTicket[]>([]);
+  // Only the newest load lands (review r07).
+  let ticketsSeq = 0;
   async function loadTickets() {
+    const mine = ++ticketsSeq;
     if ($trackers.length === 0) {
       tickets = [];
       return;
@@ -140,6 +143,7 @@
       ['recent', 'Recent'],
     ];
     const answers = await Promise.all(views.map(([view]) => workTickets({ view, limit: 20 })));
+    if (mine !== ticketsSeq) return;
     const out: SwitcherTicket[] = [];
     answers.forEach((r, i) => {
       if (r.ok && Array.isArray(r.value)) {

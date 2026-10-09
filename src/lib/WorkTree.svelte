@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   import { onWorkChangedDebounced } from './work';
   // The Work view's tree (work graph M14), shown in the sidebar in place of
   // the Sessions tree: organisation → group → task → every session of the
@@ -361,8 +362,12 @@
     applySection(k, p.tasks, p.next_cursor ?? null, more);
   }
 
+  let reviewSeq = 0;
   async function loadReviewCount() {
+    // Only the newest count lands (review r07).
+    const mine = ++reviewSeq;
     const r = await workReview({ limit: 1 });
+    if (mine !== reviewSeq) return;
     reviewTotal = r.ok && r.value && typeof r.value.total === 'number' ? r.value.total : null;
   }
 
@@ -580,7 +585,7 @@
              review as a count after them (a tablist holds only tabs). Review
              is part of Tasks; the board is a Work view of its own, not an
              overlay toggled from the layout chips. -->
-        <div class="tabs" role="tablist" aria-label="Work view">
+        <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
             class="btn btn--chip btn--toggle"
             role="tab"
@@ -628,7 +633,7 @@
           >
         {/if}
       {:else}
-        <div class="tabs" role="tablist" aria-label="Work view">
+        <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
             class="btn btn--chip btn--toggle"
             role="tab"

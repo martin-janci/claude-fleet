@@ -326,6 +326,8 @@ fn jev_outcomes_follow_the_fallback_answer_and_followup() {
         (ins(None, Some("unsure"), "assist", None), "nothing_to_do"),
         (ins(None, Some("7"), "assist", Some("confirmed")), "ok"),
         (ins(None, Some("7"), "shadow", None), "ok"),
+        // A proposal of nothing: no person is asked about it.
+        (ins(None, Some("none"), "assist", None), "nothing_to_do"),
     ];
     // A run that never called the provider ran nothing: not listed.
     let not_asked = ins(Some("flag_off"), None, "off", None);

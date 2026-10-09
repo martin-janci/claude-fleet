@@ -243,7 +243,25 @@ Five more use cases, K1–K5, were accepted by the owner on 2026-10-07 (test
 map §5): K1 `start_project` next, K5 with the picker's phase 2, K2 and K3 as
 shadow slots in Mode B and the mission loop, K4 last. K1 is built, off
 (`decide.jev.start_project`, `service/decide/start_project.rs`): the start
-popover pre-selects Jev's repository in assist; K2–K5 are not built.
+popover pre-selects Jev's repository in assist. K2 `control_route`, K3
+`mission_triage`, K4 `duplicate` and K5 `work_placement` are built with the
+redesign, each off, as are the redesign's other use cases (next paragraph).
+
+The Orbit Fleet redesign (transition plan
+`docs/ux/2026-10-08-orbit-fleet-redesign/transition-plan.md`, parity audit
+`docs/redesign/parity-audit-7.5.md`) is landed behind the local pref
+`ui.layout`, which still defaults to **Classic**: New becomes the default at
+step 7.6 and Classic is removed at 13.1, both waiting on the owner's 7.5
+sign-off. Its AI use cases are built and OFF (`decide.jev.*`, each `off` by
+default, guide `docs/decisions.md`): `sibling_repos`, `host_placement`,
+`quick_answer`, `adopt_target` / `restore_target`, `turn_outcome`,
+`duplicate`, `related_session`, `work_placement`, `routine_run_outcome`,
+`control_route`, `mission_triage`, `summary_check` and the PR shepherd's
+`pr_triage`. The ones that send
+Claude's reply text (`turn_outcome`, `routine_run_outcome`) also need the
+org's reply-text consent (D48), off by default. The notifications matrix and quiet hours (`notify.*`, 11.9) are
+on: the phone and the desktop (while its window is in the background, and
+only with OS notifications on for the desktop column) follow them.
 
 Task → session (spec `docs/superpowers/specs/2026-10-06-task-to-session-flow-design.md`,
 recommendations TS1–TS14 accepted 2026-10-07): A0, A1, A2 and C0 are landed, A3 in part.

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   /**
    * The session's terminal tabs (redesign step 5.3, Terminals board): the
    * agent's own screen, then shell terminals 1..N, with + New, Split and
@@ -43,7 +44,7 @@
   const full = $derived(shells.length >= MAX_SHELL_TERMINALS);
 </script>
 
-<div class="strip" role="tablist" aria-label="Terminals" data-testid="terminal-strip">
+<div class="strip" role="tablist" aria-label="Terminals" data-testid="terminal-strip" use:tablistKeys>
   <button
     type="button"
     role="tab"

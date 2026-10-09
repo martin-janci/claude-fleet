@@ -294,7 +294,14 @@
     actionError = null;
     existingSession = null;
     const base = baseStartArgs(t);
+    const forId = taskId;
     const p = await previewStartWork(base);
+    // Another task was opened meanwhile: this preview is not its (review
+    // r07), so neither its popover nor a start from it.
+    if (forId !== taskId) {
+      acting = false;
+      return;
+    }
     if (!p.ok && !previewUnsupported(p.error)) {
       acting = false;
       actionError = p.error.message;

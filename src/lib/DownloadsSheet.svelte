@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   import { onMount } from 'svelte';
   import Modal from './Modal.svelte';
   import NotificationList from './NotificationList.svelte';
@@ -80,7 +81,7 @@
 </script>
 
 <Modal title={tab === 'downloads' ? 'Downloads' : 'Notifications'} {onclose} width="560px" testid="downloads-sheet">
-  <div class="tabs" role="tablist">
+  <div class="tabs" role="tablist" aria-label="Downloads and notifications" use:tablistKeys>
     <button type="button" role="tab" aria-selected={tab === 'downloads'} data-testid="tab-downloads" onclick={() => (tab = 'downloads')}>Downloads</button>
     <button type="button" role="tab" aria-selected={tab === 'notifications'} data-testid="tab-notifications" onclick={() => (tab = 'notifications')}
       >Notifications{$unreadNotices > 0 ? ` (${$unreadNotices})` : ''}</button

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   // The sidebar's chrome, in four layers so a filter never looks like a
   // setting and a setting never looks like an action:
   //
@@ -506,7 +507,7 @@
           >{/if}</span
       >
     {:else}
-      <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch">
+      <div class="btn-group view-switch" role="tablist" aria-label="Sidebar view" data-testid="sidebar-view-switch" use:tablistKeys>
         <button
           class="btn btn--chip btn--toggle"
           role="tab"

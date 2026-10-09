@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tablistKeys } from './tablist_keys';
   // Missions (orchestration O1, design 2026-10-07 §9): the Work view's third
   // tab. A mission is a goal over a root task: its member tasks, the repos
   // it may run in, its lifecycle and its log, and its loop (O4–O8): the
@@ -402,8 +403,14 @@
     if (selectedId != null) await loadDetail(selectedId);
   }
 
+  // Bumped per request and by Back: a late answer for a mission no longer
+  // open (Back pressed, another opened, a newer load) is dropped (review r07).
+  let detailSeq = 0;
+
   async function loadDetail(id: number) {
+    const mine = ++detailSeq;
     const r = await getMission(id);
+    if (mine !== detailSeq || selectedId !== id) return;
     if (r.ok) {
       detail = r.value;
     } else {
@@ -430,6 +437,7 @@
   }
 
   function back() {
+    detailSeq++;
     selectedId = null;
     detail = null;
     editing = false;
@@ -899,7 +907,7 @@
         </div>
       {/if}
       {#if $uiLayout === 'new'}
-        <div class="view-switch" role="tablist" aria-label="Show tasks as">
+        <div class="view-switch" role="tablist" aria-label="Show tasks as" use:tablistKeys>
           <button
             type="button"
             role="tab"

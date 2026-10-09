@@ -325,6 +325,15 @@ async fn run(
     )
     .await
     .map_err(|e| fail("could not reach the host over SSH", e))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let why = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("no answer");
+        return Err(format!("could not reach the host over SSH: {}", why.trim()));
+    }
     let uname = String::from_utf8_lossy(&out.stdout).trim().to_string();
     let target = target_for(&uname).ok_or_else(|| {
         format!("no fleet-agent release for {uname:?}: releases are for x86_64 and aarch64 Linux")
@@ -639,6 +648,46 @@ mod tests {
             .agent_installs(None, 9)
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_host_says_so() {
+        let store = store_with_ssh_host();
+        let fake = crate::ssh_fake::FakeSsh::new();
+        fake.set_default(crate::ssh_fake::Reply::fail(
+            255,
+            "ssh: connect to host box port 22: Connection refused\n",
+        ));
+        let p = plan(
+            &store,
+            &InstallAgentArgs {
+                alias: "mercury".into(),
+                hub_url: Some("https://fleet.example.com".into()),
+                version: Some("0.5.4".into()),
+            },
+        )
+        .unwrap();
+        let id = store
+            .lock()
+            .unwrap()
+            .insert_agent_install("mercury", "0.5.4")
+            .unwrap()
+            .id;
+        let err = run(
+            &store,
+            &fake,
+            &AgentRegistry::new(),
+            id,
+            &p,
+            Duration::from_millis(50),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.starts_with("could not reach the host over SSH"),
+            "{err}"
+        );
+        assert!(err.contains("Connection refused"), "{err}");
     }
 
     #[tokio::test]
