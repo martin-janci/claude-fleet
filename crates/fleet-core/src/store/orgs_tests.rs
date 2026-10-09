@@ -646,3 +646,38 @@ fn sync_never_binds_or_fetches_across_orgs() {
     assert!(item_of(on_b).is_some());
     assert!(item_of(on_n).is_some(), "unassigned binds as before");
 }
+
+/// D48: an org's reply-text consent is its own `org_settings` row, read the
+/// same way by the row and by the gate, off by default and never inherited.
+#[test]
+fn the_reply_consent_key_is_the_one_in_the_columns() {
+    assert!(ORG_COLUMNS.contains(&format!("'{ORG_JEV_REPLY_KEY}'")));
+    assert!(
+        crate::service::settings::spec(ORG_JEV_REPLY_KEY).is_none(),
+        "never a spec"
+    );
+    let s = Store::open_in_memory().unwrap();
+    let org = s.add_org("A", None, false).unwrap().id;
+    s.set_org_jev_allowed(org, true).unwrap();
+    let row = s.get_org(org).unwrap().unwrap();
+    assert!(row.jev_allowed && !row.jev_reply_allowed);
+    assert!(!s.org_jev_reply_allowed(org).unwrap());
+    assert!(
+        s.set_org_jev_reply_allowed(org, true)
+            .unwrap()
+            .jev_reply_allowed
+    );
+    assert!(s.org_jev_reply_allowed(org).unwrap());
+    assert!(s.list_orgs().unwrap()[0].jev_reply_allowed);
+    assert!(
+        !s.set_org_jev_reply_allowed(org, false)
+            .unwrap()
+            .jev_reply_allowed
+    );
+    assert_eq!(
+        s.org_setting(org, ORG_JEV_REPLY_KEY).unwrap(),
+        None,
+        "off is no row"
+    );
+    assert!(s.set_org_jev_reply_allowed(org + 99, true).is_err());
+}

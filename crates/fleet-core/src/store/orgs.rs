@@ -92,6 +92,14 @@ pub struct OrgRow {
     /// calls (`service::decide`). Off by default; absent from an older hub.
     #[serde(default)]
     pub jev_allowed: bool,
+    /// Jev evaluation (D48): this org ALSO consented to sending Claude's
+    /// reply text (a session's pane tail at a turn's end, J2
+    /// `turn_outcome`). Separate from [`Self::jev_allowed`] and required on
+    /// top of it. Off by default; absent from an older hub. Kept as the
+    /// org's [`ORG_JEV_REPLY_KEY`] row in `org_settings` (no column of its
+    /// own), read here in SQL.
+    #[serde(default)]
+    pub jev_reply_allowed: bool,
 
     /// D31 (work graph M14.1b, migration 067): the org's bound paired
     /// clients also see unassigned work and sessions (the default), as a
@@ -288,7 +296,16 @@ pub fn normalize_rule(mut r: OrgRuleRow) -> Result<OrgRuleRow, IpcError> {
 }
 
 const ORG_COLUMNS: &str = "id, name, color, isolate_sessions, created_at, auto_tidy, jev_allowed, \
-                           bound_sees_unassigned, owns_hub, admins_see_unclaimed";
+                           bound_sees_unassigned, owns_hub, admins_see_unclaimed, \
+                           EXISTS (SELECT 1 FROM org_settings os WHERE os.org_id = orgs.id \
+                                   AND os.key = 'decide.jev.reply_consent' AND os.value = 'true')";
+
+/// `org_settings.key` of an org's reply-text consent (D48, J2): `true` =
+/// consented. NOT a settings spec on purpose: a consent is never inherited
+/// from the fleet's value, so only an org's own explicit row counts.
+/// Spelled out in [`ORG_COLUMNS`] too (`concat!` takes literals);
+/// `the_reply_consent_key_is_the_one_in_the_columns` keeps them equal.
+pub const ORG_JEV_REPLY_KEY: &str = "decide.jev.reply_consent";
 const RULE_COLUMNS: &str = "id, org_id, owner, repo, path_prefix, host_alias";
 
 fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
@@ -303,6 +320,7 @@ fn map_org(r: &rusqlite::Row<'_>) -> rusqlite::Result<OrgRow> {
         bound_sees_unassigned: r.get::<_, i64>(7)? != 0,
         owns_hub: r.get::<_, i64>(8)? != 0,
         admins_see_unclaimed: r.get::<_, i64>(9)? != 0,
+        jev_reply_allowed: r.get::<_, i64>(10)? != 0,
     })
 }
 
@@ -436,6 +454,15 @@ impl Store {
         self.get_org(id)?.ok_or_else(|| org_not_found(id))
     }
 
+    /// Set an org's consent to sending reply text to the decision model
+    /// (D48, J2 `turn_outcome`), on top of [`Self::set_org_jev_allowed`].
+    /// The same admin paths reach here.
+    pub fn set_org_jev_reply_allowed(&self, id: i64, on: bool) -> Result<OrgRow, IpcError> {
+        // Off is no row at all: the default, and what a removed org leaves.
+        self.set_org_setting(id, ORG_JEV_REPLY_KEY, on.then_some("true"))?;
+        self.get_org(id)?.ok_or_else(|| org_not_found(id))
+    }
+
     /// Set D31 for an org (work graph M14.1b): whether its bound paired
     /// clients also see unassigned work and sessions. A change bumps the
     /// auth epoch (migration 067's trigger).
@@ -462,6 +489,13 @@ impl Store {
             )
             .optional()?
             .is_some_and(|v| v != 0))
+    }
+
+    /// Whether org `id` consented to sending reply text (D48). Only the
+    /// second consent: [`crate::service::decide`] asks it on top of
+    /// [`Self::org_jev_allowed`]. `false` for an org that does not exist.
+    pub fn org_jev_reply_allowed(&self, id: i64) -> Result<bool, IpcError> {
+        Ok(self.org_setting(id, ORG_JEV_REPLY_KEY)?.as_deref() == Some("true"))
     }
 
     /// org id → its auto-tidy override, for the orgs that set one.

@@ -34,6 +34,10 @@ export interface OrgRow {
    *  to the decision model (docs/decisions.md). Off by default; absent from
    *  an older hub. */
   jev_allowed?: boolean;
+  /** Jev evaluation (D48): this org also consented to Claude's reply text
+   *  (a pane tail at a turn's end, J2) going to the decision model, on top
+   *  of `jev_allowed`. Off by default; absent from an older hub. */
+  jev_reply_allowed?: boolean;
   /** D31 (work graph M14): devices bound to this org (`fleet-hub pair
    *  --org`) also see unassigned work and sessions, as a host does. On by
    *  default; absent from an older hub, which has no bound devices. */
@@ -343,6 +347,7 @@ export function updateOrg(
     isolate_sessions?: boolean;
     auto_tidy?: OrgAutoTidy;
     jev?: 'on' | 'off';
+    jev_reply?: 'on' | 'off';
     bound_sees_unassigned?: boolean;
   },
 ) {

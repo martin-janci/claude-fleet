@@ -64,6 +64,9 @@ pub mod summary_check;
 mod summary_check_tests;
 #[cfg(test)]
 mod tests;
+pub mod turn_outcome;
+#[cfg(test)]
+mod turn_outcome_tests;
 pub mod work_link;
 #[cfg(test)]
 mod work_link_tests;
@@ -123,10 +126,12 @@ pub enum Feature {
     /// Checking a watcher's "Since 13:20" summary against its transcript
     /// before it shows (J9, redesign step 11.11).
     SummaryCheck,
+    /// What a turn came to when hooks said nothing, from the pane tail (J2).
+    TurnOutcome,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 11] = [
+    pub const ALL: [Feature; 12] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -138,6 +143,7 @@ impl Feature {
         Feature::Duplicate,
         Feature::ControlRoute,
         Feature::SummaryCheck,
+        Feature::TurnOutcome,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -153,6 +159,7 @@ impl Feature {
             Feature::Duplicate => "duplicate",
             Feature::ControlRoute => "control_route",
             Feature::SummaryCheck => "summary_check",
+            Feature::TurnOutcome => "turn_outcome",
         }
     }
 
@@ -174,7 +181,16 @@ impl Feature {
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
             Feature::ControlRoute => settings::DECIDE_JEV_CONTROL_ROUTE,
             Feature::SummaryCheck => settings::DECIDE_JEV_SUMMARY_CHECK,
+            Feature::TurnOutcome => settings::DECIDE_JEV_TURN_OUTCOME,
         }
+    }
+
+    /// Whether this feature sends Claude's reply text (a pane tail): then
+    /// the org's SECOND consent (D48, the org's `decide.jev.reply_consent` row, or
+    /// `decide.jev.unassigned_reply` for no org) is required on top of
+    /// D31's. Only J2.
+    pub fn sends_reply_text(self) -> bool {
+        matches!(self, Feature::TurnOutcome)
     }
 }
 
@@ -431,11 +447,7 @@ fn clear(
         (Caller::Live, FeatureMode::Shadow) => Mode::Shadow,
         (Caller::Live, FeatureMode::Assist) => Mode::Assist,
     };
-    let consented = match org_id {
-        Some(id) => s.org_jev_allowed(id).unwrap_or(false),
-        None => settings::get_bool(s, settings::DECIDE_JEV_UNASSIGNED),
-    };
-    if !consented {
+    if !consents(s, feature, org_id) {
         return Err(Fallback::OrgOff);
     }
     let key = match s.resolve_decision_credential() {
@@ -465,6 +477,23 @@ fn clear(
         _ => return Err(Fallback::Budget),
     }
     Ok(Cleared { mode, key, cfg })
+}
+
+/// The org's consent to `feature` (D31), and to reply text on top of it
+/// when the feature sends some (D48). A store that cannot be read
+/// consents to nothing.
+pub fn consents(s: &Store, feature: Feature, org_id: Option<i64>) -> bool {
+    let (base, reply) = match org_id {
+        Some(id) => (
+            s.org_jev_allowed(id).unwrap_or(false),
+            s.org_jev_reply_allowed(id).unwrap_or(false),
+        ),
+        None => (
+            settings::get_bool(s, settings::DECIDE_JEV_UNASSIGNED),
+            settings::get_bool(s, settings::DECIDE_JEV_UNASSIGNED_REPLY),
+        ),
+    };
+    base && (reply || !feature.sends_reply_text())
 }
 
 /// May `feature` ask the decision model about a subject of `org_id` now?
@@ -516,6 +545,43 @@ pub fn redact_state(text: &str) -> String {
     let t = URL_RE.replace_all(text, "[url]");
     let t = EMAIL_RE.replace_all(&t, "[email]");
     crate::logging::redact(&t).into_owned()
+}
+
+/// PURE: `s` with every fenced code block (```` ``` ```` … ```` ``` ````, an
+/// unclosed one to the end) replaced by `[code: <lang>, N lines]` — the
+/// fence's language word (lower case) or `unknown`, and the block's line
+/// count. Inline code is kept (decision D42's placeholder A/B; J2 sends
+/// every pane tail through it).
+pub fn code_placeholder(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find("```") {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 3..];
+        let (info, body_start) = match after.find('\n') {
+            Some(nl) => (&after[..nl], nl + 1),
+            None => (after, after.len()),
+        };
+        let lang = info
+            .split_whitespace()
+            .next()
+            .map(str::to_lowercase)
+            .filter(|w| {
+                w.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '#' | '-' | '.'))
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        let body_and_rest = &after[body_start..];
+        let (body, next) = match body_and_rest.find("```") {
+            Some(close) => (&body_and_rest[..close], &body_and_rest[close + 3..]),
+            None => (body_and_rest, ""),
+        };
+        let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
+        out.push_str(&format!("[code: {lang}, {lines} lines]"));
+        rest = next;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// PURE: `v` as JSON with every object's keys sorted, whatever map the
@@ -1137,6 +1203,12 @@ pub struct DecideStatus {
     pub model: String,
     pub key: DecisionKeyStatus,
     pub orgs_allowed: Vec<OrgConsent>,
+    /// D48: the orgs that ALSO consented to reply text (J2), and whether
+    /// rows with no org may send it. Absent from an older hub.
+    #[serde(default)]
+    pub orgs_reply_allowed: Vec<OrgConsent>,
+    #[serde(default)]
+    pub unassigned_reply: bool,
     pub breaker: BreakerState,
     pub today: TodayUsage,
     pub retention_days: i64,
@@ -1183,6 +1255,16 @@ pub fn status(s: &Store, now: i64, days: i64) -> Result<DecideStatus, IpcError> 
                 name: o.name,
             })
             .collect(),
+        orgs_reply_allowed: s
+            .list_orgs()?
+            .into_iter()
+            .filter(|o| o.jev_allowed && o.jev_reply_allowed)
+            .map(|o| OrgConsent {
+                id: o.id,
+                name: o.name,
+            })
+            .collect(),
+        unassigned_reply: settings::get_bool(s, settings::DECIDE_JEV_UNASSIGNED_REPLY),
         breaker: breaker_state(
             s,
             PROVIDER_JEV,
@@ -1246,6 +1328,19 @@ impl DecideStatus {
                         .join(", ")
                 },
                 on(self.unassigned)
+            ),
+            format!(
+                "reply text (D48): {}   rows with no org: {}",
+                if self.orgs_reply_allowed.is_empty() {
+                    "none".to_string()
+                } else {
+                    self.orgs_reply_allowed
+                        .iter()
+                        .map(|o| format!("{} (#{})", o.name, o.id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                on(self.unassigned && self.unassigned_reply)
             ),
             format!(
                 "key: {}   model: {}",
