@@ -1,5 +1,5 @@
 // Rich blocks in a reply: the parts of an assistant's text that the
-// Conversation view draws as a card instead of as Markdown. Two sources:
+// Conversation view draws as a card instead of as Markdown. Three sources:
 //
 // - A task report: a `FLEET_TASK_DONE_<nonce>` line followed by one JSON
 //   object (fenced or bare), the shape crates/fleet-core/src/service/work/report.rs
@@ -10,6 +10,9 @@
 //   or error. docs/chat-blocks.md is the format; the Rust twin of the check
 //   is crates/fleet-core/src/pages/chat_blocks.rs, and both run
 //   docs/chat-block-examples/blocks.json.
+// - A work handover: the text between `WORK_HANDOVER_BEGIN_<nonce>` and
+//   `WORK_HANDOVER_END_<nonce>` lines, the shape agent_handover.rs asks a
+//   session for; handover.ts reads it into sections.
 //
 // Everything here is data from an untrusted transcript: nothing is ever
 // interpreted as HTML, and a block that does not check out falls back to the
@@ -17,6 +20,7 @@
 import type { FormField, FormSpec } from './forms/forms';
 import { CHAT_WIZARD_IDS, type ChatWizardId } from './forms/chat_wizard_ids';
 import { fenceOpen, isClosingFence } from './markdown';
+import { HANDOVER_BEGIN, handoverMarker, parseHandover, type Handover } from './handover';
 
 export const UI_SPEC = 'fleet.ui/1';
 /** The fence language that marks a block as a card. */
@@ -133,6 +137,8 @@ export type RichSegment =
   | { t: 'report'; marker: string; report: TaskReport; raw: string }
   /** `raw` is the fence body, also the block's identity for its card state. */
   | { t: 'ui'; block: UiBlock; raw: string }
+  /** `raw` is the text between the markers, as written. */
+  | { t: 'handover'; nonce: string; handover: Handover; raw: string }
   /** A fleet-ui block that does not check out: drawn as its code, plus why. */
   | { t: 'invalid'; lang: string; raw: string; problems: string[] };
 
@@ -263,7 +269,12 @@ function reportAfter(lines: string[], i: number): { report: TaskReport; raw: str
  * turns into its card only once it is whole.
  */
 export function splitRich(source: string): RichSegment[] {
-  if (!source.includes('FLEET_TASK_DONE_') && !source.includes(UI_FENCE) && !source.includes(UI_SPEC)) {
+  if (
+    !source.includes('FLEET_TASK_DONE_') &&
+    !source.includes(UI_FENCE) &&
+    !source.includes(UI_SPEC) &&
+    !source.includes(HANDOVER_BEGIN)
+  ) {
     return [{ t: 'md', source }];
   }
   const lines = source.replace(/\r\n?/g, '\n').split('\n');
@@ -292,6 +303,13 @@ export function splitRich(source: string): RichSegment[] {
       i = end + 1;
       continue;
     }
+    const h = handoverAfter(lines, i);
+    if (h) {
+      flush();
+      out.push(h.seg);
+      i = h.end + 1;
+      continue;
+    }
     const marker = markerOf(lines[i]);
     if (marker) {
       const r = reportAfter(lines, i);
@@ -307,6 +325,23 @@ export function splitRich(source: string): RichSegment[] {
   }
   flush();
   return out.length > 0 ? out : [{ t: 'md', source }];
+}
+
+/** The handover opening on line `i`: its BEGIN marker, then the first END
+ *  marker with the same nonce. Until that line arrives (the reply is still
+ *  being written) the text stays Markdown; an empty hand-off is no card. */
+function handoverAfter(lines: string[], i: number): { seg: RichSegment; end: number } | null {
+  const open = handoverMarker(lines[i]);
+  if (!open || open.end) return null;
+  for (let k = i + 1; k < lines.length; k++) {
+    const m = handoverMarker(lines[k]);
+    if (!m) continue;
+    if (!m.end || m.nonce !== open.nonce) return null;
+    const raw = lines.slice(i + 1, k).join('\n').trim();
+    if (raw === '') return null;
+    return { seg: { t: 'handover', nonce: open.nonce, handover: parseHandover(raw), raw }, end: k };
+  }
+  return null;
 }
 
 /** The card a closed fence stands for, or null when it is ordinary code. */
