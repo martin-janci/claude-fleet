@@ -157,6 +157,47 @@ describe('WorkReview', () => {
     expect(within(rows[0]).getByTestId('work-review-change-panel')).toBeTruthy();
   });
 
+  it('marks the main ticket among several keys as Proposed by Jev (J6, 6.8)', async () => {
+    pending = [
+      item({ rule: 'R6', strength: 'weak', proposed_by: { source: 'jev', reason: 'main ticket among 2 keys', confidence_pct: 78 } }),
+      item({ review_id: 'link:43', link_id: 43, rule: 'R6', strength: 'weak', task: { task_id: 'ref:ABC-13', key: 'ABC-13', title: '' } }),
+    ];
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    const pill = within(rows[0]).getByTestId('work-review-proposed-by');
+    expect(pill.textContent).toContain('Proposed by Jev');
+    expect(pill.textContent).toContain('main ticket among 2 keys');
+    expect(within(rows[1]).queryByTestId('work-review-proposed-by')).toBeNull();
+    // Nothing is confirmed for the person: both stay suggestions.
+    expect(calls('confirm_session_work')).toHaveLength(0);
+    expect(calls('decide_work_batch')).toHaveLength(0);
+  });
+
+  it("flags a local task that may duplicate a tracker ticket; linking it is the person's click (J7, 6.8)", async () => {
+    pending = [
+      item({
+        task: { task_id: 'item:70', key: 'LOC-7', title: 'Retry declined payments' },
+        duplicate_of: { task_id: 'item:31', item_id: 31, key: 'PAY-31', title: 'Retry failed card payments', source: 'jev', confidence_pct: 77 },
+      }),
+      item({ review_id: 'link:50', session_id: 8, link_id: 50, duplicate_of: { task_id: 'item:31', item_id: 31, key: 'PAY-31', title: 'x', source: 'jev', confidence_pct: 30 } }),
+    ];
+    handlers.link_session_work = () => session('mefistos', 'api', { id: 7 });
+    render(WorkReview);
+    await flush();
+    const rows = screen.getAllByTestId('work-review-item');
+    const dup = within(rows[0]).getByTestId('work-review-duplicate');
+    expect(dup.textContent).toContain('May duplicate PAY-31');
+    expect(within(dup).getByTestId('work-review-duplicate-proposed-by').textContent).toContain('77%');
+    // Under the floor nothing shows at all.
+    expect(within(rows[1]).queryByTestId('work-review-duplicate')).toBeNull();
+    expect(calls('link_session_work')).toHaveLength(0);
+    await fireEvent.click(within(dup).getByTestId('work-review-duplicate-link'));
+    await flush();
+    expect(calls('link_session_work')[0]).toMatchObject({ session_id: 7, item_id: 31 });
+    expect(calls('reject_session_work')[0]).toMatchObject({ session_id: 7, link_id: 42 });
+  });
+
   it('shows no Jev pill under the confidence floor (6.8)', async () => {
     pending = [item({ rule: 'R12', proposed_by: { source: 'jev', reason: 'from the first prompt', confidence_pct: 40 } })];
     render(WorkReview);

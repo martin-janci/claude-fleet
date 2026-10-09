@@ -119,6 +119,16 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.main_ticket",
+          "hint": "Marks the main ticket in Review when a session's first prompt names several; you still confirm it."
+        },
+        {
+          "type": "field",
+          "key": "decide.jev.tracker_duplicate",
+          "hint": "Marks a new local task in Review that may repeat a tracker ticket; linking the ticket instead is yours."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         },
         {

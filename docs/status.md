@@ -328,8 +328,15 @@ use cases OFF (`decide.jev.*`, each `off` by
 default, guide `docs/decisions.md`): `sibling_repos`, `host_placement`,
 `quick_answer`, `adopt_target` / `restore_target`, `turn_outcome`,
 `duplicate`, `related_session`, `work_placement`, `routine_run_outcome`,
-`control_route`, `mission_triage`, `summary_check` and the PR shepherd's
-`pr_triage`. The ones that send
+`control_route`, `mission_triage`, `summary_check`, the PR shepherd's
+`pr_triage`, and Review's J6 `main_ticket` and J7 `tracker_duplicate`
+(6.8). Each closed-choice use case has a benchmark set, `fleet-hub decide
+bench <use case>` (`bench/choice.rs`, docs/decisions.md *Benchmarking the
+closed-choice use cases*), and J2's `turn-outcome` set holds 51 `asked`
+tails; every built-in set is SYNTHETIC (no recorded data yet), so nothing
+is judged and every use case stays `off` / shadow. J8 shows a warning in
+the agent tab when the pane rules could not read a turn's end. J4's context
+order for a drafted brief is a word-overlap rule, not a Jev use case. The ones that send
 Claude's reply text (`turn_outcome`, `routine_run_outcome`) also need the
 org's reply-text consent (D48), off by default.
 **Waits on the owner (11.11):** the plan says Jev checks the "Since 13:20"

@@ -447,6 +447,33 @@ export interface ReviewItem {
    *  model's suggestion (J1, rule R12, redesign 6.8). Absent otherwise, and
    *  from an older hub. */
   proposed_by?: ReviewProposer | null;
+  /** The tracker ticket this suggestion's LOCAL task may duplicate (J7
+   *  `tracker_duplicate`, redesign 6.8): a live Jev proposal only. Absent
+   *  otherwise, and from an older hub. */
+  duplicate_of?: ReviewDuplicate | null;
+}
+
+/** `ReviewItem.duplicate_of` (`work::view::ReviewDuplicate`). */
+export interface ReviewDuplicate {
+  task_id: string;
+  item_id: number;
+  key?: string | null;
+  title: string;
+  source: 'jev' | 'rule' | 'llm';
+  confidence_pct?: number | null;
+}
+
+/** The proposal `ProposedBy` shows beside a Review item's "May duplicate"
+ *  (J7), or null when nothing is flagged. */
+export function reviewDuplicateProposal(it: Pick<ReviewItem, 'duplicate_of'>): ProposalLike | null {
+  const d = it.duplicate_of;
+  if (!d) return null;
+  return {
+    value: d.key ?? d.task_id,
+    source: d.source,
+    reason: 'same work as a tracker ticket',
+    confidence_pct: d.confidence_pct ?? null,
+  };
 }
 
 /** `ReviewItem.proposed_by` (`work::view::ReviewProposer`). */

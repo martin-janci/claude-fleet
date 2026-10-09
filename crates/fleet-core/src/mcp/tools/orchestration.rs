@@ -1367,6 +1367,8 @@ impl FleetTools {
             // K5: which group a standalone task belongs in (off by default).
             if made.parent_id.is_none() {
                 crate::service::decide::work_placement::spawn_ask(&self.store, made.id);
+                // J7: whether it repeats an open tracker ticket (off by default).
+                crate::service::decide::tracker_duplicate::spawn_ask(&self.store, made.id);
             }
             return ok_json(&made);
         }

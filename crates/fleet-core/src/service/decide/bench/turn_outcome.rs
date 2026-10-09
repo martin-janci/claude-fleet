@@ -14,8 +14,10 @@
 //!
 //! The acceptance (test map J2): `asked` precision ≥ 0.9 and recall ≥ 0.8
 //! — a false `finished` hides a waiting session. Judged from
-//! [`JUDGE_MIN_ASKED`] labeled `asked` cases; the built-in fixture is far
-//! smaller, so on it the verdict is NOT JUDGED. No pane text is printed.
+//! [`JUDGE_MIN_ASKED`] labeled `asked` cases of RECORDED tails: the
+//! built-in fixture holds 51 `asked` tails but is synthetic (its `#
+//! synthetic` header), so on it every verdict is NOT JUDGED. No pane text
+//! is printed.
 
 use super::{gate_or_skip, pct, Verdict};
 use crate::service::decide::turn_outcome::{
@@ -27,8 +29,8 @@ use serde::{Deserialize, Serialize};
 
 /// What the benchmark's Jev runs are recorded under.
 pub const QUESTION_VERSION: &str = "turn_outcome.bench.v1";
-/// The built-in synthetic set: 24 hand-written tails (LLM-written, D43; not
-/// a measurement of real sessions).
+/// The built-in synthetic set: 72 hand-written tails, 51 of them `asked`
+/// (LLM-written, D43; not a measurement of real sessions).
 pub const FIXTURE: &str = include_str!("../../testdata/decide/turn_outcome_tails.jsonl");
 pub const FIXTURE_PATH: &str =
     "crates/fleet-core/src/service/testdata/decide/turn_outcome_tails.jsonl";
@@ -49,12 +51,22 @@ pub struct TailLabel {
     pub label: String,
 }
 
-/// PURE: the labeled tails of a JSONL file; blank lines skipped, a label
-/// outside the outcomes refused with its line number.
+/// PURE: whether a set says it is synthetic (a `# synthetic` line):
+/// written for the repository, never judged.
+pub fn is_synthetic(jsonl: &str) -> bool {
+    jsonl.lines().any(|l| {
+        l.trim()
+            .strip_prefix('#')
+            .is_some_and(|c| c.trim().to_ascii_lowercase().starts_with("synthetic"))
+    })
+}
+
+/// PURE: the labeled tails of a JSONL file; blank and `#` lines skipped, a
+/// label outside the outcomes refused with its line number.
 pub fn parse_labels(jsonl: &str) -> Result<Vec<TailLabel>, String> {
     let mut out = Vec::new();
     for (i, line) in jsonl.lines().enumerate() {
-        if line.trim().is_empty() {
+        if line.trim().is_empty() || line.trim_start().starts_with('#') {
             continue;
         }
         let l: TailLabel =
@@ -164,6 +176,8 @@ pub async fn run_jev(ctx: &DecideCtx, cases: &[TailLabel], max_calls: usize) -> 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Metrics {
     pub provider: Provider,
+    /// The set says it is synthetic: nothing is judged.
+    pub synthetic: bool,
     pub cases: u64,
     pub skipped: u64,
     pub answered: u64,
@@ -181,10 +195,12 @@ pub struct Metrics {
     pub recall_verdict: Verdict,
 }
 
-/// PURE: the metrics of `answers` against `cases` (same order).
-pub fn metrics(p: Provider, cases: &[TailLabel], answers: &[Answer]) -> Metrics {
+/// PURE: the metrics of `answers` against `cases` (same order). A
+/// `synthetic` set is never judged.
+pub fn metrics(p: Provider, cases: &[TailLabel], answers: &[Answer], synthetic: bool) -> Metrics {
     let mut m = Metrics {
         provider: p,
+        synthetic,
         cases: 0,
         skipped: 0,
         answered: 0,
@@ -221,7 +237,7 @@ pub fn metrics(p: Provider, cases: &[TailLabel], answers: &[Answer]) -> Metrics 
     m.accuracy_on_answered = pct(m.correct, m.answered);
     m.asked_precision = pct(m.asked_right, m.asked_answered);
     m.asked_recall = pct(m.asked_right, m.asked_labeled);
-    let judged = m.asked_labeled >= JUDGE_MIN_ASKED;
+    let judged = !synthetic && m.asked_labeled >= JUDGE_MIN_ASKED;
     m.precision_verdict = Verdict::at_least(m.asked_precision, ACCEPT_ASKED_PRECISION, judged);
     m.recall_verdict = Verdict::at_least(m.asked_recall, ACCEPT_ASKED_RECALL, judged);
     m
@@ -233,9 +249,15 @@ fn f3(v: Option<f64>) -> String {
 
 /// The report's lines: one per provider, then the acceptance.
 pub fn lines(all: &[Metrics]) -> Vec<String> {
+    let synthetic = all.iter().any(|m| m.synthetic);
     let mut out = vec![format!(
         "J2 turn_outcome: asked precision >= {ACCEPT_ASKED_PRECISION} and recall >= \
-         {ACCEPT_ASKED_RECALL}, judged from {JUDGE_MIN_ASKED} labeled asked cases"
+         {ACCEPT_ASKED_RECALL}, judged from {JUDGE_MIN_ASKED} labeled asked cases{}",
+        if synthetic {
+            "; SYNTHETIC set: not judged"
+        } else {
+            ""
+        }
     )];
     for m in all {
         out.push(format!(
@@ -270,48 +292,57 @@ mod tests {
     fn run(p: Provider) -> Metrics {
         let cases = fixture();
         let answers: Vec<Answer> = cases.iter().map(|c| offline(p, &c.pane_tail)).collect();
-        metrics(p, &cases, &answers)
+        metrics(p, &cases, &answers, is_synthetic(FIXTURE))
     }
 
     #[test]
     fn the_fixture_parses_and_a_bad_label_is_refused() {
         let cases = fixture();
-        assert_eq!(cases.len(), 24);
-        assert_eq!(cases.iter().filter(|c| c.label == "asked").count(), 9);
+        assert_eq!(cases.len(), 72);
+        assert_eq!(
+            cases.iter().filter(|c| c.label == "asked").count() as u64,
+            51,
+            "the plan's target: at least {JUDGE_MIN_ASKED} labeled asked cases"
+        );
+        assert!(is_synthetic(FIXTURE), "the header says synthetic");
+        assert!(!is_synthetic("{\"pane_tail\":\"x\",\"label\":\"asked\"}"));
         assert!(parse_labels("{\"pane_tail\":\"x\",\"label\":\"done\"}").is_err());
         assert!(parse_labels("{\"pane_tail\":\"x\",\"label\":\"unsure\"}").is_err());
-        assert!(parse_labels("\n").unwrap().is_empty());
+        assert!(parse_labels("\n# a comment\n").unwrap().is_empty());
     }
 
     /// The baselines' numbers on the fixture are pinned: the rules read an
-    /// idle REPL as finished (so they miss every prose question), "ends
-    /// with ?" misses a polite request, a dialog and an unknown input line,
-    /// and neither is judged on 9 cases.
+    /// idle REPL as finished (so they miss every prose question and catch
+    /// only the dialogs), "ends with ?" misses polite requests, a question
+    /// followed by options or code, the dialogs and an unknown input line.
+    /// With 51 asked tails the set is big enough to judge, but it is
+    /// synthetic: nothing is judged.
     #[test]
     fn the_baselines_numbers_on_the_fixture() {
         let rule = run(Provider::Rule);
-        assert_eq!(
-            (rule.cases, rule.answered),
-            (24, 21),
-            "J8: three screens the rules cannot read"
-        );
-        assert_eq!(
-            (rule.asked_right, rule.asked_answered),
-            (1, 1),
-            "only the dialog"
-        );
-        assert_eq!(rule.asked_recall, Some(0.111));
         let q = run(Provider::Qmark);
-        assert_eq!(q.answered, 24);
-        assert_eq!((q.asked_right, q.asked_answered), (6, 6));
-        assert_eq!(q.asked_precision, Some(1.0));
-        assert_eq!(q.asked_recall, Some(0.667));
+        assert_eq!(
+            (
+                (
+                    rule.cases,
+                    rule.answered,
+                    rule.asked_right,
+                    rule.asked_answered
+                ),
+                (q.cases, q.answered, q.asked_right, q.asked_answered),
+            ),
+            ((72, 65, 7, 7), (72, 72, 31, 31)),
+            "J8: seven screens the rules cannot read; they catch the seven dialogs only",
+        );
         for m in [&rule, &q] {
+            assert!(m.synthetic);
+            assert_eq!(m.asked_labeled, 51);
             assert_eq!(m.precision_verdict, Verdict::NotJudged);
             assert_eq!(m.recall_verdict, Verdict::NotJudged);
         }
         let l = lines(&[rule, q]);
         assert_eq!(l.len(), 3);
+        assert!(l[0].contains("SYNTHETIC"), "{}", l[0]);
         assert!(
             l.iter().all(|x| !x.contains("migration guide")),
             "no pane text"
@@ -340,7 +371,7 @@ mod tests {
                 skipped: None,
             })
             .collect();
-        let m = metrics(Provider::Jev, &cases, &answers);
+        let m = metrics(Provider::Jev, &cases, &answers, false);
         assert_eq!(
             (m.asked_right, m.asked_answered, m.asked_labeled),
             (45, 47, 50)
@@ -354,7 +385,7 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            metrics(Provider::Jev, &cases, &worse).recall_verdict,
+            metrics(Provider::Jev, &cases, &worse, false).recall_verdict,
             Verdict::Fail
         );
     }

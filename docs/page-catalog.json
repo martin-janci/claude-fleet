@@ -3779,6 +3779,42 @@
       ]
     },
     {
+      "default_widget": "select",
+      "key": "decide.jev.main_ticket",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: main ticket",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.tracker_duplicate",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: local task duplicates a ticket",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "decide.jev.unassigned",
       "kind": {
