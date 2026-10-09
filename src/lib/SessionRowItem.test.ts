@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { tick } from 'svelte';
+import { uiDensity } from './prefs';
 import SessionRowItem from './SessionRowItem.svelte';
 import { hosts } from './hosts';
 import { host, session } from './hosts_fixture';
@@ -49,6 +50,7 @@ function baseProps(sess: SessionRow) {
 }
 
 beforeEach(() => {
+  uiDensity.set('comfortable');
   hosts.set([]);
   hubStatus.set({ ...STANDALONE });
   resetAccessForTests();
@@ -217,6 +219,15 @@ describe('SessionRowItem action gate (multi-user M1)', () => {
     render(SessionRowItem, { props: baseProps(asking()) });
     await tick();
     expect(screen.getByTestId('answer-card')).toBeInTheDocument();
+  });
+
+  it('a Compact row names the question and leaves the card to the conversation (UX audit L2)', async () => {
+    setMyGrants(1, []);
+    uiDensity.set('compact');
+    render(SessionRowItem, { props: baseProps(asking()) });
+    await tick();
+    expect(screen.queryByTestId('answer-card')).toBeNull();
+    expect(screen.getByTestId('meta-state').textContent).toBe('Waiting for you: Do you want to proceed?');
   });
 
   it('a grant:changed narrowing drive to watch re-disables the drive actions, with no row event', async () => {

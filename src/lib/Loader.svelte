@@ -1,6 +1,27 @@
 <script lang="ts" module>
+  import type { LoaderSpec } from './loader-kit-extract';
+  import type { LoaderName } from './loader-kit.generated';
+
   /** The manual's `--loader-delay`. */
   export const LOADER_DELAY_MS = 400;
+
+  /** The one kit loader the Loader board does not draw: moving a session to
+   *  another host streams particles from one host to the other (motion.md,
+   *  "Move a session to another host"; redesign step 5.13). Drawn here, in
+   *  Svelte markup, so it gets the kit's delay, reduced motion, pausing and
+   *  off-screen stop like the 24. `HostStream.svelte` puts the hosts beside it. */
+  export const HOST_STREAM: LoaderSpec = {
+    id: 'host-stream',
+    name: 'Host stream',
+    kind: 'particle',
+    job: 'Moving a session: particles stream from one host to the other',
+    width: 120,
+    height: 12,
+    markup: '',
+  };
+  export const HOST_STREAM_DOTS = 12;
+
+  export type KitLoaderName = LoaderName | 'host-stream';
 </script>
 
 <script lang="ts">
@@ -19,7 +40,8 @@
   // In a row, a button or the status bar use only `comet` or the 16 px
   // `orbit` (loader-use.test.ts holds every caller to that).
   import { onMount } from 'svelte';
-  import { LOADER_SPECS, type LoaderName } from './loader-kit.generated';
+  import { LOADER_SPECS } from './loader-kit.generated';
+  import { COUNTED, countedMarkup } from './loader-kit-extract';
   import { effectiveMotion } from './motion';
 
   let {
@@ -29,11 +51,12 @@
     paused = false,
     delay = LOADER_DELAY_MS,
     value,
+    count,
     stage,
     class: klass = '',
     testid = 'loader',
   }: {
-    name?: LoaderName;
+    name?: KitLoaderName;
     /** Longer edge of the box, in px. Marks 16–48; Comet from 12; particle
      *  loaders default to their natural size on the board. */
     size?: number;
@@ -45,21 +68,28 @@
     delay?: number;
     /** Progress ring only: 0–1 when the size is known. */
     value?: number;
+    /** Radar and Assemble only: one blip or particle per item (hosts that
+     *  answered, sessions), up to the kit's cap (`COUNTED`). */
+    count?: number;
     /** Dark stage behind it; on by default for particle loaders but Comet. */
     stage?: boolean;
     class?: string;
     testid?: string;
   } = $props();
 
-  const spec = $derived(LOADER_SPECS.find((s) => s.id === name) ?? LOADER_SPECS[0]);
+  const stream = $derived(name === 'host-stream');
+  const spec = $derived(stream ? HOST_STREAM : (LOADER_SPECS.find((s) => s.id === name) ?? LOADER_SPECS[0]));
   const comet = $derived(spec.id === 'comet');
   const edge = $derived(size ?? (comet ? 16 : spec.kind === 'logo' ? 32 : Math.max(spec.width, spec.height)));
   // The Comet draws at its size (its ring width follows `--s`); the rest scale.
   const scale = $derived(comet ? 1 : edge / Math.max(spec.width, spec.height));
   const boxW = $derived(comet ? edge : Math.round(spec.width * scale));
   const boxH = $derived(comet ? edge : Math.round(spec.height * scale));
-  const onStage = $derived(stage ?? (spec.kind === 'particle' && !comet));
+  // The stream sits between two host names, on the page, not on a stage.
+  const onStage = $derived(stage ?? (spec.kind === 'particle' && !comet && !stream));
   const determinate = $derived(spec.id === 'progress-ring' && value !== undefined);
+  const counted = $derived(count !== undefined && COUNTED[spec.id] !== undefined);
+  const markup = $derived(counted ? countedMarkup(spec, count ?? 0) : spec.markup);
   const still = $derived($effectiveMotion !== 'full');
 
   let shown = $state(false);
@@ -116,6 +146,7 @@
     class:ofl--determinate={determinate}
     data-testid={testid}
     data-loader={spec.id}
+    data-count={counted ? count : undefined}
     style:width="{boxW}px"
     style:height="{boxH}px"
     style:--s={comet ? `${edge}px` : undefined}
@@ -126,7 +157,22 @@
   >
     {#if comet}
       <!-- Generated from the manual; no user text reaches it. -->
-      {@html spec.markup}
+      {@html markup}
+    {:else if stream}
+      <span
+        class="ofl__box ofl-hs"
+        style:width="{spec.width}px"
+        style:height="{spec.height}px"
+        style:transform="scale({scale})"
+      >
+        {#each Array.from({ length: HOST_STREAM_DOTS }, (_, i) => i) as i (i)}
+          <i
+            style:animation-delay="calc(var(--loop-slow) * {-i / HOST_STREAM_DOTS})"
+            style:top="{(i * 37) % 9}px"
+            style:left="{(i * 100) / HOST_STREAM_DOTS}%"
+          ></i>
+        {/each}
+      </span>
     {:else}
       <span
         class="ofl__box"
@@ -135,7 +181,7 @@
         style:transform="scale({scale})"
       >
         <!-- Generated from the manual; no user text reaches it. -->
-        {@html spec.markup}
+        {@html markup}
       </span>
     {/if}
   </span>

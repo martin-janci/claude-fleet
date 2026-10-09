@@ -9,6 +9,7 @@ vi.mock('./ConversationPanel.svelte', () => ({ default: () => ({}) }));
 
 import ControlView from './ControlView.svelte';
 import { controlViews, defaultLayout } from './control_views';
+import { get } from 'svelte/store';
 import { controlTab } from './control';
 import { sessions } from './sessions';
 import { operatorState, operatorSession } from './operator';
@@ -37,5 +38,16 @@ describe('ControlView', () => {
     await fireEvent.click(screen.getByTestId('control-tab-today'));
     for (let i = 0; i < 5; i++) await tick();
     await expectAccessible(container);
+  });
+
+  it('Overview opens the Today briefing beside the chat, even when the panel was closed (UX audit C3)', async () => {
+    controlViews.set({ ...defaultLayout(), open: false, hidden: ['today'] });
+    render(ControlView, { isMac: false });
+    await fireEvent.click(screen.getByTestId('control-overview'));
+    const l = get(controlViews);
+    expect(l.open).toBe(true);
+    expect(l.active).toBe('today');
+    expect(l.hidden).not.toContain('today');
+    expect(screen.getByTestId('control-overview').getAttribute('aria-pressed')).toBe('true');
   });
 });

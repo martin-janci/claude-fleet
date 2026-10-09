@@ -414,6 +414,22 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             }),
         ),
         (
+            "agent_installs",
+            "agent_installs",
+            json!({ "alias": "trn" }),
+            "[]",
+            Box::new(|b, s, _| {
+                block_on(commands::hosts::routed::agent_installs(
+                    b,
+                    fleet_core::service::agent_install::AgentInstallsArgs {
+                        alias: Some("trn".into()),
+                    },
+                    s,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "list_hosts",
             "list_hosts",
             json!({}),
@@ -1197,7 +1213,10 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             Box::new(|b, s, _| {
                 block_on(commands::work::routed::decide_work_proposal(
                     b,
-                    commands::work::WorkProposalArgs { item_id: 9 },
+                    commands::work::WorkProposalArgs {
+                        item_id: 9,
+                        merge_into: None,
+                    },
                     true,
                     s,
                 ))
@@ -1213,7 +1232,10 @@ fn routed_read_cases_but_org_admin() -> Vec<Case> {
             Box::new(|b, s, _| {
                 block_on(commands::work::routed::decide_work_proposal(
                     b,
-                    commands::work::WorkProposalArgs { item_id: 9 },
+                    commands::work::WorkProposalArgs {
+                        item_id: 9,
+                        merge_into: None,
+                    },
                     false,
                     s,
                 ))
@@ -1890,7 +1912,9 @@ fn new_session_never_sends_an_owner_over_the_wire() {
             profile: None,
             agent: None,
             origin: None,
+            over_limit_ok: false,
             owner_person_id: Some(42),
+            start_token: None,
         },
         &st,
         &ssh(),
@@ -2693,7 +2717,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
         (
             "shell_terminals",
             "shell_terminals",
-            json!({ "session_id": 7, "action": "open", "n": 2 }),
+            json!({ "session_id": 7, "action": "open", "n": 2, "at": "home" }),
             r#"{"session_id":7,"host_alias":"trn","terminals":[{"n":2,"tmux_name":"demo--sh2"}],"opened":2}"#,
             Box::new(|b, s, h| {
                 block_on(commands::sessions::routed::shell_terminals(
@@ -2702,6 +2726,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         session_id: 7,
                         action: fleet_core::service::sessions::ShellTerminalAction::Open,
                         n: Some(2),
+                        at: fleet_core::service::sessions::ShellTerminalStart::Home,
                     },
                     s,
                     h,
@@ -3457,6 +3482,25 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
             }),
         ),
         (
+            "install_agent",
+            "install_agent",
+            json!({ "alias": "trn", "hub_url": null, "version": null }),
+            r#"{"id":1,"host_alias":"trn","version":"0.6.0","state":"running","step":"target","started_at":1}"#,
+            Box::new(|b, s, h| {
+                block_on(commands::hosts::routed::install_agent(
+                    b,
+                    fleet_core::service::agent_install::InstallAgentArgs {
+                        alias: "trn".into(),
+                        hub_url: None,
+                        version: None,
+                    },
+                    s,
+                    h,
+                ))
+                .map(|_| ())
+            }),
+        ),
+        (
             "probe_host",
             "probe_host",
             json!({ "alias": "trn" }),
@@ -3682,6 +3726,7 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                 "effort": "high",
                 "profile": "work",
                 "agent": "claude",
+                "start_token": "st-demo-1",
             }),
             SESSION_PAYLOAD,
             Box::new(|b, s, h| {
@@ -3711,7 +3756,9 @@ fn routed_mutation_cases_but_the_catalog() -> Vec<Case> {
                         // an argument a client could choose (multi-user M1,
                         // T5). `new_session_never_sends_an_owner_over_the_wire`
                         // says it in one assertion as well.
+                        over_limit_ok: false,
                         owner_person_id: Some(42),
+                        start_token: Some("st-demo-1".into()),
                     },
                     s,
                     h,
@@ -7505,5 +7552,15 @@ fn update_routes_are_the_only_contract_exemption() {
             codes::E_INTERNAL,
             "only the update routes: {err:?}"
         );
+        // The artifact mirror: its own route only, never another GET.
+        let dest = std::env::temp_dir().join("fleet-not-written");
+        for path in [
+            "/downloads/3",
+            "/update/artifact/short",
+            "/update/artifact/../../x",
+        ] {
+            let err = block_on(hub.fetch_update_artifact(path, &dest, 10)).unwrap_err();
+            assert_eq!(err.code, codes::E_INTERNAL, "{path}: {err:?}");
+        }
     }
 }

@@ -92,6 +92,30 @@ impl SequenceStore for FileSequences {
     }
 }
 
+/// The file the hub's `update_admin update_now` writes in its data dir.
+pub const UPDATE_NOW_FILE: &str = "update-now";
+
+/// Sleep `wait`, or less: return as soon as `trigger` appears (it is
+/// removed, so it fires once). `true` when it was the trigger.
+pub async fn sleep_or_poked(trigger: &Path, wait: Duration) -> bool {
+    let end = tokio::time::Instant::now() + wait;
+    loop {
+        if take_trigger(trigger) {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= end {
+            return false;
+        }
+        tokio::time::sleep((end - now).min(Duration::from_secs(5))).await;
+    }
+}
+
+/// Remove `trigger` if it is there; `true` when it was.
+pub fn take_trigger(trigger: &Path) -> bool {
+    trigger.exists() && std::fs::remove_file(trigger).is_ok()
+}
+
 /// The code out of what `fleet-hub pair` printed: the URL (`…/pair#CODE`)
 /// or the bare code.
 pub fn pairing_code(arg: &str) -> Result<String, String> {
@@ -267,6 +291,16 @@ mod tests {
         assert_eq!(pairing_code(" ABCD1234\n").unwrap(), "ABCD1234");
         assert!(pairing_code("https://fleet.example.com/pair#").is_err());
         assert!(pairing_code("x&y").is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_poke_cuts_the_wait_short_and_fires_once() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join(UPDATE_NOW_FILE);
+        assert!(!sleep_or_poked(&t, Duration::from_secs(30)).await);
+        std::fs::write(&t, b"").unwrap();
+        assert!(sleep_or_poked(&t, Duration::from_secs(3600)).await);
+        assert!(!t.exists());
     }
 
     #[test]

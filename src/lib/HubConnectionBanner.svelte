@@ -20,6 +20,9 @@
     SIGNAL_LOST_AFTER_MS,
   } from './hub_connection';
   import Loader from './Loader.svelte';
+  import Banner from './kit/Banner.svelte';
+  import Button from './kit/Button.svelte';
+  import StatusDot from './kit/StatusDot.svelte';
 
   let { hubUrl }: { hubUrl: string | null } = $props();
   const c = $derived($hubConnection);
@@ -59,70 +62,55 @@
 </script>
 
 {#if text}
-  <div
-    class="hub-connection-banner"
-    role="alert"
-    data-testid="hub-connection-banner"
-    data-state={lost ? (signalLost ? 'signal-lost' : 'reconnecting') : c.state}
-  >
-    {#if lost}
-      {#if signalLost}
-        <Loader name="signal-lost" size={24} delay={0} testid="hub-lost-loader" />
-      {:else}
-        <Loader name="gravity-well" size={24} testid="hub-lost-loader" />
-      {/if}
-    {/if}
-    <span class="text">{text}</span>
-    <!-- Review r13: the transport's own words ("error sending request …
-         (os error 111)") are for Details, not the line. -->
-    {#if lost && lost.reason}<details class="reason" data-testid="hub-lost-reason"><summary>Details</summary>{lost.reason}</details>{/if}
-    {#if retrying}
-      <span class="countdown" data-testid="hub-retry-countdown"
-        >{pressed || left === 0 ? 'Trying now…' : `Retrying in ${left} s`}</span>
-      <button type="button" class="retry" disabled={pressed} data-testid="hub-retry-now" onclick={() => void retry()}>Retry now</button>
-    {/if}
+  <div class="strip">
+    <Banner
+      tone={lost ? 'waiting' : 'failed'}
+      alert
+      headline={text}
+      testid="hub-connection-banner"
+      state={lost ? (signalLost ? 'signal-lost' : 'reconnecting') : c.state}
+    >
+      {#snippet lead()}
+        {#if lost}
+          {#if signalLost}
+            <Loader name="signal-lost" size={24} delay={0} testid="hub-lost-loader" />
+          {:else}
+            <Loader name="gravity-well" size={24} testid="hub-lost-loader" />
+          {/if}
+        {:else}
+          <StatusDot state="failed" label={null} />
+        {/if}
+      {/snippet}
+      {#snippet evidence()}
+        {#if retrying}
+          <span class="countdown" data-testid="hub-retry-countdown"
+            >{pressed || left === 0 ? 'Trying now…' : `Retrying in ${left} s`}</span
+          >
+        {/if}
+        <!-- Review r13: the transport's own words ("error sending request …
+             (os error 111)") are for Details, not the line. -->
+        {#if lost && lost.reason}<details class="reason" data-testid="hub-lost-reason"><summary>Details</summary>{lost.reason}</details>{/if}
+      {/snippet}
+      {#snippet action()}
+        {#if retrying}
+          <Button size="sm" disabled={pressed} testid="hub-retry-now" onclick={() => void retry()}>Retry now</Button>
+        {/if}
+      {/snippet}
+    </Banner>
   </div>
 {/if}
 
 <style>
-  .hub-connection-banner {
-    display: flex;
-    align-items: center;
-    gap: 0.8rem;
-    padding: 0.35rem 0.8rem;
-    background: var(--waiting-faint);
-    color: var(--fg);
-    font-size: var(--text-2xs);
-    border-bottom: 1px solid var(--waiting-line);
-  }
-  .text {
-    flex: 1;
+  .strip {
+    padding: var(--space-2) var(--space-3) 0;
   }
   .reason {
-    flex: 0 1 auto;
-    min-width: 0;
-    opacity: 0.75;
     overflow-wrap: anywhere;
   }
   .reason summary {
     cursor: pointer;
   }
   .countdown {
-    flex: none;
     font-variant-numeric: tabular-nums;
-  }
-  .retry {
-    flex: none;
-    background: transparent;
-    color: inherit;
-    border: 1px solid currentColor;
-    border-radius: var(--radius-sm);
-    padding: 0.1rem 0.5rem;
-    font: inherit;
-    cursor: pointer;
-  }
-  .retry:disabled {
-    opacity: 0.6;
-    cursor: default;
   }
 </style>

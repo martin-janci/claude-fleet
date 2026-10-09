@@ -93,6 +93,8 @@ export const SETTING_KEYS = {
   decideJevMissionTriage: 'decide.jev.mission_triage',
   decideJevRoutineRunOutcome: 'decide.jev.routine_run_outcome',
   decideJevPrTriage: 'decide.jev.pr_triage',
+  decideJevMainTicket: 'decide.jev.main_ticket',
+  decideJevTrackerDuplicate: 'decide.jev.tracker_duplicate',
   decideJevUnassigned: 'decide.jev.unassigned',
   decideJevUnassignedReply: 'decide.jev.unassigned_reply',
   decideJevTimeoutMs: 'decide.jev.timeout_ms',
@@ -124,7 +126,7 @@ export const SETTING_KEYS = {
 export const DECIDE_MODES = ['off', 'shadow', 'assist'] as const;
 
 /** Mirror of `settings::UPDATE_TRACKS`: the release track the hub follows. */
-export const UPDATE_TRACKS = ['stable', 'beta', 'nightly'] as const;
+export const UPDATE_TRACKS = ['stable', 'beta', 'nightly', 'dev'] as const;
 /** Mirror of `settings::UPDATE_MODES`. */
 export const UPDATE_MODES = ['manual', 'notify', 'automatic'] as const;
 /** Mirror of `settings::UPDATE_MOBILE_MODES`: a phone never installs silently. */
@@ -285,6 +287,8 @@ export const SETTING_DEFAULTS: Record<SettingKey, string> = {
   'decide.jev.mission_triage': 'off',
   'decide.jev.routine_run_outcome': 'off',
   'decide.jev.pr_triage': 'off',
+  'decide.jev.main_ticket': 'off',
+  'decide.jev.tracker_duplicate': 'off',
   'decide.jev.unassigned': 'false',
   'decide.jev.unassigned_reply': 'false',
   'decide.jev.timeout_ms': '1500',

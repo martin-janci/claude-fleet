@@ -24,6 +24,13 @@ use crate::service::settings;
 use crate::store::Store;
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
+/// The hub's data dir, as `init` was given it (the hub's update trigger).
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The data dir `init` was given, when it has run.
+pub fn data_dir() -> Option<&'static Path> {
+    DATA_DIR.get().map(PathBuf::as_path)
+}
 
 /// One fetch per file at a time: a second request for the same sha waits
 /// for the first rather than downloading it again.
@@ -37,6 +44,7 @@ pub fn path_for(sha256: &str) -> String {
 /// Make `<data_dir>/update-mirror` (0700) the mirror's directory. Once per
 /// process; a second call keeps the first.
 pub fn init(data_dir: &Path) -> std::io::Result<PathBuf> {
+    let _ = DATA_DIR.set(data_dir.to_path_buf());
     let dir = data_dir.join("update-mirror");
     std::fs::create_dir_all(&dir)?;
     #[cfg(unix)]
@@ -167,6 +175,11 @@ pub async fn local_copy(
 /// Drop every mirrored file no cached manifest lists any more. Returns how
 /// many went.
 pub fn prune(store: &Store, keys: &TrustedKeys, now: i64) -> usize {
+    // With the mirror off nothing is served or fetched, and what is kept
+    // waits for it to come back on.
+    if !enabled(store) {
+        return 0;
+    }
     let Ok(dir) = dir() else { return 0 };
     let keep = wanted(store, super::track(store), keys, now);
     let Ok(entries) = std::fs::read_dir(dir) else {

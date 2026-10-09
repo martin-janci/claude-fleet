@@ -39,7 +39,7 @@ describe('Sessions | Work switch', () => {
     expect(screen.getByTestId('work-tree')).toBeTruthy();
     expect(screen.queryByTestId('sidebar-search')).toBeNull();
     // The footer (New session) stays in both.
-    expect(screen.getByTestId('new-session-footer')).toBeTruthy();
+    expect(screen.getByTestId('new-session-head')).toBeTruthy();
     // So does the global chrome: Refresh and collapse (Settings is on the rail, ⌘,).
     expect(screen.queryByTestId('settings-open')).toBeNull();
     for (const id of ['sidebar-refresh', 'sidebar-collapse']) {

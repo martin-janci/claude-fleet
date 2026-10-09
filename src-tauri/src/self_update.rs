@@ -322,14 +322,29 @@ impl SelfUpdate {
         data_dir: &Path,
     ) -> Result<(), IpcError> {
         use std::sync::atomic::Ordering;
-        let target = self
-            .last
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .and_then(|o| o.verified.clone())
-            .ok_or_else(|| IpcError::new(codes::E_INVALID, "check for an update first"))?;
-        let (url, signature) = installable(&target)?;
+        let (target, mirror) = {
+            let last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+            let o = last.as_ref();
+            (
+                o.and_then(|o| o.verified.clone())
+                    .ok_or_else(|| IpcError::new(codes::E_INVALID, "check for an update first"))?,
+                o.and_then(|o| o.decision.target.as_ref())
+                    .and_then(|t| t.mirror.clone()),
+            )
+        };
+        let (mut url, signature) = installable(&target)?;
+        // The hub's mirror first when it offers one (S9): the same bytes,
+        // checked here against the signed manifest's sha256 and size and
+        // handed to the plugin from loopback; the plugin still checks the
+        // bundle's signature. GitHub when the mirror fails.
+        if let (Some(path), Some(hub)) = (mirror, backend.hub()) {
+            match mirrored_bundle(hub, &path, &target.artifact, data_dir).await {
+                Ok(bytes) => url = serve_bytes_once(bytes).await?.to_string(),
+                Err(e) => {
+                    tracing::warn!(error = %e.message, "the hub's mirror failed; downloading from the release")
+                }
+            }
+        }
         if self.installing.swap(true, Ordering::SeqCst) {
             return Err(IpcError::new(
                 codes::E_CONFLICT,
@@ -500,6 +515,40 @@ fn installable(t: &VerifiedTarget) -> Result<(String, String), IpcError> {
     }
 }
 
+/// The bundle from the hub's mirror, checked against the signed manifest.
+async fn mirrored_bundle(
+    hub: &crate::backend::remote::HubBackend,
+    path: &str,
+    artifact: &Artifact,
+    data_dir: &Path,
+) -> Result<Vec<u8>, IpcError> {
+    let Artifact::Tauri { sha256, size, .. } = artifact else {
+        return Err(IpcError::new(codes::E_INVALID, "not an in-place bundle"));
+    };
+    let part = data_dir.join("update-bundle.part");
+    let got = hub.fetch_update_artifact(path, &part, *size).await;
+    let bytes = std::fs::read(&part);
+    let _ = std::fs::remove_file(&part);
+    got?;
+    let bytes = bytes.map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))?;
+    let digest = fleet_update::verify::sha256_hex(&bytes);
+    if &digest != sha256 || bytes.len() as u64 != *size {
+        return Err(IpcError::new(
+            codes::E_UPDATE_UNVERIFIED,
+            format!(
+                "the mirror sent {} bytes with sha256 {digest}; the manifest signed {size} with {sha256}",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Serve the bundle once from loopback, for the plugin's download.
+async fn serve_bytes_once(body: Vec<u8>) -> Result<url::Url, IpcError> {
+    serve_loopback_once(body, "application/octet-stream", "bundle", 60).await
+}
+
 /// tauri-plugin-updater's "dynamic" release document for one target.
 fn release_json(version: &Version, url: &str, signature: &str) -> String {
     serde_json::json!({ "version": version.to_string(), "url": url, "signature": signature })
@@ -508,6 +557,17 @@ fn release_json(version: &Version, url: &str, signature: &str) -> String {
 
 /// Serve `body` once from `127.0.0.1:<random port>` and return its URL.
 async fn serve_once(body: String) -> Result<url::Url, IpcError> {
+    serve_loopback_once(body.into_bytes(), "application/json", "update.json", 30).await
+}
+
+/// One response on a fresh loopback port: the first connection from this
+/// machine within `wait_secs` gets `body`, and the listener is gone.
+async fn serve_loopback_once(
+    body: Vec<u8>,
+    content_type: &'static str,
+    name: &str,
+    wait_secs: u64,
+) -> Result<url::Url, IpcError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -517,7 +577,8 @@ async fn serve_once(body: String) -> Result<url::Url, IpcError> {
         .map_err(|e| IpcError::new(codes::E_INTERNAL, e.to_string()))?
         .port();
     tokio::spawn(async move {
-        let accept = tokio::time::timeout(std::time::Duration::from_secs(30), listener.accept());
+        let accept =
+            tokio::time::timeout(std::time::Duration::from_secs(wait_secs), listener.accept());
         if let Ok(Ok((mut conn, peer))) = accept.await {
             // Only this process asks; anything else on the machine is refused.
             if !peer.ip().is_loopback() {
@@ -526,15 +587,15 @@ async fn serve_once(body: String) -> Result<url::Url, IpcError> {
             let mut buf = [0u8; 4096];
             let _ = conn.read(&mut buf).await;
             let head = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             let _ = conn.write_all(head.as_bytes()).await;
-            let _ = conn.write_all(body.as_bytes()).await;
+            let _ = conn.write_all(&body).await;
             let _ = conn.shutdown().await;
         }
     });
-    format!("http://127.0.0.1:{port}/update.json")
+    format!("http://127.0.0.1:{port}/{name}")
         .parse()
         .map_err(|e| IpcError::new(codes::E_INTERNAL, format!("{e}")))
 }
@@ -613,6 +674,24 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn a_mirrored_bundle_is_served_to_the_plugin_byte_for_byte() {
+        let bundle: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
+        let url = serve_bytes_once(bundle.clone()).await.unwrap();
+        assert_eq!(url.path(), "/bundle");
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", url.port().unwrap()))
+            .await
+            .unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        s.write_all(b"GET /bundle HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        s.read_to_end(&mut out).await.unwrap();
+        let at = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        assert_eq!(&out[at..], bundle.as_slice());
     }
 
     #[test]

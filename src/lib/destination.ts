@@ -16,6 +16,7 @@
 // (`control.ts`). `automation` (step 8.4) is Automation: routines, runs and
 // the built-in agents (`automation.ts`).
 import { derived, writable, type Readable } from 'svelte/store';
+import { readPref, writePref } from './prefs';
 
 export type Destination =
   | 'session'
@@ -41,6 +42,31 @@ export const DESTINATIONS: readonly Destination[] = [
 ];
 
 export const destination = writable<Destination>('session');
+
+// Step 3.15's warm start shows the last screen at once, so the destination is
+// kept (localStorage through `prefs`, which swallows a blocked store). What
+// the LAST run left is read once, here, before anything in this run writes:
+// App.svelte sets `session` as it mounts, and only a warm start
+// (`startup.ts`'s `trackActivity`) puts the stored one back.
+const LAST_KEY = 'nav.destination';
+const isDestination = (v: unknown): v is Destination => DESTINATIONS.includes(v as Destination);
+let lastRun: Destination = readPref<Destination>(LAST_KEY, 'session', isDestination);
+destination.subscribe((d) => writePref(LAST_KEY, d));
+
+/** Where the last run was when it was last in use. */
+export function lastDestination(): Destination {
+  return lastRun;
+}
+
+/** A warm start: back to the screen the last run left. */
+export function restoreLastDestination(): void {
+  destination.set(lastRun);
+}
+
+/** For tests: read the stored destination again, as a new run would. */
+export function rereadLastDestination(): void {
+  lastRun = readPref<Destination>(LAST_KEY, 'session', isDestination);
+}
 
 /** Go to `d`. Going to the Session tab is how any overlay closes. */
 export function goTo(d: Destination): void {

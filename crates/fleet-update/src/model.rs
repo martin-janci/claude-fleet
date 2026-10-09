@@ -63,13 +63,16 @@ pub enum Source {
 }
 
 /// The release track (U9): `stable` = `vX.Y.Z` tags, `beta` = `-rc.N` tags,
-/// `nightly` = every green `main` commit.
+/// `dev` = every green `main` push (`-dev.N…`, the desktop too), `nightly` =
+/// those of them at most one every two hours. A client older than `dev`
+/// cannot read a decision on it: put only current builds on `dev`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Track {
     Stable,
     Beta,
     Nightly,
+    Dev,
 }
 
 impl Track {
@@ -78,6 +81,7 @@ impl Track {
             Track::Stable => "stable",
             Track::Beta => "beta",
             Track::Nightly => "nightly",
+            Track::Dev => "dev",
         }
     }
 }

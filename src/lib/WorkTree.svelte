@@ -27,8 +27,6 @@
   import { get } from 'svelte/store';
   import { sessions } from './sessions';
   import { selectedSession, selectSessionExplicitly } from './selection';
-  import { providerInfo, unavailableLabel } from './trackers';
-  import { timeAgo } from './session_status';
   import { workBoardOpen, workViewChordLabel } from './app_views';
   import { detectMac } from './terminal_keys';
   import WorkFiltersBar from './WorkFiltersBar.svelte';
@@ -39,13 +37,14 @@
   import WorkPrs from './WorkPrs.svelte';
   import WorkRules from './WorkRules.svelte';
   import TaskList from './TaskList.svelte';
+  import WorkTaskRow from './WorkTaskRow.svelte';
+  import { formatCostMicros } from './sessions';
   import {
     buildSections,
     distributeTasks,
     filtersKey,
     isOccurrenceOf,
     mergeTasks,
-    occurrenceKind,
     openTask,
     orgSectionKey,
     readErrorText,
@@ -54,10 +53,6 @@
     sectionKey,
     selectedTaskId,
     setExpanded,
-    taskLabel,
-    taskStatus,
-    trackerDown,
-    trackerDownLabel,
     workExpanded,
     workReview,
     workTask,
@@ -101,6 +96,16 @@
   });
   let page = $state.raw<WorkTreePage | null>(null);
   const archivedHidden = $derived(page?.archived_hidden ?? 0);
+  const hiddenByFilters = $derived(page?.hidden_by_filters ?? 0);
+  /** "Hidden by filters · Show": every filter off but the archived switch
+   *  and the grouping (the saved view is left). */
+  function showHidden() {
+    activeWorkViewId.set(null);
+    workViewFilters.update((f) => {
+      const n = normalizeFilters(f);
+      return normalizeFilters({ archived: n.archived, group_by: n.group_by });
+    });
+  }
   function setArchived(on: boolean) {
     workViewFilters.update((f) => {
       const { group: _g, archived: _a, ...rest } = normalizeFilters(f);
@@ -130,11 +135,18 @@
   }
 
   const sections: OrgSection[] = $derived(page ? buildSections(page.groups, page.orgs, states) : []);
+  // A blocked task names what it waits for by key when that task is loaded.
+  const loadedById = $derived(new Map(sections.flatMap((o) => o.groups.flatMap((g) => g.tasks.map((t) => [t.task_id, t] as const)))));
+  const taskById = (id: string) => loadedById.get(id);
   const selectedSessionId = $derived($selectedSession?.id ?? null);
   const expanded = $derived($workExpanded[$workViewKey] ?? {});
 
-  function orgOpen(o: OrgSection): boolean {
-    return expanded[o.key] ?? true;
+  /** "32bit · claude-fleet": the org, then the group (one section per org
+   *  when grouped by organisation). */
+  function sectionTitle(o: OrgSection, g: GroupSection): string {
+    if (g.group.source === 'org') return o.name;
+    const group = g.group.source === 'none' ? (g.group.label || 'No group') : g.group.label;
+    return `${o.name} · ${group}`;
   }
   // A section the first page filled is open unless closed; any other is
   // closed until opened (it costs a read).
@@ -151,6 +163,7 @@
       trackers: Array.isArray(v?.trackers) ? v.trackers : [],
       total: typeof v?.total === 'number' ? v.total : 0,
       archived_hidden: typeof v?.archived_hidden === 'number' ? v.archived_hidden : 0,
+      hidden_by_filters: typeof v?.hidden_by_filters === 'number' ? v.hidden_by_filters : 0,
       next_cursor: v?.next_cursor ?? null,
       generated_at: v?.generated_at,
     };
@@ -459,7 +472,7 @@
   });
 
   // The people and tracker columns of the tasks loaded, for the filter
-  // bar's Assignee and Tracker column chips (redesign step 6.2).
+  // bar's Assignee picker and Tracker column chips (redesign step 6.2).
   function namesOf(pick: (t: WorkTask) => readonly (string | null | undefined)[]): string[] {
     const seen = new Map<string, string>();
     const lists = [page?.tasks ?? [], listPage?.tasks ?? [], ...[...states.values()].map((x) => x.tasks)];
@@ -473,10 +486,6 @@
   }
   const people = $derived(namesOf((t) => t.assignees ?? []));
   const columns = $derived(namesOf((t) => [t.status_name]));
-
-  function toggleOrg(o: OrgSection) {
-    setExpanded(get(workViewKey), o.key, !orgOpen(o));
-  }
 
   function toggleGroup(g: GroupSection) {
     const open = !groupOpen(g);
@@ -504,22 +513,6 @@
     else openTask(t.task_id, t.sessions);
   }
 
-  function occurrenceTitle(l: WorkTaskLink): string {
-    const kind = occurrenceKind(l);
-    const what =
-      kind === 'primary'
-        ? 'primary work of this session'
-        : kind === 'secondary'
-          ? 'also worked on by this session (not its primary)'
-          : kind === 'suggested'
-            ? 'a suggestion nobody has decided — it never groups a session'
-            : kind === 'rejected'
-              ? 'rejected'
-              : `ended${l.ended_at ? ` ${timeAgo(l.ended_at)}` : ''}`;
-    const parts = [what, l.host ?? '', l.why ?? ''].filter(Boolean);
-    if (l.cross_org) parts.push('links two organisations');
-    return parts.join(' · ');
-  }
 
   // "Show in Work view": expand the task's section (loading it when the
   // first page did not reach it) and scroll to it.
@@ -569,11 +562,6 @@
     if (req) flushReveal();
   });
 
-  function badge(t: WorkTask): string {
-    if (t.kind === 'local') return 'local';
-    if (t.kind === 'ref') return 'key';
-    return providerInfo(t.provider)?.icon ?? t.provider ?? 'tracker';
-  }
 </script>
 
 <div class="work-tree" data-testid="work-tree" aria-busy={loading} bind:this={root}>
@@ -584,9 +572,9 @@
              after them (a tablist holds only tabs). Review is part of Tasks;
              the board is a Work view of its own, not an overlay toggled from
              the layout chips. -->
-        <div class="tabs" role="tablist" aria-label="Work view" use:tablistKeys>
+        <div class="tabs seg" role="tablist" aria-label="Work view" use:tablistKeys>
           <button
-            class="btn btn--chip btn--toggle"
+            class="seg-tab"
             role="tab"
             aria-selected={shownTab === 'tasks'}
             class:is-active={shownTab === 'tasks'}
@@ -594,7 +582,7 @@
             onclick={() => pickTab('tasks')}>Tasks</button
           >
           <button
-            class="btn btn--chip btn--toggle"
+            class="seg-tab"
             role="tab"
             aria-selected={shownTab === 'missions'}
             class:is-active={shownTab === 'missions'}
@@ -602,7 +590,7 @@
             onclick={() => pickTab('missions')}>Missions</button
           >
           <button
-            class="btn btn--chip btn--toggle"
+            class="seg-tab"
             role="tab"
             aria-selected={shownTab === 'board'}
             class:is-active={shownTab === 'board'}
@@ -611,7 +599,7 @@
             onclick={() => pickTab('board')}>Board</button
           >
           <button
-            class="btn btn--chip btn--toggle"
+            class="seg-tab"
             role="tab"
             aria-selected={shownTab === 'prs'}
             class:is-active={shownTab === 'prs'}
@@ -708,121 +696,73 @@
         {/if}
       </div>
     {:else}
-      <ul class="orgs" aria-label="Work">
+      <!-- Board "Work · tasks with filters open": one flat list of
+           sections, each named by its org and its group, and a row per
+           task (WorkTaskRow). -->
+      <ul class="groups" aria-label="Work">
         {#each sections as o (o.key)}
-          <li class="org" data-testid="work-org">
-            <button class="org-head" type="button" data-testid="work-org-head" aria-expanded={orgOpen(o)} onclick={() => toggleOrg(o)}>
-              <span class="caret" class:open={orgOpen(o)} aria-hidden="true">▸</span>
-              {#if o.color}<span class="org-dot" style="background: {o.color}" aria-hidden="true"></span>{/if}
-              <span class="org-name">{o.name}</span>
-              <span class="count">{o.count}</span>
-            </button>
-            {#if orgOpen(o)}
-              <ul class="groups">
-                {#each o.groups as g (g.key)}
-                  <li class="group" data-testid="work-group" data-group-id={g.group.id}>
-                    <button class="group-head" type="button" data-testid="work-group-head" aria-expanded={groupOpen(g)} onclick={() => toggleGroup(g)}>
-                      <span class="caret" class:open={groupOpen(g)} aria-hidden="true">▸</span>
-                      <span class="group-name" class:none={g.group.source === 'none'}
-                        >{g.group.source === 'none' ? 'No group' : g.group.label}</span
+          {#each o.groups as g (g.key)}
+            <li class="group" data-testid="work-group" data-group-id={g.group.id} data-org-id={o.orgId ?? 'none'}>
+              <button
+                class="of-sec group-head"
+                type="button"
+                data-testid="work-group-head"
+                aria-expanded={groupOpen(g)}
+                title={g.group.source === 'none' || g.group.source === 'org' ? undefined : `Grouped by ${g.group.source}`}
+                onclick={() => toggleGroup(g)}
+              >
+                <span class="caret" class:open={groupOpen(g)} aria-hidden="true">▸</span>
+                {#if o.color}<span class="org-dot" style="background: {o.color}" aria-hidden="true"></span>{/if}
+                <span class="group-name">{sectionTitle(o, g)}</span>
+                {#if g.cost > 0}<span class="spend" data-testid="work-group-spend" title="Spend of its tasks">{formatCostMicros(g.cost)}</span>{/if}
+                <span class="of-count" data-testid="work-group-count">{g.count}</span>
+              </button>
+              {#if groupOpen(g)}
+                <ul class="tasks">
+                  {#each g.tasks as t (t.task_id)}
+                    <li
+                      class="task"
+                      class:selected={$selectedTaskId === t.task_id}
+                      class:lit={(t.sessions ?? []).some((l) => isOccurrenceOf(l, selectedSessionId))}
+                      data-testid="work-task"
+                      data-task-id={t.task_id}
+                    >
+                      <WorkTaskRow
+                        task={t}
+                        selected={$selectedTaskId === t.task_id}
+                        currentSessionId={selectedSessionId}
+                        lookup={taskById}
+                        onselect={() => selectTask(t)}
+                        onopen={(l) => openOccurrence(t, l)}
+                      />
+                    </li>
+                  {/each}
+                  {#if sectionBusy.has(g.key)}
+                    <li class="state" data-testid="work-section-loading"><Skeleton rows={1} label="Loading" /></li>
+                  {/if}
+                  {#if sectionErrors.get(g.key)}
+                    <li class="state error" role="alert" data-testid="work-section-error">
+                      {sectionErrors.get(g.key)}
+                      <button class="btn btn--quiet" type="button" onclick={() => loadMore(g)}>Retry</button>
+                    </li>
+                  {:else if g.more && !sectionBusy.has(g.key)}
+                    <li>
+                      <button class="btn btn--quiet more-btn" type="button" data-testid="work-load-more" onclick={() => loadMore(g)}
+                        >Load more ({g.count - g.tasks.length} left)</button
                       >
-                      <span class="source" title="Where this group comes from">{g.group.source}</span>
-                      <span class="count" data-testid="work-group-count">{g.count}</span>
-                    </button>
-                    {#if groupOpen(g)}
-                      <ul class="tasks">
-                        {#each g.tasks as t (t.task_id)}
-                          {@const lit = (t.sessions ?? []).some((l) => isOccurrenceOf(l, selectedSessionId))}
-                          <li
-                            class="task"
-                            class:selected={$selectedTaskId === t.task_id}
-                            class:lit
-                            data-testid="work-task"
-                            data-task-id={t.task_id}
-                          >
-                            <button
-                              class="task-row"
-                              type="button"
-                              data-testid="work-task-row"
-                              aria-current={$selectedTaskId === t.task_id ? 'true' : undefined}
-                              onclick={() => selectTask(t)}
-                            >
-                              <span class="tbadge" title={t.tracker_name ?? t.kind}>{badge(t)}</span>
-                              {#if t.needs_you}<span class="needs" data-testid="work-task-needs-you" title="A session needs you" aria-label="needs you">●</span>{/if}
-                              <span class="tlabel" class:unavailable={t.unavailable} title={t.unavailable ? unavailableLabel(t.unavailable_reason) : taskLabel(t)}>
-                                {#if t.key}<span class="key">{t.key}</span>{/if}
-                                <span class="title">{t.title || (t.key ? '' : t.task_id)}</span>
-                              </span>
-                              {#if t.review}<span class="review" data-testid="work-task-review" title="Something to review">?</span>{/if}
-                            </button>
-                            <div class="task-meta">
-                              {#if taskStatus(t)}<span class="status">{taskStatus(t)}</span>{/if}
-                              <span class="counts" data-testid="work-task-counts" title="active / past sessions"
-                                >{t.counts?.active ?? 0} active · {t.counts?.ended ?? 0} past</span
-                              >
-                              {#if trackerDown(t)}<span class="down" data-testid="work-task-tracker-down" title={`tracker state: ${t.tracker_state}`}>{trackerDownLabel(t)}</span>{/if}
-                            </div>
-                            {#if (t.sessions ?? []).length > 0}
-                              <ul class="occurrences">
-                                {#each t.sessions ?? [] as l (l.link_id)}
-                                  {@const kind = occurrenceKind(l)}
-                                  <li>
-                                    <button
-                                      class="occ occ--{kind}"
-                                      class:current={isOccurrenceOf(l, selectedSessionId)}
-                                      type="button"
-                                      data-testid="work-occurrence"
-                                      data-kind={kind}
-                                      data-session-id={l.session_id ?? ''}
-                                      title={occurrenceTitle(l)}
-                                      onclick={() => openOccurrence(t, l)}
-                                    >
-                                      <span class="mark" aria-hidden="true"
-                                        >{kind === 'primary' ? '★' : kind === 'suggested' ? '?' : kind === 'past' ? '·' : '○'}</span
-                                      >
-                                      <span class="oname">{l.name ?? `session ${l.session_id ?? l.link_id}`}</span>
-                                      {#if l.host}<span class="ohost">{l.host}</span>{/if}
-                                      {#if kind === 'past'}<span class="ended">ended</span>{/if}
-                                      {#if kind === 'suggested'}<span class="sr">suggested</span>{/if}
-                                      {#if l.needs_you}<span class="needs" aria-label="needs you">●</span>{/if}
-                                    </button>
-                                  </li>
-                                {/each}
-                                {#if (t.sessions_more ?? 0) > 0}
-                                  <li>
-                                    <button class="occ more" type="button" onclick={() => selectTask(t)}
-                                      >+{t.sessions_more} more</button
-                                    >
-                                  </li>
-                                {/if}
-                              </ul>
-                            {/if}
-                          </li>
-                        {/each}
-                        {#if sectionBusy.has(g.key)}
-                          <li class="state" data-testid="work-section-loading"><Skeleton rows={1} label="Loading" /></li>
-                        {/if}
-                        {#if sectionErrors.get(g.key)}
-                          <li class="state error" role="alert" data-testid="work-section-error">
-                            {sectionErrors.get(g.key)}
-                            <button class="btn btn--quiet" type="button" onclick={() => loadMore(g)}>Retry</button>
-                          </li>
-                        {:else if g.more && !sectionBusy.has(g.key)}
-                          <li>
-                            <button class="btn btn--quiet more-btn" type="button" data-testid="work-load-more" onclick={() => loadMore(g)}
-                              >Load more ({g.count - g.tasks.length} left)</button
-                            >
-                          </li>
-                        {/if}
-                      </ul>
-                    {/if}
-                  </li>
-                {/each}
-              </ul>
-            {/if}
-          </li>
+                    </li>
+                  {/if}
+                </ul>
+              {/if}
+            </li>
+          {/each}
         {/each}
       </ul>
+      {#if hiddenByFilters > 0}
+        <button class="of-btn quiet hidden-row" type="button" data-testid="work-hidden-by-filters" onclick={showHidden}
+          ><span>Hidden by filters <span class="of-count">{hiddenByFilters}</span></span><span>Show</span></button
+        >
+      {/if}
       {#if archivedHidden > 0 || $workViewFilters.archived}
         {@render archivedRow()}
       {/if}
@@ -854,22 +794,23 @@
 
 <style>
   .review-count {
-    min-width: var(--control-h);
-    height: 1.1rem;
-    padding: 0 0.35rem;
+    min-width: 18px;
+    height: 16px;
+    padding: 0 5px;
     border: none;
     border-radius: var(--radius-sm);
-    background: var(--accent-soft);
-    color: var(--fg);
+    background: var(--waiting-soft);
+    color: var(--status-waiting);
     font: inherit;
     font-size: var(--text-2xs);
-    font-weight: 600;
+    line-height: 16px;
+    font-weight: 500;
     cursor: pointer;
     align-self: center;
     margin-right: auto;
   }
   .review-count.is-active {
-    outline: 1px solid var(--accent);
+    outline: 1px solid var(--status-waiting);
   }
   .review-strip {
     display: flex;
@@ -893,224 +834,125 @@
     flex: 0 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
-    padding: 0.4rem 0.6rem;
-    border-bottom: 1px solid var(--border);
+    gap: 8px;
+    padding: 4px 12px 8px;
     background: var(--bg-pane);
   }
   .row {
     display: flex;
     align-items: center;
-    gap: 0.3rem;
+    gap: 6px;
   }
-  .tabs {
+  /* Board: one segmented control for the four Work views. */
+  .seg {
     display: flex;
-    gap: 0.25rem;
-    flex: 1 1 auto;
-  }
-  /* The review count follows the tabs and takes the free space after it. */
-  .tabs:has(+ .review-count) {
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--control-border);
+    border-radius: var(--radius-md);
+    background: var(--bg-raise);
     flex: 0 1 auto;
+    min-width: 0;
   }
-  .layout {
-    display: flex;
-    gap: 0.25rem;
-    flex: 0 0 auto;
+  .seg-tab {
+    height: 22px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--fg-2);
+    font: inherit;
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .seg-tab:hover {
+    color: var(--fg);
+  }
+  .seg-tab[aria-selected='true'] {
+    background: var(--bg-hover);
+    color: var(--fg);
+    font-weight: 500;
+  }
+  .seg-tab:focus-visible {
+    outline: var(--ring-w) solid var(--ring);
+    outline-offset: -1px;
+  }
+  .row:not(:has(.review-count)) .seg {
+    margin-right: auto;
   }
   .scroller {
     flex: 1 1 auto;
     overflow: auto;
     min-height: 0;
-    padding: 0.4rem 0.6rem;
+    padding: 0 0 8px;
   }
   ul {
     list-style: none;
     margin: 0;
     padding: 0;
   }
-  .org-head,
-  .group-head,
-  .task-row,
-  .occ {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
+  .group-head {
     width: 100%;
-    background: transparent;
     border: 0;
-    color: var(--fg);
+    background: transparent;
     font: inherit;
+    font-size: var(--text-2xs);
     text-align: left;
-    padding: 0.2rem 0.3rem;
-    border-radius: var(--radius-sm);
     cursor: pointer;
   }
-  .org-head:hover,
-  .group-head:hover,
-  .task-row:hover,
-  .occ:hover {
-    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  .group-head:hover {
+    color: var(--fg);
   }
-  .org-head:focus-visible,
-  .group-head:focus-visible,
-  .task-row:focus-visible,
-  .occ:focus-visible {
+  .group-head:focus-visible {
     outline: var(--ring-w) solid var(--ring);
     outline-offset: calc(-1 * var(--ring-w));
   }
-  .org-head {
-    font-weight: 600;
-  }
-  .groups {
-    padding-left: 0.5rem;
-  }
-  .group-head {
-    font-weight: 500;
-  }
-  .group-name.none {
-    color: var(--fg-muted);
-    font-style: italic;
+  .group-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .caret {
-    color: var(--fg-muted);
     font-size: var(--text-2xs);
-    width: 0.7rem;
+    width: 8px;
     transition: transform var(--dur-fast) ease;
   }
   .caret.open {
     transform: rotate(90deg);
   }
   .org-dot {
-    width: 0.55rem;
-    height: 0.55rem;
+    width: 6px;
+    height: 6px;
     border-radius: 50%;
+    flex: none;
   }
-  .count {
+  .spend {
     margin-left: auto;
     color: var(--fg-muted);
     font-size: var(--text-2xs);
+    font-variant-numeric: tabular-nums;
   }
-  .source {
-    color: var(--fg-muted);
-    font-size: var(--text-2xs);
-  }
-  .tasks {
-    padding-left: 0.6rem;
-  }
-  .task {
-    border-radius: var(--radius-sm);
-    margin: 0.1rem 0;
-  }
-  .task.selected {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
-  .task.lit {
-    box-shadow: inset 2px 0 0 var(--accent);
-  }
-  .tbadge {
-    font-size: var(--text-2xs);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-xs);
-    padding: 0 0.2rem;
-    color: var(--fg-muted);
-    flex: 0 0 auto;
-  }
-  .tlabel {
-    display: flex;
-    gap: 0.3rem;
-    min-width: 0;
-    flex: 1 1 auto;
-    overflow: hidden;
-  }
-  .tlabel .title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .tlabel.unavailable {
-    text-decoration: line-through;
-    color: var(--fg-muted);
-  }
-  .key {
-    font-family: var(--mono);
-    flex: 0 0 auto;
-  }
-  .needs {
-    color: var(--usage-crit);
-    font-size: var(--text-2xs);
-  }
-  .review {
-    font-weight: 700;
-    color: var(--usage-warn);
-  }
-  .task-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0 0.4rem;
-    padding-left: 1.6rem;
-    color: var(--fg-muted);
-    font-size: var(--text-2xs);
-  }
-  /* Each fact wraps as a whole in a narrow sidebar, never mid-phrase. */
-  .task-meta > span {
-    white-space: nowrap;
-  }
-  .down {
-    color: var(--usage-warn);
-  }
-  .occurrences {
-    padding-left: 1.4rem;
-  }
-  .occ {
-    font-size: var(--text-2xs);
-    padding: 0.1rem 0.3rem;
-    border: 1px solid transparent;
-  }
-  .occ .mark {
-    width: 0.8rem;
-    text-align: center;
-    flex: 0 0 auto;
-  }
-  .occ--primary .mark {
-    color: var(--accent);
-  }
-  .occ--suggested {
-    border: 1px dashed var(--border);
-    color: var(--fg-muted);
-  }
-  .occ--past,
-  .occ--rejected {
-    opacity: 0.6;
-  }
-  .occ.current {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    border-color: var(--accent);
-  }
-  .oname {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ohost,
-  .ended,
-  .sr {
-    color: var(--fg-muted);
-    font-size: var(--text-2xs);
-  }
-  .occ.more {
-    color: var(--fg-muted);
+  .spend + .of-count {
+    margin-left: var(--space-1);
   }
   .more-btn {
-    margin: 0.15rem 0 0.15rem 0.6rem;
+    margin: 2px 0 2px 18px;
+  }
+  .hidden-row {
+    width: calc(100% - 12px);
+    margin: 8px 6px 0;
+    justify-content: space-between;
   }
   .state {
-    padding: 0.4rem 0.2rem;
+    padding: 6px 12px;
   }
   .archived-row {
     display: flex;
     align-items: center;
     gap: 6px;
-    margin: 6px 0 4px;
+    margin: 6px 6px 4px;
     padding: 4px 6px;
     border-top: 1px dashed var(--border);
     color: var(--fg-muted);

@@ -49,6 +49,9 @@ pub mod jev;
 pub mod lost_target;
 #[cfg(test)]
 mod lost_target_tests;
+pub mod main_ticket;
+#[cfg(test)]
+mod main_ticket_tests;
 pub mod mission_triage;
 #[cfg(test)]
 mod mission_triage_tests;
@@ -76,6 +79,9 @@ pub mod summary_check;
 mod summary_check_tests;
 #[cfg(test)]
 mod tests;
+pub mod tracker_duplicate;
+#[cfg(test)]
+mod tracker_duplicate_tests;
 pub mod turn_outcome;
 #[cfg(test)]
 mod turn_outcome_tests;
@@ -154,6 +160,12 @@ pub enum Feature {
     RoutineRunOutcome,
     /// What a PR shepherd episode most likely needs (PR shepherd step 4).
     PrTriage,
+    /// The main ticket among several keys a session's prompt names (J6,
+    /// redesign step 6.8).
+    MainTicket,
+    /// A local task that may be the same work as a tracker ticket (J7,
+    /// redesign step 6.8).
+    TrackerDuplicate,
 }
 
 impl Feature {
@@ -175,6 +187,8 @@ impl Feature {
         Feature::MissionTriage,
         Feature::RoutineRunOutcome,
         Feature::PrTriage,
+        Feature::MainTicket,
+        Feature::TrackerDuplicate,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -196,6 +210,8 @@ impl Feature {
             Feature::MissionTriage => "mission_triage",
             Feature::RoutineRunOutcome => "routine_run_outcome",
             Feature::PrTriage => "pr_triage",
+            Feature::MainTicket => "main_ticket",
+            Feature::TrackerDuplicate => "tracker_duplicate",
         }
     }
 
@@ -223,6 +239,8 @@ impl Feature {
             Feature::MissionTriage => settings::DECIDE_JEV_MISSION_TRIAGE,
             Feature::RoutineRunOutcome => settings::DECIDE_JEV_ROUTINE_RUN_OUTCOME,
             Feature::PrTriage => settings::DECIDE_JEV_PR_TRIAGE,
+            Feature::MainTicket => settings::DECIDE_JEV_MAIN_TICKET,
+            Feature::TrackerDuplicate => settings::DECIDE_JEV_TRACKER_DUPLICATE,
         }
     }
 

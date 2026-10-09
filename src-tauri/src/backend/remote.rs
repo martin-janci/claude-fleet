@@ -1039,6 +1039,39 @@ impl HubBackend {
         }
     }
 
+    /// The hub's artifact mirror (`GET /update/artifact/<sha256>`, S9): a
+    /// release file into `dest`, for an update this desktop installs. Like
+    /// [`Self::post_update`], outside the contract gate — a skewed desktop is
+    /// the one that must update — and only that route. The bytes are trusted
+    /// by the caller's own sha256 check against the signed manifest.
+    pub async fn fetch_update_artifact(
+        &self,
+        path: &str,
+        dest: &std::path::Path,
+        max: u64,
+    ) -> Result<u64, IpcError> {
+        let sha = path.strip_prefix("/update/artifact/").unwrap_or_default();
+        if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(IpcError::new(
+                codes::E_INTERNAL,
+                format!("{path} is not a mirror path"),
+            ));
+        }
+        if let Some(refused) = self.unavailable_error("update_check") {
+            return Err(refused);
+        }
+        let url = format!("{}{path}", self.cfg.base_url);
+        self.transport
+            .get_to_file(&url, &self.cfg.token, dest, max)
+            .await
+            .map_err(|e| {
+                IpcError::new(
+                    codes::E_HUB_UNREACHABLE,
+                    format!("the hub's mirror: {}", self.redact(&e)),
+                )
+            })
+    }
+
     /// `commands::tasks::list_tasks`.
     pub async fn list_tasks(
         &self,
@@ -1233,26 +1266,34 @@ impl HubBackend {
         &self,
         args: &sessions::NewSessionArgs,
     ) -> Result<SessionRow, IpcError> {
-        self.route(
-            "new_session",
-            &json!({
-                "host_alias": args.host_alias,
-                "project_id": args.project_id,
-                "worktree_id": args.worktree_id,
-                "name": args.name,
-                "new_worktree": args.new_worktree,
-                "base_branch": args.base_branch,
-                "kind": args.kind,
-                "start_command": args.start_command,
-                "friendly_name": args.friendly_name,
-                "resume_claude_session_id": args.resume_claude_session_id,
-                "model": args.model,
-                "effort": args.effort,
-                "profile": args.profile,
-                "agent": args.agent,
-            }),
-        )
-        .await
+        let mut body = json!({
+            "host_alias": args.host_alias,
+            "project_id": args.project_id,
+            "worktree_id": args.worktree_id,
+            "name": args.name,
+            "new_worktree": args.new_worktree,
+            "base_branch": args.base_branch,
+            "kind": args.kind,
+            "start_command": args.start_command,
+            "friendly_name": args.friendly_name,
+            "resume_claude_session_id": args.resume_claude_session_id,
+            "model": args.model,
+            "effort": args.effort,
+            "profile": args.profile,
+            "agent": args.agent,
+            // Unlike `call_id`, the start token has a hub counterpart:
+            // the hub reports the start's steps under it as
+            // `start:progress`, and this desktop's `/events` stream
+            // carries them to the dialog that minted it (step 5.13).
+            "start_token": args.start_token,
+        });
+        // Step 4.4: the person was asked about `accounts.pause_at` and chose
+        // to start anyway. Sent only then, so an older hub sees the same
+        // arguments it always did.
+        if args.over_limit_ok {
+            body["over_limit_ok"] = json!(true);
+        }
+        self.route("new_session", &body).await
     }
 
     /// `commands::sessions::repair_session` with `explicit: true` only — the

@@ -328,6 +328,8 @@ pub enum Badge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct FieldSpec {
     pub id: &'static str,
+    /// Its label. `{title}` is the one placeholder: the renderer puts the
+    /// record's title there ("Allow Jev (decision model) for Acme's work").
     pub label: &'static str,
     pub help: &'static str,
     #[serde(flatten)]
@@ -695,7 +697,7 @@ const ORG: ResourceType = ResourceType {
         .badge(Badge::Set { text: "auto-tidy" }),
         FieldSpec::new(
             "jev_allowed",
-            "Allow Jev (decision model) for this organisation's work",
+            "Allow Jev (decision model) for {title}'s work",
             "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
             FieldKind::Bool { on_off: true, default: false },
         )
@@ -1196,6 +1198,13 @@ mod tests {
             let mut fields = std::collections::BTreeSet::new();
             for f in r.fields {
                 assert!(fields.insert(f.id), "{}: duplicate field {}", r.id, f.id);
+                let bare = f.label.replace("{title}", "");
+                assert!(
+                    !bare.contains('{') && !bare.contains('}'),
+                    "{}.{}: `{{title}}` is a label's one placeholder",
+                    r.id,
+                    f.id
+                );
                 assert!(
                     f.help.ends_with('.'),
                     "{}.{}: help is a sentence",

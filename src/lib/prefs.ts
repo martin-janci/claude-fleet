@@ -106,9 +106,16 @@ const isUiDensity = (v: unknown): v is UiDensity => v === 'comfortable' || v ===
  * included; Compact is the redesign's two-line row (a sans title, one meta
  * line, chips until hover) at {@link COMPACT_ROW_PX}.
  */
-export const uiDensity = writable<UiDensity>(readPref<UiDensity>('ui.density', 'comfortable', isUiDensity));
-uiDensity.subscribe((v) => writePref('ui.density', v));
+// Compact is the default since the UX audit (2026-10-09, L1). The key moved
+// from `ui.density` because the store writes its value back on first read,
+// so every install already held 'comfortable' without anyone choosing it;
+// a fresh key gives everyone the design's row once, and Settings › Appearance
+// still switches back.
+export const uiDensity = writable<UiDensity>(readPref<UiDensity>('ui.rowDensity', 'compact', isUiDensity));
+uiDensity.subscribe((v) => writePref('ui.rowDensity', v));
 
-/** A Compact row's height: 20 of them fit a 1080p window with 280 px to spare
- *  for the title bar, header and the list's own chrome. */
+/** A Compact row's height: what `.sess-row.compact`'s min-height
+ *  (`calc(2 * var(--text-2xs-lh) + var(--space-3))`) resolves to. 20 of
+ *  them fit a 1080p window with the shell's chrome (SessionRowDensity.test.ts
+ *  renders and measures them). */
 export const COMPACT_ROW_PX = 40;

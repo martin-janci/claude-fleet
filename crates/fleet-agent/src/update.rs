@@ -29,6 +29,9 @@ use crate::install::{Scope, UNIT_NAME};
 
 pub const UPDATE_SERVICE: &str = "fleet-agent-update.service";
 pub const UPDATE_TIMER: &str = "fleet-agent-update.timer";
+/// Starts a pass at once when the hub's `update_now` drops `update-now` in
+/// the agent's runtime directory.
+pub const UPDATE_PATH: &str = "fleet-agent-update.path";
 
 /// Where the release directories and the updater's state live.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +107,8 @@ pub fn render_update_service(scope: &Scope, binary: &Path) -> Result<String, Str
          \n\
          [Service]\n\
          Type=oneshot\n\
+         # The hub's update_now trigger, consumed: the path unit fires again only on a new one.\n\
+         ExecStartPre=-/bin/rm -f %t/fleet-agent/update-now\n\
          ExecStart={bin} update{user_flag}\n"
     ))
 }
@@ -125,7 +130,22 @@ pub fn render_update_timer() -> String {
         .to_string()
 }
 
-/// The `systemctl` calls that turn the timer on.
+/// The path unit: `update_now` on the hub → one pass now.
+pub fn render_update_path() -> String {
+    "# Written by `fleet-agent install --auto-update`.\n\
+     [Unit]\n\
+     Description=claude-fleet agent: install an update now, when the hub says so\n\
+     \n\
+     [Path]\n\
+     PathExists=%t/fleet-agent/update-now\n\
+     Unit=fleet-agent-update.service\n\
+     \n\
+     [Install]\n\
+     WantedBy=paths.target\n"
+        .to_string()
+}
+
+/// The `systemctl` calls that turn the timer and the path unit on.
 pub fn update_systemctl_calls(scope: &Scope) -> Vec<Vec<String>> {
     let scoped = |args: &[&str]| -> Vec<String> {
         let mut v = Vec::new();
@@ -138,6 +158,7 @@ pub fn update_systemctl_calls(scope: &Scope) -> Vec<Vec<String>> {
     vec![
         scoped(&["daemon-reload"]),
         scoped(&["enable", "--now", UPDATE_TIMER]),
+        scoped(&["enable", "--now", UPDATE_PATH]),
     ]
 }
 
@@ -254,11 +275,16 @@ mod tests {
         );
         assert!(render_update_service(&Scope::User, Path::new("/tmp/a b")).is_err());
         assert!(render_update_timer().contains("OnUnitActiveSec=6h"));
+        assert!(s.contains("ExecStartPre=-/bin/rm -f %t/fleet-agent/update-now\n"));
+        let p = render_update_path();
+        assert!(p.contains("PathExists=%t/fleet-agent/update-now\n"));
+        assert!(p.contains("Unit=fleet-agent-update.service\n"));
         assert_eq!(
             update_systemctl_calls(&Scope::User),
             vec![
                 vec!["--user", "daemon-reload"],
-                vec!["--user", "enable", "--now", UPDATE_TIMER]
+                vec!["--user", "enable", "--now", UPDATE_TIMER],
+                vec!["--user", "enable", "--now", UPDATE_PATH],
             ]
         );
     }

@@ -399,6 +399,25 @@ impl FleetTools {
                 "no resumable conversation with that id",
             )
         })?;
+        // Step 4.4: a Claude start on a login past `accounts.pause_at` asks
+        // first, as the desktop's dialog does: refused unless the caller
+        // says the person chose it (`over_limit_ok`).
+        let over_limit_ok = p.over_limit_ok.unwrap_or(false);
+        let runs_claude = p.kind.as_deref().unwrap_or("work") != "shell"
+            && matches!(
+                p.agent.as_deref().map(str::trim).filter(|a| !a.is_empty()),
+                None | Some(crate::store::AGENT_CLAUDE)
+            );
+        if runs_claude && !over_limit_ok {
+            let s = lock(self.reader()).map_err(to_mcp_err)?;
+            crate::service::account_limits::refuse_over_limit(
+                &s,
+                &p.host_alias,
+                p.profile.as_deref(),
+                crate::store::now_unix(),
+            )
+            .map_err(to_mcp_err)?;
+        }
         self.confirm_gate(
             "new_session",
             p.confirm_nonce.as_deref(),
@@ -423,6 +442,7 @@ impl FleetTools {
             effort: p.effort,
             profile: p.profile,
             agent: p.agent,
+            over_limit_ok,
             // Who started it (migration 124), from the connection, as the
             // owner is.
             origin: Some({
@@ -441,6 +461,7 @@ impl FleetTools {
                 let s = lock(self.reader()).map_err(to_mcp_err)?;
                 super::fleet::owner_for(&caller, &s)
             },
+            start_token: p.start_token,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await
@@ -503,10 +524,12 @@ impl FleetTools {
             // The caller's own person, as in `new_session` above — a shell
             // session is as private as any other (its pane sees the same
             // checkout and the same credentials).
+            over_limit_ok: false,
             owner_person_id: {
                 let s = lock(self.reader()).map_err(to_mcp_err)?;
                 super::fleet::owner_for(&caller, &s)
             },
+            start_token: None,
         };
         let row = sessions::new_session(args, &self.store, &self.ssh, &self.reg)
             .await

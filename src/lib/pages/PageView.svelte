@@ -321,12 +321,12 @@
     margin: 0;
     font-size: var(--text-md);
   }
+  /* UX audit S2: section headings in sentence case, not uppercase labels. */
   h5 {
     margin: 0 0 0.35rem;
-    font-size: var(--text-2xs);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--fg-muted);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--fg);
   }
   .intro {
     font-size: var(--text-2xs);

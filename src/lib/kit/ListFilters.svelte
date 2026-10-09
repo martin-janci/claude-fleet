@@ -60,8 +60,8 @@
 
 <style>
   .list-head {
-    padding: 14px 12px 10px;
-    gap: 6px;
+    padding: var(--space-3) var(--space-3) var(--space-2);
+    gap: var(--control-gap);
   }
   .head {
     display: flex;

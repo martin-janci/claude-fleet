@@ -126,17 +126,17 @@
 </DialogSheet>
 
 <style>
-  .src { margin: 0; display: flex; gap: var(--space-1, 4px); }
-  .row { display: flex; align-items: center; gap: var(--space-2, 8px); }
+  .src { margin: 0; display: flex; gap: var(--space-1); }
+  .row { display: flex; align-items: center; gap: var(--space-2); }
   .preamble {
     margin: 0;
     white-space: pre-wrap;
-    font-family: var(--font-mono, ui-monospace, monospace);
-    font-size: var(--text-xs, 11.5px);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
     color: var(--fg-muted);
-    padding: var(--space-1, 4px) var(--space-2, 8px);
+    padding: var(--space-1) var(--space-2);
     border-left: 2px solid var(--border);
   }
   textarea { width: 100%; box-sizing: border-box; min-height: 8rem; }
-  .blocked { color: var(--danger); font-size: var(--text-sm, 12.5px); margin: 0; }
+  .blocked { color: var(--danger); font-size: var(--text-sm); margin: 0; }
 </style>

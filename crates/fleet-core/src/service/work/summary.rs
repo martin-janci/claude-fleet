@@ -425,6 +425,13 @@ pub async fn summarize(
                 format!("the summary took longer than {HOST_TIMEOUT_SECS}s"),
             ))
         }
+        ScriptAnswer::Ran(_) | ScriptAnswer::Nothing
+            if crate::service::claude_print::run_signed_out(None, "", &out.stderr) =>
+        {
+            return Err(crate::service::claude_print::signed_out_error(
+                &p.host, None,
+            ))
+        }
         ScriptAnswer::Ran(_) | ScriptAnswer::Nothing => {
             return Err(IpcError::new(
                 codes::E_CLAUDE_CLI,
@@ -436,6 +443,11 @@ pub async fn summarize(
     let text = match crate::service::claude_print::parse_envelope(&text) {
         Some(env) => {
             book(store, &p, Some(&env));
+            if crate::service::claude_print::run_signed_out(Some(&env), &env.result, &out.stderr) {
+                return Err(crate::service::claude_print::signed_out_error(
+                    &p.host, None,
+                ));
+            }
             if env.is_error || env.result.trim().is_empty() {
                 return Err(IpcError::new(
                     codes::E_CLAUDE_CLI,
@@ -455,6 +467,11 @@ pub async fn summarize(
         // No envelope (an older `claude`): the text itself.
         None => {
             book(store, &p, None);
+            if crate::service::claude_print::run_signed_out(None, &text, &out.stderr) {
+                return Err(crate::service::claude_print::signed_out_error(
+                    &p.host, None,
+                ));
+            }
             text
         }
     };

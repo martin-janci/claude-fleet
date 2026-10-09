@@ -2,19 +2,21 @@
 // today's Assets workspace. Its own nav column (UX audit 2026-10-09, A2):
 // Skills, MCP servers and Hooks, each the catalog's assets of that kind as a
 // host matrix with drift per host, and the Assets catalog, the full
-// workspace (layers and changesets) unchanged.
+// workspace (layers and changesets) unchanged, and Prompts & snippets, the
+// composer's quick-action chips (moved from Settings).
 import { writable } from 'svelte/store';
 import { hostOrderOf, catalogOf, type AssetKind, type AssetListing, type AssetSummary, type HostState } from './assets';
 import { AGENT_LABELS } from './row_groups';
 import { keyOf } from './assets_workspace';
 import { readPref, writePref } from './prefs';
 
-export type ToolkitTab = 'skills' | 'mcp' | 'hooks' | 'assets';
+export type ToolkitTab = 'skills' | 'mcp' | 'hooks' | 'assets' | 'prompts';
 
-const isToolkitTab = (v: unknown): v is ToolkitTab => v === 'skills' || v === 'mcp' || v === 'hooks' || v === 'assets';
+const isToolkitTab = (v: unknown): v is ToolkitTab =>
+  v === 'skills' || v === 'mcp' || v === 'hooks' || v === 'assets' || v === 'prompts';
 
 /** The asset kind each matrix page lists. */
-export const TOOLKIT_KIND: Record<Exclude<ToolkitTab, 'assets'>, AssetKind> = {
+export const TOOLKIT_KIND: Record<Exclude<ToolkitTab, 'assets' | 'prompts'>, AssetKind> = {
   skills: 'skill',
   mcp: 'mcp_server',
   hooks: 'hook',

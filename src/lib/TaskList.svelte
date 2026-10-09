@@ -9,6 +9,7 @@
   // agent text renders as text.
   import { onDestroy, onMount } from 'svelte';
   import { get } from 'svelte/store';
+  import { viewKey } from './shortcuts';
   import { createWorkTask, onWorkChangedDebounced } from './work';
   import {
     openTask,
@@ -17,9 +18,12 @@
     workTree,
     workViewFilters,
     type WorkTask,
+    type WorkTaskLink,
     type WorkTreePage,
   } from './work_view';
-  import { providerInfo } from './trackers';
+  import WorkTaskRow from './WorkTaskRow.svelte';
+  import { sessions } from './sessions';
+  import { selectedSession, selectSessionExplicitly } from './selection';
   import { projects, loadProjects } from './projects';
   import { workButtonFor } from './start_preview';
   import WorkButton from './WorkButton.svelte';
@@ -39,7 +43,9 @@
   }: { debounceMs?: number; maxWaitMs?: number; onpage?: (p: WorkTreePage) => void } = $props();
 
   let tasks = $state.raw<WorkTask[]>([]);
-  let orgNames = $state.raw<Map<number, string>>(new Map());
+  // A blocked task names what it waits for by key when that task is loaded.
+  const byId = $derived(new Map(tasks.map((t) => [t.task_id, t])));
+  const taskById = (id: string) => byId.get(id);
   let loaded = $state(false);
   let error = $state<IpcError | null>(null);
   let doneOpen = $state(false);
@@ -76,7 +82,6 @@
     error = null;
     tasks = Array.isArray(r.value?.tasks) ? r.value.tasks : [];
     const orgs = Array.isArray(r.value?.orgs) ? r.value.orgs : [];
-    orgNames = new Map(orgs.map((o) => [o.id, o.name]));
     onpage?.({
       ...r.value,
       tasks,
@@ -136,30 +141,32 @@
    *  selection, `s` runs the selected task's Work button, ⇧S opens its
    *  start popover. Never inside a field, a menu or a dialog. */
   function onkey(e: KeyboardEvent) {
-    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    // The keys are the registry's `task-list` rows (step 0.1).
+    const act = viewKey('task-list', e);
+    if (!act) return;
     const t = e.target as HTMLElement | null;
     if (t?.closest('input, textarea, select, [role="dialog"], [role="menu"]')) return;
     const at = visibleRows.indexOf(get(selectedTaskId) ?? '');
-    if (e.key === 'j' || e.key === 'k') {
+    if (act === 'task-list.down' || act === 'task-list.up') {
       if (visibleRows.length === 0) return;
       e.preventDefault();
-      const next = e.key === 'j' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
+      const next = act === 'task-list.down' ? Math.min(at + 1, visibleRows.length - 1) : Math.max(at - 1, 0);
       const id = visibleRows[at < 0 ? 0 : next];
       openTask(id, nodeOf(id)?.task.sessions);
       document.querySelector<HTMLElement>(`[data-task-id="${CSS.escape(id)}"] .main`)?.focus();
-    } else if ((e.key === 's' || e.key === 'S') && at >= 0) {
+    } else if (at >= 0) {
       const b = workButtonFor(visibleRows[at]);
       if (!b) return;
       e.preventDefault();
-      if (e.shiftKey) b.ask();
+      if (act === 'task-list.work-ask') b.ask();
       else b.primary();
     }
   }
-  // The same badge as the Grouped tree's row.
-  function badge(t: WorkTask): string {
-    if (t.kind === 'local') return 'local';
-    if (t.kind === 'ref') return 'key';
-    return providerInfo(t.provider)?.icon ?? t.provider ?? 'tracker';
+  // A session chip opens that session, as in the Grouped tree.
+  function openLink(t: WorkTask, l: WorkTaskLink) {
+    const row = l.session_id != null ? $sessions.find((r) => r.id === l.session_id) : undefined;
+    if (row) selectSessionExplicitly(row, { task: t.task_id });
+    else openTask(t.task_id, t.sessions);
   }
   const projectName = (p: (typeof pickable)[number]) =>
     p.project.owner && p.project.owner !== 'local' ? `${p.project.owner}/${p.project.repo}` : p.project.repo;
@@ -246,45 +253,31 @@
         {#each nodes as n (n.task.task_id)}
           {@const t = n.task}
           <li class:selected={$selectedTaskId === t.task_id} data-task-id={t.task_id}>
-            <div class="row" data-testid="task-row">
-              <span class="tb" title={t.tracker_name ?? t.kind}>{badge(t)}</span>
-              <button
-                class="main"
-                type="button"
-                aria-current={$selectedTaskId === t.task_id ? 'true' : undefined}
-                onclick={() => openTask(t.task_id, t.sessions)}
+            <div data-testid="task-row">
+              <WorkTaskRow
+                task={t}
+                selected={$selectedTaskId === t.task_id}
+                currentSessionId={$selectedSession?.id ?? null}
+                lookup={taskById}
+                title={displayTitle(t)}
+                onselect={() => openTask(t.task_id, t.sessions)}
+                onopen={(l) => openLink(t, l)}
               >
-                <span class="title">
-                  {#if t.needs_you}<span class="needs" title="A session needs you" aria-label="needs you">●</span>{/if}
-                  {#if t.key}<span class="key">{t.key}</span>{/if}
-                  <span class="txt" class:derived={t.title_derived}>{displayTitle(t)}</span>
-                </span>
-                <span class="meta">
-                  {#if t.status_name}<span>{t.status_name}</span>{/if}
-                  {#if t.project_label}<span>{t.project_label}</span>{/if}
-                  {#if t.org_id != null && orgNames.get(t.org_id)}<span>{orgNames.get(t.org_id)}</span>{/if}
-                  <span title="active / past sessions">{t.counts?.active ?? 0} active · {t.counts?.ended ?? 0} past</span>
-                </span>
-              </button>
-              <span class="right">
-                {#if (t.open_proposals ?? 0) > 0}
-                  <span class="chip prop" data-testid="task-proposals-badge" title="Agent proposals — decide them on the task page"
-                    >{t.open_proposals} to review</span
-                  >
-                {/if}
-                {#if t.kind === 'local' && t.item_id != null}
-                  <button
-                    class="edit"
-                    type="button"
-                    title={editBlocked ?? 'Edit task'}
-                    aria-label="Edit {displayTitle(t)}"
-                    disabled={editBlocked !== null}
-                    data-testid="task-edit"
-                    onclick={() => (editing = t.task_id)}><Icon name="edit" size={12} /></button
-                  >
-                {/if}
-                <WorkButton task={t} />
-              </span>
+                {#snippet trailing()}
+                  {#if t.kind === 'local' && t.item_id != null}
+                    <button
+                      class="edit"
+                      type="button"
+                      title={editBlocked ?? 'Edit task'}
+                      aria-label="Edit {displayTitle(t)}"
+                      disabled={editBlocked !== null}
+                      data-testid="task-edit"
+                      onclick={() => (editing = t.task_id)}><Icon name="edit" size={12} /></button
+                    >
+                  {/if}
+                  <WorkButton task={t} />
+                {/snippet}
+              </WorkTaskRow>
             </div>
             {#if n.children.length > 0}
               <ul class="children">
@@ -315,13 +308,13 @@
     display: flex;
     gap: 6px;
     align-items: center;
-    padding: 4px 0;
+    padding: 6px 12px 2px;
   }
   .add input {
     flex: 1;
     min-width: 0;
     height: 26px;
-    padding: 0 8px;
+    padding: 0 var(--space-2);
     border: 1px dashed var(--control-border);
     border-radius: var(--radius-md);
     background: var(--bg);
@@ -335,14 +328,14 @@
   }
   h3 {
     display: flex;
-    gap: 6px;
     align-items: center;
-    margin: 10px 4px 4px;
+    gap: 6px;
+    margin: 0;
+    padding: 12px 12px 4px;
     font-size: var(--text-2xs);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    line-height: 16px;
+    font-weight: 500;
     color: var(--fg-muted);
-    font-weight: 600;
   }
   .sec {
     background: none;
@@ -355,7 +348,13 @@
     padding: 0;
   }
   .count {
-    margin-left: auto;
+    font-size: var(--text-2xs);
+    font-weight: 500;
+    padding: 0 5px;
+    border-radius: var(--radius-sm);
+    background: var(--count-bg);
+    color: var(--fg-2);
+    line-height: 16px;
     font-variant-numeric: tabular-nums;
   }
   ul {
@@ -363,85 +362,20 @@
     margin: 0;
     padding: 0;
   }
-  li.selected > .row {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-  }
-  .row {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    gap: 8px;
-    align-items: start;
-    padding: 4px;
-    border-radius: var(--radius-sm);
-  }
-  .row:hover {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-  }
-  .tb {
-    font-size: var(--text-2xs);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-xs);
-    padding: 0 0.2rem;
-    text-align: center;
-    color: var(--fg-muted);
-    margin-top: 2px;
-  }
-  .main {
-    min-width: 0;
-    display: grid;
-    gap: 1px;
-    background: none;
-    border: 0;
-    padding: 0;
-    text-align: left;
-    color: var(--fg);
-    font: inherit;
-    cursor: pointer;
-  }
-  .main:focus-visible,
   .child .txt:focus-visible {
     outline: var(--ring-w) solid var(--ring);
     outline-offset: calc(-1 * var(--ring-w));
-  }
-  .title {
-    display: flex;
-    gap: 5px;
-    align-items: baseline;
-    min-width: 0;
   }
   .txt {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .derived {
-    font-style: italic;
-    color: var(--fg-muted);
-  }
   .key {
     font-family: var(--mono);
     flex: none;
   }
-  .needs {
-    color: var(--usage-crit);
-    font-size: var(--text-2xs);
-  }
-  .meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0 8px;
-    color: var(--fg-muted);
-    font-size: var(--text-2xs);
-  }
   /* Each fact wraps as a whole in a narrow sidebar, never mid-phrase. */
-  .meta > span {
-    white-space: nowrap;
-  }
-  .right {
-    display: flex;
-    gap: 4px;
-    align-items: center;
-  }
   .edit {
     background: none;
     border: 0;
@@ -450,11 +384,6 @@
     font: inherit;
     font-size: var(--text-2xs);
     cursor: pointer;
-    opacity: 0;
-  }
-  .row:hover .edit,
-  .edit:focus-visible {
-    opacity: 1;
   }
   .edit:hover {
     color: var(--fg);
@@ -468,18 +397,14 @@
     padding: 0 6px;
     white-space: nowrap;
   }
-  .prop {
-    background: var(--accent-soft);
-    color: var(--fg);
-  }
   .agent {
     background: var(--chip-bg);
     color: var(--fg-2);
   }
   .children {
-    margin: 0 0 4px 24px;
+    margin: 0 0 var(--space-1) var(--space-6);
     border-left: 1px solid var(--border);
-    padding-left: 8px;
+    padding-left: var(--space-2);
   }
   .child {
     display: grid;
@@ -513,12 +438,12 @@
   }
   .muted {
     color: var(--fg-muted);
-    padding: 6px 4px;
+    padding: 6px 12px;
     margin: 0;
   }
   .err {
     color: var(--usage-crit);
-    padding: 4px;
+    padding: var(--space-1);
     margin: 0;
   }
 </style>

@@ -148,7 +148,8 @@ describe('NewSessionDialog', () => {
   it('new layout: the create in flight shows the Pulse on the worktree step', async () => {
     let finish!: () => void;
     const spy = vi.spyOn(sessionsModule, 'newSessionAbortable').mockImplementation(async (args) => {
-      sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work' });
+      // The backend's first frame: the worktree step started (start:progress).
+      sessionsModule.creatingStart.set({ host_alias: args.host_alias, name: args.name, kind: 'work', token: 't1', steps: { worktree: 'started', tmux: 'pending', agent: 'pending' } });
       await new Promise<void>((r) => (finish = r));
       sessionsModule.creatingStart.set(null);
       return { ok: false, error: { code: 'E_INVALID', message: 'stop here' } } as never;
@@ -2152,6 +2153,8 @@ describe('NewSessionDialog limit handling', () => {
     await fireEvent.click(screen.getByTestId('limit-start-anyway'));
     await vi.waitFor(() => expect(created()).toHaveLength(1));
     expect((created()[0][1] as any).args.profile).toBeNull();
+    // The person's choice travels, so a hub does not refuse it (step 4.4).
+    expect((created()[0][1] as any).args.over_limit_ok).toBe(true);
   });
 
   it('under the line, or with no answer, starts straight away', async () => {
@@ -2161,6 +2164,7 @@ describe('NewSessionDialog limit handling', () => {
     await fireEvent.click(screen.getByText('Create'));
     await vi.waitFor(() => expect(created()).toHaveLength(1));
     expect(screen.queryByTestId('limit-ask')).toBeNull();
+    expect((created()[0][1] as any).args.over_limit_ok).toBeUndefined();
   });
 });
 

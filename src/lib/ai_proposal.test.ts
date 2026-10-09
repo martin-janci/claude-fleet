@@ -1,7 +1,8 @@
 // Redesign step 3.11: the never-decides list and when a proposal may
 // pre-select anything.
 import { readFileSync } from 'node:fs';
-import { render, screen, fireEvent } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { LOADER_DELAY_MS } from './Loader.svelte';
 import { describe, it, expect, vi } from 'vitest';
 import ProposedBy from './ProposedBy.svelte';
 import DraftField from './DraftField.svelte';
@@ -191,6 +192,16 @@ describe('DraftField', () => {
     render(DraftField, { value: '', label: 'Summary', busy: true, onregenerate: () => {} });
     expect(screen.getByTestId('draft-field-busy').textContent).toBe('Drafting…');
     expect((screen.getByTestId('draft-field-regenerate') as HTMLButtonElement).disabled).toBe(true);
+  });
+  it('shows a small Atom while the LLM writes, only after 400 ms', async () => {
+    const started = Date.now();
+    const { rerender } = render(DraftField, { value: '', label: 'Summary', busy: true });
+    expect(screen.queryByTestId('draft-field-atom')).toBeNull();
+    const atom = await waitFor(() => screen.getByTestId('draft-field-atom'), { timeout: 3000 });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(LOADER_DELAY_MS - 5);
+    expect(atom.dataset.loader).toBe('atom');
+    await rerender({ value: 'Fix the flake', label: 'Summary', busy: false });
+    expect(screen.queryByTestId('draft-field-atom')).toBeNull();
   });
 });
 

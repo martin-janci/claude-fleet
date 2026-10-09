@@ -315,9 +315,10 @@ jobs:
         if: runner.os == 'Linux'
 
   # Windows is a desktop CLIENT for a Linux/macOS fleet (docs/windows.md):
-  # the desktop crates must build, lint and test there. fleet-agent and
-  # fleet-hub are Unix-only by design (a systemd service on a fleet host, a
-  # Linux daemon), so they are left out; fmt and cargo-deny read nothing
+  # the desktop crates must build, lint and test there. fleet-agent,
+  # fleet-hub and fleet-updater are Unix-only by design (a systemd service on
+  # a fleet host, a Linux daemon, and the update sidecar both of them use),
+  # so they are left out; fmt and cargo-deny read nothing
   # platform-specific and stay on the Linux leg of `rust` above.
   rust-windows:
     needs: changes
@@ -337,7 +338,7 @@ jobs:
       # Clippy runs in the `clippy` job below, in parallel with these tests.
       # --no-fail-fast: every crate's failures in one run, not only the first
       # failing test binary's.
-      - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --no-fail-fast
+      - run: cargo test --workspace --exclude fleet-agent --exclude fleet-hub --exclude fleet-updater --no-fail-fast
 
   # CLIPPY ON macOS AND WINDOWS, BESIDE THEIR TESTS RATHER THAN BEFORE THEM.
   # In one job, clippy's check build ran first and added ~1:45 to the two
@@ -357,9 +358,9 @@ jobs:
         include:
           - os: macos-latest
             args: --workspace --all-targets
-          # fleet-agent and fleet-hub are Unix-only (see rust-windows).
+          # fleet-agent, fleet-hub and fleet-updater are Unix-only (see rust-windows).
           - os: windows-latest
-            args: --workspace --exclude fleet-agent --exclude fleet-hub --all-targets
+            args: --workspace --exclude fleet-agent --exclude fleet-hub --exclude fleet-updater --all-targets
     runs-on: ${{ matrix.os }}
     steps:
       - run: git config --global core.autocrlf false

@@ -5,7 +5,9 @@
 #   update-channels.sh add <tag>
 #       list a PUBLISHED release: stable → stable.json and beta.json (the beta
 #       track follows every stable release too), -rc.N → beta.json,
-#       -dev.N… → nightly.json. Run by release.yml after `publish`.
+#       -dev.N… → dev.json, and nightly.json too when nightly last moved two
+#       hours ago or more (NIGHTLY_EVERY_SECS, default 7200). Run by
+#       release.yml after `publish`.
 #   update-channels.sh edit <track> <op> [version] [component] [reason] [deadline]
 #       a publisher's change: withdraw | recommend | rollback | clear-rollback
 #       | minimum | clear-minimum | mandatory. Run by update-channels.yml.
@@ -90,7 +92,15 @@ case "$cmd" in
     gh release download "$tag" --repo "$REPO" -p release-manifest.json -p release-manifest.json.minisig -D "$work" --clobber
     "$here/release-verify-sig.sh" "$work/pubkeys" "$work/release-manifest.json" "$work/release-manifest.json.minisig" manifest
     case "$version" in
-      *-dev*) tracks="nightly" ;;
+      *-dev*)
+        # Every green push is a dev release; nightly takes one every two
+        # hours at most, measured from this branch's own history.
+        tracks="dev"
+        last="$(git -C "$tree" log -1 --format=%ct --grep='^channel: list .* nightly' -- nightly.json 2>/dev/null || true)"
+        if [ -z "$last" ] || [ $(( $(date +%s) - last )) -ge "${NIGHTLY_EVERY_SECS:-7200}" ]; then
+          tracks="dev nightly"
+        fi
+        ;;
       *-*) tracks="beta" ;;
       *) tracks="stable beta" ;;
     esac
@@ -98,8 +108,9 @@ case "$cmd" in
     for t in $tracks; do
       args=(channel-add --track "$t" --manifest "$work/release-manifest.json" --manifest-url "$url" --out "$tree/$t.json")
       [ -f "$tree/$t.json" ] && args+=(--channel "$tree/$t.json")
-      # nightly.yml keeps only the newest 15 nightly releases; list no more.
-      [ "$t" = nightly ] && args+=(--keep 15)
+      # nightly.yml keeps only the newest dev releases and those nightly
+      # lists; neither track lists more than 15.
+      case "$t" in nightly | dev) args+=(--keep 15) ;; esac
       "$FLEET_RELEASE" "${args[@]}"
       sign "$t"
     done

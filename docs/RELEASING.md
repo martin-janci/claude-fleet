@@ -387,28 +387,30 @@ line is worth keeping short), and `+build` metadata is refused outright —
 `+` is not a legal character in a Docker tag, so `hub-image.yml` could not
 publish an image for such a version.
 
-### Nightlies
+### Dev releases and nightlies
 
-`.github/workflows/nightly.yml` publishes the `nightly` update track
-(update-channel design S2b). Nobody runs anything by hand:
+`.github/workflows/nightly.yml` publishes the `dev` and `nightly` update
+tracks. Nobody runs anything by hand:
 
-- after every green CI run of a `main` push (at most one every two hours):
-  `X.Y.Z-dev.N.g<sha>` — the next patch after the newest stable tag, `N` the
-  commits since it — with the hub image and the agent/hub tarballs only;
-- once a day (03:23 UTC) from the newest green `main`:
-  `X.Y.Z-dev.N.desktop.g<sha>`, every leg, the desktop bundles too.
+- after **every** green CI run of a `main` push:
+  `X.Y.Z-dev.N.desktop.g<sha>` — the next patch after the newest stable tag,
+  `N` the commits since it — with every leg, the desktop bundles included.
+  It is listed on `dev.json`;
+- the same release is also listed on `nightly.json` when nightly last moved
+  two hours ago or more (`scripts/update-channels.sh add`, from the
+  `update-channels` branch's own history).
 
 `scripts/cut-nightly.sh` makes scripts/release.sh's release commit on top of
 that `main` commit, pushes **only the tag** (the commit is on no branch;
-`main` never carries a nightly's version), and dispatches `release.yml` and
+`main` never carries a dev version), and dispatches `release.yml` and
 `hub-image.yml` at it, since a tag the workflow token pushes starts nothing
 by itself. From there it is an ordinary pre-release: same gate, same
-manifest, published, and listed on `nightly.json` by the `channel` job.
-`scripts/release-assets.sh has-desktop <version>` is the one place that says
-a per-push nightly has no desktop legs, so verify-release and the drift
-check expect none. The newest 12 per-push and 3 daily nightlies are kept;
-older ones lose their release and their tag. `workflow_dispatch` (with
-`desktop`) cuts one now.
+manifest (its `release.track` says `nightly`, which every hub reads),
+published, and listed by the `channel` job. The newest 15 dev releases are
+kept, plus whatever `nightly.json` still lists; older ones lose their
+release and their tag. `workflow_dispatch` cuts one now from the newest
+green `main`. A version without `.desktop.` (`scripts/release-assets.sh
+has-desktop`) still builds no desktop legs, for a cut by hand.
 
 ### The CI gate
 

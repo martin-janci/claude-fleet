@@ -21,6 +21,7 @@ import {
   HAS_FILTER_LABELS,
   normalizeFilters,
   STATUS_FILTER_LABELS as WORK_STATUS_LABELS,
+  WORK_STAGE_LABELS,
   type WorkTreeFilters,
 } from './work_view';
 
@@ -102,7 +103,18 @@ export function clearWorkFilterPatch(id: SessionFacetId): Partial<WorkFilters> |
 
 // ── Work view ──
 
-export type WorkFacetId = 'org' | 'tracker' | 'status' | 'status_name' | 'mine' | 'assignee' | 'has' | 'review' | 'query';
+export type WorkFacetId =
+  | 'org'
+  | 'orgs'
+  | 'tracker'
+  | 'status'
+  | 'stages'
+  | 'status_name'
+  | 'mine'
+  | 'assignee'
+  | 'has'
+  | 'review'
+  | 'query';
 
 export interface WorkFacetNames {
   orgName?: (id: number) => string | undefined;
@@ -115,12 +127,17 @@ export function workFacets(f: WorkTreeFilters, names: WorkFacetNames = {}): (Fac
   if (n.org !== undefined) {
     out.push({ id: 'org', label: `Org: ${n.org === 'none' ? 'Unassigned' : (names.orgName?.(n.org) ?? `#${n.org}`)}` });
   }
+  if (n.orgs) {
+    const each = n.orgs.map((o) => (o === 'none' ? 'Unassigned' : (names.orgName?.(o) ?? `#${o}`)));
+    out.push({ id: 'orgs', label: `Org: ${each.join(' or ')}` });
+  }
   if (n.tracker !== undefined) {
     const t =
       n.tracker === 'local' ? 'Local work' : n.tracker === 'ref' ? 'Bare keys' : (names.trackerName?.(n.tracker) ?? `#${n.tracker}`);
     out.push({ id: 'tracker', label: `Tracker: ${t}` });
   }
   if (n.status !== undefined) out.push({ id: 'status', label: `Status: ${WORK_STATUS_LABELS[n.status]}` });
+  if (n.stages) out.push({ id: 'stages', label: `Status: ${n.stages.map((st) => WORK_STAGE_LABELS[st]).join(' or ')}` });
   if (n.status_name) out.push({ id: 'status_name', label: `Column: ${n.status_name}` });
   if (n.mine) out.push({ id: 'mine', label: 'Assigned to me' });
   if (n.assignee) out.push({ id: 'assignee', label: `Assignee: ${n.assignee}` });

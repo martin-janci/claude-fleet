@@ -118,6 +118,11 @@ pub(crate) fn sample_session() -> SessionRow {
             form_id: "f_x".into(),
             title: "T".into(),
         }),
+        form_draft: Some(fleet_core::store::FormDraft {
+            draft: "{\"spec\": \"fleet.form/1\"".into(),
+            why: Some("reading your hosts".into()),
+            updated_at: 1_700_000_300,
+        }),
         parent_session_id: Some(5),
         tags: vec!["tag-a".into(), "tag-b".into()],
         row_version: 12,
@@ -974,6 +979,12 @@ fn the_whole_contract() -> BTreeMap<String, Vec<String>> {
             confidence_pct: Some(90),
             run_id: Some(1),
             unsure: false,
+            ticket: Some(fleet_core::service::decide::lost_target::LostTicket {
+                key: "PD-1".into(),
+                title: Some("t".into()),
+                source: "rule".into(),
+                reason: "r".into(),
+            }),
         }),
     );
     put(
@@ -1357,11 +1368,11 @@ fn the_hubs_field_names_are_the_ones_the_desktop_reads() {
 }
 
 /// `SessionRow` is the type the whole sidebar is made of, and the one whose
-/// seventy-one keys nothing else would notice losing. Its list is a literal
+/// seventy-two keys nothing else would notice losing. Its list is a literal
 /// here, not only in the golden, so that a regenerate cannot quietly accept a
 /// change to it.
 #[test]
-fn a_session_rows_wire_names_are_these_exact_seventy_one() {
+fn a_session_rows_wire_names_are_these_exact_seventy_two() {
     let expected = [
         "account_uuid",
         "agent",
@@ -1378,6 +1389,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_one() {
         "created_at",
         "current_activity",
         "effort_level",
+        "form_draft",
         "friendly_name",
         "host_alias",
         "id",
@@ -1436,7 +1448,7 @@ fn a_session_rows_wire_names_are_these_exact_seventy_one() {
         "worktree_key",
     ];
     let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    assert_eq!(expected.len(), 71, "the list above lost or gained a line");
+    assert_eq!(expected.len(), 72, "the list above lost or gained a line");
     assert_eq!(wire_keys(&sample_session()), expected);
 }
 

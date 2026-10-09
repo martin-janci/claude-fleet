@@ -153,21 +153,21 @@
     padding: 0;
     display: flex;
     flex-wrap: wrap;
-    gap: var(--space-1, 4px) var(--space-3, 12px);
+    gap: var(--space-1) var(--space-3);
     max-height: 12rem;
     overflow: auto;
   }
   .targets li {
     display: flex;
     align-items: center;
-    gap: var(--space-1, 4px);
-    font-size: var(--text-sm, 12.5px);
+    gap: var(--space-1);
+    font-size: var(--text-sm);
   }
   .targets li.skipped { opacity: 0.55; }
   .sess-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .muted { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .ok { color: var(--status-done); font-size: var(--text-xs, 11.5px); }
-  .err { color: var(--danger); font-size: var(--text-xs, 11.5px); }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); }
+  .ok { color: var(--status-done); font-size: var(--text-xs); }
+  .err { color: var(--danger); font-size: var(--text-xs); }
   textarea { width: 100%; box-sizing: border-box; min-height: 5rem; }
-  .presets { display: flex; align-items: center; gap: var(--space-2, 8px); flex-wrap: wrap; }
+  .presets { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 </style>

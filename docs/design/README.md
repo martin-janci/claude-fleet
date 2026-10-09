@@ -54,5 +54,19 @@ REGEN_KIT=1 pnpm exec vitest run src/lib/kit/kit.test.ts
 ```
 
 `kit.test.ts` measures every piece of text each component renders, in every
-state and both themes, against 4.5:1. Three pairs from the manual fall short
-and are pinned in `KNOWN_SHORTFALLS` until the manual fixes them.
+state and both themes, against 4.5:1, with no exceptions: the three pairs that
+fell short (fg-muted on bg-hover, fg-muted on failed-soft, status-failed on
+accent-soft) were fixed in the manual's bundle.css by having the component read
+fg-2 or fg in that state, not by moving a token value. `KNOWN_SHORTFALLS` is
+empty and a new shortfall fails.
+
+The app draws icons only from the kit's set (`src/lib/kit/icons.ts`, the
+manual's 16-unit, 1.5 px strokes); the old 24-unit `src/lib/Icon.svelte` is
+gone. A glyph the app needs is added there, drawn on the same grid. The copy
+lint (`copy_lint.test.ts`) refuses a pictograph in component markup (⚠ 🔗 🔍
+⏸ …) and a seventh status word (Blocked, Stuck, Queued, Ready, …) written as
+a label; Blocked reads "Needs you · blocked on …". The status bar, the rail,
+the hub banners, the key/value facts of a session and a host, and the context,
+disk and mission meters are the kit's StatusBar, Rail, Banner, KeyValue and
+Meter. The terminal grid's own colours are the manual's `term-bg` and
+`term-fg`.

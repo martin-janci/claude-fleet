@@ -2,39 +2,63 @@
   import type { Snippet } from 'svelte';
   import { tablistKeys } from '../tablist_keys';
   // The Automation screen's Routines tab (Orbit Fleet redesign 8.6, the
-  // Automation board): the routines on the left, one routine on the right
-  // with its switch, Run now, Skip next and Edit, then Runs, Definition and
-  // Limits. A failed run carries Fix, Retry and Pause, as in the Inbox. New
-  // starts from a template (the first is Morning PR sweep) or a blank one.
-  // 8.4's Automation page mounts this as its tab; the built-in routines
-  // (the fleet's own loops) are 8.4's.
+  // Automation board): the routines on the left, yours then the built-in
+  // ones (the fleet's own loops, 8.4), with Filters and Group; one routine
+  // in the middle with its switch, Run now, Skip next and Edit, then Runs,
+  // Definition and Limits; its limits and kill switches on the right. A
+  // failed run carries Fix, Retry and Pause, as in the Inbox. New starts
+  // from a template (the first is Morning PR sweep) or a blank one.
   import { onDestroy, onMount } from 'svelte';
+  import { get } from 'svelte/store';
   import { hosts } from '../hosts';
+  import { sessions } from '../sessions';
+  import { selectSessionExplicitly } from '../selection';
+  import { goTo } from '../destination';
+  import { fleetSettings, SETTING_KEYS, settingInt } from '../fleet_settings';
+  import { loopEvery, loopLine, startOfToday } from '../automation';
+  import { listRuns, type RunRow } from '../runs';
+  import type { LoopHealth } from '../ipc';
+  import Button from '../kit/Button.svelte';
+  import Count from '../kit/Count.svelte';
+  import Icon from '../kit/Icon.svelte';
+  import KeyValue from '../kit/KeyValue.svelte';
+  import Meter from '../kit/Meter.svelte';
+  import StatusChip from '../kit/StatusChip.svelte';
+  import StatusDot from '../kit/StatusDot.svelte';
+  import type { OfState } from '../kit/status';
+  import NewRoutineMenu from './NewRoutineMenu.svelte';
   import { accountByUuid } from '../accounts';
   import { projects } from '../projects';
   import { errorText } from '../error_copy';
   import { push, pushError } from '../toasts';
   import {
-    TEMPLATES,
+    averageRun,
+    cronParts,
     deleteRoutine,
     deviceOffsetMin,
     dollars,
     eventWords,
     fixRoutine,
     getRoutine,
+    lastRunByRoutine,
     listRoutines,
     loadFailing,
     microsOf,
     morningPrSweep,
+    nextRunWords,
     routineAccountLabel,
+    routineDot,
+    routineLine,
     routineStateWords,
     routinesRequest,
     runRoutineNow,
     runSourceHint,
+    runDot,
     runWords,
     saveRoutine,
     setRoutineEnabled,
     skipNextRun,
+    spentSince,
     triggerWords,
     type RoutineDetail,
     type RoutineInput,
@@ -51,8 +75,11 @@
   let detail = $state<RoutineDetail | null>(null);
   let tab = $state<RoutineTab>('runs');
   let busy = $state(false);
-  let menuOpen = $state(false);
   let confirmDelete = $state(false);
+  /** A built-in routine (a fleet loop) picked in the list, by name. */
+  let loopSel = $state<string | null>(null);
+  /** Each routine's newest run, for the list's dot and line. */
+  let lastRuns = $state<Map<number, RunRow>>(new Map());
   /** The editor's draft: a new routine (`id` absent) or a change. */
   let draft = $state<(Draft & { id?: number }) | null>(null);
 
@@ -86,7 +113,13 @@
     error = null;
     list = Array.isArray(r.value) ? r.value : [];
     if (selected === null || !list.some((x) => x.id === selected)) selected = list[0]?.id ?? null;
-    await loadDetail();
+    await Promise.all([loadDetail(), loadLastRuns()]);
+  }
+
+  /** The routines' newest runs; a failed read leaves the lines without them. */
+  async function loadLastRuns() {
+    const r = await listRuns({ kind: 'routine', limit: 200 });
+    if (r.ok && Array.isArray(r.value?.runs)) lastRuns = lastRunByRoutine(r.value.runs);
   }
 
   async function loadDetail() {
@@ -101,6 +134,7 @@
 
   function pick(id: number) {
     selected = id;
+    loopSel = null;
     draft = null;
     confirmDelete = false;
     void loadDetail();
@@ -141,7 +175,7 @@
   }
 
   function newFrom(template: string | null) {
-    menuOpen = false;
+    loopSel = null;
     const host = $hosts.find((h) => !h.hidden)?.alias ?? '';
     const proj = pickable[0]?.project;
     if (template === 'morning-pr-sweep') {
@@ -151,10 +185,10 @@
     }
   }
 
-  function edit(r: RoutineRow) {
+  function edit(r: RoutineRow, copy = false) {
     draft = fromInput(
       {
-        name: r.name,
+        name: copy ? `${r.name} copy` : r.name,
         trigger: (r.trigger as RoutineTrigger) ?? 'cron',
         cron: r.cron,
         event: r.event,
@@ -166,7 +200,7 @@
         budget_day_micros: r.budget_day_micros,
         overlap: r.overlap === 'parallel' ? 'parallel' : 'skip',
       },
-      r.id,
+      copy ? undefined : r.id,
     );
   }
 
@@ -228,11 +262,23 @@
   const okCount = (runs: RoutineRunRow[]) => runs.filter((r) => r.state === 'done' && r.outcome !== 'failed').length;
   const failedCount = (runs: RoutineRunRow[]) => runs.filter(failed).length;
 
+  /** A run's session, when this desktop still has it. */
+  const runSession = (run: RoutineRunRow) => (run.session_id === undefined ? undefined : $sessions.find((x) => x.id === run.session_id));
+
+  function openSession(run: RoutineRunRow) {
+    const s = get(sessions).find((x) => x.id === run.session_id);
+    if (!s) return;
+    selectSessionExplicitly(s);
+    goTo('session');
+  }
+
+  const STARTED_BY: Record<string, string> = { cron: 'its schedule', event: 'a session event', run_now: 'Run now' };
+
   // ---- requests from elsewhere (the Inbox's Fix, the palette) -----------------
 
   const unsub = routinesRequest.subscribe((req) => {
     if (!req) return;
-    if (req.template) newFrom(req.template);
+    if (req.template) newFrom(req.template === 'blank' ? null : req.template);
     if (req.select !== undefined) {
       selected = req.select;
       draft = null;
@@ -246,62 +292,204 @@
   onMount(() => void reload());
 
   // Automation's own column (UX audit 2026-10-09): with `fill`, the list is
-  // the page's left column and carries Automation's head and foot.
+  // the page's left column and carries Automation's head and foot. `loops`
+  // are the built-in routines, listed under yours.
   let {
     listHead,
     listFoot,
     fill = false,
-  }: { listHead?: Snippet; listFoot?: Snippet; fill?: boolean } = $props();
+    loops = [],
+    paused = false,
+    nowSec = Math.floor(Date.now() / 1000),
+  }: {
+    listHead?: Snippet;
+    listFoot?: Snippet;
+    fill?: boolean;
+    loops?: LoopHealth[];
+    paused?: boolean;
+    nowSec?: number;
+  } = $props();
+
+  // ---- the list: filters, grouping, rows ---------------------------------------
+
+  type Filter = 'failed' | 'working' | 'idle' | 'yours';
+  const FILTERS: { id: Filter; label: string }[] = [
+    { id: 'failed', label: 'Failed' },
+    { id: 'working', label: 'Working' },
+    { id: 'idle', label: 'Paused' },
+    { id: 'yours', label: 'Yours only' },
+  ];
+  let filters = $state<Filter[]>([]);
+  let filtersOpen = $state(false);
+  let grouping = $state<'owner' | 'state'>('owner');
+
+  interface Item {
+    key: string;
+    kind: 'routine' | 'loop';
+    id?: number;
+    name?: string;
+    title: string;
+    meta: string;
+    line: string;
+    /** Why a loop keeps running on Pause all (redesign step 8.1). */
+    why?: string;
+    state: OfState;
+  }
+
+  const loopState = (l: LoopHealth): OfState => (l.result === 'error' ? 'failed' : paused && l.pausable ? 'idle' : 'done');
+
+  const routineItems = $derived(
+    list.map((r): Item => {
+      const last = lastRuns.get(r.id);
+      return {
+        key: `r${r.id}`,
+        kind: 'routine',
+        id: r.id,
+        title: r.name,
+        meta: r.enabled ? (r.trigger === 'cron' ? (cronParts(r.cron).at ?? '') : '') : 'Paused',
+        line: routineLine(r, last, nowSec),
+        state: routineDot(r, last),
+      };
+    }),
+  );
+  const loopItems = $derived(
+    loops.map(
+      (l): Item => ({
+        key: `l${l.name}`,
+        kind: 'loop',
+        name: l.name,
+        title: l.label,
+        meta: paused && l.pausable ? 'Paused' : (loopEvery(l) ?? ''),
+        line: `System · ${l.pausable ? 'acts on its own' : 'keeps running on Pause all'} · ${loopLine(l, nowSec, paused)}`,
+        why: l.pausable ? undefined : (l.keeps_running ?? undefined),
+        state: loopState(l),
+      }),
+    ),
+  );
+
+  const keep = (it: Item) => {
+    const states: string[] = filters.filter((f) => f !== 'yours');
+    if (filters.includes('yours') && it.kind === 'loop') return false;
+    return states.length === 0 || states.includes(it.state);
+  };
+
+  const STATE_SECTIONS: { state: OfState; label: string }[] = [
+    { state: 'failed', label: 'Failed' },
+    { state: 'waiting', label: 'Needs you' },
+    { state: 'working', label: 'Working' },
+    { state: 'done', label: 'On' },
+    { state: 'idle', label: 'Paused' },
+  ];
+
+  const sections = $derived.by(() => {
+    const yours = routineItems.filter(keep);
+    const builtIn = loopItems.filter(keep);
+    if (grouping === 'owner') {
+      return [
+        { id: 'yours', label: 'Yours', items: yours },
+        { id: 'built-in', label: 'Built in', items: builtIn },
+      ].filter((x) => x.items.length > 0 || (x.id === 'yours' && filters.length === 0 && !loaded));
+    }
+    const all = [...yours, ...builtIn];
+    return STATE_SECTIONS.map((x) => ({ id: x.state, label: x.label, items: all.filter((i) => i.state === x.state) })).filter(
+      (x) => x.items.length > 0,
+    );
+  });
+
+  function toggleFilter(f: Filter) {
+    filters = filters.includes(f) ? filters.filter((x) => x !== f) : [...filters, f];
+  }
+
+  function pickLoop(name: string) {
+    loopSel = name;
+    selected = null;
+    draft = null;
+    confirmDelete = false;
+    detail = null;
+  }
+
+  const loop = $derived(loopSel === null ? undefined : loops.find((l) => l.name === loopSel));
+
+  const pauseAt = $derived(settingInt($fleetSettings, SETTING_KEYS.accountsPauseAt));
 </script>
+
+{#snippet row(it: Item)}
+  <li>
+    <button
+      type="button"
+      role="option"
+      aria-selected={it.kind === 'routine' ? selected === it.id && loopSel === null : loopSel === it.name}
+      class="of-row"
+      title={it.line}
+      data-testid={it.kind === 'routine' ? 'routine-row' : 'automation-loop'}
+      data-loop={it.name}
+      data-state={it.state}
+      onclick={() => (it.kind === 'routine' ? pick(it.id!) : pickLoop(it.name!))}>
+      <StatusDot state={it.state} />
+      <span class="body">
+        <span class="l1"><span class="title">{it.title}</span>{#if it.meta}<span class="meta tnum">{it.meta}</span>{/if}</span>
+        <span class="line" class:f={it.state === 'failed'}>{it.line}</span>
+        {#if it.why}<span class="line" data-testid="automation-loop-why">{it.why}</span>{/if}
+      </span>
+    </button>
+  </li>
+{/snippet}
 
 <div class="routines" class:fill data-testid="routines-panel">
   <div class="list">
-    {@render listHead?.()}
-    <div class="list-head">
-      <span class="title">Routines <span class="count">{list.length}</span></span>
-      <div class="new">
-        <button type="button" class="btn" data-testid="routine-new" aria-expanded={menuOpen} onclick={() => (menuOpen = !menuOpen)}
-          >+ New…</button
+    {#if listHead}
+      {@render listHead()}
+    {:else}
+      <div class="list-head">
+        <span class="title">Routines <span class="count">{list.length}</span></span>
+        <NewRoutineMenu onpick={(t) => newFrom(t === 'blank' ? null : t)} />
+      </div>
+    {/if}
+    <div class="filters">
+      <div class="filter-menu">
+        <Button testid="routine-filters" onclick={() => (filtersOpen = !filtersOpen)}
+          ><Icon name="filter" size={12} />Filters{#if filters.length}{' '}<Count n={filters.length} />{/if}</Button
         >
-        {#if menuOpen}
-          <div class="menu" role="menu" data-testid="routine-new-menu">
-            {#each TEMPLATES as t (t.id)}
-              <button type="button" role="menuitem" data-testid={`routine-template-${t.id}`} onclick={() => newFrom(t.id)}>
-                <span>{t.label}</span><span class="muted">{t.description}</span>
-              </button>
+        {#if filtersOpen}
+          <div class="menu" role="menu" data-testid="routine-filters-menu">
+            {#each FILTERS as f (f.id)}
+              <button type="button" role="menuitemcheckbox" aria-checked={filters.includes(f.id)} data-testid={`routine-filter-${f.id}`} onclick={() => toggleFilter(f.id)}
+                ><span class="tick">{filters.includes(f.id) ? '✓' : ''}</span>{f.label}</button
+              >
             {/each}
-            <button type="button" role="menuitem" data-testid="routine-template-blank" onclick={() => newFrom(null)}>
-              <span>Blank routine</span><span class="muted">Your own prompt and schedule</span>
-            </button>
           </div>
         {/if}
       </div>
-    </div>
-    <ul role="listbox" aria-label="Routines">
-      {#each list as r (r.id)}
-        <li>
-          <button
-            type="button"
-            role="option"
-            aria-selected={selected === r.id}
-            class="row"
-            data-testid="routine-row"
-            onclick={() => pick(r.id)}>
-            <span class="name">{r.name}</span>
-            <span class="muted">{triggerWords(r)}{r.enabled ? '' : ` · ${routineStateWords(r)}`}</span>
-          </button>
-        </li>
+      {#each filters as id (id)}
+        <span class="of-chip"
+          >{FILTERS.find((f) => f.id === id)?.label}
+          <button class="remove" aria-label={`Remove filter ${FILTERS.find((f) => f.id === id)?.label}`} onclick={() => toggleFilter(id)}>×</button></span
+        >
       {/each}
-    </ul>
-    {#if loaded && list.length === 0 && !error}
-      <p class="empty" data-testid="routines-empty">
-        No routines yet. A routine is a saved prompt that starts a session on a schedule. Start with Morning PR sweep.
-      </p>
-    {/if}
-    {#if error}<p class="err" role="alert" data-testid="routines-error">
-        {error}
-        <button type="button" class="btn btn--quiet" data-testid="routines-retry" onclick={() => void reload()}>Retry</button>
-      </p>{/if}
+      <span class="grow"></span>
+      <Button variant="quiet" testid="routine-group" onclick={() => (grouping = grouping === 'owner' ? 'state' : 'owner')}
+        >Group: {grouping} ▾</Button
+      >
+    </div>
+    <div class="rows">
+      <ul role="listbox" aria-label="Routines" data-testid="automation-routines">
+        {#each sections as sec (sec.id)}
+          <li class="of-sec" role="presentation" data-testid={`routine-section-${sec.id}`}>{sec.label} <Count n={sec.items.length} /></li>
+          {#each sec.items as it (it.key)}{@render row(it)}{/each}
+        {/each}
+      </ul>
+      {#if loaded && list.length === 0 && !error}
+        <p class="empty" data-testid="routines-empty">
+          No routines yet. A routine is a saved prompt that starts a session on a schedule. Start with Morning PR sweep from + New.
+        </p>
+      {:else if loaded && filters.length > 0 && sections.length === 0}
+        <p class="empty">Nothing matches these filters.</p>
+      {/if}
+      {#if error}<p class="err" role="alert" data-testid="routines-error">
+          {error}
+          <Button variant="quiet" size="sm" testid="routines-retry" onclick={() => void reload()}>Retry</Button>
+        </p>{/if}
+    </div>
     {@render listFoot?.()}
   </div>
 
@@ -363,185 +551,294 @@
           <button type="submit" class="btn btn--primary" data-testid="routine-save" disabled={!draftReady || busy}>Save</button>
         </div>
       </form>
+    {:else if loop}
+      {@const stands = paused && loop.pausable}
+      <div class="main" data-testid="automation-loop-detail">
+        <header class="head">
+          <p class="kicker">Routine · built in · {loop.pausable ? 'acts on its own' : 'keeps running on Pause all'}</p>
+          <div class="title-bar">
+            <h3>{loop.label}</h3>
+            {#if loop.result === 'error'}<StatusChip state="failed" />{:else if stands}<StatusChip state="idle" label="Paused" />{:else}<span class="state">On</span>{/if}
+          </div>
+        </header>
+        <section class="stats">
+          <div class="stat"><span class="meta">Runs</span><span>{loopEvery(loop) ?? 'On its own beat'}</span></div>
+          <div class="stat"><span class="meta">Since start</span><span class="tnum">{loop.runs} runs{#if loop.failures > 0}{' · '}<span class="bad">{loop.failures} failed</span>{/if}</span></div>
+          <div class="stat"><span class="meta">Now</span><span>{loopLine(loop, nowSec, paused)}</span></div>
+        </section>
+        {#if loop.last_error}
+          <p class="prompt mono" data-testid="automation-loop-error">{loop.last_error}</p>
+        {/if}
+        <p class="note">
+          {loop.pausable
+            ? 'Pause all, at the foot of the list, stops it until you resume.'
+            : `It keeps running under Pause all: ${loop.keeps_running ?? 'it only reads the fleet, it changes nothing.'}`}
+        </p>
+      </div>
     {:else if detail}
       {@const r = detail.routine}
-      <header>
-        <p class="kicker">
-          Routine{detail.account ? ` · runs as ${routineAccountLabel(detail.account, $accountByUuid.get(detail.account.account_uuid))} on ${r.host_alias}` : ` · on ${r.host_alias}`}
-        </p>
-        <h3 data-testid="routine-title">{r.name}</h3>
-        <div class="bar">
-          <span class="state" class:off={!r.enabled} data-testid="routine-state">{routineStateWords(r)}</span>
-          {#if detail.may_change}
-            <button
-              type="button"
-              class="btn"
-              data-testid="routine-toggle"
-              disabled={busy}
-              onclick={() => act(r.enabled ? 'Pause' : 'Turn on', () => setRoutineEnabled(r.id, !r.enabled))}
-              >{r.enabled ? 'Pause' : 'Turn on'}</button
-            >
-            <button type="button" class="btn" data-testid="routine-run-now" disabled={busy} onclick={() => act('Run now', () => runRoutineNow(r.id))}
-              >Run now</button
-            >
-            {#if r.trigger === 'cron' && r.enabled}
-              <button
-                type="button"
-                class="btn btn--quiet"
-                data-testid="routine-skip-next"
-                disabled={busy}
-                onclick={() => act('Skip next', () => skipNextRun(r.id, !r.skip_next))}>{r.skip_next ? 'Run next' : 'Skip next'}</button
+      {@const today = spentSince(detail.runs, startOfToday(nowSec * 1000))}
+      {@const avg = averageRun(detail.runs)}
+      <div class="main">
+        <header class="head">
+          <p class="kicker">
+            Routine{detail.may_change ? ' · yours' : ''}{detail.account ? ` · runs as ${routineAccountLabel(detail.account, $accountByUuid.get(detail.account.account_uuid))} on ${r.host_alias}` : ` · on ${r.host_alias}`}
+          </p>
+          <div class="title-bar">
+            <h3 data-testid="routine-title">{r.name}</h3>
+            <span class="state" class:off={!r.enabled} data-testid="routine-state">{routineStateWords(r)}</span>
+            <span class="grow"></span>
+            {#if detail.may_change}
+              <Button testid="routine-edit" onclick={() => edit(r)}>Edit</Button>
+              {#if r.trigger === 'cron' && r.enabled}
+                <Button variant="quiet" testid="routine-skip-next" disabled={busy} onclick={() => act('Skip next', () => skipNextRun(r.id, !r.skip_next))}
+                  >{r.skip_next ? 'Run next' : 'Skip next'}</Button
+                >
+              {/if}
+              <Button testid="routine-toggle" disabled={busy} onclick={() => act(r.enabled ? 'Pause' : 'Turn on', () => setRoutineEnabled(r.id, !r.enabled))}
+                >{r.enabled ? 'Pause' : 'Turn on'}</Button
               >
+              <Button variant="primary" testid="routine-run-now" disabled={busy} onclick={() => act('Run now', () => runRoutineNow(r.id))}>Run now</Button>
             {/if}
-            <button type="button" class="btn btn--quiet" data-testid="routine-edit" onclick={() => edit(r)}>Edit…</button>
-          {/if}
-        </div>
-        {#if r.paused_reason}<p class="err" data-testid="routine-paused-reason">{r.paused_reason}</p>{/if}
-      </header>
+          </div>
+          {#if r.paused_reason}<p class="err" data-testid="routine-paused-reason">{r.paused_reason}</p>{/if}
+        </header>
 
-      <div class="tabs" role="tablist" aria-label="Routine" use:tablistKeys>
-        {#each [['runs', 'Runs'], ['definition', 'Definition'], ['limits', 'Limits']] as [id, label] (id)}
-          <button
-            type="button"
-            role="tab"
-            aria-selected={tab === id}
-            data-testid={`routine-tab-${id}`}
-            onclick={() => (tab = id as RoutineTab)}>{label}</button
-          >
-        {/each}
+        <div class="tabs" role="tablist" aria-label="Routine" use:tablistKeys>
+          {#each [['runs', 'Runs'], ['definition', 'Definition'], ['limits', 'Limits']] as [id, label] (id)}
+            <button type="button" role="tab" aria-selected={tab === id} data-testid={`routine-tab-${id}`} onclick={() => (tab = id as RoutineTab)}
+              >{label}</button
+            >
+          {/each}
+        </div>
+
+        {#if tab === 'runs'}
+          <section class="stats" data-testid="routine-stats">
+            <div class="stat"><span class="meta">Schedule</span><span>{triggerWords(r)}</span></div>
+            <div class="stat">
+              <span class="meta">Last {detail.runs.length} runs</span>
+              <span class="tnum">{okCount(detail.runs)} OK{#if failedCount(detail.runs) > 0}{' · '}<span class="bad">{failedCount(detail.runs)} failed</span>{/if}</span>
+            </div>
+            <div class="stat"><span class="meta">Average cost</span><span class="tnum">{avg ?? 'No runs yet'}</span></div>
+            <div class="stat"><span class="meta">Next run</span><span class="tnum">{nextRunWords(r, nowSec)}</span></div>
+          </section>
+
+          <section>
+            <h4 class="sub">Runs <span class="meta">each run opens as a session</span></h4>
+            <ul class="runs" data-testid="routine-runs">
+              {#each detail.runs as run (run.id)}
+                {@const s = runSession(run)}
+                {@const st = runDot(run)}
+                <li class:failed={failed(run)} data-testid="routine-run" data-state={run.state}>
+                  <StatusDot state={st} label={runWords(run)} />
+                  <span class="tnum">{clock(run.started_at)}</span>
+                  <span class="what">
+                    {#if failed(run)}<span class="bad">{runWords(run)}</span>
+                    {:else if run.outcome === 'needs_person'}<StatusChip state="waiting" />
+                    {:else if run.outcome === 'nothing'}<span class="of-chip">Nothing to do</span>
+                    {:else}{runWords(run)}{/if}{#if s && !failed(run)}<span class="meta">{' · '}{s.friendly_name ?? s.tmux_name}</span>{/if}
+                  </span>
+                  <span class="meta tnum">{took(run)}</span>
+                  <span class="meta tnum">{dollars(run.cost_micros)}</span>
+                  {#if s}
+                    <Button variant="quiet" size="sm" testid="routine-run-session" onclick={() => openSession(run)}>Session</Button>
+                  {:else}<span></span>{/if}
+                  {#if runSourceHint(run)}
+                    <span class="sub-line">
+                      <span class="ai" data-testid="routine-run-jev" title={runSourceHint(run)}>Read by Jev</span>
+                      <span class="meta">from the run's last screen; open its session to check</span>
+                    </span>
+                  {:else if run.outcome === 'needs_person' && !failed(run)}
+                    <span class="sub-line meta">Its session waits for you in the Inbox.</span>
+                  {/if}
+                  {#if failed(run) && detail.may_change}
+                    <span class="sub-line">
+                      <Button
+                        size="sm"
+                        testid="routine-run-fix"
+                        onclick={() => {
+                          if (fixRoutine({ routine: r, run, may_change: true }) === 'definition') tab = 'definition';
+                        }}>Fix</Button
+                      >
+                      <Button size="sm" testid="routine-run-retry" disabled={busy} onclick={() => act('Retry', () => runRoutineNow(r.id))}>Retry</Button>
+                      {#if r.enabled}
+                        <Button variant="quiet" size="sm" testid="routine-run-pause" disabled={busy} onclick={() => act('Pause', () => setRoutineEnabled(r.id, false))}
+                          >Pause routine</Button
+                        >
+                      {/if}
+                      <details class="why">
+                        <summary class="meta">Details</summary>
+                        <span class="meta">Started by {STARTED_BY[run.trigger] ?? run.trigger}{run.trigger_ref ? ` (${run.trigger_ref})` : ''}{run.reason ? `: ${run.reason}` : ''}</span>
+                      </details>
+                    </span>
+                  {/if}
+                </li>
+              {:else}
+                <li class="none meta">No runs yet. Run now starts one.</li>
+              {/each}
+            </ul>
+          </section>
+
+          <section>
+            <h4 class="sub">Prompt</h4>
+            <p class="prompt mono" data-testid="routine-prompt-text">{r.prompt}</p>
+          </section>
+        {:else if tab === 'definition'}
+          <dl class="of-kv" data-testid="routine-definition">
+            <dt>When</dt><dd>{triggerWords(r)}</dd>
+            <dt>Host</dt><dd>{r.host_alias}</dd>
+            <dt>Project</dt><dd>{projectName(r.project_id)}</dd>
+            <dt>Account</dt><dd>{r.profile ?? "the host's own"}</dd>
+          </dl>
+          <p class="prompt mono">{r.prompt}</p>
+        {:else}
+          <dl class="of-kv" data-testid="routine-limits">
+            <dt>Per run</dt><dd>{r.budget_run_micros !== undefined ? dollars(r.budget_run_micros) : 'No limit'}</dd>
+            <dt>Per day</dt><dd>{r.budget_day_micros !== undefined ? dollars(r.budget_day_micros) : 'No limit'}</dd>
+            <dt>Overlap</dt><dd>{r.overlap === 'parallel' ? 'Runs alongside the last run' : 'Skip if the last run is still going'}</dd>
+            <dt>Over budget</dt><dd>The run fails, the routine pauses, and it lands in the Inbox</dd>
+          </dl>
+        {/if}
       </div>
 
-      {#if tab === 'runs'}
-        <dl class="facts">
-          <dt>Schedule</dt><dd>{triggerWords(r)}{r.skip_next ? ' · next one skipped' : ''}</dd>
-          <dt>Last {detail.runs.length} runs</dt><dd>{okCount(detail.runs)} OK · {failedCount(detail.runs)} failed</dd>
-        </dl>
-        <ul class="runs" data-testid="routine-runs">
-          {#each detail.runs as run (run.id)}
-            <li class:failed={failed(run)} data-testid="routine-run" data-state={run.state}>
-              <span class="when">{clock(run.started_at)}</span>
-              <span class="what"
-                >{runWords(run)}{#if runSourceHint(run)}<span class="by-jev" data-testid="routine-run-jev" title={runSourceHint(run)}
-                    >· Jev</span
-                  >{/if}</span
-              >
-              <span class="muted">{took(run)}</span>
-              <span class="muted">{dollars(run.cost_micros)}</span>
-              {#if failed(run) && detail.may_change}
-                <span class="fix">
-                  <button
-                    type="button"
-                    class="btn btn--chip"
-                    data-testid="routine-run-fix"
-                    onclick={() => {
-                      if (fixRoutine({ routine: r, run, may_change: true }) === 'definition') tab = 'definition';
-                    }}>Fix</button
-                  >
-                  <button type="button" class="btn btn--chip" data-testid="routine-run-retry" disabled={busy} onclick={() => act('Retry', () => runRoutineNow(r.id))}
-                    >Retry</button
-                  >
-                  {#if r.enabled}
-                    <button
-                      type="button"
-                      class="btn btn--chip"
-                      data-testid="routine-run-pause"
-                      disabled={busy}
-                      onclick={() => act('Pause', () => setRoutineEnabled(r.id, false))}>Pause routine</button
-                    >
-                  {/if}
-                </span>
-              {/if}
-            </li>
-          {:else}
-            <li class="muted">No runs yet.</li>
-          {/each}
-        </ul>
-      {:else if tab === 'definition'}
-        <dl class="facts" data-testid="routine-definition">
-          <dt>When</dt><dd>{triggerWords(r)}</dd>
-          <dt>Host</dt><dd>{r.host_alias}</dd>
-          <dt>Project</dt><dd>{projectName(r.project_id)}</dd>
-          <dt>Account</dt><dd>{r.profile ?? "the host's own"}</dd>
-        </dl>
-        <p class="prompt">{r.prompt}</p>
-        {#if detail.may_change}
-          {#if confirmDelete}
-            <p class="confirm">
-              Delete {r.name}? Its runs go with it.
-              <button
-                type="button"
-                class="btn btn--crit"
-                data-testid="routine-delete-confirm"
-                onclick={async () => {
-                  confirmDelete = false;
-                  selected = null;
-                  await act('Delete', () => deleteRoutine(r.id));
-                }}>Delete</button
-              >
-              <button type="button" class="btn btn--quiet" onclick={() => (confirmDelete = false)}>Keep</button>
-            </p>
-          {:else}
-            <button type="button" class="btn btn--quiet" data-testid="routine-delete" onclick={() => (confirmDelete = true)}
-              >Delete routine…</button
-            >
-          {/if}
+      {#snippet perDay()}
+        {#if r.budget_day_micros}
+          <span class="tnum">{dollars(today)} of {dollars(r.budget_day_micros)}</span>
+          <Meter
+            value={today / r.budget_day_micros}
+            level={today >= r.budget_day_micros ? 'crit' : today >= r.budget_day_micros * 0.8 ? 'warn' : 'ok'}
+            label={`${dollars(today)} of ${dollars(r.budget_day_micros)} today`}
+          />
+        {:else}
+          <span class="tnum">No limit · {dollars(today)} today</span>
         {/if}
-      {:else}
-        <dl class="facts" data-testid="routine-limits">
-          <dt>Per run</dt><dd>{r.budget_run_micros !== undefined ? dollars(r.budget_run_micros) : 'No limit'}</dd>
-          <dt>Per day</dt><dd>{r.budget_day_micros !== undefined ? dollars(r.budget_day_micros) : 'No limit'}</dd>
-          <dt>Overlap</dt><dd>{r.overlap === 'parallel' ? 'Runs alongside the last run' : 'Skip if the last run is still going'}</dd>
-          <dt>Over budget</dt><dd>The run fails, the routine pauses, and it lands in the Inbox</dd>
-        </dl>
-      {/if}
+      {/snippet}
+      <aside class="inspector" aria-label="Limits and kill switches" data-testid="routine-inspector">
+        <strong>Limits and kill switches</strong>
+        <KeyValue
+          items={[
+            { label: 'Per run', value: r.budget_run_micros !== undefined ? `${dollars(r.budget_run_micros)} · then it pauses` : 'No limit', tnum: true },
+            { label: 'Per day', content: perDay },
+            {
+              label: 'Account',
+              value: `${detail.account ? routineAccountLabel(detail.account, $accountByUuid.get(detail.account.account_uuid)) : (r.profile ?? "the host's own")} · skips a run past ${pauseAt}% used`,
+            },
+            { label: 'Host', value: r.host_alias },
+            { label: 'Overlap', value: r.overlap === 'parallel' ? 'Runs alongside the last run' : 'Skip if the last run is still going' },
+            { label: 'On failure', value: 'Inbox as Failed until you retry or pause it' },
+          ]}
+        />
+        <div class="usage">
+          <span class="of-sec flat">Counted in usage</span>
+          <span class="meta">Each run is a Claude session on the account and counts against it like any other.</span>
+        </div>
+        {#if detail.may_change}
+          <footer class="inspector-foot">
+            {#if confirmDelete}
+              <span class="confirm">
+                Delete {r.name}? Its runs go with it.
+                <Button
+                  variant="danger-fill"
+                  size="sm"
+                  testid="routine-delete-confirm"
+                  onclick={async () => {
+                    confirmDelete = false;
+                    selected = null;
+                    await act('Delete', () => deleteRoutine(r.id));
+                  }}>Delete</Button
+                >
+                <Button variant="quiet" size="sm" onclick={() => (confirmDelete = false)}>Keep</Button>
+              </span>
+            {:else}
+              <Button variant="quiet" testid="routine-duplicate" onclick={() => edit(r, true)}>Duplicate</Button>
+              <Button variant="danger" testid="routine-delete" onclick={() => (confirmDelete = true)}>Delete routine…</Button>
+            {/if}
+          </footer>
+        {/if}
+      </aside>
     {:else if loaded && list.length > 0}
-      <p class="muted">Pick a routine.</p>
+      <p class="muted pick">Pick a routine.</p>
     {/if}
   </div>
 </div>
 
 <style>
-  .routines { display: grid; grid-template-columns: minmax(200px, 260px) 1fr; gap: var(--space-4, 16px); min-height: 360px; }
-  .list { display: flex; flex-direction: column; gap: var(--space-2, 8px); border-right: 1px solid var(--border); padding-right: var(--space-3, 12px); }
-  .list-head { display: flex; align-items: center; justify-content: space-between; }
+  .routines { display: grid; grid-template-columns: minmax(220px, 300px) minmax(0, 1fr); min-height: 360px; }
+  .routines.fill { grid-template-columns: var(--list-w) minmax(0, 1fr); height: 100%; min-height: 0; }
+  .list { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border); background: var(--bg-pane); }
+  .fill .list { overflow: hidden; }
+  .list-head { display: flex; align-items: center; justify-content: space-between; padding: var(--space-3) var(--space-3) var(--space-2); }
   .title { font-weight: 600; }
   .count { color: var(--fg-muted); font-weight: 400; }
-  .new { position: relative; }
-  .menu { position: absolute; right: 0; top: 100%; z-index: 5; min-width: 260px; display: flex; flex-direction: column; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-md, var(--radius-lg)); padding: 4px; }
-  .menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 6px 8px; border: 0; background: none; color: var(--fg); border-radius: var(--radius-md); cursor: pointer; }
+  .filters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 0 var(--space-3) var(--space-1); }
+  .filter-menu { position: relative; }
+  .remove { border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
+  .menu { position: absolute; left: 0; top: calc(100% + 4px); z-index: 5; min-width: 180px; display: flex; flex-direction: column; background: var(--bg-pane); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 4px; box-shadow: var(--shadow-pop, 0 8px 24px rgb(0 0 0 / 0.25)); }
+  .menu button { display: flex; align-items: center; gap: 6px; text-align: left; padding: 5px 8px; border: 0; background: none; color: var(--fg); border-radius: var(--radius-sm); cursor: pointer; font: inherit; font-size: var(--text-xs); }
   .menu button:hover { background: var(--bg-hover); }
+  .tick { width: 12px; color: var(--accent); }
+  .grow { flex: 1 1 auto; }
+  .rows { flex: 1 1 auto; min-height: 0; overflow: auto; padding-bottom: var(--space-2); }
   ul { list-style: none; margin: 0; padding: 0; }
-  .row { width: 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 6px 8px; border: 0; border-radius: var(--radius-md); background: none; color: var(--fg); text-align: left; cursor: pointer; }
-  .row[aria-selected='true'] { background: var(--accent-soft); }
-  .row:hover { background: var(--bg-hover); }
-  .name { font-weight: 500; }
-  .muted { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .empty { color: var(--fg-muted); font-size: var(--text-sm, 12.5px); }
-  .err { color: var(--danger); font-size: var(--text-xs, 11.5px); margin: 0; }
-  .detail { display: flex; flex-direction: column; gap: var(--space-3, 12px); min-width: 0; }
-  .routines.fill { grid-template-columns: var(--list-w) minmax(0, 1fr); gap: 0; height: 100%; min-height: 0; }
-  .fill .list { min-height: 0; overflow: auto; padding: var(--space-3) var(--space-3) 0; background: var(--bg-pane); }
-  .fill .detail { min-height: 0; overflow: auto; padding: var(--space-4) var(--space-6); }
-  .kicker { margin: 0; color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  h3 { margin: 0; font-size: var(--text-lg, 15px); }
-  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2, 8px); margin-top: var(--space-2, 8px); }
-  .state { font-size: var(--text-xs, 11.5px); padding: 2px 8px; border-radius: var(--radius-pill); background: var(--done-soft); color: var(--status-done); }
-  .state.off { background: var(--bg-raise); color: var(--fg-muted); }
-  .tabs { display: flex; gap: var(--space-2, 8px); border-bottom: 1px solid var(--border); }
-  .tabs button { border: 0; background: none; padding: 6px 2px; color: var(--fg-muted); cursor: pointer; border-bottom: 2px solid transparent; }
-  .tabs button[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); }
-  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0; font-size: var(--text-sm, 12.5px); }
-  .facts dt { color: var(--fg-muted); }
-  .facts dd { margin: 0; }
-  .runs li { display: grid; grid-template-columns: 90px 1fr auto auto; gap: 4px 12px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--text-sm, 12.5px); }
-  .runs li.failed .what { color: var(--status-failed); }
-  .by-jev { margin-left: var(--space-1, 4px); color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .fix { grid-column: 2 / -1; display: flex; gap: var(--space-2, 8px); }
-  .prompt { white-space: pre-wrap; margin: 0; padding: 8px; background: var(--bg-sunk); border-radius: var(--radius-md); font-size: var(--text-sm, 12.5px); }
-  .confirm { display: flex; align-items: center; gap: var(--space-2, 8px); margin: 0; font-size: var(--text-sm, 12.5px); }
-  .editor { display: flex; flex-direction: column; gap: var(--space-2, 8px); }
-  .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm, 12.5px); }
-  .editor .hint { color: var(--fg-muted); font-size: var(--text-xs, 11.5px); }
-  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2, 8px); }
-  .actions { display: flex; justify-content: flex-end; gap: var(--space-2, 8px); }
+  .rows .of-row { width: calc(100% - 12px); border: 0; background: none; color: var(--fg); font: inherit; text-align: left; cursor: pointer; }
+  .rows .of-row:hover { background: var(--bg-hover); }
+  .rows .of-row[aria-selected='true'] { background: var(--accent-soft); }
+  .of-row .body { display: flex; flex-direction: column; }
+  .meta { font-size: var(--text-xs); line-height: 16px; color: var(--fg-muted); }
+  .tnum { font-variant-numeric: tabular-nums; }
+  .mono { font-family: var(--font-mono); font-size: var(--text-xs); }
+  .muted { color: var(--fg-muted); font-size: var(--text-xs); }
+  .empty { color: var(--fg-muted); font-size: var(--text-sm); margin: var(--space-2) var(--space-3); }
+  .err { color: var(--danger); font-size: var(--text-xs); margin: var(--space-2) var(--space-3); }
+  .head .err { margin: var(--space-2) 0 0; }
+  .detail { display: flex; min-width: 0; min-height: 0; }
+  .fill .detail { overflow: hidden; }
+  .main { flex: 1 1 520px; min-width: 0; overflow: auto; padding: var(--space-4) var(--space-6); display: flex; flex-direction: column; gap: var(--space-4); }
+  .main > * { max-width: 780px; }
+  .pick { padding: var(--space-4) var(--space-6); }
+  .kicker { margin: 0; color: var(--fg-muted); font-size: var(--text-xs); }
+  .title-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: 4px; }
+  h3 { margin: 0; font-size: var(--text-xl); line-height: 24px; font-weight: 600; }
+  .state { font-size: var(--text-2xs); font-weight: 500; padding: 0 6px; line-height: 20px; border-radius: var(--radius-sm); background: var(--done-soft); color: var(--status-done); }
+  .state.off { background: var(--chip-bg); color: var(--fg-muted); }
+  .tabs { display: flex; gap: 20px; border-bottom: 1px solid var(--border); margin-top: calc(-1 * var(--space-1)); }
+  .tabs button { border: 0; background: none; padding: 10px 0; color: var(--fg-muted); cursor: pointer; border-bottom: 2px solid transparent; font: inherit; font-size: var(--text-sm); }
+  .tabs button[aria-selected='true'] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 500; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .stat { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-pane); }
+  .bad { color: var(--status-failed); }
+  .sub { margin: 0 0 8px; font-size: var(--text-2xs); font-weight: 500; color: var(--fg-muted); display: flex; gap: 6px; align-items: baseline; }
+  .sub .meta { font-weight: 400; }
+  .runs { border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+  .runs li { display: grid; grid-template-columns: 16px 110px minmax(0, 1fr) 64px 52px 64px; gap: 6px 10px; align-items: center; padding: 9px 12px; font-size: var(--text-sm); }
+  .runs li + li { border-top: 1px solid var(--border); }
+  .runs li:first-child { background: var(--bg-pane); }
+  .runs li.none { display: block; }
+  .what { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg-2); }
+  .what :global(.of-chip) { height: 18px; }
+  .sub-line { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .why { margin-left: auto; }
+  .why summary { cursor: pointer; }
+  .ai { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-2xs); line-height: 16px; font-weight: 500; color: var(--accent); padding: 0 6px; border-radius: var(--radius-sm); background: var(--accent-soft); }
+  .ai::before { content: '✦'; font-size: var(--text-2xs); }
+  .prompt { white-space: pre-wrap; margin: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-pane); color: var(--fg-2); line-height: 18px; }
+  .note { margin: 0; font-size: var(--text-xs); color: var(--fg-muted); }
+  .inspector { flex: 0 1 300px; min-width: 260px; max-width: var(--inspector-max, 320px); border-left: 1px solid var(--border); background: var(--bg-pane); padding: 14px 16px; display: flex; flex-direction: column; gap: 18px; overflow: auto; }
+  .inspector :global(.of-kv) { grid-template-columns: 84px minmax(0, 1fr); }
+  .inspector :global(.of-meter), .inspector :global([role='meter']) { margin-top: 4px; }
+  .usage { display: flex; flex-direction: column; gap: 6px; }
+  .of-sec.flat { padding: 0; }
+  .inspector-foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); display: flex; gap: 6px; flex-wrap: wrap; }
+  .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-xs); }
+  .editor { flex: 1; min-width: 0; overflow: auto; padding: var(--space-4) var(--space-6); max-width: 720px; display: flex; flex-direction: column; gap: var(--space-2); }
+  .editor h3 { font-size: var(--text-lg); }
+  .editor label { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-sm); }
+  .editor .hint { color: var(--fg-muted); font-size: var(--text-xs); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+  .actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+  @media (max-width: 1180px) {
+    .detail { flex-direction: column; overflow: auto; }
+    .main { overflow: visible; flex: none; }
+    .inspector { max-width: none; border-left: 0; border-top: 1px solid var(--border); flex: none; }
+  }
 </style>

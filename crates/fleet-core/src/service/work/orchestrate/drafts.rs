@@ -25,6 +25,7 @@
 use super::planner::{self, PlannerOutput};
 use super::{changeable, host_sees_org, mission_id, planner_host, Deps};
 use crate::ipc_error::{codes, lock, IpcError};
+use crate::service::claude_print;
 use crate::service::settings;
 use crate::service::view_scope::ViewScope;
 use crate::service::work::today::{Today, TodayGroup, TodaySession, BUCKET_IN_PROGRESS};
@@ -320,6 +321,9 @@ pub(super) async fn run_draft(
         PlannerOutput::Ran(ran) => {
             let (answer, usage) = planner::planner_answer(ran);
             book(deps, run, usage.as_ref());
+            if claude_print::run_signed_out(usage.as_ref(), &answer, &out.stderr) {
+                return Err(claude_print::signed_out_error(run.host, None));
+            }
             if usage.as_ref().is_some_and(|u| u.is_error) {
                 return Err(IpcError::new(
                     codes::E_CLAUDE_CLI,
@@ -333,6 +337,9 @@ pub(super) async fn run_draft(
                 codes::E_CLAUDE_CLI,
                 format!("claude is not on {}'s login PATH", run.host),
             ))
+        }
+        PlannerOutput::Nothing if claude_print::run_signed_out(None, "", &out.stderr) => {
+            return Err(claude_print::signed_out_error(run.host, None))
         }
         PlannerOutput::Nothing => {
             return Err(IpcError::new(

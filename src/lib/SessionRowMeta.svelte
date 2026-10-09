@@ -25,14 +25,20 @@
 </script>
 
 <div class="sess-meta-line" data-testid="sess-meta-line" data-state={state}>
-  <span class="state state-{state}" data-testid="meta-state">{reason ?? STATE_LABELS[state]}</span>
-  <span class="sep" aria-hidden="true">·</span>
-  <span>{AGENT_LABELS[agent] ?? agent}</span>
-  <span class="sep" aria-hidden="true">·</span>
-  <span data-testid="meta-host">{sess.host_alias}</span>
-  {#if detail}
+  {#if reason}
+    <!-- A reason ("Waiting for you: Allow Bash(…)?", "Paused · weekly limit")
+         is the whole line, as the Sessions board draws it (UX audit L1). -->
+    <span class="state reason state-{state}" data-testid="meta-state" title={reason}>{reason}</span>
+  {:else}
+    <span class="state state-{state}" data-testid="meta-state">{STATE_LABELS[state]}</span>
     <span class="sep" aria-hidden="true">·</span>
-    <span class="detail" title={sess.last_prompt ?? undefined}>{detail}</span>
+    <span>{AGENT_LABELS[agent] ?? agent}</span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span data-testid="meta-host">{sess.host_alias}</span>
+    {#if detail}
+      <span class="sep" aria-hidden="true">·</span>
+      <span class="detail" title={sess.last_prompt ?? undefined}>{detail}</span>
+    {/if}
   {/if}
 </div>
 
@@ -50,6 +56,7 @@
   }
   .sess-meta-line > * { flex-shrink: 0; }
   .sep { opacity: 0.6; }
+  .sess-meta-line > .reason { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .detail { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .state-action_required,
   .state-blocked { color: var(--status-waiting); font-weight: 600; }

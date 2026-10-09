@@ -9,6 +9,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 import { invoke } from '@tauri-apps/api/core';
 import WorkMissions from './WorkMissions.svelte';
 import { expectAccessible } from './a11y_check';
+import { expectLastButton, expectOnePrimary } from './action_hierarchy_check';
 import { hosts } from './hosts';
 import {
   doneWhenRows,
@@ -533,6 +534,16 @@ describe('WorkMissions', () => {
       expect(plannerError({ code: 'E_INVALID_STATE', message: 'Payments is completed' }).text).toContain('has ended');
       expect(plannerError({ code: 'E_X', message: 'the mission loop is off (orchestrator.enabled)' }).text).toBe('The mission loop is off.');
       expect(plannerError({ code: 'E_X', message: 'boom' }).details).toBe('E_X · boom');
+      const out = plannerError({
+        code: 'E_CLAUDE_CLI',
+        message: 'Claude login expired on nas: run `claude /login` there, then retry',
+      });
+      expect(out.title).toBe("The planner's Claude login has expired");
+      expect(out.text).toBe("Claude Code on nas is signed out, so the planner can't run. Run claude /login there, then retry.");
+      const old = plannerRefusal('not a JSON array: the answer begins "Login expired · Run /login to sign in again"');
+      expect(old.title).toBe("The planner's Claude login has expired");
+      expect(old.details).toContain('Login expired');
+      expect(plannerRefusal('not a JSON array').title).toBe("The planner's answer couldn't be used");
       expect(plannerRefusal('bad').details).toBe('bad');
     });
 
@@ -655,6 +666,58 @@ describe('WorkMissions', () => {
       expect(w.limits).toMatch(/^L3 asked · L3 ceiling · L1 grant until /);
       expect(w.hint).toContain('The grant signs L1');
       expect(policyWith({ max_parallel: 2, wake_every_secs: 600 }, { wake_every_secs: null })).toEqual({ max_parallel: 2 });
+    });
+  });
+
+  describe('action hierarchy (redesign 1.5)', () => {
+    const view = () => document.body;
+    it('the list: New mission is the one primary; its form: Create', async () => {
+      render(WorkMissions);
+      await flush();
+      expectOnePrimary(view(), 'mission-new');
+      await fireEvent.click(screen.getByTestId('mission-new'));
+      await flush();
+      expectOnePrimary(view(), 'mission-create');
+    });
+
+    it('a mission: Start wave is the one primary, Save while editing; Delete… is last and asks first', async () => {
+      current = mission({ state: 'active' });
+      handlers.work_mission = () => ({
+        mission: current,
+        items: [item(10, 'Payments v2'), item(11, 'Refunds')],
+        events: [],
+        may_change: true,
+        graph: { nodes: [{ item_id: 11, state: 'ready', wave: 1 }], waves: 1 },
+        plan: {
+          steps: [{ kind: 'run', item_id: 11, role: 'implement', reason: 'Refunds is ready', auto: true }],
+          cards: [],
+          autonomy: { asked: 0, ceiling: 1, effective: 0, why: 'L0', enabled: true },
+          cost_micros: 0,
+          counts: { total: 1, open: 0 },
+        },
+      });
+      const r = render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      expectOnePrimary(view(), 'mission-start-wave');
+      await fireEvent.click(screen.getByTestId('mission-edit'));
+      await flush();
+      expectOnePrimary(view(), 'mission-edit-save');
+      r.unmount();
+      // A draft can be deleted: the last button of the detail, behind a confirm.
+      current = mission({ state: 'draft' });
+      handlers.delete_mission = () => null;
+      render(WorkMissions);
+      await flush();
+      await fireEvent.click(screen.getByTestId('mission-row'));
+      await flush();
+      const del = screen.getByTestId('mission-delete');
+      expectLastButton(screen.getByTestId('mission-detail'), del);
+      await fireEvent.click(del);
+      await flush();
+      expect(screen.getByTestId('mission-delete-confirm')).toBeTruthy();
+      expect(calls('delete_mission')).toHaveLength(0);
     });
   });
 

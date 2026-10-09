@@ -31,7 +31,9 @@
     { cx: 74.78, cy: 66, fill: 'var(--brand-amber)' },
     { cx: 33.22, cy: 66, fill: 'var(--brand-light)' },
   ];
-  const still = $derived($effectiveMotion !== 'full');
+  // The Loader kit's rule: Reduced fades the active step slowly, Off holds it.
+  const fade = $derived($effectiveMotion === 'reduced');
+  const still = $derived($effectiveMotion === 'off');
 </script>
 
 <div class="ps" data-testid={testid} data-at={pulse.at} data-done={pulse.done}>
@@ -53,6 +55,7 @@
         r="7.5"
         fill={sat.fill}
         class="sat sat--{s.state}"
+        class:sat--fade={fade}
         class:sat--still={still}
         style:transform-origin="{sat.cx}px {sat.cy}px"
         data-testid="pulse-sat"
@@ -90,7 +93,10 @@
     opacity: 0.25;
   }
   .sat--active {
-    animation: ps-pulse 1.1s ease-in-out infinite;
+    animation: ps-pulse var(--loop-fast) ease-in-out infinite;
+  }
+  .sat--active.sat--fade {
+    animation: motion-fade var(--loader-reduced) ease-in-out infinite;
   }
   .sat--active.sat--still {
     animation: none;

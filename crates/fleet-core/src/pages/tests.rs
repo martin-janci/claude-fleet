@@ -759,3 +759,63 @@ fn a_matrix_holds_choice_sets_over_the_same_options() {
         assert!(got.contains(want), "{got}");
     }
 }
+
+/// Federation's graph (`Page::graph`): a master_detail page's, its state a
+/// choice field with some values up, its facts plain fields.
+#[test]
+fn a_graph_follows_a_choice_field_of_the_resource() {
+    let fields = |r: &str| -> Value {
+        json!(super::resources::resource(r)
+            .unwrap()
+            .fields
+            .iter()
+            .map(|f| json!({ "type": "field", "key": f.id }))
+            .collect::<Vec<_>>())
+    };
+    let peers = |graph: Value| {
+        page(json!({
+            "spec": "fleet.page/1", "id": "p", "title": "P", "layout": "master_detail",
+            "resource": "peer_link", "graph": graph,
+            "sections": [{ "title": "All", "items": fields("peer_link") }]
+        }))
+    };
+    let ok = json!({ "center": "This hub", "state": "state", "up": ["connected"], "facts": ["latency", "messages_today"] });
+    assert_eq!(messages(&[peers(ok)]), "");
+    for (graph, want) in [
+        (
+            json!({ "center": "C", "state": "url", "up": ["x"] }),
+            "not a choice field",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": ["up"] }),
+            "is not one of",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": [] }),
+            "not none and not all",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": ["connected", "retrying", "refused", "incompatible"] }),
+            "not none and not all",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": ["connected"], "facts": ["sync"] }),
+            "not a plain field",
+        ),
+        (
+            json!({ "center": "C", "state": "state", "up": ["connected"], "facts": ["nope"] }),
+            "not a field of",
+        ),
+    ] {
+        let got = messages(&[peers(graph.clone())]);
+        assert!(
+            got.contains(want),
+            "{graph}\n  wanted: {want}\n  got: {got}"
+        );
+    }
+    let mut cat = category(json!([{ "type": "notice", "tone": "info", "text": "x" }]));
+    cat.graph =
+        serde_json::from_value(json!({ "center": "C", "state": "state", "up": ["connected"] }))
+            .unwrap();
+    assert!(messages(&[cat]).contains("a graph belongs to a master_detail page"));
+}

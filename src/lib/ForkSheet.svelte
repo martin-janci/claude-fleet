@@ -5,6 +5,7 @@
 </script>
 
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // Fork's confirmation sheet. Opened from ReplyActions' fork button via
   // ConversationPanel's `openForkSheet`; this dialog IS the confirmation —
   // there is no second "are you sure?" on top of it (spec §5.2).
@@ -208,7 +209,7 @@
         onchange={() => (choice = 'same')}
       />
       <span class="choice-label" data-testid="fork-same-warning"
-        >Same worktree — ⚠ both sessions edit the same files</span
+        >Same worktree <Icon name="warning" size={12} /> both sessions edit the same files</span
       >
     </label>
   </fieldset>
@@ -263,8 +264,8 @@
   .choice {
     display: flex;
     align-items: flex-start;
-    gap: var(--space-2, 8px);
-    padding: var(--space-1, 4px) 0;
+    gap: var(--space-2);
+    padding: var(--space-1) 0;
     cursor: pointer;
   }
   .choice-label {
@@ -272,26 +273,26 @@
   }
   .recommended {
     color: var(--fg-muted);
-    font-size: var(--text-xs, 11.5px);
+    font-size: var(--text-xs);
   }
   .new-worktree-fields {
-    margin: 0 0 var(--space-1, 4px) 1.5rem;
+    margin: 0 0 var(--space-1) 1.5rem;
     display: flex;
     flex-direction: column;
-    gap: var(--space-1, 4px);
+    gap: var(--space-1);
   }
   .row {
     display: flex;
     align-items: center;
-    gap: var(--space-2, 8px);
+    gap: var(--space-2);
   }
   .problem {
     margin: 0;
-    font-size: var(--text-xs, 11.5px);
+    font-size: var(--text-xs);
     color: var(--danger);
   }
   .notice {
     margin: 0;
-    font-size: var(--text-sm, 12.5px);
+    font-size: var(--text-sm);
   }
 </style>

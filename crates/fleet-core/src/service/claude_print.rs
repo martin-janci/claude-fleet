@@ -161,6 +161,65 @@ pub fn parse_envelope(out: &str) -> Option<Envelope> {
     None
 }
 
+// --- a signed-out `claude` ---------------------------------------------------
+
+/// What Claude Code prints, lowercased, when the run has no usable login:
+/// "Login expired · Run /login to sign in again", "Invalid API key · Please
+/// run /login", "OAuth token has expired", an API `authentication_error`.
+const SIGNED_OUT: &[&str] = &[
+    "login expired",
+    "run /login",
+    "invalid api key",
+    "not logged in",
+    "oauth token has expired",
+    "oauth token has been revoked",
+    "authentication_error",
+];
+
+/// PURE: whether `said` (the text of an `is_error` envelope, a reply with no
+/// envelope, or the run's stderr) is Claude Code saying its login is gone.
+/// Only the opening is read: claude's own error is one short line, and a
+/// model's answer that merely discusses `/login` further down is not one.
+/// Callers ask only of a run that failed or answered with no envelope, never
+/// of a successful envelope's text.
+pub fn says_signed_out(said: &str) -> bool {
+    let head: String = said
+        .trim()
+        .chars()
+        .take(300)
+        .collect::<String>()
+        .to_lowercase();
+    SIGNED_OUT.iter().any(|p| head.contains(p))
+}
+
+/// PURE: whether a finished run says its login is gone: no envelope, or an
+/// `is_error` one, whose `text` says so, or the last line of `stderr` does.
+/// A successful envelope is never read as signed out, whatever it says.
+pub fn run_signed_out(env: Option<&Envelope>, text: &str, stderr: &[u8]) -> bool {
+    if env.is_some_and(|e| !e.is_error) {
+        return false;
+    }
+    says_signed_out(text)
+        || says_signed_out(&crate::service::work::summary::last_error_line(stderr))
+}
+
+/// The refusal for a run whose login is gone: which login (the host's own,
+/// or the login profile `profile`) on which host, and the command that
+/// signs it in again there. Fleet holds no token, so only a person can.
+pub fn signed_out_error(host: &str, profile: Option<&str>) -> crate::ipc_error::IpcError {
+    let (whose, login) = match profile {
+        Some(p) => (
+            format!("{host} (login profile {p})"),
+            format!("CLAUDE_CONFIG_DIR=~/.claude-profiles/{p} claude /login"),
+        ),
+        None => (host.to_string(), "claude /login".to_string()),
+    };
+    crate::ipc_error::IpcError::new(
+        crate::ipc_error::codes::E_CLAUDE_CLI,
+        format!("Claude login expired on {whose}: run `{login}` there, then retry"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +262,62 @@ mod tests {
         // Whole-line match only: a prefix or a mid-line tag is not a verdict.
         assert_eq!(parse_tagged("T=runaway\nsaid T=run\n", "T=", &v), None);
         assert_eq!(parse_tagged("", "T=", &v), None);
+    }
+
+    #[test]
+    fn a_signed_out_claude_is_told_apart_from_an_answer() {
+        for said in [
+            "Login expired · Run /login to sign in again, or re-authenticate your Anthropic profile",
+            "Invalid API key · Please run /login",
+            "OAuth token has expired. Please obtain a new token or refresh your existing token.",
+            r#"API Error: 401 {"type":"error","error":{"type":"authentication_error"}}"#,
+        ] {
+            assert!(says_signed_out(said), "{said}");
+        }
+        for said in ["[]", "Goal: fix login.", "", "I think we should"] {
+            assert!(!says_signed_out(said), "{said}");
+        }
+        let late = format!("{}run /login", "x".repeat(400));
+        assert!(!says_signed_out(&late));
+    }
+
+    #[test]
+    fn only_a_failed_run_is_read_as_signed_out() {
+        let said = "Login expired · Run /login to sign in again";
+        let failed = Envelope {
+            result: said.into(),
+            is_error: true,
+            ..Default::default()
+        };
+        let ok = Envelope {
+            is_error: false,
+            ..failed.clone()
+        };
+        assert!(run_signed_out(Some(&failed), said, b""));
+        assert!(run_signed_out(None, said, b""));
+        assert!(!run_signed_out(Some(&ok), said, b""));
+        assert!(run_signed_out(
+            None,
+            "",
+            b"warn: x\nInvalid API key \xc2\xb7 Please run /login\n"
+        ));
+        assert!(!run_signed_out(None, "", b"boom\n"));
+    }
+
+    #[test]
+    fn the_signed_out_refusal_names_the_login_and_its_fix() {
+        let e = signed_out_error("mercury", None);
+        assert_eq!(e.code, "E_CLAUDE_CLI");
+        assert_eq!(
+            e.message,
+            "Claude login expired on mercury: run `claude /login` there, then retry"
+        );
+        let e = signed_out_error("mercury", Some("work"));
+        assert_eq!(
+            e.message,
+            "Claude login expired on mercury (login profile work): run \
+             `CLAUDE_CONFIG_DIR=~/.claude-profiles/work claude /login` there, then retry"
+        );
     }
 
     #[test]

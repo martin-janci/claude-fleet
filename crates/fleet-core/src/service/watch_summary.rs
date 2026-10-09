@@ -296,6 +296,12 @@ pub async fn summarize_excerpt(
                 format!("the summary took longer than {HOST_TIMEOUT_SECS}s"),
             ))
         }
+        _ if claude_print::run_signed_out(None, "", &run.stderr) => {
+            return Err(claude_print::signed_out_error(
+                &p.host,
+                p.profile.as_deref(),
+            ))
+        }
         _ => {
             return Err(IpcError::new(
                 codes::E_CLAUDE_CLI,
@@ -309,6 +315,12 @@ pub async fn summarize_excerpt(
     let text = match claude_print::parse_envelope(&text) {
         Some(env) => {
             book(store, p, Some(&env));
+            if claude_print::run_signed_out(Some(&env), &env.result, &run.stderr) {
+                return Err(claude_print::signed_out_error(
+                    &p.host,
+                    p.profile.as_deref(),
+                ));
+            }
             if env.is_error || env.result.trim().is_empty() {
                 return Err(IpcError::new(
                     codes::E_CLAUDE_CLI,
@@ -319,6 +331,12 @@ pub async fn summarize_excerpt(
         }
         None => {
             book(store, p, None);
+            if claude_print::run_signed_out(None, &text, &run.stderr) {
+                return Err(claude_print::signed_out_error(
+                    &p.host,
+                    p.profile.as_deref(),
+                ));
+            }
             text
         }
     };

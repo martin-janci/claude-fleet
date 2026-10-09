@@ -128,8 +128,8 @@ check "an rc lands on beta" test "$(json "$t/beta.json" 'd["current"]')" = "$rc"
 chan stable
 check "and not on stable" test "$(json "$t/stable.json" 'd["current"]')" = "$v"
 
-# A per-push nightly (nightly.yml, S2b): the hub tarball only, no desktop
-# bundles, and it moves nightly.json alone.
+# A per-push dev release (nightly.yml): here the hub tarball only. It lands on
+# dev, and on nightly when nightly has not moved for two hours.
 nv="0.4.2-dev.7.gabc1234"
 check "a per-push nightly builds no desktop legs" test "$("$here/release-assets.sh" has-desktop "$nv")" = false
 check "a daily nightly does" test "$("$here/release-assets.sh" has-desktop "0.4.2-dev.8.desktop.gabc1234")" = true
@@ -143,9 +143,28 @@ check "and carries no desktop artifact" test "$(json "$t/release-manifest.json" 
 cp "$t/release-manifest.json" "$t/release-manifest.json.minisig" "$t/published/v$nv/"
 before_beta="$(git -C "$t/remote.git" show update-channels:beta.json)"
 uc add "v$nv"
-check "a nightly lands on nightly" chan nightly
+check "a dev release lands on dev" chan dev
+check "dev lists it as current" test "$(json "$t/dev.json" 'd["current"]')" = "$nv"
+check "the first one lands on nightly too" chan nightly
 check "nightly lists it as current" test "$(json "$t/nightly.json" 'd["current"]')" = "$nv"
 check "and beta did not move" test "$(git -C "$t/remote.git" show update-channels:beta.json)" = "$before_beta"
+
+# The next push, minutes later: dev moves, nightly waits for its two hours.
+nv2="0.4.2-dev.9.gabc1235"
+nassets2="$t/assets-nightly2"
+mkdir -p "$nassets2" "$t/published/v$nv2" "$t/pack/fleet-hub-$nv2"
+cp "$FLEET_HUB" "$t/pack/fleet-hub-$nv2/fleet-hub"
+tar -czf "$nassets2/fleet-hub-${nv2}-x86_64-unknown-linux-gnu.tar.gz" -C "$t/pack" "fleet-hub-$nv2"
+(cd "$t" && DRY_RUN=1 TAG="v$nv2" HUB_IMAGE_WAIT_SECS=0 ASSETS_DIR="$nassets2" "$here/release-manifest.sh" 2>/dev/null)
+cp "$t/release-manifest.json" "$t/release-manifest.json.minisig" "$t/published/v$nv2/"
+before_nightly2="$(git -C "$t/remote.git" show update-channels:nightly.json)"
+uc add "v$nv2"
+chan dev
+check "the next dev release is dev's current" test "$(json "$t/dev.json" 'd["current"]')" = "$nv2"
+check "and nightly did not move within two hours" test "$(git -C "$t/remote.git" show update-channels:nightly.json)" = "$before_nightly2"
+(cd "$t/repo" && NIGHTLY_EVERY_SECS=0 REPO=o/r "$here/update-channels.sh" add "v$nv2" 2>/dev/null)
+chan nightly
+check "once its interval is up, nightly takes the newest" test "$(json "$t/nightly.json" 'd["current"]')" = "$nv2"
 
 # The phone's amendment (android-amendment.yml, design §4 / §13.2): signed,
 # kept on the channel branch, listed on every track that carries the release.

@@ -2,7 +2,7 @@ import { sidebarView } from './work_view';
 import { fireEvent, render, screen, within, waitFor } from '@testing-library/svelte';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tick } from 'svelte';
-import { readPref } from './prefs';
+import { readPref, uiDensity } from './prefs';
 
 // Three sample projects. Sessions are attached per-test so we can verify
 // the new "hide projects without sessions" behavior.
@@ -151,6 +151,9 @@ function mockBackend(projs: typeof fakeProjects, sess: ReturnType<typeof session
 }
 
 beforeEach(() => {
+  // Most row tests here read 0.5.4's Comfortable row; Compact (the default
+  // since the UX audit) has its own tests in SessionRowDensity / below.
+  uiDensity.set('comfortable');
   clearNewSessionRequest();
   resetTombstonesForTests();
   resetHostTombstones();
@@ -826,11 +829,11 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(cfRows.some((r) => r.textContent?.includes('otherperson/'))).toBe(true);
   });
 
-  it('"+ New session" opens the switcher in New session mode', async () => {
+  it('"+ New…" in the list header opens the switcher in New session mode', async () => {
     mockBackend(fakeProjects, []);
     render(Sidebar);
     await tick(); await tick();
-    await fireEvent.click(screen.getByTestId('new-session-footer'));
+    await fireEvent.click(screen.getByTestId('new-session-head'));
     expect(get(switcherRequest)).toEqual({ mode: 'new', host: undefined });
     expect(screen.queryByRole('listbox', { name: 'Pick project for new session' })).toBeNull();
   });
@@ -999,14 +1002,17 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryByTestId('sidebar-collapse')).toBeNull();
   });
 
-  it('header (search + filter) and footer (new session) stay rendered even with no projects', async () => {
+  it('header (search, filter, + New) and footer (keys, count) stay rendered even with no projects', async () => {
     mockBackend([], []);
     render(Sidebar);
     await tick(); await tick();
     expect(screen.getByTestId('sidebar-chrome-top')).toBeInTheDocument();
     expect(screen.getByTestId('sidebar-chrome-bottom')).toBeInTheDocument();
     expect(screen.getByTestId('sidebar-search')).toBeInTheDocument();
-    expect(screen.getByTestId('new-session-footer')).toBeInTheDocument();
+    expect(screen.getByTestId('new-session-head')).toBeInTheDocument();
+    // UX audit L4: the footer names the list's keys and how many rows it holds.
+    expect(screen.getByTestId('sidebar-keys').textContent).toMatch(/move.*open.*select/);
+    expect(screen.getByTestId('sidebar-count').textContent).toBe('0 sessions');
     // Redesign 1.4: the "theme: auto" line is gone from the footer; the
     // picker lives in Settings › Appearance (AppearanceSettings.test.ts).
     expect(screen.queryByTestId('theme-toggle')).toBeNull();
@@ -1170,7 +1176,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(title).not.toContain('(max)');
   });
 
-  it('renders 🔗N badge for sessions with related siblings', async () => {
+  it('renders the link-icon N badge for sessions with related siblings', async () => {
     const a = sessionFor(1, 'dev-a');
     a.worktree_key = 'main';
     const b = sessionFor(1, 'dev-b');
@@ -1184,7 +1190,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(badges[0].textContent).toContain('1');
   });
 
-  it('omits 🔗 badge for solo sessions', async () => {
+  it('omits the related badge for solo sessions', async () => {
     const solo = sessionFor(1, 'dev-solo');
     solo.worktree_key = 'main';
     mockBackend(fakeProjects, [solo]);
@@ -1194,7 +1200,7 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
   });
 
-  it('omits 🔗 badge for same-project sessions with different worktree_key', async () => {
+  it('omits the related badge for same-project sessions with different worktree_key', async () => {
     const a = sessionFor(1, 'dev-a');
     a.worktree_key = 'main';
     const b = sessionFor(1, 'dev-b');
@@ -1206,14 +1212,14 @@ describe('Sidebar (sessions-grouped view)', () => {
     expect(screen.queryAllByTestId('related-badge')).toHaveLength(0);
   });
 
-  it('shows a 🔍 badge for review sessions', async () => {
+  it('shows a search-icon badge for review sessions', async () => {
     const rev = sessionFor(1, 'dev-foo--review-1');
     rev.kind = 'review';
     rev.reviews_session_id = 999;
     mockBackend(fakeProjects, [sessionFor(1, 'dev-foo'), rev]);
     render(Sidebar);
     await tick(); await tick();
-    expect(screen.getByText('🔍')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'review session' }).querySelector('[data-icon="search"]')).not.toBeNull();
   });
 
   describe('background-session filter', () => {
@@ -1225,7 +1231,7 @@ describe('Sidebar (sessions-grouped view)', () => {
       render(Sidebar);
       await tick(); await tick();
       expect(screen.queryByText('bg:abc')).not.toBeNull();
-      expect(screen.queryByText('🤖')).not.toBeNull();
+      expect(screen.queryByRole('img', { name: 'background agent' })).not.toBeNull();
 
       showBgAgents.set(false);
       await tick(); await tick();

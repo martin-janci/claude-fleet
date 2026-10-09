@@ -233,14 +233,24 @@ including tasks with no session at all — as reads of the `work` tool
   mission), `account` (the account its sessions run on, an active one
   first) or `repo`. A task with nothing to group by sits in `none`, last;
   `group` then names a section of that grouping. An unknown `group_by` is
-  refused; a hub from before 6.2 ignores all three. A task is
+  refused; a hub from before 6.2 ignores all three. The Work board's
+  panel chips pick several at once: `orgs` (ids or `"none"`, any of them)
+  and `stages` (any of `backlog`, `in_progress`, `in_review`, `blocked`,
+  `done`, matched against each task's `stage`: done, then blocked (waits
+  for another task), then in review (its tracker column says review, or a
+  live session has a pull request), then in progress (its tracker says so,
+  or a session works on it), else backlog). They apply with `org` and
+  `status` when both are set; an unknown stage or org word is refused, and
+  an older hub ignores both. `hidden_by_filters` counts the tasks the
+  filters hide that would show with none set (the archived switch kept;
+  0 on a section's read): the list's "Hidden by filters · Show" row. A task is
   *archived* when it has no active session and is done, or every one of
   its links (at least one of them past) is archived, judged over every
   link of the task, not only the ones the caller sees. The tree hides
   archived tasks only when asked, with `archived: false` (the desktop
   always sends it); absent shows them, so a client from before the archive
-  keeps seeing every task. `status: "done"` and `has: "past_only"` show
-  them anyway. `archived_hidden` says how many passed every other filter
+  keeps seeing every task. `status: "done"`, a `done` stage and
+  `has: "past_only"` show them anyway. `archived_hidden` says how many passed every other filter
   but were hidden that way (over the whole result, not the page). Each
   task carries `archived`; `task` / `session_tasks` / `review` answer archived
   tasks as any other. Pages are a keyset: pass

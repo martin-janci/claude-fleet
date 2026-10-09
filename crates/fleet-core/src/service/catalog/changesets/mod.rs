@@ -422,6 +422,11 @@ pub struct ChangesetSummary {
     /// card under *Recently applied* so its held lines and Sync buttons show.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub held_hosts: Vec<String>,
+    /// Redesign 8.7: SB6 wrote it, not a person (`catalog.auto`'s applied
+    /// card, [`apply::AUTO_SYNC_NOTE`]); the Inbox keeps it under *Recently
+    /// applied* so an automatic write is seen. Absent from an older hub.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
 }
 
 /// The hosts whose copies the items' outcomes held back, sorted and unique.
@@ -697,6 +702,7 @@ pub fn list(store: &Mutex<Store>) -> Result<Vec<ChangesetSummary>, IpcError> {
             *groups.entry(i.grp.clone()).or_insert(0) += 1;
         }
         let pending = items.iter().filter(|i| i.state == "pending").count();
+        let auto = card.state == "applied" && card.error.as_deref() == Some(apply::AUTO_SYNC_NOTE);
         out.push(ChangesetSummary {
             withdrawn: is_withdrawn(&card),
             undoable: undoable.contains(&card.id),
@@ -711,6 +717,7 @@ pub fn list(store: &Mutex<Store>) -> Result<Vec<ChangesetSummary>, IpcError> {
             pending,
             catalogs: catalog_names(&items, &names),
             held_hosts: held_hosts(&items),
+            auto,
         });
     }
     Ok(out)

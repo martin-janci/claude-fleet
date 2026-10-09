@@ -172,6 +172,10 @@ pub fn render_unit(scope: &Scope, binary: &Path, config_path: &Path) -> Result<S
     unit.push_str("RestartSec=5\n");
     unit.push_str("KillMode=process\n");
     unit.push_str("NotifyAccess=main\n");
+    // `$RUNTIME_DIRECTORY` (`%t/fleet-agent`), the agent's own: the hub's
+    // `update_now` drops `update-now` there and `fleet-agent-update.path`
+    // starts a pass (crate::update).
+    unit.push_str("RuntimeDirectory=fleet-agent\n");
     unit.push('\n');
     unit.push_str("[Install]\n");
     unit.push_str(&format!("WantedBy={wanted_by}\n"));
@@ -272,6 +276,10 @@ pub fn install(
             (
                 crate::update::UPDATE_TIMER,
                 crate::update::render_update_timer(),
+            ),
+            (
+                crate::update::UPDATE_PATH,
+                crate::update::render_update_path(),
             ),
         ] {
             let p = dir.join(name);

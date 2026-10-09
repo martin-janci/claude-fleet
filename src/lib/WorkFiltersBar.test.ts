@@ -80,37 +80,36 @@ describe('WorkFiltersBar', () => {
     render(WorkFiltersBar, { orgs, trackers, searchDebounceMs: 5 });
     await flush();
     await fireEvent.click(screen.getByTestId('work-filters-open'));
-    await fireEvent.click(screen.getByTestId('work-filter-org-none'));
-    await fireEvent.click(screen.getByTestId('work-filter-tracker-1'));
-    await fireEvent.click(screen.getByTestId('work-filter-status-in_progress'));
+    await fireEvent.click(screen.getByTestId(`work-filter-org-${orgs[0].id}`));
+    await fireEvent.change(screen.getByTestId('work-filter-tracker'), { target: { value: '1' } });
+    await fireEvent.click(screen.getByTestId('work-filter-stage-in_progress'));
     await fireEvent.click(screen.getByTestId('work-filter-has-past_only'));
-    await fireEvent.click(screen.getByTestId('work-filter-mine'));
+    await fireEvent.change(screen.getByTestId('work-filter-assignee'), { target: { value: 'me' } });
     await fireEvent.click(screen.getByTestId('work-filter-review'));
     await fireEvent.input(screen.getByTestId('work-search'), { target: { value: 'login' } });
     expect(get(workViewFilters).query).toBeUndefined();
     await new Promise((r) => setTimeout(r, 20));
     expect(get(workViewFilters)).toEqual({
-      org: 'none',
+      orgs: [orgs[0].id],
       tracker: 1,
-      status: 'in_progress',
+      stages: ['in_progress'],
       has: 'past_only',
       mine: true,
       review: true,
       query: 'login',
     });
-    // The panel counts what it holds; the strip names every filter.
+    // The panel counts what it holds; closed, the strip names every filter.
     expect(screen.getByTestId('work-filters-open')).toHaveAttribute('aria-label', 'Filters, 6 active');
-    expect(screen.getByTestId('facet-org')).toHaveTextContent('Org: Unassigned');
+    await fireEvent.click(screen.getByTestId('work-filters-open'));
+    expect(screen.getByTestId('facet-orgs')).toHaveTextContent(`Org: ${orgs[0].name}`);
     expect(screen.getByTestId('facet-tracker')).toHaveTextContent('Tracker: Jira (acme)');
-    // Search shows its own state: no chip for it. The two toggles live in
-    // the panel, so the strip names them too.
+    expect(screen.getByTestId('facet-stages')).toHaveTextContent('Status: In progress');
+    // Search shows its own state: no chip for it.
     expect(screen.queryByTestId('facet-query')).toBeNull();
     expect(screen.getByTestId('facet-mine')).toBeTruthy();
-    await fireEvent.click(screen.getByTestId('work-filter-status-any'));
-    expect(get(workViewFilters).status).toBeUndefined();
     // A chip's × removes just that filter.
-    await fireEvent.click(screen.getByTestId('facet-org'));
-    expect(get(workViewFilters).org).toBeUndefined();
+    await fireEvent.click(screen.getByTestId('facet-orgs'));
+    expect(get(workViewFilters).orgs).toBeUndefined();
     expect(get(workViewFilters).tracker).toBe(1);
     await fireEvent.click(screen.getByTestId('work-filter-clear'));
     expect(get(workViewFilters)).toEqual({});

@@ -8,6 +8,7 @@ import { writable } from 'svelte/store';
 import { invokeCmd, type Result } from './result';
 import type { WorkItemRow } from './trackers';
 import { bumpWorkChanged } from './work';
+import type { StatusWord } from './kit/status';
 
 /** One mission (`store::MissionRow`). */
 export interface Mission {
@@ -387,27 +388,34 @@ export function doneWhenRows(text: string): string[] {
     .filter((l) => l.length > 0);
 }
 
-const NODE_GLYPH: Record<string, string> = {
-  done: '✓',
-  running: '●',
-  failed: '⚠',
-  blocked: '⚠',
-  held: '⏸',
-  proposed: '?',
-  rejected: '✕',
-  doing: '◐',
-  waiting: '…',
-  ready: '○',
+/** A node's state as one of the manual's six status words, and the reason
+ *  after " · " when the word alone would hide what the node waits on. The
+ *  dot's colour is `toneOf` (mission_graph.ts); no glyph prefixes. */
+const NODE_WORDS: Record<string, [StatusWord, string | null]> = {
+  done: ['Done', null],
+  running: ['Working', null],
+  doing: ['Working', null],
+  verifying: ['Working', 'verifying'],
+  failed: ['Failed', null],
+  blocked: ['Failed', 'blocked'],
+  proposed: ['Needs you', 'proposed'],
+  held: ['Paused', null],
+  waiting: ['Idle', 'waiting'],
+  ready: ['Idle', 'ready'],
+  rejected: ['Idle', 'rejected'],
 };
 
-/** A node's state as one glyph. */
-export function nodeGlyph(state: string): string {
-  return NODE_GLYPH[state] ?? '·';
+/** A node's state in words: "Working", "Needs you · proposed". */
+export function nodeLabel(state: string): string {
+  const [word, why] = NODE_WORDS[state] ?? ['Idle', state];
+  return why ? `${word} · ${why}` : word;
 }
 
-/** A node's state in words. */
-export function nodeLabel(state: string): string {
-  return state === 'ready' ? 'Ready' : state.charAt(0).toUpperCase() + state.slice(1);
+/** A node's state as a count's noun ("2 proposed", "1 working"): the reason
+ *  when there is one, else the word. */
+export function nodeCountWord(state: string): string {
+  const [word, why] = NODE_WORDS[state] ?? ['Idle', state];
+  return why ?? word.toLowerCase();
 }
 
 /** Node states a mission is working on now (a run or a person's task in
@@ -806,6 +814,13 @@ export function plannerError(e: { code: string; message: string }): HumanError {
       details,
     };
   }
+  if ((hit = m.match(/^Claude login expired on (.+?): run `(.+?)` there/))) {
+    return {
+      title: "The planner's Claude login has expired",
+      text: `Claude Code on ${hit[1]} is signed out, so the planner can't run. Run ${hit[2]} there, then retry.`,
+      details,
+    };
+  }
   if ((hit = m.match(/^claude is not on (.+?)'s PATH/))) {
     return { title, text: `Claude Code isn't installed on ${hit[1]}, so the planner has nowhere to run.`, details };
   }
@@ -824,8 +839,20 @@ export function plannerError(e: { code: string; message: string }): HumanError {
   return { title, text: sentence(m) || 'Something went wrong. Retry, or look at Details.', details };
 }
 
+/** Claude Code's own words for a run with no usable login. */
+const SIGNED_OUT = /login expired|run \/login|invalid api key|not logged in|oauth token has (?:expired|been revoked)/i;
+
 /** The planner ran but its answer could not be used (`PlanOutcome.refused`). */
 export function plannerRefusal(why: string): HumanError {
+  // A hub before 0.6.1 hands Claude Code's own "Login expired · Run /login"
+  // back as a refused answer; it is a signed-out host, not a bad answer.
+  if (SIGNED_OUT.test(why)) {
+    return {
+      title: "The planner's Claude login has expired",
+      text: "Claude Code on the planner's host is signed out. Run claude /login there, then retry.",
+      details: why,
+    };
+  }
   return {
     title: "The planner's answer couldn't be used",
     text: 'Nothing was changed. Retry to ask again; Details shows what was wrong with the answer.',

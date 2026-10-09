@@ -16,12 +16,13 @@
   justify-content: space-between;
   margin-bottom: 0.4rem;
 }
+/* UX audit S2: a section heading in sentence case, not an uppercase label
+   (the page's own title sits above it). */
 .settings-dialog .section-header h4 {
   margin: 0;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--fg-muted);
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--fg);
 }
 .settings-dialog .alias { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .settings-dialog .status {
@@ -35,14 +36,14 @@
 .settings-dialog .mcp-blurb {
   font-size: 11px;
   color: var(--fg-muted);
-  margin: 0 0 0.6rem;
+  margin: 0 0 var(--space-2);
   line-height: 1.4;
 }
 .settings-dialog .mcp-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 0.5rem;
+  margin-bottom: var(--space-2);
 }
 .settings-dialog .toggle {
   display: flex;
@@ -81,14 +82,14 @@
   border: 1px solid var(--border);
   color: var(--fg);
   cursor: pointer;
-  padding: 0.18rem 0.5rem;
+  padding: 0.18rem var(--space-2);
   font-size: 11px;
   border-radius: 4px;
 }
 .settings-dialog .mcp-field button:hover:not(:disabled) { border-color: var(--accent); }
 .settings-dialog .mcp-field button:disabled { opacity: 0.5; cursor: default; }
 .settings-dialog .hook-section {
-  margin-top: 12px;
+  margin-top: var(--space-3);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -99,7 +100,7 @@
   border: 1px solid var(--border);
   color: var(--fg);
   cursor: pointer;
-  padding: 0.18rem 0.5rem;
+  padding: 0.18rem var(--space-2);
   font-size: 11px;
   border-radius: 4px;
 }
@@ -110,45 +111,3 @@
   color: var(--fg-muted);
 }
 
-/* Conversation composer presets */
-/* A handle for focus lookups only: the rows stay items of .hook-section. */
-.settings-dialog .preset-rows {
-  display: contents;
-}
-.settings-dialog .preset-row {
-  display: flex;
-  gap: 0.4rem;
-  align-items: flex-start;
-  margin: 0.3rem 0;
-}
-.settings-dialog .preset-label {
-  flex: 0 0 9rem;
-}
-.settings-dialog .preset-text {
-  flex: 1 1 auto;
-  min-height: 1.9rem;
-  resize: vertical;
-  font: inherit;
-  font-size: 0.8rem;
-}
-.settings-dialog .preset-label,
-.settings-dialog .preset-text {
-  padding: 0.3rem 0.45rem;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg);
-  color: var(--fg);
-}
-.settings-dialog .preset-send {
-  display: flex;
-  align-items: center;
-  gap: 0.2rem;
-  font-size: 11px;
-  white-space: nowrap;
-  padding-top: 0.3rem;
-}
-.settings-dialog .preset-actions {
-  display: flex;
-  gap: 0.4rem;
-  margin-top: 0.4rem;
-}

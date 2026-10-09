@@ -385,7 +385,7 @@ describe('new_session and repair_session route now, so their buttons stay enable
   it('+ New session is enabled on a hub client', async () => {
     hubStatus.set(remote);
     render(Sidebar, { props: {} as never });
-    expect(await screen.findByTestId('new-session-footer')).not.toBeDisabled();
+    expect(await screen.findByTestId('new-session-head')).not.toBeDisabled();
   });
 
   it('Repair workspace is enabled on a hub client', async () => {

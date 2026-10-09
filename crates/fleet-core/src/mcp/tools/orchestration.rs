@@ -614,11 +614,13 @@ impl FleetTools {
                         // requester is somebody asking fleet directly, so it
                         // is theirs; a per-host token resolves to neither and
                         // the worker lands `unclaimed`.
+                        over_limit_ok: false,
                         owner_person_id: requester_owner.or_else(|| {
                             lock(self.reader())
                                 .ok()
                                 .and_then(|s| super::fleet::owner_for(&caller, &s))
                         }),
+                        start_token: None,
                     },
                     &self.store,
                     &self.ssh,
@@ -1365,6 +1367,8 @@ impl FleetTools {
             // K5: which group a standalone task belongs in (off by default).
             if made.parent_id.is_none() {
                 crate::service::decide::work_placement::spawn_ask(&self.store, made.id);
+                // J7: whether it repeats an open tracker ticket (off by default).
+                crate::service::decide::tracker_duplicate::spawn_ask(&self.store, made.id);
             }
             return ok_json(&made);
         }

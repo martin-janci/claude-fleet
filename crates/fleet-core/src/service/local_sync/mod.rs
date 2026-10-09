@@ -177,16 +177,18 @@ impl LocalSync {
         });
     }
 
-    fn tick(self: &Arc<Self>) {
+    /// One pass over the links; `false` when Pause all (redesign 8.1) or an
+    /// unreadable store stopped it before any link was looked at.
+    fn tick(self: &Arc<Self>) -> bool {
         if !crate::service::loops::gate("local_sync", &self.store, Some(PASS_INTERVAL)) {
-            return;
+            return false;
         }
         let rows = match lock(&self.store).and_then(|s| s.list_local_workspaces()) {
             Ok(rows) => rows,
             Err(e) => {
                 tracing::warn!(error = %e, "local sync: could not list links");
                 crate::service::loops::report("local_sync", Err(e), Some(PASS_INTERVAL));
-                return;
+                return false;
             }
         };
         let now = Instant::now();
@@ -214,6 +216,7 @@ impl LocalSync {
             .unwrap_or_default();
         self.due.retain(|id, _| alive.contains(id));
         crate::service::loops::report("local_sync", Ok::<_, String>(()), Some(PASS_INTERVAL));
+        true
     }
 
     /// One pass now, waiting for a running one to finish first.

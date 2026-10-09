@@ -61,7 +61,7 @@ describe('HostsList', () => {
     const trn = screen.getAllByTestId('host-row').find((r) => r.dataset.alias === 'claude-fleet-trn')!;
     await fireEvent.click(trn);
     expect(onselect).toHaveBeenCalledWith('claude-fleet-trn');
-    expect(within(trn).getByTestId('host-counts').textContent).toBe('14 ⚡2 ⏸1');
+    expect(within(trn).getByTestId('host-counts').textContent).toBe('14 · 2 working · 1 needs you');
     for (const row of screen.getAllByTestId('host-row')) expect(row.querySelector('button')).toBeNull();
   });
 

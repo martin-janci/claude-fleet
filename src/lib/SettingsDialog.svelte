@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   import Loader from './Loader.svelte';
   import WorkSettings from './WorkSettings.svelte';
   import ShortcutSettings from './ShortcutSettings.svelte';
@@ -22,17 +23,8 @@
   import { appVersion, loadAppVersion } from './app_version';
   import { onboardingDismissed, onboardingWelcomed } from './onboarding';
   import { hintsEnabled, resetHints } from './hints';
-  import {
-    composerPresets,
-    resetComposerPresets,
-    addPreset,
-    updatePreset,
-    removePreset,
-    movePreset,
-    flushComposerPresets,
-    refreshComposerPresetsIfIdle,
-    presetsConflict,
-  } from './composer_presets';
+  import { toolkitTab } from './toolkit_skills';
+  import { goTo } from './destination';
   import { copyOnSelect } from './prefs';
   import { startTour } from './tour';
   import { collectDiagnostics, copyDiagnostics, openLogFolder } from './diagnostics';
@@ -80,61 +72,14 @@
     type NotificationPermissionState,
   } from './notify';
 
-  let { onClose: closeDialog }: { onClose: () => void } = $props();
+  let { onClose }: { onClose: () => void } = $props();
 
-  /**
-   * Chip edits are debounced (the editor saves on every keystroke), so a
-   * dialog closed straight after the last character would otherwise leave
-   * that character's save to a timer on an unmounted component. Flushing
-   * here is fire-and-forget: it is the same write, only sooner, and the
-   * dialog must not wait on a hub round trip to disappear.
-   */
-  function onClose() {
-    void flushComposerPresets();
-    closeDialog();
-  }
-
-  // A stable key per chip row, so a move re-orders the rows instead of
-  // rewriting every field in place under the cursor (keyed by index, the
-  // focused ↑ stayed at its index while the chip it moved went elsewhere).
-  // Kept beside the list rather than in it: the list is the backend's, and an
-  // id riding in it would be sent to the hub and cached as fleet state. A
-  // change of length the editor did not make (a reload, a conflict) deals
-  // fresh ids; the fields' values come from the list either way.
-  let nextRowId = 0;
-  let presetRowIds = $state<number[]>([]);
-  $effect(() => {
-    const n = $composerPresets.length;
-    if (presetRowIds.length !== n) presetRowIds = Array.from({ length: n }, () => nextRowId++);
-  });
-  const presetKey = (i: number) => presetRowIds[i] ?? `new-${i}`;
-  let presetRows: HTMLDivElement | undefined = $state();
-
-  async function onMovePreset(i: number, dir: -1 | 1) {
-    const to = i + dir;
-    if (to < 0 || to >= presetRowIds.length) return;
-    const id = presetRowIds[i];
-    const ids = [...presetRowIds];
-    [ids[i], ids[to]] = [ids[to], ids[i]];
-    presetRowIds = ids;
-    movePreset(i, dir);
-    await tick();
-    // Keep the keyboard on the chip that moved: its same arrow, or — at the
-    // end of the list, where that one is now disabled — the other one.
-    const row = presetRows?.querySelector<HTMLElement>(`[data-row-id="${id}"]`);
-    const same = row?.querySelector<HTMLButtonElement>(`[data-testid="preset-${dir === -1 ? 'up' : 'down'}"]`);
-    const other = row?.querySelector<HTMLButtonElement>(`[data-testid="preset-${dir === -1 ? 'down' : 'up'}"]`);
-    (same && !same.disabled ? same : other)?.focus();
-  }
-
-  function onRemovePreset(i: number) {
-    presetRowIds = presetRowIds.filter((_, k) => k !== i);
-    removePreset(i);
-  }
-
-  function onAddPreset() {
-    presetRowIds = [...presetRowIds, nextRowId++];
-    addPreset();
+  // The chip editor lives in Toolkit › Prompts & snippets (UX audit
+  // 2026-10-09, Martin's call); Settings keeps a link to it.
+  function openPrompts() {
+    toolkitTab.set('prompts');
+    goTo('assets');
+    onClose();
   }
 
   // Hosts live in the Hosts view; Settings keeps fleet-wide configuration and
@@ -229,13 +174,6 @@
     }
   }
 
-  // The chip editor starts from the fleet's current list, not the one read
-  // at launch: no event announces a chip saved on the phone, and an edit
-  // made from a stale list would be refused with E_CONFLICT on its first
-  // keystroke. Skipped while an edit of ours is still pending.
-  onMount(() => {
-    void refreshComposerPresetsIfIdle();
-  });
 
   // --- The Settings tree (redesign step 7.1, `settings_tree.ts`): a leaf
   // is a hand-written panel below, a generated page (declarative pages P3;
@@ -490,6 +428,8 @@
     </div>
     <div class="settings-scroll">
     <div class="settings-content">
+    <!-- UX audit S2: the open leaf's name heads the page (Settings board). -->
+    <h2 class="page-title" data-testid="settings-page-title">{leaf?.label ?? 'Settings'}</h2>
     <!-- The hand-written panels stay mounted and are hidden when another
          leaf is open, so a draft (a hub URL, a projects root) survives a
          look at another section. -->
@@ -541,7 +481,7 @@
           {/if}
         </p>
         {#if $hubStatus.warning}
-          <p class="err" data-testid="hub-status-warning">⚠ {$hubStatus.warning}</p>
+          <p class="err" data-testid="hub-status-warning"><Icon name="warning" size={12} /> {$hubStatus.warning}</p>
         {/if}
         <!-- The trap: with `mcp.confirm_destructive` on, the hub refuses a
              kill, a worktree delete, a move or a task cancel until someone
@@ -587,7 +527,7 @@
              "This app runs its own fleet" here, as this section used to, was
              the opposite of the truth: it runs NO fleet until this is fixed. -->
         <p class="err" data-testid="hub-unavailable-reason">
-          ⚠ This app is set to use
+          <Icon name="warning" size={12} /> This app is set to use
           {#if $hubStatus.configured_url}<code>{$hubStatus.configured_url}</code>{:else}a hub{/if},
           but this launch cannot: {plainUnavailableReason($hubStatus.unavailable)}.
         </p>
@@ -632,7 +572,7 @@
                reads it — a blank URL is standalone — so this is the only place
                it is ever mentioned, and the only place it can be cleared. -->
           <p class="err" data-testid="hub-stranded-token">
-            ⚠ A hub <strong>client token</strong> is still stored on this
+            <Icon name="warning" size={12} /> A hub <strong>client token</strong> is still stored on this
             machine, left behind by a pairing that did not finish. Nothing uses
             it: no hub is configured, and this app runs its own fleet. It is a
             credential for someone else's fleet sitting in this machine's
@@ -770,8 +710,13 @@
       <div class="section-header">
         <h4>Setup guide</h4>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">Re-show the "Get started" checklist.</p>
+      <!-- UX audit S2: one row per item, its name and help on the left and
+           its control on the right (Settings board). -->
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Get started checklist</span>
+          <p class="hook-desc">Re-show the "Get started" checklist.</p>
+        </div>
         <button
           class="hook-btn"
           onclick={() => {
@@ -782,8 +727,11 @@
           Replay setup guide
         </button>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">Walk through the main parts of the window again, six short steps.</p>
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Tour</span>
+          <p class="hook-desc">Walk through the main parts of the window again, six short steps.</p>
+        </div>
         <button
           class="hook-btn"
           data-testid="settings-take-tour"
@@ -795,21 +743,29 @@
           Take the tour
         </button>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">Show inline tips the first time a feature is used.</p>
-        <label class="toggle">
-          <input type="checkbox" bind:checked={$hintsEnabled} />
-          Show feature hints
-        </label>
-        <button class="hook-btn" onclick={resetHints} data-testid="reset-hints">
-          Reset hints
-        </button>
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Feature hints</span>
+          <p class="hook-desc">Show inline tips the first time a feature is used.</p>
+        </div>
+        <div class="pref-ctl">
+          <label class="toggle">
+            <input type="checkbox" bind:checked={$hintsEnabled} />
+            Show feature hints
+          </label>
+          <button class="hook-btn" onclick={resetHints} data-testid="reset-hints">
+            Reset hints
+          </button>
+        </div>
       </div>
-      <div class="hook-section">
-        <p class="hook-desc">
-          Copy a terminal drag-selection to the clipboard as soon as the mouse
-          is released. Off: use Cmd+C / Ctrl+Shift+C or the context menu.
-        </p>
+      <div class="pref-row">
+        <div class="pref-text">
+          <span class="pref-lbl">Copy on select</span>
+          <p class="hook-desc">
+            Copy a terminal drag-selection to the clipboard as soon as the mouse
+            is released. Off: use Cmd+C / Ctrl+Shift+C or the context menu.
+          </p>
+        </div>
         <label class="toggle">
           <input type="checkbox" bind:checked={$copyOnSelect} data-testid="copy-on-select" />
           Copy on select
@@ -821,7 +777,7 @@
     <div class="panel" hidden={panel !== 'notifications'} data-testid="settings-panel-notifications">
     <section class="block" data-testid="notifications-section">
       <div class="section-header">
-        <h4>Notifications</h4>
+        <h4>Stuck sessions</h4>
       </div>
       <p class="mcp-blurb">
         When a session becomes stuck (auth menu, trust prompt, reconnect,
@@ -879,66 +835,12 @@
       <h4>Conversation composer</h4>
       <div class="hook-section">
         <p class="hook-desc">
-          Quick-action chips above the prompt box in the Conversation tab and
-          on the phone, in this order. A click fills the box; with
-          <em>Send</em> ticked it sends at once (Shift+click does the other
-          one) — except while the session waits on an answer, when it only
-          fills. Chips with an empty label or text are not shown.
+          The quick-action chips above the prompt box are edited in Toolkit ›
+          Prompts & snippets.
         </p>
-        {#if $presetsConflict}
-          <p class="hook-desc" role="status" data-testid="preset-conflict">
-            Another device changed the chips first. This is its list now; make your change again.
-          </p>
-        {/if}
-        <div class="preset-rows" bind:this={presetRows}>
-        {#each $composerPresets as p, i (presetKey(i))}
-          <div class="preset-row" data-row-id={presetKey(i)}>
-            <input
-              class="preset-label"
-              data-testid="preset-label"
-              placeholder="Label"
-              value={p.label}
-              oninput={(e) => updatePreset(i, { label: e.currentTarget.value })}
-            />
-            <textarea
-              class="preset-text"
-              data-testid="preset-text"
-              rows="1"
-              placeholder="Prompt or /command"
-              value={p.text}
-              oninput={(e) => updatePreset(i, { text: e.currentTarget.value })}
-            ></textarea>
-            <label class="preset-send" title="Send on click instead of only filling the box">
-              <input
-                type="checkbox"
-                data-testid="preset-auto-send"
-                checked={p.auto_send === true}
-                onchange={(e) => updatePreset(i, { auto_send: e.currentTarget.checked })}
-              />
-              Send
-            </label>
-            <button
-              class="hook-btn"
-              data-testid="preset-up"
-              title="Move up"
-              aria-label="Move up"
-              disabled={i === 0}
-              onclick={() => void onMovePreset(i, -1)}>↑</button>
-            <button
-              class="hook-btn"
-              data-testid="preset-down"
-              title="Move down"
-              aria-label="Move down"
-              disabled={i === $composerPresets.length - 1}
-              onclick={() => void onMovePreset(i, 1)}>↓</button>
-            <button class="hook-btn" data-testid="preset-remove" title="Remove" onclick={() => onRemovePreset(i)}>×</button>
-          </div>
-        {/each}
-        </div>
-        <div class="preset-actions">
-          <button class="hook-btn" data-testid="preset-add" onclick={onAddPreset}>Add chip</button>
-          <button class="hook-btn" data-testid="preset-reset" onclick={resetComposerPresets}>Reset to defaults</button>
-        </div>
+        <button class="hook-btn" data-testid="composer-open-toolkit" onclick={openPrompts}
+          >Open Prompts & snippets ↗</button
+        >
       </div>
     </section>
     </div>
@@ -1097,6 +999,23 @@
   }
   .settings-title { margin: 0 0 var(--space-1) var(--space-1); font-size: var(--text-lg); font-weight: 600; }
   .settings-scroll { min-width: 0; min-height: 0; overflow: auto; }
+  .pref-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .pref-text { flex: 1; min-width: 0; }
+  .pref-lbl { font-size: var(--text-sm); font-weight: 500; }
+  .pref-ctl { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; }
+  .pref-row .hook-btn { align-self: center; flex: 0 0 auto; }
+  .page-title {
+    margin: 0 0 var(--space-1);
+    font-size: var(--text-xl);
+    font-weight: 600;
+  }
   .settings-content {
     display: flex;
     flex-direction: column;

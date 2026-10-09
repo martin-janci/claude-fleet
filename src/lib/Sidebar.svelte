@@ -39,7 +39,7 @@
   import { openToday } from './control';
   import type { IpcError } from './result';
   import { bulkTargets, sessionBlocked, sessionIdBlocked } from './share';
-  import { moveToHeadroom } from './account_limits';
+  import { moveToAccount } from './account_limits';
   import {
     effectiveScope,
     scopeFilter,
@@ -556,13 +556,13 @@
     hubActionBlocked('restart_session', $hubStatus, $hubConnection) ??
       (selectedRows.length > 0 && bulkMoveTargets.length === 0 ? 'None of the selected sessions is yours to restart.' : null),
   );
-  async function bulkMoveAccount() {
-    const r = await moveToHeadroom(bulkMoveTargets, restartSession);
+  async function bulkMoveAccount(accountUuid: string | null) {
+    const r = await moveToAccount(bulkMoveTargets, accountUuid, restartSession);
     clearSelected();
     const parts = [
       r.moved > 0 ? `Switched ${r.moved} session${r.moved === 1 ? '' : 's'}` : 'Nothing switched',
-      r.stayed > 0 ? `${r.stayed} still under the line` : '',
-      r.nowhere > 0 ? `${r.nowhere} with no other login that has room` : '',
+      r.stayed > 0 ? `${r.stayed} ${accountUuid === null ? 'still under the line' : 'already there'}` : '',
+      r.nowhere > 0 ? `${r.nowhere} with ${accountUuid === null ? 'no other login that has room' : 'no login on that account'}` : '',
       r.failed > 0 ? `${r.failed} failed` : '',
     ].filter(Boolean);
     push({ message: parts.join(' · '), kind: r.failed > 0 ? 'error' : r.moved > 0 ? 'success' : 'info' });
@@ -973,6 +973,12 @@
   );
   const inboxList = $derived(inboxRows(inboxPool, attentionOpts));
   const inboxNeeding = $derived(inboxList.length + $failingCount);
+  // The footer's row count (UX audit L4): what this list holds right now.
+  const listCountText = $derived.by(() => {
+    if ($sidebarView === 'work') return '';
+    const n = $sidebarView === 'inbox' ? inboxList.length : visibleIds.size;
+    return `${n} ${$sidebarView === 'inbox' ? 'waiting' : n === 1 ? 'session' : 'sessions'}`;
+  });
   // Redesign step 7.4: a row whose state moves it to another group is a new
   // element there; snapshot every row's place before the groups re-render so
   // the new one slides from where the old one was (motion_catalog.slideIn).
@@ -1447,7 +1453,26 @@
 
   <!-- The shared chrome (Refresh, Needs you, bulk actions, Settings,
        Attention) stays in both views; only the list below swaps. -->
+  {#snippet headActions()}
+    <button
+      class="btn btn--quiet btn--icon"
+      title="Launch a supervised Claude background session"
+      aria-label="New background session"
+      onclick={() => (showBgModal = true)}
+      data-testid="new-bg-session-btn"
+      use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
+    ><Icon name="bolt" size={14} /></button>
+    <button
+      class="btn btn--quiet is-bounded new-btn"
+      onclick={() => openNewSessionPicker()}
+      data-testid="new-session-head"
+      title={isMac ? 'New session (⌘N)' : 'New session (Ctrl+Shift+N)'}
+      aria-keyshortcuts={isMac ? 'Meta+N' : 'Control+Shift+N'}
+    >+ New…{#if isMac}<kbd class="of-kbd">⌘N</kbd>{/if}</button>
+  {/snippet}
+
   <SidebarFilters
+    {headActions}
     listView={$sidebarView}
     bind:search
     bind:recency
@@ -1464,7 +1489,7 @@
     onBulkKill={() => ((bulkKillMode = 'kill'), (bulkKillOpen = true))}
     onBulkCleanUp={() => ((bulkKillMode = 'cleanup'), (bulkKillOpen = true))}
     onBulkArchive={() => void bulkArchive()}
-    onBulkMoveAccount={() => void bulkMoveAccount()}
+    onBulkMoveAccount={(a) => void bulkMoveAccount(a)}
     {bulkMoveAccountBlocked}
     {bulkArchiveBlocked}
     {bulkCleanUpBlocked}
@@ -1941,25 +1966,16 @@
   </div>
   {/if}
 
+  <!-- UX audit L4: + New moved to the list's header; the footer names the
+       list's keys and how many rows it holds. -->
   <footer class="sidebar-footer" data-testid="sidebar-chrome-bottom">
     <div class="footer-row">
-      <button
-        class="new-btn"
-        onclick={() => openNewSessionPicker()}
-        data-testid="new-session-footer"
-        title={isMac ? 'New session (⌘N)' : 'New session (Ctrl+Shift+N)'}
-        aria-keyshortcuts={isMac ? 'Meta+N' : 'Control+Shift+N'}
+      <span class="keys" data-testid="sidebar-keys"
+        ><kbd class="of-kbd">j</kbd><kbd class="of-kbd">k</kbd> move <kbd class="of-kbd">↵</kbd> open
+        <kbd class="of-kbd">x</kbd> select</span
       >
-        + New session
-      </button>
-      <button
-        class="icon-btn"
-        title="Launch a supervised Claude background session"
-        aria-label="New background session"
-        onclick={() => (showBgModal = true)}
-        data-testid="new-bg-session-btn"
-        use:hintAnchor={{ id: 'bg-session', when: $sessions.some((s) => !hasNoPane(s)) && !$sessions.some((s) => s.kind === 'bg') }}
-      ><Icon name="bolt" size={14} /></button>
+      <span class="spacer"></span>
+      <span class="list-count" data-testid="sidebar-count">{listCountText}</span>
     </div>
   </footer>
 </div>
@@ -2369,17 +2385,18 @@
     align-items: center;
   }
   .new-btn {
-    flex: 1;
-    text-align: left;
-    font-size: var(--text-xs);
-    padding: 0.4rem 0.6rem;
-    border: 1px solid var(--border);
-    background: transparent;
-    color: var(--fg);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
+    gap: 6px;
+    white-space: nowrap;
   }
-  .new-btn:hover { border-color: var(--accent); background: var(--bg-pane); }
+  .keys,
+  .list-count {
+    font-size: var(--text-2xs);
+    color: var(--fg-muted);
+    white-space: nowrap;
+  }
+  .keys kbd { margin-right: 2px; }
+  .list-count { font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
 
   .purge-btn {
     opacity: 0;

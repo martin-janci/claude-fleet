@@ -78,6 +78,14 @@
       <p class="text ai-pre" data-testid="watch-summary-text">{summary.text}</p>
       <p class="muted drafted">
         <DraftedLabel testid="watch-summary-drafted" />
+        {#if summary.check !== 'passed'}
+          <!-- 11.11 with decide.jev.summary_check off (or in shadow): the
+               text shows unchecked, and says so beside the pill, not only
+               in the small print ("Drafted · Not checked"). -->
+          <span class="unchecked" data-testid="watch-summary-unchecked" title="Jev did not check this against the transcript"
+            >Not checked</span
+          >
+        {/if}
         <span data-testid="watch-summary-meta">{meta} · {checkLabel(summary.check)}</span>
       </p>
     {:else}
@@ -125,6 +133,16 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 6px;
+  }
+  .unchecked {
+    font-size: var(--text-2xs);
+    line-height: 16px;
+    font-weight: 500;
+    padding: 0 6px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--status-waiting);
+    color: var(--status-waiting);
+    white-space: nowrap;
   }
   .error {
     margin: 0;

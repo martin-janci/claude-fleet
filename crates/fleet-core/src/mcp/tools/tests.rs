@@ -302,6 +302,38 @@ fn session_conversation_is_registered_readonly_with_documented_params() {
     assert!(guard::is_readonly_tool("session_conversation"));
 }
 
+/// Redesign 14.14: `send_prompt`'s `keys` enumerates every key the hub
+/// presses, so a client (the phone's key bar) can tell a hub that takes the
+/// arrows and Ctrl keys from an older one, whose schema lists none.
+#[test]
+fn send_prompt_keys_enumerate_every_named_key() {
+    let tools = FleetTools::tool_router_for_doc().list_all();
+    let t = tools
+        .iter()
+        .find(|t| t.name == "send_prompt")
+        .expect("send_prompt is registered");
+    let listed: Vec<String> = t.input_schema["properties"]["keys"]["enum"]
+        .as_array()
+        .expect("keys has an enum")
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let all: Vec<String> = crate::tmux::NamedKey::all_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(listed, all);
+    for k in ["Up", "Down", "Left", "Right", "BTab", "C-r", "Escape", "1"] {
+        assert!(listed.iter().any(|l| l == k), "{k} is listed");
+    }
+    for refused in ["C-z", "C-s", "C-q"] {
+        assert!(
+            !listed.iter().any(|l| l == refused),
+            "{refused} is never listed"
+        );
+    }
+}
+
 #[test]
 fn require_host_binds_per_host_callers_and_frees_master() {
     let c = host_caller("mefistos", TokenMode::Full);
@@ -1774,6 +1806,8 @@ async fn per_host_callers_cannot_spawn_or_dispatch_on_another_host() {
                 effort: None,
                 profile: None,
                 agent: None,
+                start_token: None,
+                over_limit_ok: None,
                 confirm_nonce: None,
             }),
         )
@@ -2011,6 +2045,8 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
                 effort: None,
                 profile: None,
                 agent: None,
+                start_token: None,
+                over_limit_ok: None,
                 confirm_nonce: None,
             }),
         )
@@ -2021,6 +2057,48 @@ async fn new_session_threads_kind_start_command_and_friendly_name_through() {
         "friendly_name must have reached validation, not a hardcoded None: {}",
         err.message
     );
+}
+
+/// Step 4.4 on the MCP / hub path: a Claude start on a login past
+/// `accounts.pause_at` is refused with `E_ACCOUNT_LIMIT` naming the login
+/// with headroom, before anything is created; `over_limit_ok` (the person
+/// chose it) lets it through to the rest of the create path.
+#[tokio::test]
+async fn new_session_asks_before_starting_past_pause_at() {
+    let s = crate::store::Store::open_in_memory().unwrap();
+    let now = crate::store::now_unix();
+    crate::service::account_limits::seed_usage(&s, "hosta", None, "acct-full", 95.0, now);
+    crate::service::account_limits::seed_usage(&s, "hosta", Some("spare"), "acct-free", 10.0, now);
+    let t = test_tools(s);
+    let params = |over: Option<bool>, profile: Option<&str>| {
+        new_session_params(serde_json::json!({
+            "host_alias": "hosta",
+            "project_id": 4242,
+            "name": "x",
+            "profile": profile,
+            "over_limit_ok": over,
+        }))
+    };
+    let call = |p| {
+        let t = &t;
+        async move {
+            t.new_session(
+                Extension(host_caller("hosta", TokenMode::Full)),
+                Parameters(p),
+            )
+            .await
+            .unwrap_err()
+            .message
+        }
+    };
+    let refused = call(params(None, None)).await;
+    assert!(refused.starts_with("E_ACCOUNT_LIMIT"), "{refused}");
+    assert!(refused.contains("profile \"spare\""), "{refused}");
+    // Confirmed, or on the login with headroom: on to the project lookup.
+    for p in [params(Some(true), None), params(None, Some("spare"))] {
+        let past = call(p).await;
+        assert!(!past.starts_with("E_ACCOUNT_LIMIT"), "{past}");
+    }
 }
 
 #[tokio::test]
@@ -4077,11 +4155,13 @@ fn list_host_worktrees_is_open_to_a_paired_client_in_either_mode() {
 #[test]
 fn the_served_definition_budget_stays_bounded() {
     /// Definition bytes per tool served to the master token (the widest
-    /// surface). Measured at 105,130 bytes for 133 tools (790 a tool) on
-    /// 2026-10-09, when `new_bg_session` took its launch options. Raise it
-    /// only from a measurement the failure prints, and say in the commit
-    /// message what was measured and when.
-    const BYTES_PER_TOOL: usize = 800;
+    /// surface). Measured at 107,112 bytes for 133 tools (805 a tool) on
+    /// 2026-10-09, when the redesign audit branch (send_prompt's key list,
+    /// new_session's start token, ask's draft) met main's update_admin
+    /// rollout and policy actions. Raise it only from a measurement the
+    /// failure prints, and say in the commit message what was measured and
+    /// when.
+    const BYTES_PER_TOOL: usize = 815;
     fn definition_bytes(caller: &Caller) -> (usize, usize) {
         let tools: Vec<_> = FleetTools::tool_router_for_doc()
             .list_all()
@@ -18646,6 +18726,7 @@ fn small_form() -> serde_json::Value {
 fn ask_p() -> AskParams {
     AskParams {
         form: None,
+        draft: None,
         why: None,
         wait: None,
         cancel: None,
@@ -18657,6 +18738,49 @@ fn ask_p() -> AskParams {
         note: None,
         timeout_s: None,
     }
+}
+
+/// Redesign 10.12: an agent streams its form while it writes it; the draft
+/// rides its own session's row, and only a session may draft.
+#[tokio::test]
+async fn an_agent_drafts_its_form_on_its_own_row() {
+    let g = gate_fixture();
+    let a_row = g.a_row;
+    let t = test_tools(g.store);
+    let out = t
+        .ask(
+            Extension(pane_caller(Some("%7"))),
+            Parameters(AskParams {
+                draft: Some(r#"{"spec":"fleet.form/1","title":"Pi"#.into()),
+                why: Some("your hosts".into()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .expect("a session drafts");
+    assert!(text_of(&out.content[0]).contains("drafting"));
+    let row = t
+        .store
+        .lock()
+        .unwrap()
+        .get_session_by_id(a_row)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.form_draft.map(|d| d.why),
+        Some(Some("your hosts".into()))
+    );
+    let err = t
+        .ask(
+            Extension(Caller::master()),
+            Parameters(AskParams {
+                draft: Some("{".into()),
+                ..ask_p()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("asking session"), "{err:?}");
 }
 
 #[tokio::test]
@@ -19007,4 +19131,98 @@ fn a_starts_origin_follows_the_connection() {
         ),
         SessionOrigin::operator(Some(operator_row))
     );
+}
+
+fn update_policy_args(action: &str) -> UpdatePolicyParams {
+    UpdatePolicyParams {
+        action: action.into(),
+        org_id: None,
+        component: None,
+        mode: None,
+        minimum: None,
+        window: None,
+        version: None,
+        mandatory: None,
+        reason: None,
+    }
+}
+
+/// S9: an org's admin sets their org's update policy from their device; the
+/// hub owner's device sets any org's; anybody else, or another org, is
+/// refused. The master keeps `update_admin set_policy` and is not served this.
+#[tokio::test]
+async fn update_policy_is_an_org_admins_for_their_own_org() {
+    let (tools, _guards, store) = client_tools();
+    let (acme, beta, jane) = {
+        let s = store.lock().unwrap();
+        let acme = s.add_org("Acme", None, false).unwrap().id;
+        let beta = s.add_org("Beta", None, false).unwrap().id;
+        let jane = s.create_person("jane", None).unwrap().id;
+        s.set_org_member(acme, jane, "admin", None).unwrap();
+        (acme, beta, jane)
+    };
+    let can_see = |c: &Caller| present::visible_to(c, "update_policy");
+    assert!(!can_see(&Caller::master()), "not served to the master");
+    let call = |c: Caller, a: UpdatePolicyParams| tools.update_policy(Extension(c), Parameters(a));
+    let mut admin = trusted(client_caller("jane-phone", TokenMode::Full));
+    if let Some(c) = admin.client.as_mut() {
+        c.person_id = Some(jane);
+        c.org_id = Some(acme);
+    }
+    admin.is_personal_owner = false;
+
+    // Her org, by default: manual for the desktops.
+    let mut set = update_policy_args("set");
+    set.component = Some("desktop".into());
+    set.mode = Some("manual".into());
+    let v = result_json(&call(admin.clone(), set).await.expect("her org"));
+    assert_eq!(
+        (v["org_id"].as_i64(), v["set_by"].as_str()),
+        (Some(acme), Some("device:jane-phone"))
+    );
+    // Not another org.
+    let mut other = update_policy_args("set");
+    other.org_id = Some(beta);
+    other.component = Some("desktop".into());
+    other.mode = Some("manual".into());
+    let e = call(admin.clone(), other).await.expect_err("another org");
+    assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{e:?}");
+    // A colleague with no org to administer, not even a list.
+    let colleague = another_person(trusted(client_caller("ada", TokenMode::Full)));
+    let e = call(colleague, update_policy_args("list"))
+        .await
+        .expect_err("nothing");
+    assert!(format!("{e:?}").contains("E_FORBIDDEN"), "{e:?}");
+    // An untrusted device of the admin lists but does not write.
+    let mut untrusted = client_caller("jane-laptop", TokenMode::Full);
+    if let Some(c) = untrusted.client.as_mut() {
+        c.person_id = Some(jane);
+        c.org_id = Some(acme);
+    }
+    untrusted.is_personal_owner = false;
+    let v = result_json(
+        &call(untrusted.clone(), update_policy_args("list"))
+            .await
+            .expect("lists"),
+    );
+    assert_eq!(v["policies"].as_array().unwrap().len(), 1);
+    let mut clear = update_policy_args("clear");
+    clear.component = Some("desktop".into());
+    assert!(
+        call(untrusted, clear.clone()).await.is_err(),
+        "untrusted writes nothing"
+    );
+    // The hub owner's own device: any org, named.
+    let owner = trusted(client_caller("laptop", TokenMode::Full));
+    let mut beta_set = update_policy_args("set");
+    beta_set.org_id = Some(beta);
+    beta_set.component = Some("agent".into());
+    beta_set.window = Some("02:00-04:00".into());
+    call(owner.clone(), beta_set)
+        .await
+        .expect("the owner's device");
+    let v = result_json(&call(owner, update_policy_args("list")).await.unwrap());
+    assert_eq!(v["policies"].as_array().unwrap().len(), 2);
+    let v = result_json(&call(admin.clone(), clear).await.expect("her own"));
+    assert_eq!(v["removed"], true);
 }

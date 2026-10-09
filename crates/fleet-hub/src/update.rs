@@ -148,6 +148,9 @@ async fn apply(
         all.entry(k.clone()).or_insert_with(|| v.clone());
     }
     let data_dir = config::resolve_data_dir(opts, &all);
+    // `update_now`'s trigger, consumed: fleet-hub-update.path fires again
+    // only on a new one.
+    fleet_updater::common::take_trigger(&data_dir.join(fleet_updater::common::UPDATE_NOW_FILE));
     unit_env.push(("FLEET_HUB_DATA_DIR".into(), data_dir.display().to_string()));
 
     let url = hub_url(&a, &all);
@@ -207,6 +210,7 @@ fn parse_track(s: &str) -> Result<Track, String> {
         "stable" => Ok(Track::Stable),
         "beta" => Ok(Track::Beta),
         "nightly" => Ok(Track::Nightly),
+        "dev" => Ok(Track::Dev),
         other => Err(format!(
             "--track {other:?}: expected stable, beta or nightly"
         )),

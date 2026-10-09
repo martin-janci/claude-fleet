@@ -43,8 +43,7 @@
   import { startWork, ticketBriefPreview, type TicketRow } from './trackers';
   import { startWorkMulti, siblingCandidates, multiStartNote, multiStartToast, shownSiblings } from './multi_start';
   import ProposedBy from './ProposedBy.svelte';
-  import PulseSteps from './PulseSteps.svelte';
-  import { sessionPulse } from './session_loaders';
+  import StartPulse from './StartPulse.svelte';
   import { creatingStart } from './session_starting';
   import { preselect, type ProposalLike } from './ai_proposal';
   import { HOST_PLACEMENT_FLOOR, hostProposal, proposeHostPlacement, recordHostPlacement } from './host_placement';
@@ -1180,6 +1179,8 @@
         effort: runsClaude && chosenEffort ? chosenEffort : null,
         profile: runsClaude && chosenProfile.trim() ? chosenProfile.trim() : null,
         agent: chosenKind === 'work' && chosenAgent !== 'claude' ? chosenAgent : null,
+        // Step 4.4: asked and confirmed here, so a hub does not refuse it.
+        ...(limitConfirmed ? { over_limit_ok: true } : {}),
       },
       createController.signal,
     );
@@ -1625,11 +1626,12 @@
       <p class="err">{error}</p>
     {/if}
     {#if busy && $creatingStart}
-      <!-- Redesign step 5.13: the create's worktree and tmux steps run
-           while it is in flight; the dialog then closes into the same Pulse
-           in the new session's conversation, on its agent step. -->
+      <!-- Redesign step 5.13: the backend reports the create's worktree,
+           tmux and agent steps (`start:progress`) while it is in flight; the
+           dialog then closes into the same Pulse in the new session's
+           conversation, which waits on the agent's first status. -->
       {@const c = $creatingStart}
-      <PulseSteps pulse={sessionPulse(null, c.kind)} title="Starting {c.name || 'a session'} on {c.host_alias}" testid="new-session-pulse" />
+      <StartPulse start={c} title="Starting {c.name || 'a session'} on {c.host_alias}" />
     {/if}
   </div>
 

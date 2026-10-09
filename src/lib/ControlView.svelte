@@ -10,7 +10,7 @@
   import AgentPanel from './AgentPanel.svelte';
   import TodayView from './TodayView.svelte';
   import ControlViewsPanel from './ControlViewsPanel.svelte';
-  import { controlViews, setViewsOpen } from './control_views';
+  import { controlViews, selectView, setViewsOpen } from './control_views';
   import { controlTab, type ControlTab } from './control';
   import { shortcutLabel } from './shortcuts';
   import { openSettingsAt } from './app_views';
@@ -54,6 +54,16 @@
         onclick={() => setViewsOpen(true)}>Views</button
       >
     {/if}
+    <!-- UX audit C3 (board MissionControl): Overview opens the fleet's
+         summary, the Today briefing view beside the chat. -->
+    <button
+      type="button"
+      class="btn btn--quiet overview"
+      data-testid="control-overview"
+      title="The fleet at a glance: the Today briefing beside the chat"
+      aria-pressed={$controlViews.open && $controlViews.active === 'today'}
+      onclick={() => selectView('today')}>Overview</button
+    >
     <button
       type="button"
       class="btn btn--quiet btn--icon settings"
@@ -139,7 +149,7 @@
     grid-template-columns: minmax(0, 1fr);
   }
   .split.with-views {
-    grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+    grid-template-columns: minmax(0, 1fr) minmax(var(--inspector-min), var(--list-w));
   }
   .body {
     min-height: 0;

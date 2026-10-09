@@ -117,7 +117,7 @@ describe('checkUiBlock', () => {
   });
 
   it('names what is wrong, where', () => {
-    expect(check({ kind: 'chart' })).toEqual({ ok: false, problems: ['`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error, setting'] });
+    expect(check({ kind: 'chart' })).toEqual({ ok: false, problems: ['`kind` must be one of report, steps, guide, callout, facts, choices, form, progress, results, error, setting, wizard'] });
     expect(checkUiBlock('{"spec": "fleet.ui/2", "kind": "callout", "body": "x"}')).toEqual({ ok: false, problems: ['`spec` must be "fleet.ui/1"'] });
     expect(check({ kind: 'callout', tone: 'loud', body: 'x' })).toEqual({ ok: false, problems: ['`tone` must be one of info, tip, success, warning, danger'] });
     expect(check({ kind: 'choices', options: [{ label: 'A' }] })).toEqual({ ok: false, problems: ['option 1: `prompt` is required'] });

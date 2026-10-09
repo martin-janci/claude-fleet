@@ -121,13 +121,14 @@
       label={JOB[busy]}
       done={busy === 'apply' ? ($syncProgress?.done ?? null) : null}
       total={busy === 'apply' ? ($syncProgress?.total ?? null) : null}
+      transfer={busy === 'apply'}
     />
   {:else if $lastSyncRun}
     <span class="last" data-testid="assets-last-sync">
       {summarizeRun($lastSyncRun)}
       {#if $lastSyncRun.auto}<Badge tone="muted" label="auto" title="SB6 ran this sync, not a person" />{/if}
       {#if blockedCount > 0}
-        <Badge tone="warn" glyph="⚠" label={`${blockedCount} blocked on a secret`} title="The last sync could not apply these for want of a secret" testid="assets-blocked" />
+        <Badge tone="warn" label={`${blockedCount} blocked on a secret`} title="The last sync could not apply these for want of a secret" testid="assets-blocked" />
       {/if}
     </span>
   {/if}

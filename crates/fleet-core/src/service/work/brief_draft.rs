@@ -395,6 +395,12 @@ pub async fn draft_into(
                 format!("the draft took longer than {HOST_TIMEOUT_SECS}s"),
             ))
         }
+        _ if crate::service::claude_print::run_signed_out(None, "", &out.stderr) => {
+            return Err(crate::service::claude_print::signed_out_error(
+                &plan.host_alias,
+                None,
+            ))
+        }
         _ => {
             return Err(IpcError::new(
                 codes::E_CLAUDE_CLI,
@@ -408,6 +414,12 @@ pub async fn draft_into(
     let text = match crate::service::claude_print::parse_envelope(&text) {
         Some(env) => {
             book(store, &plan, &model, org_id, Some(&env));
+            if crate::service::claude_print::run_signed_out(Some(&env), &env.result, &out.stderr) {
+                return Err(crate::service::claude_print::signed_out_error(
+                    &plan.host_alias,
+                    None,
+                ));
+            }
             if env.is_error || env.result.trim().is_empty() {
                 return Err(IpcError::new(
                     codes::E_CLAUDE_CLI,
@@ -418,6 +430,12 @@ pub async fn draft_into(
         }
         None => {
             book(store, &plan, &model, org_id, None);
+            if crate::service::claude_print::run_signed_out(None, &text, &out.stderr) {
+                return Err(crate::service::claude_print::signed_out_error(
+                    &plan.host_alias,
+                    None,
+                ));
+            }
             text
         }
     };

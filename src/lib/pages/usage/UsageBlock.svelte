@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from '../../kit/Icon.svelte';
   // The usage detail block for one Claude account (spec: "Showing usage" and
   // "Staleness and failure"). Header, the 5-hour and weekly rows, the
   // per-model disclosure, every status message from `statusMessage`, and the
@@ -107,7 +108,7 @@
     <ul class="messages">
       {#each generalLines as line, i (i)}
         <li class="msg tone-{line.tone}" data-testid="usage-message" data-kind={line.kind}>
-          {#if line.glyph}<span class="glyph" aria-hidden="true">{line.glyph}</span>{/if}
+          {#if line.glyph}<span class="glyph"><Icon name={line.glyph} size={12} /></span>{/if}
           {line.text}
         </li>
       {/each}
@@ -234,7 +235,7 @@
     gap: 0.2rem;
   }
   .msg { line-height: 1.35; }
-  .glyph { margin-right: 0.25rem; }
+  .glyph { display: inline-flex; vertical-align: -2px; margin-right: var(--space-1); }
   .tone-muted { color: var(--fg-muted); }
   .tone-warn { color: var(--usage-warn); }
   .tone-alarm { color: var(--usage-crit); }

@@ -416,6 +416,7 @@ fn sample_session_row() -> SessionRow {
         turn_outcome: None,
         proposals: Vec::new(),
         pending_form: None,
+        form_draft: None,
         parent_session_id: None,
         tags: vec!["review".into()],
         row_version: 0,

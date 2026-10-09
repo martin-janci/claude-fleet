@@ -145,6 +145,15 @@ start_hub() { # name port extra-args...
   return 1
 }
 stop_hub() { local pid; pid=$(cat "$ROOT/$1.pid"); kill -TERM "$pid"; wait "$pid"; STOP_RC=$?; rm -f "$ROOT/$1.pid"; }
+# with_timeout SECS CMD...: CMD, killed after SECS. macOS has no timeout(1)
+# (coreutils), so without it or Homebrew's gtimeout, perl's alarm stands in:
+# it survives the exec, and the SIGALRM ends CMD (exit 142).
+with_timeout() {
+  if command -v timeout >/dev/null; then timeout "$@"
+  elif command -v gtimeout >/dev/null; then gtimeout "$@"
+  else perl -e 'alarm shift; exec @ARGV or die "exec $ARGV[0]: $!\n"' "$@"
+  fi
+}
 # until TRIES CONDITION: poll every 0.2 s, at most TRIES times.
 until_ok() { local n=$1 _; for _ in $(seq "$n"); do eval "$2" && return 0; sleep 0.2; done; return 1; }
 
@@ -989,6 +998,22 @@ ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 check "a call for the host fails with E_AGENT_OFFLINE" 'echo "$c4" | grep -q E_AGENT_OFFLINE' "${c4:0:400}"
 check "and fails at once, not after a timeout (<5 s)" '[ "$ms" -lt 5000 ]' "took ${ms} ms"
 check "the tmux session survives the agent stopping" 'aenv tmux has-session -t agt2 2>/dev/null' "agt2 is gone"
+
+echo "== Contract 11 on the wire (hub C: the revision, and a Blocked reason)"
+# Redesign 2.6: what a revision-11 client reads. The ready frame names the
+# revision; agt2 (S2) is a Claude-shaped row (two real hooks above) on a host
+# whose agent just stopped, so once a probe finds the host down the row
+# carries `needs_attention { reason: host_down, state: blocked }` on the
+# wire, from the same facts /events follows.
+ready11=$(curl -sN -m 4 "http://127.0.0.1:$PC/events?kinds=session" -H "Host: $PUB" -H "Authorization: Bearer $TOKC" 2>/dev/null | sed -n '/^event: ready/{n;p;q;}')
+C11=$(printf '%s' "$ready11" | grep -oE '"contract": ?[0-9]+' | grep -oE '[0-9]+$')
+check "the /events ready frame names contract 11 or later" '[ -n "$C11" ] && [ "$C11" -ge 11 ]' "${ready11:0:300}"
+s2_row() { gtext "$(tool "$PC" "$PUB" "$TOKC" list_sessions "{\"host_alias\":\"$AH\",\"summary\":false}")" | jq -c --argjson id "${S2:-0}" '.[] | select(.id == $id)' 2>/dev/null; }
+tool "$PC" "$PUB" "$TOKC" probe_host "{\"alias\":\"$AH\"}" >/dev/null
+until_ok 75 '[ "$(s2_row | jq -r ".needs_attention.state // empty")" = blocked ]'
+row=$(s2_row)
+check "a session on the down host reads Blocked: host_down, state blocked" '[ "$(echo "$row" | jq -r .needs_attention.reason)" = host_down ] && [ "$(echo "$row" | jq -r .needs_attention.state)" = blocked ]' "${row:0:500}"
+check "and the row names its agent" '[ "$(echo "$row" | jq -r .agent)" = claude ]' "${row:0:500}"
 stop_hub c
 check "hub C SIGTERM exits 0" '[ "$STOP_RC" = 0 ]' "exit $STOP_RC"
 
@@ -1091,6 +1116,15 @@ out=$("$BIN" peer add --data-dir "$ROOT/d" --insecure "http://127.0.0.1:$PE" "$C
 check "peer add links hub D to hub E" '[ $rc -eq 0 ] && ! echo "$out" | grep -qE "[0-9a-f]{64}"' "$(redact "$out")"
 until_ok 75 '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected'
 check "the link connects within the supervisor rescan" '"$BIN" peer list --data-dir "$ROOT/d" | grep -q connected' "$(redact "$("$BIN" peer list --data-dir "$ROOT/d")")"
+# Orbit Fleet 11.5: the same link through the tools a person's device uses.
+# `link_peer` is the CLI's `peer add` (one implementation, service/peer/link.rs)
+# without `--insecure`: it dials https only, so on this loopback test it must
+# refuse the plain URL and write nothing; the link itself is linked above.
+# `list_peer_links` shows the link connected, never its token.
+lp=$(tool "$PD" "$PUB" "$TOKD" link_peer "{\"url\":\"http://127.0.0.1:$PE\",\"code\":\"ABCDEFGH\"}")
+check "link_peer refuses a plain-http hub (https only), naming why" 'echo "$lp" | grep -q E_INVALID && echo "$lp" | grep -q "https"' "$(redact "${lp:0:400}")"
+pls=$(gtext "$(tool "$PD" "$PUB" "$TOKD" list_peer_links '{}')")
+check "list_peer_links: one connected link to hub E's fleet, and no token" '[ "$(echo "$pls" | jq "[.[] | select(.revoked_at == null)] | length")" = 1 ] && echo "$pls" | grep -q connected && echo "$pls" | grep -q "$FE" && ! echo "$pls" | grep -qE "[0-9a-f]{64}"' "$(redact "${pls:0:400}")"
 
 t0=$(date +%s)
 sm=$(tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"federated ping\"}")
@@ -1151,10 +1185,33 @@ check "and /events" '[ "$(code -H "Host: $PUB" -H "Authorization: Bearer $PTOK" 
 
 stop_hub e
 tool "$PD" "$PUB" "$TOKD" send_message "{\"from_session_id\":$SD,\"to_session_id\":0,\"to_addr\":\"$FE/session/local/$NAME5\",\"body\":\"never\"}" >/dev/null
-out=$("$BIN" peer remove --data-dir "$ROOT/d" "$FE" 2>&1)
-check "peer remove fails the waiting message back" 'echo "$out" | grep -q "1 waiting message"' "$(redact "$out")"
+# Unlinked through the tool (11.5), not the CLI's `peer remove`: a peer
+# token may not, the master may, by the id list_peer_links answers.
+LID=$(gtext "$(tool "$PD" "$PUB" "$TOKD" list_peer_links '{}')" | jq -r '[.[] | select(.revoked_at == null and .role == "dialer")][0].id // empty')
+check "the live link's id is listed" '[ -n "$LID" ]' "$(redact "$(tool "$PD" "$PUB" "$TOKD" list_peer_links '{}' | head -c 400)")"
+up=$(tool "$PD" "$PUB" "$TOKD" unlink_peer "{\"id\":${LID:-0}}")
+check "unlink_peer fails the waiting message back" '[ "$(gtext "$up" | jq -r .failed_messages)" = 1 ]' "$(redact "${up:0:400}")"
+up2=$(tool "$PD" "$PUB" "$TOKD" unlink_peer "{\"id\":${LID:-0}}")
+check "and the link is gone: a second unlink_peer is E_NOTFOUND" 'echo "$up2" | grep -q E_NOTFOUND' "$(redact "${up2:0:400}")"
 hist=$(tool "$PD" "$PUB" "$TOKD" session_history "{\"session_id\":$SD}")
 check "the sender's timeline says message_undeliverable" 'echo "$hist" | grep -q message_undeliverable' "${hist:0:400}"
+
+echo "== Contract 11 on the wire (hub D: agent, origin, last_viewed_at, proposals)"
+# Redesign 2.6: SD is a shell session the master started, so its row says
+# which agent runs in it (`shell`) and who started it (`person`). Viewing it
+# stamps `last_viewed_at`. A decision proposal is written beside the running
+# hub (WAL) as the decision model's assist answer would be, and the row
+# carries it in `proposals`.
+sd_row() { gtext "$(tool "$PD" "$PUB" "$TOKD" list_sessions '{"summary":false}')" | jq -c --argjson id "${SD:-0}" '.[] | select(.id == $id)' 2>/dev/null; }
+row=$(sd_row)
+check "a session row carries agent and origin" '[ "$(echo "$row" | jq -r .agent)" = shell ] && [ "$(echo "$row" | jq -r .origin)" = person ]' "${row:0:500}"
+check "and no last_viewed_at or proposals before anything stamps them" '[ "$(echo "$row" | jq -r ".last_viewed_at // empty")" = "" ] && [ "$(echo "$row" | jq -r ".proposals // [] | length")" = 0 ]' "${row:0:500}"
+tv=$(tool "$PD" "$PUB" "$TOKD" touch_session_viewed "{\"session_id\":${SD:-0}}")
+row=$(sd_row)
+check "touch_session_viewed stamps last_viewed_at on the wire" '[ "$(echo "$row" | jq -r ".last_viewed_at // 0")" -ge "$t0" ]' "${tv:0:300} / ${row:0:500}"
+python3 -c 'import sqlite3,sys,time; c=sqlite3.connect(sys.argv[1]); c.execute("INSERT INTO decision_runs (at, feature, subject_kind, subject_id, mode, provider, question_version, answer, confidence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (int(time.time()), "work_link", "session", sys.argv[2], "assist", "jev", "e2e.v1", "PD-1", 0.9)); c.commit(); c.close()' "$ROOT/d/state.db" "${SD:-0}"
+row=$(sd_row)
+check "a live assist answer about it rides on the row as a proposal" '[ "$(echo "$row" | jq -r ".proposals[0].feature")" = work_link ] && [ "$(echo "$row" | jq -r ".proposals[0].value")" = PD-1 ] && [ "$(echo "$row" | jq -r ".proposals[0].confidence_pct")" = 90 ]' "${row:0:600}"
 stop_hub d
 
 echo "== Work graph (hub W: a fake Jira Cloud, a fake Claude, real tmux and git)"
@@ -1186,7 +1243,7 @@ echo "== Work graph (hub W: a fake Jira Cloud, a fake Claude, real tmux and git)
 #     is born (that needs a real Claude on the operator host).
 # Hub W runs with its own HOME and its own tmux server under $ROOT, like the
 # agent leg, so nothing here touches this account's ~/.claude or its tmux.
-out=$(FLEET_E2E_TRACKER_PORT=1 timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
+out=$(FLEET_E2E_TRACKER_PORT=1 with_timeout 20 "$BIN" serve --data-dir "$ROOT/refuse" --port "$(free_port)" 2>&1); rc=$?
 check "a hub built without the e2e feature refuses the fake-tracker override" '[ $rc -ne 0 ] && echo "$out" | grep -q "FLEET_E2E_TRACKER_PORT is set" && [ ! -e "$ROOT/refuse/state.db" ]' "rc=$rc $out"
 if [ -z "$WBIN" ] && [ "${CI:-}" = true ]; then
   # CI builds the e2e hub and passes it (ci.yml, hub-headless). A missing WBIN

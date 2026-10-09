@@ -53,9 +53,9 @@ Parameters: `confirm_nonce`, `force_partial`, `plan_id`
 
 ### `ask`
 
-Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
+Chat forms: `form` (fleet.form/1) opens a form in YOUR session's chat and waits ≤600 s for the person's answers (status answered | pending | declined | cancelled | expired; on pending call `wait`). `draft` shows it while written. `cancel` withdraws. A person's side: list, get, answer, decline. Spec: docs/forms.md.
 
-Parameters: `answer`, `cancel`, `decline`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
+Parameters: `answer`, `cancel`, `decline`, `draft`, `form`, `get`, `list`, `note`, `timeout_s`, `values`, `wait`, `why`
 
 ### `broadcast_prompt`
 
@@ -197,7 +197,7 @@ Parameters: `fresh_for`, `limit`, `mark_read`, `session_id`, `summary`, `unread_
 
 ### `install_agent`
 
-Install fleet-agent on a host this hub reaches over SSH, then move the host onto it. Returns the job at once (see agent_installs): target, download (checked against SHA256SUMS), start (token on stdin), connect (no hello in 120 s: back on SSH). Defaults: this hub's public URL and version. Hub only.
+Install fleet-agent on a host this hub reaches over SSH and move the host onto it. Returns the job at once (see agent_installs): target, download (SHA256SUMS-checked), start, connect (no hello in 120 s: back on SSH). Hub only.
 
 Parameters: `alias`, `hub_url`, `version`
 
@@ -329,7 +329,7 @@ Parameters: `agent`, `confirm_nonce`, `host_alias`, `name`, `project_id`, `promp
 
 Create a Claude Code tmux session on a host, in a project (and optional worktree, or a fresh one with new_worktree). Auto-clones the repo on remote hosts.
 
-Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `worktree_id`
+Parameters: `agent`, `base_branch`, `confirm_nonce`, `effort`, `friendly_name`, `host_alias`, `kind`, `model`, `name`, `new_worktree`, `over_limit_ok`, `profile`, `project_id`, `resume_claude_session_id`, `start_command`, `start_token`, `worktree_id`
 
 ### `new_shell_session`
 
@@ -767,9 +767,9 @@ Settings proposals waiting for review, each with the key's value now, and can_wr
 
 ### `shell_terminals`
 
-A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
+A session's shell terminals: tmux sessions <name>--sh<N> (N 1-9) beside its agent, started in the agent's directory (at=home: home) and never listed as sessions. action=list (default), open (n, or the lowest free) or close (n). Closing one never stops the session. Returns the open terminals.
 
-Parameters: `action`, `n`, `session_id`
+Parameters: `action`, `at`, `n`, `session_id`
 
 ### `spawn_review`
 
@@ -797,9 +797,15 @@ Parameters: `id`
 
 ### `update_admin`
 
-Update admin, master only: pin a version (below installed = rollback), unpin, refresh the channel, rollout_* in waves, or one org's policy (set_policy / clear_policy). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
+Update admin, master only: pin a version (below installed = rollback), unpin, update_now, refresh the channel, rollout_* in waves, or an org's policy (set_policy / clear_policy). E_INVALID, E_CONFLICT, E_UPDATE_UNVERIFIED.
 
 Parameters: `action`, `component`, `halt_failure_ratio`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `target`, `version`, `waves`, `window`
+
+### `update_policy`
+
+An org's update policy from a person's device: list, set or clear its mode, floor, window and pin per component. The hub owner's device for any org, an org admin's for theirs. E_FORBIDDEN, E_INVALID.
+
+Parameters: `action`, `component`, `mandatory`, `minimum`, `mode`, `org_id`, `reason`, `version`, `window`
 
 ### `update_status`
 
@@ -1129,6 +1135,8 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hosts::save_host_setup`
 - `commands::hosts::discard_host_setup`
 - `commands::hosts::run_host_setup_check`
+- `commands::hosts::install_agent`
+- `commands::hosts::agent_installs`
 - `commands::hosts::probe_ssh_alias`
 - `commands::hosts::remove_host`
 - `commands::hosts::merge_host`
@@ -1160,6 +1168,7 @@ Frontend commands registered in `src/lib.rs`:
 - `commands::hub::hub_disconnect`
 - `commands::hub::hub_connection`
 - `commands::hub::hub_retry_now`
+- `commands::hub::offline_local_sessions`
 - `commands::hub::hub_stranded_token`
 - `commands::hub::report_client_error`
 - `commands::onboarding::check_local_prereqs`

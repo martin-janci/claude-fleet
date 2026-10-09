@@ -224,6 +224,30 @@ async fn the_first_pass_downloads_what_git_would_track_and_nothing_else() {
     assert_eq!(again.state, "synced");
 }
 
+/// Redesign 8.1: Pause all stops the tick before it starts a pass, so an
+/// edit on the host stays there until the pause lifts.
+#[tokio::test]
+async fn pause_all_stops_the_tick() {
+    let f = fixture();
+    f.enable().await;
+    write(&f.remote, "README.md", "edited on the host\n");
+    crate::service::settings::set(
+        &f.engine.store.lock().unwrap(),
+        crate::service::settings::AUTOMATION_PAUSED,
+        "true",
+    )
+    .unwrap();
+    assert!(!f.engine.tick(), "no pass while paused");
+    assert_eq!(read(&f.local, "README.md").as_deref(), Some("hello\n"));
+    crate::service::settings::set(
+        &f.engine.store.lock().unwrap(),
+        crate::service::settings::AUTOMATION_PAUSED,
+        "false",
+    )
+    .unwrap();
+    assert!(f.engine.tick(), "the tick runs again once the pause lifts");
+}
+
 #[tokio::test]
 async fn edits_deletions_and_new_files_travel_both_ways() {
     let f = fixture();

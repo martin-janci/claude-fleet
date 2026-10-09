@@ -1,31 +1,24 @@
 name: nightly
 
-# The `nightly` update track (update-channel design §5, slice S2b; owner's
-# answer to §13.3): every green `main` push gets the hub image and the
-# agent/hub tarballs, at most one every two hours, and once a day the newest
-# green `main` also gets the desktop bundles. Each is a real, published
-# pre-release cut by scripts/cut-nightly.sh and built by the SAME release.yml
-# and hub-image.yml as a stable release, dispatched at its tag; release.yml's
-# `channel` job then lists it on `nightly.json`. Older nightlies are pruned
-# (releases and tags), keeping the newest 12 per-push and 3 daily ones.
+# The `dev` and `nightly` update tracks (update-channel design §5; owner's
+# answers to §13.3 and, later, "a dev track from every push"): every green
+# `main` push is cut as a real, published pre-release with EVERY leg, the
+# desktop bundles included, by scripts/cut-nightly.sh, and built by the SAME
+# release.yml and hub-image.yml as a stable release, dispatched at its tag.
+# release.yml's `channel` job lists it on `dev.json`, and on `nightly.json`
+# too when nightly last moved two hours ago or more
+# (scripts/update-channels.sh). Older ones are pruned (releases and tags):
+# the newest 15, plus whatever nightly.json still lists.
 #
 # The tag points at a release commit that is never pushed to any branch: main
-# carries no version bump for a nightly.
+# carries no version bump for a dev release.
 
 on:
   workflow_run:
     workflows: [ci]
     types: [completed]
     branches: [main]
-  schedule:
-    # The daily desktop nightly.
-    - cron: '23 3 * * *'
   workflow_dispatch:
-    inputs:
-      desktop:
-        description: Build the desktop bundles too
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -37,7 +30,7 @@ concurrency:
 
 jobs:
   cut:
-    # A push's CI run that passed, or the schedule, or a person.
+    # A push's CI run that passed, or a person.
     if: >-
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
@@ -46,40 +39,26 @@ jobs:
     outputs:
       version: ${{ steps.cut.outputs.version }}
     steps:
-      - name: Which commit, and is it due?
+      - name: Which commit?
         id: pick
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
-          INPUT_DESKTOP: ${{ inputs.desktop }}
         run: |
           set -euo pipefail
-          desktop=false
           if [ "$EVENT" = workflow_run ]; then
             sha="$RUN_SHA"
-            # At most one per-push nightly every two hours: the channel and
-            # the hub keep the newest 20, and a desktop must still find the
-            # day's desktop build among them.
-            last="$(gh release list --limit 40 --json tagName,createdAt \
-              --jq '[.[] | select(.tagName | test("-dev\\.[0-9]+\\.g"))][0].createdAt // ""')"
-            if [ -n "$last" ] && [ $(( $(date +%s) - $(date -d "$last" +%s) )) -lt 7200 ]; then
-              echo "The last per-push nightly is from $last; not due yet."
-              echo "due=false" >>"$GITHUB_OUTPUT"
-              exit 0
-            fi
           else
-            # The newest main commit whose CI push run passed.
+            # A person: the newest main commit whose CI push run passed.
             sha="$(gh run list --workflow ci.yml --branch main --event push --status success \
               --limit 1 --json headSha --jq '.[0].headSha // ""')"
             [ -n "$sha" ] || { echo "::error::no green CI run on main"; exit 1; }
-            if [ "$EVENT" = schedule ] || [ "$INPUT_DESKTOP" = true ]; then desktop=true; fi
           fi
           {
             echo "due=true"
             echo "sha=$sha"
-            echo "desktop=$desktop"
           } >>"$GITHUB_OUTPUT"
       - if: steps.pick.outputs.due == 'true'
         uses: actions/checkout@v4
@@ -88,41 +67,42 @@ jobs:
           fetch-depth: 0
       - if: steps.pick.outputs.due == 'true'
         uses: dtolnay/rust-toolchain@1.99.0
-      - name: Cut the nightly
+      - name: Cut the dev release
         if: steps.pick.outputs.due == 'true'
         id: cut
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHA: ${{ steps.pick.outputs.sha }}
-          DESKTOP: ${{ steps.pick.outputs.desktop }}
         run: |
           set -euo pipefail
-          args=()
-          if [ "$DESKTOP" = true ]; then args+=(--desktop); fi
-          version="$(scripts/cut-nightly.sh "$SHA" "${args[@]}")"
+          # Every leg, the desktop too: a dev release is the whole product.
+          version="$(scripts/cut-nightly.sh "$SHA" --desktop)"
           echo "version=$version" >>"$GITHUB_OUTPUT"
-          echo "### nightly $version" >>"$GITHUB_STEP_SUMMARY"
+          echo "### dev $version" >>"$GITHUB_STEP_SUMMARY"
 
-  # Releases and tags of older nightlies. The channel lists only what it keeps
-  # (fleet-release channel-add trims it), so a pruned release is one nothing
-  # points at any more.
+  # Releases and tags of older dev releases. The channels list only what they
+  # keep (fleet-release channel-add trims them to 15), so a pruned release is
+  # one nothing points at any more — except what nightly.json still lists,
+  # which spans more than the newest 15 pushes and is kept.
   prune:
     needs: cut
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Delete all but the newest nightlies
+      - name: Delete all but the newest dev releases and nightly's
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          gh api "repos/$GH_REPO/contents/nightly.json?ref=update-channels" --jq .content 2>/dev/null \
+            | base64 -d 2>/dev/null | jq -r '.releases[].version | "v" + .' >keep.txt || true
           gh release list --limit 200 --json tagName,createdAt \
             --jq 'sort_by(.createdAt) | reverse | .[].tagName' >tags.txt
-          grep -E -- '-dev\.[0-9]+\.g[0-9a-f]+$' tags.txt | tail -n +13 >old.txt || true
-          grep -E -- '-dev\.[0-9]+\.desktop\.g[0-9a-f]+$' tags.txt | tail -n +4 >>old.txt || true
+          grep -E -- '-dev\.[0-9]+\.(desktop\.)?g[0-9a-f]+$' tags.txt | tail -n +16 >old.txt || true
           while read -r tag; do
             [ -n "$tag" ] || continue
+            if grep -qxF -- "$tag" keep.txt; then continue; fi
             echo "pruning $tag"
             gh release delete "$tag" --yes --cleanup-tag || echo "::warning::could not prune $tag"
           done <old.txt

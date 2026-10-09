@@ -7,7 +7,7 @@ import { applyTheme, theme } from './theme';
 import { motionPref } from './motion';
 
 afterEach(() => {
-  uiDensity.set('comfortable');
+  uiDensity.set('compact');
   applyTheme('auto');
   motionPref.set('system');
 });
@@ -47,12 +47,12 @@ describe('AppearanceSettings', () => {
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
   });
 
-  it('starts on Comfortable (0.5.4 rows) and persists Compact', async () => {
+  it('starts on Compact (the design row, UX audit L1) and persists Comfortable', async () => {
     render(AppearanceSettings);
-    expect(screen.getByTestId('appearance-density-comfortable').getAttribute('aria-pressed')).toBe('true');
-    await fireEvent.click(screen.getByTestId('appearance-density-compact'));
-    expect(get(uiDensity)).toBe('compact');
-    expect(localStorage.getItem('cf:pref:ui.density')).toBe('"compact"');
+    expect(screen.getByTestId('appearance-density-compact').getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByTestId('appearance-density-comfortable'));
+    expect(get(uiDensity)).toBe('comfortable');
+    expect(localStorage.getItem('cf:pref:ui.rowDensity')).toBe('"comfortable"');
   });
 
   it('picks Motion and persists it, System first', async () => {

@@ -95,8 +95,9 @@ impl Opts {
             "stable" => Ok(Track::Stable),
             "beta" => Ok(Track::Beta),
             "nightly" => Ok(Track::Nightly),
+            "dev" => Ok(Track::Dev),
             other => Err(format!(
-                "--track must be stable | beta | nightly, got {other:?}"
+                "--track must be stable | beta | nightly | dev, got {other:?}"
             )),
         }
     }

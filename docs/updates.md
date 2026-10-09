@@ -17,9 +17,11 @@ and the phones. Design and rationale:
 > channel directly (slice S3). The Docker hub updates itself through
 > `fleet-updater` (slice S6, below): opt-in, and under the default
 > `update.hub.mode=notify` it installs only what an operator pins. The
-> desktop updates itself (slice S7, below). The phone installs nothing yet
-> (S8). A hub that cannot verify a channel still offers nothing. `nightly` is published by
-> `nightly.yml` (slice S2b).
+> desktop updates itself (slice S7, below). The phone offers what its hub
+> decides and installs once its person confirms (S8). The agents and a hub
+> without Docker update themselves from a timer (S9). A hub that cannot
+> verify a channel still offers nothing. `nightly` and `dev` are published
+> by `nightly.yml`.
 
 ## Who decides what
 
@@ -44,7 +46,8 @@ A desktop with no hub reads the channel itself (Git mode) and applies its own
 |-------|-----------------|
 | `stable` | `vX.Y.Z` releases |
 | `beta` | `-rc.N` release candidates, and every stable release too |
-| `nightly` | green `main` commits: the hub image and the agent/hub tarballs as `X.Y.Z-dev.N.g<sha>` (at most one every two hours), and once a day every component, the desktop too, as `X.Y.Z-dev.N.desktop.g<sha>`. A desktop on `nightly` is offered the newest one that carries its bundle. The newest 15 are kept |
+| `nightly` | the `dev` releases, at most one every two hours. The newest 15 are kept |
+| `dev` | every green `main` push, every component (the desktop too), as `X.Y.Z-dev.N.desktop.g<sha>`, minutes after it lands. The newest 15 are kept. A client older than the `dev` track cannot read a decision on it: put only current builds on `dev` |
 
 ## What the hub answers
 
@@ -89,6 +92,23 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   `update_status.last_refresh` says why it failed.
   `FLEET_UPDATE_CHANNEL_URL` points the hub at a mirror. It changes only
   where the documents come from: what is trusted is still the signature.
+- **Update now.** `update_admin { action: update_now, component, target?,
+  version? }` installs at once, whatever the mode: a mandatory pin to
+  `version` (default: the channel's recommended release) for the component
+  or one target, and every updater that can be woken is. A target with such
+  a pin to reach asks again within two minutes instead of hours.
+  - **Agents:** the hub runs one line through each agent (every agent host,
+    or the one named), which drops `update-now` in the agent's runtime
+    directory; `fleet-agent-update.path` (from `install --auto-update`)
+    starts a pass. The answer lists each host as `poked`, or why not (an
+    offline agent installs on its next timer pass; an agent installed
+    before this needs `install --auto-update` again for the trigger).
+  - **The hub:** `<data_dir>/update-now`. `fleet-updater`'s loop takes it
+    within five seconds; `fleet-hub-update.path` starts `fleet-hub update
+    apply`.
+  - **Desktops and phones:** the decision moves to `update_required`
+    (`update:decision` reaches them at once), so they show the required
+    banner or card; a person still installs.
 - **Stage a rollout.** `update_admin { action: rollout_start, component,
   version, waves?, halt_failure_ratio? }` opens `version` (a release the
   verified channel lists and permits) to growing waves of the component's
@@ -114,8 +134,10 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   target asks, checked against the sha256 and size in the signed manifest
   (a mismatch is `E_UPDATE_UNVERIFIED` and nothing is kept), kept under
   `<data_dir>/update-mirror/`, and dropped once no kept manifest lists it.
-  The agent's and the bare hub's own updaters try the mirror first and
-  GitHub after it; the desktop and the phone still fetch from GitHub. A
+  The agent's and the bare hub's own updaters, and a paired desktop, try the
+  mirror first and GitHub after it (the desktop checks the bundle's sha256
+  and size, then hands it to the updater plugin from loopback, which checks
+  its signature as ever); the phone does too. A
   container image is never mirrored: it is pulled by digest.
 - **One org's own policy.** `update_admin { action: set_policy, org_id,
   component, mode?, minimum?, window?, version?, mandatory? }` overrides the
@@ -126,8 +148,12 @@ that the hub refuses with `E_HUB_CONTRACT` can still ask what to install.
   a target's own pin still wins over it, and it wins over the
   component-wide pin. Fields left out keep the fleet's value; a new
   `set_policy` replaces the row whole. `clear_policy { org_id, component }`
-  removes it. `update_status.policies` lists the rows. Only the master sets
-  them.
+  removes it. `update_status.policies` lists the rows. The master sets
+  them with `update_admin`; from a person's device, `update_policy {
+  action: list | set | clear, org_id?, component, … }` does the same for
+  the org that device administers (an org admin's device, its own org; the
+  hub owner's own device, any org named), from a trusted `full` device for
+  `set` and `clear`. Such a row records `set_by: device:<name>`.
 - **The transition log.** Every phase a target reports is also kept in
   `update_events` (90 days, the newest 200 per target) for the rollout
   view of slice S4b. Nothing reads it out yet: no tool or route exposes it.
@@ -380,7 +406,9 @@ sudo fleet-agent install --hub https://fleet.example.com --token-file - --auto-u
 ```
 
 `--auto-update` adds `fleet-agent-update.timer` (every six hours, spread
-over half an hour) and the oneshot `fleet-agent-update.service` it starts;
+over half an hour), `fleet-agent-update.path` (a pass at once when the
+hub's `update_now` asks) and the oneshot `fleet-agent-update.service` they
+start;
 the pass runs outside `fleet-agent.service`, so restarting the agent does
 not stop it halfway. One pass:
 
@@ -414,8 +442,8 @@ It asks the running hub with an `updater` token, as `fleet-updater` does:
 ```bash
 sudo -u fleet env FLEET_HUB_DATA_DIR=/var/lib/fleet-hub fleet-hub pair --name updater --mode updater
 sudo fleet-hub update pair '<the URL it printed>'
-sudo cp deploy/hub/fleet-hub-update.service deploy/hub/fleet-hub-update.timer /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.timer
+sudo cp deploy/hub/fleet-hub-update.{service,timer,path} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now fleet-hub-update.timer fleet-hub-update.path
 ```
 
 Releases live in `/usr/local/lib/fleet-hub/<version>/`, and

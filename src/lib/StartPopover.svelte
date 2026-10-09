@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Icon from './kit/Icon.svelte';
   // The start popover (task → session spec §2.2): where a start of this task
   // would land — repository, host, branch, brief — and what is in the way,
   // each conflict with its choice, before anything is made. Every change of
@@ -377,7 +378,7 @@
     <ul class="conflicts" data-testid="start-popover-conflicts">
       {#each conflicts as c, i (i)}
         <li class="conflict conflict--{c.kind}" data-kind={c.kind}>
-          <span class="warn" aria-hidden="true">⚠</span>
+          <span class="warn"><Icon name="warning" size={12} /></span>
           <span>
             {c.message}
             {#if c.kind === 'live_session'}

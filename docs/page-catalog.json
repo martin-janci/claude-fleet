@@ -795,7 +795,7 @@
           "edit": "jev",
           "help": "Let this org's redacted prompts and ticket titles go to TypeSafe's decision model when Decisions (Jev) is on. Only ids and numbers are recorded; an answer is at most a suggestion.",
           "id": "jev_allowed",
-          "label": "Allow Jev (decision model) for this organisation's work",
+          "label": "Allow Jev (decision model) for {title}'s work",
           "on_off": true,
           "type": "bool"
         },
@@ -3364,7 +3364,8 @@
         "options": [
           "stable",
           "beta",
-          "nightly"
+          "nightly",
+          "dev"
         ],
         "type": "choice"
       },
@@ -3812,6 +3813,42 @@
         "type": "choice"
       },
       "label": "Jev: PR triage",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.main_ticket",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: main ticket",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
+      "default_widget": "select",
+      "key": "decide.jev.tracker_duplicate",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: local task duplicates a ticket",
       "widgets": [
         "select",
         "radio",
