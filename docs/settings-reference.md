@@ -197,6 +197,7 @@ Every operator setting fleet stores, generated from the registry in `crates/flee
 | `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.work_placement` | `off` | `off` / `shadow` / `assist` | Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.related_session` | `off` | `off` / `shadow` / `assist` | Noticing another of your sessions working on the same thing. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |

@@ -550,6 +550,9 @@ pub const DECIDE_JEV_DUPLICATE: &str = "decide.jev.duplicate";
 /// `work_placement`'s mode (proposing a Work-view group for a task nobody
 /// placed, K5).
 pub const DECIDE_JEV_WORK_PLACEMENT: &str = "decide.jev.work_placement";
+/// `related_session`'s mode (noticing another session of the same person
+/// on the same work, N1).
+pub const DECIDE_JEV_RELATED_SESSION: &str = "decide.jev.related_session";
 /// What a feature's mode may be: the store's `decision_runs.mode` words
 /// (one list; `decide::FeatureMode` and the TS mirror are tied to it by
 /// `the_mode_vocabulary_is_the_stores`). `auto` is not offered: no feature
@@ -1349,6 +1352,15 @@ pub const SPECS: &[Spec] = &[
         Kind::Choice(DECIDE_MODES),
         "Jev: task group",
         "Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests.",
+    )
+    .tags(&[Tag::Experimental, Tag::Ai])
+    .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
+    Spec::new(
+        DECIDE_JEV_RELATED_SESSION,
+        "off",
+        Kind::Choice(DECIDE_MODES),
+        "Jev: related session",
+        "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
     )
     .tags(&[Tag::Experimental, Tag::Ai])
     .labels(&[("off", "Off"), ("shadow", "Shadow: record only"), ("assist", "Assist: suggest")]),
@@ -2594,6 +2606,7 @@ mod tests {
         assert_eq!(resolve(DECIDE_JEV_SIBLING_REPOS, None), "off");
         assert_eq!(resolve(DECIDE_JEV_DUPLICATE, None), "off");
         assert_eq!(resolve(DECIDE_JEV_WORK_PLACEMENT, None), "off");
+        assert_eq!(resolve(DECIDE_JEV_RELATED_SESSION, None), "off");
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "assist").is_ok());
         assert!(validate(DECIDE_JEV_SIBLING_REPOS, "auto").is_err());
         assert_eq!(resolve(DECIDE_JEV_HOST_PLACEMENT, None), "off");

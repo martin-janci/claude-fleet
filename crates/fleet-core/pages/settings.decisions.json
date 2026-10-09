@@ -74,6 +74,11 @@
         },
         {
           "type": "field",
+          "key": "decide.jev.related_session",
+          "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged."
+        },
+        {
+          "type": "field",
           "key": "decide.jev.unassigned"
         }
       ]

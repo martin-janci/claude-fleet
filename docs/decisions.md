@@ -526,6 +526,33 @@ Code: `service/decide/work_placement.rs`, `label_proposals` in the Work
 view's graph, `record_place` in `service/work/structure.rs`; card K5 in
 the test map.
 
+## `related_session` — another session on the same work (N1)
+
+On a person's prompt in a session's current conversation (after three
+turns, with a kept first prompt; never the operator), when
+`decide.jev.related_session` is on, Jev is asked one Choice: which of the
+same person's other live sessions in the same org works on the same thing,
+or `none`. Another person's session is never a candidate (its prompts are
+theirs), nor is one sharing this session's worktree (Related sessions lists
+those already); at most 8, most recently active first. With none, nothing
+is asked.
+
+- **What is sent.** Each session's first prompt, cut to 400 characters and
+  redacted. No name, host or path. Options are `s<id>` and `none`.
+- **Shadow.** Asked off the hook's path and only recorded, with `none` as
+  the baseline (nothing notices this today).
+- **Assist.** A usable answer (at least 50%, a session) stays on the row as
+  its `related_session` proposal: in the New layout, its Details list the
+  other session under Related sessions as *Same work? · Proposed by Jev ·
+  N%*. Nothing is stopped, merged or moved.
+- **Asked once per input.** A new candidate (another session starts) is a
+  new input; the same input reuses the decided run.
+- **Follow-up.** None yet: no person's act answers it until Tidy-up's
+  Duplicates offers one. A shadow answer is never marked.
+
+Code: `service/decide/related_session.rs`, called beside `work_link` in the
+prompt hook (`mcp/hooks.rs`); card N1 in the redesign plan.
+
 ## Settings
 
 <!-- BEGIN GENERATED: settings decide. -->
@@ -541,6 +568,7 @@ the test map.
 | `decide.jev.quick_answer` | `off` | `off` / `shadow` / `assist` | Showing the likely option first in an agent's question or a chat form. Never on a push, a permission or a risky option. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.duplicate` | `off` | `off` / `shadow` / `assist` | Flagging a proposed task that may duplicate an existing one. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.work_placement` | `off` | `off` / `shadow` / `assist` | Proposing a Work-view group for a new task no rule or person placed. Shadow only records; assist suggests. Experimental. |
+| `decide.jev.related_session` | `off` | `off` / `shadow` / `assist` | Noticing another of your sessions working on the same thing. Shadow only records; assist suggests. Experimental. |
 | `decide.jev.unassigned` | `false` | on / off | Also send sessions and tickets that belong to no organisation. Experimental. Asks to confirm. |
 | `decide.jev.timeout_ms` | `1500` | 100–30000 ms | How long one call may take. A call is never retried. |
 | `decide.jev.breaker_failures` | `5` | 1–100 | Failed calls in a row that open the circuit breaker. |

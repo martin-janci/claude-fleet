@@ -46,6 +46,9 @@ pub mod jev;
 pub mod quick_answer;
 #[cfg(test)]
 mod quick_answer_tests;
+pub mod related_session;
+#[cfg(test)]
+mod related_session_tests;
 pub mod sibling_repos;
 #[cfg(test)]
 mod sibling_repos_tests;
@@ -109,10 +112,12 @@ pub enum Feature {
     Duplicate,
     /// Proposing a Work-view group for a task nobody placed (K5).
     WorkPlacement,
+    /// Noticing another session of the same person on the same work (N1).
+    RelatedSession,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 8] = [
+    pub const ALL: [Feature; 9] = [
         Feature::StatusMap,
         Feature::WorkLink,
         Feature::StartProject,
@@ -121,6 +126,7 @@ impl Feature {
         Feature::QuickAnswer,
         Feature::Duplicate,
         Feature::WorkPlacement,
+        Feature::RelatedSession,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -133,6 +139,7 @@ impl Feature {
             Feature::QuickAnswer => "quick_answer",
             Feature::Duplicate => "duplicate",
             Feature::WorkPlacement => "work_placement",
+            Feature::RelatedSession => "related_session",
         }
     }
 
@@ -151,6 +158,7 @@ impl Feature {
             Feature::QuickAnswer => settings::DECIDE_JEV_QUICK_ANSWER,
             Feature::Duplicate => settings::DECIDE_JEV_DUPLICATE,
             Feature::WorkPlacement => settings::DECIDE_JEV_WORK_PLACEMENT,
+            Feature::RelatedSession => settings::DECIDE_JEV_RELATED_SESSION,
         }
     }
 }

@@ -3603,6 +3603,24 @@
       ]
     },
     {
+      "default_widget": "select",
+      "key": "decide.jev.related_session",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: related session",
+      "widgets": [
+        "select",
+        "radio",
+        "readonly"
+      ]
+    },
+    {
       "default_widget": "switch",
       "key": "decide.jev.unassigned",
       "kind": {

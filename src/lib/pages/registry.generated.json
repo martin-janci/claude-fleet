@@ -1921,6 +1921,46 @@
       "value": "off"
     },
     {
+      "ai": "suggest",
+      "danger": {
+        "level": "none"
+      },
+      "default": "off",
+      "help": "Noticing another of your sessions working on the same thing. Shadow only records; assist suggests.",
+      "key": "decide.jev.related_session",
+      "kind": {
+        "options": [
+          "off",
+          "shadow",
+          "assist"
+        ],
+        "type": "choice"
+      },
+      "label": "Jev: related session",
+      "modified": false,
+      "option_labels": [
+        [
+          "off",
+          "Off"
+        ],
+        [
+          "shadow",
+          "Shadow: record only"
+        ],
+        [
+          "assist",
+          "Assist: suggest"
+        ]
+      ],
+      "restart": "none",
+      "tags": [
+        "experimental",
+        "ai"
+      ],
+      "unit": "none",
+      "value": "off"
+    },
+    {
       "ai": "never",
       "danger": {
         "level": "confirm",
@@ -3276,6 +3316,11 @@
             {
               "hint": "Proposes a group for a new task nothing placed; you still place it.",
               "key": "decide.jev.work_placement",
+              "type": "field"
+            },
+            {
+              "hint": "Marks another of your sessions that works on the same thing; nothing is stopped or merged.",
+              "key": "decide.jev.related_session",
               "type": "field"
             },
             {
