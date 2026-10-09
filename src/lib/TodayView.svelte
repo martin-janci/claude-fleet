@@ -59,9 +59,14 @@
   // code, never by message text.
   const HUB_HAS_NO_TODAY = ['E_INVALID', 'E_FORBIDDEN', 'E_HUB_PROTOCOL'];
 
+  // Only the newest refresh lands: an older, slower answer would put
+  // stale counts back over the newer ones (review r07).
+  let refreshSeq = 0;
   async function refresh() {
+    const mine = ++refreshSeq;
     loading = true;
     const r = await loadToday(localMidnight(now()));
+    if (mine !== refreshSeq) return;
     loading = false;
     if (r.ok) {
       today = r.value;

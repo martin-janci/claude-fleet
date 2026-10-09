@@ -95,6 +95,30 @@ describe('last-session persistence', () => {
     expect(localStorage.getItem('cf:pref:session.last')).toBe(JSON.stringify(null));
   });
 
+  it('a rename that arrives only as an event moves the remembered session with it (review r07)', () => {
+    const s = makeSession({ id: 1, tmux_name: 'old-name' });
+    sessions.set([s]);
+    selectSession(s);
+    // Renamed elsewhere (the agent's rename_session): same id, new name.
+    sessions.set([{ ...s, tmux_name: 'new-name' }]);
+    expect(get(selectedSession)?.tmux_name).toBe('new-name');
+    selectSession(null);
+    restoreLastSession();
+    expect(get(selectedSession)?.tmux_name).toBe('new-name');
+  });
+
+  it("a rename does not take over a pref that names another session (a pop-out's selection)", () => {
+    const main = makeSession({ id: 1, tmux_name: 'main-one' });
+    const pop = makeSession({ id: 2, tmux_name: 'pop-one' });
+    sessions.set([main, pop]);
+    selectSession(main);
+    selectSession(pop, { remember: false });
+    sessions.set([main, { ...pop, tmux_name: 'pop-renamed' }]);
+    expect(localStorage.getItem('cf:pref:session.last')).toBe(
+      JSON.stringify({ host_alias: 'mefistos', tmux_name: 'main-one' }),
+    );
+  });
+
   it('restoreLastSession is a no-op when nothing was remembered', () => {
     restoreLastSession();
     expect(get(selectedSession)).toBeNull();
