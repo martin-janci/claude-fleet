@@ -20,6 +20,8 @@ import { sessionActionRequest } from './lib/session_actions';
 import { link, task } from './lib/work_view_fixture';
 import type { WorkTreePage } from './lib/work_view';
 import { activeHintId, hintDef, markSeen, resetHints } from './lib/hints';
+import { selectSessionExplicitly } from './lib/selection';
+import { session } from './lib/hosts_fixture';
 import { onboardingWelcomed } from './lib/onboarding';
 
 const OVERLAYS = ['hosts-overlay', 'assets-overlay', 'board-overlay', 'accounts-overlay', 'control-overlay', 'automation-overlay'];
@@ -277,6 +279,19 @@ describe('App: the rail and the Accounts page (steps 3.2, 4.1)', () => {
     await fireEvent.keyDown(document.body, { key: 'Escape' });
     expect(get(destination)).toBe('session');
     expect(terminalSlot(container)).toBe(term);
+  });
+
+  it('opening a session leaves every fleet page for it (review r07)', async () => {
+    uiLayout.set('new');
+    const { container, getByTestId } = render(App);
+    const row = session('mefistos', 'dev-open');
+    for (const page of ['accounts', 'control', 'automation']) {
+      await fireEvent.click(getByTestId(`rail-${page}`));
+      expect(openOverlays(container)).toEqual([`${page}-overlay`]);
+      selectSessionExplicitly(row);
+      await waitFor(() => expect(openOverlays(container)).toEqual([]));
+      expect(get(destination)).toBe('session');
+    }
   });
 
   it('Toolkit (step 3.16) is the Assets screen, from the rail and from every old entry point', async () => {
