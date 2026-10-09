@@ -114,6 +114,10 @@ struct PartialRecord {
     source_transcript_path: Option<String>,
     to_turn_seq: Option<i64>,
     to_last_turn_at: Option<i64>,
+    /// Whether the move was asked to keep its source (`keep_source`). Finish
+    /// honours it: a kept source is never killed. `None` for a partial
+    /// written before the field existed, which kept nothing.
+    kept_source: Option<bool>,
 }
 
 /// Walk `events` newest-first and return the newest unresolved partial:
@@ -414,7 +418,7 @@ async fn finish(
             stored_transcript: partial.source_transcript_path.as_deref(),
             copied: Located { size, mtime, path },
             transcript_bytes: size,
-            keep_source: false,
+            keep_source: partial.kept_source.unwrap_or(false),
             extra_detail: serde_json::json!({ "finished_from_partial": true }),
         },
         store,
@@ -573,6 +577,14 @@ mod tests {
     /// `unresolved = false` a later `session_moved` marks it already resolved.
     /// Uses the same `Store` calls as `mod.rs`'s `fixture_on`.
     fn partial_fixture(unresolved: bool) -> (Mutex<Store>, i64, i64) {
+        partial_fixture_with(unresolved, serde_json::json!({}))
+    }
+
+    /// [`partial_fixture`] with `extra` merged into the partial's detail.
+    fn partial_fixture_with(
+        unresolved: bool,
+        extra: serde_json::Value,
+    ) -> (Mutex<Store>, i64, i64) {
         let s = Store::open_in_memory().unwrap();
         for h in ["alpha", "beta"] {
             s.insert_host(h, None).unwrap();
@@ -632,8 +644,12 @@ mod tests {
             "source_transcript_path": SRC_TRANSCRIPT_PATH,
             "to_turn_seq": 0,
             "to_last_turn_at": serde_json::Value::Null,
-        })
-        .to_string();
+        });
+        let mut detail = detail;
+        if let (Some(d), Some(x)) = (detail.as_object_mut(), extra.as_object()) {
+            d.extend(x.clone());
+        }
+        let detail = detail.to_string();
         for id in [source, target] {
             s.insert_session_event(id, EVENT_MOVE_PARTIAL, Some(&detail))
                 .unwrap();
@@ -860,6 +876,36 @@ mod tests {
             let d: serde_json::Value = serde_json::from_str(e.detail.as_deref().unwrap()).unwrap();
             assert_eq!(d["finished_from_partial"], true);
         }
+    }
+
+    /// r18-M1: a move told to keep its source records `kept_source`; a
+    /// Finish from that partial must keep it too, never kill it.
+    #[tokio::test]
+    async fn finish_keeps_a_source_the_move_was_told_to_keep() {
+        let (store, _source_id, target_id) =
+            partial_fixture_with(true, serde_json::json!({ "kept_source": true }));
+        let fake = FakeSsh::new();
+        fake.on_host(
+            "alpha",
+            Match::script_contains("# cf-move:locate"),
+            Reply::ok(&format!(
+                "{TRANSCRIPT_LEN}\t{MTIME}\t{SRC_TRANSCRIPT_PATH}\n"
+            )),
+        );
+        let hooks = FakeHooks::new(&fake);
+        let rep = resolve_move_with(
+            ResolveMoveArgs {
+                session_id: target_id,
+                action: ResolveMoveAction::Finish,
+            },
+            &store,
+            &fake,
+            &hooks,
+        )
+        .await
+        .expect("finish");
+        assert!(!rep.source_killed, "a kept source stays");
+        assert!(!hooks.killed_any(), "nothing is killed");
     }
 
     /// A Finish never saw the carry: it runs from the recorded event alone,

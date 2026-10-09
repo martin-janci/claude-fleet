@@ -5,6 +5,7 @@
 // Appearance → Setup guide takes it again.
 import { writable } from 'svelte/store';
 import { readPref, writePref } from './prefs';
+import { matchShortcut } from './shortcuts';
 
 export interface TourStep {
   id: string;
@@ -15,6 +16,11 @@ export interface TourStep {
   targets: string[];
   /** "Try it": the chord in the manual's Mac form (⌘K, ⌥⌘B, j, ?). */
   chord: string;
+  /** The `SHORTCUTS` row the chord is, when it is a global one: off the Mac
+   *  its binding is not the ⌘→Ctrl reading of `chord` (⌘K is Ctrl+Shift+K
+   *  there, since plain Ctrl+K belongs to the terminal), so the hint and the
+   *  match come from the registry. */
+  shortcut?: string;
   tryLabel: string;
 }
 
@@ -25,6 +31,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: 'The command field reaches every session, task, host and command. Type a few letters of a name, or a verb like "new" or "pause".',
     targets: ['[data-testid="shell-header"] .command'],
     chord: '⌘K',
+    shortcut: 'switcher',
     tryLabel: 'open it',
   },
   {
@@ -41,6 +48,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: "Read what the agent did and answer its questions with 1, 2 or 3. Terminals, Files and Details sit in the tabs beside it.",
     targets: ['[data-testid="pane-terminal"]'],
     chord: '⌘J',
+    shortcut: 'session-view',
     tryLabel: 'open the agent tab',
   },
   {
@@ -49,6 +57,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: 'Host, account, branch, pull request, task and cost of the open session, with its actions: move, fork, review, switch account.',
     targets: ['[data-testid="inspector"]', '[data-testid="pane-terminal"]'],
     chord: '⌥⌘B',
+    shortcut: 'inspector',
     tryLabel: 'show or hide it',
   },
   {
@@ -57,6 +66,7 @@ export const TOUR_STEPS: readonly TourStep[] = [
     body: "Tell Control what you want done. It starts sessions, files tasks and builds missions, and each hand-off shows up as a card you can follow.",
     targets: ['[data-testid="rail"]'],
     chord: '⌘E',
+    shortcut: 'agent',
     tryLabel: 'open Control',
   },
   {
@@ -125,6 +135,17 @@ export function matchesChord(
     return e.code === `Key${key.toUpperCase()}` || e.key.toLowerCase() === key.toLowerCase();
   }
   return e.key === key;
+}
+
+/** Whether a keydown is the step's "try it" key: its registry row when it
+ *  has one, else its chord. */
+export function matchesStep(
+  e: Pick<KeyboardEvent, 'key' | 'code' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>,
+  step: Pick<TourStep, 'chord' | 'shortcut'>,
+  mac: boolean,
+): boolean {
+  if (step.shortcut) return matchShortcut('global', e, mac) === step.shortcut;
+  return matchesChord(e, step.chord, mac);
 }
 
 export interface Rect {

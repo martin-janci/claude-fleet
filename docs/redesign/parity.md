@@ -15,11 +15,14 @@ How to use it:
 - The PR updates the row here in the same commit: **Now** says where the
   function lives today, **Proof** names the test. A row moves from *Classic*
   to *Both* when New has it, and to *New* only in 13.1, when Classic goes.
+  A function new in the redesign (its **Today** cell ends "(new)") has no
+  Classic form, so it reads *New* from the start.
 - A deleted test needs a replacement that covers the moved function, named
   in **Proof**.
 - Where 7.5 stands: [parity-audit-7.5.md](parity-audit-7.5.md).
-- Step 7.5 (parity sign-off) is done when every row reads *Both* with a
-  proof in New, and Martin has used New for a week.
+- Step 7.5 (parity sign-off) is done when every 0.5.4 row reads *Both*
+  with a proof in New, every "(new)" row has its proof, and Martin has used
+  New for a week.
 
 Columns: **Today** is the 0.5.4 function. **Goes to** is its place in the
 new layout, from the plan. **Reached by** is how a person gets there, which
