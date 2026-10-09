@@ -48,7 +48,8 @@
 
   async function retry() {
     pressed = true;
-    await retryHubNow();
+    // A refused retry must not leave the button stuck on "Trying now…".
+    if (!(await retryHubNow())) pressed = false;
   }
 </script>
 
@@ -67,7 +68,9 @@
       {/if}
     {/if}
     <span class="text">{text}</span>
-    {#if lost}<span class="reason" title={lost.reason}>{lost.reason}</span>{/if}
+    <!-- Review r13: the transport's own words ("error sending request …
+         (os error 111)") are for Details, not the line. -->
+    {#if lost && lost.reason}<details class="reason" data-testid="hub-lost-reason"><summary>Details</summary>{lost.reason}</details>{/if}
     {#if retrying}
       <span class="countdown" data-testid="hub-retry-countdown"
         >{pressed || left === 0 ? 'Trying now…' : `Retrying in ${left} s`}</span>
@@ -93,10 +96,11 @@
   .reason {
     flex: 0 1 auto;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     opacity: 0.75;
+    overflow-wrap: anywhere;
+  }
+  .reason summary {
+    cursor: pointer;
   }
   .countdown {
     flex: none;

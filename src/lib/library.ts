@@ -6,7 +6,7 @@
 // the sessions work in, per host (`sessions` × `projects`). Only the first is
 // new; the other two are read from where they already live.
 import { derived, get, writable } from 'svelte/store';
-import { invokeCmd, type Result } from './result';
+import { invokeCmd, type IpcError, type Result } from './result';
 import { downloads, loadDownloads, type Download } from './downloads';
 import { sessions, type SessionRow } from './sessions';
 import { projectById } from './projects';
@@ -173,9 +173,13 @@ export const libraryEntryList = derived(
   ([$items, $dls, $sessions, $byId]) => libraryEntries($items, $dls, reposOf($sessions, $byId)),
 );
 
-/** Open the Library: its own rows and the downloads, read fresh. */
-export async function refreshLibrary(): Promise<void> {
-  await Promise.all([loadLibrary(), loadDownloads()]);
+/** Open the Library: its own rows and the downloads, read fresh. Answers
+ *  the first failure, so a failed read is never shown as an empty Library. */
+export async function refreshLibrary(): Promise<IpcError | null> {
+  const [lib, dls] = await Promise.all([loadLibrary(), loadDownloads()]);
+  if (!lib.ok) return lib.error;
+  if (!dls.ok) return dls.error;
+  return null;
 }
 
 /** The host paths `upload_attachments` answered, paired with what was picked. */

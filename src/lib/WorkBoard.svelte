@@ -28,8 +28,10 @@
     sidebarView,
     workTree,
     workViewFilters,
+    activeWorkViewId,
     type WorkTask,
   } from './work_view';
+  import { facetSentence, workFacets } from './filter_facets';
   import { providerInfo } from './trackers';
   import { hintAnchor } from './hints';
   import EditTaskDialog from './EditTaskDialog.svelte';
@@ -266,6 +268,23 @@
   {:else}
     {#if more}
       <p class="muted pad" data-testid="work-board-more">Showing the 200 most recent tasks. Narrow the Work view's filters to see the rest.</p>
+    {/if}
+    {@const facets = workFacets({ ...$workViewFilters, status: undefined })}
+    {#if facets.length > 0 && columns.lanes.every((l) => (columns.cards[l.id] ?? []).length === 0)}
+      <!-- Review r13 (step 10.6): filters that hide every task say so and
+           offer the way out, as the list does. -->
+      <p class="muted pad" data-testid="work-board-no-match">
+        No tasks match <strong>{facetSentence(facets)}</strong>.
+        <button
+          class="btn btn--quiet"
+          type="button"
+          data-testid="work-board-clear"
+          onclick={() => {
+            activeWorkViewId.set(null);
+            workViewFilters.set({});
+          }}>Clear filters</button
+        >
+      </p>
     {/if}
     <div class="columns" style:grid-template-columns="repeat({columns.lanes.length}, minmax(200px, 1fr))">
       {#each columns.lanes as lane (lane.id)}

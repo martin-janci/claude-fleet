@@ -166,7 +166,8 @@ describe('the watcher’s pane view', () => {
     });
     render(WatchView, { props: { session: makeSession(), access: 'watch' } });
     const err = await screen.findByTestId('watch-error');
-    expect(err.textContent).toContain('E_HOST_OFFLINE');
+    expect(err.textContent).toContain('The host is offline');
+    expect(err.textContent).not.toContain('E_HOST_OFFLINE');
     expect(screen.queryByTestId('watch-pane')).toBeNull();
   });
 

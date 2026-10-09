@@ -16,6 +16,7 @@
  * whatever the hub answered.
  */
 
+import { errorText } from './error_copy';
 import type { ProposalLike, ProposalSource } from './ai_proposal';
 import { derived, get, writable, type Readable } from 'svelte/store';
 import { invokeCmd, type IpcError, type Result } from './result';
@@ -867,7 +868,7 @@ export function isOlderHub(e: IpcError | null | undefined): boolean {
 
 /** The error line a read shows. */
 export function readErrorText(e: IpcError): string {
-  return isOlderHub(e) ? NEWER_HUB : e.message;
+  return isOlderHub(e) ? NEWER_HUB : errorText(e);
 }
 
 // ---------------------------------------------------------------------------

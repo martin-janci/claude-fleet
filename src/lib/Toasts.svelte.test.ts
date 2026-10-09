@@ -106,6 +106,8 @@ describe('Toasts.svelte', () => {
     expect(shown).toHaveLength(1);
     expect(shown[0].getAttribute('data-kind')).toBe('error');
     expect(screen.getByTestId('toast-code').textContent).toBe('E_SSH');
+    // Review r13: the code is under Details, not in the line.
+    expect(screen.getByTestId('toast-code').closest('details')).not.toBeNull();
     expect(shown[0].textContent).toContain('×2');
   });
 

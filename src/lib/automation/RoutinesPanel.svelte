@@ -9,6 +9,7 @@
   import { onDestroy, onMount } from 'svelte';
   import { hosts } from '../hosts';
   import { projects } from '../projects';
+  import { errorText } from '../error_copy';
   import { push, pushError } from '../toasts';
   import {
     TEMPLATES,
@@ -75,7 +76,7 @@
     const r = await listRoutines();
     loaded = true;
     if (!r.ok) {
-      error = r.error.message;
+      error = `Couldn't load routines: ${errorText(r.error)}.`;
       return;
     }
     error = null;
@@ -91,7 +92,7 @@
     }
     const r = await getRoutine(selected);
     detail = r.ok ? r.value : null;
-    if (!r.ok) error = r.error.message;
+    if (!r.ok) error = `Couldn't load the routine: ${errorText(r.error)}.`;
   }
 
   function pick(id: number) {
@@ -284,7 +285,10 @@
         No routines yet. A routine is a saved prompt that starts a session on a schedule. Start with Morning PR sweep.
       </p>
     {/if}
-    {#if error}<p class="err" role="alert">{error}</p>{/if}
+    {#if error}<p class="err" role="alert" data-testid="routines-error">
+        {error}
+        <button type="button" class="btn btn--quiet" data-testid="routines-retry" onclick={() => void reload()}>Retry</button>
+      </p>{/if}
   </div>
 
   <div class="detail">

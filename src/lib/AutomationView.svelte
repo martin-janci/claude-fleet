@@ -20,6 +20,9 @@
   import { goTo } from './destination';
   import { focusSession } from './session_focus';
   import { pushError } from './toasts';
+  import { errorText } from './error_copy';
+  import type { IpcError } from './result';
+  import LoadError from './states/LoadError.svelte';
   import { timeAgo } from './session_status';
   import {
     automationTab,
@@ -35,8 +38,13 @@
   } from './automation';
 
   let auto = $state<AutomationState | null>(null);
-  let error = $state<string | null>(null);
+  /** The automation read failed (review r13: said as a failure, with Retry). */
+  let error = $state<IpcError | null>(null);
   let runs = $state<RunRow[] | null>(null);
+  /** The Runs read has its own error, so a later good `load()` cannot clear
+   *  it and leave the tab blank. */
+  let runsError = $state<IpcError | null>(null);
+  let retrying = $state(false);
   let runsTotal = $state(0);
   let busy = $state(false);
   let nowSec = $state(Math.floor(Date.now() / 1000));
@@ -46,7 +54,7 @@
     if (r.ok) {
       auto = r.value;
       error = null;
-    } else error = r.error.message;
+    } else error = r.error;
   }
 
   async function loadRuns() {
@@ -54,7 +62,14 @@
     if (r.ok) {
       runs = r.value.runs;
       runsTotal = r.value.total;
-    } else error = r.error.message;
+      runsError = null;
+    } else runsError = r.error;
+  }
+
+  async function retry(what: () => Promise<void>) {
+    retrying = true;
+    await what();
+    retrying = false;
   }
 
   onMount(() => {
@@ -130,7 +145,13 @@
       update checks keep running.
     </p>
   {/if}
-  {#if error}<p class="err" role="alert" data-testid="automation-error">{error}</p>{/if}
+  {#if error && auto}
+    <!-- A refresh failed: what is shown is the last good read. -->
+    <p class="err" role="alert" data-testid="automation-error">
+      Couldn't refresh automation: {errorText(error)}. Showing what was read before.
+      <Button variant="quiet" size="sm" testid="automation-retry" disabled={retrying} onclick={() => retry(load)}>Retry</Button>
+    </p>
+  {/if}
 
   {#if !auto && !error}
     <div class="loading"><Loader name="orbit" size={32} label="Loading automation" /></div>
@@ -140,7 +161,9 @@
     </div>
   {:else if $automationTab === 'runs'}
     <div class="body" role="tabpanel" aria-label="Runs" data-testid="automation-runs">
-      {#if runs && runs.length === 0}
+      {#if runsError && !runs}
+        <LoadError title="Couldn't load the runs" error={runsError} onretry={() => retry(loadRuns)} {retrying} testid="automation-runs-error" />
+      {:else if runs && runs.length === 0}
         <p class="none">Nothing has run on the fleet's behalf yet.</p>
       {:else if runs}
         <ul class="list">
@@ -201,6 +224,8 @@
         {/each}
       </ul>
     </div>
+  {:else if error}
+    <LoadError title="Couldn't load automation" {error} onretry={() => retry(load)} {retrying} testid="automation-load-error" />
   {/if}
 </section>
 

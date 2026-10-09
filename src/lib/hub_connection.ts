@@ -60,7 +60,10 @@ export function lostLine(c: HubConnection, lostAt: number | null, url: string | 
     c.state === 'reconnecting'
       ? `Lost ${hub}${at ? ` at ${at}` : ''}`
       : `Cannot reach ${hub}${at ? ` since ${at}` : ''}`;
-  return `${head} · try ${c.attempt} · your sessions keep running on their hosts`;
+  // Review r13: the list under the banner is what was read before the link
+  // went, and it says so ("showing what was cached at 13:38", States board).
+  const cached = at ? ` · showing what was cached at ${at}` : '';
+  return `${head} · try ${c.attempt} · your sessions keep running on their hosts${cached}`;
 }
 
 /** Runs after the backend's event bridge re-listed sessions, hosts, tasks
@@ -88,8 +91,8 @@ export async function startHubConnection(): Promise<void> {
 
 /** The banner's Retry now: try the hub again at once instead of after the
  *  backoff. Its answer is the next `hub:connection` event. */
-export async function retryHubNow(): Promise<void> {
-  await invokeCmd<null>('hub_retry_now');
+export async function retryHubNow(): Promise<boolean> {
+  return (await invokeCmd<null>('hub_retry_now')).ok;
 }
 
 /** The banner's sentence, or null when there is nothing to say. `live`:

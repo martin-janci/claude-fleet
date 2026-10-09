@@ -113,3 +113,18 @@ describe('host offline', () => {
     expect(sinceWords(NOW - 3 * 86_400, NOW)).toBe('3 d');
   });
 });
+
+describe('a failed load (review r13)', () => {
+  it('says the read failed in a sentence, keeps the code under Details, and Retry re-runs it', async () => {
+    const { default: LoadError } = await import('./LoadError.svelte');
+    const onretry = vi.fn();
+    render(LoadError, {
+      props: { title: "Couldn't load the library", error: { code: 'E_HUB_TIMEOUT', message: 'deadline 10 s' }, onretry },
+    });
+    expect(screen.getByTestId('load-error-text').textContent).toBe('The hub took too long to answer.');
+    expect(screen.getByTestId('load-error-code').closest('details')).not.toBeNull();
+    expect(screen.getByTestId('load-error-code').textContent).toBe('E_HUB_TIMEOUT: deadline 10 s');
+    await fireEvent.click(screen.getByTestId('load-error-retry'));
+    expect(onretry).toHaveBeenCalledOnce();
+  });
+});
